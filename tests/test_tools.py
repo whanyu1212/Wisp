@@ -70,6 +70,21 @@ def test_edit_tool_applies_unique_replacements_from_original(tmp_path: Path) -> 
     assert path.read_text(encoding="utf-8") == "hi brave Wisp\n"
 
 
+def test_edit_tool_preserves_crlf_line_endings(tmp_path: Path) -> None:
+    path = tmp_path / "crlf.txt"
+    path.write_bytes(b"alpha\r\nbeta\r\ngamma\r\n")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        EditTool(),
+        {"path": "crlf.txt", "edits": [{"oldText": "beta", "newText": "BETA"}]},
+        context,
+    )
+
+    assert result.data["edits"] == 1
+    assert path.read_bytes() == b"alpha\r\nBETA\r\ngamma\r\n"
+
+
 def test_edit_tool_rejects_non_unique_replacement(tmp_path: Path) -> None:
     path = tmp_path / "dupes.txt"
     path.write_text("same same\n", encoding="utf-8")
@@ -253,7 +268,7 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    calls: list[tuple[list[str], int]] = []
+    calls: list[tuple[list[str], int, int | None, int | None]] = []
 
     async def fake_run(
         command: list[str],
@@ -261,10 +276,14 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
         cwd: Path,
         max_stdout_lines: int,
         stdout_count_filter: object = None,
+        max_buffered_stdout_bytes: int | None = None,
+        max_buffered_stdout_lines: int | None = None,
     ) -> builtin_tools_module.ProcessResult:
         assert cwd == tmp_path
         assert callable(stdout_count_filter)
-        calls.append((command, max_stdout_lines))
+        calls.append(
+            (command, max_stdout_lines, max_buffered_stdout_bytes, max_buffered_stdout_lines)
+        )
         return builtin_tools_module.ProcessResult(
             exit_code=-9,
             stdout="one.txt:1:e\ntwo.txt:1:e\nthree.txt:1:e\n",
@@ -293,6 +312,8 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
                 ".",
             ],
             3,
+            50000,
+            2000,
         )
     ]
     assert result.text == "one.txt:1:e\ntwo.txt:1:e\n[truncated]"
@@ -313,6 +334,28 @@ def test_grep_tool_ripgrep_bounds_long_lines_before_buffering(tmp_path: Path) ->
 
     assert result.text == "data.txt:1:[Omitted long matching line]"
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes
+
+
+def test_grep_tool_ripgrep_bounds_context_output_before_buffering(tmp_path: Path) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    lines = [f"before {index}" for index in range(50)]
+    lines.append("needle")
+    lines.extend(f"after {index}" for index in range(50))
+    (tmp_path / "data.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path, max_output_lines=10)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "needle", "path": ".", "context": 1000, "literal": True},
+        context,
+    )
+
+    assert len(result.text.splitlines()) <= context.max_output_lines
+    assert "data.txt:51:needle" in result.text
+    assert "data.txt-1-before 0" not in result.text
+    assert result.text.endswith("[truncated]")
+    assert result.truncated is True
 
 
 def test_grep_tool_ripgrep_counts_matches_separately_from_context_lines(

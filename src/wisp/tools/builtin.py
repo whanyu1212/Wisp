@@ -159,7 +159,8 @@ class EditTool:
             raise ToolError(f"File does not exist: {display_tool_path(path, context)}")
 
         try:
-            original = path.read_text(encoding="utf-8")
+            with path.open("r", encoding="utf-8", newline="") as file:
+                original = file.read()
         except UnicodeDecodeError as exc:
             raise ToolError(f"File is not valid UTF-8: {display_tool_path(path, context)}") from exc
 
@@ -188,7 +189,8 @@ class EditTool:
             cursor = end
         parts.append(original[cursor:])
 
-        path.write_text("".join(parts), encoding="utf-8")
+        with path.open("w", encoding="utf-8", newline="") as file:
+            file.write("".join(parts))
         return ToolResult(
             text=f"Applied {len(edits)} edit(s) to {display_tool_path(path, context)}",
             data={"path": display_tool_path(path, context), "edits": len(edits)},
@@ -640,6 +642,8 @@ async def _run_exec_limited_stdout(
     max_stdout_lines: int,
     stdout_line_filter: Callable[[str], bool] | None = None,
     stdout_count_filter: Callable[[str], bool] | None = None,
+    max_buffered_stdout_bytes: int | None = None,
+    max_buffered_stdout_lines: int | None = None,
 ) -> ProcessResult:
     try:
         process = await asyncio.create_subprocess_exec(
@@ -658,6 +662,8 @@ async def _run_exec_limited_stdout(
     stderr_task = asyncio.create_task(process.stderr.read())
     stdout_lines: list[bytes] = []
     stdout_count = 0
+    buffered_stdout_bytes = 0
+    buffered_stdout_lines = 0
     stdout_truncated = False
     while stdout_count < max_stdout_lines:
         line = await process.stdout.readline()
@@ -665,7 +671,19 @@ async def _run_exec_limited_stdout(
             break
         decoded_line = line.decode("utf-8", errors="replace").rstrip("\r\n")
         if stdout_line_filter is None or stdout_line_filter(decoded_line):
+            if (
+                max_buffered_stdout_lines is not None
+                and buffered_stdout_lines >= max_buffered_stdout_lines
+            ) or (
+                max_buffered_stdout_bytes is not None
+                and buffered_stdout_bytes + len(line) > max_buffered_stdout_bytes
+            ):
+                stdout_truncated = True
+                _kill_process_tree(process)
+                break
             stdout_lines.append(line)
+            buffered_stdout_lines += 1
+            buffered_stdout_bytes += len(line)
             if stdout_count_filter is None or stdout_count_filter(decoded_line):
                 stdout_count += 1
 
@@ -706,6 +724,8 @@ async def _run_rg_grep(
     max_results: int,
     context: ToolContext,
 ) -> ToolResult:
+    effective_context_lines = _bounded_rg_context_lines(context_lines, context)
+    context_truncated = effective_context_lines < context_lines
     command = [
         rg_path,
         "--line-number",
@@ -719,8 +739,8 @@ async def _run_rg_grep(
         command.append("--fixed-strings")
     if ignore_case:
         command.append("--ignore-case")
-    if context_lines:
-        command.extend(("--context", str(context_lines)))
+    if effective_context_lines:
+        command.extend(("--context", str(effective_context_lines)))
     if glob:
         command.extend(("--glob", glob))
     command.extend(("--", pattern, _command_path(path, context)))
@@ -730,6 +750,8 @@ async def _run_rg_grep(
         cwd=context.cwd,
         max_stdout_lines=max_results + 1,
         stdout_count_filter=_is_grep_match_line,
+        max_buffered_stdout_bytes=max(0, context.max_output_bytes),
+        max_buffered_stdout_lines=max(0, context.max_output_lines),
     )
     if result.exit_code == 1 and not result.stdout.strip():
         return ToolResult(text="No matches", data={"count": 0, "matches": []})
@@ -740,8 +762,14 @@ async def _run_rg_grep(
         [_normalize_rg_line(line) for line in result.stdout.splitlines()],
         max_results=max_results,
         context=context,
-        force_truncated=result.stdout_truncated,
+        force_truncated=result.stdout_truncated or context_truncated,
     )
+
+
+def _bounded_rg_context_lines(requested_context_lines: int, context: ToolContext) -> int:
+    if requested_context_lines <= 0:
+        return 0
+    return min(requested_context_lines, max(0, (context.max_output_lines - 1) // 2))
 
 
 async def _run_rg_find(
