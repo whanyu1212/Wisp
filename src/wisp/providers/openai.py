@@ -14,7 +14,12 @@ from openai.types.responses import (
     Response,
     ResponseErrorEvent,
     ResponseFailedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
+    ResponseFunctionToolCall,
     ResponseIncompleteEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
     ResponseRefusalDeltaEvent,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
@@ -59,6 +64,10 @@ class OpenAIProvider:
         async for event in stream:
             if isinstance(event, ResponseTextDeltaEvent | ResponseRefusalDeltaEvent):
                 yield event.delta
+            elif _is_function_tool_call_event(event):
+                raise ProviderError(
+                    "OpenAI returned a function tool call, but Wisp does not execute tools yet"
+                )
             elif isinstance(event, ResponseErrorEvent):
                 raise ProviderError(f"OpenAI API error: {event.message}")
             elif isinstance(event, ResponseFailedEvent):
@@ -102,6 +111,17 @@ class OpenAIProvider:
 
         self._client = AsyncOpenAI(api_key=api_key)
         return self._client
+
+
+def _is_function_tool_call_event(event: ResponseStreamEvent) -> bool:
+    if isinstance(
+        event,
+        ResponseFunctionCallArgumentsDeltaEvent | ResponseFunctionCallArgumentsDoneEvent,
+    ):
+        return True
+    if isinstance(event, ResponseOutputItemAddedEvent | ResponseOutputItemDoneEvent):
+        return isinstance(event.item, ResponseFunctionToolCall)
+    return False
 
 
 def _failed_response_message(response: Response) -> str:

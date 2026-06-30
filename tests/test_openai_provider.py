@@ -11,7 +11,10 @@ from openai.types.responses import (
     ResponseError,
     ResponseErrorEvent,
     ResponseFailedEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
+    ResponseFunctionToolCall,
     ResponseIncompleteEvent,
+    ResponseOutputItemAddedEvent,
     ResponseRefusalDeltaEvent,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
@@ -171,6 +174,48 @@ def test_openai_provider_omits_tools_when_no_tool_specs_are_provided() -> None:
     ]
 
 
+def test_openai_provider_raises_on_function_tool_call_arguments_event() -> None:
+    provider = StubOpenAIProvider([_function_call_arguments_done_event("lookup")])
+    tool = ToolSpec(
+        name="lookup",
+        description="Look something up.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    async def run() -> list[str]:
+        return [
+            delta
+            async for delta in provider.stream(
+                [Message(role="user", content="hello")],
+                tools=[tool],
+            )
+        ]
+
+    with pytest.raises(ProviderError, match="does not execute tools yet"):
+        anyio.run(run)
+
+
+def test_openai_provider_raises_on_function_tool_call_output_item_event() -> None:
+    provider = StubOpenAIProvider([_function_call_output_item_added_event("lookup")])
+    tool = ToolSpec(
+        name="lookup",
+        description="Look something up.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    async def run() -> list[str]:
+        return [
+            delta
+            async for delta in provider.stream(
+                [Message(role="user", content="hello")],
+                tools=[tool],
+            )
+        ]
+
+    with pytest.raises(ProviderError, match="does not execute tools yet"):
+        anyio.run(run)
+
+
 def test_openai_provider_streams_refusal_deltas() -> None:
     provider = StubOpenAIProvider([_refusal_delta("I can't help with that")])
 
@@ -260,6 +305,31 @@ def _refusal_delta(text: str, *, sequence_number: int = 0) -> ResponseRefusalDel
         output_index=0,
         sequence_number=sequence_number,
         type="response.refusal.delta",
+    )
+
+
+def _function_call_arguments_done_event(name: str) -> ResponseFunctionCallArgumentsDoneEvent:
+    return ResponseFunctionCallArgumentsDoneEvent(
+        arguments="{}",
+        item_id="item",
+        name=name,
+        output_index=0,
+        sequence_number=0,
+        type="response.function_call_arguments.done",
+    )
+
+
+def _function_call_output_item_added_event(name: str) -> ResponseOutputItemAddedEvent:
+    return ResponseOutputItemAddedEvent(
+        item=ResponseFunctionToolCall(
+            arguments="{}",
+            call_id="call-id",
+            name=name,
+            type="function_call",
+        ),
+        output_index=0,
+        sequence_number=0,
+        type="response.output_item.added",
     )
 
 
