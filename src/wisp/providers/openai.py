@@ -12,6 +12,7 @@ from openai.types.responses import (
     Response,
     ResponseErrorEvent,
     ResponseFailedEvent,
+    ResponseIncompleteEvent,
     ResponseRefusalDeltaEvent,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
@@ -59,6 +60,8 @@ class OpenAIProvider:
                 raise ProviderError(f"OpenAI API error: {event.message}")
             elif isinstance(event, ResponseFailedEvent):
                 raise ProviderError(_failed_response_message(event.response))
+            elif isinstance(event, ResponseIncompleteEvent):
+                raise ProviderError(_incomplete_response_message(event.response))
 
     async def _create_stream(
         self,
@@ -94,6 +97,14 @@ def _failed_response_message(response: Response) -> str:
     if response.status:
         return f"OpenAI response failed with status: {response.status}"
     return "OpenAI response failed"
+
+
+def _incomplete_response_message(response: Response) -> str:
+    if response.incomplete_details is not None and response.incomplete_details.reason:
+        return f"OpenAI response incomplete: {response.incomplete_details.reason}"
+    if response.status:
+        return f"OpenAI response incomplete with status: {response.status}"
+    return "OpenAI response incomplete"
 
 
 def _messages_to_response_input(messages: Sequence[Message]) -> ResponseInputParam:

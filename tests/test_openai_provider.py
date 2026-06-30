@@ -9,10 +9,12 @@ from openai.types.responses import (
     ResponseError,
     ResponseErrorEvent,
     ResponseFailedEvent,
+    ResponseIncompleteEvent,
     ResponseRefusalDeltaEvent,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
 )
+from openai.types.responses.response import IncompleteDetails
 from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message
@@ -99,6 +101,16 @@ def test_openai_provider_raises_on_failed_response_event() -> None:
         anyio.run(run)
 
 
+def test_openai_provider_raises_on_incomplete_response_event() -> None:
+    provider = StubOpenAIProvider([_incomplete_event("max_output_tokens")])
+
+    async def run() -> list[str]:
+        return [delta async for delta in provider.stream([Message(role="user", content="hello")])]
+
+    with pytest.raises(ProviderError, match="OpenAI response incomplete: max_output_tokens"):
+        anyio.run(run)
+
+
 def test_openai_provider_requires_api_key(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     provider = OpenAIProvider()
@@ -139,10 +151,25 @@ def _error_event(message: str) -> ResponseErrorEvent:
 
 def _failed_event(message: str) -> ResponseFailedEvent:
     error = ResponseError(code="server_error", message=message)
-    response = Response(
+    response = _response(error=error)
+    return ResponseFailedEvent(response=response, sequence_number=0, type="response.failed")
+
+
+def _incomplete_event(reason: str) -> ResponseIncompleteEvent:
+    response = _response(incomplete_details=IncompleteDetails(reason=reason))
+    return ResponseIncompleteEvent(response=response, sequence_number=0, type="response.incomplete")
+
+
+def _response(
+    *,
+    error: ResponseError | None = None,
+    incomplete_details: IncompleteDetails | None = None,
+) -> Response:
+    return Response(
         id="response-id",
         created_at=0.0,
         error=error,
+        incomplete_details=incomplete_details,
         model="gpt-5.5",
         object="response",
         output=[],
@@ -150,4 +177,3 @@ def _failed_event(message: str) -> ResponseFailedEvent:
         tool_choice="auto",
         tools=[],
     )
-    return ResponseFailedEvent(response=response, sequence_number=0, type="response.failed")
