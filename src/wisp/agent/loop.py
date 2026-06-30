@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 
 from wisp.agent.messages import Message
 from wisp.events import (
@@ -13,7 +13,7 @@ from wisp.events import (
     TokenDelta,
     WispEvent,
 )
-from wisp.providers.base import Provider
+from wisp.providers.base import Provider, ToolSpec
 from wisp.runtime.event_bus import EventBus
 from wisp.sessions.jsonl import JsonlSessionStore
 
@@ -28,11 +28,13 @@ class Agent:
         sessions: JsonlSessionStore,
         events: EventBus | None = None,
         model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
     ) -> None:
         self.provider = provider
         self.sessions = sessions
         self.events = events
         self.model = model
+        self.tools = tuple(tools)
 
     async def run(self, prompt: str) -> AsyncIterator[WispEvent]:
         session = self.sessions.create()
@@ -45,7 +47,7 @@ class Agent:
         chunks: list[str] = []
 
         try:
-            async for delta in self.provider.stream(messages, model=self.model):
+            async for delta in self.provider.stream(messages, model=self.model, tools=self.tools):
                 chunks.append(delta)
                 yield await self._emit(TokenDelta(delta=delta))
         except Exception as exc:

@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Sequence
 import anyio
 
 from wisp.agent.messages import Message
+from wisp.providers.base import ToolSpec
 
 
 class FakeProvider:
@@ -20,6 +21,7 @@ class FakeProvider:
         messages: Sequence[Message],
         *,
         model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
     ) -> AsyncIterator[str]:
         prompt = _last_user_prompt(messages)
         response = f"fake response to: {prompt}"

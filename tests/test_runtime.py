@@ -42,6 +42,18 @@ def test_tool_registry_registers_and_resolves_tool() -> None:
 
     assert registry.get("read") is tool
     assert registry.names() == ("read",)
+    assert registry.all() == (tool,)
+
+
+def test_tool_registry_returns_provider_tool_specs() -> None:
+    registry = ToolRegistry()
+    tool = ReadTool()
+
+    registry.register(tool)
+
+    assert registry.specs()[0].name == "read"
+    assert registry.specs()[0].description == tool.description
+    assert registry.specs()[0].input_schema == tool.input_schema
 
 
 def test_tool_registry_raises_for_unknown_tool() -> None:

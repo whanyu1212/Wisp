@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Sequence
+from copy import deepcopy
 from typing import Literal, cast
 
 from openai import AsyncOpenAI
 from openai.types.responses import (
     EasyInputMessageParam,
+    FunctionToolParam,
     Response,
     ResponseErrorEvent,
     ResponseFailedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
+    ResponseFunctionToolCall,
     ResponseIncompleteEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
     ResponseRefusalDeltaEvent,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
@@ -20,7 +27,7 @@ from openai.types.responses import (
 from openai.types.responses.response_input_param import ResponseInputParam
 
 from wisp.agent.messages import Message, Role
-from wisp.providers.base import ProviderConfigurationError, ProviderError
+from wisp.providers.base import ProviderConfigurationError, ProviderError, ToolSpec
 
 DEFAULT_OPENAI_MODEL = "gpt-5.5"
 OpenAIRole = Literal["user", "assistant", "system", "developer"]
@@ -47,15 +54,20 @@ class OpenAIProvider:
         messages: Sequence[Message],
         *,
         model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
     ) -> AsyncIterator[str]:
         """Stream text deltas from OpenAI's Responses API."""
 
         selected_model = model or self.default_model or DEFAULT_OPENAI_MODEL
-        stream = await self._create_stream(messages, model=selected_model)
+        stream = await self._create_stream(messages, model=selected_model, tools=tools)
 
         async for event in stream:
             if isinstance(event, ResponseTextDeltaEvent | ResponseRefusalDeltaEvent):
                 yield event.delta
+            elif _is_function_tool_call_event(event):
+                raise ProviderError(
+                    "OpenAI returned a function tool call, but Wisp does not execute tools yet"
+                )
             elif isinstance(event, ResponseErrorEvent):
                 raise ProviderError(f"OpenAI API error: {event.message}")
             elif isinstance(event, ResponseFailedEvent):
@@ -68,13 +80,23 @@ class OpenAIProvider:
         messages: Sequence[Message],
         *,
         model: str,
+        tools: Sequence[ToolSpec] = (),
     ) -> AsyncIterator[ResponseStreamEvent]:
         client = self._client_or_create()
-        stream = await client.responses.create(
-            model=model,
-            input=_messages_to_response_input(messages),
-            stream=True,
-        )
+        openai_tools = _tool_specs_to_openai_tools(tools)
+        if openai_tools:
+            stream = await client.responses.create(
+                model=model,
+                input=_messages_to_response_input(messages),
+                stream=True,
+                tools=openai_tools,
+            )
+        else:
+            stream = await client.responses.create(
+                model=model,
+                input=_messages_to_response_input(messages),
+                stream=True,
+            )
         return cast(AsyncIterator[ResponseStreamEvent], stream)
 
     def _client_or_create(self) -> AsyncOpenAI:
@@ -89,6 +111,17 @@ class OpenAIProvider:
 
         self._client = AsyncOpenAI(api_key=api_key)
         return self._client
+
+
+def _is_function_tool_call_event(event: ResponseStreamEvent) -> bool:
+    if isinstance(
+        event,
+        ResponseFunctionCallArgumentsDeltaEvent | ResponseFunctionCallArgumentsDoneEvent,
+    ):
+        return True
+    if isinstance(event, ResponseOutputItemAddedEvent | ResponseOutputItemDoneEvent):
+        return isinstance(event.item, ResponseFunctionToolCall)
+    return False
 
 
 def _failed_response_message(response: Response) -> str:
@@ -116,6 +149,20 @@ def _messages_to_response_input(messages: Sequence[Message]) -> ResponseInputPar
         }
         response_input.append(message_param)
     return response_input
+
+
+def _tool_specs_to_openai_tools(tools: Sequence[ToolSpec]) -> list[FunctionToolParam]:
+    return [_tool_spec_to_openai_tool(tool) for tool in tools]
+
+
+def _tool_spec_to_openai_tool(tool: ToolSpec) -> FunctionToolParam:
+    return {
+        "type": "function",
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": deepcopy(dict(tool.input_schema)),
+        "strict": False,
+    }
 
 
 def _to_openai_role(role: Role) -> OpenAIRole:

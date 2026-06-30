@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from typing import Any, cast
 
 import anyio
 import pytest
+from openai import AsyncOpenAI
 from openai.types.responses import (
     Response,
     ResponseError,
     ResponseErrorEvent,
     ResponseFailedEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
+    ResponseFunctionToolCall,
     ResponseIncompleteEvent,
+    ResponseOutputItemAddedEvent,
     ResponseRefusalDeltaEvent,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
@@ -18,7 +23,7 @@ from openai.types.responses.response import IncompleteDetails
 from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message
-from wisp.providers.base import ProviderConfigurationError, ProviderError
+from wisp.providers.base import ProviderConfigurationError, ProviderError, ToolSpec
 from wisp.providers.openai import OpenAIProvider
 
 
@@ -28,15 +33,18 @@ class StubOpenAIProvider(OpenAIProvider):
         self.events = events
         self.seen_model: str | None = None
         self.seen_messages: Sequence[Message] | None = None
+        self.seen_tools: Sequence[ToolSpec] | None = None
 
     async def _create_stream(
         self,
         messages: Sequence[Message],
         *,
         model: str,
+        tools: Sequence[ToolSpec] = (),
     ) -> AsyncIterator[ResponseStreamEvent]:
         self.seen_model = model
         self.seen_messages = messages
+        self.seen_tools = tools
 
         async def stream() -> AsyncIterator[ResponseStreamEvent]:
             for event in self.events:
@@ -70,6 +78,142 @@ def test_openai_provider_uses_default_model_when_model_is_not_provided() -> None
 
     assert anyio.run(run) == ["hello"]
     assert provider.seen_model == "default-test-model"
+
+
+def test_openai_provider_accepts_provider_tool_specs() -> None:
+    provider = StubOpenAIProvider([_text_delta("hello")])
+    tool = ToolSpec(
+        name="lookup",
+        description="Look something up.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    async def run() -> list[str]:
+        return [
+            delta
+            async for delta in provider.stream(
+                [Message(role="user", content="hello")],
+                tools=[tool],
+            )
+        ]
+
+    assert anyio.run(run) == ["hello"]
+    assert provider.seen_tools == [tool]
+
+
+def test_openai_provider_serializes_tool_specs_to_responses_tools() -> None:
+    responses = StubResponsesResource()
+    provider = OpenAIProvider(
+        api_key="test-key",
+        client=cast(AsyncOpenAI, StubAsyncOpenAI(responses)),
+    )
+    tool = ToolSpec(
+        name="lookup",
+        description="Look something up.",
+        input_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    )
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [Message(role="user", content="hello")],
+            model="gpt-test",
+            tools=[tool],
+        )
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert responses.calls == [
+        {
+            "model": "gpt-test",
+            "input": [{"role": "user", "content": "hello"}],
+            "stream": True,
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "description": "Look something up.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                    "strict": False,
+                }
+            ],
+        }
+    ]
+
+
+def test_openai_provider_omits_tools_when_no_tool_specs_are_provided() -> None:
+    responses = StubResponsesResource()
+    provider = OpenAIProvider(
+        api_key="test-key",
+        client=cast(AsyncOpenAI, StubAsyncOpenAI(responses)),
+    )
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [Message(role="user", content="hello")],
+            model="gpt-test",
+        )
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert responses.calls == [
+        {
+            "model": "gpt-test",
+            "input": [{"role": "user", "content": "hello"}],
+            "stream": True,
+        }
+    ]
+
+
+def test_openai_provider_raises_on_function_tool_call_arguments_event() -> None:
+    provider = StubOpenAIProvider([_function_call_arguments_done_event("lookup")])
+    tool = ToolSpec(
+        name="lookup",
+        description="Look something up.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    async def run() -> list[str]:
+        return [
+            delta
+            async for delta in provider.stream(
+                [Message(role="user", content="hello")],
+                tools=[tool],
+            )
+        ]
+
+    with pytest.raises(ProviderError, match="does not execute tools yet"):
+        anyio.run(run)
+
+
+def test_openai_provider_raises_on_function_tool_call_output_item_event() -> None:
+    provider = StubOpenAIProvider([_function_call_output_item_added_event("lookup")])
+    tool = ToolSpec(
+        name="lookup",
+        description="Look something up.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    async def run() -> list[str]:
+        return [
+            delta
+            async for delta in provider.stream(
+                [Message(role="user", content="hello")],
+                tools=[tool],
+            )
+        ]
+
+    with pytest.raises(ProviderError, match="does not execute tools yet"):
+        anyio.run(run)
 
 
 def test_openai_provider_streams_refusal_deltas() -> None:
@@ -122,6 +266,25 @@ def test_openai_provider_requires_api_key(monkeypatch: MonkeyPatch) -> None:
         anyio.run(run)
 
 
+class StubAsyncOpenAI:
+    def __init__(self, responses: StubResponsesResource) -> None:
+        self.responses = responses
+
+
+class StubResponsesResource:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, **kwargs: object) -> AsyncIterator[ResponseStreamEvent]:
+        self.calls.append(dict(kwargs))
+
+        async def stream() -> AsyncIterator[ResponseStreamEvent]:
+            if False:
+                yield _text_delta("unreachable")
+
+        return stream()
+
+
 def _text_delta(text: str, *, sequence_number: int = 0) -> ResponseTextDeltaEvent:
     return ResponseTextDeltaEvent(
         content_index=0,
@@ -142,6 +305,31 @@ def _refusal_delta(text: str, *, sequence_number: int = 0) -> ResponseRefusalDel
         output_index=0,
         sequence_number=sequence_number,
         type="response.refusal.delta",
+    )
+
+
+def _function_call_arguments_done_event(name: str) -> ResponseFunctionCallArgumentsDoneEvent:
+    return ResponseFunctionCallArgumentsDoneEvent(
+        arguments="{}",
+        item_id="item",
+        name=name,
+        output_index=0,
+        sequence_number=0,
+        type="response.function_call_arguments.done",
+    )
+
+
+def _function_call_output_item_added_event(name: str) -> ResponseOutputItemAddedEvent:
+    return ResponseOutputItemAddedEvent(
+        item=ResponseFunctionToolCall(
+            arguments="{}",
+            call_id="call-id",
+            name=name,
+            type="function_call",
+        ),
+        output_index=0,
+        sequence_number=0,
+        type="response.output_item.added",
     )
 
 
