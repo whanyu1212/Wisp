@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Sequence
+
+import anyio
+import pytest
+from openai.types.responses import ResponseErrorEvent, ResponseStreamEvent, ResponseTextDeltaEvent
+from pytest import MonkeyPatch
+
+from wisp.agent.messages import Message
+from wisp.providers.base import ProviderConfigurationError, ProviderError
+from wisp.providers.openai import OpenAIProvider
+
+
+class StubOpenAIProvider(OpenAIProvider):
+    def __init__(self, events: Sequence[ResponseStreamEvent]) -> None:
+        super().__init__(api_key="test-key", default_model="default-test-model")
+        self.events = events
+        self.seen_model: str | None = None
+        self.seen_messages: Sequence[Message] | None = None
+
+    async def _create_stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+    ) -> AsyncIterator[ResponseStreamEvent]:
+        self.seen_model = model
+        self.seen_messages = messages
+
+        async def stream() -> AsyncIterator[ResponseStreamEvent]:
+            for event in self.events:
+                yield event
+
+        return stream()
+
+
+def test_openai_provider_streams_text_deltas() -> None:
+    provider = StubOpenAIProvider(
+        [
+            _text_delta("hello"),
+            _text_delta(" world", sequence_number=1),
+        ]
+    )
+    messages = [Message(role="user", content="Say hello")]
+
+    async def run() -> list[str]:
+        return [delta async for delta in provider.stream(messages, model="gpt-test")]
+
+    assert anyio.run(run) == ["hello", " world"]
+    assert provider.seen_model == "gpt-test"
+    assert provider.seen_messages == messages
+
+
+def test_openai_provider_uses_default_model_when_model_is_not_provided() -> None:
+    provider = StubOpenAIProvider([_text_delta("hello")])
+
+    async def run() -> list[str]:
+        return [delta async for delta in provider.stream([Message(role="user", content="hello")])]
+
+    assert anyio.run(run) == ["hello"]
+    assert provider.seen_model == "default-test-model"
+
+
+def test_openai_provider_raises_on_stream_error_event() -> None:
+    provider = StubOpenAIProvider([_error_event("boom")])
+
+    async def run() -> list[str]:
+        return [delta async for delta in provider.stream([Message(role="user", content="hello")])]
+
+    with pytest.raises(ProviderError, match="OpenAI API error: boom"):
+        anyio.run(run)
+
+
+def test_openai_provider_requires_api_key(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    provider = OpenAIProvider()
+
+    async def run() -> list[str]:
+        return [delta async for delta in provider.stream([Message(role="user", content="hello")])]
+
+    with pytest.raises(ProviderConfigurationError, match="OPENAI_API_KEY is required"):
+        anyio.run(run)
+
+
+def _text_delta(text: str, *, sequence_number: int = 0) -> ResponseTextDeltaEvent:
+    return ResponseTextDeltaEvent(
+        content_index=0,
+        delta=text,
+        item_id="item",
+        logprobs=[],
+        output_index=0,
+        sequence_number=sequence_number,
+        type="response.output_text.delta",
+    )
+
+
+def _error_event(message: str) -> ResponseErrorEvent:
+    return ResponseErrorEvent(message=message, sequence_number=0, type="error")

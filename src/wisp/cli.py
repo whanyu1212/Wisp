@@ -13,7 +13,9 @@ from rich.console import Console
 from wisp.agent.loop import Agent
 from wisp.config import WispConfig
 from wisp.events import ErrorEvent, TokenDelta
+from wisp.providers.base import ProviderError
 from wisp.runtime.extensions import build_runtime
+from wisp.runtime.registry import UnknownProviderError
 from wisp.sessions.jsonl import JsonlSessionStore
 
 app = typer.Typer(
@@ -31,6 +33,14 @@ def cli_callback(
         str | None,
         typer.Option("--prompt", "-p", help="Run one prompt and exit."),
     ] = None,
+    provider: Annotated[
+        str | None,
+        typer.Option(help="Provider to use, e.g. fake or openai."),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(help="Model name for the selected provider."),
+    ] = None,
     session_dir: Annotated[
         Path | None,
         typer.Option(help="Directory for JSONL session files."),
@@ -46,8 +56,13 @@ def cli_callback(
         # to the callback friendly in tests or embedded usage.
         raise typer.Exit(0)
 
-    config = WispConfig.from_env(session_dir=session_dir)
-    anyio.run(_run_print, prompt, config)
+    config = WispConfig.from_env(provider=provider, model=model, session_dir=session_dir)
+    console = Console(stderr=True)
+    try:
+        anyio.run(_run_print, prompt, config)
+    except (ProviderError, UnknownProviderError) as exc:
+        console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(1) from exc
 
 
 def main() -> None:
@@ -57,11 +72,10 @@ def main() -> None:
 
 
 async def _run_print(prompt: str, config: WispConfig) -> None:
-    console = Console(stderr=True)
     runtime = await build_runtime()
     provider = runtime.providers.get(config.provider)
     sessions = JsonlSessionStore(config.session_dir)
-    agent = Agent(provider=provider, sessions=sessions, events=runtime.events)
+    agent = Agent(provider=provider, sessions=sessions, events=runtime.events, model=config.model)
 
     wrote_tokens = False
     async for event in agent.run(prompt):
@@ -70,7 +84,7 @@ async def _run_print(prompt: str, config: WispConfig) -> None:
             sys.stdout.flush()
             wrote_tokens = True
         elif isinstance(event, ErrorEvent):
-            console.print(f"[red]error:[/red] {event.message}")
+            raise ProviderError(event.message)
 
     if wrote_tokens:
         sys.stdout.write("\n")

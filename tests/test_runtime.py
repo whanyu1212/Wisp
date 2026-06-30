@@ -51,12 +51,12 @@ def test_activate_extensions_runs_extension_factories() -> None:
     assert anyio.run(run) == ("fake",)
 
 
-def test_build_runtime_activates_builtin_fake_provider() -> None:
+def test_build_runtime_activates_builtin_providers() -> None:
     async def run() -> tuple[str, ...]:
         runtime = await build_runtime()
         return runtime.providers.names()
 
-    assert anyio.run(run) == ("fake",)
+    assert anyio.run(run) == ("fake", "openai")
 
 
 def test_event_bus_emits_to_named_and_wildcard_handlers() -> None:
