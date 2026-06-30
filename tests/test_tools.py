@@ -237,6 +237,26 @@ def test_bash_tool_uses_taskkill_for_windows_process_tree_cleanup(
     assert process.killed is False
 
 
+def test_exec_helper_bounds_stderr_before_buffering(tmp_path: Path) -> None:
+    async def run() -> builtin_tools_module.ProcessResult:
+        return await builtin_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('e' * 10000)",
+            ],
+            cwd=tmp_path,
+            max_stdout_lines=1,
+            max_buffered_stderr_bytes=20,
+            max_buffered_stderr_lines=100,
+        )
+
+    result = anyio.run(run)
+
+    assert len(result.stderr.encode("utf-8")) <= 20
+    assert result.stderr_truncated is True
+
+
 def test_grep_tool_python_fallback_supports_literal_ignore_case_and_glob(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -297,7 +317,7 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    calls: list[tuple[list[str], int, int | None, int | None]] = []
+    calls: list[tuple[list[str], int, int | None, int | None, int | None, int | None]] = []
 
     async def fake_run(
         command: list[str],
@@ -307,11 +327,20 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
         stdout_count_filter: object = None,
         max_buffered_stdout_bytes: int | None = None,
         max_buffered_stdout_lines: int | None = None,
+        max_buffered_stderr_bytes: int | None = None,
+        max_buffered_stderr_lines: int | None = None,
     ) -> builtin_tools_module.ProcessResult:
         assert cwd == tmp_path
         assert callable(stdout_count_filter)
         calls.append(
-            (command, max_stdout_lines, max_buffered_stdout_bytes, max_buffered_stdout_lines)
+            (
+                command,
+                max_stdout_lines,
+                max_buffered_stdout_bytes,
+                max_buffered_stdout_lines,
+                max_buffered_stderr_bytes,
+                max_buffered_stderr_lines,
+            )
         )
         return builtin_tools_module.ProcessResult(
             exit_code=-9,
@@ -345,6 +374,8 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
                 ".",
             ],
             3,
+            50000,
+            2000,
             50000,
             2000,
         )
@@ -445,6 +476,55 @@ def test_grep_tool_ripgrep_counts_matches_separately_from_context_lines(
     assert "data.txt-1-before" in result.text
     assert "data.txt:2:match" in result.text
     assert "data.txt-3-after" in result.text
+
+
+def test_grep_tool_ripgrep_drops_context_for_omitted_merged_match(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_run(
+        command: list[str],
+        *,
+        cwd: Path,
+        max_stdout_lines: int,
+        stdout_count_filter: object = None,
+        max_buffered_stdout_bytes: int | None = None,
+        max_buffered_stdout_lines: int | None = None,
+        max_buffered_stderr_bytes: int | None = None,
+        max_buffered_stderr_lines: int | None = None,
+    ) -> builtin_tools_module.ProcessResult:
+        assert cwd == tmp_path
+        assert max_stdout_lines == 2
+        assert callable(stdout_count_filter)
+        assert max_buffered_stdout_bytes == 50000
+        assert max_buffered_stdout_lines == 2000
+        assert max_buffered_stderr_bytes == 50000
+        assert max_buffered_stderr_lines == 2000
+        return builtin_tools_module.ProcessResult(
+            exit_code=-9,
+            stdout=(
+                "data.txt\x1f1\x1fneedle one\n"
+                "data.txt\x1e2\x1ebridge\n"
+                "data.txt\x1f3\x1fneedle two\n"
+            ),
+            stderr="",
+            stdout_truncated=True,
+        )
+
+    monkeypatch.setattr(builtin_tools_module.shutil, "which", lambda _name: "rg")
+    monkeypatch.setattr(builtin_tools_module, "_run_exec_limited_stdout", fake_run)
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "needle", "path": ".", "context": 1, "literal": True, "max_results": 1},
+        context,
+    )
+
+    assert result.text == "data.txt:1:needle one\n[truncated]"
+    assert result.data["matches"] == ["data.txt:1:needle one"]
+    assert result.data["count"] == 1
+    assert result.truncated is True
 
 
 def test_grep_tool_ripgrep_preserves_whitespace_only_patterns(tmp_path: Path) -> None:
@@ -657,7 +737,7 @@ def test_find_tool_ripgrep_bounds_stdout_before_buffering(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    calls: list[tuple[list[str], int]] = []
+    calls: list[tuple[list[str], int, int | None, int | None]] = []
 
     async def fake_run(
         command: list[str],
@@ -665,10 +745,14 @@ def test_find_tool_ripgrep_bounds_stdout_before_buffering(
         cwd: Path,
         max_stdout_lines: int,
         stdout_line_filter: object = None,
+        max_buffered_stderr_bytes: int | None = None,
+        max_buffered_stderr_lines: int | None = None,
     ) -> builtin_tools_module.ProcessResult:
         assert cwd == tmp_path
         assert callable(stdout_line_filter)
-        calls.append((command, max_stdout_lines))
+        calls.append(
+            (command, max_stdout_lines, max_buffered_stderr_bytes, max_buffered_stderr_lines)
+        )
         selected = [line for line in ["a.py", "b.txt", "c.py", "d.py"] if stdout_line_filter(line)]
         return builtin_tools_module.ProcessResult(
             exit_code=-9,
@@ -683,7 +767,7 @@ def test_find_tool_ripgrep_bounds_stdout_before_buffering(
 
     result = run_tool(FindTool(), {"path": ".", "pattern": "*.py", "max_results": 2}, context)
 
-    assert calls == [(["rg", "--files", "--", "."], 3)]
+    assert calls == [(["rg", "--files", "--", "."], 3, 50000, 2000)]
     assert result.text == "a.py\nc.py\n[truncated]"
     assert result.truncated is True
 

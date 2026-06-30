@@ -648,6 +648,8 @@ async def _run_exec_limited_stdout(
     stdout_count_filter: Callable[[str], bool] | None = None,
     max_buffered_stdout_bytes: int | None = None,
     max_buffered_stdout_lines: int | None = None,
+    max_buffered_stderr_bytes: int | None = None,
+    max_buffered_stderr_lines: int | None = None,
 ) -> ProcessResult:
     try:
         process = await asyncio.create_subprocess_exec(
@@ -663,7 +665,17 @@ async def _run_exec_limited_stdout(
     assert process.stdout is not None
     assert process.stderr is not None
 
-    stderr_task = asyncio.create_task(process.stderr.read())
+    stderr_budget: _OutputBudget | None = None
+    if max_buffered_stderr_bytes is not None or max_buffered_stderr_lines is not None:
+        stderr_budget = _OutputBudget(
+            max_bytes=max_buffered_stderr_bytes if max_buffered_stderr_bytes is not None else 2**63,
+            max_lines=max_buffered_stderr_lines if max_buffered_stderr_lines is not None else 2**63,
+        )
+        stderr_task = asyncio.create_task(
+            _read_stream_limited(process.stderr, stderr_budget, process)
+        )
+    else:
+        stderr_task = asyncio.create_task(process.stderr.read())
     stdout_lines: list[bytes] = []
     stdout_count = 0
     buffered_stdout_bytes = 0
@@ -715,6 +727,7 @@ async def _run_exec_limited_stdout(
         stdout=b"".join(stdout_lines).decode("utf-8", errors="replace"),
         stderr=stderr_bytes.decode("utf-8", errors="replace"),
         stdout_truncated=stdout_truncated,
+        stderr_truncated=stderr_budget.exhausted if stderr_budget is not None else False,
     )
 
 
@@ -773,6 +786,8 @@ async def _run_rg_grep(
         stdout_count_filter=_is_grep_match_line,
         max_buffered_stdout_bytes=max(0, context.max_output_bytes),
         max_buffered_stdout_lines=max(0, context.max_output_lines),
+        max_buffered_stderr_bytes=max(0, context.max_output_bytes),
+        max_buffered_stderr_lines=max(0, context.max_output_lines),
     )
     if result.exit_code == 1 and not result.stdout.strip():
         return ToolResult(text="No matches", data={"count": 0, "matches": []})
@@ -820,6 +835,8 @@ async def _run_rg_find(
                 pattern,
                 context,
             ),
+            max_buffered_stderr_bytes=max(0, context.max_output_bytes),
+            max_buffered_stderr_lines=max(0, context.max_output_lines),
         )
         if result.exit_code == 1 and not result.stdout.strip() and not result.stderr.strip():
             candidates = []
@@ -1093,22 +1110,37 @@ def _result_from_grep_lines(
     force_truncated: bool = False,
 ) -> ToolResult:
     kept: list[str] = []
+    pending_context_after_limit: list[str] = []
     match_count = 0
     truncated_by_count = force_truncated
     for line in lines:
         if line == "--" and match_count >= max_results:
+            kept.extend(pending_context_after_limit)
+            pending_context_after_limit.clear()
             truncated_by_count = True
             break
         line_kind = _grep_line_kind(line, context)
         if line_kind == "match":
             if match_count >= max_results:
+                pending_context_after_limit.clear()
                 truncated_by_count = True
                 break
+            kept.extend(pending_context_after_limit)
+            pending_context_after_limit.clear()
             match_count += 1
-        elif match_count >= max_results and line_kind != "context":
+            kept.append(_normalize_rg_line(line))
+            continue
+        if match_count >= max_results and line_kind == "context":
+            pending_context_after_limit.append(_normalize_rg_line(line))
+            continue
+        if match_count >= max_results:
+            pending_context_after_limit.clear()
             truncated_by_count = True
             break
+        kept.extend(pending_context_after_limit)
+        pending_context_after_limit.clear()
         kept.append(_normalize_rg_line(line))
+    kept.extend(pending_context_after_limit)
 
     if not kept:
         return ToolResult(text="No matches", data={"count": 0, "matches": []})
