@@ -480,6 +480,7 @@ class _OutputBudget:
         self._remaining_bytes = max(0, max_bytes)
         self._remaining_lines = max(0, max_lines)
         self._lock = asyncio.Lock()
+        self._kill_requested = False
         self.exhausted = self._remaining_bytes == 0 or self._remaining_lines == 0
 
     async def take(self, chunk: bytes) -> tuple[bytes, bool]:
@@ -499,6 +500,13 @@ class _OutputBudget:
             if len(accepted) < len(chunk):
                 self.exhausted = True
             return accepted, self.exhausted
+
+    async def request_kill_once(self) -> bool:
+        async with self._lock:
+            if self._kill_requested:
+                return False
+            self._kill_requested = True
+            return True
 
 
 def _offset_after_nth_newline(chunk: bytes, newline_count: int) -> int:
@@ -557,6 +565,11 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             return
+        except PermissionError:
+            try:
+                process.kill()
+            except (ProcessLookupError, PermissionError):
+                return
     elif os.name == "nt":
         try:
             completed = subprocess.run(
@@ -609,7 +622,8 @@ async def _read_stream_limited(
         if accepted:
             chunks.append(accepted)
         if exhausted:
-            _kill_process_tree(process)
+            if await budget.request_kill_once():
+                _kill_process_tree(process)
             while await stream.read(8192):
                 pass
             break
@@ -787,13 +801,6 @@ def _python_grep(
         for index, line in enumerate(lines):
             if not matcher(line):
                 continue
-            match_count += 1
-            if context_lines:
-                output.extend(
-                    _format_context_lines(file_path, lines, index, context_lines, context)
-                )
-            else:
-                output.append(f"{display_tool_path(file_path, context)}:{index + 1}:{line}")
             if match_count >= max_results:
                 return _result_from_grep_lines(
                     output,
@@ -801,6 +808,13 @@ def _python_grep(
                     context=context,
                     force_truncated=True,
                 )
+            match_count += 1
+            if context_lines:
+                output.extend(
+                    _format_context_lines(file_path, lines, index, context_lines, context)
+                )
+            else:
+                output.append(f"{display_tool_path(file_path, context)}:{index + 1}:{line}")
 
     if not output:
         return ToolResult(text="No matches", data={"count": 0, "matches": []})

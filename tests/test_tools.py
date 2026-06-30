@@ -335,6 +335,42 @@ def test_grep_tool_python_fallback_counts_matches_separately_from_context_lines(
     assert "data.txt-3-after" in result.text
 
 
+def test_grep_tool_python_fallback_does_not_truncate_exact_limit(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text("match\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "match", "path": ".", "literal": True, "max_results": 1},
+        context,
+    )
+
+    assert result.text == "data.txt:1:match"
+    assert result.truncated is False
+
+
+def test_grep_tool_python_fallback_truncates_when_another_match_exists(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text("match\nmatch\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "match", "path": ".", "literal": True, "max_results": 1},
+        context,
+    )
+
+    assert result.text == "data.txt:1:match\n[truncated]"
+    assert result.truncated is True
+
+
 def test_grep_tool_python_fallback_skips_hidden_entries(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
