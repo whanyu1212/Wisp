@@ -9,7 +9,7 @@ import re
 import shutil
 import signal
 import subprocess
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1010,11 +1010,16 @@ def _is_grep_context_line(line: str) -> bool:
     return _grep_line_kind(line) == "context"
 
 
-def _grep_line_kind(line: str) -> str | None:
+def _grep_line_kind(line: str, context: ToolContext | None = None) -> str | None:
     if _has_rg_field_separator(line, RG_MATCH_SEPARATOR):
         return "match"
     if _has_rg_field_separator(line, RG_CONTEXT_SEPARATOR):
         return "context"
+
+    if context is not None:
+        kind = _grep_line_kind_from_existing_path(line, context)
+        if kind is not None:
+            return kind
 
     match_index = _find_line_number_separator(line, ":")
     context_index = _find_line_number_separator(line, "-")
@@ -1031,19 +1036,46 @@ def _has_rg_field_separator(line: str, field_separator: str) -> bool:
 
 
 def _find_line_number_separator(line: str, separator: str) -> int:
+    return next(_iter_line_number_separators(line, separator), -1)
+
+
+def _iter_line_number_separators(line: str, separator: str) -> Iterator[int]:
     search_start = 0
     while True:
         first = line.find(separator, search_start)
         if first == -1:
-            return -1
+            return
         digit_start = first + len(separator)
         if digit_start < len(line) and line[digit_start].isdigit():
             digit_end = digit_start + 1
             while digit_end < len(line) and line[digit_end].isdigit():
                 digit_end += 1
             if line.startswith(separator, digit_end):
-                return first
+                yield first
         search_start = first + len(separator)
+
+
+def _grep_line_kind_from_existing_path(line: str, context: ToolContext) -> str | None:
+    candidates: list[tuple[int, str]] = []
+    for separator, kind in ((":", "match"), ("-", "context")):
+        for separator_index in _iter_line_number_separators(line, separator):
+            if _grep_record_path_exists(line[:separator_index], context):
+                candidates.append((separator_index, kind))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: candidate[0])[1]
+
+
+def _grep_record_path_exists(path_text: str, context: ToolContext) -> bool:
+    if not path_text:
+        return False
+    path = Path(path_text)
+    if not path.is_absolute():
+        path = context.cwd / path
+    try:
+        return path.resolve(strict=False).is_file()
+    except OSError:
+        return False
 
 
 def _path_from_rg_line(line: str, context: ToolContext) -> Path:
@@ -1067,12 +1099,13 @@ def _result_from_grep_lines(
         if line == "--" and match_count >= max_results:
             truncated_by_count = True
             break
-        if _is_grep_match_line(line):
+        line_kind = _grep_line_kind(line, context)
+        if line_kind == "match":
             if match_count >= max_results:
                 truncated_by_count = True
                 break
             match_count += 1
-        elif match_count >= max_results and not _is_grep_context_line(line):
+        elif match_count >= max_results and line_kind != "context":
             truncated_by_count = True
             break
         kept.append(_normalize_rg_line(line))

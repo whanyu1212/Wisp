@@ -481,6 +481,26 @@ def test_grep_tool_python_fallback_does_not_count_context_text_as_match(
     assert result.data["count"] == 1
 
 
+def test_grep_tool_python_fallback_counts_match_when_path_contains_separator(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    package_dir = tmp_path / "pkg-1-test"
+    package_dir.mkdir()
+    (package_dir / "a.txt").write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "needle", "path": ".", "literal": True},
+        context,
+    )
+
+    assert result.text == "pkg-1-test/a.txt:1:needle"
+    assert result.data["count"] == 1
+
+
 def test_grep_tool_python_fallback_counts_matches_separately_from_context_lines(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
