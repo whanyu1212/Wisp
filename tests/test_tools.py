@@ -111,6 +111,22 @@ def test_bash_tool_retruncates_combined_stdout_and_stderr(tmp_path: Path) -> Non
     assert result.truncated is True
 
 
+def test_bash_tool_bounds_output_before_buffering(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=80, max_output_lines=1000)
+    python = shlex.quote(sys.executable)
+    code = (
+        "import sys; "
+        "\nfor _ in range(10000): "
+        "\n    sys.stdout.write('x' * 1000 + '\\n'); sys.stdout.flush()"
+    )
+    command = f"{python} -u -c {shlex.quote(code)}"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+
+    assert len(str(result.data["stdout"]).encode("utf-8")) <= context.max_output_bytes
+    assert result.truncated is True
+
+
 def test_bash_tool_reports_timeout_and_kills_child_processes(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     python = shlex.quote(sys.executable)
@@ -345,12 +361,15 @@ def test_find_tool_ripgrep_bounds_stdout_before_buffering(
         *,
         cwd: Path,
         max_stdout_lines: int,
+        stdout_line_filter: object = None,
     ) -> builtin_tools_module.ProcessResult:
         assert cwd == tmp_path
+        assert callable(stdout_line_filter)
         calls.append((command, max_stdout_lines))
+        selected = [line for line in ["a.py", "b.txt", "c.py", "d.py"] if stdout_line_filter(line)]
         return builtin_tools_module.ProcessResult(
             exit_code=-9,
-            stdout="a.py\nb.py\nc.py\n",
+            stdout="\n".join(selected[:max_stdout_lines]) + "\n",
             stderr="",
             stdout_truncated=True,
         )
@@ -361,8 +380,8 @@ def test_find_tool_ripgrep_bounds_stdout_before_buffering(
 
     result = run_tool(FindTool(), {"path": ".", "pattern": "*.py", "max_results": 2}, context)
 
-    assert calls == [(["rg", "--files", "--glob", "*.py", "--", "."], 3)]
-    assert result.text == "a.py\nb.py\n[truncated]"
+    assert calls == [(["rg", "--files", "--", "."], 3)]
+    assert result.text == "a.py\nc.py\n[truncated]"
     assert result.truncated is True
 
 

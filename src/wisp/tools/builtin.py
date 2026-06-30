@@ -45,6 +45,7 @@ class ProcessResult:
     stdout: str
     stderr: str
     stdout_truncated: bool = False
+    stderr_truncated: bool = False
 
 
 class ReadTool:
@@ -214,7 +215,13 @@ class BashTool:
         if timeout is None or timeout < 1:
             raise ToolError("bash.timeout must be greater than or equal to 1")
 
-        result = await _run_shell(command, cwd=context.cwd, timeout=float(timeout))
+        result = await _run_shell(
+            command,
+            cwd=context.cwd,
+            timeout=float(timeout),
+            max_output_bytes=context.max_output_bytes,
+            max_output_lines=context.max_output_lines,
+        )
         stdout = truncate_text(
             result.stdout,
             max_bytes=context.max_output_bytes,
@@ -238,7 +245,13 @@ class BashTool:
                 "stdout": stdout.text,
                 "stderr": stderr.text,
             },
-            truncated=stdout.truncated or stderr.truncated or truncated_output.truncated,
+            truncated=(
+                result.stdout_truncated
+                or result.stderr_truncated
+                or stdout.truncated
+                or stderr.truncated
+                or truncated_output.truncated
+            ),
         )
 
 
@@ -462,7 +475,50 @@ def _find_occurrences(text: str, needle: str) -> list[int]:
         start = position + 1
 
 
-async def _run_shell(command: str, *, cwd: Path, timeout: float) -> ProcessResult:
+class _OutputBudget:
+    def __init__(self, *, max_bytes: int, max_lines: int) -> None:
+        self._remaining_bytes = max(0, max_bytes)
+        self._remaining_lines = max(0, max_lines)
+        self._lock = asyncio.Lock()
+        self.exhausted = self._remaining_bytes == 0 or self._remaining_lines == 0
+
+    async def take(self, chunk: bytes) -> tuple[bytes, bool]:
+        async with self._lock:
+            if self.exhausted:
+                return b"", True
+
+            accepted = chunk[: self._remaining_bytes]
+            if accepted.count(b"\n") >= self._remaining_lines:
+                accepted = accepted[: _offset_after_nth_newline(accepted, self._remaining_lines)]
+
+            self._remaining_bytes -= len(accepted)
+            self._remaining_lines -= accepted.count(b"\n")
+            if (
+                len(accepted) < len(chunk)
+                or self._remaining_bytes <= 0
+                or self._remaining_lines <= 0
+            ):
+                self.exhausted = True
+            return accepted, self.exhausted
+
+
+def _offset_after_nth_newline(chunk: bytes, newline_count: int) -> int:
+    position = -1
+    for _ in range(newline_count):
+        position = chunk.find(b"\n", position + 1)
+        if position == -1:
+            return len(chunk)
+    return position + 1
+
+
+async def _run_shell(
+    command: str,
+    *,
+    cwd: Path,
+    timeout: float,
+    max_output_bytes: int,
+    max_output_lines: int,
+) -> ProcessResult:
     try:
         process = await asyncio.create_subprocess_shell(
             command,
@@ -474,17 +530,23 @@ async def _run_shell(command: str, *, cwd: Path, timeout: float) -> ProcessResul
     except OSError as exc:
         raise ToolError(f"Failed to start command: {exc}") from exc
 
+    budget = _OutputBudget(max_bytes=max_output_bytes, max_lines=max_output_lines)
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            _collect_limited_output(process, budget),
+            timeout=timeout,
+        )
     except TimeoutError as exc:
         _kill_process_tree(process)
-        await process.communicate()
+        await process.wait()
         raise ToolError(f"Command timed out after {timeout:g} seconds") from exc
 
     return ProcessResult(
         exit_code=process.returncode if process.returncode is not None else -1,
         stdout=stdout_bytes.decode("utf-8", errors="replace"),
         stderr=stderr_bytes.decode("utf-8", errors="replace"),
+        stdout_truncated=budget.exhausted,
+        stderr_truncated=budget.exhausted,
     )
 
 
@@ -514,11 +576,51 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
         process.kill()
 
 
+async def _collect_limited_output(
+    process: asyncio.subprocess.Process,
+    budget: _OutputBudget,
+) -> tuple[bytes, bytes]:
+    assert process.stdout is not None
+    assert process.stderr is not None
+
+    stdout_task = asyncio.create_task(_read_stream_limited(process.stdout, budget, process))
+    stderr_task = asyncio.create_task(_read_stream_limited(process.stderr, budget, process))
+    try:
+        await process.wait()
+        stdout_bytes, stderr_bytes = await asyncio.gather(stdout_task, stderr_task)
+        return stdout_bytes, stderr_bytes
+    finally:
+        for task in (stdout_task, stderr_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+
+
+async def _read_stream_limited(
+    stream: asyncio.StreamReader,
+    budget: _OutputBudget,
+    process: asyncio.subprocess.Process,
+) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = await stream.read(8192)
+        if not chunk:
+            break
+        accepted, exhausted = await budget.take(chunk)
+        if accepted:
+            chunks.append(accepted)
+        if exhausted:
+            _kill_process_tree(process)
+            break
+    return b"".join(chunks)
+
+
 async def _run_exec_limited_stdout(
     command: Sequence[str],
     *,
     cwd: Path,
     max_stdout_lines: int,
+    stdout_line_filter: Callable[[str], bool] | None = None,
 ) -> ProcessResult:
     try:
         process = await asyncio.create_subprocess_exec(
@@ -541,7 +643,9 @@ async def _run_exec_limited_stdout(
         line = await process.stdout.readline()
         if not line:
             break
-        stdout_lines.append(line)
+        decoded_line = line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if stdout_line_filter is None or stdout_line_filter(decoded_line):
+            stdout_lines.append(line)
 
     if len(stdout_lines) >= max_stdout_lines:
         stdout_truncated = True
@@ -621,9 +725,14 @@ async def _run_rg_find(
         candidates = [path]
     else:
         result = await _run_exec_limited_stdout(
-            [rg_path, "--files", "--glob", pattern, "--", _command_path(path, context)],
+            [rg_path, "--files", "--", _command_path(path, context)],
             cwd=context.cwd,
             max_stdout_lines=max_results + 1,
+            stdout_line_filter=lambda line: _matches_glob(
+                _path_from_rg_line(line, context),
+                pattern,
+                context,
+            ),
         )
         if result.exit_code == 1 and not result.stdout.strip() and not result.stderr.strip():
             candidates = []
@@ -795,7 +904,7 @@ def _normalize_rg_line(line: str) -> str:
 
 
 def _path_from_rg_line(line: str, context: ToolContext) -> Path:
-    path = Path(line)
+    path = Path(line.rstrip("\r\n"))
     if not path.is_absolute():
         path = context.cwd / path
     return path.resolve(strict=False)
