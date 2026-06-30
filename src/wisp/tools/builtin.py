@@ -585,8 +585,8 @@ async def _collect_limited_output(
     stdout_task = asyncio.create_task(_read_stream_limited(process.stdout, budget, process))
     stderr_task = asyncio.create_task(_read_stream_limited(process.stderr, budget, process))
     try:
-        await process.wait()
         stdout_bytes, stderr_bytes = await asyncio.gather(stdout_task, stderr_task)
+        await process.wait()
         return stdout_bytes, stderr_bytes
     finally:
         for task in (stdout_task, stderr_task):
@@ -610,6 +610,8 @@ async def _read_stream_limited(
             chunks.append(accepted)
         if exhausted:
             _kill_process_tree(process)
+            while await stream.read(8192):
+                pass
             break
     return b"".join(chunks)
 
