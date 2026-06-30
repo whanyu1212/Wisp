@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from wisp.providers.base import Provider
+from wisp.tools.base import Tool
 
 
 class UnknownProviderError(KeyError):
@@ -14,6 +15,17 @@ class UnknownProviderError(KeyError):
 
     def __str__(self) -> str:
         return f"Unknown provider: {self.name}"
+
+
+class UnknownToolError(KeyError):
+    """Raised when a tool name is not registered in the runtime."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.name = name
+
+    def __str__(self) -> str:
+        return f"Unknown tool: {self.name}"
 
 
 class ProviderRegistry:
@@ -42,3 +54,31 @@ class ProviderRegistry:
         """Return registered provider names in registration order."""
 
         return tuple(self._providers.keys())
+
+
+class ToolRegistry:
+    """Registry of tools available to the agent runtime."""
+
+    def __init__(self) -> None:
+        self._tools: dict[str, Tool] = {}
+
+    def register(self, tool: Tool, *, replace: bool = True) -> None:
+        """Register a tool by its declared name."""
+
+        if not replace and tool.name in self._tools:
+            msg = f"Tool already registered: {tool.name}"
+            raise ValueError(msg)
+        self._tools[tool.name] = tool
+
+    def get(self, name: str) -> Tool:
+        """Return a registered tool by name."""
+
+        try:
+            return self._tools[name]
+        except KeyError as exc:
+            raise UnknownToolError(name) from exc
+
+    def names(self) -> tuple[str, ...]:
+        """Return registered tool names in registration order."""
+
+        return tuple(self._tools.keys())
