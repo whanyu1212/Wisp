@@ -486,6 +486,9 @@ class _OutputBudget:
         async with self._lock:
             if self.exhausted:
                 return b"", True
+            if self._remaining_bytes <= 0 or self._remaining_lines <= 0:
+                self.exhausted = True
+                return b"", True
 
             accepted = chunk[: self._remaining_bytes]
             if accepted.count(b"\n") >= self._remaining_lines:
@@ -493,11 +496,7 @@ class _OutputBudget:
 
             self._remaining_bytes -= len(accepted)
             self._remaining_lines -= accepted.count(b"\n")
-            if (
-                len(accepted) < len(chunk)
-                or self._remaining_bytes <= 0
-                or self._remaining_lines <= 0
-            ):
+            if len(accepted) < len(chunk):
                 self.exhausted = True
             return accepted, self.exhausted
 
@@ -621,6 +620,7 @@ async def _run_exec_limited_stdout(
     cwd: Path,
     max_stdout_lines: int,
     stdout_line_filter: Callable[[str], bool] | None = None,
+    stdout_count_filter: Callable[[str], bool] | None = None,
 ) -> ProcessResult:
     try:
         process = await asyncio.create_subprocess_exec(
@@ -638,16 +638,19 @@ async def _run_exec_limited_stdout(
 
     stderr_task = asyncio.create_task(process.stderr.read())
     stdout_lines: list[bytes] = []
+    stdout_count = 0
     stdout_truncated = False
-    while len(stdout_lines) < max_stdout_lines:
+    while stdout_count < max_stdout_lines:
         line = await process.stdout.readline()
         if not line:
             break
         decoded_line = line.decode("utf-8", errors="replace").rstrip("\r\n")
         if stdout_line_filter is None or stdout_line_filter(decoded_line):
             stdout_lines.append(line)
+            if stdout_count_filter is None or stdout_count_filter(decoded_line):
+                stdout_count += 1
 
-    if len(stdout_lines) >= max_stdout_lines:
+    if stdout_count >= max_stdout_lines:
         stdout_truncated = True
         _kill_process_tree(process)
 
@@ -699,17 +702,18 @@ async def _run_rg_grep(
         command,
         cwd=context.cwd,
         max_stdout_lines=max_results + 1,
+        stdout_count_filter=_is_grep_match_line,
     )
     if result.exit_code == 1 and not result.stdout.strip():
         return ToolResult(text="No matches", data={"count": 0, "matches": []})
     if result.exit_code != 0 and not result.stdout_truncated:
         raise ToolError(result.stderr.strip() or f"rg failed with exit code {result.exit_code}")
 
-    return _result_from_lines(
+    return _result_from_grep_lines(
         [_normalize_rg_line(line) for line in result.stdout.splitlines()],
         max_results=max_results,
         context=context,
-        count_label="matches",
+        force_truncated=result.stdout_truncated,
     )
 
 
@@ -770,6 +774,7 @@ def _python_grep(
 
     matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
     output: list[str] = []
+    match_count = 0
     for file_path in _iter_files(path):
         if glob is not None and not _matches_glob(file_path, glob, context):
             continue
@@ -780,25 +785,27 @@ def _python_grep(
         for index, line in enumerate(lines):
             if not matcher(line):
                 continue
+            match_count += 1
             if context_lines:
                 output.extend(
                     _format_context_lines(file_path, lines, index, context_lines, context)
                 )
             else:
                 output.append(f"{display_tool_path(file_path, context)}:{index + 1}:{line}")
-            if len(output) >= max_results:
-                return _result_from_lines(
+            if match_count >= max_results:
+                return _result_from_grep_lines(
                     output,
                     max_results=max_results,
                     context=context,
-                    count_label="matches",
                     force_truncated=True,
                 )
 
     if not output:
         return ToolResult(text="No matches", data={"count": 0, "matches": []})
-    return _result_from_lines(
-        output, max_results=max_results, context=context, count_label="matches"
+    return _result_from_grep_lines(
+        output,
+        max_results=max_results,
+        context=context,
     )
 
 
@@ -903,11 +910,61 @@ def _normalize_rg_line(line: str) -> str:
     return line
 
 
+def _is_grep_match_line(line: str) -> bool:
+    return re.match(r"^.+:\d+:", line) is not None
+
+
+def _is_grep_context_line(line: str) -> bool:
+    return re.match(r"^.+-\d+-", line) is not None
+
+
 def _path_from_rg_line(line: str, context: ToolContext) -> Path:
     path = Path(line.rstrip("\r\n"))
     if not path.is_absolute():
         path = context.cwd / path
     return path.resolve(strict=False)
+
+
+def _result_from_grep_lines(
+    lines: Sequence[str],
+    *,
+    max_results: int,
+    context: ToolContext,
+    force_truncated: bool = False,
+) -> ToolResult:
+    kept: list[str] = []
+    match_count = 0
+    truncated_by_count = force_truncated
+    for line in lines:
+        if line == "--" and match_count >= max_results:
+            truncated_by_count = True
+            break
+        if _is_grep_match_line(line):
+            if match_count >= max_results:
+                truncated_by_count = True
+                break
+            match_count += 1
+        elif match_count >= max_results and not _is_grep_context_line(line):
+            truncated_by_count = True
+            break
+        kept.append(line)
+
+    if not kept:
+        return ToolResult(text="No matches", data={"count": 0, "matches": []})
+
+    text = "\n".join(kept)
+    if truncated_by_count:
+        text = f"{text}\n[truncated]"
+    truncated = truncate_text(
+        text,
+        max_bytes=context.max_output_bytes,
+        max_lines=context.max_output_lines,
+    )
+    return ToolResult(
+        text=truncated.text,
+        data={"count": match_count, "matches": kept},
+        truncated=truncated.truncated or truncated_by_count,
+    )
 
 
 def _result_from_lines(

@@ -127,6 +127,24 @@ def test_bash_tool_bounds_output_before_buffering(tmp_path: Path) -> None:
     assert result.truncated is True
 
 
+def test_bash_tool_does_not_kill_process_at_exact_output_limit(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=100, max_output_lines=1)
+    python = shlex.quote(sys.executable)
+    marker = tmp_path / "finished.txt"
+    code = (
+        "import pathlib, time; "
+        "print('done'); time.sleep(0.2); "
+        f"pathlib.Path({str(marker)!r}).write_text('ok')"
+    )
+    command = f"{python} -c {shlex.quote(code)}"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+
+    assert result.data["stdout"] == "done\n"
+    assert result.truncated is False
+    assert marker.read_text(encoding="utf-8") == "ok"
+
+
 def test_bash_tool_reports_timeout_and_kills_child_processes(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     python = shlex.quote(sys.executable)
@@ -242,8 +260,10 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
         *,
         cwd: Path,
         max_stdout_lines: int,
+        stdout_count_filter: object = None,
     ) -> builtin_tools_module.ProcessResult:
         assert cwd == tmp_path
+        assert callable(stdout_count_filter)
         calls.append((command, max_stdout_lines))
         return builtin_tools_module.ProcessResult(
             exit_code=-9,
@@ -275,6 +295,44 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
     ]
     assert result.text == "one.txt:1:e\ntwo.txt:1:e\n[truncated]"
     assert result.truncated is True
+
+
+def test_grep_tool_ripgrep_counts_matches_separately_from_context_lines(
+    tmp_path: Path,
+) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    (tmp_path / "data.txt").write_text("before\nmatch\nafter\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "match", "path": ".", "context": 1, "literal": True, "max_results": 1},
+        context,
+    )
+
+    assert "data.txt-1-before" in result.text
+    assert "data.txt:2:match" in result.text
+    assert "data.txt-3-after" in result.text
+
+
+def test_grep_tool_python_fallback_counts_matches_separately_from_context_lines(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text("before\nmatch\nafter\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "match", "path": ".", "context": 1, "literal": True, "max_results": 1},
+        context,
+    )
+
+    assert "data.txt-1-before" in result.text
+    assert "data.txt:2:match" in result.text
+    assert "data.txt-3-after" in result.text
 
 
 def test_grep_tool_python_fallback_skips_hidden_entries(
