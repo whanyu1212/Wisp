@@ -200,6 +200,21 @@ def test_grep_tool_ripgrep_treats_option_like_pattern_as_literal(tmp_path: Path)
     assert "Usage:" not in result.text
 
 
+def test_grep_tool_ripgrep_includes_filename_for_single_file_search(tmp_path: Path) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    (tmp_path / "data.txt").write_text("match\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "match", "path": "data.txt", "literal": True},
+        context,
+    )
+
+    assert result.text == "data.txt:1:match"
+
+
 def test_grep_tool_python_fallback_skips_hidden_entries(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

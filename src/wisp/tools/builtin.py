@@ -555,7 +555,7 @@ async def _run_rg_grep(
     max_results: int,
     context: ToolContext,
 ) -> ToolResult:
-    command = [rg_path, "--line-number", "--no-heading", "--color=never"]
+    command = [rg_path, "--line-number", "--no-heading", "--color=never", "--with-filename"]
     if literal:
         command.append("--fixed-strings")
     if ignore_case:
