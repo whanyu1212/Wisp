@@ -36,7 +36,7 @@ class WispConfig(BaseModel):
         """
 
         if load_env_file:
-            load_dotenv()
+            load_dotenv(dotenv_path=Path.cwd() / ".env")
 
         provider_name = _first_non_empty(
             provider,
