@@ -215,6 +215,52 @@ def test_grep_tool_ripgrep_includes_filename_for_single_file_search(tmp_path: Pa
     assert result.text == "data.txt:1:match"
 
 
+def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], int]] = []
+
+    async def fake_run(
+        command: list[str],
+        *,
+        cwd: Path,
+        max_stdout_lines: int,
+    ) -> builtin_tools_module.ProcessResult:
+        assert cwd == tmp_path
+        calls.append((command, max_stdout_lines))
+        return builtin_tools_module.ProcessResult(
+            exit_code=-9,
+            stdout="one.txt:1:e\ntwo.txt:1:e\nthree.txt:1:e\n",
+            stderr="",
+            stdout_truncated=True,
+        )
+
+    monkeypatch.setattr(builtin_tools_module.shutil, "which", lambda _name: "rg")
+    monkeypatch.setattr(builtin_tools_module, "_run_exec_limited_stdout", fake_run)
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(GrepTool(), {"pattern": "e", "path": ".", "max_results": 2}, context)
+
+    assert calls == [
+        (
+            [
+                "rg",
+                "--line-number",
+                "--no-heading",
+                "--color=never",
+                "--with-filename",
+                "--",
+                "e",
+                ".",
+            ],
+            3,
+        )
+    ]
+    assert result.text == "one.txt:1:e\ntwo.txt:1:e\n[truncated]"
+    assert result.truncated is True
+
+
 def test_grep_tool_python_fallback_skips_hidden_entries(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -286,6 +332,38 @@ def test_find_tool_ripgrep_returns_no_files_for_empty_directory(tmp_path: Path) 
 
     assert result.text == "No files found"
     assert result.data == {"count": 0, "files": []}
+
+
+def test_find_tool_ripgrep_bounds_stdout_before_buffering(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], int]] = []
+
+    async def fake_run(
+        command: list[str],
+        *,
+        cwd: Path,
+        max_stdout_lines: int,
+    ) -> builtin_tools_module.ProcessResult:
+        assert cwd == tmp_path
+        calls.append((command, max_stdout_lines))
+        return builtin_tools_module.ProcessResult(
+            exit_code=-9,
+            stdout="a.py\nb.py\nc.py\n",
+            stderr="",
+            stdout_truncated=True,
+        )
+
+    monkeypatch.setattr(builtin_tools_module.shutil, "which", lambda _name: "rg")
+    monkeypatch.setattr(builtin_tools_module, "_run_exec_limited_stdout", fake_run)
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(FindTool(), {"path": ".", "pattern": "*.py", "max_results": 2}, context)
+
+    assert calls == [(["rg", "--files", "--glob", "*.py", "--", "."], 3)]
+    assert result.text == "a.py\nb.py\n[truncated]"
+    assert result.truncated is True
 
 
 def test_ls_tool_lists_sorted_entries_with_directory_suffix(tmp_path: Path) -> None:

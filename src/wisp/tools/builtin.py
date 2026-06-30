@@ -44,6 +44,7 @@ class ProcessResult:
     exit_code: int
     stdout: str
     stderr: str
+    stdout_truncated: bool = False
 
 
 class ReadTool:
@@ -513,22 +514,46 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
         process.kill()
 
 
-async def _run_exec(command: Sequence[str], *, cwd: Path) -> ProcessResult:
+async def _run_exec_limited_stdout(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    max_stdout_lines: int,
+) -> ProcessResult:
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=str(cwd),
+            start_new_session=os.name == "posix",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
     except OSError as exc:
         raise ToolError(f"Failed to start command: {exc}") from exc
 
-    stdout_bytes, stderr_bytes = await process.communicate()
+    assert process.stdout is not None
+    assert process.stderr is not None
+
+    stderr_task = asyncio.create_task(process.stderr.read())
+    stdout_lines: list[bytes] = []
+    stdout_truncated = False
+    while len(stdout_lines) < max_stdout_lines:
+        line = await process.stdout.readline()
+        if not line:
+            break
+        stdout_lines.append(line)
+
+    if len(stdout_lines) >= max_stdout_lines:
+        stdout_truncated = True
+        _kill_process_tree(process)
+
+    await process.wait()
+    stderr_bytes = await stderr_task
     return ProcessResult(
         exit_code=process.returncode if process.returncode is not None else -1,
-        stdout=stdout_bytes.decode("utf-8", errors="replace"),
+        stdout=b"".join(stdout_lines).decode("utf-8", errors="replace"),
         stderr=stderr_bytes.decode("utf-8", errors="replace"),
+        stdout_truncated=stdout_truncated,
     )
 
 
@@ -566,10 +591,14 @@ async def _run_rg_grep(
         command.extend(("--glob", glob))
     command.extend(("--", pattern, _command_path(path, context)))
 
-    result = await _run_exec(command, cwd=context.cwd)
-    if result.exit_code == 1:
+    result = await _run_exec_limited_stdout(
+        command,
+        cwd=context.cwd,
+        max_stdout_lines=max_results + 1,
+    )
+    if result.exit_code == 1 and not result.stdout.strip():
         return ToolResult(text="No matches", data={"count": 0, "matches": []})
-    if result.exit_code != 0:
+    if result.exit_code != 0 and not result.stdout_truncated:
         raise ToolError(result.stderr.strip() or f"rg failed with exit code {result.exit_code}")
 
     return _result_from_lines(
@@ -591,12 +620,14 @@ async def _run_rg_find(
     if path.is_file():
         candidates = [path]
     else:
-        result = await _run_exec(
-            [rg_path, "--files", "--", _command_path(path, context)], cwd=context.cwd
+        result = await _run_exec_limited_stdout(
+            [rg_path, "--files", "--glob", pattern, "--", _command_path(path, context)],
+            cwd=context.cwd,
+            max_stdout_lines=max_results + 1,
         )
         if result.exit_code == 1 and not result.stdout.strip() and not result.stderr.strip():
             candidates = []
-        elif result.exit_code != 0:
+        elif result.exit_code != 0 and not result.stdout_truncated:
             raise ToolError(
                 result.stderr.strip() or f"rg --files failed with exit code {result.exit_code}"
             )
