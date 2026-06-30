@@ -185,6 +185,19 @@ def test_find_tool_ripgrep_handles_option_like_paths(tmp_path: Path) -> None:
     assert result.text == "-dash/tool.py"
 
 
+def test_find_tool_ripgrep_returns_no_files_for_empty_directory(tmp_path: Path) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(FindTool(), {"path": "empty", "pattern": "*.py"}, context)
+
+    assert result.text == "No files found"
+    assert result.data == {"count": 0, "files": []}
+
+
 def test_ls_tool_lists_sorted_entries_with_directory_suffix(tmp_path: Path) -> None:
     (tmp_path / "zeta.txt").write_text("", encoding="utf-8")
     (tmp_path / "alpha").mkdir()

@@ -574,11 +574,14 @@ async def _run_rg_find(
         result = await _run_exec(
             [rg_path, "--files", "--", _command_path(path, context)], cwd=context.cwd
         )
-        if result.exit_code != 0:
+        if result.exit_code == 1 and not result.stdout.strip() and not result.stderr.strip():
+            candidates = []
+        elif result.exit_code != 0:
             raise ToolError(
                 result.stderr.strip() or f"rg --files failed with exit code {result.exit_code}"
             )
-        candidates = [_path_from_rg_line(line, context) for line in result.stdout.splitlines()]
+        else:
+            candidates = [_path_from_rg_line(line, context) for line in result.stdout.splitlines()]
 
     matches = [
         display_tool_path(candidate, context)
