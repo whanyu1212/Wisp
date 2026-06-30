@@ -336,6 +336,26 @@ def test_grep_tool_ripgrep_bounds_long_lines_before_buffering(tmp_path: Path) ->
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes
 
 
+def test_grep_tool_ripgrep_preserves_oversized_match_when_truncated(tmp_path: Path) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    (tmp_path / "data.txt").write_text("needle" + ("x" * 10_000) + "\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path, max_output_bytes=35)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "needle", "path": ".", "literal": True},
+        context,
+    )
+
+    assert result.text != "No matches"
+    assert result.text.startswith("data.txt:1:")
+    assert result.text.endswith("[truncated]")
+    assert result.data["count"] == 1
+    assert result.truncated is True
+    assert len(result.text.encode("utf-8")) <= context.max_output_bytes
+
+
 def test_grep_tool_ripgrep_bounds_context_output_before_buffering(tmp_path: Path) -> None:
     if shutil.which("rg") is None:
         pytest.skip("ripgrep is not installed")

@@ -671,20 +671,33 @@ async def _run_exec_limited_stdout(
             break
         decoded_line = line.decode("utf-8", errors="replace").rstrip("\r\n")
         if stdout_line_filter is None or stdout_line_filter(decoded_line):
+            count_line = stdout_count_filter is None or stdout_count_filter(decoded_line)
             if (
                 max_buffered_stdout_lines is not None
                 and buffered_stdout_lines >= max_buffered_stdout_lines
-            ) or (
-                max_buffered_stdout_bytes is not None
-                and buffered_stdout_bytes + len(line) > max_buffered_stdout_bytes
             ):
                 stdout_truncated = True
                 _kill_process_tree(process)
                 break
+            if max_buffered_stdout_bytes is not None:
+                remaining_bytes = max_buffered_stdout_bytes - buffered_stdout_bytes
+                if remaining_bytes <= 0:
+                    stdout_truncated = True
+                    _kill_process_tree(process)
+                    break
+                if len(line) > remaining_bytes:
+                    stdout_lines.append(line[:remaining_bytes])
+                    buffered_stdout_lines += 1
+                    buffered_stdout_bytes += remaining_bytes
+                    if count_line:
+                        stdout_count += 1
+                    stdout_truncated = True
+                    _kill_process_tree(process)
+                    break
             stdout_lines.append(line)
             buffered_stdout_lines += 1
             buffered_stdout_bytes += len(line)
-            if stdout_count_filter is None or stdout_count_filter(decoded_line):
+            if count_line:
                 stdout_count += 1
 
     if stdout_count >= max_stdout_lines:
