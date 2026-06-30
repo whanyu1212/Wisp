@@ -27,10 +27,12 @@ class Agent:
         provider: Provider,
         sessions: JsonlSessionStore,
         events: EventBus | None = None,
+        model: str | None = None,
     ) -> None:
         self.provider = provider
         self.sessions = sessions
         self.events = events
+        self.model = model
 
     async def run(self, prompt: str) -> AsyncIterator[WispEvent]:
         session = self.sessions.create()
@@ -43,7 +45,7 @@ class Agent:
         chunks: list[str] = []
 
         try:
-            async for delta in self.provider.stream(messages):
+            async for delta in self.provider.stream(messages, model=self.model):
                 chunks.append(delta)
                 yield await self._emit(TokenDelta(delta=delta))
         except Exception as exc:

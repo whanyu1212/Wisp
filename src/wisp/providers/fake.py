@@ -13,8 +13,14 @@ class FakeProvider:
     """Deterministic provider for tests and early CLI smoke runs."""
 
     name = "fake"
+    default_model: str | None = "fake"
 
-    async def stream(self, messages: Sequence[Message]) -> AsyncIterator[str]:
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+    ) -> AsyncIterator[str]:
         prompt = _last_user_prompt(messages)
         response = f"fake response to: {prompt}"
 
