@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shlex
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
+from wisp.tools import builtin as builtin_tools_module
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
@@ -97,6 +99,18 @@ def test_bash_tool_captures_stdout_stderr_and_exit_code(tmp_path: Path) -> None:
     assert "err" in result.text
 
 
+def test_bash_tool_retruncates_combined_stdout_and_stderr(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=40, max_output_lines=100)
+    python = shlex.quote(sys.executable)
+    code = "import sys; sys.stdout.write('o' * 100); sys.stderr.write('e' * 100)"
+    command = f"{python} -c {shlex.quote(code)}"
+
+    result = run_tool(BashTool(), {"command": command}, context)
+
+    assert len(result.text.encode("utf-8")) <= context.max_output_bytes
+    assert result.truncated is True
+
+
 def test_bash_tool_reports_timeout_and_kills_child_processes(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     python = shlex.quote(sys.executable)
@@ -116,6 +130,33 @@ def test_bash_tool_reports_timeout_and_kills_child_processes(tmp_path: Path) -> 
     time.sleep(1.0)
 
     assert not marker.exists()
+
+
+def test_bash_tool_uses_taskkill_for_windows_process_tree_cleanup(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    process = DummyProcess()
+    monkeypatch.setattr(builtin_tools_module.os, "name", "nt")
+    monkeypatch.setattr(builtin_tools_module.subprocess, "run", fake_run)
+
+    builtin_tools_module._kill_process_tree(process)  # noqa: SLF001
+
+    assert calls == [["taskkill", "/F", "/T", "/PID", "123"]]
+    assert process.killed is False
 
 
 def test_grep_tool_python_fallback_supports_literal_ignore_case_and_glob(
@@ -159,6 +200,23 @@ def test_grep_tool_ripgrep_treats_option_like_pattern_as_literal(tmp_path: Path)
     assert "Usage:" not in result.text
 
 
+def test_grep_tool_python_fallback_skips_hidden_entries(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / ".env").write_text("secret\n", encoding="utf-8")
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / ".hidden" / "secret.txt").write_text("secret\n", encoding="utf-8")
+    (tmp_path / "visible.txt").write_text("secret\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
+
+    assert result.text == "visible.txt:1:secret"
+    assert result.data["matches"] == ["visible.txt:1:secret"]
+
+
 def test_find_tool_python_fallback_filters_glob(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", "")
     (tmp_path / "pkg").mkdir()
@@ -170,6 +228,23 @@ def test_find_tool_python_fallback_filters_glob(tmp_path: Path, monkeypatch: Mon
 
     assert result.text == "pkg/one.py"
     assert result.data["files"] == ["pkg/one.py"]
+
+
+def test_find_tool_python_fallback_skips_hidden_entries(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / ".hidden.py").write_text("", encoding="utf-8")
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / ".hidden" / "secret.py").write_text("", encoding="utf-8")
+    (tmp_path / "visible.py").write_text("", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(FindTool(), {"path": ".", "pattern": "*.py"}, context)
+
+    assert result.text == "visible.py"
+    assert result.data["files"] == ["visible.py"]
 
 
 def test_find_tool_ripgrep_handles_option_like_paths(tmp_path: Path) -> None:

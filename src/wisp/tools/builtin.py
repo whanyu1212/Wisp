@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -224,14 +225,19 @@ class BashTool:
             max_lines=context.max_output_lines,
         )
         output = _format_process_output(result.exit_code, stdout.text, stderr.text)
+        truncated_output = truncate_text(
+            output,
+            max_bytes=context.max_output_bytes,
+            max_lines=context.max_output_lines,
+        )
         return ToolResult(
-            text=output,
+            text=truncated_output.text,
             data={
                 "exit_code": result.exit_code,
                 "stdout": stdout.text,
                 "stderr": stderr.text,
             },
-            truncated=stdout.truncated or stderr.truncated,
+            truncated=stdout.truncated or stderr.truncated or truncated_output.truncated,
         )
 
 
@@ -489,6 +495,20 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             return
+    elif os.name == "nt":
+        try:
+            completed = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            process.kill()
+        else:
+            if completed.returncode != 0:
+                process.kill()
     else:
         process.kill()
 
@@ -670,9 +690,15 @@ def _iter_files(path: Path) -> Iterable[Path]:
         return
 
     for root, dir_names, file_names in os.walk(path):
-        dir_names[:] = sorted(name for name in dir_names if name not in IGNORED_DIRS)
-        for file_name in sorted(file_names):
+        dir_names[:] = sorted(
+            name for name in dir_names if name not in IGNORED_DIRS and not _is_hidden(name)
+        )
+        for file_name in sorted(name for name in file_names if not _is_hidden(name)):
             yield Path(root) / file_name
+
+
+def _is_hidden(name: str) -> bool:
+    return name.startswith(".")
 
 
 def _matches_glob(path: Path, pattern: str, context: ToolContext) -> bool:
