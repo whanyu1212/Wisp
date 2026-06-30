@@ -17,7 +17,7 @@ from wisp.tools.base import Tool, ToolArguments, ToolInputSchema
 from wisp.tools.context import ToolContext
 from wisp.tools.paths import display_tool_path, resolve_tool_path
 from wisp.tools.result import ToolError, ToolResult
-from wisp.tools.truncation import truncate_text
+from wisp.tools.truncation import TruncatedText, truncate_text
 
 IGNORED_DIRS = {
     ".git",
@@ -48,6 +48,7 @@ class ProcessResult:
     stderr: str
     stdout_truncated: bool = False
     stderr_truncated: bool = False
+    stdout_count: int = 0
 
 
 class ReadTool:
@@ -78,25 +79,22 @@ class ReadTool:
             raise ToolError(f"File does not exist: {display_tool_path(path, context)}")
 
         try:
-            with path.open("r", encoding="utf-8", newline="") as file:
-                text = file.read()
+            selected, line_count, stream_truncated = _read_line_slice(
+                path,
+                offset=offset,
+                limit=limit,
+                max_bytes=context.max_output_bytes,
+                max_lines=context.max_output_lines,
+            )
         except UnicodeDecodeError as exc:
             raise ToolError(f"File is not valid UTF-8: {display_tool_path(path, context)}") from exc
 
-        lines = text.splitlines(keepends=True)
-        start = offset - 1
-        end = start + limit if limit is not None else None
-        selected = "".join(lines[start:end])
-        truncated = truncate_text(
-            selected,
-            max_bytes=context.max_output_bytes,
-            max_lines=context.max_output_lines,
-        )
+        truncated = _truncate_text(selected, context=context, force_truncated=stream_truncated)
         return ToolResult(
             text=truncated.text,
             data={
                 "path": display_tool_path(path, context),
-                "line_count": len(lines),
+                "line_count": line_count,
                 "offset": offset,
                 "limit": limit,
             },
@@ -403,6 +401,75 @@ def builtin_tools() -> tuple[Tool, ...]:
     )
 
 
+def _read_line_slice(
+    path: Path,
+    *,
+    offset: int,
+    limit: int | None,
+    max_bytes: int,
+    max_lines: int,
+) -> tuple[str, int, bool]:
+    selected_parts: list[str] = []
+    line_count = 0
+    selected_count = 0
+    buffered_bytes = 0
+    buffered_lines = 0
+    truncated = False
+    buffering = True
+
+    with path.open("r", encoding="utf-8", newline="") as file:
+        for line in file:
+            line_count += 1
+            if line_count < offset:
+                continue
+            if limit is not None and selected_count >= limit:
+                continue
+
+            selected_count += 1
+            if not buffering:
+                continue
+            if max_bytes <= 0 or max_lines <= 0 or buffered_lines >= max_lines:
+                truncated = True
+                buffering = False
+                continue
+
+            encoded_line = line.encode("utf-8")
+            remaining_bytes = max_bytes - buffered_bytes
+            if remaining_bytes <= 0:
+                truncated = True
+                buffering = False
+                continue
+            if len(encoded_line) > remaining_bytes:
+                selected_parts.append(
+                    encoded_line[:remaining_bytes].decode("utf-8", errors="ignore")
+                )
+                truncated = True
+                buffering = False
+                continue
+
+            selected_parts.append(line)
+            buffered_bytes += len(encoded_line)
+            buffered_lines += 1
+
+    return "".join(selected_parts), line_count, truncated
+
+
+def _truncate_text(
+    text: str,
+    *,
+    context: ToolContext,
+    force_truncated: bool = False,
+) -> TruncatedText:
+    if force_truncated:
+        separator = "" if not text or text.endswith("\n") else "\n"
+        text = f"{text}{separator}[truncated]"
+    return truncate_text(
+        text,
+        max_bytes=context.max_output_bytes,
+        max_lines=context.max_output_lines,
+    )
+
+
 def _required_string(
     arguments: Mapping[str, object],
     name: str,
@@ -692,12 +759,16 @@ async def _run_exec_limited_stdout(
                 max_buffered_stdout_lines is not None
                 and buffered_stdout_lines >= max_buffered_stdout_lines
             ):
+                if count_line:
+                    stdout_count += 1
                 stdout_truncated = True
                 _kill_process_tree(process)
                 break
             if max_buffered_stdout_bytes is not None:
                 remaining_bytes = max_buffered_stdout_bytes - buffered_stdout_bytes
                 if remaining_bytes <= 0:
+                    if count_line:
+                        stdout_count += 1
                     stdout_truncated = True
                     _kill_process_tree(process)
                     break
@@ -728,6 +799,7 @@ async def _run_exec_limited_stdout(
         stderr=stderr_bytes.decode("utf-8", errors="replace"),
         stdout_truncated=stdout_truncated,
         stderr_truncated=stderr_budget.exhausted if stderr_budget is not None else False,
+        stdout_count=stdout_count,
     )
 
 
@@ -799,6 +871,7 @@ async def _run_rg_grep(
         max_results=max_results,
         context=context,
         force_truncated=result.stdout_truncated or context_truncated,
+        known_match_count=min(result.stdout_count, max_results),
     )
 
 
@@ -1108,6 +1181,7 @@ def _result_from_grep_lines(
     max_results: int,
     context: ToolContext,
     force_truncated: bool = False,
+    known_match_count: int | None = None,
 ) -> ToolResult:
     kept: list[str] = []
     pending_context_after_limit: list[str] = []
@@ -1141,9 +1215,23 @@ def _result_from_grep_lines(
         pending_context_after_limit.clear()
         kept.append(_normalize_rg_line(line))
     kept.extend(pending_context_after_limit)
+    effective_match_count = max(match_count, known_match_count or 0)
+    if effective_match_count > match_count:
+        truncated_by_count = True
 
     if not kept:
-        return ToolResult(text="No matches", data={"count": 0, "matches": []})
+        if effective_match_count == 0:
+            return ToolResult(text="No matches", data={"count": 0, "matches": []})
+        truncated = truncate_text(
+            "[truncated]",
+            max_bytes=context.max_output_bytes,
+            max_lines=context.max_output_lines,
+        )
+        return ToolResult(
+            text=truncated.text,
+            data={"count": effective_match_count, "matches": []},
+            truncated=True,
+        )
 
     text = "\n".join(kept)
     if truncated_by_count:
@@ -1155,7 +1243,7 @@ def _result_from_grep_lines(
     )
     return ToolResult(
         text=truncated.text,
-        data={"count": match_count, "matches": kept},
+        data={"count": effective_match_count, "matches": kept},
         truncated=truncated.truncated or truncated_by_count,
     )
 

@@ -38,6 +38,17 @@ def test_read_tool_supports_offset_limit_and_truncation(tmp_path: Path) -> None:
     assert result.data["line_count"] == 4
 
 
+def test_read_tool_streams_requested_slice_with_line_count(tmp_path: Path) -> None:
+    path = tmp_path / "large.log"
+    path.write_text("".join(f"line {index}\n" for index in range(10_000)), encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(ReadTool(), {"path": "large.log", "offset": 5000, "limit": 2}, context)
+
+    assert result.text == "line 4999\nline 5000\n"
+    assert result.data["line_count"] == 10_000
+
+
 def test_read_tool_preserves_crlf_line_endings_for_edit_workflow(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"
     path.write_bytes(b"one\r\ntwo\r\n")
@@ -415,6 +426,24 @@ def test_grep_tool_ripgrep_preserves_oversized_match_when_truncated(tmp_path: Pa
     assert result.text != "No matches"
     assert result.text.startswith("data.txt:1:")
     assert result.text.endswith("[truncated]")
+    assert result.data["count"] == 1
+    assert result.truncated is True
+    assert len(result.text.encode("utf-8")) <= context.max_output_bytes
+
+
+def test_grep_tool_ripgrep_counts_match_when_budget_cuts_record_prefix(tmp_path: Path) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    (tmp_path / "data.txt").write_text("needle" + ("x" * 10_000) + "\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path, max_output_bytes=5)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "needle", "path": ".", "literal": True},
+        context,
+    )
+
+    assert result.text != "No matches"
     assert result.data["count"] == 1
     assert result.truncated is True
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes
