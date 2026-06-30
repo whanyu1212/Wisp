@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from wisp.providers.base import Provider
+from wisp.providers.base import Provider, ToolSpec
 from wisp.tools.base import Tool
 
 
@@ -82,3 +82,13 @@ class ToolRegistry:
         """Return registered tool names in registration order."""
 
         return tuple(self._tools.keys())
+
+    def all(self) -> tuple[Tool, ...]:
+        """Return registered tools in registration order."""
+
+        return tuple(self._tools.values())
+
+    def specs(self) -> tuple[ToolSpec, ...]:
+        """Return provider-facing specs for registered tools."""
+
+        return tuple(ToolSpec.from_tool(tool) for tool in self._tools.values())
