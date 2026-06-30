@@ -13,7 +13,7 @@ from rich.console import Console
 from wisp.agent.loop import Agent
 from wisp.config import WispConfig
 from wisp.events import ErrorEvent, TokenDelta
-from wisp.providers.fake import FakeProvider
+from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSessionStore
 
 app = typer.Typer(
@@ -58,9 +58,10 @@ def main() -> None:
 
 async def _run_print(prompt: str, config: WispConfig) -> None:
     console = Console(stderr=True)
-    provider = FakeProvider()
+    runtime = await build_runtime()
+    provider = runtime.providers.get(config.provider)
     sessions = JsonlSessionStore(config.session_dir)
-    agent = Agent(provider=provider, sessions=sessions)
+    agent = Agent(provider=provider, sessions=sessions, events=runtime.events)
 
     wrote_tokens = False
     async for event in agent.run(prompt):

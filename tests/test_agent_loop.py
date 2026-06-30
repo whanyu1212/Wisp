@@ -8,12 +8,19 @@ import anyio
 from wisp.agent.loop import Agent
 from wisp.events import AssistantMessage, SessionSaved, TokenDelta
 from wisp.providers.fake import FakeProvider
+from wisp.runtime.event_bus import EventBus
 from wisp.sessions.jsonl import JsonlSessionStore
 
 
 def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
+    emitted_event_types: list[str] = []
+
     async def run_agent() -> list[object]:
-        agent = Agent(provider=FakeProvider(), sessions=JsonlSessionStore(tmp_path))
+        event_bus = EventBus()
+        event_bus.on("*", lambda event: emitted_event_types.append(event.type))
+        agent = Agent(
+            provider=FakeProvider(), sessions=JsonlSessionStore(tmp_path), events=event_bus
+        )
         return [event async for event in agent.run("hello")]
 
     events = anyio.run(run_agent)
@@ -33,4 +40,13 @@ def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
     assert [record["message"]["content"] for record in records] == [
         "hello",
         "fake response to: hello",
+    ]
+    assert emitted_event_types == [
+        "agent.started",
+        "token.delta",
+        "token.delta",
+        "token.delta",
+        "token.delta",
+        "assistant.message",
+        "session.saved",
     ]
