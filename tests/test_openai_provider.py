@@ -4,7 +4,15 @@ from collections.abc import AsyncIterator, Sequence
 
 import anyio
 import pytest
-from openai.types.responses import ResponseErrorEvent, ResponseStreamEvent, ResponseTextDeltaEvent
+from openai.types.responses import (
+    Response,
+    ResponseError,
+    ResponseErrorEvent,
+    ResponseFailedEvent,
+    ResponseRefusalDeltaEvent,
+    ResponseStreamEvent,
+    ResponseTextDeltaEvent,
+)
 from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message
@@ -62,6 +70,15 @@ def test_openai_provider_uses_default_model_when_model_is_not_provided() -> None
     assert provider.seen_model == "default-test-model"
 
 
+def test_openai_provider_streams_refusal_deltas() -> None:
+    provider = StubOpenAIProvider([_refusal_delta("I can't help with that")])
+
+    async def run() -> list[str]:
+        return [delta async for delta in provider.stream([Message(role="user", content="hello")])]
+
+    assert anyio.run(run) == ["I can't help with that"]
+
+
 def test_openai_provider_raises_on_stream_error_event() -> None:
     provider = StubOpenAIProvider([_error_event("boom")])
 
@@ -69,6 +86,16 @@ def test_openai_provider_raises_on_stream_error_event() -> None:
         return [delta async for delta in provider.stream([Message(role="user", content="hello")])]
 
     with pytest.raises(ProviderError, match="OpenAI API error: boom"):
+        anyio.run(run)
+
+
+def test_openai_provider_raises_on_failed_response_event() -> None:
+    provider = StubOpenAIProvider([_failed_event("server exploded")])
+
+    async def run() -> list[str]:
+        return [delta async for delta in provider.stream([Message(role="user", content="hello")])]
+
+    with pytest.raises(ProviderError, match="OpenAI response failed: server exploded"):
         anyio.run(run)
 
 
@@ -95,5 +122,32 @@ def _text_delta(text: str, *, sequence_number: int = 0) -> ResponseTextDeltaEven
     )
 
 
+def _refusal_delta(text: str, *, sequence_number: int = 0) -> ResponseRefusalDeltaEvent:
+    return ResponseRefusalDeltaEvent(
+        content_index=0,
+        delta=text,
+        item_id="item",
+        output_index=0,
+        sequence_number=sequence_number,
+        type="response.refusal.delta",
+    )
+
+
 def _error_event(message: str) -> ResponseErrorEvent:
     return ResponseErrorEvent(message=message, sequence_number=0, type="error")
+
+
+def _failed_event(message: str) -> ResponseFailedEvent:
+    error = ResponseError(code="server_error", message=message)
+    response = Response(
+        id="response-id",
+        created_at=0.0,
+        error=error,
+        model="gpt-5.5",
+        object="response",
+        output=[],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    )
+    return ResponseFailedEvent(response=response, sequence_number=0, type="response.failed")

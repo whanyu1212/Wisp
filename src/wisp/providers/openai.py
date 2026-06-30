@@ -9,7 +9,10 @@ from typing import Literal, cast
 from openai import AsyncOpenAI
 from openai.types.responses import (
     EasyInputMessageParam,
+    Response,
     ResponseErrorEvent,
+    ResponseFailedEvent,
+    ResponseRefusalDeltaEvent,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
 )
@@ -50,10 +53,12 @@ class OpenAIProvider:
         stream = await self._create_stream(messages, model=selected_model)
 
         async for event in stream:
-            if isinstance(event, ResponseTextDeltaEvent):
+            if isinstance(event, ResponseTextDeltaEvent | ResponseRefusalDeltaEvent):
                 yield event.delta
             elif isinstance(event, ResponseErrorEvent):
                 raise ProviderError(f"OpenAI API error: {event.message}")
+            elif isinstance(event, ResponseFailedEvent):
+                raise ProviderError(_failed_response_message(event.response))
 
     async def _create_stream(
         self,
@@ -81,6 +86,14 @@ class OpenAIProvider:
 
         self._client = AsyncOpenAI(api_key=api_key)
         return self._client
+
+
+def _failed_response_message(response: Response) -> str:
+    if response.error is not None:
+        return f"OpenAI response failed: {response.error.message}"
+    if response.status:
+        return f"OpenAI response failed with status: {response.status}"
+    return "OpenAI response failed"
 
 
 def _messages_to_response_input(messages: Sequence[Message]) -> ResponseInputParam:
