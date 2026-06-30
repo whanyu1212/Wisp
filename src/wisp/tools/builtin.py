@@ -35,6 +35,8 @@ IGNORED_DIRS = {
     "target",
     "vendor",
 }
+RG_MATCH_SEPARATOR = "\x1f"
+RG_CONTEXT_SEPARATOR = "\x1e"
 
 
 @dataclass(frozen=True)
@@ -747,6 +749,10 @@ async def _run_rg_grep(
         "--no-heading",
         "--color=never",
         "--with-filename",
+        "--field-match-separator",
+        RG_MATCH_SEPARATOR,
+        "--field-context-separator",
+        RG_CONTEXT_SEPARATOR,
         "--max-columns",
         str(max(1, context.max_output_bytes)),
     ]
@@ -774,7 +780,7 @@ async def _run_rg_grep(
         raise ToolError(result.stderr.strip() or f"rg failed with exit code {result.exit_code}")
 
     return _result_from_grep_lines(
-        [_normalize_rg_line(line) for line in result.stdout.splitlines()],
+        _split_stdout_records(result.stdout),
         max_results=max_results,
         context=context,
         force_truncated=result.stdout_truncated or context_truncated,
@@ -785,6 +791,13 @@ def _bounded_rg_context_lines(requested_context_lines: int, context: ToolContext
     if requested_context_lines <= 0:
         return 0
     return min(requested_context_lines, max(0, (context.max_output_lines - 1) // 2))
+
+
+def _split_stdout_records(stdout: str) -> list[str]:
+    records = stdout.split("\n")
+    if records and records[-1] == "":
+        records.pop()
+    return records
 
 
 async def _run_rg_find(
@@ -975,17 +988,62 @@ def _command_path(path: Path, context: ToolContext) -> str:
 
 
 def _normalize_rg_line(line: str) -> str:
+    line = _replace_rg_field_separator(line, RG_MATCH_SEPARATOR, ":")
+    line = _replace_rg_field_separator(line, RG_CONTEXT_SEPARATOR, "-")
     if line.startswith("./"):
         return line[2:]
     return line
 
 
+def _replace_rg_field_separator(line: str, field_separator: str, output_separator: str) -> str:
+    parts = line.split(field_separator, 2)
+    if len(parts) == 3 and parts[1].isdigit():
+        return f"{parts[0]}{output_separator}{parts[1]}{output_separator}{parts[2]}"
+    return line
+
+
 def _is_grep_match_line(line: str) -> bool:
-    return re.match(r"^.+:\d+:", line) is not None
+    return _grep_line_kind(line) == "match"
 
 
 def _is_grep_context_line(line: str) -> bool:
-    return re.match(r"^.+-\d+-", line) is not None
+    return _grep_line_kind(line) == "context"
+
+
+def _grep_line_kind(line: str) -> str | None:
+    if _has_rg_field_separator(line, RG_MATCH_SEPARATOR):
+        return "match"
+    if _has_rg_field_separator(line, RG_CONTEXT_SEPARATOR):
+        return "context"
+
+    match_index = _find_line_number_separator(line, ":")
+    context_index = _find_line_number_separator(line, "-")
+    if match_index == -1 and context_index == -1:
+        return None
+    if context_index != -1 and (match_index == -1 or context_index < match_index):
+        return "context"
+    return "match"
+
+
+def _has_rg_field_separator(line: str, field_separator: str) -> bool:
+    parts = line.split(field_separator, 2)
+    return len(parts) == 3 and parts[1].isdigit()
+
+
+def _find_line_number_separator(line: str, separator: str) -> int:
+    search_start = 0
+    while True:
+        first = line.find(separator, search_start)
+        if first == -1:
+            return -1
+        digit_start = first + len(separator)
+        if digit_start < len(line) and line[digit_start].isdigit():
+            digit_end = digit_start + 1
+            while digit_end < len(line) and line[digit_end].isdigit():
+                digit_end += 1
+            if line.startswith(separator, digit_end):
+                return first
+        search_start = first + len(separator)
 
 
 def _path_from_rg_line(line: str, context: ToolContext) -> Path:
@@ -1017,7 +1075,7 @@ def _result_from_grep_lines(
         elif match_count >= max_results and not _is_grep_context_line(line):
             truncated_by_count = True
             break
-        kept.append(line)
+        kept.append(_normalize_rg_line(line))
 
     if not kept:
         return ToolResult(text="No matches", data={"count": 0, "matches": []})

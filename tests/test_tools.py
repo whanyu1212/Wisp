@@ -334,6 +334,10 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
                 "--no-heading",
                 "--color=never",
                 "--with-filename",
+                "--field-match-separator",
+                "\x1f",
+                "--field-context-separator",
+                "\x1e",
                 "--max-columns",
                 "50000",
                 "--",
@@ -407,6 +411,23 @@ def test_grep_tool_ripgrep_bounds_context_output_before_buffering(tmp_path: Path
     assert result.truncated is True
 
 
+def test_grep_tool_ripgrep_does_not_count_context_text_as_match(tmp_path: Path) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    (tmp_path / "data.txt").write_text("context :123: text\nneedle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "needle", "path": ".", "context": 1, "literal": True, "max_results": 1},
+        context,
+    )
+
+    assert "data.txt-1-context :123: text" in result.text
+    assert "data.txt:2:needle" in result.text
+    assert result.data["count"] == 1
+
+
 def test_grep_tool_ripgrep_counts_matches_separately_from_context_lines(
     tmp_path: Path,
 ) -> None:
@@ -439,6 +460,25 @@ def test_grep_tool_ripgrep_preserves_whitespace_only_patterns(tmp_path: Path) ->
     )
 
     assert result.text == "data.txt:1:a b"
+
+
+def test_grep_tool_python_fallback_does_not_count_context_text_as_match(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text("context :123: text\nneedle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "needle", "path": ".", "context": 1, "literal": True, "max_results": 1},
+        context,
+    )
+
+    assert "data.txt-1-context :123: text" in result.text
+    assert "data.txt:2:needle" in result.text
+    assert result.data["count"] == 1
 
 
 def test_grep_tool_python_fallback_counts_matches_separately_from_context_lines(
