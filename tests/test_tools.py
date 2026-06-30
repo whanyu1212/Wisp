@@ -286,6 +286,8 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
                 "--no-heading",
                 "--color=never",
                 "--with-filename",
+                "--max-columns",
+                "50000",
                 "--",
                 "e",
                 ".",
@@ -295,6 +297,22 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
     ]
     assert result.text == "one.txt:1:e\ntwo.txt:1:e\n[truncated]"
     assert result.truncated is True
+
+
+def test_grep_tool_ripgrep_bounds_long_lines_before_buffering(tmp_path: Path) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    (tmp_path / "data.txt").write_text("needle" + ("x" * 10_000) + "\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path, max_output_bytes=80)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "needle", "path": ".", "literal": True},
+        context,
+    )
+
+    assert result.text == "data.txt:1:[Omitted long matching line]"
+    assert len(result.text.encode("utf-8")) <= context.max_output_bytes
 
 
 def test_grep_tool_ripgrep_counts_matches_separately_from_context_lines(
