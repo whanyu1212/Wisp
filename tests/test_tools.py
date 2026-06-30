@@ -316,6 +316,21 @@ def test_grep_tool_ripgrep_counts_matches_separately_from_context_lines(
     assert "data.txt-3-after" in result.text
 
 
+def test_grep_tool_ripgrep_preserves_whitespace_only_patterns(tmp_path: Path) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    (tmp_path / "data.txt").write_text("a b\nab\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": " ", "path": ".", "literal": True},
+        context,
+    )
+
+    assert result.text == "data.txt:1:a b"
+
+
 def test_grep_tool_python_fallback_counts_matches_separately_from_context_lines(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -333,6 +348,30 @@ def test_grep_tool_python_fallback_counts_matches_separately_from_context_lines(
     assert "data.txt-1-before" in result.text
     assert "data.txt:2:match" in result.text
     assert "data.txt-3-after" in result.text
+
+
+def test_grep_tool_python_fallback_preserves_whitespace_only_patterns(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text("\tindent\nplain\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "\t", "path": ".", "literal": True},
+        context,
+    )
+
+    assert result.text == "data.txt:1:\tindent"
+
+
+def test_grep_tool_rejects_empty_pattern(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+
+    with pytest.raises(ToolError, match="pattern must not be empty"):
+        run_tool(GrepTool(), {"pattern": ""}, context)
 
 
 def test_grep_tool_python_fallback_does_not_truncate_exact_limit(

@@ -275,7 +275,7 @@ class GrepTool:
     }
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
-        pattern = _required_string(arguments, "pattern")
+        pattern = _required_string(arguments, "pattern", allow_whitespace=True)
         path = resolve_tool_path(_optional_string(arguments, "path"), context)
         glob = _optional_string(arguments, "glob")
         ignore_case = _optional_bool(arguments, "ignore_case", default=False)
@@ -402,12 +402,15 @@ def _required_string(
     name: str,
     *,
     allow_empty: bool = False,
+    allow_whitespace: bool = False,
 ) -> str:
     value = arguments.get(name)
     if not isinstance(value, str):
         raise ToolError(f"{name} must be a string")
-    if not allow_empty and not value.strip():
-        raise ToolError(f"{name} must not be empty")
+    if not allow_empty:
+        is_empty = value == "" if allow_whitespace else not value.strip()
+        if is_empty:
+            raise ToolError(f"{name} must not be empty")
     return value
 
 
