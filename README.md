@@ -36,3 +36,17 @@ uv run wisp -p "hello" --provider openai --model gpt-5.5
 ```
 
 `OPENAI_API_KEY` is required only when using the `openai` provider. Never commit `.env` or real API keys.
+
+## Local tools
+
+Wisp registers built-in local tools through the extension API:
+
+- `read`
+- `write`
+- `edit`
+- `bash`
+- `grep`
+- `find`
+- `ls`
+
+The tool registry is available to runtime/extensions first; provider tool-calling is intentionally deferred to a later milestone.

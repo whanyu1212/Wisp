@@ -5,8 +5,16 @@ import pytest
 
 from wisp.events import AgentStarted
 from wisp.providers.fake import FakeProvider
-from wisp.runtime import EventBus, ExtensionAPI, ProviderRegistry, UnknownProviderError
+from wisp.runtime import (
+    EventBus,
+    ExtensionAPI,
+    ProviderRegistry,
+    ToolRegistry,
+    UnknownProviderError,
+    UnknownToolError,
+)
 from wisp.runtime.extensions import activate_extensions, build_runtime
+from wisp.tools.builtin import ReadTool
 
 
 def test_provider_registry_registers_and_resolves_provider() -> None:
@@ -26,37 +34,62 @@ def test_provider_registry_raises_for_unknown_provider() -> None:
         registry.get("missing")
 
 
-def test_extension_api_registers_provider() -> None:
+def test_tool_registry_registers_and_resolves_tool() -> None:
+    registry = ToolRegistry()
+    tool = ReadTool()
+
+    registry.register(tool)
+
+    assert registry.get("read") is tool
+    assert registry.names() == ("read",)
+
+
+def test_tool_registry_raises_for_unknown_tool() -> None:
+    registry = ToolRegistry()
+
+    with pytest.raises(UnknownToolError, match="Unknown tool: missing"):
+        registry.get("missing")
+
+
+def test_extension_api_registers_provider_and_tool() -> None:
     providers = ProviderRegistry()
+    tools = ToolRegistry()
     event_bus = EventBus()
-    api = ExtensionAPI(providers=providers, events=event_bus)
+    api = ExtensionAPI(providers=providers, tools=tools, events=event_bus)
 
     api.register_provider(FakeProvider())
+    api.register_tool(ReadTool())
 
     assert providers.names() == ("fake",)
+    assert tools.names() == ("read",)
 
 
 def test_activate_extensions_runs_extension_factories() -> None:
     async def run() -> tuple[str, ...]:
         providers = ProviderRegistry()
+        tools = ToolRegistry()
         event_bus = EventBus()
-        api = ExtensionAPI(providers=providers, events=event_bus)
+        api = ExtensionAPI(providers=providers, tools=tools, events=event_bus)
 
         def extension(api: ExtensionAPI) -> None:
             api.register_provider(FakeProvider())
+            api.register_tool(ReadTool())
 
         await activate_extensions(api, [extension])
-        return providers.names()
+        return providers.names(), tools.names()
 
-    assert anyio.run(run) == ("fake",)
+    assert anyio.run(run) == (("fake",), ("read",))
 
 
-def test_build_runtime_activates_builtin_providers() -> None:
-    async def run() -> tuple[str, ...]:
+def test_build_runtime_activates_builtin_providers_and_tools() -> None:
+    async def run() -> tuple[tuple[str, ...], tuple[str, ...]]:
         runtime = await build_runtime()
-        return runtime.providers.names()
+        return runtime.providers.names(), runtime.tools.names()
 
-    assert anyio.run(run) == ("fake", "openai")
+    assert anyio.run(run) == (
+        ("fake", "openai"),
+        ("read", "write", "edit", "bash", "grep", "find", "ls"),
+    )
 
 
 def test_event_bus_emits_to_named_and_wildcard_handlers() -> None:

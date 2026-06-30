@@ -12,7 +12,7 @@ from inspect import isawaitable
 from wisp.extensions import builtin
 from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.event_bus import EventBus
-from wisp.runtime.registry import ProviderRegistry
+from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 
 type ExtensionFactory = Callable[[ExtensionAPI], Awaitable[None] | None]
 
@@ -21,9 +21,10 @@ async def build_runtime() -> WispRuntime:
     """Create runtime state and activate built-in extensions."""
 
     providers = ProviderRegistry()
+    tools = ToolRegistry()
     events = EventBus()
-    api = ExtensionAPI(providers=providers, events=events)
-    runtime = WispRuntime(providers=providers, events=events, api=api)
+    api = ExtensionAPI(providers=providers, tools=tools, events=events)
+    runtime = WispRuntime(providers=providers, tools=tools, events=events, api=api)
     await activate_builtin_extensions(api)
     return runtime
 
