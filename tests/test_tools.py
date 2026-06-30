@@ -38,6 +38,26 @@ def test_read_tool_supports_offset_limit_and_truncation(tmp_path: Path) -> None:
     assert result.data["line_count"] == 4
 
 
+def test_read_tool_preserves_crlf_line_endings_for_edit_workflow(tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_bytes(b"one\r\ntwo\r\n")
+    context = ToolContext(cwd=tmp_path)
+
+    read_result = run_tool(ReadTool(), {"path": "notes.txt"}, context)
+    edit_result = run_tool(
+        EditTool(),
+        {
+            "path": "notes.txt",
+            "edits": [{"oldText": read_result.text, "newText": "uno\r\ndos\r\n"}],
+        },
+        context,
+    )
+
+    assert read_result.text == "one\r\ntwo\r\n"
+    assert edit_result.data["edits"] == 1
+    assert path.read_bytes() == b"uno\r\ndos\r\n"
+
+
 def test_write_tool_creates_parent_directories_and_overwrites(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
 
@@ -47,6 +67,15 @@ def test_write_tool_creates_parent_directories_and_overwrites(tmp_path: Path) ->
     assert first.data["bytes"] == 5
     assert second.data["bytes"] == 6
     assert (tmp_path / "nested/file.txt").read_text(encoding="utf-8") == "second"
+
+
+def test_write_tool_preserves_exact_newline_bytes(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(WriteTool(), {"path": "mixed.txt", "content": "one\ntwo\r\n"}, context)
+
+    assert result.data["bytes"] == len(b"one\ntwo\r\n")
+    assert (tmp_path / "mixed.txt").read_bytes() == b"one\ntwo\r\n"
 
 
 def test_edit_tool_applies_unique_replacements_from_original(tmp_path: Path) -> None:

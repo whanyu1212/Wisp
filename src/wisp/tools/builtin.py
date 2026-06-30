@@ -76,7 +76,8 @@ class ReadTool:
             raise ToolError(f"File does not exist: {display_tool_path(path, context)}")
 
         try:
-            text = path.read_text(encoding="utf-8")
+            with path.open("r", encoding="utf-8", newline="") as file:
+                text = file.read()
         except UnicodeDecodeError as exc:
             raise ToolError(f"File is not valid UTF-8: {display_tool_path(path, context)}") from exc
 
@@ -120,7 +121,8 @@ class WriteTool:
         content = _required_string(arguments, "content", allow_empty=True)
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        with path.open("w", encoding="utf-8", newline="") as file:
+            file.write(content)
         byte_count = len(content.encode("utf-8"))
         return ToolResult(
             text=f"Wrote {byte_count} bytes to {display_tool_path(path, context)}",
