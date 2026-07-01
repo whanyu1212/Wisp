@@ -89,6 +89,66 @@ def test_write_tool_preserves_exact_newline_bytes(tmp_path: Path) -> None:
     assert (tmp_path / "mixed.txt").read_bytes() == b"one\ntwo\r\n"
 
 
+def test_file_tools_reject_paths_outside_cwd(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("outside\n", encoding="utf-8")
+    outside_dir = tmp_path / "outside-dir"
+    outside_dir.mkdir()
+    context = ToolContext(cwd=workspace)
+
+    cases: tuple[tuple[object, dict[str, object]], ...] = (
+        (ReadTool(), {"path": str(outside_file)}),
+        (WriteTool(), {"path": str(outside_file), "content": "overwrite"}),
+        (
+            EditTool(),
+            {"path": str(outside_file), "edits": [{"oldText": "outside", "newText": "inside"}]},
+        ),
+        (GrepTool(), {"pattern": "outside", "path": str(outside_file)}),
+        (FindTool(), {"path": str(outside_dir)}),
+        (LsTool(), {"path": str(outside_dir)}),
+    )
+
+    for tool, arguments in cases:
+        with pytest.raises(ToolError, match="outside the tool working directory"):
+            run_tool(tool, arguments, context)
+
+
+def test_file_tools_allow_absolute_paths_inside_cwd(tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("inside\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(ReadTool(), {"path": str(path)}, context)
+
+    assert result.text == "inside\n"
+
+
+def test_file_tools_can_opt_out_of_cwd_containment(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("outside\n", encoding="utf-8")
+    context = ToolContext(cwd=workspace, allow_outside_cwd=True)
+
+    result = run_tool(ReadTool(), {"path": str(outside_file)}, context)
+
+    assert result.text == "outside\n"
+
+
+def test_builtin_tools_have_safety_metadata() -> None:
+    assert {tool.name: tool.safety for tool in (ReadTool(), GrepTool(), FindTool(), LsTool())} == {
+        "read": "read",
+        "grep": "read",
+        "find": "read",
+        "ls": "read",
+    }
+    assert WriteTool().safety == "mutating"
+    assert EditTool().safety == "mutating"
+    assert BashTool().safety == "command"
+
+
 def test_edit_tool_applies_unique_replacements_from_original(tmp_path: Path) -> None:
     path = tmp_path / "story.txt"
     path.write_text("hello brave world\n", encoding="utf-8")
@@ -370,6 +430,8 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
         (
             [
                 "rg",
+                "--no-config",
+                "--no-follow",
                 "--line-number",
                 "--no-heading",
                 "--color=never",
@@ -571,6 +633,117 @@ def test_grep_tool_ripgrep_preserves_whitespace_only_patterns(tmp_path: Path) ->
     assert result.text == "data.txt:1:a b"
 
 
+def test_grep_tool_ripgrep_ignores_config_that_follows_symlinks(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    link = workspace / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    config = tmp_path / "ripgreprc"
+    config.write_text("--follow\n", encoding="utf-8")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+    context = ToolContext(cwd=workspace)
+
+    result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
+
+    assert result.text == "No matches"
+    assert result.data == {"count": 0, "matches": []}
+
+
+def test_grep_tool_ripgrep_follows_symlinked_files_when_opted_out(tmp_path: Path) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    link = workspace / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    context = ToolContext(cwd=workspace, allow_outside_cwd=True)
+
+    result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
+
+    assert result.text == "link.txt:1:secret"
+    assert result.data["matches"] == ["link.txt:1:secret"]
+
+
+def test_grep_tool_python_fallback_skips_symlinked_files_outside_cwd(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    link = workspace / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    context = ToolContext(cwd=workspace)
+
+    result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
+
+    assert result.text == "No matches"
+    assert result.data == {"count": 0, "matches": []}
+
+
+def test_find_tool_python_fallback_skips_symlinked_files_outside_cwd(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("", encoding="utf-8")
+    link = workspace / "outside.py"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    context = ToolContext(cwd=workspace)
+
+    result = run_tool(FindTool(), {"path": ".", "pattern": "*.py"}, context)
+
+    assert result.text == "No files found"
+    assert result.data == {"count": 0, "files": []}
+
+
+def test_grep_tool_python_fallback_allows_symlinked_files_when_opted_out(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    link = workspace / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    context = ToolContext(cwd=workspace, allow_outside_cwd=True)
+
+    result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
+
+    assert result.text == f"{link}:1:secret"
+
+
 def test_grep_tool_python_fallback_does_not_count_context_text_as_match(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -762,6 +935,52 @@ def test_find_tool_ripgrep_returns_no_files_for_empty_directory(tmp_path: Path) 
     assert result.data == {"count": 0, "files": []}
 
 
+def test_find_tool_ripgrep_ignores_config_that_follows_symlinks(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("", encoding="utf-8")
+    link = workspace / "outside.py"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    config = tmp_path / "ripgreprc"
+    config.write_text("--follow\n", encoding="utf-8")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+    context = ToolContext(cwd=workspace)
+
+    result = run_tool(FindTool(), {"path": ".", "pattern": "*.py"}, context)
+
+    assert result.text == "No files found"
+    assert result.data == {"count": 0, "files": []}
+
+
+def test_find_tool_ripgrep_follows_symlinked_files_when_opted_out(tmp_path: Path) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("", encoding="utf-8")
+    link = workspace / "outside.py"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    context = ToolContext(cwd=workspace, allow_outside_cwd=True)
+
+    result = run_tool(FindTool(), {"path": ".", "pattern": "*.py"}, context)
+
+    assert result.text == str(link)
+    assert result.data == {"count": 1, "files": [str(link)]}
+
+
 def test_find_tool_ripgrep_bounds_stdout_before_buffering(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -796,7 +1015,7 @@ def test_find_tool_ripgrep_bounds_stdout_before_buffering(
 
     result = run_tool(FindTool(), {"path": ".", "pattern": "*.py", "max_results": 2}, context)
 
-    assert calls == [(["rg", "--files", "--", "."], 3, 50000, 2000)]
+    assert calls == [(["rg", "--no-config", "--no-follow", "--files", "--", "."], 3, 50000, 2000)]
     assert result.text == "a.py\nc.py\n[truncated]"
     assert result.truncated is True
 

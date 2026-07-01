@@ -49,4 +49,16 @@ Wisp registers built-in local tools through the extension API:
 - `find`
 - `ls`
 
-The tool registry is available to runtime/extensions first; provider tool-calling is intentionally deferred to a later milestone.
+The tool registry is available to runtime/extensions and the agent tool loop.
+File tools are sandboxed to the tool context working directory by default.
+
+Print-mode CLI does not expose tools to the model unless explicitly requested:
+
+```bash
+uv run wisp -p "list files" --provider openai --allow-read-tools
+uv run wisp -p "run tests" --provider openai --allow-tool bash
+```
+
+Read tools (`read`, `grep`, `find`, `ls`) can be enabled together with
+`--allow-read-tools`. Mutating tools (`write`, `edit`) and command execution
+(`bash`) require explicit `--allow-tool <name>` opt-in.

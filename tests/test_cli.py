@@ -31,7 +31,7 @@ def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
     assert [record["message"]["role"] for record in records] == ["user", "assistant"]
 
 
-def test_print_mode_exposes_no_tools_without_sandboxing() -> None:
+def test_print_mode_exposes_no_tools_by_default() -> None:
     registry = ToolRegistry()
     for tool in (
         ReadTool(),
@@ -47,6 +47,47 @@ def test_print_mode_exposes_no_tools_without_sandboxing() -> None:
     filtered = _print_mode_tool_registry(registry)
 
     assert filtered.names() == ()
+
+
+def test_print_mode_can_expose_sandboxed_read_tools() -> None:
+    registry = ToolRegistry()
+    for tool in (
+        ReadTool(),
+        WriteTool(),
+        EditTool(),
+        BashTool(),
+        GrepTool(),
+        FindTool(),
+        LsTool(),
+    ):
+        registry.register(tool)
+
+    filtered = _print_mode_tool_registry(registry, allow_read_tools=True)
+
+    assert filtered.names() == ("read", "grep", "find", "ls")
+
+
+def test_print_mode_can_expose_explicit_tools() -> None:
+    registry = ToolRegistry()
+    for tool in (ReadTool(), WriteTool(), BashTool()):
+        registry.register(tool)
+
+    filtered = _print_mode_tool_registry(registry, allowed_tools=("bash", "write"))
+
+    assert filtered.names() == ("write", "bash")
+
+
+def test_print_mode_reports_unknown_allowed_tool(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["-p", "hello", "--allow-tool", "missing", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1
+    assert "Unknown tool: missing" in result.output
 
 
 def test_print_mode_reports_unknown_provider(tmp_path: Path) -> None:

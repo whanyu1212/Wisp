@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from wisp.tools.base import Tool, ToolArguments, ToolInputSchema
+from wisp.tools.base import Tool, ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.context import ToolContext
 from wisp.tools.paths import display_tool_path, resolve_tool_path
 from wisp.tools.result import ToolError, ToolResult
@@ -55,6 +55,7 @@ class ReadTool:
     """Read text files with optional line slicing."""
 
     name = "read"
+    safety: ToolSafety = "read"
     description = "Read a UTF-8 text file. Supports 1-indexed offset and line limit."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -106,6 +107,7 @@ class WriteTool:
     """Create or overwrite UTF-8 text files."""
 
     name = "write"
+    safety: ToolSafety = "mutating"
     description = "Create or overwrite a UTF-8 text file, creating parent directories."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -134,6 +136,7 @@ class EditTool:
     """Apply exact text replacements to a file."""
 
     name = "edit"
+    safety: ToolSafety = "mutating"
     description = "Apply unique, non-overlapping exact text replacements to a UTF-8 file."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -203,6 +206,7 @@ class BashTool:
     """Run shell commands in the tool working directory."""
 
     name = "bash"
+    safety: ToolSafety = "command"
     description = "Run a shell command and capture stdout, stderr, and exit code."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -263,6 +267,7 @@ class GrepTool:
     """Search file contents."""
 
     name = "grep"
+    safety: ToolSafety = "read"
     description = "Search text files with ripgrep when available, falling back to Python."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -321,6 +326,7 @@ class FindTool:
     """Find files by glob pattern."""
 
     name = "find"
+    safety: ToolSafety = "read"
     description = "Find files with ripgrep when available, falling back to Python walking."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -355,6 +361,7 @@ class LsTool:
     """List directory entries."""
 
     name = "ls"
+    safety: ToolSafety = "read"
     description = "List a directory with sorted entries and '/' suffixes for directories."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -830,6 +837,7 @@ async def _run_rg_grep(
     context_truncated = effective_context_lines < context_lines
     command = [
         rg_path,
+        *_rg_sandbox_args(context),
         "--line-number",
         "--no-heading",
         "--color=never",
@@ -875,6 +883,10 @@ async def _run_rg_grep(
     )
 
 
+def _rg_sandbox_args(context: ToolContext) -> tuple[str, str]:
+    return ("--no-config", "--follow" if context.allow_outside_cwd else "--no-follow")
+
+
 def _bounded_rg_context_lines(requested_context_lines: int, context: ToolContext) -> int:
     if requested_context_lines <= 0:
         return 0
@@ -900,7 +912,7 @@ async def _run_rg_find(
         candidates = [path]
     else:
         result = await _run_exec_limited_stdout(
-            [rg_path, "--files", "--", _command_path(path, context)],
+            [rg_path, *_rg_sandbox_args(context), "--files", "--", _command_path(path, context)],
             cwd=context.cwd,
             max_stdout_lines=max_results + 1,
             stdout_line_filter=lambda line: _matches_glob(
@@ -948,7 +960,7 @@ def _python_grep(
     matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
     output: list[str] = []
     match_count = 0
-    for file_path in _iter_files(path):
+    for file_path in _iter_files(path, context):
         if glob is not None and not _matches_glob(file_path, glob, context):
             continue
         try:
@@ -993,7 +1005,7 @@ def _python_find(
         raise ToolError(f"Path does not exist: {display_tool_path(path, context)}")
     matches = [
         display_tool_path(candidate, context)
-        for candidate in _iter_files(path)
+        for candidate in _iter_files(path, context)
         if _matches_glob(candidate, pattern, context)
     ]
     matches.sort()
@@ -1002,9 +1014,10 @@ def _python_find(
     )
 
 
-def _iter_files(path: Path) -> Iterable[Path]:
+def _iter_files(path: Path, context: ToolContext) -> Iterable[Path]:
     if path.is_file():
-        yield path
+        if _is_path_within_tool_cwd(path, context):
+            yield path
         return
     if not path.is_dir():
         return
@@ -1014,7 +1027,19 @@ def _iter_files(path: Path) -> Iterable[Path]:
             name for name in dir_names if name not in IGNORED_DIRS and not _is_hidden(name)
         )
         for file_name in sorted(name for name in file_names if not _is_hidden(name)):
-            yield Path(root) / file_name
+            candidate = Path(root) / file_name
+            if _is_path_within_tool_cwd(candidate, context):
+                yield candidate
+
+
+def _is_path_within_tool_cwd(path: Path, context: ToolContext) -> bool:
+    if context.allow_outside_cwd:
+        return True
+    try:
+        path.resolve(strict=False).relative_to(context.cwd.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
 
 
 def _is_hidden(name: str) -> bool:
@@ -1172,6 +1197,8 @@ def _path_from_rg_line(line: str, context: ToolContext) -> Path:
     path = Path(line.rstrip("\r\n"))
     if not path.is_absolute():
         path = context.cwd / path
+    if context.allow_outside_cwd:
+        return path
     return path.resolve(strict=False)
 
 

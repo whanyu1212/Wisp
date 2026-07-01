@@ -22,6 +22,7 @@ from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.context import ToolContext
+from wisp.tools.policy import ToolPolicy
 
 
 class Agent:
@@ -37,6 +38,7 @@ class Agent:
         tools: Sequence[ToolSpec] | None = None,
         tool_registry: ToolRegistry | None = None,
         tool_context: ToolContext | None = None,
+        tool_policy: ToolPolicy | None = None,
         max_tool_iterations: int = 8,
     ) -> None:
         self.provider = provider
@@ -44,8 +46,13 @@ class Agent:
         self.events = events
         self.model = model
         self.tool_registry = tool_registry
+        self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tools = (
-            tuple(tools) if tools is not None else tool_registry.specs() if tool_registry else ()
+            tuple(tools)
+            if tools is not None
+            else self._allowed_tool_specs(tool_registry)
+            if tool_registry
+            else ()
         )
         self.tool_context = tool_context or ToolContext.default()
         self.max_tool_iterations = max_tool_iterations
@@ -160,8 +167,12 @@ class Agent:
         else:
             try:
                 tool = self.tool_registry.get(tool_call.name)
-                result = await tool.run(arguments, self.tool_context)
-                output = result.text
+                if not self.tool_policy.allows(tool):
+                    output = self.tool_policy.block_reason(tool)
+                    is_error = True
+                else:
+                    result = await tool.run(arguments, self.tool_context)
+                    output = result.text
             except UnknownToolError as exc:
                 output = str(exc)
                 is_error = True
@@ -170,6 +181,13 @@ class Agent:
                 is_error = True
 
         return ToolCallResult(call_id=tool_call.call_id, output=output, is_error=is_error)
+
+    def _allowed_tool_specs(self, tool_registry: ToolRegistry) -> tuple[ToolSpec, ...]:
+        return tuple(
+            ToolSpec.from_tool(tool)
+            for tool in tool_registry.all()
+            if self.tool_policy.allows(tool)
+        )
 
     async def _emit(self, event: WispEvent) -> WispEvent:
         if self.events is not None:
