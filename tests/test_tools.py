@@ -631,6 +631,71 @@ def test_grep_tool_ripgrep_preserves_whitespace_only_patterns(tmp_path: Path) ->
     assert result.text == "data.txt:1:a b"
 
 
+def test_grep_tool_python_fallback_skips_symlinked_files_outside_cwd(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    link = workspace / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    context = ToolContext(cwd=workspace)
+
+    result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
+
+    assert result.text == "No matches"
+    assert result.data == {"count": 0, "matches": []}
+
+
+def test_find_tool_python_fallback_skips_symlinked_files_outside_cwd(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("", encoding="utf-8")
+    link = workspace / "outside.py"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    context = ToolContext(cwd=workspace)
+
+    result = run_tool(FindTool(), {"path": ".", "pattern": "*.py"}, context)
+
+    assert result.text == "No files found"
+    assert result.data == {"count": 0, "files": []}
+
+
+def test_grep_tool_python_fallback_allows_symlinked_files_when_opted_out(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    link = workspace / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    context = ToolContext(cwd=workspace, allow_outside_cwd=True)
+
+    result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
+
+    assert result.text == f"{link}:1:secret"
+
+
 def test_grep_tool_python_fallback_does_not_count_context_text_as_match(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

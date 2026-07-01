@@ -955,7 +955,7 @@ def _python_grep(
     matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
     output: list[str] = []
     match_count = 0
-    for file_path in _iter_files(path):
+    for file_path in _iter_files(path, context):
         if glob is not None and not _matches_glob(file_path, glob, context):
             continue
         try:
@@ -1000,7 +1000,7 @@ def _python_find(
         raise ToolError(f"Path does not exist: {display_tool_path(path, context)}")
     matches = [
         display_tool_path(candidate, context)
-        for candidate in _iter_files(path)
+        for candidate in _iter_files(path, context)
         if _matches_glob(candidate, pattern, context)
     ]
     matches.sort()
@@ -1009,9 +1009,10 @@ def _python_find(
     )
 
 
-def _iter_files(path: Path) -> Iterable[Path]:
+def _iter_files(path: Path, context: ToolContext) -> Iterable[Path]:
     if path.is_file():
-        yield path
+        if _is_path_within_tool_cwd(path, context):
+            yield path
         return
     if not path.is_dir():
         return
@@ -1021,7 +1022,19 @@ def _iter_files(path: Path) -> Iterable[Path]:
             name for name in dir_names if name not in IGNORED_DIRS and not _is_hidden(name)
         )
         for file_name in sorted(name for name in file_names if not _is_hidden(name)):
-            yield Path(root) / file_name
+            candidate = Path(root) / file_name
+            if _is_path_within_tool_cwd(candidate, context):
+                yield candidate
+
+
+def _is_path_within_tool_cwd(path: Path, context: ToolContext) -> bool:
+    if context.allow_outside_cwd:
+        return True
+    try:
+        path.resolve(strict=False).relative_to(context.cwd.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
 
 
 def _is_hidden(name: str) -> bool:
