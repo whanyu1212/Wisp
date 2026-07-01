@@ -37,7 +37,6 @@ IGNORED_DIRS = {
 }
 RG_MATCH_SEPARATOR = "\x1f"
 RG_CONTEXT_SEPARATOR = "\x1e"
-RG_SANDBOX_ARGS = ("--no-config", "--no-follow")
 
 
 @dataclass(frozen=True)
@@ -838,7 +837,7 @@ async def _run_rg_grep(
     context_truncated = effective_context_lines < context_lines
     command = [
         rg_path,
-        *RG_SANDBOX_ARGS,
+        *_rg_sandbox_args(context),
         "--line-number",
         "--no-heading",
         "--color=never",
@@ -884,6 +883,10 @@ async def _run_rg_grep(
     )
 
 
+def _rg_sandbox_args(context: ToolContext) -> tuple[str, str]:
+    return ("--no-config", "--follow" if context.allow_outside_cwd else "--no-follow")
+
+
 def _bounded_rg_context_lines(requested_context_lines: int, context: ToolContext) -> int:
     if requested_context_lines <= 0:
         return 0
@@ -909,7 +912,7 @@ async def _run_rg_find(
         candidates = [path]
     else:
         result = await _run_exec_limited_stdout(
-            [rg_path, *RG_SANDBOX_ARGS, "--files", "--", _command_path(path, context)],
+            [rg_path, *_rg_sandbox_args(context), "--files", "--", _command_path(path, context)],
             cwd=context.cwd,
             max_stdout_lines=max_results + 1,
             stdout_line_filter=lambda line: _matches_glob(
@@ -1194,6 +1197,8 @@ def _path_from_rg_line(line: str, context: ToolContext) -> Path:
     path = Path(line.rstrip("\r\n"))
     if not path.is_absolute():
         path = context.cwd / path
+    if context.allow_outside_cwd:
+        return path
     return path.resolve(strict=False)
 
 

@@ -659,6 +659,26 @@ def test_grep_tool_ripgrep_ignores_config_that_follows_symlinks(
     assert result.data == {"count": 0, "matches": []}
 
 
+def test_grep_tool_ripgrep_follows_symlinked_files_when_opted_out(tmp_path: Path) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    link = workspace / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    context = ToolContext(cwd=workspace, allow_outside_cwd=True)
+
+    result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
+
+    assert result.text == "link.txt:1:secret"
+    assert result.data["matches"] == ["link.txt:1:secret"]
+
+
 def test_grep_tool_python_fallback_skips_symlinked_files_outside_cwd(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -939,6 +959,26 @@ def test_find_tool_ripgrep_ignores_config_that_follows_symlinks(
 
     assert result.text == "No files found"
     assert result.data == {"count": 0, "files": []}
+
+
+def test_find_tool_ripgrep_follows_symlinked_files_when_opted_out(tmp_path: Path) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("", encoding="utf-8")
+    link = workspace / "outside.py"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    context = ToolContext(cwd=workspace, allow_outside_cwd=True)
+
+    result = run_tool(FindTool(), {"path": ".", "pattern": "*.py"}, context)
+
+    assert result.text == str(link)
+    assert result.data == {"count": 1, "files": [str(link)]}
 
 
 def test_find_tool_ripgrep_bounds_stdout_before_buffering(
