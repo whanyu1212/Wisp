@@ -188,6 +188,39 @@ def test_openai_provider_omits_tools_when_no_tool_specs_are_provided() -> None:
     ]
 
 
+def test_openai_provider_serializes_system_context_before_user_message() -> None:
+    responses = StubResponsesResource()
+    provider = OpenAIProvider(
+        api_key="test-key",
+        client=cast(AsyncOpenAI, StubAsyncOpenAI(responses)),
+    )
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [
+                Message(role="system", content="instructions"),
+                Message(role="system", content="context"),
+                Message(role="user", content="hello"),
+            ],
+            model="gpt-test",
+        )
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert responses.calls == [
+        {
+            "model": "gpt-test",
+            "input": [
+                {"role": "system", "content": "instructions"},
+                {"role": "system", "content": "context"},
+                {"role": "user", "content": "hello"},
+            ],
+            "stream": True,
+        }
+    ]
+
+
 def test_openai_provider_sends_tool_results_with_previous_response_id() -> None:
     responses = StubResponsesResource()
     provider = OpenAIProvider(
