@@ -15,8 +15,10 @@ from wisp.config import WispConfig
 from wisp.events import ErrorEvent, TokenDelta
 from wisp.providers.base import ProviderError
 from wisp.runtime.extensions import build_runtime
-from wisp.runtime.registry import UnknownProviderError
+from wisp.runtime.registry import ToolRegistry, UnknownProviderError
 from wisp.sessions.jsonl import JsonlSessionStore
+
+READ_ONLY_PRINT_TOOL_NAMES = frozenset({"read", "grep", "find", "ls"})
 
 app = typer.Typer(
     add_completion=False,
@@ -80,7 +82,7 @@ async def _run_print(prompt: str, config: WispConfig) -> None:
         sessions=sessions,
         events=runtime.events,
         model=config.model,
-        tool_registry=runtime.tools,
+        tool_registry=_print_mode_tool_registry(runtime.tools),
     )
 
     wrote_tokens = False
@@ -94,3 +96,13 @@ async def _run_print(prompt: str, config: WispConfig) -> None:
 
     if wrote_tokens:
         sys.stdout.write("\n")
+
+
+def _print_mode_tool_registry(tools: ToolRegistry) -> ToolRegistry:
+    """Return tools safe to expose without an interactive approval policy."""
+
+    filtered = ToolRegistry()
+    for tool in tools.all():
+        if tool.name in READ_ONLY_PRINT_TOOL_NAMES:
+            filtered.register(tool)
+    return filtered
