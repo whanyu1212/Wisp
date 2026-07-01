@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Sequence
 from copy import deepcopy
+from json import JSONDecodeError, loads
 from typing import Literal, cast
 
 from openai import AsyncOpenAI
@@ -12,9 +13,9 @@ from openai.types.responses import (
     EasyInputMessageParam,
     FunctionToolParam,
     Response,
+    ResponseCreatedEvent,
     ResponseErrorEvent,
     ResponseFailedEvent,
-    ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
     ResponseIncompleteEvent,
@@ -27,7 +28,15 @@ from openai.types.responses import (
 from openai.types.responses.response_input_param import ResponseInputParam
 
 from wisp.agent.messages import Message, Role
-from wisp.providers.base import ProviderConfigurationError, ProviderError, ToolSpec
+from wisp.providers.base import (
+    JsonObject,
+    ProviderConfigurationError,
+    ProviderError,
+    ProviderStreamEvent,
+    ToolCall,
+    ToolCallResult,
+    ToolSpec,
+)
 
 DEFAULT_OPENAI_MODEL = "gpt-5.5"
 OpenAIRole = Literal["user", "assistant", "system", "developer"]
@@ -55,19 +64,53 @@ class OpenAIProvider:
         *,
         model: str | None = None,
         tools: Sequence[ToolSpec] = (),
-    ) -> AsyncIterator[str]:
-        """Stream text deltas from OpenAI's Responses API."""
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        """Stream text deltas and tool calls from OpenAI's Responses API."""
 
         selected_model = model or self.default_model or DEFAULT_OPENAI_MODEL
-        stream = await self._create_stream(messages, model=selected_model, tools=tools)
+        stream = await self._create_stream(
+            messages,
+            model=selected_model,
+            tools=tools,
+            tool_results=tool_results,
+            previous_response_id=previous_response_id,
+        )
+        response_id: str | None = previous_response_id
+        pending_tool_calls: dict[str, ResponseFunctionToolCall] = {}
+        emitted_tool_item_ids: set[str] = set()
 
         async for event in stream:
-            if isinstance(event, ResponseTextDeltaEvent | ResponseRefusalDeltaEvent):
+            if isinstance(event, ResponseCreatedEvent):
+                response_id = event.response.id
+            elif isinstance(event, ResponseTextDeltaEvent | ResponseRefusalDeltaEvent):
                 yield event.delta
-            elif _is_function_tool_call_event(event):
-                raise ProviderError(
-                    "OpenAI returned a function tool call, but Wisp does not execute tools yet"
+            elif isinstance(event, ResponseFunctionCallArgumentsDoneEvent):
+                pending = pending_tool_calls.get(event.item_id)
+                call_id = pending.call_id if pending is not None else event.item_id
+                yield _tool_call_from_openai(
+                    call_id=call_id,
+                    name=event.name,
+                    raw_arguments=event.arguments,
+                    response_id=response_id,
                 )
+                emitted_tool_item_ids.add(event.item_id)
+            elif isinstance(event, ResponseOutputItemAddedEvent | ResponseOutputItemDoneEvent):
+                if isinstance(event.item, ResponseFunctionToolCall):
+                    item_id = event.item.id
+                    if item_id is not None:
+                        pending_tool_calls[item_id] = event.item
+                    already_emitted = item_id is not None and item_id in emitted_tool_item_ids
+                    if isinstance(event, ResponseOutputItemDoneEvent) and not already_emitted:
+                        yield _tool_call_from_openai(
+                            call_id=event.item.call_id,
+                            name=event.item.name,
+                            raw_arguments=event.item.arguments,
+                            response_id=response_id,
+                        )
+                        if item_id is not None:
+                            emitted_tool_item_ids.add(item_id)
             elif isinstance(event, ResponseErrorEvent):
                 raise ProviderError(f"OpenAI API error: {event.message}")
             elif isinstance(event, ResponseFailedEvent):
@@ -81,20 +124,42 @@ class OpenAIProvider:
         *,
         model: str,
         tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         client = self._client_or_create()
         openai_tools = _tool_specs_to_openai_tools(tools)
-        if openai_tools:
+        response_input = (
+            _tool_results_to_response_input(tool_results)
+            if tool_results
+            else _messages_to_response_input(messages)
+        )
+        if openai_tools and previous_response_id is not None:
             stream = await client.responses.create(
                 model=model,
-                input=_messages_to_response_input(messages),
+                input=response_input,
                 stream=True,
                 tools=openai_tools,
+                previous_response_id=previous_response_id,
+            )
+        elif openai_tools:
+            stream = await client.responses.create(
+                model=model,
+                input=response_input,
+                stream=True,
+                tools=openai_tools,
+            )
+        elif previous_response_id is not None:
+            stream = await client.responses.create(
+                model=model,
+                input=response_input,
+                stream=True,
+                previous_response_id=previous_response_id,
             )
         else:
             stream = await client.responses.create(
                 model=model,
-                input=_messages_to_response_input(messages),
+                input=response_input,
                 stream=True,
             )
         return cast(AsyncIterator[ResponseStreamEvent], stream)
@@ -113,15 +178,32 @@ class OpenAIProvider:
         return self._client
 
 
-def _is_function_tool_call_event(event: ResponseStreamEvent) -> bool:
-    if isinstance(
-        event,
-        ResponseFunctionCallArgumentsDeltaEvent | ResponseFunctionCallArgumentsDoneEvent,
-    ):
-        return True
-    if isinstance(event, ResponseOutputItemAddedEvent | ResponseOutputItemDoneEvent):
-        return isinstance(event.item, ResponseFunctionToolCall)
-    return False
+def _tool_call_from_openai(
+    *,
+    call_id: str,
+    name: str,
+    raw_arguments: str,
+    response_id: str | None,
+) -> ToolCall:
+    arguments, parse_error = _parse_tool_arguments(name=name, raw_arguments=raw_arguments)
+    return ToolCall(
+        call_id=call_id,
+        name=name,
+        arguments=arguments,
+        raw_arguments=raw_arguments,
+        response_id=response_id,
+        parse_error=parse_error,
+    )
+
+
+def _parse_tool_arguments(*, name: str, raw_arguments: str) -> tuple[JsonObject, str | None]:
+    try:
+        parsed = loads(raw_arguments or "{}")
+    except JSONDecodeError as exc:
+        return {}, f"Invalid JSON arguments for tool {name}: {exc.msg}"
+    if not isinstance(parsed, dict):
+        return {}, f"Invalid JSON arguments for tool {name}: expected an object"
+    return cast(JsonObject, parsed), None
 
 
 def _failed_response_message(response: Response) -> str:
@@ -148,6 +230,19 @@ def _messages_to_response_input(messages: Sequence[Message]) -> ResponseInputPar
             "content": message.content,
         }
         response_input.append(message_param)
+    return response_input
+
+
+def _tool_results_to_response_input(tool_results: Sequence[ToolCallResult]) -> ResponseInputParam:
+    response_input: ResponseInputParam = []
+    for result in tool_results:
+        response_input.append(
+            {
+                "type": "function_call_output",
+                "call_id": result.call_id,
+                "output": result.output,
+            }
+        )
     return response_input
 
 

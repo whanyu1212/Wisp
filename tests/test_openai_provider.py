@@ -8,13 +8,14 @@ import pytest
 from openai import AsyncOpenAI
 from openai.types.responses import (
     Response,
+    ResponseCreatedEvent,
     ResponseError,
     ResponseErrorEvent,
     ResponseFailedEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
     ResponseIncompleteEvent,
-    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
     ResponseRefusalDeltaEvent,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
@@ -23,7 +24,13 @@ from openai.types.responses.response import IncompleteDetails
 from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message
-from wisp.providers.base import ProviderConfigurationError, ProviderError, ToolSpec
+from wisp.providers.base import (
+    ProviderConfigurationError,
+    ProviderError,
+    ToolCall,
+    ToolCallResult,
+    ToolSpec,
+)
 from wisp.providers.openai import OpenAIProvider
 
 
@@ -34,6 +41,8 @@ class StubOpenAIProvider(OpenAIProvider):
         self.seen_model: str | None = None
         self.seen_messages: Sequence[Message] | None = None
         self.seen_tools: Sequence[ToolSpec] | None = None
+        self.seen_tool_results: Sequence[ToolCallResult] | None = None
+        self.seen_previous_response_id: str | None = None
 
     async def _create_stream(
         self,
@@ -41,10 +50,14 @@ class StubOpenAIProvider(OpenAIProvider):
         *,
         model: str,
         tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         self.seen_model = model
         self.seen_messages = messages
         self.seen_tools = tools
+        self.seen_tool_results = tool_results
+        self.seen_previous_response_id = previous_response_id
 
         async def stream() -> AsyncIterator[ResponseStreamEvent]:
             for event in self.events:
@@ -174,46 +187,108 @@ def test_openai_provider_omits_tools_when_no_tool_specs_are_provided() -> None:
     ]
 
 
-def test_openai_provider_raises_on_function_tool_call_arguments_event() -> None:
-    provider = StubOpenAIProvider([_function_call_arguments_done_event("lookup")])
+def test_openai_provider_sends_tool_results_with_previous_response_id() -> None:
+    responses = StubResponsesResource()
+    provider = OpenAIProvider(
+        api_key="test-key",
+        client=cast(AsyncOpenAI, StubAsyncOpenAI(responses)),
+    )
+    tool = ToolSpec(
+        name="lookup",
+        description="Look something up.",
+        input_schema={"type": "object", "properties": {}},
+    )
+    tool_result = ToolCallResult(call_id="call-id", output="found it")
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [Message(role="user", content="hello")],
+            model="gpt-test",
+            tools=[tool],
+            tool_results=[tool_result],
+            previous_response_id="response-id",
+        )
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert responses.calls == [
+        {
+            "model": "gpt-test",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-id",
+                    "output": "found it",
+                }
+            ],
+            "stream": True,
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "description": "Look something up.",
+                    "parameters": {"type": "object", "properties": {}},
+                    "strict": False,
+                }
+            ],
+            "previous_response_id": "response-id",
+        }
+    ]
+
+
+def test_openai_provider_streams_function_tool_calls() -> None:
+    provider = StubOpenAIProvider(
+        [
+            _created_event("response-id"),
+            _function_call_output_item_done_event("lookup", arguments='{"query": "wisp"}'),
+        ]
+    )
     tool = ToolSpec(
         name="lookup",
         description="Look something up.",
         input_schema={"type": "object", "properties": {}},
     )
 
-    async def run() -> list[str]:
+    async def run() -> list[object]:
         return [
-            delta
-            async for delta in provider.stream(
+            event
+            async for event in provider.stream(
                 [Message(role="user", content="hello")],
                 tools=[tool],
             )
         ]
 
-    with pytest.raises(ProviderError, match="does not execute tools yet"):
-        anyio.run(run)
+    events = anyio.run(run)
+
+    assert events == [
+        ToolCall(
+            call_id="call-id",
+            name="lookup",
+            arguments={"query": "wisp"},
+            raw_arguments='{"query": "wisp"}',
+            response_id="response-id",
+        )
+    ]
 
 
-def test_openai_provider_raises_on_function_tool_call_output_item_event() -> None:
-    provider = StubOpenAIProvider([_function_call_output_item_added_event("lookup")])
-    tool = ToolSpec(
-        name="lookup",
-        description="Look something up.",
-        input_schema={"type": "object", "properties": {}},
-    )
+def test_openai_provider_streams_tool_call_parse_errors() -> None:
+    provider = StubOpenAIProvider([_function_call_arguments_done_event("lookup", "not-json")])
 
-    async def run() -> list[str]:
-        return [
-            delta
-            async for delta in provider.stream(
-                [Message(role="user", content="hello")],
-                tools=[tool],
-            )
-        ]
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
 
-    with pytest.raises(ProviderError, match="does not execute tools yet"):
-        anyio.run(run)
+    events = anyio.run(run)
+
+    assert events == [
+        ToolCall(
+            call_id="item",
+            name="lookup",
+            arguments={},
+            raw_arguments="not-json",
+            parse_error="Invalid JSON arguments for tool lookup: Expecting value",
+        )
+    ]
 
 
 def test_openai_provider_streams_refusal_deltas() -> None:
@@ -308,9 +383,20 @@ def _refusal_delta(text: str, *, sequence_number: int = 0) -> ResponseRefusalDel
     )
 
 
-def _function_call_arguments_done_event(name: str) -> ResponseFunctionCallArgumentsDoneEvent:
+def _created_event(response_id: str) -> ResponseCreatedEvent:
+    return ResponseCreatedEvent(
+        response=_response(response_id=response_id),
+        sequence_number=0,
+        type="response.created",
+    )
+
+
+def _function_call_arguments_done_event(
+    name: str,
+    arguments: str = "{}",
+) -> ResponseFunctionCallArgumentsDoneEvent:
     return ResponseFunctionCallArgumentsDoneEvent(
-        arguments="{}",
+        arguments=arguments,
         item_id="item",
         name=name,
         output_index=0,
@@ -319,17 +405,22 @@ def _function_call_arguments_done_event(name: str) -> ResponseFunctionCallArgume
     )
 
 
-def _function_call_output_item_added_event(name: str) -> ResponseOutputItemAddedEvent:
-    return ResponseOutputItemAddedEvent(
+def _function_call_output_item_done_event(
+    name: str,
+    *,
+    arguments: str = "{}",
+) -> ResponseOutputItemDoneEvent:
+    return ResponseOutputItemDoneEvent(
         item=ResponseFunctionToolCall(
-            arguments="{}",
+            arguments=arguments,
             call_id="call-id",
+            id="item",
             name=name,
             type="function_call",
         ),
         output_index=0,
         sequence_number=0,
-        type="response.output_item.added",
+        type="response.output_item.done",
     )
 
 
@@ -350,11 +441,12 @@ def _incomplete_event(reason: str) -> ResponseIncompleteEvent:
 
 def _response(
     *,
+    response_id: str = "response-id",
     error: ResponseError | None = None,
     incomplete_details: IncompleteDetails | None = None,
 ) -> Response:
     return Response(
-        id="response-id",
+        id=response_id,
         created_at=0.0,
         error=error,
         incomplete_details=incomplete_details,

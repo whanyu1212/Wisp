@@ -75,7 +75,13 @@ async def _run_print(prompt: str, config: WispConfig) -> None:
     runtime = await build_runtime()
     provider = runtime.providers.get(config.provider)
     sessions = JsonlSessionStore(config.session_dir)
-    agent = Agent(provider=provider, sessions=sessions, events=runtime.events, model=config.model)
+    agent = Agent(
+        provider=provider,
+        sessions=sessions,
+        events=runtime.events,
+        model=config.model,
+        tool_registry=runtime.tools,
+    )
 
     wrote_tokens = False
     async for event in agent.run(prompt):
