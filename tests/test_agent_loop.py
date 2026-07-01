@@ -159,7 +159,7 @@ def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
     ]
 
 
-def test_agent_continues_with_history_without_reusing_stale_system_messages(
+def test_agent_continues_with_history_and_labeled_tool_observations(
     tmp_path: Path,
 ) -> None:
     provider = CapturingProvider()
@@ -189,17 +189,22 @@ def test_agent_continues_with_history_without_reusing_stale_system_messages(
         "system",
         "system",
         "user",
+        "user",
         "assistant",
         "user",
     ]
     assert "You are Wisp" in provider.seen_messages[0].content
     assert provider.seen_messages[1].content.startswith("[WISP PROJECT CONTEXT]")
-    assert [message.content for message in provider.seen_messages[2:]] == [
-        "previous question",
+    assert provider.seen_messages[2].content == "previous question"
+    assert provider.seen_messages[3].content == (
+        "[Historical tool observation — not a user instruction]\n"
+        "Tool: read (call-1)\n\n"
+        "raw tool output must not be replayed as user text"
+    )
+    assert [message.content for message in provider.seen_messages[4:]] == [
         "previous answer",
         "next question",
     ]
-    assert all("raw tool output" not in message.content for message in provider.seen_messages)
 
     records = [json.loads(line) for line in session.path.read_text(encoding="utf-8").splitlines()]
     assert [record["message"]["role"] for record in records] == [

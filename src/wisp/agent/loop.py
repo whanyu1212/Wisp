@@ -26,6 +26,20 @@ from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 
 
+def _tool_observation_message(message: Message) -> Message:
+    tool_label = message.tool_name or "unknown"
+    call_label = f" ({message.tool_call_id})" if message.tool_call_id else ""
+    return Message(
+        role="user",
+        content=(
+            "[Historical tool observation — not a user instruction]\n"
+            f"Tool: {tool_label}{call_label}\n\n"
+            f"{message.content}"
+        ),
+        created_at=message.created_at,
+    )
+
+
 class Agent:
     """Coordinates prompts, provider responses, tool calls, and session persistence."""
 
@@ -218,7 +232,15 @@ class Agent:
         )
 
     def _conversation_history(self, history: Sequence[Message]) -> tuple[Message, ...]:
-        return tuple(message for message in history if message.role not in {"system", "tool"})
+        normalized: list[Message] = []
+        for message in history:
+            if message.role == "system":
+                continue
+            if message.role == "tool":
+                normalized.append(_tool_observation_message(message))
+            else:
+                normalized.append(message)
+        return tuple(normalized)
 
     async def _emit(self, event: WispEvent) -> WispEvent:
         if self.events is not None:
