@@ -430,6 +430,8 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
         (
             [
                 "rg",
+                "--no-config",
+                "--no-follow",
                 "--line-number",
                 "--no-heading",
                 "--color=never",
@@ -629,6 +631,32 @@ def test_grep_tool_ripgrep_preserves_whitespace_only_patterns(tmp_path: Path) ->
     )
 
     assert result.text == "data.txt:1:a b"
+
+
+def test_grep_tool_ripgrep_ignores_config_that_follows_symlinks(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    link = workspace / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    config = tmp_path / "ripgreprc"
+    config.write_text("--follow\n", encoding="utf-8")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+    context = ToolContext(cwd=workspace)
+
+    result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
+
+    assert result.text == "No matches"
+    assert result.data == {"count": 0, "matches": []}
 
 
 def test_grep_tool_python_fallback_skips_symlinked_files_outside_cwd(
@@ -887,6 +915,32 @@ def test_find_tool_ripgrep_returns_no_files_for_empty_directory(tmp_path: Path) 
     assert result.data == {"count": 0, "files": []}
 
 
+def test_find_tool_ripgrep_ignores_config_that_follows_symlinks(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("", encoding="utf-8")
+    link = workspace / "outside.py"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    config = tmp_path / "ripgreprc"
+    config.write_text("--follow\n", encoding="utf-8")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+    context = ToolContext(cwd=workspace)
+
+    result = run_tool(FindTool(), {"path": ".", "pattern": "*.py"}, context)
+
+    assert result.text == "No files found"
+    assert result.data == {"count": 0, "files": []}
+
+
 def test_find_tool_ripgrep_bounds_stdout_before_buffering(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -921,7 +975,7 @@ def test_find_tool_ripgrep_bounds_stdout_before_buffering(
 
     result = run_tool(FindTool(), {"path": ".", "pattern": "*.py", "max_results": 2}, context)
 
-    assert calls == [(["rg", "--files", "--", "."], 3, 50000, 2000)]
+    assert calls == [(["rg", "--no-config", "--no-follow", "--files", "--", "."], 3, 50000, 2000)]
     assert result.text == "a.py\nc.py\n[truncated]"
     assert result.truncated is True
 
