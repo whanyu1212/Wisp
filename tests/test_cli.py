@@ -38,6 +38,98 @@ def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
     assert "allowed tools: none exposed to the model" in records[1]["message"]["content"]
 
 
+def test_print_mode_continue_appends_to_latest_session(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    first = runner.invoke(
+        app,
+        ["-p", "first", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+    second = runner.invoke(
+        app,
+        ["-p", "second", "--continue", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 0, second.output
+    session_files = list(tmp_path.glob("*.jsonl"))
+    assert len(session_files) == 1
+    records = [
+        json.loads(line) for line in session_files[0].read_text(encoding="utf-8").splitlines()
+    ]
+    assert [record["message"]["role"] for record in records] == [
+        "system",
+        "system",
+        "user",
+        "assistant",
+        "system",
+        "system",
+        "user",
+        "assistant",
+    ]
+    assert [
+        record["message"]["content"] for record in records if record["message"]["role"] == "user"
+    ] == [
+        "first",
+        "second",
+    ]
+
+
+def test_print_mode_resume_appends_to_named_session(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    first = runner.invoke(
+        app,
+        ["-p", "first", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+    assert first.exit_code == 0, first.output
+    session_file = next(tmp_path.glob("*.jsonl"))
+
+    second = runner.invoke(
+        app,
+        ["-p", "second", "--resume", session_file.name, "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert second.exit_code == 0, second.output
+    records = [json.loads(line) for line in session_file.read_text(encoding="utf-8").splitlines()]
+    assert [
+        record["message"]["content"] for record in records if record["message"]["role"] == "user"
+    ] == [
+        "first",
+        "second",
+    ]
+
+
+def test_print_mode_rejects_resume_and_continue_together(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["-p", "hello", "--resume", "missing", "--continue", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1
+    assert "use either --resume or --continue" in result.output
+
+
+def test_print_mode_reports_missing_resume_session(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["-p", "hello", "--resume", "missing", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1
+    assert "Session not found: missing" in result.output
+
+
 def test_print_mode_context_describes_allowed_read_tools(tmp_path: Path) -> None:
     runner = CliRunner()
 
