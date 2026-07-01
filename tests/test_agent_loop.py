@@ -12,6 +12,8 @@ from wisp.events import (
     AssistantMessage,
     SessionSaved,
     TokenDelta,
+    ToolApprovalRequested,
+    ToolApprovalResolved,
     ToolCallRequested,
     ToolExecutionStarted,
     ToolResultReady,
@@ -21,6 +23,7 @@ from wisp.providers.fake import FakeProvider
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry
 from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import ToolArguments, ToolInputSchema
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
@@ -360,7 +363,53 @@ def test_agent_returns_error_result_for_policy_blocked_tool(tmp_path: Path) -> N
     )
 
 
-def test_agent_allows_explicit_tool_policy_names(tmp_path: Path) -> None:
+def test_agent_blocks_approval_required_tool_without_override(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [ToolCall(call_id="call-1", name="mutate", arguments={}, response_id="response-1")],
+            ["recovered"],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(MutatingTool())
+    emitted_events: list[object] = []
+
+    async def run_agent() -> list[object]:
+        event_bus = EventBus()
+        event_bus.on("*", emitted_events.append)
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            events=event_bus,
+            tool_registry=tools,
+            tool_policy=ToolPolicy.allow_tool_names({"mutate"}),
+        )
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+
+    blocked_result = provider.calls[1][0][0]
+    assert blocked_result.is_error is True
+    assert "Tool mutate requires approval before execution" in blocked_result.output
+    approval_requested = next(event for event in events if isinstance(event, ToolApprovalRequested))
+    approval_resolved = next(event for event in events if isinstance(event, ToolApprovalResolved))
+    assert approval_requested.safety == "mutating"
+    assert approval_resolved.approved is False
+    assert approval_resolved.reason is not None
+    assert [event.type for event in emitted_events[:6]] == [
+        "agent.started",
+        "tool.execution.started",
+        "tool.call",
+        "tool.approval.requested",
+        "tool.approval.resolved",
+        "tool.execution.ended",
+    ]
+    assert any(
+        isinstance(event, AssistantMessage) and event.content == "recovered" for event in events
+    )
+
+
+def test_agent_approves_required_tool_with_override(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="mutate", arguments={}, response_id="response-1")],
@@ -376,12 +425,16 @@ def test_agent_allows_explicit_tool_policy_names(tmp_path: Path) -> None:
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=tools,
             tool_policy=ToolPolicy.allow_tool_names({"mutate"}),
+            tool_approval_policy=ToolApprovalPolicy.approve_all(),
         )
         return [event async for event in agent.run("hello")]
 
-    anyio.run(run_agent)
+    events = anyio.run(run_agent)
 
     assert provider.calls[1][0] == (ToolCallResult(call_id="call-1", output="mutated"),)
+    approval_resolved = next(event for event in events if isinstance(event, ToolApprovalResolved))
+    assert approval_resolved.approved is True
+    assert approval_resolved.reason is None
 
 
 def test_agent_updates_previous_response_id_for_chained_tool_calls(tmp_path: Path) -> None:

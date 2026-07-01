@@ -17,6 +17,7 @@ from wisp.providers.base import ProviderError
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import ToolRegistry, UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
+from wisp.tools.approval import ToolApprovalPolicy
 
 app = typer.Typer(
     add_completion=False,
@@ -66,6 +67,14 @@ def cli_callback(
         bool,
         typer.Option("--continue", help="Continue the latest session in the session directory."),
     ] = False,
+    approve_unsafe_tools: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "--allow-unsafe-tool-execution",
+            help="Approve non-interactive execution of mutating and command tools.",
+        ),
+    ] = False,
 ) -> None:
     """Run Wisp in the initial print-mode CLI."""
 
@@ -92,6 +101,7 @@ def cli_callback(
             tuple(allow_tool or ()),
             resume,
             continue_latest,
+            approve_unsafe_tools,
         )
     except (ProviderError, SessionError, UnknownProviderError, UnknownToolError) as exc:
         console.print(f"[red]error:[/red] {exc}")
@@ -111,6 +121,7 @@ async def _run_print(
     allowed_tools: tuple[str, ...] = (),
     resume: str | None = None,
     continue_latest: bool = False,
+    approve_unsafe_tools: bool = False,
 ) -> None:
     runtime = await build_runtime()
     provider = runtime.providers.get(config.provider)
@@ -127,6 +138,7 @@ async def _run_print(
             allow_read_tools=allow_read_tools,
             allowed_tools=allowed_tools,
         ),
+        tool_approval_policy=_print_mode_tool_approval_policy(approve_unsafe_tools),
     )
 
     wrote_tokens = False
@@ -140,6 +152,12 @@ async def _run_print(
 
     if wrote_tokens:
         sys.stdout.write("\n")
+
+
+def _print_mode_tool_approval_policy(approve_unsafe_tools: bool) -> ToolApprovalPolicy:
+    if approve_unsafe_tools:
+        return ToolApprovalPolicy.approve_all()
+    return ToolApprovalPolicy.require_approval()
 
 
 def _session_for_print_run(

@@ -53,6 +53,22 @@ class ToolExecutionStarted(WispEvent):
     arguments: JsonObject
 
 
+class ToolApprovalRequested(WispEvent):
+    type: Literal["tool.approval.requested"] = "tool.approval.requested"
+    call_id: str
+    name: str
+    arguments: JsonObject
+    safety: Literal["read", "mutating", "command"]
+
+
+class ToolApprovalResolved(WispEvent):
+    type: Literal["tool.approval.resolved"] = "tool.approval.resolved"
+    call_id: str
+    name: str
+    approved: bool
+    reason: str | None = None
+
+
 class ToolExecutionEnded(WispEvent):
     type: Literal["tool.execution.ended"] = "tool.execution.ended"
     call_id: str

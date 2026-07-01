@@ -12,6 +12,8 @@ from wisp.events import (
     ErrorEvent,
     SessionSaved,
     TokenDelta,
+    ToolApprovalRequested,
+    ToolApprovalResolved,
     ToolCallRequested,
     ToolExecutionEnded,
     ToolExecutionStarted,
@@ -22,6 +24,7 @@ from wisp.providers.base import Provider, ToolCall, ToolCallResult, ToolSpec
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
+from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 
@@ -54,6 +57,7 @@ class Agent:
         tool_registry: ToolRegistry | None = None,
         tool_context: ToolContext | None = None,
         tool_policy: ToolPolicy | None = None,
+        tool_approval_policy: ToolApprovalPolicy | None = None,
         prompt_messages: Sequence[Message] | None = None,
         project_context_max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
         max_tool_iterations: int = 8,
@@ -64,6 +68,7 @@ class Agent:
         self.model = model
         self.tool_registry = tool_registry
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
+        self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
         self.tool_context = tool_context or ToolContext.default()
         self.tools = (
             tuple(tools)
@@ -145,6 +150,8 @@ class Agent:
                             arguments=arguments,
                         )
                     )
+                    for approval_event in self._approval_events(tool_call, arguments=arguments):
+                        yield await self._emit(approval_event)
                     result = await self._execute_tool_call(tool_call, arguments=arguments)
                     yield await self._emit(
                         ToolExecutionEnded(
@@ -203,6 +210,9 @@ class Agent:
                 if not self.tool_policy.allows(tool):
                     output = self.tool_policy.block_reason(tool)
                     is_error = True
+                elif not self.tool_approval_policy.approves(tool):
+                    output = self.tool_approval_policy.block_reason(tool)
+                    is_error = True
                 else:
                     result = await tool.run(arguments, self.tool_context)
                     output = result.text
@@ -214,6 +224,39 @@ class Agent:
                 is_error = True
 
         return ToolCallResult(call_id=tool_call.call_id, output=output, is_error=is_error)
+
+    def _approval_events(
+        self,
+        tool_call: ToolCall,
+        *,
+        arguments: dict[str, object],
+    ) -> tuple[ToolApprovalRequested | ToolApprovalResolved, ...]:
+        if tool_call.parse_error is not None or self.tool_registry is None:
+            return ()
+        try:
+            tool = self.tool_registry.get(tool_call.name)
+        except UnknownToolError:
+            return ()
+        if not self.tool_policy.allows(tool) or not self.tool_approval_policy.requires_approval(
+            tool
+        ):
+            return ()
+        approved = self.tool_approval_policy.approves(tool)
+        reason = None if approved else self.tool_approval_policy.block_reason(tool)
+        return (
+            ToolApprovalRequested(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                arguments=arguments,
+                safety=tool.safety,
+            ),
+            ToolApprovalResolved(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                approved=approved,
+                reason=reason,
+            ),
+        )
 
     def _allowed_tool_specs(self, tool_registry: ToolRegistry) -> tuple[ToolSpec, ...]:
         return tuple(
