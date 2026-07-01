@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence
 
 from wisp.agent.messages import Message
+from wisp.agent.prompt import DEFAULT_CONTEXT_MAX_CHARS, build_prompt_messages
 from wisp.events import (
     AgentStarted,
     AssistantMessage,
@@ -39,6 +40,8 @@ class Agent:
         tool_registry: ToolRegistry | None = None,
         tool_context: ToolContext | None = None,
         tool_policy: ToolPolicy | None = None,
+        prompt_messages: Sequence[Message] | None = None,
+        project_context_max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
         max_tool_iterations: int = 8,
     ) -> None:
         self.provider = provider
@@ -47,6 +50,7 @@ class Agent:
         self.model = model
         self.tool_registry = tool_registry
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
+        self.tool_context = tool_context or ToolContext.default()
         self.tools = (
             tuple(tools)
             if tools is not None
@@ -54,17 +58,22 @@ class Agent:
             if tool_registry
             else ()
         )
-        self.tool_context = tool_context or ToolContext.default()
+        self.prompt_messages = tuple(prompt_messages) if prompt_messages is not None else None
+        self.project_context_max_chars = project_context_max_chars
         self.max_tool_iterations = max_tool_iterations
 
     async def run(self, prompt: str) -> AsyncIterator[WispEvent]:
         session = self.sessions.create()
         yield await self._emit(AgentStarted(session_id=session.session_id))
 
+        prompt_messages = self._prompt_messages()
+        for prompt_message in prompt_messages:
+            await session.append_message(prompt_message)
+
         user_message = Message(role="user", content=prompt)
         await session.append_message(user_message)
 
-        messages: list[Message] = [user_message]
+        messages: list[Message] = [*prompt_messages, user_message]
         chunks: list[str] = []
         pending_tool_results: tuple[ToolCallResult, ...] = ()
         previous_response_id: str | None = None
@@ -187,6 +196,15 @@ class Agent:
             ToolSpec.from_tool(tool)
             for tool in tool_registry.all()
             if self.tool_policy.allows(tool)
+        )
+
+    def _prompt_messages(self) -> tuple[Message, ...]:
+        if self.prompt_messages is not None:
+            return self.prompt_messages
+        return build_prompt_messages(
+            cwd=self.tool_context.cwd,
+            tools=self.tools,
+            max_context_chars=self.project_context_max_chars,
         )
 
     async def _emit(self, event: WispEvent) -> WispEvent:

@@ -37,6 +37,17 @@ uv run wisp -p "hello" --provider openai --model gpt-5.5
 
 `OPENAI_API_KEY` is required only when using the `openai` provider. Never commit `.env` or real API keys.
 
+## Default prompt and project context
+
+Each agent turn sends a small default coding-agent system prompt plus a bounded project context message before the user prompt. The context includes:
+
+- current working directory
+- git branch and a capped short status summary when available
+- detected root project files such as `pyproject.toml`, `package.json`, or `README.md`
+- the tools currently exposed to the model, or that no tools are exposed
+
+These prompt/context messages are persisted in the JSONL session so the provider-visible input is auditable. Context is informational only: it does not change the print-mode tool exposure policy described below.
+
 ## Local tools
 
 Wisp registers built-in local tools through the extension API:

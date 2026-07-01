@@ -32,6 +32,7 @@ class CapturingProvider:
     default_model: str | None = "default"
 
     def __init__(self) -> None:
+        self.seen_messages: Sequence[Message] | None = None
         self.seen_tools: Sequence[ToolSpec] | None = None
 
     async def stream(
@@ -43,6 +44,7 @@ class CapturingProvider:
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
     ) -> AsyncIterator[object]:
+        self.seen_messages = messages
         self.seen_tools = tools
         yield "done"
 
@@ -134,8 +136,15 @@ def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
     assert saved.path.exists()
 
     records = [json.loads(line) for line in saved.path.read_text(encoding="utf-8").splitlines()]
-    assert [record["message"]["role"] for record in records] == ["user", "assistant"]
-    assert [record["message"]["content"] for record in records] == [
+    assert [record["message"]["role"] for record in records] == [
+        "system",
+        "system",
+        "user",
+        "assistant",
+    ]
+    assert "You are Wisp" in records[0]["message"]["content"]
+    assert "[WISP PROJECT CONTEXT]" in records[1]["message"]["content"]
+    assert [record["message"]["content"] for record in records[2:]] == [
         "hello",
         "fake response to: hello",
     ]
@@ -168,6 +177,11 @@ def test_agent_passes_tool_specs_to_provider(tmp_path: Path) -> None:
 
     events = anyio.run(run_agent)
 
+    assert provider.seen_messages is not None
+    assert [message.role for message in provider.seen_messages] == ["system", "system", "user"]
+    assert "You are Wisp" in provider.seen_messages[0].content
+    assert "allowed tools:\n  - lookup: Look something up." in provider.seen_messages[1].content
+    assert provider.seen_messages[2].content == "hello"
     assert provider.seen_tools == (tool,)
     assert any(isinstance(event, AssistantMessage) and event.content == "done" for event in events)
 
@@ -226,10 +240,16 @@ def test_agent_executes_tool_calls_and_continues_to_final_response(tmp_path: Pat
 
     saved = next(event for event in events if isinstance(event, SessionSaved))
     records = [json.loads(line) for line in saved.path.read_text(encoding="utf-8").splitlines()]
-    assert [record["message"]["role"] for record in records] == ["user", "tool", "assistant"]
-    assert records[1]["message"]["tool_call_id"] == "call-1"
-    assert records[1]["message"]["tool_name"] == "echo"
-    assert records[1]["message"]["content"] == "echo: hello"
+    assert [record["message"]["role"] for record in records] == [
+        "system",
+        "system",
+        "user",
+        "tool",
+        "assistant",
+    ]
+    assert records[3]["message"]["tool_call_id"] == "call-1"
+    assert records[3]["message"]["tool_name"] == "echo"
+    assert records[3]["message"]["content"] == "echo: hello"
 
 
 def test_agent_filters_provider_tool_specs_by_policy(tmp_path: Path) -> None:
