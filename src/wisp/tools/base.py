@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Protocol
+from typing import Literal, Protocol
 
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolResult
 
 ToolArguments = Mapping[str, object]
 ToolInputSchema = Mapping[str, object]
+ToolSafety = Literal["read", "mutating", "command"]
 
 
 class Tool(Protocol):
@@ -18,6 +19,7 @@ class Tool(Protocol):
     name: str
     description: str
     input_schema: ToolInputSchema
+    safety: ToolSafety
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         """Execute the tool with JSON-like arguments."""

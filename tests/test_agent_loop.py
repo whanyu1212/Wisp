@@ -23,6 +23,7 @@ from wisp.runtime.registry import ToolRegistry
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.base import ToolArguments, ToolInputSchema
 from wisp.tools.context import ToolContext
+from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolResult
 
 
@@ -71,6 +72,7 @@ class ToolLoopProvider:
 
 class EchoTool:
     name = "echo"
+    safety = "read"
     description = "Echo input text."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -84,6 +86,7 @@ class EchoTool:
 
 class BlockingTool:
     name = "blocking"
+    safety = "read"
     description = "Blocks until released."
     input_schema: ToolInputSchema = {"type": "object", "properties": {}}
 
@@ -95,6 +98,16 @@ class BlockingTool:
         self.log.append("run-started")
         await self.release.wait()
         return ToolResult(text="released")
+
+
+class MutatingTool:
+    name = "mutate"
+    safety = "mutating"
+    description = "Pretend to mutate state."
+    input_schema: ToolInputSchema = {"type": "object", "properties": {}}
+
+    async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        return ToolResult(text="mutated")
 
 
 def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
@@ -217,6 +230,80 @@ def test_agent_executes_tool_calls_and_continues_to_final_response(tmp_path: Pat
     assert records[1]["message"]["tool_call_id"] == "call-1"
     assert records[1]["message"]["tool_name"] == "echo"
     assert records[1]["message"]["content"] == "echo: hello"
+
+
+def test_agent_filters_provider_tool_specs_by_policy(tmp_path: Path) -> None:
+    provider = CapturingProvider()
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+    tools.register(MutatingTool())
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+            tool_policy=ToolPolicy.allow_read_tools(),
+        )
+        return [event async for event in agent.run("hello")]
+
+    anyio.run(run_agent)
+
+    assert provider.seen_tools is not None
+    assert [tool.name for tool in provider.seen_tools] == ["echo"]
+
+
+def test_agent_returns_error_result_for_policy_blocked_tool(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [ToolCall(call_id="call-1", name="mutate", arguments={}, response_id="response-1")],
+            ["recovered"],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(MutatingTool())
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+            tool_policy=ToolPolicy.allow_read_tools(),
+        )
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+
+    assert provider.calls[1][0] == (
+        ToolCallResult(call_id="call-1", output="Tool mutate is blocked by policy", is_error=True),
+    )
+    assert any(
+        isinstance(event, AssistantMessage) and event.content == "recovered" for event in events
+    )
+
+
+def test_agent_allows_explicit_tool_policy_names(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [ToolCall(call_id="call-1", name="mutate", arguments={}, response_id="response-1")],
+            ["done"],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(MutatingTool())
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+            tool_policy=ToolPolicy.allow_tool_names({"mutate"}),
+        )
+        return [event async for event in agent.run("hello")]
+
+    anyio.run(run_agent)
+
+    assert provider.calls[1][0] == (ToolCallResult(call_id="call-1", output="mutated"),)
 
 
 def test_agent_updates_previous_response_id_for_chained_tool_calls(tmp_path: Path) -> None:

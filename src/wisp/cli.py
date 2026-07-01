@@ -15,7 +15,7 @@ from wisp.config import WispConfig
 from wisp.events import ErrorEvent, TokenDelta
 from wisp.providers.base import ProviderError
 from wisp.runtime.extensions import build_runtime
-from wisp.runtime.registry import ToolRegistry, UnknownProviderError
+from wisp.runtime.registry import ToolRegistry, UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore
 
 app = typer.Typer(
@@ -45,6 +45,17 @@ def cli_callback(
         Path | None,
         typer.Option(help="Directory for JSONL session files."),
     ] = None,
+    allow_read_tools: Annotated[
+        bool,
+        typer.Option(help="Expose sandboxed read-only tools in print mode."),
+    ] = False,
+    allow_tool: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allow-tool",
+            help="Expose a specific tool in print mode. Can be repeated.",
+        ),
+    ] = None,
 ) -> None:
     """Run Wisp in the initial print-mode CLI."""
 
@@ -59,8 +70,14 @@ def cli_callback(
     config = WispConfig.from_env(provider=provider, model=model, session_dir=session_dir)
     console = Console(stderr=True)
     try:
-        anyio.run(_run_print, prompt, config)
-    except (ProviderError, UnknownProviderError) as exc:
+        anyio.run(
+            _run_print,
+            prompt,
+            config,
+            allow_read_tools,
+            tuple(allow_tool or ()),
+        )
+    except (ProviderError, UnknownProviderError, UnknownToolError) as exc:
         console.print(f"[red]error:[/red] {exc}")
         raise typer.Exit(1) from exc
 
@@ -71,7 +88,12 @@ def main() -> None:
     app()
 
 
-async def _run_print(prompt: str, config: WispConfig) -> None:
+async def _run_print(
+    prompt: str,
+    config: WispConfig,
+    allow_read_tools: bool = False,
+    allowed_tools: tuple[str, ...] = (),
+) -> None:
     runtime = await build_runtime()
     provider = runtime.providers.get(config.provider)
     sessions = JsonlSessionStore(config.session_dir)
@@ -80,7 +102,11 @@ async def _run_print(prompt: str, config: WispConfig) -> None:
         sessions=sessions,
         events=runtime.events,
         model=config.model,
-        tool_registry=_print_mode_tool_registry(runtime.tools),
+        tool_registry=_print_mode_tool_registry(
+            runtime.tools,
+            allow_read_tools=allow_read_tools,
+            allowed_tools=allowed_tools,
+        ),
     )
 
     wrote_tokens = False
@@ -96,12 +122,20 @@ async def _run_print(prompt: str, config: WispConfig) -> None:
         sys.stdout.write("\n")
 
 
-def _print_mode_tool_registry(tools: ToolRegistry) -> ToolRegistry:
-    """Return tools safe to expose without a sandbox or approval policy.
+def _print_mode_tool_registry(
+    tools: ToolRegistry,
+    *,
+    allow_read_tools: bool = False,
+    allowed_tools: tuple[str, ...] = (),
+) -> ToolRegistry:
+    """Return tools explicitly allowed for non-interactive print mode."""
 
-    Print mode is non-interactive, and even read-like file tools can access
-    paths outside the project until cwd containment lands. Keep model-visible
-    tools disabled here; PR #7 can re-enable them behind policy/sandboxing.
-    """
+    allowed_names = set(allowed_tools)
+    for name in allowed_names:
+        tools.get(name)
 
-    return ToolRegistry()
+    filtered = ToolRegistry()
+    for tool in tools.all():
+        if tool.name in allowed_names or (allow_read_tools and tool.safety == "read"):
+            filtered.register(tool)
+    return filtered

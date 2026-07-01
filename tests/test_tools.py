@@ -89,6 +89,66 @@ def test_write_tool_preserves_exact_newline_bytes(tmp_path: Path) -> None:
     assert (tmp_path / "mixed.txt").read_bytes() == b"one\ntwo\r\n"
 
 
+def test_file_tools_reject_paths_outside_cwd(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("outside\n", encoding="utf-8")
+    outside_dir = tmp_path / "outside-dir"
+    outside_dir.mkdir()
+    context = ToolContext(cwd=workspace)
+
+    cases: tuple[tuple[object, dict[str, object]], ...] = (
+        (ReadTool(), {"path": str(outside_file)}),
+        (WriteTool(), {"path": str(outside_file), "content": "overwrite"}),
+        (
+            EditTool(),
+            {"path": str(outside_file), "edits": [{"oldText": "outside", "newText": "inside"}]},
+        ),
+        (GrepTool(), {"pattern": "outside", "path": str(outside_file)}),
+        (FindTool(), {"path": str(outside_dir)}),
+        (LsTool(), {"path": str(outside_dir)}),
+    )
+
+    for tool, arguments in cases:
+        with pytest.raises(ToolError, match="outside the tool working directory"):
+            run_tool(tool, arguments, context)
+
+
+def test_file_tools_allow_absolute_paths_inside_cwd(tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("inside\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(ReadTool(), {"path": str(path)}, context)
+
+    assert result.text == "inside\n"
+
+
+def test_file_tools_can_opt_out_of_cwd_containment(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("outside\n", encoding="utf-8")
+    context = ToolContext(cwd=workspace, allow_outside_cwd=True)
+
+    result = run_tool(ReadTool(), {"path": str(outside_file)}, context)
+
+    assert result.text == "outside\n"
+
+
+def test_builtin_tools_have_safety_metadata() -> None:
+    assert {tool.name: tool.safety for tool in (ReadTool(), GrepTool(), FindTool(), LsTool())} == {
+        "read": "read",
+        "grep": "read",
+        "find": "read",
+        "ls": "read",
+    }
+    assert WriteTool().safety == "mutating"
+    assert EditTool().safety == "mutating"
+    assert BashTool().safety == "command"
+
+
 def test_edit_tool_applies_unique_replacements_from_original(tmp_path: Path) -> None:
     path = tmp_path / "story.txt"
     path.write_text("hello brave world\n", encoding="utf-8")

@@ -13,6 +13,7 @@ class ToolContext:
     cwd: Path
     max_output_bytes: int = 50_000
     max_output_lines: int = 2_000
+    allow_outside_cwd: bool = False
 
     @classmethod
     def default(cls) -> ToolContext:

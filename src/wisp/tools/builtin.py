@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from wisp.tools.base import Tool, ToolArguments, ToolInputSchema
+from wisp.tools.base import Tool, ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.context import ToolContext
 from wisp.tools.paths import display_tool_path, resolve_tool_path
 from wisp.tools.result import ToolError, ToolResult
@@ -55,6 +55,7 @@ class ReadTool:
     """Read text files with optional line slicing."""
 
     name = "read"
+    safety: ToolSafety = "read"
     description = "Read a UTF-8 text file. Supports 1-indexed offset and line limit."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -106,6 +107,7 @@ class WriteTool:
     """Create or overwrite UTF-8 text files."""
 
     name = "write"
+    safety: ToolSafety = "mutating"
     description = "Create or overwrite a UTF-8 text file, creating parent directories."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -134,6 +136,7 @@ class EditTool:
     """Apply exact text replacements to a file."""
 
     name = "edit"
+    safety: ToolSafety = "mutating"
     description = "Apply unique, non-overlapping exact text replacements to a UTF-8 file."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -203,6 +206,7 @@ class BashTool:
     """Run shell commands in the tool working directory."""
 
     name = "bash"
+    safety: ToolSafety = "command"
     description = "Run a shell command and capture stdout, stderr, and exit code."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -263,6 +267,7 @@ class GrepTool:
     """Search file contents."""
 
     name = "grep"
+    safety: ToolSafety = "read"
     description = "Search text files with ripgrep when available, falling back to Python."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -321,6 +326,7 @@ class FindTool:
     """Find files by glob pattern."""
 
     name = "find"
+    safety: ToolSafety = "read"
     description = "Find files with ripgrep when available, falling back to Python walking."
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -355,6 +361,7 @@ class LsTool:
     """List directory entries."""
 
     name = "ls"
+    safety: ToolSafety = "read"
     description = "List a directory with sorted entries and '/' suffixes for directories."
     input_schema: ToolInputSchema = {
         "type": "object",
