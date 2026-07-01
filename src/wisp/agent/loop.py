@@ -78,7 +78,7 @@ class Agent:
                         yield await self._emit(TokenDelta(delta=provider_event))
                     else:
                         tool_calls.append(provider_event)
-                        if previous_response_id is None:
+                        if provider_event.response_id is not None:
                             previous_response_id = provider_event.response_id
 
                 if not tool_calls:
@@ -90,9 +90,38 @@ class Agent:
                 tool_iterations += 1
                 tool_results: list[ToolCallResult] = []
                 for tool_call in tool_calls:
-                    result, tool_events = await self._execute_tool_call(tool_call)
-                    for tool_event in tool_events:
-                        yield tool_event
+                    arguments = dict(tool_call.arguments)
+                    yield await self._emit(
+                        ToolExecutionStarted(
+                            call_id=tool_call.call_id,
+                            name=tool_call.name,
+                            arguments=arguments,
+                        )
+                    )
+                    yield await self._emit(
+                        ToolCallRequested(
+                            call_id=tool_call.call_id,
+                            name=tool_call.name,
+                            arguments=arguments,
+                        )
+                    )
+                    result = await self._execute_tool_call(tool_call, arguments=arguments)
+                    yield await self._emit(
+                        ToolExecutionEnded(
+                            call_id=tool_call.call_id,
+                            name=tool_call.name,
+                            output=result.output,
+                            is_error=result.is_error,
+                        )
+                    )
+                    yield await self._emit(
+                        ToolResultReady(
+                            call_id=tool_call.call_id,
+                            name=tool_call.name,
+                            output=result.output,
+                            is_error=result.is_error,
+                        )
+                    )
                     tool_results.append(result)
                     await session.append_message(
                         Message(
@@ -115,29 +144,11 @@ class Agent:
         yield await self._emit(SessionSaved(session_id=session.session_id, path=session.path))
 
     async def _execute_tool_call(
-        self, tool_call: ToolCall
-    ) -> tuple[ToolCallResult, tuple[WispEvent, ...]]:
-        emitted_events: list[WispEvent] = []
-
-        async def emit(event: WispEvent) -> None:
-            emitted_events.append(await self._emit(event))
-
-        arguments = dict(tool_call.arguments)
-        await emit(
-            ToolCallRequested(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                arguments=arguments,
-            )
-        )
-        await emit(
-            ToolExecutionStarted(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                arguments=arguments,
-            )
-        )
-
+        self,
+        tool_call: ToolCall,
+        *,
+        arguments: dict[str, object],
+    ) -> ToolCallResult:
         output: str
         is_error = False
         if tool_call.parse_error is not None:
@@ -158,26 +169,7 @@ class Agent:
                 output = str(exc)
                 is_error = True
 
-        await emit(
-            ToolExecutionEnded(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                output=output,
-                is_error=is_error,
-            )
-        )
-        await emit(
-            ToolResultReady(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                output=output,
-                is_error=is_error,
-            )
-        )
-        return (
-            ToolCallResult(call_id=tool_call.call_id, output=output, is_error=is_error),
-            tuple(emitted_events),
-        )
+        return ToolCallResult(call_id=tool_call.call_id, output=output, is_error=is_error)
 
     async def _emit(self, event: WispEvent) -> WispEvent:
         if self.events is not None:

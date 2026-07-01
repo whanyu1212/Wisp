@@ -8,7 +8,14 @@ import anyio
 
 from wisp.agent.loop import Agent
 from wisp.agent.messages import Message
-from wisp.events import AssistantMessage, SessionSaved, TokenDelta, ToolResultReady
+from wisp.events import (
+    AssistantMessage,
+    SessionSaved,
+    TokenDelta,
+    ToolCallRequested,
+    ToolExecutionStarted,
+    ToolResultReady,
+)
 from wisp.providers.base import ToolCall, ToolCallResult, ToolSpec
 from wisp.providers.fake import FakeProvider
 from wisp.runtime.event_bus import EventBus
@@ -73,6 +80,21 @@ class EchoTool:
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         return ToolResult(text=f"echo: {arguments['text']}")
+
+
+class BlockingTool:
+    name = "blocking"
+    description = "Blocks until released."
+    input_schema: ToolInputSchema = {"type": "object", "properties": {}}
+
+    def __init__(self, *, release: anyio.Event, log: list[str]) -> None:
+        self.release = release
+        self.log = log
+
+    async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        self.log.append("run-started")
+        await self.release.wait()
+        return ToolResult(text="released")
 
 
 def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
@@ -180,8 +202,8 @@ def test_agent_executes_tool_calls_and_continues_to_final_response(tmp_path: Pat
     assert tool_result.is_error is False
     assert emitted_event_types == [
         "agent.started",
-        "tool.call",
         "tool.execution.started",
+        "tool.call",
         "tool.execution.ended",
         "tool.result",
         "token.delta",
@@ -195,6 +217,85 @@ def test_agent_executes_tool_calls_and_continues_to_final_response(tmp_path: Pat
     assert records[1]["message"]["tool_call_id"] == "call-1"
     assert records[1]["message"]["tool_name"] == "echo"
     assert records[1]["message"]["content"] == "echo: hello"
+
+
+def test_agent_updates_previous_response_id_for_chained_tool_calls(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [
+                ToolCall(
+                    call_id="call-1",
+                    name="echo",
+                    arguments={"text": "first"},
+                    response_id="response-1",
+                )
+            ],
+            [
+                ToolCall(
+                    call_id="call-2",
+                    name="echo",
+                    arguments={"text": "second"},
+                    response_id="response-2",
+                )
+            ],
+            ["final answer"],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        return [event async for event in agent.run("hello")]
+
+    anyio.run(run_agent)
+
+    assert provider.calls == [
+        ((), None),
+        ((ToolCallResult(call_id="call-1", output="echo: first"),), "response-1"),
+        ((ToolCallResult(call_id="call-2", output="echo: second"),), "response-2"),
+    ]
+
+
+def test_agent_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [ToolCall(call_id="call-1", name="blocking", arguments={}, response_id="response-1")],
+            ["final answer"],
+        ]
+    )
+
+    async def run_agent() -> None:
+        release = anyio.Event()
+        log: list[str] = []
+        tools = ToolRegistry()
+        tools.register(BlockingTool(release=release, log=log))
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        events = agent.run("hello")
+
+        first_event = await anext(events)
+        assert first_event.type == "agent.started"
+        start_event = await anext(events)
+        call_event = await anext(events)
+
+        assert isinstance(start_event, ToolExecutionStarted)
+        assert isinstance(call_event, ToolCallRequested)
+        assert log == []
+
+        release.set()
+        remaining_events = [event async for event in events]
+        assert log == ["run-started"]
+        assert any(isinstance(event, AssistantMessage) for event in remaining_events)
+
+    anyio.run(run_agent)
 
 
 def test_agent_returns_error_result_for_unknown_tool(tmp_path: Path) -> None:
