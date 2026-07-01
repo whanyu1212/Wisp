@@ -33,6 +33,54 @@ def test_project_context_reports_no_allowed_tools(tmp_path: Path) -> None:
     assert "allowed tools: none exposed to the model" in context
 
 
+def test_project_context_scans_git_root_from_subdirectory(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    subdir = repo / "src" / "wisp"
+    subdir.mkdir(parents=True)
+    (repo / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (repo / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    def fake_run_git(_cwd: Path, *args: str) -> str | None:
+        if args == ("rev-parse", "--show-toplevel"):
+            return str(repo)
+        if args == ("rev-parse", "--is-inside-work-tree"):
+            return "true"
+        if args == ("branch", "--show-current"):
+            return "main"
+        if args == ("status", "--short"):
+            return ""
+        return None
+
+    monkeypatch.setattr(prompt_module, "_run_git", fake_run_git)
+
+    context = build_project_context(cwd=subdir)
+
+    assert f"cwd: {subdir.resolve(strict=False)}" in context
+    assert f"project root: {repo.resolve(strict=False)}" in context
+    assert "git: branch main; status clean" in context
+    assert "project files:\n  pyproject.toml" in context
+    assert "  README.md" in context
+    assert "project files: none detected" not in context
+
+
+def test_project_context_walks_parents_without_git(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    subdir = project / "packages" / "app"
+    subdir.mkdir(parents=True)
+    (project / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+    monkeypatch.setattr(prompt_module, "_run_git", lambda _cwd, *args: None)
+
+    context = build_project_context(cwd=subdir)
+
+    assert f"project root: {project.resolve(strict=False)}" in context
+    assert "project files:\n  package.json" in context
+
+
 def test_project_context_includes_bounded_git_status(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

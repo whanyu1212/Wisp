@@ -75,14 +75,28 @@ def build_project_context(
     """Collect a bounded, low-noise project context block."""
 
     resolved_cwd = cwd.resolve(strict=False)
+    project_root = _project_root(resolved_cwd)
+    root_section = f"project root: {project_root}" if project_root != resolved_cwd else ""
     sections = [
         "[WISP PROJECT CONTEXT]",
         f"cwd: {resolved_cwd}",
+        root_section,
         _git_summary(resolved_cwd),
-        _project_files_summary(resolved_cwd),
+        _project_files_summary(project_root),
         _tool_summary(tools),
     ]
     return _truncate_context("\n".join(section for section in sections if section), max_chars)
+
+
+def _project_root(cwd: Path) -> Path:
+    git_root = _run_git(cwd, "rev-parse", "--show-toplevel")
+    if git_root:
+        return Path(git_root).expanduser().resolve(strict=False)
+
+    for candidate in (cwd, *cwd.parents):
+        if any((candidate / name).exists() for name in PROJECT_FILE_CANDIDATES):
+            return candidate
+    return cwd
 
 
 def _git_summary(cwd: Path) -> str:
