@@ -5,7 +5,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from wisp.cli import _print_mode_tool_registry, app
+from wisp.cli import _print_mode_tool_approval_policy, _print_mode_tool_registry, app
 from wisp.runtime.registry import ToolRegistry
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
 
@@ -154,6 +154,23 @@ def test_print_mode_context_describes_allowed_read_tools(tmp_path: Path) -> None
     assert "- write:" not in context
     assert "- edit:" not in context
     assert "- bash:" not in context
+
+
+def test_print_mode_requires_approval_for_dangerous_tools_without_yes() -> None:
+    approval = _print_mode_tool_approval_policy(False)
+
+    assert approval.approves(ReadTool()) is True
+    assert approval.approves(WriteTool()) is False
+    assert approval.approves(EditTool()) is False
+    assert approval.approves(BashTool()) is False
+
+
+def test_print_mode_yes_approves_dangerous_tools() -> None:
+    approval = _print_mode_tool_approval_policy(True)
+
+    assert approval.approves(WriteTool()) is True
+    assert approval.approves(EditTool()) is True
+    assert approval.approves(BashTool()) is True
 
 
 def test_print_mode_exposes_no_tools_by_default() -> None:

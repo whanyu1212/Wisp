@@ -79,9 +79,14 @@ Print-mode CLI does not expose tools to the model unless explicitly requested:
 
 ```bash
 uv run wisp -p "list files" --provider openai --allow-read-tools
-uv run wisp -p "run tests" --provider openai --allow-tool bash
+uv run wisp -p "run tests" --provider openai --allow-tool bash --yes
 ```
 
 Read tools (`read`, `grep`, `find`, `ls`) can be enabled together with
 `--allow-read-tools`. Mutating tools (`write`, `edit`) and command execution
 (`bash`) require explicit `--allow-tool <name>` opt-in.
+
+Because print mode is non-interactive, mutating and command tools are still
+blocked at execution time unless you also pass `--yes` (alias:
+`--allow-unsafe-tool-execution`). Without that override, the model receives a
+clear tool error instead of Wisp executing the operation.
