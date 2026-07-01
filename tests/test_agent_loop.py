@@ -167,6 +167,12 @@ def test_agent_continues_with_history_without_reusing_stale_system_messages(
     history = [
         Message(role="system", content="old instructions"),
         Message(role="user", content="previous question"),
+        Message(
+            role="tool",
+            content="raw tool output must not be replayed as user text",
+            tool_call_id="call-1",
+            tool_name="read",
+        ),
         Message(role="assistant", content="previous answer"),
     ]
 
@@ -193,6 +199,7 @@ def test_agent_continues_with_history_without_reusing_stale_system_messages(
         "previous answer",
         "next question",
     ]
+    assert all("raw tool output" not in message.content for message in provider.seen_messages)
 
     records = [json.loads(line) for line in session.path.read_text(encoding="utf-8").splitlines()]
     assert [record["message"]["role"] for record in records] == [

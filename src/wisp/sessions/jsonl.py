@@ -132,17 +132,18 @@ def _read_entries(path: Path, *, limit: int | None = None) -> list[SessionEntry]
 
     entries: list[SessionEntry] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        with path.open("r", encoding="utf-8") as session_file:
+            for line_number, line in enumerate(session_file, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    entries.append(SessionEntry.model_validate_json(line))
+                except ValidationError as exc:
+                    raise SessionError(f"Invalid session entry at {path}:{line_number}") from exc
+                if limit is not None and len(entries) >= limit:
+                    break
+    except UnicodeDecodeError as exc:
+        raise SessionError(f"Session file is not valid UTF-8: {path}") from exc
     except OSError as exc:
         raise SessionError(f"Could not read session file: {path}") from exc
-
-    for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
-        try:
-            entries.append(SessionEntry.model_validate_json(line))
-        except ValidationError as exc:
-            raise SessionError(f"Invalid session entry at {path}:{line_number}") from exc
-        if limit is not None and len(entries) >= limit:
-            break
     return entries

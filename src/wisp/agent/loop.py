@@ -218,7 +218,7 @@ class Agent:
         )
 
     def _conversation_history(self, history: Sequence[Message]) -> tuple[Message, ...]:
-        return tuple(message for message in history if message.role != "system")
+        return tuple(message for message in history if message.role not in {"system", "tool"})
 
     async def _emit(self, event: WispEvent) -> WispEvent:
         if self.events is not None:

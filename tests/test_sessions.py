@@ -5,8 +5,10 @@ from pathlib import Path
 
 import anyio
 import pytest
+from pytest import MonkeyPatch
 
-from wisp.agent.messages import Message
+from wisp.agent.messages import Message, SessionEntry
+from wisp.sessions import jsonl as jsonl_module
 from wisp.sessions.jsonl import AmbiguousSessionError, JsonlSessionStore, SessionNotFoundError
 
 
@@ -57,3 +59,47 @@ def test_session_store_reports_missing_and_ambiguous_refs(tmp_path: Path) -> Non
         store.load("missing")
     with pytest.raises(AmbiguousSessionError, match="ambiguous"):
         store.load("20")
+
+
+def test_limited_session_read_stops_after_requested_entry(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    path = tmp_path / "session.jsonl"
+    path.touch()
+    first_line = SessionEntry(
+        session_id="session-id",
+        message=Message(role="user", content="hello"),
+    ).model_dump_json()
+
+    class TrackingFile:
+        next_calls = 0
+
+        def __enter__(self) -> TrackingFile:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def __iter__(self) -> TrackingFile:
+            return self
+
+        def __next__(self) -> str:
+            self.next_calls += 1
+            if self.next_calls == 1:
+                return f"{first_line}\n"
+            raise AssertionError("limited read consumed another line")
+
+    tracking_file = TrackingFile()
+
+    def fake_open(self: Path, *args: object, **kwargs: object) -> TrackingFile:
+        assert self == path
+        return tracking_file
+
+    monkeypatch.setattr(Path, "open", fake_open)
+
+    entries = jsonl_module._read_entries(path, limit=1)  # noqa: SLF001
+
+    assert len(entries) == 1
+    assert entries[0].session_id == "session-id"
+    assert tracking_file.next_calls == 1
