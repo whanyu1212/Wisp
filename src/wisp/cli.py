@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -12,7 +13,16 @@ from rich.console import Console
 
 from wisp.agent.loop import Agent
 from wisp.config import WispConfig
-from wisp.events import ErrorEvent, TokenDelta
+from wisp.events import (
+    ErrorEvent,
+    SessionSaved,
+    TokenDelta,
+    ToolApprovalRequested,
+    ToolApprovalResolved,
+    ToolCallRequested,
+    ToolResultReady,
+    WispEvent,
+)
 from wisp.providers.base import ProviderError
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import ToolRegistry, UnknownProviderError, UnknownToolError
@@ -141,17 +151,69 @@ async def _run_print(
         tool_approval_policy=_print_mode_tool_approval_policy(approve_unsafe_tools),
     )
 
-    wrote_tokens = False
+    event_console = Console(stderr=True, soft_wrap=True)
+    needs_stdout_newline = False
     async for event in agent.run(prompt, session=session, history=history):
         if isinstance(event, TokenDelta):
             sys.stdout.write(event.delta)
             sys.stdout.flush()
-            wrote_tokens = True
+            needs_stdout_newline = True
         elif isinstance(event, ErrorEvent):
             raise ProviderError(event.message)
+        else:
+            if needs_stdout_newline:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                needs_stdout_newline = False
+            _render_print_event(event, event_console)
 
-    if wrote_tokens:
+    if needs_stdout_newline:
         sys.stdout.write("\n")
+
+
+def _render_print_event(event: WispEvent, console: Console) -> None:
+    line = _print_event_line(event)
+    if line is not None:
+        console.print(line, markup=False)
+
+
+def _print_event_line(event: WispEvent) -> str | None:
+    if isinstance(event, ToolCallRequested):
+        return f"→ tool {event.name} {_format_event_arguments(event.arguments)}"
+    if isinstance(event, ToolApprovalRequested):
+        return f"? approval required for {event.name} ({event.safety})"
+    if isinstance(event, ToolApprovalResolved):
+        if event.approved:
+            return f"✓ approved {event.name}"
+        reason = f": {event.reason}" if event.reason else ""
+        return f"! denied {event.name}{reason}"
+    if isinstance(event, ToolResultReady):
+        status = "✗" if event.is_error else "✓"
+        return f"{status} tool {event.name}: {_format_event_output(event.output)}"
+    if isinstance(event, SessionSaved):
+        return f"session saved: {event.path}"
+    return None
+
+
+def _format_event_arguments(arguments: dict[str, object]) -> str:
+    if not arguments:
+        return "{}"
+    try:
+        text = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        text = str(arguments)
+    return _truncate_inline(text, 240)
+
+
+def _format_event_output(output: str) -> str:
+    first_line = next((line.strip() for line in output.splitlines() if line.strip()), "")
+    return _truncate_inline(first_line or "(no output)", 240)
+
+
+def _truncate_inline(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max(0, max_chars - 1)].rstrip()}…"
 
 
 def _print_mode_tool_approval_policy(approve_unsafe_tools: bool) -> ToolApprovalPolicy:

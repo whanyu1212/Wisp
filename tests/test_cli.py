@@ -1,13 +1,70 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
+from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
+from wisp import cli as cli_module
 from wisp.cli import _print_mode_tool_approval_policy, _print_mode_tool_registry, app
-from wisp.runtime.registry import ToolRegistry
+from wisp.providers.base import ProviderStreamEvent, ToolCall, ToolCallResult, ToolSpec
+from wisp.runtime.api import ExtensionAPI, WispRuntime
+from wisp.runtime.event_bus import EventBus
+from wisp.runtime.registry import ProviderRegistry, ToolRegistry
+from wisp.tools.base import ToolArguments, ToolInputSchema
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
+from wisp.tools.context import ToolContext
+from wisp.tools.result import ToolResult
+
+
+class ToolCallingProvider:
+    name = "tool-test"
+    default_model: str | None = "tool-test"
+
+    async def stream(
+        self,
+        messages: Sequence[object],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        if not tool_results:
+            yield ToolCall(
+                call_id="call-1",
+                name="danger",
+                arguments={"path": "file.txt"},
+                response_id="response-1",
+            )
+            return
+        yield "done"
+
+
+class DangerTool:
+    name = "danger"
+    safety = "mutating"
+    description = "Pretend to mutate a file."
+    input_schema: ToolInputSchema = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+    }
+
+    async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        return ToolResult(text=f"changed {arguments['path']}")
+
+
+async def build_tool_runtime() -> WispRuntime:
+    providers = ProviderRegistry()
+    tools = ToolRegistry()
+    events = EventBus()
+    api = ExtensionAPI(providers=providers, tools=tools, events=events)
+    providers.register(ToolCallingProvider())
+    tools.register(DangerTool())
+    return WispRuntime(providers=providers, tools=tools, events=events, api=api)
 
 
 def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
@@ -20,7 +77,8 @@ def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    assert result.output == "fake response to: hello\n"
+    assert result.stdout == "fake response to: hello\n"
+    assert "session saved:" in result.stderr
 
     session_files = list(tmp_path.glob("*.jsonl"))
     assert len(session_files) == 1
@@ -128,6 +186,59 @@ def test_print_mode_reports_missing_resume_session(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "Session not found: missing" in result.output
+
+
+def test_print_mode_renders_denied_tool_events_to_stderr(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_tool_runtime)
+
+    result = runner.invoke(
+        app,
+        ["-p", "use tool", "--allow-tool", "danger", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "tool-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "done\n"
+    assert '→ tool danger {"path": "file.txt"}' in result.stderr
+    assert "? approval required for danger (mutating)" in result.stderr
+    assert "! denied danger: Tool danger requires approval before execution" in result.stderr
+    assert "✗ tool danger: Tool danger requires approval before execution" in result.stderr
+    assert "session saved:" in result.stderr
+    assert "changed file.txt" not in result.stderr
+
+
+def test_print_mode_renders_approved_tool_events_to_stderr(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_tool_runtime)
+
+    result = runner.invoke(
+        app,
+        [
+            "-p",
+            "use tool",
+            "--allow-tool",
+            "danger",
+            "--yes",
+            "--session-dir",
+            str(tmp_path),
+        ],
+        env={"WISP_PROVIDER": "tool-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "done\n"
+    assert '→ tool danger {"path": "file.txt"}' in result.stderr
+    assert "? approval required for danger (mutating)" in result.stderr
+    assert "✓ approved danger" in result.stderr
+    assert "✓ tool danger: changed file.txt" in result.stderr
+    assert "session saved:" in result.stderr
 
 
 def test_print_mode_context_describes_allowed_read_tools(tmp_path: Path) -> None:

@@ -90,3 +90,8 @@ Because print mode is non-interactive, mutating and command tools are still
 blocked at execution time unless you also pass `--yes` (alias:
 `--allow-unsafe-tool-execution`). Without that override, the model receives a
 clear tool error instead of Wisp executing the operation.
+
+Print mode keeps assistant text on stdout and writes operational events to
+stderr, including tool calls, approval decisions, tool result summaries, and the
+saved session path. This keeps command output pipe-friendly while still making
+agent activity visible in the terminal.
