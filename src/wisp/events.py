@@ -8,6 +8,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+JsonObject = dict[str, object]
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -35,6 +37,36 @@ class TokenDelta(WispEvent):
 class AssistantMessage(WispEvent):
     type: Literal["assistant.message"] = "assistant.message"
     content: str
+
+
+class ToolCallRequested(WispEvent):
+    type: Literal["tool.call"] = "tool.call"
+    call_id: str
+    name: str
+    arguments: JsonObject
+
+
+class ToolExecutionStarted(WispEvent):
+    type: Literal["tool.execution.started"] = "tool.execution.started"
+    call_id: str
+    name: str
+    arguments: JsonObject
+
+
+class ToolExecutionEnded(WispEvent):
+    type: Literal["tool.execution.ended"] = "tool.execution.ended"
+    call_id: str
+    name: str
+    output: str
+    is_error: bool
+
+
+class ToolResultReady(WispEvent):
+    type: Literal["tool.result"] = "tool.result"
+    call_id: str
+    name: str
+    output: str
+    is_error: bool
 
 
 class SessionSaved(WispEvent):

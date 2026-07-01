@@ -15,7 +15,7 @@ from wisp.config import WispConfig
 from wisp.events import ErrorEvent, TokenDelta
 from wisp.providers.base import ProviderError
 from wisp.runtime.extensions import build_runtime
-from wisp.runtime.registry import UnknownProviderError
+from wisp.runtime.registry import ToolRegistry, UnknownProviderError
 from wisp.sessions.jsonl import JsonlSessionStore
 
 app = typer.Typer(
@@ -75,7 +75,13 @@ async def _run_print(prompt: str, config: WispConfig) -> None:
     runtime = await build_runtime()
     provider = runtime.providers.get(config.provider)
     sessions = JsonlSessionStore(config.session_dir)
-    agent = Agent(provider=provider, sessions=sessions, events=runtime.events, model=config.model)
+    agent = Agent(
+        provider=provider,
+        sessions=sessions,
+        events=runtime.events,
+        model=config.model,
+        tool_registry=_print_mode_tool_registry(runtime.tools),
+    )
 
     wrote_tokens = False
     async for event in agent.run(prompt):
@@ -88,3 +94,14 @@ async def _run_print(prompt: str, config: WispConfig) -> None:
 
     if wrote_tokens:
         sys.stdout.write("\n")
+
+
+def _print_mode_tool_registry(tools: ToolRegistry) -> ToolRegistry:
+    """Return tools safe to expose without a sandbox or approval policy.
+
+    Print mode is non-interactive, and even read-like file tools can access
+    paths outside the project until cwd containment lands. Keep model-visible
+    tools disabled here; PR #7 can re-enable them behind policy/sandboxing.
+    """
+
+    return ToolRegistry()

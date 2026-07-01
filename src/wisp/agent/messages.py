@@ -20,6 +20,8 @@ class Message(BaseModel):
 
     role: Role
     content: str
+    tool_call_id: str | None = None
+    tool_name: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 

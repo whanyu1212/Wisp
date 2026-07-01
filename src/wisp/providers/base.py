@@ -38,6 +38,9 @@ class ToolCall:
     call_id: str
     name: str
     arguments: JsonObject
+    raw_arguments: str = ""
+    response_id: str | None = None
+    parse_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,9 @@ class ToolCallResult:
     call_id: str
     output: str
     is_error: bool = False
+
+
+type ProviderStreamEvent = str | ToolCall
 
 
 class ProviderError(RuntimeError):
@@ -69,6 +75,8 @@ class Provider(Protocol):
         *,
         model: str | None = None,
         tools: Sequence[ToolSpec] = (),
-    ) -> AsyncIterator[str]:
-        """Yield text deltas for the assistant response."""
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        """Yield text deltas or tool-call requests for the assistant response."""
         ...

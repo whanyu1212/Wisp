@@ -8,11 +8,22 @@ import anyio
 
 from wisp.agent.loop import Agent
 from wisp.agent.messages import Message
-from wisp.events import AssistantMessage, SessionSaved, TokenDelta
-from wisp.providers.base import ToolSpec
+from wisp.events import (
+    AssistantMessage,
+    SessionSaved,
+    TokenDelta,
+    ToolCallRequested,
+    ToolExecutionStarted,
+    ToolResultReady,
+)
+from wisp.providers.base import ToolCall, ToolCallResult, ToolSpec
 from wisp.providers.fake import FakeProvider
 from wisp.runtime.event_bus import EventBus
+from wisp.runtime.registry import ToolRegistry
 from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.tools.base import ToolArguments, ToolInputSchema
+from wisp.tools.context import ToolContext
+from wisp.tools.result import ToolResult
 
 
 class CapturingProvider:
@@ -28,9 +39,62 @@ class CapturingProvider:
         *,
         model: str | None = None,
         tools: Sequence[ToolSpec] = (),
-    ) -> AsyncIterator[str]:
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[object]:
         self.seen_tools = tools
         yield "done"
+
+
+class ToolLoopProvider:
+    name = "tool-loop"
+    default_model: str | None = "default"
+
+    def __init__(self, turns: Sequence[Sequence[object]]) -> None:
+        self.turns = list(turns)
+        self.calls: list[tuple[Sequence[ToolCallResult], str | None]] = []
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[object]:
+        self.calls.append((tool_results, previous_response_id))
+        turn = self.turns.pop(0)
+        for event in turn:
+            yield event
+
+
+class EchoTool:
+    name = "echo"
+    description = "Echo input text."
+    input_schema: ToolInputSchema = {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    }
+
+    async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        return ToolResult(text=f"echo: {arguments['text']}")
+
+
+class BlockingTool:
+    name = "blocking"
+    description = "Blocks until released."
+    input_schema: ToolInputSchema = {"type": "object", "properties": {}}
+
+    def __init__(self, *, release: anyio.Event, log: list[str]) -> None:
+        self.release = release
+        self.log = log
+
+    async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        self.log.append("run-started")
+        await self.release.wait()
+        return ToolResult(text="released")
 
 
 def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
@@ -93,3 +157,235 @@ def test_agent_passes_tool_specs_to_provider(tmp_path: Path) -> None:
 
     assert provider.seen_tools == (tool,)
     assert any(isinstance(event, AssistantMessage) and event.content == "done" for event in events)
+
+
+def test_agent_executes_tool_calls_and_continues_to_final_response(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [
+                ToolCall(
+                    call_id="call-1",
+                    name="echo",
+                    arguments={"text": "hello"},
+                    response_id="response-1",
+                )
+            ],
+            ["final answer"],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+    emitted_event_types: list[str] = []
+
+    async def run_agent() -> list[object]:
+        event_bus = EventBus()
+        event_bus.on("*", lambda event: emitted_event_types.append(event.type))
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            events=event_bus,
+            tool_registry=tools,
+        )
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+
+    assert provider.calls[1] == (
+        (ToolCallResult(call_id="call-1", output="echo: hello"),),
+        "response-1",
+    )
+    assert any(
+        isinstance(event, AssistantMessage) and event.content == "final answer" for event in events
+    )
+    tool_result = next(event for event in events if isinstance(event, ToolResultReady))
+    assert tool_result.output == "echo: hello"
+    assert tool_result.is_error is False
+    assert emitted_event_types == [
+        "agent.started",
+        "tool.execution.started",
+        "tool.call",
+        "tool.execution.ended",
+        "tool.result",
+        "token.delta",
+        "assistant.message",
+        "session.saved",
+    ]
+
+    saved = next(event for event in events if isinstance(event, SessionSaved))
+    records = [json.loads(line) for line in saved.path.read_text(encoding="utf-8").splitlines()]
+    assert [record["message"]["role"] for record in records] == ["user", "tool", "assistant"]
+    assert records[1]["message"]["tool_call_id"] == "call-1"
+    assert records[1]["message"]["tool_name"] == "echo"
+    assert records[1]["message"]["content"] == "echo: hello"
+
+
+def test_agent_updates_previous_response_id_for_chained_tool_calls(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [
+                ToolCall(
+                    call_id="call-1",
+                    name="echo",
+                    arguments={"text": "first"},
+                    response_id="response-1",
+                )
+            ],
+            [
+                ToolCall(
+                    call_id="call-2",
+                    name="echo",
+                    arguments={"text": "second"},
+                    response_id="response-2",
+                )
+            ],
+            ["final answer"],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        return [event async for event in agent.run("hello")]
+
+    anyio.run(run_agent)
+
+    assert provider.calls == [
+        ((), None),
+        ((ToolCallResult(call_id="call-1", output="echo: first"),), "response-1"),
+        ((ToolCallResult(call_id="call-2", output="echo: second"),), "response-2"),
+    ]
+
+
+def test_agent_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [ToolCall(call_id="call-1", name="blocking", arguments={}, response_id="response-1")],
+            ["final answer"],
+        ]
+    )
+
+    async def run_agent() -> None:
+        release = anyio.Event()
+        log: list[str] = []
+        tools = ToolRegistry()
+        tools.register(BlockingTool(release=release, log=log))
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        events = agent.run("hello")
+
+        first_event = await anext(events)
+        assert first_event.type == "agent.started"
+        start_event = await anext(events)
+        call_event = await anext(events)
+
+        assert isinstance(start_event, ToolExecutionStarted)
+        assert isinstance(call_event, ToolCallRequested)
+        assert log == []
+
+        release.set()
+        remaining_events = [event async for event in events]
+        assert log == ["run-started"]
+        assert any(isinstance(event, AssistantMessage) for event in remaining_events)
+
+    anyio.run(run_agent)
+
+
+def test_agent_returns_error_result_for_unknown_tool(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [ToolCall(call_id="call-1", name="missing", arguments={}, response_id="response-1")],
+            ["recovered"],
+        ]
+    )
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=ToolRegistry(),
+        )
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+
+    assert provider.calls[1][0] == (
+        ToolCallResult(call_id="call-1", output="Unknown tool: missing", is_error=True),
+    )
+    assert any(
+        isinstance(event, AssistantMessage) and event.content == "recovered" for event in events
+    )
+
+
+def test_agent_enforces_max_tool_iterations(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [ToolCall(call_id="call-1", name="echo", arguments={"text": "hello"})],
+            [ToolCall(call_id="call-2", name="echo", arguments={"text": "again"})],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+            max_tool_iterations=1,
+        )
+        return [event async for event in agent.run("hello")]
+
+    try:
+        anyio.run(run_agent)
+    except RuntimeError as exc:
+        assert str(exc) == "Maximum tool iterations exceeded: 1"
+    else:
+        raise AssertionError("Expected max tool iteration guard to raise")
+
+
+def test_agent_returns_error_result_for_invalid_tool_arguments(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [
+                ToolCall(
+                    call_id="call-1",
+                    name="echo",
+                    arguments={},
+                    parse_error="Invalid JSON arguments for tool echo: Expecting value",
+                    response_id="response-1",
+                )
+            ],
+            ["recovered"],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+
+    assert provider.calls[1][0] == (
+        ToolCallResult(
+            call_id="call-1",
+            output="Invalid JSON arguments for tool echo: Expecting value",
+            is_error=True,
+        ),
+    )
+    assert any(
+        isinstance(event, AssistantMessage) and event.content == "recovered" for event in events
+    )
