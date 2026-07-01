@@ -21,7 +21,7 @@ from wisp.events import (
 from wisp.providers.base import Provider, ToolCall, ToolCallResult, ToolSpec
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
-from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 
@@ -62,8 +62,14 @@ class Agent:
         self.project_context_max_chars = project_context_max_chars
         self.max_tool_iterations = max_tool_iterations
 
-    async def run(self, prompt: str) -> AsyncIterator[WispEvent]:
-        session = self.sessions.create()
+    async def run(
+        self,
+        prompt: str,
+        *,
+        session: JsonlSession | None = None,
+        history: Sequence[Message] = (),
+    ) -> AsyncIterator[WispEvent]:
+        session = session or self.sessions.create()
         yield await self._emit(AgentStarted(session_id=session.session_id))
 
         prompt_messages = self._prompt_messages()
@@ -73,7 +79,11 @@ class Agent:
         user_message = Message(role="user", content=prompt)
         await session.append_message(user_message)
 
-        messages: list[Message] = [*prompt_messages, user_message]
+        messages: list[Message] = [
+            *prompt_messages,
+            *self._conversation_history(history),
+            user_message,
+        ]
         chunks: list[str] = []
         pending_tool_results: tuple[ToolCallResult, ...] = ()
         previous_response_id: str | None = None
@@ -206,6 +216,9 @@ class Agent:
             tools=self.tools,
             max_context_chars=self.project_context_max_chars,
         )
+
+    def _conversation_history(self, history: Sequence[Message]) -> tuple[Message, ...]:
+        return tuple(message for message in history if message.role != "system")
 
     async def _emit(self, event: WispEvent) -> WispEvent:
         if self.events is not None:

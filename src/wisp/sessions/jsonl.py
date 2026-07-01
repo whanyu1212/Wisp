@@ -7,12 +7,25 @@ from pathlib import Path
 from uuid import uuid4
 
 import anyio
+from pydantic import ValidationError
 
 from wisp.agent.messages import Message, SessionEntry
 
 
+class SessionError(RuntimeError):
+    """Base error for session loading and persistence failures."""
+
+
+class SessionNotFoundError(SessionError):
+    """Raised when a requested session cannot be found."""
+
+
+class AmbiguousSessionError(SessionError):
+    """Raised when a session reference matches more than one session."""
+
+
 class JsonlSessionStore:
-    """Creates JSONL-backed Wisp sessions."""
+    """Creates and opens JSONL-backed Wisp sessions."""
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -22,6 +35,47 @@ class JsonlSessionStore:
         timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         path = self.root / f"{timestamp}-{session_id[:8]}.jsonl"
         return JsonlSession(session_id=session_id, path=path)
+
+    def load(self, reference: str | Path) -> JsonlSession:
+        """Open a session by JSONL path, filename, full id, or id prefix."""
+
+        path = self._resolve_path(reference)
+        return JsonlSession(session_id=_read_session_id(path), path=path)
+
+    def latest(self) -> JsonlSession:
+        """Open the newest session file in the store."""
+
+        files = list(self._session_files())
+        if not files:
+            raise SessionNotFoundError(f"No sessions found in {self.root}")
+        path = max(files, key=lambda candidate: (candidate.stat().st_mtime_ns, candidate.name))
+        return JsonlSession(session_id=_read_session_id(path), path=path)
+
+    def _resolve_path(self, reference: str | Path) -> Path:
+        selected = Path(reference).expanduser()
+        direct_candidates = [selected]
+        if not selected.is_absolute():
+            direct_candidates.append(self.root / selected)
+        for candidate in direct_candidates:
+            if candidate.is_file():
+                return candidate.resolve(strict=False)
+
+        ref_text = str(reference)
+        matches = [path for path in self._session_files() if _matches_reference(path, ref_text)]
+        if not matches:
+            raise SessionNotFoundError(f"Session not found: {reference}")
+        if len(matches) > 1:
+            matched = ", ".join(path.name for path in matches[:5])
+            suffix = "..." if len(matches) > 5 else ""
+            raise AmbiguousSessionError(
+                f"Session reference is ambiguous: {reference} ({matched}{suffix})"
+            )
+        return matches[0]
+
+    def _session_files(self) -> tuple[Path, ...]:
+        if not self.root.exists():
+            return ()
+        return tuple(sorted(self.root.glob("*.jsonl"), key=lambda path: path.name))
 
 
 class JsonlSession:
@@ -37,8 +91,58 @@ class JsonlSession:
         await anyio.to_thread.run_sync(self._append_line, line)
         return entry
 
+    def read_entries(self) -> tuple[SessionEntry, ...]:
+        """Read all persisted entries from the session file."""
+
+        return tuple(_read_entries(self.path))
+
+    def read_messages(self) -> tuple[Message, ...]:
+        """Read all persisted messages from the session file."""
+
+        return tuple(entry.message for entry in self.read_entries())
+
     def _append_line(self, line: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as session_file:
             session_file.write(line)
             session_file.write("\n")
+
+
+def _matches_reference(path: Path, reference: str) -> bool:
+    if path.name == reference or path.stem == reference:
+        return True
+    if path.name.startswith(reference) or path.stem.startswith(reference):
+        return True
+    try:
+        session_id = _read_session_id(path)
+    except SessionError:
+        return False
+    return session_id.startswith(reference)
+
+
+def _read_session_id(path: Path) -> str:
+    for entry in _read_entries(path, limit=1):
+        return entry.session_id
+    raise SessionError(f"Session file is empty: {path}")
+
+
+def _read_entries(path: Path, *, limit: int | None = None) -> list[SessionEntry]:
+    if not path.is_file():
+        raise SessionNotFoundError(f"Session file does not exist: {path}")
+
+    entries: list[SessionEntry] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise SessionError(f"Could not read session file: {path}") from exc
+
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            entries.append(SessionEntry.model_validate_json(line))
+        except ValidationError as exc:
+            raise SessionError(f"Invalid session entry at {path}:{line_number}") from exc
+        if limit is not None and len(entries) >= limit:
+            break
+    return entries

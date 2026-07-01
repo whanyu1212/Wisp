@@ -159,6 +159,52 @@ def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
     ]
 
 
+def test_agent_continues_with_history_without_reusing_stale_system_messages(
+    tmp_path: Path,
+) -> None:
+    provider = CapturingProvider()
+    session = JsonlSessionStore(tmp_path).create()
+    history = [
+        Message(role="system", content="old instructions"),
+        Message(role="user", content="previous question"),
+        Message(role="assistant", content="previous answer"),
+    ]
+
+    async def run_agent() -> list[object]:
+        agent = Agent(provider=provider, sessions=JsonlSessionStore(tmp_path))
+        return [
+            event async for event in agent.run("next question", session=session, history=history)
+        ]
+
+    anyio.run(run_agent)
+
+    assert provider.seen_messages is not None
+    assert [message.role for message in provider.seen_messages] == [
+        "system",
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert "You are Wisp" in provider.seen_messages[0].content
+    assert provider.seen_messages[1].content.startswith("[WISP PROJECT CONTEXT]")
+    assert [message.content for message in provider.seen_messages[2:]] == [
+        "previous question",
+        "previous answer",
+        "next question",
+    ]
+
+    records = [json.loads(line) for line in session.path.read_text(encoding="utf-8").splitlines()]
+    assert [record["message"]["role"] for record in records] == [
+        "system",
+        "system",
+        "user",
+        "assistant",
+    ]
+    assert records[2]["message"]["content"] == "next question"
+    assert records[3]["message"]["content"] == "done"
+
+
 def test_agent_passes_tool_specs_to_provider(tmp_path: Path) -> None:
     provider = CapturingProvider()
     tool = ToolSpec(

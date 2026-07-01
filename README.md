@@ -48,6 +48,18 @@ Each agent turn sends a small default coding-agent system prompt plus a bounded 
 
 These prompt/context messages are persisted in the JSONL session so the provider-visible input is auditable. Context is informational only: it does not change the print-mode tool exposure policy described below.
 
+## Session continuation
+
+Print mode can continue an existing JSONL session:
+
+```bash
+uv run wisp -p "continue the work" --continue
+uv run wisp -p "continue the work" --resume path/to/session.jsonl
+uv run wisp -p "continue the work" --resume <session-id-prefix>
+```
+
+`--continue` resumes the newest session in the session directory. `--resume` accepts a JSONL path, filename, full session id, or unique id prefix. Wisp rebuilds the current prompt/context for the new turn and reuses prior non-system conversation messages as history, so stale project context from earlier turns is not replayed as instructions.
+
 ## Local tools
 
 Wisp registers built-in local tools through the extension API:
