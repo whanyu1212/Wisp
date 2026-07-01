@@ -79,6 +79,7 @@ class OpenAIProvider:
         )
         response_id: str | None = previous_response_id
         pending_tool_calls: dict[str, ResponseFunctionToolCall] = {}
+        completed_tool_arguments: dict[str, str] = {}
         emitted_tool_item_ids: set[str] = set()
 
         async for event in stream:
@@ -87,15 +88,16 @@ class OpenAIProvider:
             elif isinstance(event, ResponseTextDeltaEvent | ResponseRefusalDeltaEvent):
                 yield event.delta
             elif isinstance(event, ResponseFunctionCallArgumentsDoneEvent):
+                completed_tool_arguments[event.item_id] = event.arguments
                 pending = pending_tool_calls.get(event.item_id)
-                call_id = pending.call_id if pending is not None else event.item_id
-                yield _tool_call_from_openai(
-                    call_id=call_id,
-                    name=event.name,
-                    raw_arguments=event.arguments,
-                    response_id=response_id,
-                )
-                emitted_tool_item_ids.add(event.item_id)
+                if pending is not None:
+                    yield _tool_call_from_openai(
+                        call_id=pending.call_id,
+                        name=pending.name,
+                        raw_arguments=event.arguments,
+                        response_id=response_id,
+                    )
+                    emitted_tool_item_ids.add(event.item_id)
             elif isinstance(event, ResponseOutputItemAddedEvent | ResponseOutputItemDoneEvent):
                 if isinstance(event.item, ResponseFunctionToolCall):
                     item_id = event.item.id
@@ -103,10 +105,15 @@ class OpenAIProvider:
                         pending_tool_calls[item_id] = event.item
                     already_emitted = item_id is not None and item_id in emitted_tool_item_ids
                     if isinstance(event, ResponseOutputItemDoneEvent) and not already_emitted:
+                        raw_arguments = (
+                            completed_tool_arguments.get(item_id, event.item.arguments)
+                            if item_id is not None
+                            else event.item.arguments
+                        )
                         yield _tool_call_from_openai(
                             call_id=event.item.call_id,
                             name=event.item.name,
-                            raw_arguments=event.item.arguments,
+                            raw_arguments=raw_arguments,
                             response_id=response_id,
                         )
                         if item_id is not None:

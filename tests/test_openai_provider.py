@@ -15,6 +15,7 @@ from openai.types.responses import (
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
     ResponseIncompleteEvent,
+    ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponseRefusalDeltaEvent,
     ResponseStreamEvent,
@@ -237,6 +238,52 @@ def test_openai_provider_sends_tool_results_with_previous_response_id() -> None:
     ]
 
 
+def test_openai_provider_uses_buffered_item_metadata_for_argument_done_events() -> None:
+    provider = StubOpenAIProvider(
+        [
+            _function_call_output_item_added_event("lookup"),
+            _function_call_arguments_done_event("wrong-name", '{"query": "wisp"}'),
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
+
+    events = anyio.run(run)
+
+    assert events == [
+        ToolCall(
+            call_id="call-id",
+            name="lookup",
+            arguments={"query": "wisp"},
+            raw_arguments='{"query": "wisp"}',
+        )
+    ]
+
+
+def test_openai_provider_waits_for_output_item_done_when_arguments_done_lacks_metadata() -> None:
+    provider = StubOpenAIProvider(
+        [
+            _function_call_arguments_done_event_without_name('{"query": "wisp"}'),
+            _function_call_output_item_done_event("lookup", arguments="{}"),
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
+
+    events = anyio.run(run)
+
+    assert events == [
+        ToolCall(
+            call_id="call-id",
+            name="lookup",
+            arguments={"query": "wisp"},
+            raw_arguments='{"query": "wisp"}',
+        )
+    ]
+
+
 def test_openai_provider_streams_function_tool_calls() -> None:
     provider = StubOpenAIProvider(
         [
@@ -273,7 +320,12 @@ def test_openai_provider_streams_function_tool_calls() -> None:
 
 
 def test_openai_provider_streams_tool_call_parse_errors() -> None:
-    provider = StubOpenAIProvider([_function_call_arguments_done_event("lookup", "not-json")])
+    provider = StubOpenAIProvider(
+        [
+            _function_call_output_item_added_event("lookup"),
+            _function_call_arguments_done_event("lookup", "not-json"),
+        ]
+    )
 
     async def run() -> list[object]:
         return [event async for event in provider.stream([Message(role="user", content="hello")])]
@@ -282,7 +334,7 @@ def test_openai_provider_streams_tool_call_parse_errors() -> None:
 
     assert events == [
         ToolCall(
-            call_id="item",
+            call_id="call-id",
             name="lookup",
             arguments={},
             raw_arguments="not-json",
@@ -402,6 +454,38 @@ def _function_call_arguments_done_event(
         output_index=0,
         sequence_number=0,
         type="response.function_call_arguments.done",
+    )
+
+
+def _function_call_arguments_done_event_without_name(
+    arguments: str,
+) -> ResponseFunctionCallArgumentsDoneEvent:
+    return ResponseFunctionCallArgumentsDoneEvent.model_construct(
+        arguments=arguments,
+        item_id="item",
+        name=None,
+        output_index=0,
+        sequence_number=0,
+        type="response.function_call_arguments.done",
+    )
+
+
+def _function_call_output_item_added_event(
+    name: str,
+    *,
+    arguments: str = "",
+) -> ResponseOutputItemAddedEvent:
+    return ResponseOutputItemAddedEvent(
+        item=ResponseFunctionToolCall(
+            arguments=arguments,
+            call_id="call-id",
+            id="item",
+            name=name,
+            type="function_call",
+        ),
+        output_index=0,
+        sequence_number=0,
+        type="response.output_item.added",
     )
 
 
