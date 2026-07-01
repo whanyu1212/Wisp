@@ -18,8 +18,6 @@ from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import ToolRegistry, UnknownProviderError
 from wisp.sessions.jsonl import JsonlSessionStore
 
-READ_ONLY_PRINT_TOOL_NAMES = frozenset({"read", "grep", "find", "ls"})
-
 app = typer.Typer(
     add_completion=False,
     help="Wisp: a Python, Pi-inspired coding agent.",
@@ -99,10 +97,11 @@ async def _run_print(prompt: str, config: WispConfig) -> None:
 
 
 def _print_mode_tool_registry(tools: ToolRegistry) -> ToolRegistry:
-    """Return tools safe to expose without an interactive approval policy."""
+    """Return tools safe to expose without a sandbox or approval policy.
 
-    filtered = ToolRegistry()
-    for tool in tools.all():
-        if tool.name in READ_ONLY_PRINT_TOOL_NAMES:
-            filtered.register(tool)
-    return filtered
+    Print mode is non-interactive, and even read-like file tools can access
+    paths outside the project until cwd containment lands. Keep model-visible
+    tools disabled here; PR #7 can re-enable them behind policy/sandboxing.
+    """
+
+    return ToolRegistry()

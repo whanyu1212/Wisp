@@ -31,7 +31,7 @@ def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
     assert [record["message"]["role"] for record in records] == ["user", "assistant"]
 
 
-def test_print_mode_exposes_only_read_only_tools() -> None:
+def test_print_mode_exposes_no_tools_without_sandboxing() -> None:
     registry = ToolRegistry()
     for tool in (
         ReadTool(),
@@ -46,7 +46,7 @@ def test_print_mode_exposes_only_read_only_tools() -> None:
 
     filtered = _print_mode_tool_registry(registry)
 
-    assert filtered.names() == ("read", "grep", "find", "ls")
+    assert filtered.names() == ()
 
 
 def test_print_mode_reports_unknown_provider(tmp_path: Path) -> None:
