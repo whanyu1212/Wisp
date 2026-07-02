@@ -7,7 +7,7 @@ import sys
 from collections.abc import AsyncIterator
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import anyio
 import typer
@@ -37,10 +37,11 @@ class OutputMode(StrEnum):
 
     text = "text"
     json = "json"
+    rpc = "rpc"
 
 
-class _JsonModeError(ProviderError):
-    """Raised after JSON mode has already emitted a model-visible error event."""
+class _JsonOutputModeError(ProviderError):
+    """Raised after JSONL output has already emitted a model-visible error event."""
 
 
 app = typer.Typer(
@@ -72,7 +73,7 @@ def cli_callback(
     ] = None,
     mode: Annotated[
         OutputMode,
-        typer.Option("--mode", help="Output mode: text or JSONL event stream."),
+        typer.Option("--mode", help="Output mode: text, JSONL events, or RPC."),
     ] = OutputMode.text,
     allow_read_tools: Annotated[
         bool,
@@ -116,12 +117,19 @@ def cli_callback(
     if ctx.invoked_subcommand is not None:
         return
 
-    if prompt is None:
+    console = Console(stderr=True)
+    if mode is OutputMode.rpc:
+        if prompt is not None:
+            _exit_with_error(
+                "--prompt is not used with --mode rpc; send prompt commands on stdin",
+                mode=mode,
+                console=console,
+            )
+    elif prompt is None:
         # no_args_is_help normally handles this. This branch keeps direct calls
         # to the callback friendly in tests or embedded usage.
         raise typer.Exit(0)
 
-    console = Console(stderr=True)
     if resume is not None and continue_latest:
         _exit_with_error(
             "use either --resume or --continue, not both",
@@ -137,22 +145,35 @@ def cli_callback(
 
     config = WispConfig.from_env(provider=provider, model=model, session_dir=session_dir)
     try:
-        anyio.run(
-            _run_print,
-            prompt,
-            config,
-            allow_read_tools,
-            tuple(allow_tool or ()),
-            resume,
-            continue_latest,
-            approve_unsafe_tools,
-            max_tool_iterations,
-            mode,
-        )
-    except _JsonModeError as exc:
+        if mode is OutputMode.rpc:
+            anyio.run(
+                _run_rpc,
+                config,
+                allow_read_tools,
+                tuple(allow_tool or ()),
+                resume,
+                continue_latest,
+                approve_unsafe_tools,
+                max_tool_iterations,
+            )
+        else:
+            assert prompt is not None
+            anyio.run(
+                _run_print,
+                prompt,
+                config,
+                allow_read_tools,
+                tuple(allow_tool or ()),
+                resume,
+                continue_latest,
+                approve_unsafe_tools,
+                max_tool_iterations,
+                mode,
+            )
+    except _JsonOutputModeError as exc:
         raise typer.Exit(1) from exc
     except (ProviderError, SessionError, UnknownProviderError, UnknownToolError) as exc:
-        if mode is OutputMode.json:
+        if _writes_json_events(mode):
             _write_json_event(ErrorEvent(message=str(exc)))
         else:
             console.print(f"[red]error:[/red] {exc}")
@@ -166,11 +187,15 @@ def main() -> None:
 
 
 def _exit_with_error(message: str, *, mode: OutputMode, console: Console) -> None:
-    if mode is OutputMode.json:
+    if _writes_json_events(mode):
         _write_json_event(ErrorEvent(message=message))
     else:
         console.print(f"[red]error:[/red] {message}")
     raise typer.Exit(1)
+
+
+def _writes_json_events(mode: OutputMode) -> bool:
+    return mode in {OutputMode.json, OutputMode.rpc}
 
 
 async def _run_print(
@@ -229,6 +254,73 @@ async def _run_print(
         sys.stdout.write("\n")
 
 
+async def _run_rpc(
+    config: WispConfig,
+    allow_read_tools: bool = False,
+    allowed_tools: tuple[str, ...] = (),
+    resume: str | None = None,
+    continue_latest: bool = False,
+    approve_unsafe_tools: bool = False,
+    max_tool_iterations: int | None = None,
+) -> None:
+    runtime = await build_runtime()
+    provider = runtime.providers.get(config.provider)
+    sessions = JsonlSessionStore(config.session_dir)
+    session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
+    agent = Agent(
+        provider=provider,
+        sessions=sessions,
+        events=runtime.events,
+        model=config.model,
+        tool_registry=_print_mode_tool_registry(
+            runtime.tools,
+            allow_read_tools=allow_read_tools,
+            allowed_tools=allowed_tools,
+        ),
+        tool_approval_policy=_print_mode_tool_approval_policy(approve_unsafe_tools),
+        max_tool_iterations=max_tool_iterations,
+    )
+
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
+        if not line:
+            continue
+        command = _parse_rpc_command(line)
+        if command is None:
+            continue
+        command_type = command.get("type")
+        if command_type == "shutdown":
+            return
+        if command_type == "prompt":
+            prompt = command.get("prompt")
+            if not isinstance(prompt, str):
+                _write_json_event(
+                    ErrorEvent(message="RPC prompt command requires string field: prompt")
+                )
+                continue
+            if session is None:
+                session = sessions.create()
+            history = session.read_messages() if session.path.is_file() else ()
+            try:
+                await _render_json_events(agent.run(prompt, session=session, history=history))
+            except _JsonOutputModeError:
+                continue
+            continue
+        _write_json_event(ErrorEvent(message=f"Unknown RPC command: {command_type}"))
+
+
+def _parse_rpc_command(line: str) -> dict[str, object] | None:
+    try:
+        command = json.loads(line)
+    except json.JSONDecodeError as exc:
+        _write_json_event(ErrorEvent(message=f"Invalid RPC JSON: {exc.msg}"))
+        return None
+    if not isinstance(command, dict):
+        _write_json_event(ErrorEvent(message="RPC command must be a JSON object"))
+        return None
+    return cast(dict[str, object], command)
+
+
 async def _render_json_events(events: AsyncIterator[WispEvent]) -> None:
     rendered_error: str | None = None
     try:
@@ -240,7 +332,7 @@ async def _render_json_events(events: AsyncIterator[WispEvent]) -> None:
         if rendered_error is None:
             rendered_error = str(exc)
             _write_json_event(ErrorEvent(message=rendered_error))
-        raise _JsonModeError(rendered_error) from exc
+        raise _JsonOutputModeError(rendered_error) from exc
 
 
 def _write_json_event(event: WispEvent) -> None:

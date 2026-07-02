@@ -107,6 +107,20 @@ JSON mode writes each `WispEvent` as one JSON object per line on stdout,
 including `token.delta`, tool lifecycle events, errors, and `session.saved`.
 Assistant text is not written as raw text in this mode.
 
+For long-lived integrations, use JSONL RPC mode over stdin/stdout:
+
+```bash
+printf '{"type":"prompt","prompt":"hello"}\n{"type":"shutdown"}\n' | uv run wisp --mode rpc
+```
+
+RPC mode currently supports sequential commands:
+
+- `{"type":"prompt","prompt":"..."}` runs one agent turn and streams `WispEvent` JSONL.
+- `{"type":"shutdown"}` exits cleanly.
+
+Provider, model, tool exposure, approval, session, and max-iteration CLI flags
+apply to the whole RPC process.
+
 Wisp does not cap model/tool rounds by default, matching Pi's permissive agent
 loop. If you want a non-interactive fuse for a run, pass
 `--max-tool-iterations <n>`.
