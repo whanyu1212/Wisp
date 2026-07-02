@@ -542,7 +542,39 @@ def test_agent_returns_error_result_for_unknown_tool(tmp_path: Path) -> None:
     )
 
 
-def test_agent_enforces_max_tool_iterations(tmp_path: Path) -> None:
+def test_agent_defaults_to_uncapped_tool_iterations(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [
+                ToolCall(
+                    call_id=f"call-{index}",
+                    name="echo",
+                    arguments={"text": str(index)},
+                    response_id=f"response-{index}",
+                )
+            ]
+            for index in range(10)
+        ]
+        + [["done"]]
+    )
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+
+    assert len(provider.calls) == 11
+    assert any(isinstance(event, AssistantMessage) and event.content == "done" for event in events)
+
+
+def test_agent_enforces_configured_max_tool_iterations(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="echo", arguments={"text": "hello"})],

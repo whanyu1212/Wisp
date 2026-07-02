@@ -96,3 +96,7 @@ Print mode keeps assistant text on stdout and writes operational events to
 stderr, including tool calls, approval decisions, tool result summaries, and the
 saved session path. Stderr may include spacing for terminal readability, while
 stdout remains assistant-only and pipe-friendly.
+
+Wisp does not cap model/tool rounds by default, matching Pi's permissive agent
+loop. If you want a non-interactive fuse for a run, pass
+`--max-tool-iterations <n>`.
