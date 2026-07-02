@@ -352,13 +352,13 @@ def test_json_mode_emits_error_event_without_stderr_noise(
     assert records[-1]["message"] == "Maximum tool iterations exceeded: 0"
 
 
-def test_rpc_mode_runs_prompt_commands(tmp_path: Path) -> None:
+def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
     runner = CliRunner()
 
     result = runner.invoke(
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
-        input='{"type":"prompt","prompt":"hello"}\n{"type":"shutdown"}\n',
+        input='{"id":"cmd-1","type":"prompt","prompt":"hello"}\n',
         env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
     )
 
@@ -366,6 +366,7 @@ def test_rpc_mode_runs_prompt_commands(tmp_path: Path) -> None:
     assert result.stderr == ""
     records = _jsonl_records(result.stdout)
     assert [record["type"] for record in records] == [
+        "rpc.command.started",
         "agent.started",
         "token.delta",
         "token.delta",
@@ -373,8 +374,38 @@ def test_rpc_mode_runs_prompt_commands(tmp_path: Path) -> None:
         "token.delta",
         "assistant.message",
         "session.saved",
+        "rpc.command.finished",
     ]
-    assert records[-2]["content"] == "fake response to: hello"
+    assert records[0]["type"] == "rpc.command.started"
+    assert records[0]["command_id"] == "cmd-1"
+    assert records[0]["command_type"] == "prompt"
+    assert records[-3]["content"] == "fake response to: hello"
+    assert records[-1]["command_id"] == "cmd-1"
+    assert records[-1]["command_type"] == "prompt"
+    assert records[-1]["ok"] is True
+    assert records[-1]["error"] is None
+
+
+def test_rpc_mode_generates_command_id_when_missing(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input='{"type":"prompt","prompt":"hello"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    started = records[0]
+    finished = records[-1]
+    assert started["type"] == "rpc.command.started"
+    assert finished["type"] == "rpc.command.finished"
+    assert isinstance(started["command_id"], str)
+    assert started["command_id"]
+    assert finished["command_id"] == started["command_id"]
+    assert finished["ok"] is True
 
 
 def test_rpc_mode_runs_multiple_prompt_commands_in_one_session(tmp_path: Path) -> None:
@@ -384,9 +415,8 @@ def test_rpc_mode_runs_multiple_prompt_commands_in_one_session(tmp_path: Path) -
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
         input=(
-            '{"type":"prompt","prompt":"first"}\n'
-            '{"type":"prompt","prompt":"second"}\n'
-            '{"type":"shutdown"}\n'
+            '{"id":"cmd-1","type":"prompt","prompt":"first"}\n'
+            '{"id":"cmd-2","type":"prompt","prompt":"second"}\n'
         ),
         env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
     )
@@ -397,6 +427,11 @@ def test_rpc_mode_runs_multiple_prompt_commands_in_one_session(tmp_path: Path) -
         record["content"] for record in records if record["type"] == "assistant.message"
     ]
     assert assistant_messages == ["fake response to: first", "fake response to: second"]
+    started = [record for record in records if record["type"] == "rpc.command.started"]
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [record["command_id"] for record in started] == ["cmd-1", "cmd-2"]
+    assert [record["command_id"] for record in finished] == ["cmd-1", "cmd-2"]
+    assert all(record["ok"] is True for record in finished)
     session_paths = {record["path"] for record in records if record["type"] == "session.saved"}
     assert len(session_paths) == 1
     session_file = next(tmp_path.glob("*.jsonl"))
@@ -404,7 +439,7 @@ def test_rpc_mode_runs_multiple_prompt_commands_in_one_session(tmp_path: Path) -
     user_messages = [
         record["message"]["content"]
         for record in session_records
-        if record["message"]["role"] == "user"
+        if record["kind"] == "message" and record["message"]["role"] == "user"
     ]
     assert user_messages == ["first", "second"]
 
@@ -418,10 +453,10 @@ def test_rpc_mode_reports_bad_commands_and_continues(tmp_path: Path) -> None:
         input=(
             "not json\n"
             "[]\n"
-            '{"type":"missing"}\n'
-            '{"type":"prompt"}\n'
-            '{"type":"prompt","prompt":"ok"}\n'
-            '{"type":"shutdown"}\n'
+            '{"id":"bad","type":"missing"}\n'
+            '{"id":"missing-prompt","type":"prompt"}\n'
+            '{"id":123,"type":"prompt","prompt":"bad id"}\n'
+            '{"id":"ok","type":"prompt","prompt":"ok"}\n'
         ),
         env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
     )
@@ -429,16 +464,27 @@ def test_rpc_mode_reports_bad_commands_and_continues(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert result.stderr == ""
     records = _jsonl_records(result.stdout)
-    assert [record["message"] for record in records[:4]] == [
+    error_messages = [record["message"] for record in records if record["type"] == "error"]
+    assert error_messages[:5] == [
         "Invalid RPC JSON: Expecting value",
         "RPC command must be a JSON object",
         "Unknown RPC command: missing",
         "RPC prompt command requires string field: prompt",
+        "RPC command id must be a non-empty string",
     ]
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [(record["command_id"], record["ok"], record["error"]) for record in finished[:2]] == [
+        ("bad", False, "Unknown RPC command: missing"),
+        ("missing-prompt", False, "RPC prompt command requires string field: prompt"),
+    ]
+    assert finished[2]["ok"] is False
+    assert finished[2]["error"] == "RPC command id must be a non-empty string"
     assert any(
         record["type"] == "assistant.message" and record["content"] == "fake response to: ok"
         for record in records
     )
+    assert finished[-1]["command_id"] == "ok"
+    assert finished[-1]["ok"] is True
 
 
 def test_rpc_mode_rejects_cli_prompt(tmp_path: Path) -> None:
@@ -459,19 +505,28 @@ def test_rpc_mode_rejects_cli_prompt(tmp_path: Path) -> None:
     )
 
 
-def test_rpc_mode_shutdown_exits_without_events(tmp_path: Path) -> None:
+def test_rpc_mode_shutdown_emits_lifecycle_and_exits(tmp_path: Path) -> None:
     runner = CliRunner()
 
     result = runner.invoke(
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
-        input='{"type":"shutdown"}\n',
+        input='{"id":"bye","type":"shutdown"}\n',
         env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
     )
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == ""
     assert result.stderr == ""
+    records = _jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == [
+        "rpc.command.started",
+        "rpc.command.finished",
+    ]
+    assert records[0]["command_id"] == "bye"
+    assert records[0]["command_type"] == "shutdown"
+    assert records[1]["command_id"] == "bye"
+    assert records[1]["command_type"] == "shutdown"
+    assert records[1]["ok"] is True
 
 
 def test_print_mode_renders_denied_tool_events_to_stderr(

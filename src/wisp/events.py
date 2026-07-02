@@ -91,6 +91,20 @@ class SessionSaved(WispEvent):
     path: Path
 
 
+class RpcCommandStarted(WispEvent):
+    type: Literal["rpc.command.started"] = "rpc.command.started"
+    command_id: str
+    command_type: str
+
+
+class RpcCommandFinished(WispEvent):
+    type: Literal["rpc.command.finished"] = "rpc.command.finished"
+    command_id: str
+    command_type: str
+    ok: bool
+    error: str | None = None
+
+
 class ErrorEvent(WispEvent):
     type: Literal["error"] = "error"
     message: str
