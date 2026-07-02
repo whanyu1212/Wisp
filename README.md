@@ -97,6 +97,16 @@ stderr, including tool calls, approval decisions, tool result summaries, and the
 saved session path. Stderr may include spacing for terminal readability, while
 stdout remains assistant-only and pipe-friendly.
 
+For machine-readable integrations, use JSONL event output:
+
+```bash
+uv run wisp -p "hello" --mode json
+```
+
+JSON mode writes each `WispEvent` as one JSON object per line on stdout,
+including `token.delta`, tool lifecycle events, errors, and `session.saved`.
+Assistant text is not written as raw text in this mode.
+
 Wisp does not cap model/tool rounds by default, matching Pi's permissive agent
 loop. If you want a non-interactive fuse for a run, pass
 `--max-tool-iterations <n>`.
