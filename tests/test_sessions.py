@@ -9,6 +9,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message, SessionEntry
+from wisp.events import ErrorEvent, ToolCallRequested
 from wisp.sessions import jsonl as jsonl_module
 from wisp.sessions.jsonl import (
     AmbiguousSessionError,
@@ -31,6 +32,30 @@ def test_session_store_loads_by_path_filename_and_id_prefix(tmp_path: Path) -> N
     assert store.load(session.path.name).path == session.path
     assert store.load(session.session_id[:12]).path == session.path
     assert store.load(session.session_id[:12]).read_messages()[0].content == "hello"
+
+
+def test_session_persists_event_entries_without_polluting_messages(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        await session.append_message(Message(role="user", content="hello"))
+        await session.append_event(
+            ToolCallRequested(call_id="call-1", name="lookup", arguments={"query": "wisp"})
+        )
+        await session.append_event(ErrorEvent(message="boom"))
+        await session.append_message(Message(role="assistant", content="done"))
+
+    anyio.run(write)
+
+    entries = session.read_entries()
+    assert [entry.kind for entry in entries] == ["message", "event", "event", "message"]
+    assert [message.content for message in session.read_messages()] == ["hello", "done"]
+    events = session.read_events()
+    assert [event["type"] for event in events] == ["tool.call", "error"]
+    assert events[0]["call_id"] == "call-1"
+    assert events[0]["name"] == "lookup"
+    assert events[0]["arguments"] == {"query": "wisp"}
+    assert events[1]["message"] == "boom"
 
 
 def test_session_store_creates_private_directories_and_files(tmp_path: Path) -> None:

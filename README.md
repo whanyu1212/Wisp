@@ -61,6 +61,8 @@ uv run wisp -p "continue the work" --resume <session-id-prefix>
 
 By default, Wisp stores sessions under a private, non-precreatable OS temp directory (`<tmp>/wisp-<user>-*/sessions`) created for the current process. `--continue` resumes the newest session in the active session directory. `--resume` accepts a JSONL path, filename, full session id, or unique id prefix. Use `--session-dir` or `WISP_SESSION_DIR` for durable session storage and cross-invocation `--continue`. Wisp rebuilds the current prompt/context for the new turn and reuses prior non-system conversation messages as history, so stale project context from earlier turns is not replayed as instructions.
 
+Session JSONL files contain provider-facing `message` entries plus selected structured `event` entries for audit/debugging. Wisp persists tool calls, approvals, tool execution start/end, and errors, but not `token.delta` events. Session continuation reads only message entries, so audit events do not become model-visible history.
+
 ## Local tools
 
 Wisp registers built-in local tools through the extension API:
