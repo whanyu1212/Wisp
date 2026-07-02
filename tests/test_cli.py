@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
+from queue import Queue
 
+import anyio
 from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from wisp import cli as cli_module
+from wisp.agent.messages import Message
 from wisp.cli import _print_mode_tool_approval_policy, _print_mode_tool_registry, app
 from wisp.providers.base import ProviderStreamEvent, ToolCall, ToolCallResult, ToolSpec
 from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.tools.base import ToolArguments, ToolInputSchema
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
 from wisp.tools.context import ToolContext
@@ -42,6 +48,53 @@ class MixedTextToolProvider:
             )
             return
         yield "suffix"
+
+
+class CancellableProvider:
+    name = "cancellable-test"
+    default_model: str | None = "cancellable-test"
+
+    async def stream(
+        self,
+        messages: Sequence[object],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        user_prompts = _user_prompts(messages)
+        prompt = user_prompts[-1] if user_prompts else ""
+        if prompt == "slow":
+            yield "working"
+            await anyio.sleep_forever()
+        if "slow" in user_prompts[:-1]:
+            yield "leaked slow"
+            return
+        yield f"done {prompt}"
+
+
+class FailingProvider:
+    name = "failing-test"
+    default_model: str | None = "failing-test"
+
+    async def stream(
+        self,
+        messages: Sequence[object],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        user_prompts = _user_prompts(messages)
+        prompt = user_prompts[-1] if user_prompts else ""
+        if prompt == "fail":
+            raise RuntimeError("provider failed")
+        if "fail" in user_prompts[:-1]:
+            yield "saw failed history"
+            return
+        yield f"done {prompt}"
 
 
 class ToolCallingProvider:
@@ -92,6 +145,24 @@ async def build_tool_runtime() -> WispRuntime:
     return WispRuntime(providers=providers, tools=tools, events=events, api=api)
 
 
+async def build_cancellable_runtime() -> WispRuntime:
+    providers = ProviderRegistry()
+    tools = ToolRegistry()
+    events = EventBus()
+    api = ExtensionAPI(providers=providers, tools=tools, events=events)
+    providers.register(CancellableProvider())
+    return WispRuntime(providers=providers, tools=tools, events=events, api=api)
+
+
+async def build_failing_runtime() -> WispRuntime:
+    providers = ProviderRegistry()
+    tools = ToolRegistry()
+    events = EventBus()
+    api = ExtensionAPI(providers=providers, tools=tools, events=events)
+    providers.register(FailingProvider())
+    return WispRuntime(providers=providers, tools=tools, events=events, api=api)
+
+
 async def build_mixed_tool_runtime() -> WispRuntime:
     providers = ProviderRegistry()
     tools = ToolRegistry()
@@ -104,6 +175,153 @@ async def build_mixed_tool_runtime() -> WispRuntime:
 
 def _jsonl_records(output: str) -> list[dict[str, object]]:
     return [json.loads(line) for line in output.splitlines()]
+
+
+def _last_user_prompt(messages: Sequence[object]) -> str:
+    user_prompts = _user_prompts(messages)
+    return user_prompts[-1] if user_prompts else ""
+
+
+def _user_prompts(messages: Sequence[object]) -> list[str]:
+    return [
+        str(getattr(message, "content", ""))
+        for message in messages
+        if getattr(message, "role", None) == "user"
+    ]
+
+
+def test_rpc_stdin_reader_dispatches_buffered_pipe_lines(monkeypatch: MonkeyPatch) -> None:
+    read_fd, write_fd = os.pipe()
+    stdin = os.fdopen(read_fd, "r", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", stdin)
+
+    async def run_reader() -> None:
+        stop_reader = anyio.Event()
+        send, receive = anyio.create_memory_object_stream[object](10)
+        async with receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(cli_module._read_rpc_stdin, send, stop_reader)
+                os.write(
+                    write_fd,
+                    b'{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}\n'
+                    b'{"id":"shutdown-1","type":"shutdown"}\n',
+                )
+                with anyio.fail_after(1):
+                    first = await receive.receive()
+                    second = await receive.receive()
+                assert isinstance(first, cli_module._RpcInputCommand)
+                assert isinstance(second, cli_module._RpcInputCommand)
+                assert first.command["id"] == "cancel-1"
+                assert second.command["id"] == "shutdown-1"
+                stop_reader.set()
+                task_group.cancel_scope.cancel()
+
+    try:
+        anyio.run(run_reader)
+    finally:
+        os.close(write_fd)
+        stdin.close()
+
+
+def test_rpc_thread_stdin_reader_uses_bounded_queue(monkeypatch: MonkeyPatch) -> None:
+    created_queue_sizes: list[int] = []
+
+    class RecordingQueue(Queue[str | Exception]):
+        def __init__(self, maxsize: int = 0) -> None:
+            created_queue_sizes.append(maxsize)
+            super().__init__(maxsize=maxsize)
+
+    monkeypatch.setattr(cli_module, "Queue", RecordingQueue)
+
+    async def run_reader() -> None:
+        stop_reader = anyio.Event()
+        stop_reader.set()
+        send, receive = anyio.create_memory_object_stream[object](10)
+        async with receive:
+            await cli_module._read_rpc_thread_stdin(send, stop_reader)
+
+    anyio.run(run_reader)
+
+    assert created_queue_sizes == [cli_module._STDIN_THREAD_QUEUE_SIZE]
+    assert created_queue_sizes[0] > 0
+
+
+def test_rpc_stdin_reader_uses_thread_reader_for_windows_pipe(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    read_fd, write_fd = os.pipe()
+    stdin = os.fdopen(read_fd, "r", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(cli_module, "_rpc_stdin_needs_thread_reader", lambda _mode: True)
+
+    async def fail_wait_readable(_fd: int) -> None:
+        raise AssertionError("wait_readable should not be used for Windows pipe stdin")
+
+    monkeypatch.setattr(cli_module.anyio, "wait_readable", fail_wait_readable)
+
+    async def run_reader() -> None:
+        stop_reader = anyio.Event()
+        send, receive = anyio.create_memory_object_stream[object](10)
+        async with receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(cli_module._read_rpc_stdin, send, stop_reader)
+                os.write(
+                    write_fd,
+                    b'{"id":"prompt-1","type":"prompt","prompt":"hello"}\n'
+                    b'{"id":"shutdown-1","type":"shutdown"}\n',
+                )
+                with anyio.fail_after(1):
+                    first = await receive.receive()
+                    second = await receive.receive()
+                assert isinstance(first, cli_module._RpcInputCommand)
+                assert isinstance(second, cli_module._RpcInputCommand)
+                assert first.command["id"] == "prompt-1"
+                assert second.command["id"] == "shutdown-1"
+                stop_reader.set()
+                task_group.cancel_scope.cancel()
+
+    try:
+        anyio.run(run_reader)
+    finally:
+        os.close(write_fd)
+        stdin.close()
+
+
+def test_rpc_stdin_reader_handles_regular_file_stdin(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "commands.jsonl"
+    input_path.write_text(
+        '{"id":"prompt-1","type":"prompt","prompt":"hello"}\n'
+        '{"id":"shutdown-1","type":"shutdown"}\n',
+        encoding="utf-8",
+    )
+    stdin = input_path.open("r", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", stdin)
+
+    async def run_reader() -> None:
+        stop_reader = anyio.Event()
+        send, receive = anyio.create_memory_object_stream[object](10)
+        async with receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(cli_module._read_rpc_stdin, send, stop_reader)
+                with anyio.fail_after(1):
+                    first = await receive.receive()
+                    second = await receive.receive()
+                    closed = await receive.receive()
+                assert isinstance(first, cli_module._RpcInputCommand)
+                assert isinstance(second, cli_module._RpcInputCommand)
+                assert isinstance(closed, cli_module._RpcInputClosed)
+                assert first.command["id"] == "prompt-1"
+                assert second.command["id"] == "shutdown-1"
+                stop_reader.set()
+                task_group.cancel_scope.cancel()
+
+    try:
+        anyio.run(run_reader)
+    finally:
+        stdin.close()
 
 
 def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
@@ -527,6 +745,275 @@ def test_rpc_mode_shutdown_emits_lifecycle_and_exits(tmp_path: Path) -> None:
     assert records[1]["command_id"] == "bye"
     assert records[1]["command_type"] == "shutdown"
     assert records[1]["ok"] is True
+
+
+def test_rpc_mode_cancels_running_prompt(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_cancellable_runtime)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"cmd-1","type":"prompt","prompt":"slow"}\n'
+            '{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}\n'
+        ),
+        env={"WISP_PROVIDER": "cancellable-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    records = _jsonl_records(result.stdout)
+    errors = [record["message"] for record in records if record["type"] == "error"]
+    assert "RPC command cancelled: cmd-1" in errors
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    cancel_finished = next(record for record in finished if record["command_id"] == "cancel-1")
+    prompt_finished = next(record for record in finished if record["command_id"] == "cmd-1")
+    assert cancel_finished["ok"] is True
+    assert prompt_finished["ok"] is False
+    assert prompt_finished["error"] == "RPC command cancelled: cmd-1"
+
+
+def test_rpc_mode_cancel_reports_unknown_target(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input='{"id":"cancel-1","type":"cancel","target_id":"missing"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == [
+        "rpc.command.started",
+        "error",
+        "rpc.command.finished",
+    ]
+    assert records[1]["message"] == "No running RPC command with id: missing"
+    assert records[2]["command_id"] == "cancel-1"
+    assert records[2]["ok"] is False
+    assert records[2]["error"] == "No running RPC command with id: missing"
+
+
+def test_rpc_mode_cancel_requires_target_id(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input='{"id":"cancel-1","type":"cancel"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert records[1]["message"] == "RPC cancel command requires string field: target_id"
+    assert records[2]["command_id"] == "cancel-1"
+    assert records[2]["ok"] is False
+
+
+def test_rpc_mode_rejects_commands_beyond_queue_cap_while_prompt_runs(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_cancellable_runtime)
+    monkeypatch.setattr(cli_module, "_MAX_QUEUED_RPC_COMMANDS", 2)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"cmd-1","type":"prompt","prompt":"slow"}\n'
+            '{"id":"cmd-2","type":"prompt","prompt":"second"}\n'
+            '{"id":"cmd-3","type":"prompt","prompt":"third"}\n'
+            '{"id":"cmd-overflow","type":"prompt","prompt":"overflow"}\n'
+            '{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}\n'
+        ),
+        env={"WISP_PROVIDER": "cancellable-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    overflow_error = next(
+        record
+        for record in records
+        if record["type"] == "rpc.command.finished" and record["command_id"] == "cmd-overflow"
+    )
+    assert overflow_error["ok"] is False
+    assert overflow_error["error"] == "RPC command queue is full while a prompt is running"
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert ("cancel-1", True) in [(record["command_id"], record["ok"]) for record in finished]
+    assistant_messages = [
+        record["content"] for record in records if record["type"] == "assistant.message"
+    ]
+    assert assistant_messages == ["done second", "done third"]
+
+
+def test_rpc_mode_processes_queued_shutdown_after_running_prompt_finishes(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_cancellable_runtime)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"cmd-1","type":"prompt","prompt":"slow"}\n'
+            '{"id":"shutdown-1","type":"shutdown"}\n'
+            '{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}\n'
+        ),
+        env={"WISP_PROVIDER": "cancellable-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert "RPC prompt command requires string field: prompt" not in [
+        record.get("message") for record in records
+    ]
+    started = [record for record in records if record["type"] == "rpc.command.started"]
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [record["command_id"] for record in started] == [
+        "cmd-1",
+        "cancel-1",
+        "shutdown-1",
+    ]
+    assert [(record["command_id"], record["ok"]) for record in finished] == [
+        ("cancel-1", True),
+        ("cmd-1", False),
+        ("shutdown-1", True),
+    ]
+
+
+def test_rpc_mode_finishes_command_when_session_write_fails_before_file_exists(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+
+    async def fail_append_message(
+        self: JsonlSession,
+        message: Message,
+    ) -> object:
+        raise RuntimeError("session write failed")
+
+    monkeypatch.setattr(JsonlSession, "append_message", fail_append_message)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input='{"id":"cmd-1","type":"prompt","prompt":"hello"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert {record["type"] for record in records} >= {"error", "rpc.command.finished"}
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [
+        (record["command_id"], record["command_type"], record["ok"], record["error"])
+        for record in finished
+    ] == [("cmd-1", "prompt", False, "session write failed")]
+
+
+def test_rpc_mode_preserves_failed_prompt_in_next_prompt_history(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_failing_runtime)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"cmd-1","type":"prompt","prompt":"fail"}\n'
+            '{"id":"cmd-2","type":"prompt","prompt":"second"}\n'
+        ),
+        env={"WISP_PROVIDER": "failing-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assistant_messages = [
+        record["content"] for record in records if record["type"] == "assistant.message"
+    ]
+    assert assistant_messages == ["saw failed history"]
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [(record["command_id"], record["ok"]) for record in finished] == [
+        ("cmd-1", False),
+        ("cmd-2", True),
+    ]
+
+
+def test_rpc_mode_excludes_cancelled_prompt_from_next_prompt_history(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_cancellable_runtime)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"cmd-1","type":"prompt","prompt":"slow"}\n'
+            '{"id":"cmd-2","type":"prompt","prompt":"second"}\n'
+            '{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}\n'
+        ),
+        env={"WISP_PROVIDER": "cancellable-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assistant_messages = [
+        record["content"] for record in records if record["type"] == "assistant.message"
+    ]
+    assert assistant_messages == ["done second"]
+    session = JsonlSessionStore(tmp_path).latest()
+    persisted_user_messages = [
+        message.content for message in session.read_messages() if message.role == "user"
+    ]
+    assert persisted_user_messages == ["second"]
+
+
+def test_rpc_mode_queues_prompts_while_canceling_running_prompt(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_cancellable_runtime)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"cmd-1","type":"prompt","prompt":"slow"}\n'
+            '{"id":"cmd-2","type":"prompt","prompt":"second"}\n'
+            '{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}\n'
+        ),
+        env={"WISP_PROVIDER": "cancellable-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assistant_messages = [
+        record["content"] for record in records if record["type"] == "assistant.message"
+    ]
+    assert assistant_messages == ["done second"]
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [(record["command_id"], record["ok"]) for record in finished] == [
+        ("cancel-1", True),
+        ("cmd-1", False),
+        ("cmd-2", True),
+    ]
 
 
 def test_print_mode_renders_denied_tool_events_to_stderr(

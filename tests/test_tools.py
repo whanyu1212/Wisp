@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -277,6 +278,44 @@ def test_bash_tool_reports_timeout_and_kills_child_processes(tmp_path: Path) -> 
     with pytest.raises(ToolError, match="timed out"):
         run_tool(BashTool(), {"command": command, "timeout": 1}, context)
     time.sleep(1.0)
+
+    assert not marker.exists()
+
+
+def test_bash_tool_cancellation_kills_child_processes(tmp_path: Path) -> None:
+    if os.name != "posix":
+        pytest.skip("POSIX process-group cancellation regression")
+    context = ToolContext(cwd=tmp_path)
+    python = shlex.quote(sys.executable)
+    ready = tmp_path / "parent-ready.txt"
+    marker = tmp_path / "child-survived.txt"
+    child_code = (
+        f"import pathlib, time; time.sleep(1.0); pathlib.Path({str(marker)!r}).write_text('alive')"
+    )
+    parent_code = (
+        "import pathlib, subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+        f"pathlib.Path({str(ready)!r}).write_text('ready'); "
+        "time.sleep(5)"
+    )
+    command = f"{python} -c {shlex.quote(parent_code)}"
+
+    async def run_and_cancel() -> None:
+        async def run_bash() -> None:
+            try:
+                await BashTool().run({"command": command, "timeout": 10}, context)
+            except anyio.get_cancelled_exc_class():
+                pass
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(run_bash)
+            with anyio.fail_after(2):
+                while not ready.exists():
+                    await anyio.sleep(0.05)
+            task_group.cancel_scope.cancel()
+
+    anyio.run(run_and_cancel)
+    time.sleep(1.3)
 
     assert not marker.exists()
 

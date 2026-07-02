@@ -13,6 +13,8 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import anyio
+
 from wisp.tools.base import Tool, ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.context import ToolContext
 from wisp.tools.paths import display_tool_path, resolve_tool_path
@@ -627,9 +629,12 @@ async def _run_shell(
             timeout=timeout,
         )
     except TimeoutError as exc:
-        _kill_process_tree(process)
-        await process.wait()
+        await _kill_process_tree_and_wait(process)
         raise ToolError(f"Command timed out after {timeout:g} seconds") from exc
+    except asyncio.CancelledError:
+        with anyio.CancelScope(shield=True):
+            await _kill_process_tree_and_wait(process)
+        raise
 
     return ProcessResult(
         exit_code=process.returncode if process.returncode is not None else -1,
@@ -638,6 +643,23 @@ async def _run_shell(
         stdout_truncated=budget.exhausted,
         stderr_truncated=budget.exhausted,
     )
+
+
+async def _kill_process_tree_and_wait(process: asyncio.subprocess.Process) -> None:
+    _kill_process_tree(process)
+    await process.wait()
+    await _drain_process_stream(process.stdout)
+    await _drain_process_stream(process.stderr)
+    await asyncio.sleep(0)
+
+
+async def _drain_process_stream(stream: asyncio.StreamReader | None) -> None:
+    if stream is None or stream.at_eof():
+        return
+    try:
+        await asyncio.wait_for(stream.read(), timeout=1)
+    except (OSError, RuntimeError, TimeoutError):
+        return
 
 
 def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
@@ -755,51 +777,59 @@ async def _run_exec_limited_stdout(
     buffered_stdout_bytes = 0
     buffered_stdout_lines = 0
     stdout_truncated = False
-    while stdout_count < max_stdout_lines:
-        line = await process.stdout.readline()
-        if not line:
-            break
-        decoded_line = line.decode("utf-8", errors="replace").rstrip("\r\n")
-        if stdout_line_filter is None or stdout_line_filter(decoded_line):
-            count_line = stdout_count_filter is None or stdout_count_filter(decoded_line)
-            if (
-                max_buffered_stdout_lines is not None
-                and buffered_stdout_lines >= max_buffered_stdout_lines
-            ):
+    try:
+        while stdout_count < max_stdout_lines:
+            line = await process.stdout.readline()
+            if not line:
+                break
+            decoded_line = line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if stdout_line_filter is None or stdout_line_filter(decoded_line):
+                count_line = stdout_count_filter is None or stdout_count_filter(decoded_line)
+                if (
+                    max_buffered_stdout_lines is not None
+                    and buffered_stdout_lines >= max_buffered_stdout_lines
+                ):
+                    if count_line:
+                        stdout_count += 1
+                    stdout_truncated = True
+                    _kill_process_tree(process)
+                    break
+                if max_buffered_stdout_bytes is not None:
+                    remaining_bytes = max_buffered_stdout_bytes - buffered_stdout_bytes
+                    if remaining_bytes <= 0:
+                        if count_line:
+                            stdout_count += 1
+                        stdout_truncated = True
+                        _kill_process_tree(process)
+                        break
+                    if len(line) > remaining_bytes:
+                        stdout_lines.append(line[:remaining_bytes])
+                        buffered_stdout_lines += 1
+                        buffered_stdout_bytes += remaining_bytes
+                        if count_line:
+                            stdout_count += 1
+                        stdout_truncated = True
+                        _kill_process_tree(process)
+                        break
+                stdout_lines.append(line)
+                buffered_stdout_lines += 1
+                buffered_stdout_bytes += len(line)
                 if count_line:
                     stdout_count += 1
-                stdout_truncated = True
-                _kill_process_tree(process)
-                break
-            if max_buffered_stdout_bytes is not None:
-                remaining_bytes = max_buffered_stdout_bytes - buffered_stdout_bytes
-                if remaining_bytes <= 0:
-                    if count_line:
-                        stdout_count += 1
-                    stdout_truncated = True
-                    _kill_process_tree(process)
-                    break
-                if len(line) > remaining_bytes:
-                    stdout_lines.append(line[:remaining_bytes])
-                    buffered_stdout_lines += 1
-                    buffered_stdout_bytes += remaining_bytes
-                    if count_line:
-                        stdout_count += 1
-                    stdout_truncated = True
-                    _kill_process_tree(process)
-                    break
-            stdout_lines.append(line)
-            buffered_stdout_lines += 1
-            buffered_stdout_bytes += len(line)
-            if count_line:
-                stdout_count += 1
 
-    if stdout_count >= max_stdout_lines:
-        stdout_truncated = True
-        _kill_process_tree(process)
+        if stdout_count >= max_stdout_lines:
+            stdout_truncated = True
+            _kill_process_tree(process)
 
-    await process.wait()
-    stderr_bytes = await stderr_task
+        await process.wait()
+        stderr_bytes = await stderr_task
+    except asyncio.CancelledError:
+        with anyio.CancelScope(shield=True):
+            if not stderr_task.done():
+                stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
+            await _kill_process_tree_and_wait(process)
+        raise
     return ProcessResult(
         exit_code=process.returncode if process.returncode is not None else -1,
         stdout=b"".join(stdout_lines).decode("utf-8", errors="replace"),
