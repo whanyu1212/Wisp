@@ -59,7 +59,7 @@ uv run wisp -p "continue the work" --resume path/to/session.jsonl
 uv run wisp -p "continue the work" --resume <session-id-prefix>
 ```
 
-By default, Wisp stores sessions under the OS temp directory (`<tmp>/wisp/sessions`). `--continue` resumes the newest session in the active session directory. `--resume` accepts a JSONL path, filename, full session id, or unique id prefix. Use `--session-dir` or `WISP_SESSION_DIR` for durable session storage. Wisp rebuilds the current prompt/context for the new turn and reuses prior non-system conversation messages as history, so stale project context from earlier turns is not replayed as instructions.
+By default, Wisp stores sessions under a per-user directory in OS temp storage (`<tmp>/wisp-<user>/sessions`) with private permissions for newly-created session directories and files. `--continue` resumes the newest session in the active session directory. `--resume` accepts a JSONL path, filename, full session id, or unique id prefix. Use `--session-dir` or `WISP_SESSION_DIR` for durable session storage. Wisp rebuilds the current prompt/context for the new turn and reuses prior non-system conversation messages as history, so stale project context from earlier turns is not replayed as instructions.
 
 ## Local tools
 

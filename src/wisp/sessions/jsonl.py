@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -102,10 +103,25 @@ class JsonlSession:
         return tuple(entry.message for entry in self.read_entries())
 
     def _append_line(self, line: str) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as session_file:
+        _ensure_private_directory(self.path.parent)
+        fd = os.open(self.path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as session_file:
             session_file.write(line)
             session_file.write("\n")
+
+
+def _ensure_private_directory(path: Path) -> None:
+    missing: list[Path] = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            if not directory.is_dir():
+                raise
 
 
 def _matches_reference(path: Path, reference: str) -> bool:

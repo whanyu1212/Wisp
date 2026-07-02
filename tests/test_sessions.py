@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 import anyio
@@ -25,6 +26,20 @@ def test_session_store_loads_by_path_filename_and_id_prefix(tmp_path: Path) -> N
     assert store.load(session.path.name).path == session.path
     assert store.load(session.session_id[:12]).path == session.path
     assert store.load(session.session_id[:12]).read_messages()[0].content == "hello"
+
+
+def test_session_store_creates_private_directories_and_files(tmp_path: Path) -> None:
+    root = tmp_path / "missing" / "sessions"
+    session = JsonlSessionStore(root).create()
+
+    async def write() -> None:
+        await session.append_message(Message(role="user", content="hello"))
+
+    anyio.run(write)
+
+    if os.name == "posix":
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        assert stat.S_IMODE(session.path.stat().st_mode) == 0o600
 
 
 def test_session_store_opens_latest_session(tmp_path: Path) -> None:

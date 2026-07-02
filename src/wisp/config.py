@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import getpass
+import hashlib
 import os
 import tempfile
 from pathlib import Path
@@ -62,7 +64,15 @@ def default_session_dir() -> Path:
 
     if env_dir := os.environ.get("WISP_SESSION_DIR"):
         return Path(env_dir).expanduser()
-    return Path(tempfile.gettempdir()) / "wisp" / "sessions"
+    return Path(tempfile.gettempdir()) / f"wisp-{_temp_session_owner()}" / "sessions"
+
+
+def _temp_session_owner() -> str:
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None:
+        return str(getuid())
+    username = getpass.getuser()
+    return hashlib.sha256(username.encode("utf-8")).hexdigest()[:12]
 
 
 def _first_non_empty(*values: str | None, default: str | None = None) -> str | None:

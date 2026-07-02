@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -19,10 +20,19 @@ def test_config_defaults_to_fake_provider(tmp_path: Path, monkeypatch: MonkeyPat
     assert config.session_dir == tmp_path
 
 
-def test_config_defaults_session_dir_to_temp(monkeypatch: MonkeyPatch) -> None:
+def test_config_defaults_session_dir_to_user_private_temp(
+    monkeypatch: MonkeyPatch,
+) -> None:
     monkeypatch.delenv("WISP_SESSION_DIR", raising=False)
 
-    assert default_session_dir() == Path(tempfile.gettempdir()) / "wisp" / "sessions"
+    session_dir = default_session_dir()
+
+    assert session_dir.name == "sessions"
+    assert session_dir.parent.parent == Path(tempfile.gettempdir())
+    if hasattr(os, "getuid"):
+        assert session_dir.parent.name == f"wisp-{os.getuid()}"
+    else:
+        assert session_dir.parent.name.startswith("wisp-")
 
 
 def test_config_reads_session_dir_from_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
