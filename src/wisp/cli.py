@@ -11,6 +11,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from queue import Empty, Queue
+from threading import Thread
 from typing import Annotated, cast
 from uuid import uuid4
 
@@ -89,6 +91,7 @@ type _RpcControlEvent = _RpcInputCommand | _RpcInputClosed | _RpcPromptCompleted
 
 
 _STDIN_READ_CHUNK_SIZE = 64 * 1024
+_STDIN_THREAD_POLL_INTERVAL = 0.01
 
 
 app = typer.Typer(
@@ -446,7 +449,14 @@ async def _read_rpc_stdin(
         if stat.S_ISREG(stdin_mode):
             await _read_rpc_text_stdin(send, stop_reader)
             return
+        if _rpc_stdin_needs_thread_reader(stdin_mode):
+            await _read_rpc_thread_stdin(send, stop_reader)
+            return
         await _read_rpc_fd_stdin(send, stop_reader, fd)
+
+
+def _rpc_stdin_needs_thread_reader(stdin_mode: int) -> bool:
+    return os.name != "posix" and not stat.S_ISREG(stdin_mode)
 
 
 async def _read_rpc_text_stdin(
@@ -459,6 +469,40 @@ async def _read_rpc_text_stdin(
             await send.send(_RpcInputClosed())
             return
         await _send_rpc_input_line(send, raw_line)
+
+
+async def _read_rpc_thread_stdin(
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    stop_reader: anyio.Event,
+) -> None:
+    lines: Queue[str | Exception] = Queue()
+    stdin = sys.stdin
+
+    def read_lines() -> None:
+        try:
+            while True:
+                raw_line = stdin.readline()
+                lines.put(raw_line)
+                if raw_line == "":
+                    return
+        except Exception as exc:  # noqa: BLE001 - surface stdin reader failures as RPC errors
+            lines.put(exc)
+
+    Thread(target=read_lines, name="wisp-rpc-stdin-reader", daemon=True).start()
+    while not stop_reader.is_set():
+        try:
+            item = lines.get_nowait()
+        except Empty:
+            await anyio.sleep(_STDIN_THREAD_POLL_INTERVAL)
+            continue
+        if isinstance(item, Exception):
+            _write_json_event(ErrorEvent(message=f"Failed to read RPC stdin: {item}"))
+            await send.send(_RpcInputClosed())
+            return
+        if item == "":
+            await send.send(_RpcInputClosed())
+            return
+        await _send_rpc_input_line(send, item)
 
 
 async def _read_rpc_fd_stdin(
