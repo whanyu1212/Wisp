@@ -665,6 +665,8 @@ def _updated_rpc_history(
     committed_history: tuple[Message, ...],
     entry_start: int,
 ) -> tuple[Message, ...]:
+    if not session.path.is_file():
+        return committed_history
     entries = session.read_entries()
     new_messages = tuple(
         entry.message

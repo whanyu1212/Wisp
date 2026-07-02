@@ -11,12 +11,13 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from wisp import cli as cli_module
+from wisp.agent.messages import Message
 from wisp.cli import _print_mode_tool_approval_policy, _print_mode_tool_registry, app
 from wisp.providers.base import ProviderStreamEvent, ToolCall, ToolCallResult, ToolSpec
 from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
-from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.tools.base import ToolArguments, ToolInputSchema
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
 from wisp.tools.context import ToolContext
@@ -865,6 +866,37 @@ def test_rpc_mode_processes_queued_shutdown_after_running_prompt_finishes(
         ("cmd-1", False),
         ("shutdown-1", True),
     ]
+
+
+def test_rpc_mode_finishes_command_when_session_write_fails_before_file_exists(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+
+    async def fail_append_message(
+        self: JsonlSession,
+        message: Message,
+    ) -> object:
+        raise RuntimeError("session write failed")
+
+    monkeypatch.setattr(JsonlSession, "append_message", fail_append_message)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input='{"id":"cmd-1","type":"prompt","prompt":"hello"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert {record["type"] for record in records} >= {"error", "rpc.command.finished"}
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [
+        (record["command_id"], record["command_type"], record["ok"], record["error"])
+        for record in finished
+    ] == [("cmd-1", "prompt", False, "session write failed")]
 
 
 def test_rpc_mode_preserves_failed_prompt_in_next_prompt_history(
