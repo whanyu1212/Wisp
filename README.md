@@ -118,12 +118,16 @@ printf '{"type":"prompt","prompt":"hello"}\n{"type":"shutdown"}\n' | uv run wisp
 RPC mode currently supports sequential commands:
 
 - `{"id":"cmd-1","type":"prompt","prompt":"..."}` runs one agent turn and streams `WispEvent` JSONL.
+- `{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}` requests cancellation of the running prompt.
 - `{"id":"cmd-2","type":"shutdown"}` exits cleanly.
 
 The `id` field is optional; Wisp generates one when omitted. Each command emits
 `rpc.command.started` and `rpc.command.finished` events so clients can group the
-agent events that occur between them. Provider, model, tool exposure, approval,
-session, and max-iteration CLI flags apply to the whole RPC process.
+agent events that occur between them. Prompt commands run sequentially; `cancel`
+is handled while a prompt is running, and other commands wait for the current
+prompt to finish. Cancellation is best-effort for providers/tools. Provider,
+model, tool exposure, approval, session, and max-iteration CLI flags apply to the
+whole RPC process.
 
 Wisp does not cap model/tool rounds by default, matching Pi's permissive agent
 loop. If you want a non-interactive fuse for a run, pass

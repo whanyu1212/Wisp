@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import deque
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, cast
@@ -12,6 +14,8 @@ from uuid import uuid4
 
 import anyio
 import typer
+from anyio.abc import TaskGroup
+from anyio.streams.memory import MemoryObjectSendStream
 from rich.console import Console
 
 from wisp.agent.loop import Agent
@@ -45,6 +49,30 @@ class OutputMode(StrEnum):
 
 class _JsonOutputModeError(ProviderError):
     """Raised after JSONL output has already emitted a model-visible error event."""
+
+
+@dataclass(frozen=True)
+class _RpcInputCommand:
+    command: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _RpcInputClosed:
+    pass
+
+
+@dataclass(frozen=True)
+class _RpcPromptCompleted:
+    command_id: str
+
+
+@dataclass(frozen=True)
+class _RpcRunningPrompt:
+    command_id: str
+    cancel_scope: anyio.CancelScope
+
+
+type _RpcControlEvent = _RpcInputCommand | _RpcInputClosed | _RpcPromptCompleted
 
 
 app = typer.Typer(
@@ -284,75 +312,235 @@ async def _run_rpc(
         max_tool_iterations=max_tool_iterations,
     )
 
-    for raw_line in sys.stdin:
-        line = raw_line.strip()
-        if not line:
-            continue
-        command = _parse_rpc_command(line)
-        if command is None:
-            continue
-        command_type = _rpc_command_type(command)
-        command_id, id_error = _rpc_command_id(command)
-        _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-        if id_error is not None:
-            _write_json_event(ErrorEvent(message=id_error))
+    queued_commands: deque[dict[str, object]] = deque()
+    running_prompt: _RpcRunningPrompt | None = None
+    stdin_closed = False
+    send, receive = anyio.create_memory_object_stream[_RpcControlEvent](100)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(_read_rpc_stdin, send.clone())
+        async with send, receive:
+            while True:
+                if running_prompt is None and queued_commands:
+                    command = queued_commands.popleft()
+                    running_prompt, session = _start_rpc_prompt_command(
+                        command,
+                        agent=agent,
+                        sessions=sessions,
+                        session=session,
+                        task_group=task_group,
+                        send=send,
+                    )
+                    continue
+                if stdin_closed and running_prompt is None and not queued_commands:
+                    task_group.cancel_scope.cancel()
+                    return
+
+                control_event = await receive.receive()
+                if isinstance(control_event, _RpcInputClosed):
+                    stdin_closed = True
+                    continue
+                if isinstance(control_event, _RpcPromptCompleted):
+                    if (
+                        running_prompt is not None
+                        and control_event.command_id == running_prompt.command_id
+                    ):
+                        running_prompt = None
+                    continue
+
+                command = control_event.command
+                command_type = _rpc_command_type(command)
+                if running_prompt is not None and command_type != "cancel":
+                    queued_commands.append(command)
+                    continue
+                if command_type == "prompt":
+                    running_prompt, session = _start_rpc_prompt_command(
+                        command,
+                        agent=agent,
+                        sessions=sessions,
+                        session=session,
+                        task_group=task_group,
+                        send=send,
+                    )
+                    continue
+                should_shutdown = _handle_rpc_control_command(
+                    command,
+                    running_prompt=running_prompt,
+                )
+                if should_shutdown:
+                    task_group.cancel_scope.cancel()
+                    return
+
+
+async def _read_rpc_stdin(send: MemoryObjectSendStream[_RpcControlEvent]) -> None:
+    async with send:
+        while True:
+            raw_line = await anyio.to_thread.run_sync(
+                sys.stdin.readline,
+                abandon_on_cancel=True,
+            )
+            if raw_line == "":
+                await send.send(_RpcInputClosed())
+                return
+            line = raw_line.strip()
+            if not line:
+                continue
+            command = _parse_rpc_command(line)
+            if command is not None:
+                await send.send(_RpcInputCommand(command=command))
+
+
+def _start_rpc_prompt_command(
+    command: dict[str, object],
+    *,
+    agent: Agent,
+    sessions: JsonlSessionStore,
+    session: JsonlSession | None,
+    task_group: TaskGroup,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+) -> tuple[_RpcRunningPrompt | None, JsonlSession | None]:
+    command_type, command_id, id_error = _rpc_command_identity(command)
+    _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+        )
+        return None, session
+
+    prompt = command.get("prompt")
+    if not isinstance(prompt, str):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC prompt command requires string field: prompt",
+        )
+        return None, session
+
+    selected_session = session or sessions.create()
+    cancel_scope = anyio.CancelScope()
+    task_group.start_soon(
+        _run_rpc_prompt_command,
+        agent,
+        selected_session,
+        prompt,
+        command_id,
+        command_type,
+        cancel_scope,
+        send.clone(),
+    )
+    return _RpcRunningPrompt(command_id=command_id, cancel_scope=cancel_scope), selected_session
+
+
+async def _run_rpc_prompt_command(
+    agent: Agent,
+    session: JsonlSession,
+    prompt: str,
+    command_id: str,
+    command_type: str,
+    cancel_scope: anyio.CancelScope,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+) -> None:
+    error: str | None = None
+    try:
+        with cancel_scope:
+            try:
+                history = session.read_messages() if session.path.is_file() else ()
+                await _render_json_events(agent.run(prompt, session=session, history=history))
+            except _JsonOutputModeError as exc:
+                error = str(exc)
+            except anyio.get_cancelled_exc_class():
+                error = f"RPC command cancelled: {command_id}"
+    finally:
+        async with send:
+            if error is not None and error.startswith("RPC command cancelled:"):
+                _write_json_event(ErrorEvent(message=error))
             _write_json_event(
                 RpcCommandFinished(
                     command_id=command_id,
                     command_type=command_type,
-                    ok=False,
-                    error=id_error,
+                    ok=error is None,
+                    error=error,
                 )
             )
-            continue
-        if command_type == "shutdown":
-            _write_json_event(
-                RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True)
-            )
-            return
-        if command_type == "prompt":
-            prompt = command.get("prompt")
-            if not isinstance(prompt, str):
-                message = "RPC prompt command requires string field: prompt"
-                _write_json_event(ErrorEvent(message=message))
-                _write_json_event(
-                    RpcCommandFinished(
-                        command_id=command_id,
-                        command_type=command_type,
-                        ok=False,
-                        error=message,
-                    )
-                )
-                continue
-            if session is None:
-                session = sessions.create()
-            history = session.read_messages() if session.path.is_file() else ()
-            try:
-                await _render_json_events(agent.run(prompt, session=session, history=history))
-            except _JsonOutputModeError as exc:
-                _write_json_event(
-                    RpcCommandFinished(
-                        command_id=command_id,
-                        command_type=command_type,
-                        ok=False,
-                        error=str(exc),
-                    )
-                )
-                continue
-            _write_json_event(
-                RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True)
-            )
-            continue
-        message = f"Unknown RPC command: {command_type}"
-        _write_json_event(ErrorEvent(message=message))
-        _write_json_event(
-            RpcCommandFinished(
-                command_id=command_id,
-                command_type=command_type,
-                ok=False,
-                error=message,
-            )
+            await send.send(_RpcPromptCompleted(command_id=command_id))
+
+
+def _handle_rpc_control_command(
+    command: dict[str, object],
+    *,
+    running_prompt: _RpcRunningPrompt | None,
+) -> bool:
+    command_type, command_id, id_error = _rpc_command_identity(command)
+    _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
         )
+        return False
+    if command_type == "shutdown":
+        _write_json_event(
+            RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True)
+        )
+        return True
+    if command_type == "cancel":
+        _handle_rpc_cancel_command(
+            command,
+            command_id=command_id,
+            command_type=command_type,
+            running_prompt=running_prompt,
+        )
+        return False
+    message = f"Unknown RPC command: {command_type}"
+    _write_rpc_command_error(command_id=command_id, command_type=command_type, message=message)
+    return False
+
+
+def _handle_rpc_cancel_command(
+    command: dict[str, object],
+    *,
+    command_id: str,
+    command_type: str,
+    running_prompt: _RpcRunningPrompt | None,
+) -> None:
+    target_id = command.get("target_id")
+    if not isinstance(target_id, str) or not target_id:
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC cancel command requires string field: target_id",
+        )
+        return
+    if running_prompt is None or running_prompt.command_id != target_id:
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=f"No running RPC command with id: {target_id}",
+        )
+        return
+    running_prompt.cancel_scope.cancel()
+    _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def _write_rpc_command_error(*, command_id: str, command_type: str, message: str) -> None:
+    _write_json_event(ErrorEvent(message=message))
+    _write_json_event(
+        RpcCommandFinished(
+            command_id=command_id,
+            command_type=command_type,
+            ok=False,
+            error=message,
+        )
+    )
+
+
+def _rpc_command_identity(command: dict[str, object]) -> tuple[str, str, str | None]:
+    command_type = _rpc_command_type(command)
+    command_id, id_error = _rpc_command_id(command)
+    return command_type, command_id, id_error
 
 
 def _rpc_command_type(command: dict[str, object]) -> str:
