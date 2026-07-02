@@ -92,6 +92,7 @@ type _RpcControlEvent = _RpcInputCommand | _RpcInputClosed | _RpcPromptCompleted
 
 _STDIN_READ_CHUNK_SIZE = 64 * 1024
 _STDIN_THREAD_POLL_INTERVAL = 0.01
+_MAX_QUEUED_RPC_COMMANDS = 100
 
 
 app = typer.Typer(
@@ -381,6 +382,12 @@ async def _run_rpc(
                 command = control_event.command
                 command_type = _rpc_command_type(command)
                 if running_prompt is not None and command_type != "cancel":
+                    if len(queued_commands) >= _MAX_QUEUED_RPC_COMMANDS:
+                        _reject_rpc_command(
+                            command,
+                            message="RPC command queue is full while a prompt is running",
+                        )
+                        continue
                     queued_commands.append(command)
                     continue
                 running_prompt, should_shutdown = _dispatch_rpc_command(
@@ -665,6 +672,16 @@ def _updated_rpc_history(
         if entry.kind == "message" and entry.message is not None
     )
     return (*committed_history, *new_messages)
+
+
+def _reject_rpc_command(command: dict[str, object], *, message: str) -> None:
+    command_type, command_id, id_error = _rpc_command_identity(command)
+    _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    _write_rpc_command_error(
+        command_id=command_id,
+        command_type=command_type,
+        message=id_error or message,
+    )
 
 
 def _handle_rpc_control_command(

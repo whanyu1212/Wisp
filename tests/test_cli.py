@@ -792,6 +792,44 @@ def test_rpc_mode_cancel_requires_target_id(tmp_path: Path) -> None:
     assert records[2]["ok"] is False
 
 
+def test_rpc_mode_rejects_commands_beyond_queue_cap_while_prompt_runs(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_cancellable_runtime)
+    monkeypatch.setattr(cli_module, "_MAX_QUEUED_RPC_COMMANDS", 2)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"cmd-1","type":"prompt","prompt":"slow"}\n'
+            '{"id":"cmd-2","type":"prompt","prompt":"second"}\n'
+            '{"id":"cmd-3","type":"prompt","prompt":"third"}\n'
+            '{"id":"cmd-overflow","type":"prompt","prompt":"overflow"}\n'
+            '{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}\n'
+        ),
+        env={"WISP_PROVIDER": "cancellable-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    overflow_error = next(
+        record
+        for record in records
+        if record["type"] == "rpc.command.finished" and record["command_id"] == "cmd-overflow"
+    )
+    assert overflow_error["ok"] is False
+    assert overflow_error["error"] == "RPC command queue is full while a prompt is running"
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert ("cancel-1", True) in [(record["command_id"], record["ok"]) for record in finished]
+    assistant_messages = [
+        record["content"] for record in records if record["type"] == "assistant.message"
+    ]
+    assert assistant_messages == ["done second", "done third"]
+
+
 def test_rpc_mode_processes_queued_shutdown_after_running_prompt_finishes(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
