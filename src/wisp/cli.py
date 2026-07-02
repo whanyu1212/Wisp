@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import AsyncIterator
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -28,6 +30,18 @@ from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import ToolRegistry, UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalPolicy
+
+
+class OutputMode(StrEnum):
+    """Non-interactive output modes."""
+
+    text = "text"
+    json = "json"
+
+
+class _JsonModeError(ProviderError):
+    """Raised after JSON mode has already emitted a model-visible error event."""
+
 
 app = typer.Typer(
     add_completion=False,
@@ -56,6 +70,10 @@ def cli_callback(
         Path | None,
         typer.Option(help="Directory for JSONL session files."),
     ] = None,
+    mode: Annotated[
+        OutputMode,
+        typer.Option("--mode", help="Output mode: text or JSONL event stream."),
+    ] = OutputMode.text,
     allow_read_tools: Annotated[
         bool,
         typer.Option(help="Expose sandboxed read-only tools in print mode."),
@@ -105,11 +123,17 @@ def cli_callback(
 
     console = Console(stderr=True)
     if resume is not None and continue_latest:
-        console.print("[red]error:[/red] use either --resume or --continue, not both")
-        raise typer.Exit(1)
+        _exit_with_error(
+            "use either --resume or --continue, not both",
+            mode=mode,
+            console=console,
+        )
     if max_tool_iterations is not None and max_tool_iterations < 0:
-        console.print("[red]error:[/red] --max-tool-iterations must be non-negative")
-        raise typer.Exit(1)
+        _exit_with_error(
+            "--max-tool-iterations must be non-negative",
+            mode=mode,
+            console=console,
+        )
 
     config = WispConfig.from_env(provider=provider, model=model, session_dir=session_dir)
     try:
@@ -123,9 +147,15 @@ def cli_callback(
             continue_latest,
             approve_unsafe_tools,
             max_tool_iterations,
+            mode,
         )
+    except _JsonModeError as exc:
+        raise typer.Exit(1) from exc
     except (ProviderError, SessionError, UnknownProviderError, UnknownToolError) as exc:
-        console.print(f"[red]error:[/red] {exc}")
+        if mode is OutputMode.json:
+            _write_json_event(ErrorEvent(message=str(exc)))
+        else:
+            console.print(f"[red]error:[/red] {exc}")
         raise typer.Exit(1) from exc
 
 
@@ -133,6 +163,14 @@ def main() -> None:
     """Console-script entry point."""
 
     app()
+
+
+def _exit_with_error(message: str, *, mode: OutputMode, console: Console) -> None:
+    if mode is OutputMode.json:
+        _write_json_event(ErrorEvent(message=message))
+    else:
+        console.print(f"[red]error:[/red] {message}")
+    raise typer.Exit(1)
 
 
 async def _run_print(
@@ -144,6 +182,7 @@ async def _run_print(
     continue_latest: bool = False,
     approve_unsafe_tools: bool = False,
     max_tool_iterations: int | None = None,
+    mode: OutputMode = OutputMode.text,
 ) -> None:
     runtime = await build_runtime()
     provider = runtime.providers.get(config.provider)
@@ -164,10 +203,15 @@ async def _run_print(
         max_tool_iterations=max_tool_iterations,
     )
 
+    events = agent.run(prompt, session=session, history=history)
+    if mode is OutputMode.json:
+        await _render_json_events(events)
+        return
+
     event_console = Console(stderr=True, soft_wrap=True)
     wrote_tokens = False
     stderr_needs_separator = False
-    async for event in agent.run(prompt, session=session, history=history):
+    async for event in events:
         if isinstance(event, TokenDelta):
             sys.stdout.write(event.delta)
             sys.stdout.flush()
@@ -183,6 +227,25 @@ async def _run_print(
 
     if wrote_tokens:
         sys.stdout.write("\n")
+
+
+async def _render_json_events(events: AsyncIterator[WispEvent]) -> None:
+    rendered_error: str | None = None
+    try:
+        async for event in events:
+            _write_json_event(event)
+            if isinstance(event, ErrorEvent):
+                rendered_error = event.message
+    except Exception as exc:
+        if rendered_error is None:
+            rendered_error = str(exc)
+            _write_json_event(ErrorEvent(message=rendered_error))
+        raise _JsonModeError(rendered_error) from exc
+
+
+def _write_json_event(event: WispEvent) -> None:
+    sys.stdout.write(f"{event.model_dump_json()}\n")
+    sys.stdout.flush()
 
 
 def _render_print_event(event: WispEvent, console: Console) -> None:
