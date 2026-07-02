@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections import deque
 from collections.abc import AsyncIterator
@@ -84,6 +85,9 @@ class _RpcRunningPrompt:
 
 
 type _RpcControlEvent = _RpcInputCommand | _RpcInputClosed | _RpcPromptCompleted
+
+
+_STDIN_READ_CHUNK_SIZE = 64 * 1024
 
 
 app = typer.Typer(
@@ -432,32 +436,69 @@ async def _read_rpc_stdin(
     stop_reader: anyio.Event,
 ) -> None:
     async with send:
-        while not stop_reader.is_set():
-            raw_line = await _read_rpc_stdin_line(stop_reader)
-            if raw_line is None:
-                return
-            if raw_line == "":
-                await send.send(_RpcInputClosed())
-                return
-            line = raw_line.strip()
-            if not line:
-                continue
-            command = _parse_rpc_command(line)
-            if command is not None:
-                await send.send(_RpcInputCommand(command=command))
+        try:
+            fd = sys.stdin.fileno()
+        except (AttributeError, OSError, ValueError):
+            await _read_rpc_text_stdin(send, stop_reader)
+            return
+        await _read_rpc_fd_stdin(send, stop_reader, fd)
 
 
-async def _read_rpc_stdin_line(stop_reader: anyio.Event) -> str | None:
-    try:
-        fd = sys.stdin.fileno()
-    except (AttributeError, OSError, ValueError):
+async def _read_rpc_text_stdin(
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    stop_reader: anyio.Event,
+) -> None:
+    while not stop_reader.is_set():
+        raw_line = await anyio.to_thread.run_sync(sys.stdin.readline)
+        if raw_line == "":
+            await send.send(_RpcInputClosed())
+            return
+        await _send_rpc_input_line(send, raw_line)
+
+
+async def _read_rpc_fd_stdin(
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    stop_reader: anyio.Event,
+    fd: int,
+) -> None:
+    buffer = bytearray()
+    while not stop_reader.is_set():
+        await anyio.wait_readable(fd)
         if stop_reader.is_set():
-            return None
-        return await anyio.to_thread.run_sync(sys.stdin.readline)
-    await anyio.wait_readable(fd)
-    if stop_reader.is_set():
-        return None
-    return sys.stdin.readline()
+            return
+        try:
+            chunk = os.read(fd, _STDIN_READ_CHUNK_SIZE)
+        except BlockingIOError:
+            continue
+        if chunk == b"":
+            if buffer:
+                await _send_rpc_input_line(send, _decode_rpc_stdin_line(buffer))
+            await send.send(_RpcInputClosed())
+            return
+        buffer.extend(chunk)
+        while True:
+            newline_index = buffer.find(b"\n")
+            if newline_index < 0:
+                break
+            line = _decode_rpc_stdin_line(buffer[:newline_index])
+            del buffer[: newline_index + 1]
+            await _send_rpc_input_line(send, line)
+
+
+async def _send_rpc_input_line(
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    raw_line: str,
+) -> None:
+    line = raw_line.strip()
+    if not line:
+        return
+    command = _parse_rpc_command(line)
+    if command is not None:
+        await send.send(_RpcInputCommand(command=command))
+
+
+def _decode_rpc_stdin_line(raw_line: bytes | bytearray) -> str:
+    return bytes(raw_line).decode("utf-8", errors="replace")
 
 
 def _start_rpc_prompt_command(
@@ -528,12 +569,22 @@ async def _run_rpc_prompt_command(
             except anyio.get_cancelled_exc_class():
                 error = f"RPC command cancelled: {command_id}"
     finally:
-        entry_count = len(session.read_entries()) if session.path.is_file() else entry_start
+        cancelled = error is not None and error.startswith("RPC command cancelled:")
+        if cancelled:
+            await session.truncate_entries(entry_start)
+        entry_count = (
+            entry_start
+            if cancelled
+            else len(session.read_entries())
+            if session.path.is_file()
+            else entry_start
+        )
         updated_history = (
             _updated_rpc_history(session, committed_history, entry_start) if error is None else None
         )
         async with send:
-            if error is not None and error.startswith("RPC command cancelled:"):
+            if cancelled:
+                assert error is not None
                 _write_json_event(ErrorEvent(message=error))
             _write_json_event(
                 RpcCommandFinished(

@@ -111,6 +111,13 @@ class JsonlSession:
         line = entry.model_dump_json(exclude_none=True)
         await anyio.to_thread.run_sync(self._append_line, line)
 
+    async def truncate_entries(self, count: int) -> None:
+        """Remove entries after count, preserving the first count entries."""
+
+        if count < 0:
+            raise ValueError("Session entry count cannot be negative")
+        await anyio.to_thread.run_sync(self._truncate_entries, count)
+
     def read_entries(self) -> tuple[SessionEntry, ...]:
         """Read all persisted entries from the session file."""
 
@@ -147,6 +154,33 @@ class JsonlSession:
                 fd = -1
                 session_file.write(line)
                 session_file.write("\n")
+        finally:
+            if fd != -1:
+                os.close(fd)
+
+    def _truncate_entries(self, count: int) -> None:
+        if not self.path.is_file():
+            return
+        entries = self.read_entries()[:count]
+        if not entries:
+            self.path.unlink(missing_ok=True)
+            return
+        self._replace_lines([entry.model_dump_json(exclude_none=True) for entry in entries])
+
+    def _replace_lines(self, lines: list[str]) -> None:
+        _ensure_private_directory(self.path.parent)
+        flags = os.O_CREAT | os.O_TRUNC | os.O_WRONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(self.path, flags, PRIVATE_FILE_MODE)
+        try:
+            if os.name == "posix":
+                os.fchmod(fd, PRIVATE_FILE_MODE)
+            with os.fdopen(fd, "w", encoding="utf-8") as session_file:
+                fd = -1
+                for line in lines:
+                    session_file.write(line)
+                    session_file.write("\n")
         finally:
             if fd != -1:
                 os.close(fd)

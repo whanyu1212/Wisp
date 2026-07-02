@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from wisp.providers.base import ProviderStreamEvent, ToolCall, ToolCallResult, T
 from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
+from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.base import ToolArguments, ToolInputSchema
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
 from wisp.tools.context import ToolContext
@@ -151,6 +154,39 @@ def _user_prompts(messages: Sequence[object]) -> list[str]:
         for message in messages
         if getattr(message, "role", None) == "user"
     ]
+
+
+def test_rpc_stdin_reader_dispatches_buffered_pipe_lines(monkeypatch: MonkeyPatch) -> None:
+    read_fd, write_fd = os.pipe()
+    stdin = os.fdopen(read_fd, "r", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", stdin)
+
+    async def run_reader() -> None:
+        stop_reader = anyio.Event()
+        send, receive = anyio.create_memory_object_stream[object](10)
+        async with receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(cli_module._read_rpc_stdin, send, stop_reader)
+                os.write(
+                    write_fd,
+                    b'{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}\n'
+                    b'{"id":"shutdown-1","type":"shutdown"}\n',
+                )
+                with anyio.fail_after(1):
+                    first = await receive.receive()
+                    second = await receive.receive()
+                assert isinstance(first, cli_module._RpcInputCommand)
+                assert isinstance(second, cli_module._RpcInputCommand)
+                assert first.command["id"] == "cancel-1"
+                assert second.command["id"] == "shutdown-1"
+                stop_reader.set()
+                task_group.cancel_scope.cancel()
+
+    try:
+        anyio.run(run_reader)
+    finally:
+        stdin.close()
+        os.close(write_fd)
 
 
 def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
@@ -707,6 +743,11 @@ def test_rpc_mode_excludes_cancelled_prompt_from_next_prompt_history(
         record["content"] for record in records if record["type"] == "assistant.message"
     ]
     assert assistant_messages == ["done second"]
+    session = JsonlSessionStore(tmp_path).latest()
+    persisted_user_messages = [
+        message.content for message in session.read_messages() if message.role == "user"
+    ]
+    assert persisted_user_messages == ["second"]
 
 
 def test_rpc_mode_queues_prompts_while_canceling_running_prompt(
