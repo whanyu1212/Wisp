@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 from collections import deque
 from collections.abc import AsyncIterator
@@ -438,7 +439,11 @@ async def _read_rpc_stdin(
     async with send:
         try:
             fd = sys.stdin.fileno()
+            stdin_mode = os.fstat(fd).st_mode
         except (AttributeError, OSError, ValueError):
+            await _read_rpc_text_stdin(send, stop_reader)
+            return
+        if stat.S_ISREG(stdin_mode):
             await _read_rpc_text_stdin(send, stop_reader)
             return
         await _read_rpc_fd_stdin(send, stop_reader, fd)

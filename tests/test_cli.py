@@ -189,6 +189,43 @@ def test_rpc_stdin_reader_dispatches_buffered_pipe_lines(monkeypatch: MonkeyPatc
         os.close(write_fd)
 
 
+def test_rpc_stdin_reader_handles_regular_file_stdin(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "commands.jsonl"
+    input_path.write_text(
+        '{"id":"prompt-1","type":"prompt","prompt":"hello"}\n'
+        '{"id":"shutdown-1","type":"shutdown"}\n',
+        encoding="utf-8",
+    )
+    stdin = input_path.open("r", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", stdin)
+
+    async def run_reader() -> None:
+        stop_reader = anyio.Event()
+        send, receive = anyio.create_memory_object_stream[object](10)
+        async with receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(cli_module._read_rpc_stdin, send, stop_reader)
+                with anyio.fail_after(1):
+                    first = await receive.receive()
+                    second = await receive.receive()
+                    closed = await receive.receive()
+                assert isinstance(first, cli_module._RpcInputCommand)
+                assert isinstance(second, cli_module._RpcInputCommand)
+                assert isinstance(closed, cli_module._RpcInputClosed)
+                assert first.command["id"] == "prompt-1"
+                assert second.command["id"] == "shutdown-1"
+                stop_reader.set()
+                task_group.cancel_scope.cancel()
+
+    try:
+        anyio.run(run_reader)
+    finally:
+        stdin.close()
+
+
 def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
     runner = CliRunner()
 
