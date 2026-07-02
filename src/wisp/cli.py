@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, cast
+from uuid import uuid4
 
 import anyio
 import typer
@@ -17,6 +18,8 @@ from wisp.agent.loop import Agent
 from wisp.config import WispConfig
 from wisp.events import (
     ErrorEvent,
+    RpcCommandFinished,
+    RpcCommandStarted,
     SessionSaved,
     TokenDelta,
     ToolApprovalRequested,
@@ -288,14 +291,37 @@ async def _run_rpc(
         command = _parse_rpc_command(line)
         if command is None:
             continue
-        command_type = command.get("type")
+        command_type = _rpc_command_type(command)
+        command_id, id_error = _rpc_command_id(command)
+        _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+        if id_error is not None:
+            _write_json_event(ErrorEvent(message=id_error))
+            _write_json_event(
+                RpcCommandFinished(
+                    command_id=command_id,
+                    command_type=command_type,
+                    ok=False,
+                    error=id_error,
+                )
+            )
+            continue
         if command_type == "shutdown":
+            _write_json_event(
+                RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True)
+            )
             return
         if command_type == "prompt":
             prompt = command.get("prompt")
             if not isinstance(prompt, str):
+                message = "RPC prompt command requires string field: prompt"
+                _write_json_event(ErrorEvent(message=message))
                 _write_json_event(
-                    ErrorEvent(message="RPC prompt command requires string field: prompt")
+                    RpcCommandFinished(
+                        command_id=command_id,
+                        command_type=command_type,
+                        ok=False,
+                        error=message,
+                    )
                 )
                 continue
             if session is None:
@@ -303,10 +329,44 @@ async def _run_rpc(
             history = session.read_messages() if session.path.is_file() else ()
             try:
                 await _render_json_events(agent.run(prompt, session=session, history=history))
-            except _JsonOutputModeError:
+            except _JsonOutputModeError as exc:
+                _write_json_event(
+                    RpcCommandFinished(
+                        command_id=command_id,
+                        command_type=command_type,
+                        ok=False,
+                        error=str(exc),
+                    )
+                )
                 continue
+            _write_json_event(
+                RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True)
+            )
             continue
-        _write_json_event(ErrorEvent(message=f"Unknown RPC command: {command_type}"))
+        message = f"Unknown RPC command: {command_type}"
+        _write_json_event(ErrorEvent(message=message))
+        _write_json_event(
+            RpcCommandFinished(
+                command_id=command_id,
+                command_type=command_type,
+                ok=False,
+                error=message,
+            )
+        )
+
+
+def _rpc_command_type(command: dict[str, object]) -> str:
+    command_type = command.get("type")
+    return command_type if isinstance(command_type, str) and command_type else "unknown"
+
+
+def _rpc_command_id(command: dict[str, object]) -> tuple[str, str | None]:
+    command_id = command.get("id")
+    if command_id is None:
+        return uuid4().hex, None
+    if isinstance(command_id, str) and command_id:
+        return command_id, None
+    return uuid4().hex, "RPC command id must be a non-empty string"
 
 
 def _parse_rpc_command(line: str) -> dict[str, object] | None:
