@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -11,6 +12,9 @@ import anyio
 from pydantic import ValidationError
 
 from wisp.agent.messages import Message, SessionEntry
+
+PRIVATE_DIR_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
 
 
 class SessionError(RuntimeError):
@@ -104,10 +108,20 @@ class JsonlSession:
 
     def _append_line(self, line: str) -> None:
         _ensure_private_directory(self.path.parent)
-        fd = os.open(self.path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as session_file:
-            session_file.write(line)
-            session_file.write("\n")
+        flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(self.path, flags, PRIVATE_FILE_MODE)
+        try:
+            if os.name == "posix":
+                os.fchmod(fd, PRIVATE_FILE_MODE)
+            with os.fdopen(fd, "a", encoding="utf-8") as session_file:
+                fd = -1
+                session_file.write(line)
+                session_file.write("\n")
+        finally:
+            if fd != -1:
+                os.close(fd)
 
 
 def _ensure_private_directory(path: Path) -> None:
@@ -118,10 +132,30 @@ def _ensure_private_directory(path: Path) -> None:
         current = current.parent
     for directory in reversed(missing):
         try:
-            directory.mkdir(mode=0o700)
+            directory.mkdir(mode=PRIVATE_DIR_MODE)
         except FileExistsError:
-            if not directory.is_dir():
-                raise
+            pass
+        _validate_private_directory(directory)
+    _validate_private_directory(path)
+
+
+def _validate_private_directory(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise SessionError(f"Could not inspect session directory: {path}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise SessionError(f"Session directory is not a directory: {path}")
+    if os.name != "posix":
+        return
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None and info.st_uid != getuid():
+        raise SessionError(f"Session directory is not owned by the current user: {path}")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        path.chmod(PRIVATE_DIR_MODE)
+        info = path.lstat()
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise SessionError(f"Session directory is not private: {path}")
 
 
 def _matches_reference(path: Path, reference: str) -> bool:

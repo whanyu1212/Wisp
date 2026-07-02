@@ -10,7 +10,12 @@ from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message, SessionEntry
 from wisp.sessions import jsonl as jsonl_module
-from wisp.sessions.jsonl import AmbiguousSessionError, JsonlSessionStore, SessionNotFoundError
+from wisp.sessions.jsonl import (
+    AmbiguousSessionError,
+    JsonlSessionStore,
+    SessionError,
+    SessionNotFoundError,
+)
 
 
 def test_session_store_loads_by_path_filename_and_id_prefix(tmp_path: Path) -> None:
@@ -40,6 +45,39 @@ def test_session_store_creates_private_directories_and_files(tmp_path: Path) -> 
     if os.name == "posix":
         assert stat.S_IMODE(root.stat().st_mode) == 0o700
         assert stat.S_IMODE(session.path.stat().st_mode) == 0o600
+
+
+def test_session_store_secures_existing_session_directory(tmp_path: Path) -> None:
+    root = tmp_path / "sessions"
+    root.mkdir()
+    if os.name == "posix":
+        root.chmod(0o777)
+    session = JsonlSessionStore(root).create()
+
+    async def write() -> None:
+        await session.append_message(Message(role="user", content="hello"))
+
+    anyio.run(write)
+
+    if os.name == "posix":
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        assert stat.S_IMODE(session.path.stat().st_mode) == 0o600
+
+
+def test_session_store_rejects_symlink_session_directory(tmp_path: Path) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are not supported")
+    target = tmp_path / "target"
+    target.mkdir()
+    root = tmp_path / "sessions"
+    root.symlink_to(target, target_is_directory=True)
+    session = JsonlSessionStore(root).create()
+
+    async def write() -> None:
+        await session.append_message(Message(role="user", content="hello"))
+
+    with pytest.raises(SessionError, match="not a directory"):
+        anyio.run(write)
 
 
 def test_session_store_opens_latest_session(tmp_path: Path) -> None:

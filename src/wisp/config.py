@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
 DEFAULT_PROVIDER = "fake"
+_DEFAULT_TEMP_SESSION_DIR: Path | None = None
 
 
 class WispConfig(BaseModel):
@@ -64,7 +65,15 @@ def default_session_dir() -> Path:
 
     if env_dir := os.environ.get("WISP_SESSION_DIR"):
         return Path(env_dir).expanduser()
-    return Path(tempfile.gettempdir()) / f"wisp-{_temp_session_owner()}" / "sessions"
+    return _default_temp_session_dir()
+
+
+def _default_temp_session_dir() -> Path:
+    global _DEFAULT_TEMP_SESSION_DIR
+    if _DEFAULT_TEMP_SESSION_DIR is None:
+        root = Path(tempfile.mkdtemp(prefix=f"wisp-{_temp_session_owner()}-"))
+        _DEFAULT_TEMP_SESSION_DIR = root / "sessions"
+    return _DEFAULT_TEMP_SESSION_DIR
 
 
 def _temp_session_owner() -> str:

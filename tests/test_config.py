@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from pathlib import Path
 
 from pytest import MonkeyPatch
 
+from wisp import config as config_module
 from wisp.config import WispConfig, default_session_dir
 
 
@@ -20,19 +22,25 @@ def test_config_defaults_to_fake_provider(tmp_path: Path, monkeypatch: MonkeyPat
     assert config.session_dir == tmp_path
 
 
-def test_config_defaults_session_dir_to_user_private_temp(
+def test_config_defaults_session_dir_to_non_precreatable_private_temp(
+    tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("WISP_SESSION_DIR", raising=False)
+    monkeypatch.setattr(config_module, "_DEFAULT_TEMP_SESSION_DIR", None)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
 
     session_dir = default_session_dir()
 
     assert session_dir.name == "sessions"
-    assert session_dir.parent.parent == Path(tempfile.gettempdir())
+    assert session_dir.parent.parent == tmp_path
     if hasattr(os, "getuid"):
-        assert session_dir.parent.name == f"wisp-{os.getuid()}"
+        assert session_dir.parent.name.startswith(f"wisp-{os.getuid()}-")
     else:
         assert session_dir.parent.name.startswith("wisp-")
+    assert default_session_dir() == session_dir
+    if os.name == "posix":
+        assert stat.S_IMODE(session_dir.parent.stat().st_mode) == 0o700
 
 
 def test_config_reads_session_dir_from_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
