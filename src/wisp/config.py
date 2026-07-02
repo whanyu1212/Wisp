@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
-from platformdirs import user_data_dir
 from pydantic import BaseModel, ConfigDict, Field
 
 DEFAULT_PROVIDER = "fake"
@@ -55,13 +55,14 @@ class WispConfig(BaseModel):
 def default_session_dir() -> Path:
     """Return the default JSONL session directory.
 
-    The env override keeps tests and shell experiments isolated without needing
-    a config file format yet.
+    Sessions default to OS temp storage so early dogfooding does not leave
+    durable transcripts behind unless the user opts in with WISP_SESSION_DIR or
+    --session-dir.
     """
 
     if env_dir := os.environ.get("WISP_SESSION_DIR"):
         return Path(env_dir).expanduser()
-    return Path(user_data_dir("wisp", "wisp")) / "sessions"
+    return Path(tempfile.gettempdir()) / "wisp" / "sessions"
 
 
 def _first_non_empty(*values: str | None, default: str | None = None) -> str | None:

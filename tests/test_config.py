@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 from pytest import MonkeyPatch
 
-from wisp.config import WispConfig
+from wisp.config import WispConfig, default_session_dir
 
 
 def test_config_defaults_to_fake_provider(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -16,6 +17,21 @@ def test_config_defaults_to_fake_provider(tmp_path: Path, monkeypatch: MonkeyPat
     assert config.provider == "fake"
     assert config.model is None
     assert config.session_dir == tmp_path
+
+
+def test_config_defaults_session_dir_to_temp(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.delenv("WISP_SESSION_DIR", raising=False)
+
+    assert default_session_dir() == Path(tempfile.gettempdir()) / "wisp" / "sessions"
+
+
+def test_config_reads_session_dir_from_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    selected = tmp_path / "sessions"
+    monkeypatch.setenv("WISP_SESSION_DIR", str(selected))
+
+    config = WispConfig.from_env(load_env_file=False)
+
+    assert config.session_dir == selected
 
 
 def test_config_reads_provider_and_model_from_env(

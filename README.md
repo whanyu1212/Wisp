@@ -25,6 +25,7 @@ Available environment variables:
 ```env
 WISP_PROVIDER=fake
 WISP_MODEL=
+WISP_SESSION_DIR=
 OPENAI_API_KEY=
 ```
 
@@ -35,7 +36,7 @@ uv run wisp -p "hello" --provider fake
 uv run wisp -p "hello" --provider openai --model gpt-5.5
 ```
 
-`OPENAI_API_KEY` is required only when using the `openai` provider. Never commit `.env` or real API keys.
+`OPENAI_API_KEY` is required only when using the `openai` provider. Sessions default to OS temp storage; set `WISP_SESSION_DIR` or pass `--session-dir` to keep them somewhere durable. Never commit `.env` or real API keys.
 
 ## Default prompt and project context
 
@@ -58,7 +59,7 @@ uv run wisp -p "continue the work" --resume path/to/session.jsonl
 uv run wisp -p "continue the work" --resume <session-id-prefix>
 ```
 
-`--continue` resumes the newest session in the session directory. `--resume` accepts a JSONL path, filename, full session id, or unique id prefix. Wisp rebuilds the current prompt/context for the new turn and reuses prior non-system conversation messages as history, so stale project context from earlier turns is not replayed as instructions.
+By default, Wisp stores sessions under the OS temp directory (`<tmp>/wisp/sessions`). `--continue` resumes the newest session in the active session directory. `--resume` accepts a JSONL path, filename, full session id, or unique id prefix. Use `--session-dir` or `WISP_SESSION_DIR` for durable session storage. Wisp rebuilds the current prompt/context for the new turn and reuses prior non-system conversation messages as history, so stale project context from earlier turns is not replayed as instructions.
 
 ## Local tools
 
