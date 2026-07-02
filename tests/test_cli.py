@@ -5,6 +5,7 @@ import os
 import sys
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
+from queue import Queue
 
 import anyio
 from pytest import MonkeyPatch
@@ -220,6 +221,29 @@ def test_rpc_stdin_reader_dispatches_buffered_pipe_lines(monkeypatch: MonkeyPatc
     finally:
         os.close(write_fd)
         stdin.close()
+
+
+def test_rpc_thread_stdin_reader_uses_bounded_queue(monkeypatch: MonkeyPatch) -> None:
+    created_queue_sizes: list[int] = []
+
+    class RecordingQueue(Queue[str | Exception]):
+        def __init__(self, maxsize: int = 0) -> None:
+            created_queue_sizes.append(maxsize)
+            super().__init__(maxsize=maxsize)
+
+    monkeypatch.setattr(cli_module, "Queue", RecordingQueue)
+
+    async def run_reader() -> None:
+        stop_reader = anyio.Event()
+        stop_reader.set()
+        send, receive = anyio.create_memory_object_stream[object](10)
+        async with receive:
+            await cli_module._read_rpc_thread_stdin(send, stop_reader)
+
+    anyio.run(run_reader)
+
+    assert created_queue_sizes == [cli_module._STDIN_THREAD_QUEUE_SIZE]
+    assert created_queue_sizes[0] > 0
 
 
 def test_rpc_stdin_reader_uses_thread_reader_for_windows_pipe(

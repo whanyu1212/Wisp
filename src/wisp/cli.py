@@ -92,6 +92,7 @@ type _RpcControlEvent = _RpcInputCommand | _RpcInputClosed | _RpcPromptCompleted
 
 _STDIN_READ_CHUNK_SIZE = 64 * 1024
 _STDIN_THREAD_POLL_INTERVAL = 0.01
+_STDIN_THREAD_QUEUE_SIZE = 100
 _MAX_QUEUED_RPC_COMMANDS = 100
 
 
@@ -482,7 +483,7 @@ async def _read_rpc_thread_stdin(
     send: MemoryObjectSendStream[_RpcControlEvent],
     stop_reader: anyio.Event,
 ) -> None:
-    lines: Queue[str | Exception] = Queue()
+    lines: Queue[str | Exception] = Queue(maxsize=_STDIN_THREAD_QUEUE_SIZE)
     stdin = sys.stdin
 
     def read_lines() -> None:
