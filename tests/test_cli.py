@@ -58,10 +58,14 @@ class CancellableProvider:
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
     ) -> AsyncIterator[ProviderStreamEvent]:
-        prompt = _last_user_prompt(messages)
+        user_prompts = _user_prompts(messages)
+        prompt = user_prompts[-1] if user_prompts else ""
         if prompt == "slow":
             yield "working"
             await anyio.sleep_forever()
+        if "slow" in user_prompts[:-1]:
+            yield "leaked slow"
+            return
         yield f"done {prompt}"
 
 
@@ -137,10 +141,16 @@ def _jsonl_records(output: str) -> list[dict[str, object]]:
 
 
 def _last_user_prompt(messages: Sequence[object]) -> str:
-    for message in reversed(messages):
-        if getattr(message, "role", None) == "user":
-            return str(getattr(message, "content", ""))
-    return ""
+    user_prompts = _user_prompts(messages)
+    return user_prompts[-1] if user_prompts else ""
+
+
+def _user_prompts(messages: Sequence[object]) -> list[str]:
+    return [
+        str(getattr(message, "content", ""))
+        for message in messages
+        if getattr(message, "role", None) == "user"
+    ]
 
 
 def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
@@ -671,6 +681,32 @@ def test_rpc_mode_processes_queued_shutdown_after_running_prompt_finishes(
         ("cmd-1", False),
         ("shutdown-1", True),
     ]
+
+
+def test_rpc_mode_excludes_cancelled_prompt_from_next_prompt_history(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_cancellable_runtime)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"cmd-1","type":"prompt","prompt":"slow"}\n'
+            '{"id":"cmd-2","type":"prompt","prompt":"second"}\n'
+            '{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}\n'
+        ),
+        env={"WISP_PROVIDER": "cancellable-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assistant_messages = [
+        record["content"] for record in records if record["type"] == "assistant.message"
+    ]
+    assert assistant_messages == ["done second"]
 
 
 def test_rpc_mode_queues_prompts_while_canceling_running_prompt(
