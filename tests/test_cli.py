@@ -72,6 +72,29 @@ class CancellableProvider:
         yield f"done {prompt}"
 
 
+class FailingProvider:
+    name = "failing-test"
+    default_model: str | None = "failing-test"
+
+    async def stream(
+        self,
+        messages: Sequence[object],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        user_prompts = _user_prompts(messages)
+        prompt = user_prompts[-1] if user_prompts else ""
+        if prompt == "fail":
+            raise RuntimeError("provider failed")
+        if "fail" in user_prompts[:-1]:
+            yield "saw failed history"
+            return
+        yield f"done {prompt}"
+
+
 class ToolCallingProvider:
     name = "tool-test"
     default_model: str | None = "tool-test"
@@ -126,6 +149,15 @@ async def build_cancellable_runtime() -> WispRuntime:
     events = EventBus()
     api = ExtensionAPI(providers=providers, tools=tools, events=events)
     providers.register(CancellableProvider())
+    return WispRuntime(providers=providers, tools=tools, events=events, api=api)
+
+
+async def build_failing_runtime() -> WispRuntime:
+    providers = ProviderRegistry()
+    tools = ToolRegistry()
+    events = EventBus()
+    api = ExtensionAPI(providers=providers, tools=tools, events=events)
+    providers.register(FailingProvider())
     return WispRuntime(providers=providers, tools=tools, events=events, api=api)
 
 
@@ -753,6 +785,36 @@ def test_rpc_mode_processes_queued_shutdown_after_running_prompt_finishes(
         ("cancel-1", True),
         ("cmd-1", False),
         ("shutdown-1", True),
+    ]
+
+
+def test_rpc_mode_preserves_failed_prompt_in_next_prompt_history(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_failing_runtime)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"cmd-1","type":"prompt","prompt":"fail"}\n'
+            '{"id":"cmd-2","type":"prompt","prompt":"second"}\n'
+        ),
+        env={"WISP_PROVIDER": "failing-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assistant_messages = [
+        record["content"] for record in records if record["type"] == "assistant.message"
+    ]
+    assert assistant_messages == ["saw failed history"]
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [(record["command_id"], record["ok"]) for record in finished] == [
+        ("cmd-1", False),
+        ("cmd-2", True),
     ]
 
 

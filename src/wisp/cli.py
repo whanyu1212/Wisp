@@ -371,7 +371,7 @@ async def _run_rpc(
                     ):
                         running_prompt = None
                         session_state.entry_count = control_event.entry_count
-                        if control_event.ok and control_event.history is not None:
+                        if control_event.history is not None:
                             session_state.history = control_event.history
                     continue
 
@@ -585,7 +585,7 @@ async def _run_rpc_prompt_command(
             else entry_start
         )
         updated_history = (
-            _updated_rpc_history(session, committed_history, entry_start) if error is None else None
+            None if cancelled else _updated_rpc_history(session, committed_history, entry_start)
         )
         async with send:
             if cancelled:
