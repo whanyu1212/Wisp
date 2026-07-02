@@ -60,7 +60,7 @@ class Agent:
         tool_approval_policy: ToolApprovalPolicy | None = None,
         prompt_messages: Sequence[Message] | None = None,
         project_context_max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
-        max_tool_iterations: int = 8,
+        max_tool_iterations: int | None = None,
     ) -> None:
         self.provider = provider
         self.sessions = sessions
@@ -128,7 +128,10 @@ class Agent:
 
                 if not tool_calls:
                     break
-                if tool_iterations >= self.max_tool_iterations:
+                if (
+                    self.max_tool_iterations is not None
+                    and tool_iterations >= self.max_tool_iterations
+                ):
                     msg = f"Maximum tool iterations exceeded: {self.max_tool_iterations}"
                     raise RuntimeError(msg)
 

@@ -85,6 +85,13 @@ def cli_callback(
             help="Approve non-interactive execution of mutating and command tools.",
         ),
     ] = False,
+    max_tool_iterations: Annotated[
+        int | None,
+        typer.Option(
+            "--max-tool-iterations",
+            help="Optional cap on model/tool rounds. Defaults to uncapped.",
+        ),
+    ] = None,
 ) -> None:
     """Run Wisp in the initial print-mode CLI."""
 
@@ -100,6 +107,9 @@ def cli_callback(
     if resume is not None and continue_latest:
         console.print("[red]error:[/red] use either --resume or --continue, not both")
         raise typer.Exit(1)
+    if max_tool_iterations is not None and max_tool_iterations < 0:
+        console.print("[red]error:[/red] --max-tool-iterations must be non-negative")
+        raise typer.Exit(1)
 
     config = WispConfig.from_env(provider=provider, model=model, session_dir=session_dir)
     try:
@@ -112,6 +122,7 @@ def cli_callback(
             resume,
             continue_latest,
             approve_unsafe_tools,
+            max_tool_iterations,
         )
     except (ProviderError, SessionError, UnknownProviderError, UnknownToolError) as exc:
         console.print(f"[red]error:[/red] {exc}")
@@ -132,6 +143,7 @@ async def _run_print(
     resume: str | None = None,
     continue_latest: bool = False,
     approve_unsafe_tools: bool = False,
+    max_tool_iterations: int | None = None,
 ) -> None:
     runtime = await build_runtime()
     provider = runtime.providers.get(config.provider)
@@ -149,6 +161,7 @@ async def _run_print(
             allowed_tools=allowed_tools,
         ),
         tool_approval_policy=_print_mode_tool_approval_policy(approve_unsafe_tools),
+        max_tool_iterations=max_tool_iterations,
     )
 
     event_console = Console(stderr=True, soft_wrap=True)

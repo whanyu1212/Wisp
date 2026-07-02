@@ -276,6 +276,46 @@ def test_print_mode_renders_approved_tool_events_to_stderr(
     assert "session saved:" in result.stderr
 
 
+def test_print_mode_enforces_explicit_tool_iteration_cap(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_tool_runtime)
+
+    result = runner.invoke(
+        app,
+        [
+            "-p",
+            "use tool",
+            "--allow-tool",
+            "danger",
+            "--yes",
+            "--max-tool-iterations",
+            "0",
+            "--session-dir",
+            str(tmp_path),
+        ],
+        env={"WISP_PROVIDER": "tool-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "error: Maximum tool iterations exceeded: 0" in result.stderr
+
+
+def test_print_mode_rejects_negative_tool_iteration_cap(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["-p", "hello", "--max-tool-iterations", "-1", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "error: --max-tool-iterations must be non-negative" in result.stderr
+
+
 def test_print_mode_keeps_event_separator_out_of_stdout(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
