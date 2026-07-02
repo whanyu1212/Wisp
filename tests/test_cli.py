@@ -352,6 +352,128 @@ def test_json_mode_emits_error_event_without_stderr_noise(
     assert records[-1]["message"] == "Maximum tool iterations exceeded: 0"
 
 
+def test_rpc_mode_runs_prompt_commands(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input='{"type":"prompt","prompt":"hello"}\n{"type":"shutdown"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    records = _jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == [
+        "agent.started",
+        "token.delta",
+        "token.delta",
+        "token.delta",
+        "token.delta",
+        "assistant.message",
+        "session.saved",
+    ]
+    assert records[-2]["content"] == "fake response to: hello"
+
+
+def test_rpc_mode_runs_multiple_prompt_commands_in_one_session(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"type":"prompt","prompt":"first"}\n'
+            '{"type":"prompt","prompt":"second"}\n'
+            '{"type":"shutdown"}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assistant_messages = [
+        record["content"] for record in records if record["type"] == "assistant.message"
+    ]
+    assert assistant_messages == ["fake response to: first", "fake response to: second"]
+    session_paths = {record["path"] for record in records if record["type"] == "session.saved"}
+    assert len(session_paths) == 1
+    session_file = next(tmp_path.glob("*.jsonl"))
+    session_records = _jsonl_records(session_file.read_text(encoding="utf-8"))
+    user_messages = [
+        record["message"]["content"]
+        for record in session_records
+        if record["message"]["role"] == "user"
+    ]
+    assert user_messages == ["first", "second"]
+
+
+def test_rpc_mode_reports_bad_commands_and_continues(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            "not json\n"
+            "[]\n"
+            '{"type":"missing"}\n'
+            '{"type":"prompt"}\n'
+            '{"type":"prompt","prompt":"ok"}\n'
+            '{"type":"shutdown"}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    records = _jsonl_records(result.stdout)
+    assert [record["message"] for record in records[:4]] == [
+        "Invalid RPC JSON: Expecting value",
+        "RPC command must be a JSON object",
+        "Unknown RPC command: missing",
+        "RPC prompt command requires string field: prompt",
+    ]
+    assert any(
+        record["type"] == "assistant.message" and record["content"] == "fake response to: ok"
+        for record in records
+    )
+
+
+def test_rpc_mode_rejects_cli_prompt(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["-p", "hello", "--mode", "rpc", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert result.stderr == ""
+    records = _jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == ["error"]
+    assert records[0]["message"] == (
+        "--prompt is not used with --mode rpc; send prompt commands on stdin"
+    )
+
+
+def test_rpc_mode_shutdown_exits_without_events(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input='{"type":"shutdown"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
 def test_print_mode_renders_denied_tool_events_to_stderr(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
