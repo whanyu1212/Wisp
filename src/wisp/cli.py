@@ -323,14 +323,18 @@ async def _run_rpc(
             while True:
                 if running_prompt is None and queued_commands:
                     command = queued_commands.popleft()
-                    running_prompt, session = _start_rpc_prompt_command(
+                    running_prompt, session, should_shutdown = _dispatch_rpc_command(
                         command,
                         agent=agent,
                         sessions=sessions,
                         session=session,
                         task_group=task_group,
                         send=send,
+                        running_prompt=running_prompt,
                     )
+                    if should_shutdown:
+                        task_group.cancel_scope.cancel()
+                        return
                     continue
                 if stdin_closed and running_prompt is None and not queued_commands:
                     task_group.cancel_scope.cancel()
@@ -353,23 +357,43 @@ async def _run_rpc(
                 if running_prompt is not None and command_type != "cancel":
                     queued_commands.append(command)
                     continue
-                if command_type == "prompt":
-                    running_prompt, session = _start_rpc_prompt_command(
-                        command,
-                        agent=agent,
-                        sessions=sessions,
-                        session=session,
-                        task_group=task_group,
-                        send=send,
-                    )
-                    continue
-                should_shutdown = _handle_rpc_control_command(
+                running_prompt, session, should_shutdown = _dispatch_rpc_command(
                     command,
+                    agent=agent,
+                    sessions=sessions,
+                    session=session,
+                    task_group=task_group,
+                    send=send,
                     running_prompt=running_prompt,
                 )
                 if should_shutdown:
                     task_group.cancel_scope.cancel()
                     return
+
+
+def _dispatch_rpc_command(
+    command: dict[str, object],
+    *,
+    agent: Agent,
+    sessions: JsonlSessionStore,
+    session: JsonlSession | None,
+    task_group: TaskGroup,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    running_prompt: _RpcRunningPrompt | None,
+) -> tuple[_RpcRunningPrompt | None, JsonlSession | None, bool]:
+    command_type = _rpc_command_type(command)
+    if command_type == "prompt":
+        new_running_prompt, new_session = _start_rpc_prompt_command(
+            command,
+            agent=agent,
+            sessions=sessions,
+            session=session,
+            task_group=task_group,
+            send=send,
+        )
+        return new_running_prompt, new_session, False
+    should_shutdown = _handle_rpc_control_command(command, running_prompt=running_prompt)
+    return running_prompt, session, should_shutdown
 
 
 async def _read_rpc_stdin(send: MemoryObjectSendStream[_RpcControlEvent]) -> None:

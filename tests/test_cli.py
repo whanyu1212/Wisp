@@ -636,6 +636,43 @@ def test_rpc_mode_cancel_requires_target_id(tmp_path: Path) -> None:
     assert records[2]["ok"] is False
 
 
+def test_rpc_mode_processes_queued_shutdown_after_running_prompt_finishes(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_cancellable_runtime)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"cmd-1","type":"prompt","prompt":"slow"}\n'
+            '{"id":"shutdown-1","type":"shutdown"}\n'
+            '{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}\n'
+        ),
+        env={"WISP_PROVIDER": "cancellable-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert "RPC prompt command requires string field: prompt" not in [
+        record.get("message") for record in records
+    ]
+    started = [record for record in records if record["type"] == "rpc.command.started"]
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [record["command_id"] for record in started] == [
+        "cmd-1",
+        "cancel-1",
+        "shutdown-1",
+    ]
+    assert [(record["command_id"], record["ok"]) for record in finished] == [
+        ("cancel-1", True),
+        ("cmd-1", False),
+        ("shutdown-1", True),
+    ]
+
+
 def test_rpc_mode_queues_prompts_while_canceling_running_prompt(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
