@@ -301,16 +301,27 @@ def test_agent_executes_tool_calls_and_continues_to_final_response(tmp_path: Pat
 
     saved = next(event for event in events if isinstance(event, SessionSaved))
     records = [json.loads(line) for line in saved.path.read_text(encoding="utf-8").splitlines()]
-    assert [record["message"]["role"] for record in records] == [
+    message_records = [record for record in records if record["kind"] == "message"]
+    event_records = [record for record in records if record["kind"] == "event"]
+    assert [record["message"]["role"] for record in message_records] == [
         "system",
         "system",
         "user",
         "tool",
         "assistant",
     ]
-    assert records[3]["message"]["tool_call_id"] == "call-1"
-    assert records[3]["message"]["tool_name"] == "echo"
-    assert records[3]["message"]["content"] == "echo: hello"
+    assert [record["event"]["type"] for record in event_records] == [
+        "tool.execution.started",
+        "tool.call",
+        "tool.execution.ended",
+    ]
+    assert event_records[1]["event"]["call_id"] == "call-1"
+    assert event_records[1]["event"]["arguments"] == {"text": "hello"}
+    assert event_records[2]["event"]["output"] == "echo: hello"
+    assert event_records[2]["event"]["is_error"] is False
+    assert message_records[3]["message"]["tool_call_id"] == "call-1"
+    assert message_records[3]["message"]["tool_name"] == "echo"
+    assert message_records[3]["message"]["content"] == "echo: hello"
 
 
 def test_agent_filters_provider_tool_specs_by_policy(tmp_path: Path) -> None:
@@ -407,6 +418,18 @@ def test_agent_blocks_approval_required_tool_without_override(tmp_path: Path) ->
     assert any(
         isinstance(event, AssistantMessage) and event.content == "recovered" for event in events
     )
+    saved = next(event for event in events if isinstance(event, SessionSaved))
+    records = [json.loads(line) for line in saved.path.read_text(encoding="utf-8").splitlines()]
+    event_records = [record for record in records if record["kind"] == "event"]
+    assert [record["event"]["type"] for record in event_records] == [
+        "tool.execution.started",
+        "tool.call",
+        "tool.approval.requested",
+        "tool.approval.resolved",
+        "tool.execution.ended",
+    ]
+    assert event_records[3]["event"]["approved"] is False
+    assert "requires approval" in event_records[3]["event"]["reason"]
 
 
 def test_agent_approves_required_tool_with_override(tmp_path: Path) -> None:
@@ -599,6 +622,10 @@ def test_agent_enforces_configured_max_tool_iterations(tmp_path: Path) -> None:
         assert str(exc) == "Maximum tool iterations exceeded: 1"
     else:
         raise AssertionError("Expected max tool iteration guard to raise")
+
+    session = JsonlSessionStore(tmp_path).latest()
+    error_events = [event for event in session.read_events() if event["type"] == "error"]
+    assert error_events[-1]["message"] == "Maximum tool iterations exceeded: 1"
 
 
 def test_agent_returns_error_result_for_invalid_tool_arguments(tmp_path: Path) -> None:

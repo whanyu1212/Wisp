@@ -12,6 +12,7 @@ import anyio
 from pydantic import ValidationError
 
 from wisp.agent.messages import Message, SessionEntry
+from wisp.events import JsonObject, WispEvent
 
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
@@ -92,9 +93,23 @@ class JsonlSession:
 
     async def append_message(self, message: Message) -> SessionEntry:
         entry = SessionEntry(session_id=self.session_id, message=message)
-        line = entry.model_dump_json()
-        await anyio.to_thread.run_sync(self._append_line, line)
+        await self._append_entry(entry)
         return entry
+
+    async def append_event(self, event: WispEvent) -> SessionEntry:
+        """Persist a structured runtime event for audit/debugging."""
+
+        entry = SessionEntry(
+            session_id=self.session_id,
+            kind="event",
+            event=event.model_dump(mode="json"),
+        )
+        await self._append_entry(entry)
+        return entry
+
+    async def _append_entry(self, entry: SessionEntry) -> None:
+        line = entry.model_dump_json(exclude_none=True)
+        await anyio.to_thread.run_sync(self._append_line, line)
 
     def read_entries(self) -> tuple[SessionEntry, ...]:
         """Read all persisted entries from the session file."""
@@ -104,7 +119,20 @@ class JsonlSession:
     def read_messages(self) -> tuple[Message, ...]:
         """Read all persisted messages from the session file."""
 
-        return tuple(entry.message for entry in self.read_entries())
+        return tuple(
+            entry.message
+            for entry in self.read_entries()
+            if entry.kind == "message" and entry.message is not None
+        )
+
+    def read_events(self) -> tuple[JsonObject, ...]:
+        """Read all persisted structured events from the session file."""
+
+        return tuple(
+            entry.event
+            for entry in self.read_entries()
+            if entry.kind == "event" and entry.event is not None
+        )
 
     def _append_line(self, line: str) -> None:
         _ensure_private_directory(self.path.parent)

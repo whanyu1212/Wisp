@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from wisp.events import utc_now
+from wisp.events import JsonObject, utc_now
 
 Role = Literal["system", "user", "assistant", "tool"]
 
@@ -32,6 +32,15 @@ class SessionEntry(BaseModel):
 
     id: str = Field(default_factory=lambda: uuid4().hex)
     session_id: str
-    kind: Literal["message"] = "message"
-    message: Message
+    kind: Literal["message", "event"] = "message"
+    message: Message | None = None
+    event: JsonObject | None = None
     created_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def _validate_payload(self) -> Self:
+        if self.kind == "message" and self.message is None:
+            raise ValueError("message session entries require a message")
+        if self.kind == "event" and self.event is None:
+            raise ValueError("event session entries require an event")
+        return self

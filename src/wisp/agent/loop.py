@@ -28,6 +28,17 @@ from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 
+PERSISTED_SESSION_EVENT_TYPES = frozenset(
+    {
+        "tool.execution.started",
+        "tool.call",
+        "tool.approval.requested",
+        "tool.approval.resolved",
+        "tool.execution.ended",
+        "error",
+    }
+)
+
 
 def _tool_observation_message(message: Message) -> Message:
     tool_label = message.tool_name or "unknown"
@@ -89,7 +100,11 @@ class Agent:
         history: Sequence[Message] = (),
     ) -> AsyncIterator[WispEvent]:
         session = session or self.sessions.create()
-        yield await self._emit(AgentStarted(session_id=session.session_id))
+
+        async def emit(event: WispEvent) -> WispEvent:
+            return await self._emit(event, session=session)
+
+        yield await emit(AgentStarted(session_id=session.session_id))
 
         prompt_messages = self._prompt_messages()
         for prompt_message in prompt_messages:
@@ -120,7 +135,7 @@ class Agent:
                 ):
                     if isinstance(provider_event, str):
                         chunks.append(provider_event)
-                        yield await self._emit(TokenDelta(delta=provider_event))
+                        yield await emit(TokenDelta(delta=provider_event))
                     else:
                         tool_calls.append(provider_event)
                         if provider_event.response_id is not None:
@@ -139,14 +154,14 @@ class Agent:
                 tool_results: list[ToolCallResult] = []
                 for tool_call in tool_calls:
                     arguments = dict(tool_call.arguments)
-                    yield await self._emit(
+                    yield await emit(
                         ToolExecutionStarted(
                             call_id=tool_call.call_id,
                             name=tool_call.name,
                             arguments=arguments,
                         )
                     )
-                    yield await self._emit(
+                    yield await emit(
                         ToolCallRequested(
                             call_id=tool_call.call_id,
                             name=tool_call.name,
@@ -154,9 +169,9 @@ class Agent:
                         )
                     )
                     for approval_event in self._approval_events(tool_call, arguments=arguments):
-                        yield await self._emit(approval_event)
+                        yield await emit(approval_event)
                     result = await self._execute_tool_call(tool_call, arguments=arguments)
-                    yield await self._emit(
+                    yield await emit(
                         ToolExecutionEnded(
                             call_id=tool_call.call_id,
                             name=tool_call.name,
@@ -164,7 +179,7 @@ class Agent:
                             is_error=result.is_error,
                         )
                     )
-                    yield await self._emit(
+                    yield await emit(
                         ToolResultReady(
                             call_id=tool_call.call_id,
                             name=tool_call.name,
@@ -183,15 +198,15 @@ class Agent:
                     )
                 pending_tool_results = tuple(tool_results)
         except Exception as exc:
-            yield await self._emit(ErrorEvent(message=str(exc)))
+            yield await emit(ErrorEvent(message=str(exc)))
             raise
 
         assistant_content = "".join(chunks)
         assistant_message = Message(role="assistant", content=assistant_content)
         await session.append_message(assistant_message)
 
-        yield await self._emit(AssistantMessage(content=assistant_content))
-        yield await self._emit(SessionSaved(session_id=session.session_id, path=session.path))
+        yield await emit(AssistantMessage(content=assistant_content))
+        yield await emit(SessionSaved(session_id=session.session_id, path=session.path))
 
     async def _execute_tool_call(
         self,
@@ -288,7 +303,14 @@ class Agent:
                 normalized.append(message)
         return tuple(normalized)
 
-    async def _emit(self, event: WispEvent) -> WispEvent:
+    async def _emit(
+        self,
+        event: WispEvent,
+        *,
+        session: JsonlSession | None = None,
+    ) -> WispEvent:
+        if session is not None and event.type in PERSISTED_SESSION_EVENT_TYPES:
+            await session.append_event(event)
         if self.events is not None:
             await self.events.emit(event)
         return event
