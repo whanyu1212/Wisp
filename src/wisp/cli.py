@@ -152,22 +152,23 @@ async def _run_print(
     )
 
     event_console = Console(stderr=True, soft_wrap=True)
-    needs_stdout_newline = False
+    wrote_tokens = False
+    stderr_needs_separator = False
     async for event in agent.run(prompt, session=session, history=history):
         if isinstance(event, TokenDelta):
             sys.stdout.write(event.delta)
             sys.stdout.flush()
-            needs_stdout_newline = True
+            wrote_tokens = True
+            stderr_needs_separator = True
         elif isinstance(event, ErrorEvent):
             raise ProviderError(event.message)
         else:
-            if needs_stdout_newline:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-                needs_stdout_newline = False
+            if stderr_needs_separator and _print_event_line(event) is not None:
+                event_console.print()
+                stderr_needs_separator = False
             _render_print_event(event, event_console)
 
-    if needs_stdout_newline:
+    if wrote_tokens:
         sys.stdout.write("\n")
 
 

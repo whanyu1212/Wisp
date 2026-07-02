@@ -93,5 +93,5 @@ clear tool error instead of Wisp executing the operation.
 
 Print mode keeps assistant text on stdout and writes operational events to
 stderr, including tool calls, approval decisions, tool result summaries, and the
-saved session path. This keeps command output pipe-friendly while still making
-agent activity visible in the terminal.
+saved session path. Stderr may include spacing for terminal readability, while
+stdout remains assistant-only and pipe-friendly.

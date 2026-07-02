@@ -19,6 +19,31 @@ from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolResult
 
 
+class MixedTextToolProvider:
+    name = "mixed-tool-test"
+    default_model: str | None = "mixed-tool-test"
+
+    async def stream(
+        self,
+        messages: Sequence[object],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        if not tool_results:
+            yield "prefix"
+            yield ToolCall(
+                call_id="call-1",
+                name="danger",
+                arguments={"path": "file.txt"},
+                response_id="response-1",
+            )
+            return
+        yield "suffix"
+
+
 class ToolCallingProvider:
     name = "tool-test"
     default_model: str | None = "tool-test"
@@ -63,6 +88,16 @@ async def build_tool_runtime() -> WispRuntime:
     events = EventBus()
     api = ExtensionAPI(providers=providers, tools=tools, events=events)
     providers.register(ToolCallingProvider())
+    tools.register(DangerTool())
+    return WispRuntime(providers=providers, tools=tools, events=events, api=api)
+
+
+async def build_mixed_tool_runtime() -> WispRuntime:
+    providers = ProviderRegistry()
+    tools = ToolRegistry()
+    events = EventBus()
+    api = ExtensionAPI(providers=providers, tools=tools, events=events)
+    providers.register(MixedTextToolProvider())
     tools.register(DangerTool())
     return WispRuntime(providers=providers, tools=tools, events=events, api=api)
 
@@ -239,6 +274,33 @@ def test_print_mode_renders_approved_tool_events_to_stderr(
     assert "✓ approved danger" in result.stderr
     assert "✓ tool danger: changed file.txt" in result.stderr
     assert "session saved:" in result.stderr
+
+
+def test_print_mode_keeps_event_separator_out_of_stdout(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_mixed_tool_runtime)
+
+    result = runner.invoke(
+        app,
+        [
+            "-p",
+            "use tool",
+            "--allow-tool",
+            "danger",
+            "--yes",
+            "--session-dir",
+            str(tmp_path),
+        ],
+        env={"WISP_PROVIDER": "mixed-tool-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "prefixsuffix\n"
+    assert "\n→ tool danger" in result.stderr
+    assert "✓ tool danger: changed file.txt" in result.stderr
 
 
 def test_print_mode_context_describes_allowed_read_tools(tmp_path: Path) -> None:
