@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import io
+import sys
 from collections import deque
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -18,6 +20,7 @@ from wisp.events import (
     ErrorEvent,
     KnownWispEvent,
     RpcCommandFinished,
+    SessionSaved,
     TokenDelta,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -25,7 +28,7 @@ from wisp.events import (
     ToolResultReady,
 )
 from wisp.tui import TuiInteractionState, TuiOptions, TuiShell, TuiStatus
-from wisp.tui.app import _InputLine, _InputMode, _rpc_command
+from wisp.tui.app import _default_prompt_reader, _InputLine, _InputMode, _rpc_command
 
 type EventBatch = list[KnownWispEvent]
 type ScriptedBatch = EventBatch | tuple[float, EventBatch]
@@ -171,6 +174,43 @@ def test_tui_shell_runs_prompt_then_shutdown() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_help_renders_approval_hint_literally() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/help", "/quit"]),
+        )
+
+        await shell.run()
+
+        assert "approve? [y/N]" in output.getvalue()
+
+    anyio.run(run)
+
+
+def test_default_prompt_reader_hides_prompts_for_non_tty(monkeypatch: object) -> None:
+    prompts: list[str] = []
+
+    class NonTtyStdin:
+        def isatty(self) -> bool:
+            return False
+
+    def fake_input(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return "hello"
+
+    monkeypatch.setattr(sys, "stdin", NonTtyStdin())
+    monkeypatch.setattr(builtins, "input", fake_input)
+
+    result = anyio.run(_default_prompt_reader, "wisp> ")
+
+    assert result == "hello"
+    assert prompts == [""]
+
+
 def test_tui_shell_quit_then_eof_sends_one_shutdown() -> None:
     async def run() -> None:
         controller = ScriptedController()
@@ -244,6 +284,8 @@ def test_tui_shell_discards_queued_follow_ups_after_input_eof() -> None:
         rendered = output.getvalue()
         assert "queued follow-up #1" in rendered
         assert "running queued follow-up" not in rendered
+        assert "input closed; finishing current prompt" in rendered
+        assert "waiting for current prompt" not in rendered
 
     anyio.run(run)
 
@@ -290,12 +332,13 @@ def test_tui_shell_interrupt_cancels_running_prompt() -> None:
                 (
                     0.05,
                     [
+                        ErrorEvent(message="RPC command cancelled: prompt-1"),
                         RpcCommandFinished(
                             command_id="prompt-1",
                             command_type="prompt",
                             ok=False,
                             error="RPC command cancelled: prompt-1",
-                        )
+                        ),
                     ],
                 )
             ]
@@ -319,7 +362,30 @@ def test_tui_shell_interrupt_cancels_running_prompt() -> None:
 
         assert controller.cancelled == ["prompt-1"]
         assert controller.shutdown_count == 1
-        assert "Cancelling current prompt" in output.getvalue()
+        rendered = output.getvalue()
+        assert "Cancelling current prompt" in rendered
+        assert "cancelled" in rendered
+        assert "command failed" not in rendered
+        assert "error: RPC command cancelled" not in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_ignores_repeated_cancel_for_same_prompt() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(controller, console=console)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.running
+
+        first_exit = await shell._cancel_current("Cancelling current prompt...")
+        second_exit = await shell._cancel_current("Cancelling current prompt...")
+
+        assert first_exit is False
+        assert second_exit is False
+        assert controller.cancelled == ["prompt-1"]
+        assert "cancel already requested" in output.getvalue()
 
     anyio.run(run)
 
@@ -547,6 +613,22 @@ def test_tui_shell_escapes_approval_markup() -> None:
         assert "[black]hidden[/black]" in rendered
 
     anyio.run(run)
+
+
+def test_tui_shell_compacts_session_saved_path(tmp_path: Path) -> None:
+    console, output = _console()
+    shell = TuiShell(ScriptedController(), console=console)
+
+    shell._render_event(
+        SessionSaved(
+            session_id="session-1",
+            path=tmp_path / "20260703-123456-abcdef12.jsonl",
+        )
+    )
+
+    rendered = output.getvalue()
+    assert "session saved: 20260703-123456-abcdef12.jsonl" in rendered
+    assert str(tmp_path) not in rendered
 
 
 def test_tui_interaction_state_tracks_status() -> None:

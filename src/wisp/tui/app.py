@@ -71,6 +71,7 @@ class TuiInteractionState:
     queued_prompts: deque[str] = field(default_factory=deque)
     exit_requested: bool = False
     input_closed: bool = False
+    cancel_requested: bool = False
     token_stream_started: bool = False
     rendered_tokens: bool = False
 
@@ -276,10 +277,7 @@ class TuiShell:
             )
         if self.state.current_command_id is not None:
             self.state.queued_prompts.clear()
-            self.console.print(
-                "[yellow]Input closed; waiting for current prompt to finish "
-                "before shutdown.[/yellow]"
-            )
+            self.console.print("[dim]input closed; finishing current prompt[/dim]")
             return False
         return await self._request_shutdown()
 
@@ -313,8 +311,10 @@ class TuiShell:
     async def _start_prompt(self, prompt: str) -> bool:
         self.state.status = TuiStatus.running
         self.state.pending_approval = None
+        self.state.cancel_requested = False
         self.state.token_stream_started = False
         self.state.rendered_tokens = False
+        self.console.print("[dim]running...[/dim]")
         try:
             command_id = await self.controller.prompt(prompt)
         except Exception as exc:
@@ -327,8 +327,12 @@ class TuiShell:
         command_id = self.state.current_command_id
         if command_id is None:
             return False
+        if self.state.cancel_requested:
+            self.console.print("[dim]cancel already requested[/dim]")
+            return False
         self.console.print(f"\n[yellow]{_markup_escape(message)}[/yellow]")
         self.state.queued_prompts.clear()
+        self.state.cancel_requested = True
         try:
             await self.controller.cancel(command_id)
         except Exception as exc:
@@ -437,11 +441,13 @@ class TuiShell:
         if self.state.exit_requested or not event.ok:
             self.state.queued_prompts.clear()
         if self.state.exit_requested:
+            self.state.cancel_requested = False
             return await self._request_shutdown()
         if self.state.queued_prompts:
             queued_prompt = self.state.queued_prompts.popleft()
             self.console.print("[dim]running queued follow-up[/dim]")
             return await self._start_prompt(queued_prompt)
+        self.state.cancel_requested = False
         self.state.status = TuiStatus.idle
         return False
 
@@ -468,11 +474,14 @@ class TuiShell:
         return True
 
     def _render_help(self) -> None:
-        self.console.print("Commands:")
-        self.console.print("  /help        show this help")
-        self.console.print("  /quit, /exit quit the TUI")
-        self.console.print("While a prompt is running, submitted input is queued as a follow-up.")
-        self.console.print("Tool approvals prompt with approve? [y/N].")
+        self.console.print("Commands:", markup=False)
+        self.console.print("  /help        show this help", markup=False)
+        self.console.print("  /quit, /exit quit the TUI", markup=False)
+        self.console.print(
+            "While a prompt is running, submitted input is queued as a follow-up.",
+            markup=False,
+        )
+        self.console.print("Tool approvals prompt with approve? [y/N].", markup=False)
 
     def _render_approval_request(self, event: ToolApprovalRequested) -> None:
         self.console.print(
@@ -501,17 +510,24 @@ class TuiShell:
             output = _markup_escape(_first_line(event.output))
             self.console.print(f"{status} tool {tool_name}: {output}")
         elif isinstance(event, ErrorEvent):
-            self.console.print(f"[red]error:[/red] {_markup_escape(event.message)}")
+            if not (self.state.cancel_requested and _is_rpc_cancelled_message(event.message)):
+                self.console.print(f"[red]error:[/red] {_markup_escape(event.message)}")
         elif isinstance(event, SessionSaved):
-            self.console.print(f"[dim]session saved: {_markup_escape(event.path)}[/dim]")
-        elif isinstance(event, RpcCommandFinished) and not event.ok:
             self.console.print(
-                f"[red]command failed:[/red] {_markup_escape(event.error or event.command_id)}"
+                f"[dim]session saved: {_markup_escape(_compact_session_path(event.path))}[/dim]"
             )
+        elif isinstance(event, RpcCommandFinished) and not event.ok:
+            if self.state.cancel_requested and _is_rpc_cancelled_message(event.error):
+                self.console.print("[yellow]cancelled[/yellow]")
+            else:
+                self.console.print(
+                    f"[red]command failed:[/red] {_markup_escape(event.error or event.command_id)}"
+                )
 
 
 async def _default_prompt_reader(prompt: str) -> str:
-    return await anyio.to_thread.run_sync(input, prompt, abandon_on_cancel=True)
+    selected_prompt = prompt if _stdin_is_interactive() else ""
+    return await anyio.to_thread.run_sync(input, selected_prompt, abandon_on_cancel=True)
 
 
 async def _preflight_tui_options(options: TuiOptions) -> None:
@@ -559,6 +575,11 @@ def _rpc_env() -> dict[str, str]:
     return dict(os.environ)
 
 
+def _stdin_is_interactive() -> bool:
+    isatty = getattr(sys.stdin, "isatty", None)
+    return bool(isatty and isatty())
+
+
 def _input_mode_for_status(status: TuiStatus) -> _InputMode:
     if status is TuiStatus.waiting_for_approval:
         return _InputMode.approval
@@ -577,6 +598,15 @@ def _prompt_for_mode(mode: _InputMode) -> str:
     if mode is _InputMode.exiting:
         return "wisp(exiting)> "
     return "wisp> "
+
+
+def _compact_session_path(path: object) -> str:
+    path_text = str(path)
+    return os.path.basename(path_text) or path_text
+
+
+def _is_rpc_cancelled_message(message: str | None) -> bool:
+    return bool(message and message.startswith("RPC command cancelled:"))
 
 
 def _first_line(text: str) -> str:
