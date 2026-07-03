@@ -920,6 +920,56 @@ def test_rpc_approval_command_resolves_pending_approval(
     assert decision == cli_module.ToolApprovalDecision(approved=False, reason="not safe")
 
 
+def test_rpc_approval_policy_rejects_duplicate_decisions() -> None:
+    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    tool = DangerTool()
+    approval_policy.prepare_approval(tool, call_id="call-1", arguments={})
+
+    assert approval_policy.resolve_approval(
+        call_id="call-1",
+        approved=False,
+        reason="first decision",
+    )
+    assert not approval_policy.resolve_approval(call_id="call-1", approved=True)
+
+    async def wait_for_decision() -> object:
+        return await approval_policy.await_approval(tool, call_id="call-1", arguments={})
+
+    decision = anyio.run(wait_for_decision)
+    assert decision == cli_module.ToolApprovalDecision(
+        approved=False,
+        reason="first decision",
+    )
+
+
+def test_rpc_mode_denies_pending_approval_when_input_closes(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_tool_runtime)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--allow-tool", "danger", "--session-dir", str(tmp_path)],
+        input='{"id":"cmd-1","type":"prompt","prompt":"use tool"}\n',
+        env={"WISP_PROVIDER": "tool-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    approval_resolved = next(
+        record for record in records if record["type"] == "tool.approval.resolved"
+    )
+    assert approval_resolved["approved"] is False
+    assert approval_resolved["reason"] == "RPC input closed before approval response"
+    tool_result = next(record for record in records if record["type"] == "tool.result")
+    assert tool_result["is_error"] is True
+    assert tool_result["output"] == "RPC input closed before approval response"
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [(record["command_id"], record["ok"]) for record in finished] == [("cmd-1", True)]
+
+
 def test_rpc_mode_approval_reports_unknown_call_id(tmp_path: Path) -> None:
     runner = CliRunner()
 

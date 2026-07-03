@@ -94,6 +94,7 @@ class _RpcPendingApproval:
     event: anyio.Event
     approved: bool | None = None
     reason: str | None = None
+    resolved: bool = False
 
 
 type _RpcControlEvent = _RpcInputCommand | _RpcInputClosed | _RpcPromptCompleted
@@ -114,6 +115,7 @@ class _RpcToolApprovalPolicy(ToolApprovalPolicy):
             approved_safety=fallback.approved_safety,
         )
         self._pending: dict[str, _RpcPendingApproval] = {}
+        self._input_closed_reason: str | None = None
 
     def prepare_approval(
         self,
@@ -124,7 +126,14 @@ class _RpcToolApprovalPolicy(ToolApprovalPolicy):
     ) -> None:
         if self.approves(tool):
             return
-        self._pending[call_id] = _RpcPendingApproval(call_id=call_id, event=anyio.Event())
+        pending = _RpcPendingApproval(call_id=call_id, event=anyio.Event())
+        self._pending[call_id] = pending
+        if self._input_closed_reason is not None:
+            self._resolve_pending(
+                pending,
+                approved=False,
+                reason=self._input_closed_reason,
+            )
 
     async def await_approval(
         self,
@@ -154,12 +163,29 @@ class _RpcToolApprovalPolicy(ToolApprovalPolicy):
         reason: str | None = None,
     ) -> bool:
         pending = self._pending.get(call_id)
-        if pending is None:
+        if pending is None or pending.resolved:
             return False
+        self._resolve_pending(pending, approved=approved, reason=reason)
+        return True
+
+    def deny_pending_on_input_closed(self) -> None:
+        reason = "RPC input closed before approval response"
+        self._input_closed_reason = reason
+        for pending in tuple(self._pending.values()):
+            if not pending.resolved:
+                self._resolve_pending(pending, approved=False, reason=reason)
+
+    def _resolve_pending(
+        self,
+        pending: _RpcPendingApproval,
+        *,
+        approved: bool,
+        reason: str | None,
+    ) -> None:
+        pending.resolved = True
         pending.approved = approved
         pending.reason = None if approved else reason
         pending.event.set()
-        return True
 
 
 app = typer.Typer(
@@ -436,6 +462,7 @@ async def _run_rpc(
                 control_event = await receive.receive()
                 if isinstance(control_event, _RpcInputClosed):
                     stdin_closed = True
+                    approval_policy.deny_pending_on_input_closed()
                     continue
                 if isinstance(control_event, _RpcPromptCompleted):
                     if (
