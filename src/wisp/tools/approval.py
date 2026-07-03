@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from wisp.tools.base import Tool, ToolSafety
@@ -10,6 +11,14 @@ APPROVAL_REQUIRED_SAFETY: frozenset[ToolSafety] = frozenset({"mutating", "comman
 
 
 @dataclass(frozen=True)
+class ToolApprovalDecision:
+    """Decision for a tool call that requires approval."""
+
+    approved: bool
+    reason: str | None = None
+
+
+@dataclass
 class ToolApprovalPolicy:
     """Approval state for tools that are allowed by policy but require confirmation."""
 
@@ -46,6 +55,30 @@ class ToolApprovalPolicy:
             not self.requires_approval(tool)
             or tool.name in self.approved_tools
             or tool.safety in self.approved_safety
+        )
+
+    def prepare_approval(
+        self,
+        tool: Tool,
+        *,
+        call_id: str,
+        arguments: Mapping[str, object],
+    ) -> None:
+        """Prepare to answer an approval request before the request is emitted."""
+
+    async def await_approval(
+        self,
+        tool: Tool,
+        *,
+        call_id: str,
+        arguments: Mapping[str, object],
+    ) -> ToolApprovalDecision:
+        """Return the approval decision for a tool call."""
+
+        approved = self.approves(tool)
+        return ToolApprovalDecision(
+            approved=approved,
+            reason=None if approved else self.block_reason(tool),
         )
 
     def block_reason(self, tool: Tool) -> str:

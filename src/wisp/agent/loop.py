@@ -24,7 +24,7 @@ from wisp.providers.base import Provider, ToolCall, ToolCallResult, ToolSpec
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
-from wisp.tools.approval import ToolApprovalPolicy
+from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 
@@ -168,9 +168,25 @@ class Agent:
                             arguments=arguments,
                         )
                     )
-                    for approval_event in self._approval_events(tool_call, arguments=arguments):
+                    approval_decision: ToolApprovalDecision | None = None
+                    async for approval_event in self._approval_events(
+                        tool_call,
+                        arguments=arguments,
+                    ):
                         yield await emit(approval_event)
-                    result = await self._execute_tool_call(tool_call, arguments=arguments)
+                        if isinstance(approval_event, ToolApprovalResolved):
+                            approval_decision = ToolApprovalDecision(
+                                approved=approval_event.approved,
+                                reason=approval_event.reason,
+                            )
+                    if approval_decision is not None and not approval_decision.approved:
+                        result = ToolCallResult(
+                            call_id=tool_call.call_id,
+                            output=approval_decision.reason or "Tool execution was not approved",
+                            is_error=True,
+                        )
+                    else:
+                        result = await self._execute_tool_call(tool_call, arguments=arguments)
                     yield await emit(
                         ToolExecutionEnded(
                             call_id=tool_call.call_id,
@@ -228,9 +244,6 @@ class Agent:
                 if not self.tool_policy.allows(tool):
                     output = self.tool_policy.block_reason(tool)
                     is_error = True
-                elif not self.tool_approval_policy.approves(tool):
-                    output = self.tool_approval_policy.block_reason(tool)
-                    is_error = True
                 else:
                     result = await tool.run(arguments, self.tool_context)
                     output = result.text
@@ -243,37 +256,43 @@ class Agent:
 
         return ToolCallResult(call_id=tool_call.call_id, output=output, is_error=is_error)
 
-    def _approval_events(
+    async def _approval_events(
         self,
         tool_call: ToolCall,
         *,
         arguments: dict[str, object],
-    ) -> tuple[ToolApprovalRequested | ToolApprovalResolved, ...]:
+    ) -> AsyncIterator[ToolApprovalRequested | ToolApprovalResolved]:
         if tool_call.parse_error is not None or self.tool_registry is None:
-            return ()
+            return
         try:
             tool = self.tool_registry.get(tool_call.name)
         except UnknownToolError:
-            return ()
+            return
         if not self.tool_policy.allows(tool) or not self.tool_approval_policy.requires_approval(
             tool
         ):
-            return ()
-        approved = self.tool_approval_policy.approves(tool)
-        reason = None if approved else self.tool_approval_policy.block_reason(tool)
-        return (
-            ToolApprovalRequested(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                arguments=arguments,
-                safety=tool.safety,
-            ),
-            ToolApprovalResolved(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                approved=approved,
-                reason=reason,
-            ),
+            return
+        self.tool_approval_policy.prepare_approval(
+            tool,
+            call_id=tool_call.call_id,
+            arguments=arguments,
+        )
+        yield ToolApprovalRequested(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            arguments=arguments,
+            safety=tool.safety,
+        )
+        decision = await self.tool_approval_policy.await_approval(
+            tool,
+            call_id=tool_call.call_id,
+            arguments=arguments,
+        )
+        yield ToolApprovalResolved(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            approved=decision.approved,
+            reason=decision.reason,
         )
 
     def _allowed_tool_specs(self, tool_registry: ToolRegistry) -> tuple[ToolSpec, ...]:

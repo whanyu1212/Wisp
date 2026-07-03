@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -12,13 +13,16 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from wisp import cli as cli_module
+from wisp.agent.loop import Agent
 from wisp.agent.messages import Message
 from wisp.cli import _print_mode_tool_approval_policy, _print_mode_tool_registry, app
+from wisp.events import ToolApprovalRequested, ToolApprovalResolved, ToolResultReady
 from wisp.providers.base import ProviderStreamEvent, ToolCall, ToolCallResult, ToolSpec
 from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
+from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import ToolArguments, ToolInputSchema
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
 from wisp.tools.context import ToolContext
@@ -815,6 +819,201 @@ def test_rpc_mode_cancel_requires_target_id(tmp_path: Path) -> None:
     assert records[1]["message"] == "RPC cancel command requires string field: target_id"
     assert records[2]["command_id"] == "cancel-1"
     assert records[2]["ok"] is False
+
+
+def test_rpc_approval_policy_approves_waiting_tool_call(tmp_path: Path) -> None:
+    provider = ToolCallingProvider()
+    tools = ToolRegistry()
+    tools.register(DangerTool())
+    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+            tool_approval_policy=approval_policy,
+        )
+        events: list[object] = []
+        async for event in agent.run("use tool"):
+            events.append(event)
+            if isinstance(event, ToolApprovalRequested):
+                assert approval_policy.resolve_approval(call_id=event.call_id, approved=True)
+        return events
+
+    events = anyio.run(run_agent)
+
+    resolved = next(event for event in events if isinstance(event, ToolApprovalResolved))
+    result = next(event for event in events if isinstance(event, ToolResultReady))
+    assert resolved.approved is True
+    assert resolved.reason is None
+    assert result.output == "changed file.txt"
+    assert result.is_error is False
+
+
+def test_rpc_approval_policy_denies_waiting_tool_call(tmp_path: Path) -> None:
+    provider = ToolCallingProvider()
+    tools = ToolRegistry()
+    tools.register(DangerTool())
+    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+            tool_approval_policy=approval_policy,
+        )
+        events: list[object] = []
+        async for event in agent.run("use tool"):
+            events.append(event)
+            if isinstance(event, ToolApprovalRequested):
+                assert approval_policy.resolve_approval(
+                    call_id=event.call_id,
+                    approved=False,
+                    reason="not allowed",
+                )
+        return events
+
+    events = anyio.run(run_agent)
+
+    resolved = next(event for event in events if isinstance(event, ToolApprovalResolved))
+    result = next(event for event in events if isinstance(event, ToolResultReady))
+    assert resolved.approved is False
+    assert resolved.reason == "not allowed"
+    assert result.output == "not allowed"
+    assert result.is_error is True
+
+
+def test_rpc_approval_command_resolves_pending_approval(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    tool = DangerTool()
+    approval_policy.prepare_approval(tool, call_id="call-1", arguments={})
+
+    cli_module._handle_rpc_control_command(
+        {
+            "id": "approval-1",
+            "type": "approval",
+            "call_id": "call-1",
+            "approved": False,
+            "reason": "not safe",
+        },
+        running_prompt=None,
+        approval_policy=approval_policy,
+    )
+
+    async def wait_for_decision() -> object:
+        return await approval_policy.await_approval(tool, call_id="call-1", arguments={})
+
+    decision = anyio.run(wait_for_decision)
+    records = _jsonl_records(output.getvalue())
+    assert [record["type"] for record in records] == [
+        "rpc.command.started",
+        "rpc.command.finished",
+    ]
+    assert records[1]["command_id"] == "approval-1"
+    assert records[1]["ok"] is True
+    assert decision == cli_module.ToolApprovalDecision(approved=False, reason="not safe")
+
+
+def test_rpc_approval_policy_rejects_duplicate_decisions() -> None:
+    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    tool = DangerTool()
+    approval_policy.prepare_approval(tool, call_id="call-1", arguments={})
+
+    assert approval_policy.resolve_approval(
+        call_id="call-1",
+        approved=False,
+        reason="first decision",
+    )
+    assert not approval_policy.resolve_approval(call_id="call-1", approved=True)
+
+    async def wait_for_decision() -> object:
+        return await approval_policy.await_approval(tool, call_id="call-1", arguments={})
+
+    decision = anyio.run(wait_for_decision)
+    assert decision == cli_module.ToolApprovalDecision(
+        approved=False,
+        reason="first decision",
+    )
+
+
+def test_rpc_mode_denies_pending_approval_when_input_closes(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "build_runtime", build_tool_runtime)
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--allow-tool", "danger", "--session-dir", str(tmp_path)],
+        input='{"id":"cmd-1","type":"prompt","prompt":"use tool"}\n',
+        env={"WISP_PROVIDER": "tool-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    approval_resolved = next(
+        record for record in records if record["type"] == "tool.approval.resolved"
+    )
+    assert approval_resolved["approved"] is False
+    assert approval_resolved["reason"] == "RPC input closed before approval response"
+    tool_result = next(record for record in records if record["type"] == "tool.result")
+    assert tool_result["is_error"] is True
+    assert tool_result["output"] == "RPC input closed before approval response"
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [(record["command_id"], record["ok"]) for record in finished] == [("cmd-1", True)]
+
+
+def test_rpc_mode_approval_reports_unknown_call_id(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input='{"id":"approval-1","type":"approval","call_id":"missing","approved":true}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == [
+        "rpc.command.started",
+        "error",
+        "rpc.command.finished",
+    ]
+    assert records[1]["message"] == "No pending tool approval with call_id: missing"
+    assert records[2]["command_id"] == "approval-1"
+    assert records[2]["ok"] is False
+
+
+def test_rpc_mode_approval_requires_valid_fields(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"approval-1","type":"approval","approved":true}\n'
+            '{"id":"approval-2","type":"approval","call_id":"call-1"}\n'
+            '{"id":"approval-3","type":"approval","call_id":"call-1","approved":false,"reason":3}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    errors = [record["message"] for record in records if record["type"] == "error"]
+    assert errors == [
+        "RPC approval command requires string field: call_id",
+        "RPC approval command requires boolean field: approved",
+        "RPC approval command field reason must be a string",
+    ]
 
 
 def test_rpc_mode_rejects_commands_beyond_queue_cap_while_prompt_runs(

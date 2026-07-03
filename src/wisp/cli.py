@@ -7,7 +7,7 @@ import os
 import stat
 import sys
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -41,7 +41,8 @@ from wisp.providers.base import ProviderError
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import ToolRegistry, UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
-from wisp.tools.approval import ToolApprovalPolicy
+from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
+from wisp.tools.base import Tool
 
 
 class OutputMode(StrEnum):
@@ -87,6 +88,15 @@ class _RpcRunningPrompt:
     cancel_scope: anyio.CancelScope
 
 
+@dataclass
+class _RpcPendingApproval:
+    call_id: str
+    event: anyio.Event
+    approved: bool | None = None
+    reason: str | None = None
+    resolved: bool = False
+
+
 type _RpcControlEvent = _RpcInputCommand | _RpcInputClosed | _RpcPromptCompleted
 
 
@@ -94,6 +104,88 @@ _STDIN_READ_CHUNK_SIZE = 64 * 1024
 _STDIN_THREAD_POLL_INTERVAL = 0.01
 _STDIN_THREAD_QUEUE_SIZE = 100
 _MAX_QUEUED_RPC_COMMANDS = 100
+
+
+class _RpcToolApprovalPolicy(ToolApprovalPolicy):
+    """Tool approval policy that can wait for RPC approval responses."""
+
+    def __init__(self, fallback: ToolApprovalPolicy) -> None:
+        super().__init__(
+            approved_tools=fallback.approved_tools,
+            approved_safety=fallback.approved_safety,
+        )
+        self._pending: dict[str, _RpcPendingApproval] = {}
+        self._input_closed_reason: str | None = None
+
+    def prepare_approval(
+        self,
+        tool: Tool,
+        *,
+        call_id: str,
+        arguments: Mapping[str, object],
+    ) -> None:
+        if self.approves(tool):
+            return
+        pending = _RpcPendingApproval(call_id=call_id, event=anyio.Event())
+        self._pending[call_id] = pending
+        if self._input_closed_reason is not None:
+            self._resolve_pending(
+                pending,
+                approved=False,
+                reason=self._input_closed_reason,
+            )
+
+    async def await_approval(
+        self,
+        tool: Tool,
+        *,
+        call_id: str,
+        arguments: Mapping[str, object],
+    ) -> ToolApprovalDecision:
+        if self.approves(tool):
+            return ToolApprovalDecision(approved=True)
+        pending = self._pending.get(call_id)
+        if pending is None:
+            return ToolApprovalDecision(approved=False, reason=self.block_reason(tool))
+        try:
+            await pending.event.wait()
+            approved = pending.approved is True
+            reason = None if approved else pending.reason or "Tool execution was denied"
+            return ToolApprovalDecision(approved=approved, reason=reason)
+        finally:
+            self._pending.pop(call_id, None)
+
+    def resolve_approval(
+        self,
+        *,
+        call_id: str,
+        approved: bool,
+        reason: str | None = None,
+    ) -> bool:
+        pending = self._pending.get(call_id)
+        if pending is None or pending.resolved:
+            return False
+        self._resolve_pending(pending, approved=approved, reason=reason)
+        return True
+
+    def deny_pending_on_input_closed(self) -> None:
+        reason = "RPC input closed before approval response"
+        self._input_closed_reason = reason
+        for pending in tuple(self._pending.values()):
+            if not pending.resolved:
+                self._resolve_pending(pending, approved=False, reason=reason)
+
+    def _resolve_pending(
+        self,
+        pending: _RpcPendingApproval,
+        *,
+        approved: bool,
+        reason: str | None,
+    ) -> None:
+        pending.resolved = True
+        pending.approved = approved
+        pending.reason = None if approved else reason
+        pending.event.set()
 
 
 app = typer.Typer(
@@ -320,6 +412,7 @@ async def _run_rpc(
     sessions = JsonlSessionStore(config.session_dir)
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     session_state = _rpc_session_state(session)
+    approval_policy = _RpcToolApprovalPolicy(_print_mode_tool_approval_policy(approve_unsafe_tools))
     agent = Agent(
         provider=provider,
         sessions=sessions,
@@ -330,7 +423,7 @@ async def _run_rpc(
             allow_read_tools=allow_read_tools,
             allowed_tools=allowed_tools,
         ),
-        tool_approval_policy=_print_mode_tool_approval_policy(approve_unsafe_tools),
+        tool_approval_policy=approval_policy,
         max_tool_iterations=max_tool_iterations,
     )
 
@@ -354,6 +447,7 @@ async def _run_rpc(
                         task_group=task_group,
                         send=send,
                         running_prompt=running_prompt,
+                        approval_policy=approval_policy,
                     )
                     if should_shutdown:
                         stop_reader.set()
@@ -368,6 +462,7 @@ async def _run_rpc(
                 control_event = await receive.receive()
                 if isinstance(control_event, _RpcInputClosed):
                     stdin_closed = True
+                    approval_policy.deny_pending_on_input_closed()
                     continue
                 if isinstance(control_event, _RpcPromptCompleted):
                     if (
@@ -382,7 +477,7 @@ async def _run_rpc(
 
                 command = control_event.command
                 command_type = _rpc_command_type(command)
-                if running_prompt is not None and command_type != "cancel":
+                if running_prompt is not None and command_type not in {"approval", "cancel"}:
                     if len(queued_commands) >= _MAX_QUEUED_RPC_COMMANDS:
                         _reject_rpc_command(
                             command,
@@ -399,6 +494,7 @@ async def _run_rpc(
                     task_group=task_group,
                     send=send,
                     running_prompt=running_prompt,
+                    approval_policy=approval_policy,
                 )
                 if should_shutdown:
                     stop_reader.set()
@@ -415,6 +511,7 @@ def _dispatch_rpc_command(
     task_group: TaskGroup,
     send: MemoryObjectSendStream[_RpcControlEvent],
     running_prompt: _RpcRunningPrompt | None,
+    approval_policy: _RpcToolApprovalPolicy,
 ) -> tuple[_RpcRunningPrompt | None, bool]:
     command_type = _rpc_command_type(command)
     if command_type == "prompt":
@@ -429,7 +526,11 @@ def _dispatch_rpc_command(
         if new_session is not None:
             session_state.session = new_session
         return new_running_prompt, False
-    should_shutdown = _handle_rpc_control_command(command, running_prompt=running_prompt)
+    should_shutdown = _handle_rpc_control_command(
+        command,
+        running_prompt=running_prompt,
+        approval_policy=approval_policy,
+    )
     return running_prompt, should_shutdown
 
 
@@ -691,6 +792,7 @@ def _handle_rpc_control_command(
     command: dict[str, object],
     *,
     running_prompt: _RpcRunningPrompt | None,
+    approval_policy: _RpcToolApprovalPolicy,
 ) -> bool:
     command_type, command_id, id_error = _rpc_command_identity(command)
     _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
@@ -714,9 +816,62 @@ def _handle_rpc_control_command(
             running_prompt=running_prompt,
         )
         return False
+    if command_type == "approval":
+        _handle_rpc_approval_command(
+            command,
+            command_id=command_id,
+            command_type=command_type,
+            approval_policy=approval_policy,
+        )
+        return False
     message = f"Unknown RPC command: {command_type}"
     _write_rpc_command_error(command_id=command_id, command_type=command_type, message=message)
     return False
+
+
+def _handle_rpc_approval_command(
+    command: dict[str, object],
+    *,
+    command_id: str,
+    command_type: str,
+    approval_policy: _RpcToolApprovalPolicy,
+) -> None:
+    call_id = command.get("call_id")
+    if not isinstance(call_id, str) or not call_id:
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC approval command requires string field: call_id",
+        )
+        return
+    approved = command.get("approved")
+    if not isinstance(approved, bool):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC approval command requires boolean field: approved",
+        )
+        return
+    reason = command.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC approval command field reason must be a string",
+        )
+        return
+    if not approval_policy.resolve_approval(
+        call_id=call_id,
+        approved=approved,
+        reason=reason,
+    ):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=f"No pending tool approval with call_id: {call_id}",
+        )
+        return
+    _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 
 def _handle_rpc_cancel_command(
