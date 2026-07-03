@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 JsonObject = dict[str, object]
 
@@ -108,3 +108,34 @@ class RpcCommandFinished(WispEvent):
 class ErrorEvent(WispEvent):
     type: Literal["error"] = "error"
     message: str
+
+
+type KnownWispEvent = Annotated[
+    AgentStarted
+    | TokenDelta
+    | AssistantMessage
+    | ToolCallRequested
+    | ToolExecutionStarted
+    | ToolApprovalRequested
+    | ToolApprovalResolved
+    | ToolExecutionEnded
+    | ToolResultReady
+    | SessionSaved
+    | RpcCommandStarted
+    | RpcCommandFinished
+    | ErrorEvent,
+    Field(discriminator="type"),
+]
+KnownWispEventAdapter: TypeAdapter[KnownWispEvent] = TypeAdapter(KnownWispEvent)
+
+
+def wisp_event_from_json(line: str) -> KnownWispEvent:
+    """Parse one JSONL event line into a typed Wisp event."""
+
+    return KnownWispEventAdapter.validate_json(line)
+
+
+def wisp_event_from_dict(data: JsonObject) -> KnownWispEvent:
+    """Parse one event dictionary into a typed Wisp event."""
+
+    return KnownWispEventAdapter.validate_python(data)

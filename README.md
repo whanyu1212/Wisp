@@ -133,6 +133,23 @@ an optional denial `reason`. Cancellation is best-effort for providers/tools.
 Provider, model, tool exposure, approval, session, and max-iteration CLI flags
 apply to the whole RPC process.
 
+Python integrations that do not want to hand-roll JSONL can use the typed RPC
+client/controller helpers:
+
+```python
+from wisp.rpc import JsonlSubprocessRpcTransport, RpcController
+
+transport = await JsonlSubprocessRpcTransport.start()
+controller = RpcController(transport)
+command_id = await controller.prompt("hello")
+async for event in controller.events():
+    ...
+```
+
+`RpcController` exposes typed `prompt`, `cancel`, `approve`, and `shutdown`
+methods and yields parsed `WispEvent` objects. This is intended as the stable
+integration layer for future TUI work.
+
 Wisp does not cap model/tool rounds by default, matching Pi's permissive agent
 loop. If you want a non-interactive fuse for a run, pass
 `--max-tool-iterations <n>`.
