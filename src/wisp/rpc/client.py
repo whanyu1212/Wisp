@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from pathlib import Path
@@ -112,14 +113,21 @@ class JsonlSubprocessRpcTransport:
         *,
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
+        stderr: int | None = subprocess.DEVNULL,
     ) -> JsonlSubprocessRpcTransport:
-        """Start a subprocess running Wisp RPC mode."""
+        """Start a subprocess running Wisp RPC mode.
+
+        Stderr defaults to ``DEVNULL`` so an undrained stderr pipe cannot block
+        the RPC event stream. Pass ``stderr=subprocess.PIPE`` only if another
+        task will drain it.
+        """
 
         selected_command = tuple(command) if command is not None else _default_rpc_command()
         process = await anyio.open_process(
             selected_command,
             cwd=str(cwd) if cwd is not None else None,
             env=dict(env) if env is not None else None,
+            stderr=stderr,
         )
         return cls(process)
 

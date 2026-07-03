@@ -172,3 +172,37 @@ print(json.dumps(finished), flush=True)
         assert events[1].ok is True
 
     anyio.run(run)
+
+
+def test_jsonl_subprocess_rpc_transport_does_not_block_on_stderr(tmp_path: Path) -> None:
+    async def run() -> None:
+        script = """
+import json
+import sys
+sys.stderr.write("x" * 200000)
+sys.stderr.flush()
+command = json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "rpc.command.finished",
+    "command_id": command["id"],
+    "command_type": command["type"],
+    "ok": True,
+}), flush=True)
+"""
+        transport = await JsonlSubprocessRpcTransport.start(
+            [sys.executable, "-c", script],
+            cwd=tmp_path,
+        )
+        controller = RpcController(transport, command_id_factory=lambda _prefix: "shutdown-1")
+
+        await controller.shutdown()
+        with anyio.fail_after(5):
+            events = [event async for event in controller.events()]
+        await controller.close()
+
+        assert [event.type for event in events] == ["rpc.command.finished"]
+        assert isinstance(events[0], RpcCommandFinished)
+        assert events[0].command_id == "shutdown-1"
+        assert events[0].ok is True
+
+    anyio.run(run)
