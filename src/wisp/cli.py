@@ -46,11 +46,12 @@ from wisp.tools.base import Tool
 
 
 class OutputMode(StrEnum):
-    """Non-interactive output modes."""
+    """CLI output/application modes."""
 
     text = "text"
     json = "json"
     rpc = "rpc"
+    tui = "tui"
 
 
 class _JsonOutputModeError(ProviderError):
@@ -217,7 +218,7 @@ def cli_callback(
     ] = None,
     mode: Annotated[
         OutputMode,
-        typer.Option("--mode", help="Output mode: text, JSONL events, or RPC."),
+        typer.Option("--mode", help="Output mode: text, JSONL events, RPC, or TUI."),
     ] = OutputMode.text,
     allow_read_tools: Annotated[
         bool,
@@ -269,6 +270,13 @@ def cli_callback(
                 mode=mode,
                 console=console,
             )
+    elif mode is OutputMode.tui:
+        if prompt is not None:
+            _exit_with_error(
+                "--prompt is not used with --mode tui; enter prompts in the TUI",
+                mode=mode,
+                console=console,
+            )
     elif prompt is None:
         # no_args_is_help normally handles this. This branch keeps direct calls
         # to the callback friendly in tests or embedded usage.
@@ -299,6 +307,19 @@ def cli_callback(
                 continue_latest,
                 approve_unsafe_tools,
                 max_tool_iterations,
+            )
+        elif mode is OutputMode.tui:
+            from wisp.tui import TuiOptions, run_tui
+
+            anyio.run(
+                run_tui,
+                TuiOptions(
+                    config=config,
+                    allow_read_tools=allow_read_tools,
+                    allowed_tools=tuple(allow_tool or ()),
+                    approve_unsafe_tools=approve_unsafe_tools,
+                    max_tool_iterations=max_tool_iterations,
+                ),
             )
         else:
             assert prompt is not None
