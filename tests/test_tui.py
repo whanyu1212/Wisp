@@ -198,6 +198,38 @@ def test_tui_shell_queues_follow_up_while_running() -> None:
                 [RpcCommandFinished(command_id="prompt-2", command_type="prompt", ok=True)],
             ]
         )
+        inputs = deque(["first", "second"])
+
+        async def read(_prompt: str) -> str:
+            if inputs:
+                return inputs.popleft()
+            await anyio.sleep(0.1)
+            raise EOFError
+
+        console, output = _console()
+        shell = TuiShell(controller, console=console, prompt_reader=read)
+
+        await shell.run()
+
+        assert controller.prompts == ["first", "second"]
+        assert controller.shutdown_count == 1
+        rendered = output.getvalue()
+        assert "queued follow-up #1" in rendered
+        assert "running queued follow-up" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_discards_queued_follow_ups_after_input_eof() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            [
+                (
+                    0.05,
+                    [RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True)],
+                )
+            ]
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
@@ -207,11 +239,11 @@ def test_tui_shell_queues_follow_up_while_running() -> None:
 
         await shell.run()
 
-        assert controller.prompts == ["first", "second"]
+        assert controller.prompts == ["first"]
         assert controller.shutdown_count == 1
         rendered = output.getvalue()
         assert "queued follow-up #1" in rendered
-        assert "running queued follow-up" in rendered
+        assert "running queued follow-up" not in rendered
 
     anyio.run(run)
 

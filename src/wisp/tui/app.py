@@ -275,6 +275,7 @@ class TuiShell:
                 exit_after_denial=True,
             )
         if self.state.current_command_id is not None:
+            self.state.queued_prompts.clear()
             self.console.print(
                 "[yellow]Input closed; waiting for current prompt to finish "
                 "before shutdown.[/yellow]"
@@ -433,14 +434,14 @@ class TuiShell:
         self.state.pending_approval = None
         self.state.token_stream_started = False
         self.state.rendered_tokens = False
-        if not event.ok:
+        if self.state.exit_requested or not event.ok:
             self.state.queued_prompts.clear()
+        if self.state.exit_requested:
+            return await self._request_shutdown()
         if self.state.queued_prompts:
             queued_prompt = self.state.queued_prompts.popleft()
             self.console.print("[dim]running queued follow-up[/dim]")
             return await self._start_prompt(queued_prompt)
-        if self.state.exit_requested:
-            return await self._request_shutdown()
         self.state.status = TuiStatus.idle
         return False
 
