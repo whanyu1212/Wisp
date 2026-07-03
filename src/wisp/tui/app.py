@@ -100,6 +100,14 @@ async def run_tui(
             await selected_controller.close()
 
 
+class _TuiCommandStreamClosed(RuntimeError):
+    """Raised when RPC events end before the requested command finishes."""
+
+    def __init__(self, command_id: str) -> None:
+        super().__init__(f"RPC event stream ended before command completed: {command_id}")
+        self.command_id = command_id
+
+
 class TuiShell:
     """Small prompt/event shell that drives Wisp through `RpcController`."""
 
@@ -134,52 +142,114 @@ class TuiShell:
                 self._render_help()
                 continue
 
-            command_id = await self.controller.prompt(prompt)
             try:
-                await self._drain_prompt(command_id)
+                command_id = await self.controller.prompt(prompt)
+            except Exception as exc:
+                self.console.print(f"[red]failed to send prompt:[/red] {_markup_escape(exc)}")
+                return
+            try:
+                exit_requested = await self._drain_prompt(command_id)
             except KeyboardInterrupt:
                 self.console.print("\n[yellow]Cancelling current prompt...[/yellow]")
-                await self.controller.cancel(command_id)
-                await self._drain_prompt(command_id)
-
-    async def _shutdown(self) -> None:
-        shutdown_id = await self.controller.shutdown()
-        async for event in self.controller.events():
-            self._render_event(event)
-            if _is_finished(event, shutdown_id):
+                try:
+                    await self.controller.cancel(command_id)
+                except Exception as exc:
+                    self.console.print(f"[red]failed to send cancel:[/red] {_markup_escape(exc)}")
+                    return
+                try:
+                    await self._drain_prompt(command_id)
+                except _TuiCommandStreamClosed as exc:
+                    self._render_stream_closed(exc)
+                return
+            except _TuiCommandStreamClosed as exc:
+                self._render_stream_closed(exc)
+                return
+            if exit_requested:
+                await self._shutdown()
                 return
 
-    async def _drain_prompt(self, command_id: str) -> None:
+    async def _shutdown(self) -> None:
+        try:
+            shutdown_id = await self.controller.shutdown()
+        except Exception as exc:
+            self.console.print(f"[red]shutdown failed:[/red] {_markup_escape(exc)}")
+            return
+        try:
+            await self._drain_until_finished(shutdown_id, handle_approvals=False)
+        except _TuiCommandStreamClosed as exc:
+            self._render_stream_closed(exc)
+
+    async def _drain_prompt(self, command_id: str) -> bool:
+        return await self._drain_until_finished(command_id, handle_approvals=True)
+
+    async def _drain_until_finished(self, command_id: str, *, handle_approvals: bool) -> bool:
         token_stream_started = False
+        exit_requested = False
         async for event in self.controller.events():
-            if isinstance(event, ToolApprovalRequested):
+            if handle_approvals and isinstance(event, ToolApprovalRequested):
                 if token_stream_started:
                     self.console.print()
                     token_stream_started = False
-                await self._handle_approval(event)
+                should_continue = await self._handle_approval(event)
+                exit_requested = exit_requested or not should_continue
                 continue
             if isinstance(event, TokenDelta):
                 token_stream_started = True
                 self.console.print(event.delta, end="", markup=False, highlight=False)
                 continue
-            if isinstance(event, AssistantMessage) and token_stream_started:
+            if token_stream_started:
                 self.console.print()
                 token_stream_started = False
-                continue
+                if isinstance(event, AssistantMessage):
+                    continue
             self._render_event(event)
             if _is_finished(event, command_id):
-                return
+                return exit_requested
+        if token_stream_started:
+            self.console.print()
+        raise _TuiCommandStreamClosed(command_id)
 
-    async def _handle_approval(self, event: ToolApprovalRequested) -> None:
+    async def _handle_approval(self, event: ToolApprovalRequested) -> bool:
         self.console.print(
             "[yellow]? approval required[/yellow] "
             f"{_markup_escape(event.name)} ({_markup_escape(event.safety)}) "
             f"{_markup_escape(event.arguments)}"
         )
-        answer = (await self.prompt_reader("approve? [y/N] ")).strip().lower()
+        try:
+            answer = (await self.prompt_reader("approve? [y/N] ")).strip().lower()
+        except EOFError:
+            self.console.print("[yellow]Approval input closed; denying tool request.[/yellow]")
+            await self._send_approval(
+                event.call_id,
+                approved=False,
+                reason="Denied from TUI: input closed",
+            )
+            return False
+        except KeyboardInterrupt:
+            self.console.print("\n[yellow]Approval interrupted; denying tool request.[/yellow]")
+            await self._send_approval(
+                event.call_id,
+                approved=False,
+                reason="Denied from TUI: interrupted",
+            )
+            return False
         approved = answer in {"y", "yes"}
         reason = None if approved else "Denied from TUI"
-        await self.controller.approve(event.call_id, approved=approved, reason=reason)
+        return await self._send_approval(event.call_id, approved=approved, reason=reason)
+
+    async def _send_approval(
+        self,
+        call_id: str,
+        *,
+        approved: bool,
+        reason: str | None,
+    ) -> bool:
+        try:
+            await self.controller.approve(call_id, approved=approved, reason=reason)
+        except Exception as exc:
+            self.console.print(f"[red]failed to send approval:[/red] {_markup_escape(exc)}")
+            return False
+        return True
 
     def _render_help(self) -> None:
         self.console.print("Commands:")
@@ -214,6 +284,9 @@ class TuiShell:
             self.console.print(
                 f"[red]command failed:[/red] {_markup_escape(event.error or event.command_id)}"
             )
+
+    def _render_stream_closed(self, exc: _TuiCommandStreamClosed) -> None:
+        self.console.print(f"[red]{_markup_escape(str(exc))}[/red]")
 
 
 async def _default_prompt_reader(prompt: str) -> str:

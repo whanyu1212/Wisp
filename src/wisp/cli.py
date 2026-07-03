@@ -222,13 +222,13 @@ def cli_callback(
     ] = OutputMode.text,
     allow_read_tools: Annotated[
         bool,
-        typer.Option(help="Expose sandboxed read-only tools in print mode."),
+        typer.Option(help="Expose sandboxed read-only tools in agent modes."),
     ] = False,
     allow_tool: Annotated[
         list[str] | None,
         typer.Option(
             "--allow-tool",
-            help="Expose a specific tool in print mode. Can be repeated.",
+            help="Expose a specific tool in agent modes. Can be repeated.",
         ),
     ] = None,
     resume: Annotated[
