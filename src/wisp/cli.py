@@ -317,6 +317,8 @@ def cli_callback(
                     config=config,
                     allow_read_tools=allow_read_tools,
                     allowed_tools=tuple(allow_tool or ()),
+                    resume=resume,
+                    continue_latest=continue_latest,
                     approve_unsafe_tools=approve_unsafe_tools,
                     max_tool_iterations=max_tool_iterations,
                 ),

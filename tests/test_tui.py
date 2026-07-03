@@ -162,6 +162,7 @@ def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
             config=WispConfig(provider="fake", model="model-x", session_dir=tmp_path),
             allow_read_tools=True,
             allowed_tools=("bash",),
+            resume="session-123",
             approve_unsafe_tools=True,
             max_tool_iterations=3,
         )
@@ -181,6 +182,10 @@ def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
         command[command.index("--session-dir")],
         command[command.index("--session-dir") + 1],
     )
+    assert ("--resume", "session-123") == (
+        command[command.index("--resume")],
+        command[command.index("--resume") + 1],
+    )
     assert "--allow-read-tools" in command
     assert ("--allow-tool", "bash") == (
         command[command.index("--allow-tool")],
@@ -191,6 +196,17 @@ def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
         command[command.index("--max-tool-iterations")],
         command[command.index("--max-tool-iterations") + 1],
     )
+
+
+def test_tui_rpc_command_includes_continue_latest(tmp_path: Path) -> None:
+    command = _rpc_command(
+        TuiOptions(
+            config=WispConfig(provider="fake", session_dir=tmp_path),
+            continue_latest=True,
+        )
+    )
+
+    assert "--continue" in command
 
 
 def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) -> None:
@@ -204,10 +220,19 @@ def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) ->
 
     result = runner.invoke(
         app,
-        ["--mode", "tui", "--provider", "fake", "--session-dir", str(tmp_path)],
+        [
+            "--mode",
+            "tui",
+            "--provider",
+            "fake",
+            "--session-dir",
+            str(tmp_path),
+            "--continue",
+        ],
     )
 
     assert result.exit_code == 0, result.output
     assert len(captured) == 1
     assert captured[0].config.provider == "fake"
     assert captured[0].config.session_dir == tmp_path
+    assert captured[0].continue_latest is True

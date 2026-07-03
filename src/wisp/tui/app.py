@@ -39,6 +39,8 @@ class TuiOptions:
     config: WispConfig
     allow_read_tools: bool = False
     allowed_tools: tuple[str, ...] = ()
+    resume: str | None = None
+    continue_latest: bool = False
     approve_unsafe_tools: bool = False
     max_tool_iterations: int | None = None
 
@@ -222,6 +224,10 @@ def _rpc_command(options: TuiOptions) -> tuple[str, ...]:
     ]
     if options.config.model is not None:
         command.extend(("--model", options.config.model))
+    if options.resume is not None:
+        command.extend(("--resume", options.resume))
+    if options.continue_latest:
+        command.append("--continue")
     if options.allow_read_tools:
         command.append("--allow-read-tools")
     for tool_name in options.allowed_tools:
