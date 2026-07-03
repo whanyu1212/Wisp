@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 from collections import deque
 from collections.abc import AsyncIterator
@@ -23,26 +24,50 @@ from wisp.events import (
     ToolCallRequested,
     ToolResultReady,
 )
-from wisp.tui import TuiOptions, TuiShell
-from wisp.tui.app import _rpc_command
+from wisp.tui import TuiInteractionState, TuiOptions, TuiShell, TuiStatus
+from wisp.tui.app import _InputLine, _InputMode, _rpc_command
+
+type EventBatch = list[KnownWispEvent]
+type ScriptedBatch = EventBatch | tuple[float, EventBatch]
 
 
 class ScriptedController:
-    def __init__(self, event_batches: list[list[KnownWispEvent]]) -> None:
-        self.event_batches = deque(event_batches)
+    def __init__(
+        self,
+        prompt_events: list[ScriptedBatch] | None = None,
+        *,
+        approval_events: list[ScriptedBatch] | None = None,
+        cancel_events: list[ScriptedBatch] | None = None,
+        shutdown_events: list[ScriptedBatch] | None = None,
+        close_after_prompt: bool = False,
+    ) -> None:
+        self.prompt_events = deque(prompt_events or [])
+        self.approval_events = deque(approval_events or [])
+        self.cancel_events = deque(cancel_events or [])
+        self.shutdown_events = deque(shutdown_events or [])
+        self.close_after_prompt = close_after_prompt
         self.prompts: list[str] = []
         self.approvals: list[tuple[str, bool, str | None]] = []
         self.cancelled: list[str] = []
         self.shutdown_count = 0
         self.closed = False
+        self._send, self._receive = anyio.create_memory_object_stream[KnownWispEvent](100)
 
     async def prompt(self, prompt: str, *, command_id: str | None = None) -> str:
         self.prompts.append(prompt)
-        return command_id or "prompt-1"
+        selected_id = command_id or f"prompt-{len(self.prompts)}"
+        await self._emit_scripted(
+            self.prompt_events,
+            default=[RpcCommandFinished(command_id=selected_id, command_type="prompt", ok=True)],
+        )
+        if self.close_after_prompt:
+            await self._send.aclose()
+        return selected_id
 
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str:
         self.cancelled.append(target_id)
-        return command_id or "cancel-1"
+        await self._emit_scripted(self.cancel_events, default=[])
+        return command_id or f"cancel-{len(self.cancelled)}"
 
     async def approve(
         self,
@@ -53,28 +78,61 @@ class ScriptedController:
         command_id: str | None = None,
     ) -> str:
         self.approvals.append((call_id, approved, reason))
-        return command_id or "approval-1"
+        await self._emit_scripted(self.approval_events, default=[])
+        return command_id or f"approval-{len(self.approvals)}"
 
     async def shutdown(self, *, command_id: str | None = None) -> str:
         self.shutdown_count += 1
-        return command_id or "shutdown-1"
+        selected_id = command_id or f"shutdown-{self.shutdown_count}"
+        await self._emit_scripted(
+            self.shutdown_events,
+            default=[RpcCommandFinished(command_id=selected_id, command_type="shutdown", ok=True)],
+        )
+        return selected_id
 
     def events(self) -> AsyncIterator[KnownWispEvent]:
         return self._events()
 
     async def _events(self) -> AsyncIterator[KnownWispEvent]:
-        batch = self.event_batches.popleft()
-        for event in batch:
-            yield event
+        async with self._receive.clone() as receive:
+            async for event in receive:
+                yield event
 
     async def close(self) -> None:
         self.closed = True
+        await self._send.aclose()
+
+    async def emit(self, events: EventBatch) -> None:
+        await self._emit(events)
+
+    async def _emit_scripted(
+        self,
+        batches: deque[ScriptedBatch],
+        *,
+        default: EventBatch,
+    ) -> None:
+        batch = batches.popleft() if batches else default
+        if isinstance(batch, tuple):
+            delay, events = batch
+            asyncio.create_task(self._emit_after(delay, events))
+            return
+        await self._emit(batch)
+
+    async def _emit_after(self, delay: float, events: EventBatch) -> None:
+        await anyio.sleep(delay)
+        await self._emit(events)
+
+    async def _emit(self, events: EventBatch) -> None:
+        for event in events:
+            await self._send.send(event)
 
 
 async def _reader_from(inputs: list[str]) -> object:
     values = deque(inputs)
 
     async def read(_prompt: str) -> str:
+        if not values:
+            raise EOFError
         return values.popleft()
 
     return read
@@ -93,15 +151,14 @@ def test_tui_shell_runs_prompt_then_shutdown() -> None:
                     TokenDelta(delta="hello"),
                     AssistantMessage(content="hello"),
                     RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
-                ],
-                [RpcCommandFinished(command_id="shutdown-1", command_type="shutdown", ok=True)],
+                ]
             ]
         )
         console, output = _console()
         shell = TuiShell(
             controller,
             console=console,
-            prompt_reader=await _reader_from(["hello", "/quit"]),
+            prompt_reader=await _reader_from(["hello"]),
         )
 
         await shell.run()
@@ -110,6 +167,127 @@ def test_tui_shell_runs_prompt_then_shutdown() -> None:
         assert controller.shutdown_count == 1
         assert "Wisp TUI MVP" in output.getvalue()
         assert "hello" in output.getvalue()
+
+    anyio.run(run)
+
+
+def test_tui_shell_quit_then_eof_sends_one_shutdown() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(
+            controller,
+            console=_console()[0],
+            prompt_reader=await _reader_from(["/quit"]),
+        )
+
+        await shell.run()
+
+        assert controller.shutdown_count == 1
+
+    anyio.run(run)
+
+
+def test_tui_shell_queues_follow_up_while_running() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            [
+                (
+                    0.05,
+                    [RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True)],
+                ),
+                [RpcCommandFinished(command_id="prompt-2", command_type="prompt", ok=True)],
+            ]
+        )
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["first", "second"]),
+        )
+
+        await shell.run()
+
+        assert controller.prompts == ["first", "second"]
+        assert controller.shutdown_count == 1
+        rendered = output.getvalue()
+        assert "queued follow-up #1" in rendered
+        assert "running queued follow-up" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_clears_queued_follow_ups_after_failed_prompt() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            [
+                (
+                    0.05,
+                    [
+                        RpcCommandFinished(
+                            command_id="prompt-1",
+                            command_type="prompt",
+                            ok=False,
+                            error="failed",
+                        )
+                    ],
+                )
+            ]
+        )
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["first", "second"]),
+        )
+
+        await shell.run()
+
+        assert controller.prompts == ["first"]
+        assert controller.shutdown_count == 1
+        rendered = output.getvalue()
+        assert "queued follow-up #1" in rendered
+        assert "running queued follow-up" not in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_interrupt_cancels_running_prompt() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            [
+                (
+                    0.05,
+                    [
+                        RpcCommandFinished(
+                            command_id="prompt-1",
+                            command_type="prompt",
+                            ok=False,
+                            error="RPC command cancelled: prompt-1",
+                        )
+                    ],
+                )
+            ]
+        )
+
+        interrupted = False
+
+        async def read(prompt: str) -> str:
+            nonlocal interrupted
+            if prompt == "wisp> ":
+                return "hello"
+            if not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            raise EOFError
+
+        console, output = _console()
+        shell = TuiShell(controller, console=console, prompt_reader=read)
+
+        await shell.run()
+
+        assert controller.cancelled == ["prompt-1"]
+        assert controller.shutdown_count == 1
+        assert "Cancelling current prompt" in output.getvalue()
 
     anyio.run(run)
 
@@ -129,15 +307,14 @@ def test_tui_shell_separates_streamed_text_from_tool_events() -> None:
                     ),
                     AssistantMessage(content="partial"),
                     RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
-                ],
-                [RpcCommandFinished(command_id="shutdown-1", command_type="shutdown", ok=True)],
+                ]
             ]
         )
         console, output = _console()
         shell = TuiShell(
             controller,
             console=console,
-            prompt_reader=await _reader_from(["use tool", "/quit"]),
+            prompt_reader=await _reader_from(["use tool"]),
         )
 
         await shell.run()
@@ -151,44 +328,68 @@ def test_tui_shell_separates_streamed_text_from_tool_events() -> None:
 
 def test_tui_shell_denies_tool_approval() -> None:
     async def run() -> None:
-        controller = ScriptedController(
-            [
-                [
-                    ToolApprovalRequested(
-                        call_id="call-1",
-                        name="danger",
-                        arguments={"path": "file.txt"},
-                        safety="mutating",
-                    ),
-                    ToolApprovalResolved(
-                        call_id="call-1",
-                        name="danger",
-                        approved=False,
-                        reason="Denied from TUI",
-                    ),
-                    ToolResultReady(
-                        call_id="call-1",
-                        name="danger",
-                        output="Denied from TUI",
-                        is_error=True,
-                    ),
-                    RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
-                ],
-                [RpcCommandFinished(command_id="shutdown-1", command_type="shutdown", ok=True)],
-            ]
-        )
-        console, output = _console()
-        shell = TuiShell(
-            controller,
-            console=console,
-            prompt_reader=await _reader_from(["use tool", "n", "/quit"]),
+        controller = ScriptedController()
+        shell = TuiShell(controller)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.waiting_for_approval
+        shell.state.pending_approval = ToolApprovalRequested(
+            call_id="call-1",
+            name="danger",
+            arguments={"path": "file.txt"},
+            safety="mutating",
         )
 
-        await shell.run()
+        should_exit = await shell._handle_input_line(_InputLine(text="n", mode=_InputMode.approval))
 
+        assert should_exit is False
         assert controller.approvals == [("call-1", False, "Denied from TUI")]
-        assert "approval required" in output.getvalue()
-        assert "denied" in output.getvalue()
+        assert shell.state.pending_approval is None
+
+    anyio.run(run)
+
+
+def test_tui_shell_does_not_approve_from_stale_running_input() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(controller)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.waiting_for_approval
+        shell.state.pending_approval = ToolApprovalRequested(
+            call_id="call-1",
+            name="danger",
+            arguments={"path": "file.txt"},
+            safety="mutating",
+        )
+
+        should_exit = await shell._handle_input_line(
+            _InputLine(text="yes", mode=_InputMode.running)
+        )
+
+        assert should_exit is False
+        assert controller.approvals == []
+        assert list(shell.state.queued_prompts) == ["yes"]
+
+    anyio.run(run)
+
+
+def test_tui_shell_denies_tool_approval_on_blank_answer() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(controller)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.waiting_for_approval
+        shell.state.pending_approval = ToolApprovalRequested(
+            call_id="call-1",
+            name="danger",
+            arguments={"path": "file.txt"},
+            safety="mutating",
+        )
+
+        should_exit = await shell._handle_input_line(_InputLine(text="", mode=_InputMode.approval))
+
+        assert should_exit is False
+        assert controller.approvals == [("call-1", False, "Denied from TUI")]
+        assert list(shell.state.queued_prompts) == []
 
     anyio.run(run)
 
@@ -203,7 +404,11 @@ def test_tui_shell_denies_approval_on_input_eof_then_shutdown() -> None:
                         name="danger",
                         arguments={"path": "file.txt"},
                         safety="mutating",
-                    ),
+                    )
+                ]
+            ],
+            approval_events=[
+                [
                     ToolApprovalResolved(
                         call_id="call-1",
                         name="danger",
@@ -211,15 +416,14 @@ def test_tui_shell_denies_approval_on_input_eof_then_shutdown() -> None:
                         reason="Denied from TUI: input closed",
                     ),
                     RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
-                ],
-                [RpcCommandFinished(command_id="shutdown-1", command_type="shutdown", ok=True)],
-            ]
+                ]
+            ],
         )
 
         async def read(prompt: str) -> str:
-            if prompt == "approve? [y/N] ":
-                raise EOFError
-            return "use tool"
+            if prompt == "wisp> ":
+                return "use tool"
+            raise EOFError
 
         console, output = _console()
         shell = TuiShell(controller, console=console, prompt_reader=read)
@@ -245,7 +449,7 @@ def test_tui_shell_reports_prompt_send_failure() -> None:
         shell = TuiShell(
             controller,
             console=console,
-            prompt_reader=await _reader_from(["hello", "again"]),
+            prompt_reader=await _reader_from(["hello"]),
         )
 
         await shell.run()
@@ -260,12 +464,15 @@ def test_tui_shell_reports_prompt_send_failure() -> None:
 
 def test_tui_shell_reports_rpc_eof_before_prompt_finished() -> None:
     async def run() -> None:
-        controller = ScriptedController([[ErrorEvent(message="Unknown provider")]])
+        controller = ScriptedController(
+            [[ErrorEvent(message="Unknown provider")]],
+            close_after_prompt=True,
+        )
         console, output = _console()
         shell = TuiShell(
             controller,
             console=console,
-            prompt_reader=await _reader_from(["hello", "again"]),
+            prompt_reader=await _reader_from(["hello"]),
         )
 
         await shell.run()
@@ -291,15 +498,14 @@ def test_tui_shell_escapes_approval_markup() -> None:
                         safety="mutating",
                     ),
                     RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
-                ],
-                [RpcCommandFinished(command_id="shutdown-1", command_type="shutdown", ok=True)],
+                ]
             ]
         )
         console, output = _console()
         shell = TuiShell(
             controller,
             console=console,
-            prompt_reader=await _reader_from(["use tool", "y", "/quit"]),
+            prompt_reader=await _reader_from(["use tool", "y"]),
         )
 
         await shell.run()
@@ -309,6 +515,14 @@ def test_tui_shell_escapes_approval_markup() -> None:
         assert "[black]hidden[/black]" in rendered
 
     anyio.run(run)
+
+
+def test_tui_interaction_state_tracks_status() -> None:
+    state = TuiInteractionState()
+
+    assert state.status is TuiStatus.idle
+    state.status = TuiStatus.running
+    assert state.status is TuiStatus.running
 
 
 def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:

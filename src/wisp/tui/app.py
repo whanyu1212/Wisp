@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import os
 import sys
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Protocol
 
 import anyio
+from anyio.streams.memory import MemoryObjectSendStream
 from rich.console import Console
 from rich.markup import escape
 
@@ -48,6 +51,30 @@ class TuiOptions:
     max_tool_iterations: int | None = None
 
 
+class TuiStatus(StrEnum):
+    """High-level TUI interaction state."""
+
+    idle = "idle"
+    running = "running"
+    waiting_for_approval = "waiting_for_approval"
+    exiting = "exiting"
+
+
+@dataclass
+class TuiInteractionState:
+    """Mutable interaction state for the minimal TUI event loop."""
+
+    status: TuiStatus = TuiStatus.idle
+    current_command_id: str | None = None
+    shutdown_command_id: str | None = None
+    pending_approval: ToolApprovalRequested | None = None
+    queued_prompts: deque[str] = field(default_factory=deque)
+    exit_requested: bool = False
+    input_closed: bool = False
+    token_stream_started: bool = False
+    rendered_tokens: bool = False
+
+
 class TuiController(Protocol):
     """Controller surface consumed by the TUI shell."""
 
@@ -72,6 +99,42 @@ class TuiController(Protocol):
 
 
 PromptReader = Callable[[str], Awaitable[str]]
+
+
+class _InputMode(StrEnum):
+    idle = "idle"
+    running = "running"
+    approval = "approval"
+    exiting = "exiting"
+
+
+@dataclass(frozen=True)
+class _InputLine:
+    text: str
+    mode: _InputMode
+
+
+@dataclass(frozen=True)
+class _InputClosed:
+    mode: _InputMode
+
+
+@dataclass(frozen=True)
+class _InputInterrupted:
+    mode: _InputMode
+
+
+@dataclass(frozen=True)
+class _RpcEvent:
+    event: KnownWispEvent
+
+
+@dataclass(frozen=True)
+class _RpcEventsClosed:
+    error: str | None = None
+
+
+type _TuiSignal = _InputLine | _InputClosed | _InputInterrupted | _RpcEvent | _RpcEventsClosed
 
 
 async def run_tui(
@@ -103,14 +166,6 @@ async def run_tui(
             await selected_controller.close()
 
 
-class _TuiCommandStreamClosed(RuntimeError):
-    """Raised when RPC events end before the requested command finishes."""
-
-    def __init__(self, command_id: str) -> None:
-        super().__init__(f"RPC event stream ended before command completed: {command_id}")
-        self.command_id = command_id
-
-
 class TuiShell:
     """Small prompt/event shell that drives Wisp through `RpcController`."""
 
@@ -120,127 +175,212 @@ class TuiShell:
         *,
         console: Console | None = None,
         prompt_reader: PromptReader | None = None,
+        state: TuiInteractionState | None = None,
     ) -> None:
         self.controller = controller
         self.console = console or Console()
         self.prompt_reader = prompt_reader or _default_prompt_reader
+        self.state = state or TuiInteractionState()
 
     async def run(self) -> None:
-        """Run the interactive prompt loop."""
+        """Run the interactive prompt/event loop."""
 
         self.console.print("[bold cyan]Wisp TUI MVP[/bold cyan]")
-        self.console.print("Type a prompt, /help, /quit, or press Ctrl-C to exit.")
-        while True:
-            try:
-                prompt = (await self.prompt_reader("wisp> ")).strip()
-            except (EOFError, KeyboardInterrupt):
-                await self._shutdown()
-                return
-            if not prompt:
-                continue
-            if prompt in {"/quit", "/exit", ":q"}:
-                await self._shutdown()
-                return
-            if prompt == "/help":
-                self._render_help()
-                continue
-
-            try:
-                command_id = await self.controller.prompt(prompt)
-            except Exception as exc:
-                self.console.print(f"[red]failed to send prompt:[/red] {_markup_escape(exc)}")
-                return
-            try:
-                exit_requested = await self._drain_prompt(command_id)
-            except KeyboardInterrupt:
-                self.console.print("\n[yellow]Cancelling current prompt...[/yellow]")
-                try:
-                    await self.controller.cancel(command_id)
-                except Exception as exc:
-                    self.console.print(f"[red]failed to send cancel:[/red] {_markup_escape(exc)}")
+        self.console.print("Type a prompt, /help, /quit, Ctrl-C to interrupt, or Ctrl-D to exit.")
+        send, receive = anyio.create_memory_object_stream[_TuiSignal](100)
+        async with anyio.create_task_group() as task_group, send, receive:
+            task_group.start_soon(self._read_inputs, send.clone())
+            task_group.start_soon(self._read_rpc_events, send.clone())
+            while True:
+                signal = await receive.receive()
+                should_exit = await self._handle_signal(signal)
+                if should_exit:
+                    task_group.cancel_scope.cancel()
                     return
-                try:
-                    await self._drain_prompt(command_id)
-                except _TuiCommandStreamClosed as exc:
-                    self._render_stream_closed(exc)
-                return
-            except _TuiCommandStreamClosed as exc:
-                self._render_stream_closed(exc)
-                return
-            if exit_requested:
-                await self._shutdown()
-                return
 
-    async def _shutdown(self) -> None:
+    async def _read_inputs(self, send: MemoryObjectSendStream[_TuiSignal]) -> None:
+        async with send:
+            while True:
+                mode = _input_mode_for_status(self.state.status)
+                try:
+                    text = (await self.prompt_reader(_prompt_for_mode(mode))).strip()
+                except EOFError:
+                    await send.send(_InputClosed(mode=mode))
+                    return
+                except KeyboardInterrupt:
+                    await send.send(_InputInterrupted(mode=mode))
+                    continue
+                await send.send(_InputLine(text=text, mode=mode))
+
+    async def _read_rpc_events(self, send: MemoryObjectSendStream[_TuiSignal]) -> None:
+        async with send:
+            try:
+                async for event in self.controller.events():
+                    await send.send(_RpcEvent(event=event))
+            except Exception as exc:  # noqa: BLE001 - surface event reader failures in the TUI
+                await send.send(_RpcEventsClosed(error=str(exc)))
+            else:
+                await send.send(_RpcEventsClosed())
+
+    async def _handle_signal(self, signal: _TuiSignal) -> bool:
+        if isinstance(signal, _InputLine):
+            return await self._handle_input_line(signal)
+        if isinstance(signal, _InputClosed):
+            return await self._handle_input_closed(signal)
+        if isinstance(signal, _InputInterrupted):
+            return await self._handle_input_interrupted(signal)
+        if isinstance(signal, _RpcEvent):
+            return await self._handle_rpc_event(signal.event)
+        return self._handle_rpc_closed(signal)
+
+    async def _handle_input_line(self, signal: _InputLine) -> bool:
+        text = signal.text
+        if self.state.status is TuiStatus.exiting:
+            return False
+        if self.state.pending_approval is not None:
+            if text in {"/quit", "/exit", ":q"}:
+                return await self._handle_quit()
+            if text == "/help":
+                self._render_help()
+                return False
+            if signal.mode is _InputMode.approval:
+                return await self._answer_pending_approval(text, exit_after_denial=False)
+            if text and self.state.current_command_id is not None:
+                self.state.queued_prompts.append(text)
+                self.console.print(f"[dim]queued follow-up #{len(self.state.queued_prompts)}[/dim]")
+            return False
+        if not text:
+            return False
+        if text in {"/quit", "/exit", ":q"}:
+            return await self._handle_quit()
+        if text == "/help":
+            self._render_help()
+            return False
+        if self.state.current_command_id is not None:
+            self.state.queued_prompts.append(text)
+            self.console.print(f"[dim]queued follow-up #{len(self.state.queued_prompts)}[/dim]")
+            return False
+        return await self._start_prompt(text)
+
+    async def _handle_input_closed(self, signal: _InputClosed) -> bool:
+        self.state.input_closed = True
+        if self.state.status is TuiStatus.exiting:
+            return False
+        self.state.exit_requested = True
+        if self.state.pending_approval is not None:
+            return await self._answer_pending_approval(
+                "",
+                approved=False,
+                reason="Denied from TUI: input closed",
+                exit_after_denial=True,
+            )
+        if self.state.current_command_id is not None:
+            self.console.print(
+                "[yellow]Input closed; waiting for current prompt to finish "
+                "before shutdown.[/yellow]"
+            )
+            return False
+        return await self._request_shutdown()
+
+    async def _handle_input_interrupted(self, signal: _InputInterrupted) -> bool:
+        if self.state.pending_approval is not None:
+            return await self._answer_pending_approval(
+                "",
+                approved=False,
+                reason="Denied from TUI: interrupted",
+                exit_after_denial=False,
+            )
+        if self.state.current_command_id is not None:
+            return await self._cancel_current("Cancelling current prompt...")
+        self.console.print("[dim]input cleared[/dim]")
+        return False
+
+    async def _handle_quit(self) -> bool:
+        self.state.exit_requested = True
+        self.state.queued_prompts.clear()
+        if self.state.pending_approval is not None:
+            return await self._answer_pending_approval(
+                "",
+                approved=False,
+                reason="Denied from TUI: quit requested",
+                exit_after_denial=True,
+            )
+        if self.state.current_command_id is not None:
+            return await self._cancel_current("Quit requested; cancelling current prompt...")
+        return await self._request_shutdown()
+
+    async def _start_prompt(self, prompt: str) -> bool:
+        self.state.status = TuiStatus.running
+        self.state.pending_approval = None
+        self.state.token_stream_started = False
+        self.state.rendered_tokens = False
+        try:
+            command_id = await self.controller.prompt(prompt)
+        except Exception as exc:
+            self.console.print(f"[red]failed to send prompt:[/red] {_markup_escape(exc)}")
+            return True
+        self.state.current_command_id = command_id
+        return False
+
+    async def _cancel_current(self, message: str) -> bool:
+        command_id = self.state.current_command_id
+        if command_id is None:
+            return False
+        self.console.print(f"\n[yellow]{_markup_escape(message)}[/yellow]")
+        self.state.queued_prompts.clear()
+        try:
+            await self.controller.cancel(command_id)
+        except Exception as exc:
+            self.console.print(f"[red]failed to send cancel:[/red] {_markup_escape(exc)}")
+            return True
+        self.state.status = TuiStatus.running
+        self.state.pending_approval = None
+        return False
+
+    async def _request_shutdown(self) -> bool:
+        if self.state.shutdown_command_id is not None:
+            self.state.status = TuiStatus.exiting
+            return False
+        self.state.status = TuiStatus.exiting
         try:
             shutdown_id = await self.controller.shutdown()
         except Exception as exc:
             self.console.print(f"[red]shutdown failed:[/red] {_markup_escape(exc)}")
-            return
-        try:
-            await self._drain_until_finished(shutdown_id, handle_approvals=False)
-        except _TuiCommandStreamClosed as exc:
-            self._render_stream_closed(exc)
+            return True
+        self.state.shutdown_command_id = shutdown_id
+        return False
 
-    async def _drain_prompt(self, command_id: str) -> bool:
-        return await self._drain_until_finished(command_id, handle_approvals=True)
-
-    async def _drain_until_finished(self, command_id: str, *, handle_approvals: bool) -> bool:
-        token_stream_started = False
-        rendered_tokens = False
-        exit_requested = False
-        async for event in self.controller.events():
-            if handle_approvals and isinstance(event, ToolApprovalRequested):
-                if token_stream_started:
-                    self.console.print()
-                    token_stream_started = False
-                should_continue = await self._handle_approval(event)
-                exit_requested = exit_requested or not should_continue
-                continue
-            if isinstance(event, TokenDelta):
-                token_stream_started = True
-                rendered_tokens = True
-                self.console.print(event.delta, end="", markup=False, highlight=False)
-                continue
-            if token_stream_started:
-                self.console.print()
-                token_stream_started = False
-            if isinstance(event, AssistantMessage) and rendered_tokens:
-                continue
-            self._render_event(event)
-            if _is_finished(event, command_id):
-                return exit_requested
-        if token_stream_started:
-            self.console.print()
-        raise _TuiCommandStreamClosed(command_id)
-
-    async def _handle_approval(self, event: ToolApprovalRequested) -> bool:
-        self.console.print(
-            "[yellow]? approval required[/yellow] "
-            f"{_markup_escape(event.name)} ({_markup_escape(event.safety)}) "
-            f"{_markup_escape(event.arguments)}"
+    async def _answer_pending_approval(
+        self,
+        answer: str,
+        *,
+        approved: bool | None = None,
+        reason: str | None = None,
+        exit_after_denial: bool,
+    ) -> bool:
+        approval = self.state.pending_approval
+        if approval is None:
+            return False
+        selected_approved = (
+            approved if approved is not None else answer.strip().lower() in {"y", "yes"}
         )
-        try:
-            answer = (await self.prompt_reader("approve? [y/N] ")).strip().lower()
-        except EOFError:
+        selected_reason = None if selected_approved else reason or "Denied from TUI"
+        if reason == "Denied from TUI: input closed":
             self.console.print("[yellow]Approval input closed; denying tool request.[/yellow]")
-            await self._send_approval(
-                event.call_id,
-                approved=False,
-                reason="Denied from TUI: input closed",
-            )
-            return False
-        except KeyboardInterrupt:
+        elif reason == "Denied from TUI: interrupted":
             self.console.print("\n[yellow]Approval interrupted; denying tool request.[/yellow]")
-            await self._send_approval(
-                event.call_id,
-                approved=False,
-                reason="Denied from TUI: interrupted",
-            )
-            return False
-        approved = answer in {"y", "yes"}
-        reason = None if approved else "Denied from TUI"
-        return await self._send_approval(event.call_id, approved=approved, reason=reason)
+        elif reason == "Denied from TUI: quit requested":
+            self.console.print("[yellow]Quit requested; denying pending tool request.[/yellow]")
+        ok = await self._send_approval(
+            approval.call_id,
+            approved=selected_approved,
+            reason=selected_reason,
+        )
+        self.state.pending_approval = None
+        self.state.status = TuiStatus.running if self.state.current_command_id else TuiStatus.idle
+        if exit_after_denial and not selected_approved:
+            self.state.exit_requested = True
+        return not ok
 
     async def _send_approval(
         self,
@@ -256,11 +396,89 @@ class TuiShell:
             return False
         return True
 
+    async def _handle_rpc_event(self, event: KnownWispEvent) -> bool:
+        if isinstance(event, TokenDelta):
+            self.state.token_stream_started = True
+            self.state.rendered_tokens = True
+            self.console.print(event.delta, end="", markup=False, highlight=False)
+            return False
+        if self.state.token_stream_started:
+            self.console.print()
+            self.state.token_stream_started = False
+        if isinstance(event, AssistantMessage) and self.state.rendered_tokens:
+            return False
+        if isinstance(event, ToolApprovalRequested):
+            self.state.pending_approval = event
+            self.state.status = TuiStatus.waiting_for_approval
+            self._render_approval_request(event)
+            if self.state.input_closed:
+                return await self._answer_pending_approval(
+                    "",
+                    approved=False,
+                    reason="Denied from TUI: input closed",
+                    exit_after_denial=True,
+                )
+            return False
+
+        self._render_event(event)
+        if isinstance(event, RpcCommandFinished):
+            if event.command_id == self.state.shutdown_command_id:
+                return True
+            if event.command_id == self.state.current_command_id:
+                return await self._finish_current_prompt(event)
+        return False
+
+    async def _finish_current_prompt(self, event: RpcCommandFinished) -> bool:
+        self.state.current_command_id = None
+        self.state.pending_approval = None
+        self.state.token_stream_started = False
+        self.state.rendered_tokens = False
+        if not event.ok:
+            self.state.queued_prompts.clear()
+        if self.state.queued_prompts:
+            queued_prompt = self.state.queued_prompts.popleft()
+            self.console.print("[dim]running queued follow-up[/dim]")
+            return await self._start_prompt(queued_prompt)
+        if self.state.exit_requested:
+            return await self._request_shutdown()
+        self.state.status = TuiStatus.idle
+        return False
+
+    def _handle_rpc_closed(self, signal: _RpcEventsClosed) -> bool:
+        if signal.error is not None:
+            self.console.print(
+                f"[red]RPC event reader failed:[/red] {_markup_escape(signal.error)}"
+            )
+        if self.state.token_stream_started:
+            self.console.print()
+            self.state.token_stream_started = False
+        if self.state.current_command_id is not None:
+            self.console.print(
+                "[red]RPC event stream ended before command completed: "
+                f"{_markup_escape(self.state.current_command_id)}[/red]"
+            )
+        elif self.state.shutdown_command_id is not None:
+            self.console.print(
+                "[red]RPC event stream ended before shutdown completed: "
+                f"{_markup_escape(self.state.shutdown_command_id)}[/red]"
+            )
+        elif signal.error is None:
+            self.console.print("[red]RPC event stream ended unexpectedly.[/red]")
+        return True
+
     def _render_help(self) -> None:
         self.console.print("Commands:")
         self.console.print("  /help        show this help")
         self.console.print("  /quit, /exit quit the TUI")
+        self.console.print("While a prompt is running, submitted input is queued as a follow-up.")
         self.console.print("Tool approvals prompt with approve? [y/N].")
+
+    def _render_approval_request(self, event: ToolApprovalRequested) -> None:
+        self.console.print(
+            "[yellow]? approval required[/yellow] "
+            f"{_markup_escape(event.name)} ({_markup_escape(event.safety)}) "
+            f"{_markup_escape(event.arguments)}"
+        )
 
     def _render_event(self, event: KnownWispEvent) -> None:
         if isinstance(event, AssistantMessage):
@@ -290,12 +508,9 @@ class TuiShell:
                 f"[red]command failed:[/red] {_markup_escape(event.error or event.command_id)}"
             )
 
-    def _render_stream_closed(self, exc: _TuiCommandStreamClosed) -> None:
-        self.console.print(f"[red]{_markup_escape(str(exc))}[/red]")
-
 
 async def _default_prompt_reader(prompt: str) -> str:
-    return await anyio.to_thread.run_sync(input, prompt)
+    return await anyio.to_thread.run_sync(input, prompt, abandon_on_cancel=True)
 
 
 async def _preflight_tui_options(options: TuiOptions) -> None:
@@ -343,8 +558,24 @@ def _rpc_env() -> dict[str, str]:
     return dict(os.environ)
 
 
-def _is_finished(event: KnownWispEvent, command_id: str) -> bool:
-    return isinstance(event, RpcCommandFinished) and event.command_id == command_id
+def _input_mode_for_status(status: TuiStatus) -> _InputMode:
+    if status is TuiStatus.waiting_for_approval:
+        return _InputMode.approval
+    if status is TuiStatus.running:
+        return _InputMode.running
+    if status is TuiStatus.exiting:
+        return _InputMode.exiting
+    return _InputMode.idle
+
+
+def _prompt_for_mode(mode: _InputMode) -> str:
+    if mode is _InputMode.approval:
+        return "approve? [y/N] "
+    if mode is _InputMode.running:
+        return "wisp(running)> "
+    if mode is _InputMode.exiting:
+        return "wisp(exiting)> "
+    return "wisp> "
 
 
 def _first_line(text: str) -> str:
