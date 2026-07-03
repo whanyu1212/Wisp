@@ -27,7 +27,7 @@ from wisp.events import (
     ToolCallRequested,
     ToolResultReady,
 )
-from wisp.tui import TuiInteractionState, TuiOptions, TuiShell, TuiStatus
+from wisp.tui import LineTuiRenderer, TuiInteractionState, TuiOptions, TuiShell, TuiStatus
 from wisp.tui.app import _default_prompt_reader, _InputLine, _InputMode, _rpc_command
 
 type EventBatch = list[KnownWispEvent]
@@ -144,6 +144,38 @@ async def _reader_from(inputs: list[str]) -> object:
 def _console() -> tuple[Console, io.StringIO]:
     output = io.StringIO()
     return Console(file=output, force_terminal=False, width=120), output
+
+
+def test_tui_shell_uses_injected_renderer() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.calls: list[str] = []
+
+        def __bool__(self) -> bool:
+            return False
+
+        def startup(self) -> None:
+            self.calls.append("startup")
+
+        def running(self) -> None:
+            self.calls.append("running")
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from(["hello"]),
+        )
+
+        await shell.run()
+
+        assert renderer.calls == ["startup", "running"]
+        assert controller.prompts == ["hello"]
+
+    anyio.run(run)
 
 
 def test_tui_shell_runs_prompt_then_shutdown() -> None:
@@ -556,6 +588,25 @@ def test_tui_shell_reports_prompt_send_failure() -> None:
         rendered = output.getvalue()
         assert "failed to send prompt" in rendered
         assert "[red]closed pipe[/red]" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_reports_shutdown_failure_with_original_wording() -> None:
+    class FailingShutdownController(ScriptedController):
+        async def shutdown(self, *, command_id: str | None = None) -> str:
+            self.shutdown_count += 1
+            raise RuntimeError("closed")
+
+    async def run() -> None:
+        controller = FailingShutdownController()
+        console, output = _console()
+        shell = TuiShell(controller, console=console)
+
+        should_exit = await shell._request_shutdown()
+
+        assert should_exit is True
+        assert "shutdown failed: closed" in output.getvalue()
 
     anyio.run(run)
 
