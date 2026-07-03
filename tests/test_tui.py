@@ -152,6 +152,9 @@ def test_tui_shell_uses_injected_renderer() -> None:
             super().__init__(_console()[0])
             self.calls: list[str] = []
 
+        def __bool__(self) -> bool:
+            return False
+
         def startup(self) -> None:
             self.calls.append("startup")
 

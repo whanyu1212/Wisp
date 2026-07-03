@@ -176,7 +176,7 @@ class TuiShell:
         renderer: TuiRenderer | None = None,
     ) -> None:
         self.controller = controller
-        self.renderer = renderer or LineTuiRenderer(console)
+        self.renderer = renderer if renderer is not None else LineTuiRenderer(console)
         self.prompt_reader = prompt_reader or _default_prompt_reader
         self.state = state or TuiInteractionState()
 
