@@ -137,13 +137,26 @@ Python integrations that do not want to hand-roll JSONL can use the typed RPC
 client/controller helpers:
 
 ```python
+from wisp.events import RpcCommandFinished
 from wisp.rpc import JsonlSubprocessRpcTransport, RpcController
 
 transport = await JsonlSubprocessRpcTransport.start()
 controller = RpcController(transport)
-command_id = await controller.prompt("hello")
-async for event in controller.events():
-    ...
+prompt_id = await controller.prompt("hello")
+shutdown_id = None
+try:
+    async for event in controller.events():
+        ...
+        if isinstance(event, RpcCommandFinished) and event.command_id == prompt_id:
+            shutdown_id = await controller.shutdown()
+        elif (
+            isinstance(event, RpcCommandFinished)
+            and shutdown_id is not None
+            and event.command_id == shutdown_id
+        ):
+            break
+finally:
+    await controller.close()
 ```
 
 `RpcController` exposes typed `prompt`, `cancel`, `approve`, and `shutdown`

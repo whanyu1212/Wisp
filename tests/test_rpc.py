@@ -60,6 +60,17 @@ def test_rpc_commands_serialize_as_jsonl_and_parse() -> None:
     assert rpc_command_from_json(line) == command
 
 
+def test_rpc_commands_allow_protocol_optional_id() -> None:
+    command = PromptCommand(prompt="hello")
+
+    line = command.to_json_line()
+    parsed = rpc_command_from_json('{"type":"prompt","prompt":"hello"}')
+
+    assert json.loads(line) == {"type": "prompt", "prompt": "hello"}
+    assert command.id is None
+    assert parsed == command
+
+
 def test_wisp_event_from_json_returns_typed_event() -> None:
     event = wisp_event_from_json(
         '{"type":"rpc.command.finished","command_id":"cmd-1","command_type":"prompt","ok":true}'

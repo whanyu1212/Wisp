@@ -12,7 +12,7 @@ class RpcCommandModel(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    id: str
+    id: str | None = None
 
     def to_json_line(self) -> str:
         """Serialize this command as one JSONL command line."""
