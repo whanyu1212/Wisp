@@ -15,6 +15,7 @@ from typing import Protocol
 
 import anyio
 from rich.console import Console
+from rich.markup import escape
 
 from wisp.config import WispConfig
 from wisp.events import (
@@ -171,7 +172,9 @@ class TuiShell:
 
     async def _handle_approval(self, event: ToolApprovalRequested) -> None:
         self.console.print(
-            f"[yellow]? approval required[/yellow] {event.name} ({event.safety}) {event.arguments}"
+            "[yellow]? approval required[/yellow] "
+            f"{_markup_escape(event.name)} ({_markup_escape(event.safety)}) "
+            f"{_markup_escape(event.arguments)}"
         )
         answer = (await self.prompt_reader("approve? [y/N] ")).strip().lower()
         approved = answer in {"y", "yes"}
@@ -188,22 +191,29 @@ class TuiShell:
         if isinstance(event, AssistantMessage):
             self.console.print(event.content, markup=False, highlight=False)
         elif isinstance(event, ToolCallRequested):
-            self.console.print(f"[blue]→ tool[/blue] {event.name} {event.arguments}")
+            self.console.print(
+                f"[blue]→ tool[/blue] {_markup_escape(event.name)} "
+                f"{_markup_escape(event.arguments)}"
+            )
         elif isinstance(event, ToolApprovalResolved):
             if event.approved:
-                self.console.print(f"[green]✓ approved[/green] {event.name}")
+                self.console.print(f"[green]✓ approved[/green] {_markup_escape(event.name)}")
             else:
-                reason = f": {event.reason}" if event.reason else ""
-                self.console.print(f"[red]! denied[/red] {event.name}{reason}")
+                reason = f": {_markup_escape(event.reason)}" if event.reason else ""
+                self.console.print(f"[red]! denied[/red] {_markup_escape(event.name)}{reason}")
         elif isinstance(event, ToolResultReady):
             status = "[red]✗[/red]" if event.is_error else "[green]✓[/green]"
-            self.console.print(f"{status} tool {event.name}: {_first_line(event.output)}")
+            tool_name = _markup_escape(event.name)
+            output = _markup_escape(_first_line(event.output))
+            self.console.print(f"{status} tool {tool_name}: {output}")
         elif isinstance(event, ErrorEvent):
-            self.console.print(f"[red]error:[/red] {event.message}")
+            self.console.print(f"[red]error:[/red] {_markup_escape(event.message)}")
         elif isinstance(event, SessionSaved):
-            self.console.print(f"[dim]session saved: {event.path}[/dim]")
+            self.console.print(f"[dim]session saved: {_markup_escape(event.path)}[/dim]")
         elif isinstance(event, RpcCommandFinished) and not event.ok:
-            self.console.print(f"[red]command failed:[/red] {event.error or event.command_id}")
+            self.console.print(
+                f"[red]command failed:[/red] {_markup_escape(event.error or event.command_id)}"
+            )
 
 
 async def _default_prompt_reader(prompt: str) -> str:
@@ -249,3 +259,7 @@ def _is_finished(event: KnownWispEvent, command_id: str) -> bool:
 
 def _first_line(text: str) -> str:
     return next((line.strip() for line in text.splitlines() if line.strip()), "(no output)")
+
+
+def _markup_escape(value: object) -> str:
+    return escape(str(value))

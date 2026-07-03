@@ -156,6 +156,38 @@ def test_tui_shell_denies_tool_approval() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_escapes_approval_markup() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            [
+                [
+                    ToolApprovalRequested(
+                        call_id="call-1",
+                        name="[red]write[/red]",
+                        arguments={"path": "[black]hidden[/black]"},
+                        safety="mutating",
+                    ),
+                    RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
+                ],
+                [RpcCommandFinished(command_id="shutdown-1", command_type="shutdown", ok=True)],
+            ]
+        )
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["use tool", "y", "/quit"]),
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert "[red]write[/red]" in rendered
+        assert "[black]hidden[/black]" in rendered
+
+    anyio.run(run)
+
+
 def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
     command = _rpc_command(
         TuiOptions(
