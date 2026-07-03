@@ -31,6 +31,8 @@ from wisp.events import (
     ToolResultReady,
 )
 from wisp.rpc import JsonlSubprocessRpcTransport, RpcController
+from wisp.runtime.extensions import build_runtime
+from wisp.sessions.jsonl import JsonlSessionStore
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,7 @@ async def run_tui(
     selected_controller = controller
     owns_controller = selected_controller is None
     if selected_controller is None:
+        await _preflight_tui_options(options)
         transport = await JsonlSubprocessRpcTransport.start(_rpc_command(options), env=_rpc_env())
         selected_controller = RpcController(transport)
 
@@ -184,6 +187,7 @@ class TuiShell:
 
     async def _drain_until_finished(self, command_id: str, *, handle_approvals: bool) -> bool:
         token_stream_started = False
+        rendered_tokens = False
         exit_requested = False
         async for event in self.controller.events():
             if handle_approvals and isinstance(event, ToolApprovalRequested):
@@ -195,13 +199,14 @@ class TuiShell:
                 continue
             if isinstance(event, TokenDelta):
                 token_stream_started = True
+                rendered_tokens = True
                 self.console.print(event.delta, end="", markup=False, highlight=False)
                 continue
             if token_stream_started:
                 self.console.print()
                 token_stream_started = False
-                if isinstance(event, AssistantMessage):
-                    continue
+            if isinstance(event, AssistantMessage) and rendered_tokens:
+                continue
             self._render_event(event)
             if _is_finished(event, command_id):
                 return exit_requested
@@ -291,6 +296,18 @@ class TuiShell:
 
 async def _default_prompt_reader(prompt: str) -> str:
     return await anyio.to_thread.run_sync(input, prompt)
+
+
+async def _preflight_tui_options(options: TuiOptions) -> None:
+    runtime = await build_runtime()
+    runtime.providers.get(options.config.provider)
+    for tool_name in set(options.allowed_tools):
+        runtime.tools.get(tool_name)
+    sessions = JsonlSessionStore(options.config.session_dir)
+    if options.resume is not None:
+        sessions.load(options.resume)
+    elif options.continue_latest:
+        sessions.latest()
 
 
 def _rpc_command(options: TuiOptions) -> tuple[str, ...]:

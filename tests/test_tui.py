@@ -121,6 +121,13 @@ def test_tui_shell_separates_streamed_text_from_tool_events() -> None:
                 [
                     TokenDelta(delta="partial"),
                     ToolCallRequested(call_id="call-1", name="read", arguments={"path": "x"}),
+                    ToolResultReady(
+                        call_id="call-1",
+                        name="read",
+                        output="ok",
+                        is_error=False,
+                    ),
+                    AssistantMessage(content="partial"),
                     RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
                 ],
                 [RpcCommandFinished(command_id="shutdown-1", command_type="shutdown", ok=True)],
@@ -135,7 +142,9 @@ def test_tui_shell_separates_streamed_text_from_tool_events() -> None:
 
         await shell.run()
 
-        assert "partial\n→ tool" in output.getvalue()
+        rendered = output.getvalue()
+        assert "partial\n→ tool" in rendered
+        assert rendered.count("partial") == 1
 
     anyio.run(run)
 
@@ -353,6 +362,30 @@ def test_tui_rpc_command_includes_continue_latest(tmp_path: Path) -> None:
     )
 
     assert "--continue" in command
+
+
+def test_cli_tui_mode_validates_provider_before_prompting() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["--mode", "tui", "--provider", "missing"])
+
+    assert result.exit_code == 1
+    assert "Unknown provider: missing" in result.output
+    assert "Wisp TUI MVP" not in result.output
+
+
+def test_cli_tui_mode_validates_continue_before_prompting(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "tui", "--provider", "fake", "--session-dir", str(tmp_path), "--continue"],
+    )
+
+    assert result.exit_code == 1
+    assert "No sessions found" in result.output
+    assert str(tmp_path.name) in result.output
+    assert "Wisp TUI MVP" not in result.output
 
 
 def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) -> None:
