@@ -163,6 +163,22 @@ finally:
 methods and yields parsed `WispEvent` objects. This is intended as the stable
 integration layer for future TUI work.
 
+## TUI MVP
+
+Wisp also includes a minimal terminal UI shell built on the RPC controller:
+
+```bash
+uv run wisp --mode tui --provider fake
+uv run wisp --mode tui --provider openai --allow-read-tools
+uv run wisp --mode tui --provider openai --allow-tool bash
+```
+
+The TUI currently provides a prompt loop, streamed assistant text, basic tool
+call/result rendering, interactive approval prompts for mutating/command tools,
+and `/help` plus `/quit` commands. It is intentionally small and not yet a
+full-screen UI; the goal is to dogfood the RPC/controller layer before adding
+richer layout, transcript panes, and session controls.
+
 Wisp does not cap model/tool rounds by default, matching Pi's permissive agent
 loop. If you want a non-interactive fuse for a run, pass
 `--max-tool-iterations <n>`.
