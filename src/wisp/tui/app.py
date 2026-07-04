@@ -447,11 +447,13 @@ class TuiShell:
             reason=selected_reason,
         )
         self.state.pending_approval = None
+        if not ok:
+            return True
         self.state.status = TuiStatus.running if self.state.current_command_id else TuiStatus.idle
         if exit_after_denial and not selected_approved:
             self.state.exit_requested = True
         self._sync_view()
-        return not ok
+        return False
 
     async def _send_approval(
         self,
@@ -502,6 +504,7 @@ class TuiShell:
         return False
 
     async def _finish_current_prompt(self, event: RpcCommandFinished) -> bool:
+        was_cancelled = (not event.ok) and _is_rpc_cancelled_message(event.error)
         self.state.current_command_id = None
         self.state.pending_approval = None
         self.state.token_stream_started = False
@@ -523,6 +526,8 @@ class TuiShell:
         self.state.cancel_requested = False
         self.state.status = TuiStatus.idle
         if event.ok:
+            self._sync_view()
+        elif was_cancelled:
             self._sync_view()
         else:
             self._update_view(

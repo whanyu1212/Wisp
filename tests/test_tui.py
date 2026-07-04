@@ -603,6 +603,86 @@ def test_tui_shell_preserves_error_footer_after_failed_prompt_completion() -> No
     anyio.run(run)
 
 
+def test_tui_shell_preserves_cancelled_footer_after_cancelled_prompt_completion() -> None:
+    async def run() -> None:
+        class RecordingFullscreenRenderer(FullscreenTuiRenderer):
+            def __init__(self) -> None:
+                super().__init__(_console()[0], clear_screen=False)
+                self.snapshots: list[TuiViewSnapshot] = []
+
+            def view_updated(self, snapshot: TuiViewSnapshot) -> None:
+                self.snapshots.append(snapshot)
+                super().view_updated(snapshot)
+
+        renderer = RecordingFullscreenRenderer()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.running
+        shell.state.cancel_requested = True
+        cancelled = RpcCommandFinished(
+            command_id="prompt-1",
+            command_type="prompt",
+            ok=False,
+            error="RPC command cancelled: prompt-1",
+        )
+
+        shell._render_event(cancelled)
+        should_exit = await shell._finish_current_prompt(cancelled)
+
+        assert should_exit is False
+        assert shell.state.status is TuiStatus.idle
+        assert all(snapshot.status != "error" for snapshot in renderer.snapshots)
+        assert renderer.snapshots[-1].status == "idle"
+        assert any(entry.content == "cancelled" for entry in renderer.state.transcript)
+
+    anyio.run(run)
+
+
+def test_tui_shell_preserves_error_footer_when_approval_send_fails() -> None:
+    class FailingApprovalController(ScriptedController):
+        async def approve(
+            self,
+            call_id: str,
+            *,
+            approved: bool = True,
+            reason: str | None = None,
+            command_id: str | None = None,
+        ) -> str:
+            raise RuntimeError("approval pipe closed")
+
+    async def run() -> None:
+        class RecordingFullscreenRenderer(FullscreenTuiRenderer):
+            def __init__(self) -> None:
+                super().__init__(_console()[0], clear_screen=False)
+                self.snapshots: list[TuiViewSnapshot] = []
+
+            def view_updated(self, snapshot: TuiViewSnapshot) -> None:
+                self.snapshots.append(snapshot)
+                super().view_updated(snapshot)
+
+        renderer = RecordingFullscreenRenderer()
+        shell = TuiShell(FailingApprovalController(), renderer=renderer)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.waiting_for_approval
+        shell.state.pending_approval = ToolApprovalRequested(
+            call_id="call-1",
+            name="bash",
+            arguments={"command": "echo hi"},
+            safety="command",
+        )
+
+        should_exit = await shell._answer_pending_approval("y", exit_after_denial=False)
+
+        assert should_exit is True
+        assert shell.state.pending_approval is None
+        assert renderer.snapshots[-1].status == "error"
+        assert any(
+            "failed to send approval" in entry.content for entry in renderer.state.transcript
+        )
+
+    anyio.run(run)
+
+
 def test_tui_shell_interrupt_cancels_running_prompt() -> None:
     async def run() -> None:
         controller = ScriptedController(
