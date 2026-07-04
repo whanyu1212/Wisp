@@ -46,7 +46,7 @@ class TuiRenderer(Protocol):
 
     def queued_follow_up(self, count: int) -> None: ...
 
-    def running_queued_follow_up(self) -> None: ...
+    def running_queued_follow_up(self, count: int) -> None: ...
 
     def input_closed_finishing_prompt(self) -> None: ...
 
@@ -114,8 +114,8 @@ class LineTuiRenderer:
     def queued_follow_up(self, count: int) -> None:
         self.console.print(f"[dim]queued follow-up #{count}[/dim]")
 
-    def running_queued_follow_up(self) -> None:
-        self.console.print("[dim]running queued follow-up[/dim]")
+    def running_queued_follow_up(self, count: int) -> None:
+        self.console.print(f"[dim]running queued follow-up; {count} queued[/dim]")
 
     def input_closed_finishing_prompt(self) -> None:
         self.console.print("[dim]input closed; finishing current prompt[/dim]")
@@ -281,9 +281,10 @@ class FullscreenTuiRenderer:
         self._append("system", f"queued follow-up #{count}", style="dim")
         self._refresh()
 
-    def running_queued_follow_up(self) -> None:
+    def running_queued_follow_up(self, count: int) -> None:
         self.state.status = "running queued follow-up"
         self.state.input_hint = "wisp(running)> "
+        self.state.queued_follow_ups = count
         self._append("system", "running queued follow-up", style="dim")
         self._refresh()
 

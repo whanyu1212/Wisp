@@ -472,6 +472,49 @@ def test_tui_shell_queues_follow_up_while_running() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_preserves_remaining_fullscreen_follow_up_count() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            [
+                (
+                    0.05,
+                    [RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True)],
+                ),
+                (
+                    0.05,
+                    [RpcCommandFinished(command_id="prompt-2", command_type="prompt", ok=True)],
+                ),
+                [RpcCommandFinished(command_id="prompt-3", command_type="prompt", ok=True)],
+            ]
+        )
+        inputs = deque(["first", "second", "third"])
+
+        async def read(_prompt: str) -> str:
+            if inputs:
+                return inputs.popleft()
+            await anyio.sleep(0.2)
+            raise EOFError
+
+        class RecordingFullscreenRenderer(FullscreenTuiRenderer):
+            def __init__(self) -> None:
+                super().__init__(_console()[0], clear_screen=False)
+                self.running_follow_up_counts: list[int] = []
+
+            def running_queued_follow_up(self, count: int) -> None:
+                self.running_follow_up_counts.append(count)
+                super().running_queued_follow_up(count)
+
+        renderer = RecordingFullscreenRenderer()
+        shell = TuiShell(controller, renderer=renderer, prompt_reader=read)
+
+        await shell.run()
+
+        assert controller.prompts == ["first", "second", "third"]
+        assert renderer.running_follow_up_counts == [1, 0]
+
+    anyio.run(run)
+
+
 def test_tui_shell_discards_queued_follow_ups_after_input_eof() -> None:
     async def run() -> None:
         controller = ScriptedController(

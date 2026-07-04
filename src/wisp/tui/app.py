@@ -445,7 +445,7 @@ class TuiShell:
             return await self._request_shutdown()
         if self.state.queued_prompts:
             queued_prompt = self.state.queued_prompts.popleft()
-            self.renderer.running_queued_follow_up()
+            self.renderer.running_queued_follow_up(len(self.state.queued_prompts))
             return await self._start_prompt(queued_prompt)
         self.state.cancel_requested = False
         self.state.status = TuiStatus.idle
