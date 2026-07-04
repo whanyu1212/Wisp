@@ -206,6 +206,17 @@ def test_fullscreen_tui_renderer_renders_layout_regions(tmp_path: Path) -> None:
     assert renderer.state.last_session == "session.jsonl"
 
 
+def test_fullscreen_tui_renderer_does_not_clear_terminal_by_default() -> None:
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=True, color_system=None, width=80)
+    renderer = FullscreenTuiRenderer(console)
+
+    renderer.startup()
+
+    assert renderer.clear_screen is False
+    assert "\x1b[2J" not in output.getvalue()
+
+
 def test_fullscreen_tui_renderer_restores_idle_footer_after_cancellation() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
 

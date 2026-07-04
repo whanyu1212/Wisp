@@ -245,8 +245,11 @@ class FullscreenTuiRenderer:
         self.console = console or Console()
         self.state = FullscreenTuiState()
         self.max_transcript_entries = max_transcript_entries
-        is_terminal = bool(getattr(self.console, "is_terminal", False))
-        self.clear_screen = is_terminal if clear_screen is None else clear_screen
+        # Input is still line-oriented via input(), so clearing a real terminal
+        # during background RPC refreshes would erase the active input line and
+        # any partially typed follow-up. Keep clearing opt-in until input is
+        # owned by the renderer/live full-screen UI.
+        self.clear_screen = False if clear_screen is None else clear_screen
 
     def startup(self) -> None:
         self.state.status = "idle"
