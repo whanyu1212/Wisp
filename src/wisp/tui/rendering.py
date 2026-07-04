@@ -33,8 +33,20 @@ class TuiRendererKind(StrEnum):
     fullscreen = "fullscreen"
 
 
+@dataclass(frozen=True)
+class TuiViewSnapshot:
+    """Renderer-facing snapshot of shell-owned TUI view state."""
+
+    status: str
+    input_hint: str
+    queued_follow_ups: int = 0
+    last_session: str | None = None
+
+
 class TuiRenderer(Protocol):
     """Renderer surface consumed by the TUI controller loop."""
+
+    def view_updated(self, snapshot: TuiViewSnapshot) -> None: ...
 
     def startup(self) -> None: ...
 
@@ -90,6 +102,9 @@ class LineTuiRenderer:
 
     def __init__(self, console: Console | None = None) -> None:
         self.console = console or Console()
+
+    def view_updated(self, snapshot: TuiViewSnapshot) -> None:
+        pass
 
     def startup(self) -> None:
         self.console.print("[bold cyan]Wisp TUI MVP[/bold cyan]")
@@ -251,9 +266,14 @@ class FullscreenTuiRenderer:
         # owned by the renderer/live full-screen UI.
         self.clear_screen = False if clear_screen is None else clear_screen
 
+    def view_updated(self, snapshot: TuiViewSnapshot) -> None:
+        self.state.status = snapshot.status
+        self.state.input_hint = snapshot.input_hint
+        self.state.queued_follow_ups = snapshot.queued_follow_ups
+        self.state.last_session = snapshot.last_session
+        self._refresh()
+
     def startup(self) -> None:
-        self.state.status = "idle"
-        self.state.input_hint = "wisp> "
         self._refresh()
 
     def help(self) -> None:
@@ -272,24 +292,17 @@ class FullscreenTuiRenderer:
         self._append("user", prompt, style="bold")
 
     def running(self) -> None:
-        self.state.status = "running"
-        self.state.input_hint = "wisp(running)> "
         self._refresh()
 
     def queued_follow_up(self, count: int) -> None:
-        self.state.queued_follow_ups = count
         self._append("system", f"queued follow-up #{count}", style="dim")
         self._refresh()
 
     def running_queued_follow_up(self, count: int) -> None:
-        self.state.status = "running queued follow-up"
-        self.state.input_hint = "wisp(running)> "
-        self.state.queued_follow_ups = count
         self._append("system", "running queued follow-up", style="dim")
         self._refresh()
 
     def input_closed_finishing_prompt(self) -> None:
-        self.state.queued_follow_ups = 0
         self._append("system", "input closed; finishing current prompt", style="dim")
         self._refresh()
 
@@ -298,7 +311,6 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def cancelling(self, message: str) -> None:
-        self.state.status = "cancelling"
         self._append("system", message, style="yellow")
         self._refresh()
 
@@ -319,24 +331,18 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def send_failed(self, action: str, error: object) -> None:
-        self.state.status = "error"
         self._append("error", f"failed to send {action}: {error}", style="red")
         self._refresh()
 
     def shutdown_failed(self, error: object) -> None:
-        self.state.status = "error"
         self._append("error", f"shutdown failed: {error}", style="red")
         self._refresh()
 
     def cancelled(self) -> None:
-        self.state.status = "idle"
-        self.state.input_hint = "wisp> "
-        self.state.queued_follow_ups = 0
         self._append("system", "cancelled", style="yellow")
         self._refresh()
 
     def token_delta(self, delta: str) -> None:
-        self.state.status = "running"
         self.state.streaming_text += delta
         # The layout foundation still uses line-oriented input and a plain
         # console renderer. Redrawing the full layout for every token would
@@ -350,8 +356,6 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def approval_request(self, event: ToolApprovalRequested) -> None:
-        self.state.status = "waiting for approval"
-        self.state.input_hint = "approve? [y/N] "
         self._append(
             "approval",
             f"? approval required {event.name} ({event.safety}) {event.arguments}",
@@ -365,8 +369,6 @@ class FullscreenTuiRenderer:
         elif isinstance(event, ToolCallRequested):
             self._append("tool", f"→ tool {event.name} {event.arguments}", style="blue")
         elif isinstance(event, ToolApprovalResolved):
-            self.state.status = "running"
-            self.state.input_hint = "wisp(running)> "
             if event.approved:
                 self._append("approval", f"✓ approved {event.name}", style="green")
             else:
@@ -378,35 +380,26 @@ class FullscreenTuiRenderer:
                 "tool", f"{status} tool {event.name}: {_first_line(event.output)}", style="blue"
             )
         elif isinstance(event, ErrorEvent):
-            self.state.status = "error"
             self._append("error", f"error: {event.message}", style="red")
         elif isinstance(event, SessionSaved):
-            self.state.last_session = _compact_session_path(event.path)
-            self._append("session", f"session saved: {self.state.last_session}", style="dim")
-        elif isinstance(event, RpcCommandFinished):
-            if event.ok and event.command_type in {"prompt", "shutdown"}:
-                self.state.status = "idle"
-                self.state.input_hint = "wisp> "
-                self.state.queued_follow_ups = 0
-            elif not event.ok:
-                self.state.status = "error"
-                if event.command_type == "prompt":
-                    self.state.input_hint = "wisp> "
-                    self.state.queued_follow_ups = 0
-                self._append(
-                    "error",
-                    f"command failed: {event.error or event.command_id}",
-                    style="red",
-                )
+            self._append(
+                "session",
+                f"session saved: {_compact_session_path(event.path)}",
+                style="dim",
+            )
+        elif isinstance(event, RpcCommandFinished) and not event.ok:
+            self._append(
+                "error",
+                f"command failed: {event.error or event.command_id}",
+                style="red",
+            )
         self._refresh()
 
     def rpc_event_reader_failed(self, error: str) -> None:
-        self.state.status = "error"
         self._append("error", f"RPC event reader failed: {error}", style="red")
         self._refresh()
 
     def rpc_stream_ended_before_command(self, command_id: str) -> None:
-        self.state.status = "error"
         self._append(
             "error",
             f"RPC event stream ended before command completed: {command_id}",
@@ -415,7 +408,6 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def rpc_stream_ended_before_shutdown(self, command_id: str) -> None:
-        self.state.status = "error"
         self._append(
             "error",
             f"RPC event stream ended before shutdown completed: {command_id}",
@@ -424,7 +416,6 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def rpc_stream_ended_unexpectedly(self) -> None:
-        self.state.status = "error"
         self._append("error", "RPC event stream ended unexpectedly.", style="red")
         self._refresh()
 
