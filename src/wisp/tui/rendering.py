@@ -337,7 +337,10 @@ class FullscreenTuiRenderer:
     def token_delta(self, delta: str) -> None:
         self.state.status = "running"
         self.state.streaming_text += delta
-        self._refresh()
+        # The layout foundation still uses line-oriented input and a plain
+        # console renderer. Redrawing the full layout for every token would
+        # append repeated frames when clear_screen is disabled, so coalesce
+        # streamed text until end_token_stream() can render one updated frame.
 
     def end_token_stream(self) -> None:
         if self.state.streaming_text:

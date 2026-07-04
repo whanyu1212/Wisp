@@ -217,6 +217,26 @@ def test_fullscreen_tui_renderer_does_not_clear_terminal_by_default() -> None:
     assert "\x1b[2J" not in output.getvalue()
 
 
+def test_fullscreen_tui_renderer_coalesces_streaming_token_redraws() -> None:
+    console, output = _console()
+    renderer = FullscreenTuiRenderer(console, clear_screen=False)
+
+    renderer.startup()
+    renderer.running()
+    before_tokens = output.getvalue()
+
+    renderer.token_delta("hel")
+    renderer.token_delta("lo")
+
+    assert renderer.state.streaming_text == "hello"
+    assert output.getvalue() == before_tokens
+
+    renderer.end_token_stream()
+
+    assert renderer.state.streaming_text == ""
+    assert "hello" in output.getvalue()
+
+
 def test_fullscreen_tui_renderer_restores_idle_footer_after_cancellation() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
 
