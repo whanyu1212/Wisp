@@ -729,6 +729,34 @@ def test_tui_shell_interrupt_cancels_running_prompt() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_preserves_cancelling_footer_while_cancel_is_pending() -> None:
+    async def run() -> None:
+        class RecordingFullscreenRenderer(FullscreenTuiRenderer):
+            def __init__(self) -> None:
+                super().__init__(_console()[0], clear_screen=False)
+                self.snapshots: list[TuiViewSnapshot] = []
+
+            def view_updated(self, snapshot: TuiViewSnapshot) -> None:
+                self.snapshots.append(snapshot)
+                super().view_updated(snapshot)
+
+        controller = ScriptedController()
+        renderer = RecordingFullscreenRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.running
+
+        should_exit = await shell._cancel_current("Cancelling current prompt...")
+
+        assert should_exit is False
+        assert controller.cancelled == ["prompt-1"]
+        assert shell.state.status is TuiStatus.running
+        assert renderer.snapshots[-1].status == "cancelling"
+        assert all(snapshot.status != "running" for snapshot in renderer.snapshots)
+
+    anyio.run(run)
+
+
 def test_tui_shell_ignores_repeated_cancel_for_same_prompt() -> None:
     async def run() -> None:
         controller = ScriptedController()

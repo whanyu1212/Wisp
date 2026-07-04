@@ -401,7 +401,6 @@ class TuiShell:
             return True
         self.state.status = TuiStatus.running
         self.state.pending_approval = None
-        self._sync_view()
         return False
 
     async def _request_shutdown(self) -> bool:
