@@ -274,6 +274,7 @@ def test_fullscreen_tui_renderer_clears_follow_ups_on_failed_prompt() -> None:
     )
 
     assert renderer.state.status == "error"
+    assert renderer.state.input_hint == "wisp> "
     assert renderer.state.queued_follow_ups == 0
 
 

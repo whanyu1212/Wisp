@@ -390,6 +390,7 @@ class FullscreenTuiRenderer:
             elif not event.ok:
                 self.state.status = "error"
                 if event.command_type == "prompt":
+                    self.state.input_hint = "wisp> "
                     self.state.queued_follow_ups = 0
                 self._append(
                     "error",
