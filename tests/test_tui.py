@@ -255,6 +255,33 @@ def test_create_tui_renderer_selects_fullscreen_renderer() -> None:
     assert isinstance(renderer, FullscreenTuiRenderer)
 
 
+def test_tui_shell_records_submitted_prompt_for_fullscreen_renderer() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            [
+                [
+                    AssistantMessage(content="answer"),
+                    RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
+                ]
+            ]
+        )
+        renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from(["what <now>?"]),
+        )
+
+        await shell.run()
+
+        assert any(
+            entry.role == "user" and entry.content == "what <now>?"
+            for entry in renderer.state.transcript
+        )
+
+    anyio.run(run)
+
+
 def test_tui_shell_runs_with_fullscreen_renderer() -> None:
     async def run() -> None:
         controller = ScriptedController(

@@ -40,6 +40,8 @@ class TuiRenderer(Protocol):
 
     def help(self) -> None: ...
 
+    def prompt_submitted(self, prompt: str) -> None: ...
+
     def running(self) -> None: ...
 
     def queued_follow_up(self, count: int) -> None: ...
@@ -102,6 +104,9 @@ class LineTuiRenderer:
             markup=False,
         )
         self.console.print("Tool approvals prompt with approve? [y/N].", markup=False)
+
+    def prompt_submitted(self, prompt: str) -> None:
+        pass
 
     def running(self) -> None:
         self.console.print("[dim]running...[/dim]")
@@ -259,6 +264,9 @@ class FullscreenTuiRenderer:
             style="cyan",
         )
         self._refresh()
+
+    def prompt_submitted(self, prompt: str) -> None:
+        self._append("user", prompt, style="bold")
 
     def running(self) -> None:
         self.state.status = "running"

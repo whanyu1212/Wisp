@@ -313,6 +313,7 @@ class TuiShell:
         self.state.cancel_requested = False
         self.state.token_stream_started = False
         self.state.rendered_tokens = False
+        self.renderer.prompt_submitted(prompt)
         self.renderer.running()
         try:
             command_id = await self.controller.prompt(prompt)
