@@ -43,6 +43,7 @@ from wisp.runtime.registry import ToolRegistry, UnknownProviderError, UnknownToo
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.base import Tool
+from wisp.tui.rendering import TuiRendererKind
 
 
 class OutputMode(StrEnum):
@@ -220,6 +221,13 @@ def cli_callback(
         OutputMode,
         typer.Option("--mode", help="Output mode: text, JSONL events, RPC, or TUI."),
     ] = OutputMode.text,
+    tui_renderer: Annotated[
+        TuiRendererKind,
+        typer.Option(
+            "--tui-renderer",
+            help="TUI renderer to use with --mode tui.",
+        ),
+    ] = TuiRendererKind.line,
     allow_read_tools: Annotated[
         bool,
         typer.Option(help="Expose sandboxed read-only tools in agent modes."),
@@ -321,6 +329,7 @@ def cli_callback(
                     continue_latest=continue_latest,
                     approve_unsafe_tools=approve_unsafe_tools,
                     max_tool_iterations=max_tool_iterations,
+                    renderer=tui_renderer,
                 ),
             )
         else:

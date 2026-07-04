@@ -27,7 +27,16 @@ from wisp.events import (
     ToolCallRequested,
     ToolResultReady,
 )
-from wisp.tui import LineTuiRenderer, TuiInteractionState, TuiOptions, TuiShell, TuiStatus
+from wisp.tui import (
+    FullscreenTuiRenderer,
+    LineTuiRenderer,
+    TuiInteractionState,
+    TuiOptions,
+    TuiRendererKind,
+    TuiShell,
+    TuiStatus,
+    create_tui_renderer,
+)
 from wisp.tui.app import _default_prompt_reader, _InputLine, _InputMode, _rpc_command
 
 type EventBatch = list[KnownWispEvent]
@@ -174,6 +183,57 @@ def test_tui_shell_uses_injected_renderer() -> None:
 
         assert renderer.calls == ["startup", "running"]
         assert controller.prompts == ["hello"]
+
+    anyio.run(run)
+
+
+def test_fullscreen_tui_renderer_renders_layout_regions(tmp_path: Path) -> None:
+    console, output = _console()
+    renderer = FullscreenTuiRenderer(console, clear_screen=False)
+
+    renderer.startup()
+    renderer.running()
+    renderer.token_delta("hello")
+    renderer.end_token_stream()
+    renderer.event(SessionSaved(session_id="session", path=tmp_path / "session.jsonl"))
+
+    rendered = output.getvalue()
+    assert "Transcript" in rendered
+    assert "Status" in rendered
+    assert "Input" in rendered
+    assert "hello" in rendered
+    assert "session saved: session.jsonl" in rendered
+    assert renderer.state.last_session == "session.jsonl"
+
+
+def test_create_tui_renderer_selects_fullscreen_renderer() -> None:
+    renderer = create_tui_renderer(TuiRendererKind.fullscreen, _console()[0])
+
+    assert isinstance(renderer, FullscreenTuiRenderer)
+
+
+def test_tui_shell_runs_with_fullscreen_renderer() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            [
+                [
+                    AssistantMessage(content="fullscreen response"),
+                    RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
+                ]
+            ]
+        )
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            renderer=FullscreenTuiRenderer(console, clear_screen=False),
+            prompt_reader=await _reader_from(["hello"]),
+        )
+
+        await shell.run()
+
+        assert controller.prompts == ["hello"]
+        assert "Transcript" in output.getvalue()
+        assert "fullscreen response" in output.getvalue()
 
     anyio.run(run)
 
@@ -786,6 +846,8 @@ def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) ->
             "--session-dir",
             str(tmp_path),
             "--continue",
+            "--tui-renderer",
+            "fullscreen",
         ],
     )
 
@@ -794,3 +856,4 @@ def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) ->
     assert captured[0].config.provider == "fake"
     assert captured[0].config.session_dir == tmp_path
     assert captured[0].continue_latest is True
+    assert captured[0].renderer is TuiRendererKind.fullscreen
