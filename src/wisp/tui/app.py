@@ -25,13 +25,19 @@ from wisp.events import (
     ErrorEvent,
     KnownWispEvent,
     RpcCommandFinished,
+    SessionSaved,
     TokenDelta,
     ToolApprovalRequested,
 )
 from wisp.rpc import JsonlSubprocessRpcTransport, RpcController
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSessionStore
-from wisp.tui.rendering import TuiRenderer, TuiRendererKind, create_tui_renderer
+from wisp.tui.rendering import (
+    TuiRenderer,
+    TuiRendererKind,
+    TuiViewSnapshot,
+    create_tui_renderer,
+)
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,26 @@ class TuiInteractionState:
     cancel_requested: bool = False
     token_stream_started: bool = False
     rendered_tokens: bool = False
+
+
+@dataclass
+class TuiViewState:
+    """Shell-owned renderer-visible TUI state."""
+
+    status: str = "idle"
+    input_hint: str = "wisp> "
+    queued_follow_ups: int = 0
+    last_session: str | None = None
+
+    def snapshot(self) -> TuiViewSnapshot:
+        """Return an immutable renderer-facing view snapshot."""
+
+        return TuiViewSnapshot(
+            status=self.status,
+            input_hint=self.input_hint,
+            queued_follow_ups=self.queued_follow_ups,
+            last_session=self.last_session,
+        )
 
 
 class TuiController(Protocol):
@@ -182,11 +208,13 @@ class TuiShell:
         )
         self.prompt_reader = prompt_reader or _default_prompt_reader
         self.state = state or TuiInteractionState()
+        self.view = TuiViewState()
 
     async def run(self) -> None:
         """Run the interactive prompt/event loop."""
 
         self.renderer.startup()
+        self._sync_view()
         send, receive = anyio.create_memory_object_stream[_TuiSignal](100)
         async with anyio.create_task_group() as task_group, send, receive:
             task_group.start_soon(self._read_inputs, send.clone())
@@ -197,6 +225,31 @@ class TuiShell:
                 if should_exit:
                     task_group.cancel_scope.cancel()
                     return
+
+    def _sync_view(self) -> None:
+        self._update_view(
+            status=_view_status_for_status(self.state.status),
+            input_hint=_prompt_for_mode(_input_mode_for_status(self.state.status)),
+            queued_follow_ups=len(self.state.queued_prompts),
+        )
+
+    def _update_view(
+        self,
+        *,
+        status: str | None = None,
+        input_hint: str | None = None,
+        queued_follow_ups: int | None = None,
+        last_session: str | None = None,
+    ) -> None:
+        if status is not None:
+            self.view.status = status
+        if input_hint is not None:
+            self.view.input_hint = input_hint
+        if queued_follow_ups is not None:
+            self.view.queued_follow_ups = queued_follow_ups
+        if last_session is not None:
+            self.view.last_session = last_session
+        self.renderer.view_updated(self.view.snapshot())
 
     async def _read_inputs(self, send: MemoryObjectSendStream[_TuiSignal]) -> None:
         async with send:
@@ -247,6 +300,7 @@ class TuiShell:
                 return await self._answer_pending_approval(text, exit_after_denial=False)
             if text and self.state.current_command_id is not None:
                 self.state.queued_prompts.append(text)
+                self._update_view(queued_follow_ups=len(self.state.queued_prompts))
                 self.renderer.queued_follow_up(len(self.state.queued_prompts))
             return False
         if not text:
@@ -258,6 +312,7 @@ class TuiShell:
             return False
         if self.state.current_command_id is not None:
             self.state.queued_prompts.append(text)
+            self._update_view(queued_follow_ups=len(self.state.queued_prompts))
             self.renderer.queued_follow_up(len(self.state.queued_prompts))
             return False
         return await self._start_prompt(text)
@@ -276,6 +331,7 @@ class TuiShell:
             )
         if self.state.current_command_id is not None:
             self.state.queued_prompts.clear()
+            self._update_view(queued_follow_ups=0)
             self.renderer.input_closed_finishing_prompt()
             return False
         return await self._request_shutdown()
@@ -296,6 +352,7 @@ class TuiShell:
     async def _handle_quit(self) -> bool:
         self.state.exit_requested = True
         self.state.queued_prompts.clear()
+        self._update_view(queued_follow_ups=0)
         if self.state.pending_approval is not None:
             return await self._answer_pending_approval(
                 "",
@@ -313,11 +370,13 @@ class TuiShell:
         self.state.cancel_requested = False
         self.state.token_stream_started = False
         self.state.rendered_tokens = False
+        self._sync_view()
         self.renderer.prompt_submitted(prompt)
         self.renderer.running()
         try:
             command_id = await self.controller.prompt(prompt)
         except Exception as exc:
+            self._update_view(status="error")
             self.renderer.send_failed("prompt", exc)
             return True
         self.state.current_command_id = command_id
@@ -330,12 +389,14 @@ class TuiShell:
         if self.state.cancel_requested:
             self.renderer.cancel_already_requested()
             return False
-        self.renderer.cancelling(message)
         self.state.queued_prompts.clear()
         self.state.cancel_requested = True
+        self._update_view(status="cancelling", queued_follow_ups=0)
+        self.renderer.cancelling(message)
         try:
             await self.controller.cancel(command_id)
         except Exception as exc:
+            self._update_view(status="error")
             self.renderer.send_failed("cancel", exc)
             return True
         self.state.status = TuiStatus.running
@@ -345,11 +406,14 @@ class TuiShell:
     async def _request_shutdown(self) -> bool:
         if self.state.shutdown_command_id is not None:
             self.state.status = TuiStatus.exiting
+            self._sync_view()
             return False
         self.state.status = TuiStatus.exiting
+        self._sync_view()
         try:
             shutdown_id = await self.controller.shutdown()
         except Exception as exc:
+            self._update_view(status="error")
             self.renderer.shutdown_failed(exc)
             return True
         self.state.shutdown_command_id = shutdown_id
@@ -382,10 +446,13 @@ class TuiShell:
             reason=selected_reason,
         )
         self.state.pending_approval = None
+        if not ok:
+            return True
         self.state.status = TuiStatus.running if self.state.current_command_id else TuiStatus.idle
         if exit_after_denial and not selected_approved:
             self.state.exit_requested = True
-        return not ok
+        self._sync_view()
+        return False
 
     async def _send_approval(
         self,
@@ -397,6 +464,7 @@ class TuiShell:
         try:
             await self.controller.approve(call_id, approved=approved, reason=reason)
         except Exception as exc:
+            self._update_view(status="error")
             self.renderer.send_failed("approval", exc)
             return False
         return True
@@ -415,6 +483,7 @@ class TuiShell:
         if isinstance(event, ToolApprovalRequested):
             self.state.pending_approval = event
             self.state.status = TuiStatus.waiting_for_approval
+            self._sync_view()
             self.renderer.approval_request(event)
             if self.state.input_closed:
                 return await self._answer_pending_approval(
@@ -434,6 +503,7 @@ class TuiShell:
         return False
 
     async def _finish_current_prompt(self, event: RpcCommandFinished) -> bool:
+        was_cancelled = (not event.ok) and _is_rpc_cancelled_message(event.error)
         self.state.current_command_id = None
         self.state.pending_approval = None
         self.state.token_stream_started = False
@@ -445,13 +515,29 @@ class TuiShell:
             return await self._request_shutdown()
         if self.state.queued_prompts:
             queued_prompt = self.state.queued_prompts.popleft()
+            self._update_view(
+                status="running queued follow-up",
+                input_hint=_prompt_for_mode(_InputMode.running),
+                queued_follow_ups=len(self.state.queued_prompts),
+            )
             self.renderer.running_queued_follow_up(len(self.state.queued_prompts))
             return await self._start_prompt(queued_prompt)
         self.state.cancel_requested = False
         self.state.status = TuiStatus.idle
+        if event.ok:
+            self._sync_view()
+        elif was_cancelled:
+            self._sync_view()
+        else:
+            self._update_view(
+                status="error",
+                input_hint=_prompt_for_mode(_InputMode.idle),
+                queued_follow_ups=0,
+            )
         return False
 
     def _handle_rpc_closed(self, signal: _RpcEventsClosed) -> bool:
+        self._update_view(status="error")
         if signal.error is not None:
             self.renderer.rpc_event_reader_failed(signal.error)
         if self.state.token_stream_started:
@@ -477,8 +563,18 @@ class TuiShell:
                 and not event.ok
                 and _is_rpc_cancelled_message(event.error)
             ):
+                self.state.status = TuiStatus.idle
+                self.state.cancel_requested = False
+                self.state.queued_prompts.clear()
+                self._sync_view()
                 self.renderer.cancelled()
                 return
+        if isinstance(event, SessionSaved):
+            self._update_view(last_session=_compact_session_path(event.path))
+        if isinstance(event, ErrorEvent):
+            self._update_view(status="error")
+        if isinstance(event, RpcCommandFinished) and not event.ok:
+            self._update_view(status="error")
         self.renderer.event(event)
 
 
@@ -547,6 +643,12 @@ def _input_mode_for_status(status: TuiStatus) -> _InputMode:
     return _InputMode.idle
 
 
+def _view_status_for_status(status: TuiStatus) -> str:
+    if status is TuiStatus.waiting_for_approval:
+        return "waiting for approval"
+    return status.value
+
+
 def _prompt_for_mode(mode: _InputMode) -> str:
     if mode is _InputMode.approval:
         return "approve? [y/N] "
@@ -555,6 +657,11 @@ def _prompt_for_mode(mode: _InputMode) -> str:
     if mode is _InputMode.exiting:
         return "wisp(exiting)> "
     return "wisp> "
+
+
+def _compact_session_path(path: object) -> str:
+    path_text = str(path)
+    return os.path.basename(path_text) or path_text
 
 
 def _is_rpc_cancelled_message(message: str | None) -> bool:
