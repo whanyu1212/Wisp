@@ -372,6 +372,41 @@ def test_live_fullscreen_tui_close_cancels_stuck_application() -> None:
     anyio.run(run)
 
 
+def test_live_fullscreen_tui_retags_submission_after_mode_change() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        shell = TuiShell(
+            ScriptedController(), renderer=renderer, prompt_reader=renderer.read_prompt
+        )
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.running
+        send, receive = anyio.create_memory_object_stream[object](10)
+
+        async with anyio.create_task_group() as task_group, send, receive:
+            task_group.start_soon(shell._read_inputs, send.clone())
+            await anyio.sleep(0)
+
+            shell.state.status = TuiStatus.waiting_for_approval
+            shell.state.pending_approval = ToolApprovalRequested(
+                call_id="call-1",
+                name="bash",
+                arguments={"command": "echo hi"},
+                safety="command",
+            )
+            shell._sync_view()
+            renderer._buffer.insert_text("y")
+            renderer._accept_input()
+
+            signal = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert isinstance(signal, _InputLine)
+        assert signal.text == "y"
+        assert signal.mode is _InputMode.approval
+
+    anyio.run(run)
+
+
 def test_create_tui_renderer_selects_fullscreen_renderer() -> None:
     renderer = create_tui_renderer(TuiRendererKind.fullscreen, _console()[0])
 

@@ -281,7 +281,12 @@ class TuiShell:
                 except (KeyboardInterrupt, LiveFullscreenInputInterrupted):
                     await send.send(_InputInterrupted(mode=mode))
                     continue
-                await send.send(_InputLine(text=text, mode=mode))
+                await send.send(_InputLine(text=text, mode=self._submitted_input_mode(mode)))
+
+    def _submitted_input_mode(self, requested_mode: _InputMode) -> _InputMode:
+        if isinstance(self.renderer, LiveFullscreenTui):
+            return _input_mode_for_status(self.state.status)
+        return requested_mode
 
     async def _read_rpc_events(self, send: MemoryObjectSendStream[_TuiSignal]) -> None:
         async with send:
