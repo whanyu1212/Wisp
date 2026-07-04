@@ -12,6 +12,7 @@ import anyio
 from rich.console import Console
 from typer.testing import CliRunner
 
+import wisp.tui.app as tui_app_module
 from wisp import tui as tui_module
 from wisp.cli import app
 from wisp.config import WispConfig
@@ -30,6 +31,8 @@ from wisp.events import (
 from wisp.tui import (
     FullscreenTuiRenderer,
     LineTuiRenderer,
+    LiveFullscreenInputInterrupted,
+    LiveFullscreenTui,
     TuiInteractionState,
     TuiOptions,
     TuiRendererKind,
@@ -280,6 +283,93 @@ def test_fullscreen_tui_renderer_messages_do_not_infer_footer_state() -> None:
     assert renderer.state.status == "running"
     assert renderer.state.input_hint == "wisp(running)> "
     assert renderer.state.queued_follow_ups == 1
+
+
+def test_live_fullscreen_tui_accepts_submitted_input() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+
+        renderer._buffer.insert_text("hello")
+        renderer._accept_input()
+
+        assert await read_task == "hello"
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_interrupts_input() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+
+        renderer._interrupt_input()
+
+        try:
+            await read_task
+        except LiveFullscreenInputInterrupted:
+            pass
+        else:  # pragma: no cover - defensive assertion branch
+            raise AssertionError("expected KeyboardInterrupt")
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_closes_input() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+
+        renderer._close_input()
+
+        try:
+            await read_task
+        except EOFError:
+            pass
+        else:  # pragma: no cover - defensive assertion branch
+            raise AssertionError("expected EOFError")
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_close_ends_pending_input() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+
+        await renderer.close()
+
+        try:
+            await read_task
+        except EOFError:
+            pass
+        else:  # pragma: no cover - defensive assertion branch
+            raise AssertionError("expected EOFError")
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_close_cancels_stuck_application() -> None:
+    class StuckApplication:
+        is_done = False
+
+        def exit(self) -> None:
+            raise RuntimeError("not running yet")
+
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        renderer._application = StuckApplication()
+        renderer._application_task = asyncio.create_task(anyio.sleep(10))
+
+        await renderer.close()
+
+        assert renderer._application_task.done()
+
+    anyio.run(run)
 
 
 def test_create_tui_renderer_selects_fullscreen_renderer() -> None:
@@ -1095,6 +1185,116 @@ def test_tui_rpc_command_includes_continue_latest(tmp_path: Path) -> None:
     )
 
     assert "--continue" in command
+
+
+def test_run_tui_uses_live_fullscreen_when_interactive(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    instances: list[object] = []
+
+    class FakeLiveFullscreenTui(FullscreenTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0], clear_screen=False)
+            self.prompts: list[str] = []
+            self.closed = False
+            instances.append(self)
+
+        async def read_prompt(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return "/quit"
+            await anyio.sleep(1)
+            raise EOFError
+
+        async def close(self) -> None:
+            self.closed = True
+
+    async def run() -> None:
+        monkeypatch.setattr(tui_app_module, "_stdio_is_interactive", lambda: True)
+        monkeypatch.setattr(tui_app_module, "LiveFullscreenTui", FakeLiveFullscreenTui)
+        controller = ScriptedController()
+
+        await tui_app_module.run_tui(
+            TuiOptions(
+                config=WispConfig(provider="fake", session_dir=tmp_path),
+                renderer=TuiRendererKind.fullscreen,
+            ),
+            controller=controller,
+        )
+
+        assert controller.shutdown_count == 1
+        assert len(instances) == 1
+        live = instances[0]
+        assert isinstance(live, FakeLiveFullscreenTui)
+        assert live.prompts[0] == "wisp> "
+        assert live.closed is True
+
+    anyio.run(run)
+
+
+def test_run_tui_uses_fullscreen_fallback_with_explicit_prompt_reader(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    class FailingLiveFullscreenTui:
+        def __init__(self) -> None:
+            raise AssertionError("live fullscreen should not be constructed")
+
+    async def run() -> None:
+        monkeypatch.setattr(tui_app_module, "_stdio_is_interactive", lambda: True)
+        monkeypatch.setattr(tui_app_module, "LiveFullscreenTui", FailingLiveFullscreenTui)
+        controller = ScriptedController()
+
+        await tui_app_module.run_tui(
+            TuiOptions(
+                config=WispConfig(provider="fake", session_dir=tmp_path),
+                renderer=TuiRendererKind.fullscreen,
+            ),
+            controller=controller,
+            prompt_reader=await _reader_from(["/quit"]),
+        )
+
+        assert controller.shutdown_count == 1
+
+    anyio.run(run)
+
+
+def test_run_tui_uses_fullscreen_fallback_when_stdio_is_not_interactive(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    class FailingLiveFullscreenTui:
+        def __init__(self) -> None:
+            raise AssertionError("live fullscreen should not be constructed")
+
+    prompts: list[str] = []
+
+    async def fake_default_prompt_reader(prompt: str) -> str:
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return "/quit"
+        await anyio.sleep(1)
+        raise EOFError
+
+    async def run() -> None:
+        monkeypatch.setattr(tui_app_module, "_stdio_is_interactive", lambda: False)
+        monkeypatch.setattr(tui_app_module, "LiveFullscreenTui", FailingLiveFullscreenTui)
+        monkeypatch.setattr(tui_app_module, "_default_prompt_reader", fake_default_prompt_reader)
+        controller = ScriptedController()
+
+        await tui_app_module.run_tui(
+            TuiOptions(
+                config=WispConfig(provider="fake", session_dir=tmp_path),
+                renderer=TuiRendererKind.fullscreen,
+            ),
+            controller=controller,
+        )
+
+        assert controller.shutdown_count == 1
+        assert prompts[0] == "wisp> "
+
+    anyio.run(run)
 
 
 def test_cli_tui_mode_validates_provider_before_prompting() -> None:

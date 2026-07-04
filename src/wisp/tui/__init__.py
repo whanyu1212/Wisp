@@ -1,6 +1,7 @@
 """Minimal terminal UI shell for Wisp."""
 
 from wisp.tui.app import TuiInteractionState, TuiOptions, TuiShell, TuiStatus, TuiViewState, run_tui
+from wisp.tui.live import LiveFullscreenInputInterrupted, LiveFullscreenTui
 from wisp.tui.rendering import (
     FullscreenTuiRenderer,
     FullscreenTuiState,
@@ -16,6 +17,8 @@ __all__ = [
     "FullscreenTuiRenderer",
     "FullscreenTuiState",
     "LineTuiRenderer",
+    "LiveFullscreenInputInterrupted",
+    "LiveFullscreenTui",
     "TuiInteractionState",
     "TuiOptions",
     "TuiRenderer",

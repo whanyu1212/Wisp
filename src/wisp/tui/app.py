@@ -32,6 +32,7 @@ from wisp.events import (
 from wisp.rpc import JsonlSubprocessRpcTransport, RpcController
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.tui.live import LiveFullscreenInputInterrupted, LiveFullscreenTui
 from wisp.tui.rendering import (
     TuiRenderer,
     TuiRendererKind,
@@ -178,16 +179,33 @@ async def run_tui(
         transport = await JsonlSubprocessRpcTransport.start(_rpc_command(options), env=_rpc_env())
         selected_controller = RpcController(transport)
 
+    live_tui: LiveFullscreenTui | None = None
+    selected_renderer = create_tui_renderer(options.renderer, selected_console)
+    selected_prompt_reader = prompt_reader
+    if (
+        options.renderer is TuiRendererKind.fullscreen
+        and prompt_reader is None
+        and console is None
+        and _stdio_is_interactive()
+    ):
+        live_tui = LiveFullscreenTui()
+        selected_renderer = live_tui
+        selected_prompt_reader = live_tui.read_prompt
+
     shell = TuiShell(
         selected_controller,
-        renderer=create_tui_renderer(options.renderer, selected_console),
-        prompt_reader=prompt_reader,
+        renderer=selected_renderer,
+        prompt_reader=selected_prompt_reader,
     )
     try:
         await shell.run()
     finally:
-        if owns_controller:
-            await selected_controller.close()
+        try:
+            if live_tui is not None:
+                await live_tui.close()
+        finally:
+            if owns_controller:
+                await selected_controller.close()
 
 
 class TuiShell:
@@ -260,7 +278,7 @@ class TuiShell:
                 except EOFError:
                     await send.send(_InputClosed(mode=mode))
                     return
-                except KeyboardInterrupt:
+                except (KeyboardInterrupt, LiveFullscreenInputInterrupted):
                     await send.send(_InputInterrupted(mode=mode))
                     continue
                 await send.send(_InputLine(text=text, mode=mode))
@@ -631,6 +649,15 @@ def _rpc_env() -> dict[str, str]:
 def _stdin_is_interactive() -> bool:
     isatty = getattr(sys.stdin, "isatty", None)
     return bool(isatty and isatty())
+
+
+def _stdout_is_interactive() -> bool:
+    isatty = getattr(sys.stdout, "isatty", None)
+    return bool(isatty and isatty())
+
+
+def _stdio_is_interactive() -> bool:
+    return _stdin_is_interactive() and _stdout_is_interactive()
 
 
 def _input_mode_for_status(status: TuiStatus) -> _InputMode:
