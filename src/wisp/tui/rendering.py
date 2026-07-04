@@ -277,6 +277,7 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def input_closed_finishing_prompt(self) -> None:
+        self.state.queued_follow_ups = 0
         self._append("system", "input closed; finishing current prompt", style="dim")
         self._refresh()
 
