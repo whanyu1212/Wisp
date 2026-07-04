@@ -206,6 +206,18 @@ def test_fullscreen_tui_renderer_renders_layout_regions(tmp_path: Path) -> None:
     assert renderer.state.last_session == "session.jsonl"
 
 
+def test_fullscreen_tui_renderer_restores_idle_footer_after_cancellation() -> None:
+    renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+
+    renderer.running()
+    renderer.queued_follow_up(1)
+    renderer.cancelled()
+
+    assert renderer.state.status == "idle"
+    assert renderer.state.input_hint == "wisp> "
+    assert renderer.state.queued_follow_ups == 0
+
+
 def test_fullscreen_tui_renderer_clears_discarded_follow_ups_on_eof() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
 

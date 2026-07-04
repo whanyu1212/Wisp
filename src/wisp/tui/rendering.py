@@ -317,7 +317,9 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def cancelled(self) -> None:
-        self.state.status = "cancelled"
+        self.state.status = "idle"
+        self.state.input_hint = "wisp> "
+        self.state.queued_follow_ups = 0
         self._append("system", "cancelled", style="yellow")
         self._refresh()
 
