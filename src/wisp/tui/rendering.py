@@ -347,6 +347,8 @@ class FullscreenTuiRenderer:
         elif isinstance(event, ToolCallRequested):
             self._append("tool", f"→ tool {event.name} {event.arguments}", style="blue")
         elif isinstance(event, ToolApprovalResolved):
+            self.state.status = "running"
+            self.state.input_hint = "wisp(running)> "
             if event.approved:
                 self._append("approval", f"✓ approved {event.name}", style="green")
             else:
@@ -364,11 +366,11 @@ class FullscreenTuiRenderer:
             self.state.last_session = _compact_session_path(event.path)
             self._append("session", f"session saved: {self.state.last_session}", style="dim")
         elif isinstance(event, RpcCommandFinished):
-            if event.ok:
+            if event.ok and event.command_type in {"prompt", "shutdown"}:
                 self.state.status = "idle"
                 self.state.input_hint = "wisp> "
                 self.state.queued_follow_ups = 0
-            else:
+            elif not event.ok:
                 self.state.status = "error"
                 self._append(
                     "error",

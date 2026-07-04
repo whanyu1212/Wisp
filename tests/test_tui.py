@@ -206,6 +206,27 @@ def test_fullscreen_tui_renderer_renders_layout_regions(tmp_path: Path) -> None:
     assert renderer.state.last_session == "session.jsonl"
 
 
+def test_fullscreen_tui_renderer_does_not_idle_on_approval_completion() -> None:
+    renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+
+    renderer.running()
+    renderer.approval_request(
+        ToolApprovalRequested(
+            call_id="call-1",
+            name="bash",
+            arguments={"command": "echo hi"},
+            safety="command",
+        )
+    )
+    renderer.queued_follow_up(1)
+    renderer.event(ToolApprovalResolved(call_id="call-1", name="bash", approved=True))
+    renderer.event(RpcCommandFinished(command_id="approval-1", command_type="approval", ok=True))
+
+    assert renderer.state.status == "running"
+    assert renderer.state.input_hint == "wisp(running)> "
+    assert renderer.state.queued_follow_ups == 1
+
+
 def test_create_tui_renderer_selects_fullscreen_renderer() -> None:
     renderer = create_tui_renderer(TuiRendererKind.fullscreen, _console()[0])
 
