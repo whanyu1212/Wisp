@@ -248,6 +248,27 @@ def test_fullscreen_tui_renderer_coalesces_streaming_token_redraws() -> None:
     assert "hello" in output.getvalue()
 
 
+def test_live_fullscreen_tui_refreshes_streaming_token_deltas() -> None:
+    class FakeApplication:
+        is_done = False
+
+        def __init__(self) -> None:
+            self.invalidations = 0
+
+        def invalidate(self) -> None:
+            self.invalidations += 1
+
+    renderer = LiveFullscreenTui(run_application=False)
+    app = FakeApplication()
+    renderer._application = app
+
+    renderer.token_delta("hel")
+    renderer.token_delta("lo")
+
+    assert renderer.state.streaming_text == "hello"
+    assert app.invalidations == 2
+
+
 def test_fullscreen_tui_renderer_applies_view_snapshot() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
 

@@ -71,6 +71,12 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
             except (asyncio.CancelledError, EOFError):
                 pass
 
+    def token_delta(self, delta: str) -> None:
+        """Append streamed text and refresh the live screen immediately."""
+
+        super().token_delta(delta)
+        self._refresh()
+
     def _refresh(self) -> None:
         if self._application is not None and not self._application.is_done:
             self._application.invalidate()
