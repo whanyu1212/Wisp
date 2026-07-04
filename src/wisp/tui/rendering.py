@@ -383,6 +383,8 @@ class FullscreenTuiRenderer:
                 self.state.queued_follow_ups = 0
             elif not event.ok:
                 self.state.status = "error"
+                if event.command_type == "prompt":
+                    self.state.queued_follow_ups = 0
                 self._append(
                     "error",
                     f"command failed: {event.error or event.command_id}",

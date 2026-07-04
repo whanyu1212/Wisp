@@ -228,6 +228,24 @@ def test_fullscreen_tui_renderer_clears_discarded_follow_ups_on_eof() -> None:
     assert renderer.state.queued_follow_ups == 0
 
 
+def test_fullscreen_tui_renderer_clears_follow_ups_on_failed_prompt() -> None:
+    renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+
+    renderer.running()
+    renderer.queued_follow_up(1)
+    renderer.event(
+        RpcCommandFinished(
+            command_id="prompt-1",
+            command_type="prompt",
+            ok=False,
+            error="failed",
+        )
+    )
+
+    assert renderer.state.status == "error"
+    assert renderer.state.queued_follow_ups == 0
+
+
 def test_fullscreen_tui_renderer_does_not_idle_on_approval_completion() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
 
