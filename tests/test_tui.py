@@ -568,6 +568,41 @@ def test_tui_shell_clears_queued_follow_ups_after_failed_prompt() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_preserves_error_footer_after_failed_prompt_completion() -> None:
+    async def run() -> None:
+        class RecordingFullscreenRenderer(FullscreenTuiRenderer):
+            def __init__(self) -> None:
+                super().__init__(_console()[0], clear_screen=False)
+                self.snapshots: list[TuiViewSnapshot] = []
+
+            def view_updated(self, snapshot: TuiViewSnapshot) -> None:
+                self.snapshots.append(snapshot)
+                super().view_updated(snapshot)
+
+        renderer = RecordingFullscreenRenderer()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.running
+        shell.state.queued_prompts.append("queued")
+        failed = RpcCommandFinished(
+            command_id="prompt-1",
+            command_type="prompt",
+            ok=False,
+            error="failed",
+        )
+
+        shell._render_event(failed)
+        should_exit = await shell._finish_current_prompt(failed)
+
+        assert should_exit is False
+        assert shell.state.status is TuiStatus.idle
+        assert renderer.snapshots[-1].status == "error"
+        assert renderer.snapshots[-1].input_hint == "wisp> "
+        assert renderer.snapshots[-1].queued_follow_ups == 0
+
+    anyio.run(run)
+
+
 def test_tui_shell_interrupt_cancels_running_prompt() -> None:
     async def run() -> None:
         controller = ScriptedController(

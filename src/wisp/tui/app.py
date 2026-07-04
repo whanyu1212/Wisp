@@ -522,7 +522,14 @@ class TuiShell:
             return await self._start_prompt(queued_prompt)
         self.state.cancel_requested = False
         self.state.status = TuiStatus.idle
-        self._sync_view()
+        if event.ok:
+            self._sync_view()
+        else:
+            self._update_view(
+                status="error",
+                input_hint=_prompt_for_mode(_InputMode.idle),
+                queued_follow_ups=0,
+            )
         return False
 
     def _handle_rpc_closed(self, signal: _RpcEventsClosed) -> bool:
