@@ -31,7 +31,7 @@ from wisp.events import (
 from wisp.rpc import JsonlSubprocessRpcTransport, RpcController
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSessionStore
-from wisp.tui.rendering import LineTuiRenderer, TuiRenderer
+from wisp.tui.rendering import TuiRenderer, TuiRendererKind, create_tui_renderer
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,7 @@ class TuiOptions:
     continue_latest: bool = False
     approve_unsafe_tools: bool = False
     max_tool_iterations: int | None = None
+    renderer: TuiRendererKind = TuiRendererKind.line
 
 
 class TuiStatus(StrEnum):
@@ -153,7 +154,7 @@ async def run_tui(
 
     shell = TuiShell(
         selected_controller,
-        console=selected_console,
+        renderer=create_tui_renderer(options.renderer, selected_console),
         prompt_reader=prompt_reader,
     )
     try:
@@ -176,7 +177,9 @@ class TuiShell:
         renderer: TuiRenderer | None = None,
     ) -> None:
         self.controller = controller
-        self.renderer = renderer if renderer is not None else LineTuiRenderer(console)
+        self.renderer = (
+            renderer if renderer is not None else create_tui_renderer(TuiRendererKind.line, console)
+        )
         self.prompt_reader = prompt_reader or _default_prompt_reader
         self.state = state or TuiInteractionState()
 
@@ -310,6 +313,7 @@ class TuiShell:
         self.state.cancel_requested = False
         self.state.token_stream_started = False
         self.state.rendered_tokens = False
+        self.renderer.prompt_submitted(prompt)
         self.renderer.running()
         try:
             command_id = await self.controller.prompt(prompt)
@@ -441,7 +445,7 @@ class TuiShell:
             return await self._request_shutdown()
         if self.state.queued_prompts:
             queued_prompt = self.state.queued_prompts.popleft()
-            self.renderer.running_queued_follow_up()
+            self.renderer.running_queued_follow_up(len(self.state.queued_prompts))
             return await self._start_prompt(queued_prompt)
         self.state.cancel_requested = False
         self.state.status = TuiStatus.idle
