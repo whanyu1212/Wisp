@@ -214,6 +214,16 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
             self._close_input()
             event.app.invalidate()
 
+        @bindings.add(Keys.PageUp)
+        def _page_up(event: KeyPressEvent) -> None:
+            self.scroll_transcript_up()
+            event.app.invalidate()
+
+        @bindings.add(Keys.PageDown)
+        def _page_down(event: KeyPressEvent) -> None:
+            self.scroll_transcript_down()
+            event.app.invalidate()
+
         @bindings.add(Keys.BracketedPaste)
         def _paste(event: KeyPressEvent) -> None:
             self._paste_input(event.data)
@@ -273,13 +283,8 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         fragments: StyleAndTextTuples = []
         if not self.state.transcript and not self.state.streaming_text:
             return [("class:dim", "No messages yet.")]
-        for entry in self.state.transcript:
+        for entry in self._visible_transcript_entries():
             self._append_entry_fragments(fragments, entry)
-        if self.state.streaming_text:
-            self._append_entry_fragments(
-                fragments,
-                TuiTranscriptEntry("assistant", self.state.streaming_text, "assistant"),
-            )
         return fragments
 
     def _append_entry_fragments(

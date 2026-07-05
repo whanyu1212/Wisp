@@ -26,6 +26,62 @@ def test_live_fullscreen_tui_refreshes_streaming_token_deltas() -> None:
     assert app.invalidations == 2
 
 
+def test_live_fullscreen_tui_registers_transcript_scroll_keybindings() -> None:
+    from prompt_toolkit.keys import Keys
+
+    renderer = LiveFullscreenTui(run_application=False)
+
+    assert (Keys.PageUp,) in {binding.keys for binding in renderer._key_bindings.bindings}
+    assert (Keys.PageDown,) in {binding.keys for binding in renderer._key_bindings.bindings}
+
+
+def test_live_fullscreen_tui_scrolls_visible_transcript_and_refreshes() -> None:
+    class FakeApplication:
+        is_done = False
+
+        def __init__(self) -> None:
+            self.invalidations = 0
+
+        def invalidate(self) -> None:
+            self.invalidations += 1
+
+    renderer = LiveFullscreenTui(run_application=False)
+    renderer.state.transcript_view_entries = 2
+    renderer._application = FakeApplication()
+    for index in range(4):
+        renderer.event(AssistantMessage(content=f"message {index}"))
+
+    renderer.scroll_transcript_top()
+
+    rendered = "".join(fragment for _style, fragment in renderer._transcript_fragments())
+    assert "message 0" in rendered
+    assert "message 1" in rendered
+    assert "message 3" not in rendered
+    assert renderer._application.invalidations == 5
+
+
+def test_live_fullscreen_tui_preserves_scrolled_view_during_streaming() -> None:
+    renderer = LiveFullscreenTui(run_application=False)
+    renderer.state.transcript_view_entries = 2
+    for index in range(4):
+        renderer.event(AssistantMessage(content=f"message {index}"))
+    renderer.scroll_transcript_up(1)
+
+    renderer.token_delta("stream")
+
+    rendered = "".join(fragment for _style, fragment in renderer._transcript_fragments())
+    assert "message 1" in rendered
+    assert "message 2" in rendered
+    assert "message 3" not in rendered
+    assert "stream" not in rendered
+
+    renderer.scroll_transcript_bottom()
+
+    rendered = "".join(fragment for _style, fragment in renderer._transcript_fragments())
+    assert "message 3" in rendered
+    assert "stream" in rendered
+
+
 def test_live_fullscreen_tui_accepts_submitted_input() -> None:
     async def run() -> None:
         renderer = LiveFullscreenTui(run_application=False)

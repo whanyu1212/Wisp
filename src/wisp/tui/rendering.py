@@ -243,6 +243,8 @@ class FullscreenTuiState:
     last_session: str | None = None
     transcript: list[TuiTranscriptEntry] = field(default_factory=list)
     streaming_text: str = ""
+    transcript_scroll_offset: int = 0
+    transcript_view_entries: int = 50
 
 
 class FullscreenTuiRenderer:
@@ -257,10 +259,13 @@ class FullscreenTuiRenderer:
         console: Console | None = None,
         *,
         max_transcript_entries: int = 200,
+        transcript_view_entries: int = 50,
         clear_screen: bool | None = None,
     ) -> None:
         self.console = console or Console()
-        self.state = FullscreenTuiState()
+        self.state = FullscreenTuiState(
+            transcript_view_entries=max(1, transcript_view_entries),
+        )
         self.max_transcript_entries = max_transcript_entries
         # Input is still line-oriented via input(), so clearing a real terminal
         # during background RPC refreshes would erase the active input line and
@@ -346,7 +351,10 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def token_delta(self, delta: str) -> None:
+        if not self.state.streaming_text and self.state.transcript_scroll_offset > 0:
+            self.state.transcript_scroll_offset += 1
         self.state.streaming_text += delta
+        self._clamp_transcript_scroll()
         # The layout foundation still uses line-oriented input and a plain
         # console renderer. Redrawing the full layout for every token would
         # append repeated frames when clear_screen is disabled, so coalesce
@@ -354,7 +362,12 @@ class FullscreenTuiRenderer:
 
     def end_token_stream(self) -> None:
         if self.state.streaming_text:
-            self._append("assistant", self.state.streaming_text, style="green")
+            self._append(
+                "assistant",
+                self.state.streaming_text,
+                style="green",
+                preserve_scroll=False,
+            )
             self.state.streaming_text = ""
         self._refresh()
 
@@ -364,6 +377,24 @@ class FullscreenTuiRenderer:
             f"? approval required {event.name} ({event.safety}) {event.arguments}",
             style="yellow",
         )
+        self._refresh()
+
+    def scroll_transcript_up(self, amount: int | None = None) -> None:
+        self.state.transcript_scroll_offset += self._scroll_amount(amount)
+        self._clamp_transcript_scroll()
+        self._refresh()
+
+    def scroll_transcript_down(self, amount: int | None = None) -> None:
+        self.state.transcript_scroll_offset -= self._scroll_amount(amount)
+        self._clamp_transcript_scroll()
+        self._refresh()
+
+    def scroll_transcript_top(self) -> None:
+        self.state.transcript_scroll_offset = self._max_transcript_scroll_offset()
+        self._refresh()
+
+    def scroll_transcript_bottom(self) -> None:
+        self.state.transcript_scroll_offset = 0
         self._refresh()
 
     def event(self, event: KnownWispEvent) -> None:
@@ -422,11 +453,21 @@ class FullscreenTuiRenderer:
         self._append("error", "RPC event stream ended unexpectedly.", style="red")
         self._refresh()
 
-    def _append(self, role: str, content: object, *, style: str = "") -> None:
+    def _append(
+        self,
+        role: str,
+        content: object,
+        *,
+        style: str = "",
+        preserve_scroll: bool = True,
+    ) -> None:
+        if preserve_scroll and self.state.transcript_scroll_offset > 0:
+            self.state.transcript_scroll_offset += 1
         self.state.transcript.append(TuiTranscriptEntry(role, str(content), style))
         if len(self.state.transcript) > self.max_transcript_entries:
             excess = len(self.state.transcript) - self.max_transcript_entries
             del self.state.transcript[:excess]
+        self._clamp_transcript_scroll()
 
     def _refresh(self) -> None:
         if self.clear_screen:
@@ -450,7 +491,7 @@ class FullscreenTuiRenderer:
         layout["transcript"].update(
             Panel(
                 self._transcript_text(),
-                title="Transcript",
+                title=self._transcript_title(),
                 border_style="cyan",
             )
         )
@@ -465,17 +506,51 @@ class FullscreenTuiRenderer:
 
     def _transcript_text(self) -> Text:
         text = Text()
-        if not self.state.transcript and not self.state.streaming_text:
+        entries = self._visible_transcript_entries()
+        if not entries:
             text.append("No messages yet.", style="dim")
             return text
-        for entry in self.state.transcript:
+        for entry in entries:
             self._append_entry_text(text, entry)
-        if self.state.streaming_text:
-            self._append_entry_text(
-                text,
-                TuiTranscriptEntry("assistant", self.state.streaming_text, "green"),
-            )
         return text
+
+    def _transcript_title(self) -> str:
+        max_offset = self._max_transcript_scroll_offset()
+        if max_offset <= 0:
+            return "Transcript"
+        if self.state.transcript_scroll_offset <= 0:
+            return "Transcript (latest)"
+        return f"Transcript ({self.state.transcript_scroll_offset}/{max_offset})"
+
+    def _transcript_entries(self) -> list[TuiTranscriptEntry]:
+        entries = list(self.state.transcript)
+        if self.state.streaming_text:
+            entries.append(TuiTranscriptEntry("assistant", self.state.streaming_text, "green"))
+        return entries
+
+    def _visible_transcript_entries(self) -> list[TuiTranscriptEntry]:
+        entries = self._transcript_entries()
+        if not entries:
+            return []
+        self._clamp_transcript_scroll()
+        visible_count = min(self.state.transcript_view_entries, len(entries))
+        end = len(entries) - self.state.transcript_scroll_offset
+        start = max(0, end - visible_count)
+        return entries[start:end]
+
+    def _scroll_amount(self, amount: int | None) -> int:
+        if amount is None:
+            return max(1, self.state.transcript_view_entries - 1)
+        return max(1, amount)
+
+    def _max_transcript_scroll_offset(self) -> int:
+        return max(0, len(self._transcript_entries()) - self.state.transcript_view_entries)
+
+    def _clamp_transcript_scroll(self) -> None:
+        self.state.transcript_scroll_offset = min(
+            max(0, self.state.transcript_scroll_offset),
+            self._max_transcript_scroll_offset(),
+        )
 
     def _append_entry_text(self, text: Text, entry: TuiTranscriptEntry) -> None:
         if text.plain:
