@@ -19,6 +19,10 @@ from prompt_toolkit.widgets import Frame
 
 from wisp.tui.rendering import FullscreenTuiRenderer, TuiTranscriptEntry, TuiViewSnapshot
 
+_HEADER_FRAME_HEIGHT = 3
+_FOOTER_HEIGHT = 5
+_TRANSCRIPT_FRAME_BORDER_HEIGHT = 2
+
 
 class LiveFullscreenInputInterrupted(Exception):
     """Raised by the live input adapter for Ctrl-C interrupts."""
@@ -286,6 +290,20 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         for entry in self._visible_transcript_entries():
             self._append_entry_fragments(fragments, entry)
         return fragments
+
+    def _transcript_view_entries(self) -> int:
+        output = getattr(self._application, "output", None)
+        get_size = getattr(output, "get_size", None)
+        if not callable(get_size):
+            return super()._transcript_view_entries()
+        size = get_size()
+        rows = getattr(size, "rows", None)
+        if not isinstance(rows, int) or rows <= 0:
+            return super()._transcript_view_entries()
+        transcript_rows = (
+            rows - _HEADER_FRAME_HEIGHT - _FOOTER_HEIGHT - _TRANSCRIPT_FRAME_BORDER_HEIGHT
+        )
+        return max(1, min(super()._transcript_view_entries(), transcript_rows))
 
     def _append_entry_fragments(
         self,

@@ -533,18 +533,21 @@ class FullscreenTuiRenderer:
         if not entries:
             return []
         self._clamp_transcript_scroll()
-        visible_count = min(self.state.transcript_view_entries, len(entries))
+        visible_count = min(self._transcript_view_entries(), len(entries))
         end = len(entries) - self.state.transcript_scroll_offset
         start = max(0, end - visible_count)
         return entries[start:end]
 
+    def _transcript_view_entries(self) -> int:
+        return max(1, self.state.transcript_view_entries)
+
     def _scroll_amount(self, amount: int | None) -> int:
         if amount is None:
-            return max(1, self.state.transcript_view_entries - 1)
+            return max(1, self._transcript_view_entries() - 1)
         return max(1, amount)
 
     def _max_transcript_scroll_offset(self) -> int:
-        return max(0, len(self._transcript_entries()) - self.state.transcript_view_entries)
+        return max(0, len(self._transcript_entries()) - self._transcript_view_entries())
 
     def _clamp_transcript_scroll(self) -> None:
         self.state.transcript_scroll_offset = min(

@@ -60,6 +60,35 @@ def test_live_fullscreen_tui_scrolls_visible_transcript_and_refreshes() -> None:
     assert renderer._application.invalidations == 5
 
 
+def test_live_fullscreen_tui_sizes_latest_view_to_terminal_rows() -> None:
+    class FakeSize:
+        rows = 13
+
+    class FakeOutput:
+        def get_size(self) -> FakeSize:
+            return FakeSize()
+
+    class FakeApplication:
+        is_done = False
+        output = FakeOutput()
+
+        def invalidate(self) -> None:
+            pass
+
+    renderer = LiveFullscreenTui(run_application=False)
+    renderer._application = FakeApplication()
+    for index in range(6):
+        renderer.event(AssistantMessage(content=f"message {index}"))
+
+    assert renderer._transcript_view_entries() == 3
+    rendered = "".join(fragment for _style, fragment in renderer._transcript_fragments())
+    assert "message 0" not in rendered
+    assert "message 2" not in rendered
+    assert "message 3" in rendered
+    assert "message 4" in rendered
+    assert "message 5" in rendered
+
+
 def test_live_fullscreen_tui_preserves_scrolled_view_during_streaming() -> None:
     renderer = LiveFullscreenTui(run_application=False)
     renderer.state.transcript_view_entries = 2
