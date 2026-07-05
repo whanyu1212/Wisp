@@ -7,9 +7,10 @@ import os
 import typer
 from rich.console import Console
 
-from wisp.cli_output import _exit_with_error
-from wisp.cli_types import OutputMode
 from wisp.tui.rendering import TuiRendererKind
+
+from .output import _exit_with_error
+from .types import OutputMode
 
 
 def _option_was_provided(ctx: typer.Context, name: str) -> bool:

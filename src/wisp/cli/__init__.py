@@ -21,12 +21,8 @@ from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 from rich.console import Console
 
-from wisp import cli_options as _cli_options
-from wisp import cli_output as _cli_output
-from wisp import cli_tools as _cli_tools
 from wisp.agent.loop import Agent
 from wisp.agent.messages import Message
-from wisp.cli_types import OutputMode, _JsonOutputModeError
 from wisp.config import WispConfig, load_project_env
 from wisp.events import ErrorEvent, RpcCommandFinished, RpcCommandStarted, TokenDelta
 from wisp.providers.base import ProviderError
@@ -36,6 +32,11 @@ from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.base import Tool
 from wisp.tui.rendering import TuiRendererKind
+
+from . import options as _cli_options
+from . import output as _cli_output
+from . import tools as _cli_tools
+from .types import OutputMode, _JsonOutputModeError
 
 
 @dataclass(frozen=True)
