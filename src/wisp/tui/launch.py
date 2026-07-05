@@ -27,7 +27,7 @@ class TuiOptions:
 
 
 async def _preflight_tui_options(options: TuiOptions) -> None:
-    runtime = await build_runtime()
+    runtime = await build_runtime(auth_path=options.config.auth_path)
     runtime.providers.get(options.config.provider)
     for tool_name in set(options.allowed_tools):
         runtime.tools.get(tool_name)
@@ -49,6 +49,8 @@ def _rpc_command(options: TuiOptions) -> tuple[str, ...]:
         options.config.provider,
         "--session-dir",
         str(options.config.session_dir),
+        "--auth-file",
+        str(options.config.auth_path),
     ]
     if options.config.model is not None:
         command.extend(("--model", options.config.model))

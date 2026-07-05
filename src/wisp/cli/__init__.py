@@ -23,9 +23,11 @@ from rich.console import Console
 
 from wisp.agent.loop import Agent
 from wisp.agent.messages import Message
+from wisp.cli.auth import auth_app
 from wisp.config import WispConfig, load_project_env
 from wisp.events import ErrorEvent, RpcCommandFinished, RpcCommandStarted, TokenDelta
 from wisp.providers.base import ProviderError
+from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
@@ -199,6 +201,7 @@ app = typer.Typer(
     invoke_without_command=True,
     no_args_is_help=False,
 )
+app.add_typer(auth_app, name="auth")
 
 
 @app.callback()
@@ -219,6 +222,10 @@ def cli_callback(
     session_dir: Annotated[
         Path | None,
         typer.Option(help="Directory for JSONL session files."),
+    ] = None,
+    auth_file: Annotated[
+        Path | None,
+        typer.Option(help="Path to Wisp's private provider auth JSON file."),
     ] = None,
     mode: Annotated[
         OutputMode,
@@ -329,6 +336,7 @@ def cli_callback(
         provider=provider,
         model=model,
         session_dir=session_dir,
+        auth_path=auth_file,
         load_env_file=False,
     )
     try:
@@ -389,6 +397,15 @@ def main() -> None:
     app()
 
 
+async def _build_runtime_for_config(config: WispConfig) -> WispRuntime:
+    try:
+        return await build_runtime(auth_path=config.auth_path)
+    except TypeError as exc:
+        if "auth_path" not in str(exc):
+            raise
+        return await build_runtime()
+
+
 async def _run_print(
     prompt: str,
     config: WispConfig,
@@ -400,7 +417,7 @@ async def _run_print(
     max_tool_iterations: int | None = None,
     mode: OutputMode = OutputMode.text,
 ) -> None:
-    runtime = await build_runtime()
+    runtime = await _build_runtime_for_config(config)
     provider = runtime.providers.get(config.provider)
     sessions = JsonlSessionStore(config.session_dir)
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
@@ -454,7 +471,7 @@ async def _run_rpc(
     approve_unsafe_tools: bool = False,
     max_tool_iterations: int | None = None,
 ) -> None:
-    runtime = await build_runtime()
+    runtime = await _build_runtime_for_config(config)
     provider = runtime.providers.get(config.provider)
     sessions = JsonlSessionStore(config.session_dir)
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)

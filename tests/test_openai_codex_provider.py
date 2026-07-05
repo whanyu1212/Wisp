@@ -1,0 +1,174 @@
+from __future__ import annotations
+
+import base64
+import json
+from collections.abc import AsyncIterator, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+import anyio
+import pytest
+
+from wisp.agent.messages import Message
+from wisp.auth.storage import JsonAuthStore, OAuthCredential
+from wisp.providers.auth import StoredProviderAuthResolver
+from wisp.providers.base import ProviderConfigurationError, ToolCall, ToolCallResult, ToolSpec
+from wisp.providers.openai_codex import OpenAICodexProvider
+
+
+class StubOpenAICodexProvider(OpenAICodexProvider):
+    def __init__(
+        self,
+        events: Sequence[dict[str, object]],
+        *,
+        auth_resolver: StoredProviderAuthResolver,
+    ) -> None:
+        super().__init__(auth_resolver=auth_resolver, default_model="gpt-test")
+        self.events = events
+        self.seen_body: Mapping[str, object] | None = None
+        self.seen_headers: Mapping[str, str] | None = None
+
+    async def _create_stream(
+        self,
+        *,
+        body: Mapping[str, object],
+        headers: Mapping[str, str],
+    ) -> AsyncIterator[dict[str, object]]:
+        self.seen_body = body
+        self.seen_headers = headers
+        for event in self.events:
+            yield event
+
+
+def test_openai_codex_provider_streams_text_with_subscription_headers(tmp_path: Path) -> None:
+    store = _store_with_oauth(tmp_path)
+    provider = StubOpenAICodexProvider(
+        [
+            {"type": "response.created", "response": {"id": "response-id"}},
+            {"type": "response.output_text.delta", "delta": "hello"},
+            {"type": "response.output_text.delta", "delta": " world"},
+        ],
+        auth_resolver=StoredProviderAuthResolver(store),
+    )
+
+    async def run() -> list[str]:
+        return [delta async for delta in provider.stream([Message(role="user", content="hi")])]
+
+    assert anyio.run(run) == ["hello", " world"]
+    assert provider.seen_body is not None
+    assert provider.seen_body["model"] == "gpt-test"
+    assert provider.seen_body["input"] == [{"role": "user", "content": "hi"}]
+    assert provider.seen_headers is not None
+    assert provider.seen_headers["Authorization"] == f"Bearer {_fake_codex_token()}"
+    assert provider.seen_headers["chatgpt-account-id"] == "account-id"
+    assert provider.seen_headers["OpenAI-Beta"] == "responses=experimental"
+
+
+def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path) -> None:
+    store = _store_with_oauth(tmp_path)
+    provider = StubOpenAICodexProvider(
+        [],
+        auth_resolver=StoredProviderAuthResolver(store),
+    )
+    tool = ToolSpec(
+        name="lookup",
+        description="Look something up.",
+        input_schema={"type": "object", "properties": {"query": {"type": "string"}}},
+    )
+    result = ToolCallResult(call_id="call-id", output="found")
+
+    async def run() -> None:
+        assert [
+            event
+            async for event in provider.stream(
+                [Message(role="user", content="hi")],
+                tools=[tool],
+                tool_results=[result],
+                previous_response_id="response-id",
+            )
+        ] == []
+
+    anyio.run(run)
+
+    assert provider.seen_body is not None
+    assert provider.seen_body["input"] == [
+        {"type": "function_call_output", "call_id": "call-id", "output": "found"}
+    ]
+    assert provider.seen_body["previous_response_id"] == "response-id"
+    assert provider.seen_body["tools"] == [
+        {
+            "type": "function",
+            "name": "lookup",
+            "description": "Look something up.",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+            "strict": False,
+        }
+    ]
+
+
+def test_openai_codex_provider_yields_tool_calls(tmp_path: Path) -> None:
+    store = _store_with_oauth(tmp_path)
+    provider = StubOpenAICodexProvider(
+        [
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "item-id",
+                    "call_id": "call-id",
+                    "name": "lookup",
+                    "arguments": '{"query":"wisp"}',
+                },
+            }
+        ],
+        auth_resolver=StoredProviderAuthResolver(store),
+    )
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hi")])]
+
+    events = anyio.run(run)
+    assert events == [
+        ToolCall(
+            call_id="call-id",
+            name="lookup",
+            arguments={"query": "wisp"},
+            raw_arguments='{"query":"wisp"}',
+        )
+    ]
+
+
+def test_openai_codex_provider_requires_login(tmp_path: Path) -> None:
+    provider = OpenAICodexProvider(
+        auth_resolver=StoredProviderAuthResolver(JsonAuthStore(tmp_path / "auth.json"))
+    )
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hi")])]
+
+    with pytest.raises(ProviderConfigurationError, match="wisp auth login openai-codex"):
+        anyio.run(run)
+
+
+def _store_with_oauth(tmp_path: Path) -> JsonAuthStore:
+    store = JsonAuthStore(tmp_path / "auth.json")
+    store.set(
+        "openai-codex",
+        OAuthCredential(
+            access=_fake_codex_token(),
+            refresh="refresh-token",
+            expires=4_102_444_800_000,
+            account_id="account-id",
+        ),
+    )
+    return store
+
+
+def _fake_codex_token() -> str:
+    header: dict[str, Any] = {"alg": "none"}
+    payload = {"https://api.openai.com/auth": {"chatgpt_account_id": "account-id"}}
+    return ".".join([_b64(header), _b64(payload), "signature"])
+
+
+def _b64(value: object) -> str:
+    return base64.urlsafe_b64encode(json.dumps(value).encode("utf-8")).decode("ascii").rstrip("=")
