@@ -232,6 +232,13 @@ class TuiTranscriptEntry:
     style: str = ""
 
 
+@dataclass(frozen=True)
+class _RenderedTranscriptLine:
+    role: str
+    content: str
+    style: str = ""
+
+
 @dataclass
 class FullscreenTuiState:
     """Render-state snapshot used by the full-screen layout foundation."""
@@ -351,10 +358,9 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def token_delta(self, delta: str) -> None:
-        if not self.state.streaming_text and self.state.transcript_scroll_offset > 0:
-            self.state.transcript_scroll_offset += 1
+        previous_lines = len(self._rendered_transcript_lines())
         self.state.streaming_text += delta
-        self._clamp_transcript_scroll()
+        self._preserve_scroll_after_line_count_change(previous_lines)
         # The layout foundation still uses line-oriented input and a plain
         # console renderer. Redrawing the full layout for every token would
         # append repeated frames when clear_screen is disabled, so coalesce
@@ -362,13 +368,15 @@ class FullscreenTuiRenderer:
 
     def end_token_stream(self) -> None:
         if self.state.streaming_text:
+            streaming_text = self.state.streaming_text
+            self.state.streaming_text = ""
             self._append(
                 "assistant",
-                self.state.streaming_text,
+                streaming_text,
                 style="green",
                 preserve_scroll=False,
             )
-            self.state.streaming_text = ""
+            self._clamp_transcript_scroll()
         self._refresh()
 
     def approval_request(self, event: ToolApprovalRequested) -> None:
@@ -461,13 +469,15 @@ class FullscreenTuiRenderer:
         style: str = "",
         preserve_scroll: bool = True,
     ) -> None:
-        if preserve_scroll and self.state.transcript_scroll_offset > 0:
-            self.state.transcript_scroll_offset += 1
+        previous_lines = len(self._rendered_transcript_lines())
         self.state.transcript.append(TuiTranscriptEntry(role, str(content), style))
         if len(self.state.transcript) > self.max_transcript_entries:
             excess = len(self.state.transcript) - self.max_transcript_entries
             del self.state.transcript[:excess]
-        self._clamp_transcript_scroll()
+        if preserve_scroll:
+            self._preserve_scroll_after_line_count_change(previous_lines)
+        else:
+            self._clamp_transcript_scroll()
 
     def _refresh(self) -> None:
         if self.clear_screen:
@@ -511,7 +521,7 @@ class FullscreenTuiRenderer:
             text.append("No messages yet.", style="dim")
             return text
         for entry in entries:
-            self._append_entry_text(text, entry)
+            self._append_transcript_line_text(text, entry)
         return text
 
     def _transcript_title(self) -> str:
@@ -528,8 +538,8 @@ class FullscreenTuiRenderer:
             entries.append(TuiTranscriptEntry("assistant", self.state.streaming_text, "green"))
         return entries
 
-    def _visible_transcript_entries(self) -> list[TuiTranscriptEntry]:
-        entries = self._transcript_entries()
+    def _visible_transcript_entries(self) -> list[_RenderedTranscriptLine]:
+        entries = self._rendered_transcript_lines()
         if not entries:
             return []
         self._clamp_transcript_scroll()
@@ -537,6 +547,37 @@ class FullscreenTuiRenderer:
         end = len(entries) - self.state.transcript_scroll_offset
         start = max(0, end - visible_count)
         return entries[start:end]
+
+    def _rendered_transcript_lines(self) -> list[_RenderedTranscriptLine]:
+        lines: list[_RenderedTranscriptLine] = []
+        for entry in self._transcript_entries():
+            lines.extend(self._rendered_entry_lines(entry))
+        return lines
+
+    def _rendered_entry_lines(self, entry: TuiTranscriptEntry) -> list[_RenderedTranscriptLine]:
+        rendered: list[_RenderedTranscriptLine] = []
+        raw_lines = entry.content.splitlines() or [""]
+        for line_index, raw_line in enumerate(raw_lines):
+            prefix_width = len(f"{entry.role}: ") if line_index == 0 else 0
+            wrap_width = self._line_wrap_width(prefix_width=prefix_width)
+            for part_index, part in enumerate(_wrap_transcript_line(raw_line, width=wrap_width)):
+                rendered.append(
+                    _RenderedTranscriptLine(
+                        entry.role if line_index == 0 and part_index == 0 else "",
+                        part,
+                        entry.style,
+                    )
+                )
+        return rendered
+
+    def _line_wrap_width(self, *, prefix_width: int) -> int | None:
+        width = self._transcript_wrap_width()
+        if width is None:
+            return None
+        return max(1, width - prefix_width)
+
+    def _transcript_wrap_width(self) -> int | None:
+        return None
 
     def _transcript_view_entries(self) -> int:
         return max(1, self.state.transcript_view_entries)
@@ -547,7 +588,15 @@ class FullscreenTuiRenderer:
         return max(1, amount)
 
     def _max_transcript_scroll_offset(self) -> int:
-        return max(0, len(self._transcript_entries()) - self._transcript_view_entries())
+        return max(0, len(self._rendered_transcript_lines()) - self._transcript_view_entries())
+
+    def _preserve_scroll_after_line_count_change(self, previous_lines: int) -> None:
+        if self.state.transcript_scroll_offset > 0:
+            self.state.transcript_scroll_offset += max(
+                0,
+                len(self._rendered_transcript_lines()) - previous_lines,
+            )
+        self._clamp_transcript_scroll()
 
     def _clamp_transcript_scroll(self) -> None:
         self.state.transcript_scroll_offset = min(
@@ -555,11 +604,12 @@ class FullscreenTuiRenderer:
             self._max_transcript_scroll_offset(),
         )
 
-    def _append_entry_text(self, text: Text, entry: TuiTranscriptEntry) -> None:
+    def _append_transcript_line_text(self, text: Text, entry: _RenderedTranscriptLine) -> None:
         if text.plain:
             text.append("\n")
-        label_style = f"bold {entry.style}" if entry.style else "bold"
-        text.append(f"{entry.role}: ", style=label_style)
+        if entry.role:
+            label_style = f"bold {entry.style}" if entry.style else "bold"
+            text.append(f"{entry.role}: ", style=label_style)
         text.append(entry.content, style=entry.style)
 
     def _status_text(self) -> Text:
@@ -589,6 +639,12 @@ def create_tui_renderer(kind: TuiRendererKind, console: Console | None = None) -
     """Create a built-in TUI renderer."""
 
     return _BUILT_IN_RENDERERS[kind](console)
+
+
+def _wrap_transcript_line(line: str, *, width: int | None) -> list[str]:
+    if width is None or width <= 0 or len(line) <= width:
+        return [line]
+    return [line[index : index + width] for index in range(0, len(line), width)]
 
 
 def _compact_session_path(path: object) -> str:

@@ -17,11 +17,12 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame
 
-from wisp.tui.rendering import FullscreenTuiRenderer, TuiTranscriptEntry, TuiViewSnapshot
+from wisp.tui.rendering import FullscreenTuiRenderer, TuiViewSnapshot, _RenderedTranscriptLine
 
 _HEADER_FRAME_HEIGHT = 3
 _FOOTER_HEIGHT = 5
 _TRANSCRIPT_FRAME_BORDER_HEIGHT = 2
+_TRANSCRIPT_FRAME_BORDER_WIDTH = 2
 
 
 class LiveFullscreenInputInterrupted(Exception):
@@ -292,30 +293,45 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         return fragments
 
     def _transcript_view_entries(self) -> int:
-        output = getattr(self._application, "output", None)
-        get_size = getattr(output, "get_size", None)
-        if not callable(get_size):
-            return super()._transcript_view_entries()
-        size = get_size()
-        rows = getattr(size, "rows", None)
-        if not isinstance(rows, int) or rows <= 0:
+        rows, _columns = self._terminal_size()
+        if rows is None:
             return super()._transcript_view_entries()
         transcript_rows = (
             rows - _HEADER_FRAME_HEIGHT - _FOOTER_HEIGHT - _TRANSCRIPT_FRAME_BORDER_HEIGHT
         )
         return max(1, min(super()._transcript_view_entries(), transcript_rows))
 
+    def _transcript_wrap_width(self) -> int | None:
+        _rows, columns = self._terminal_size()
+        if columns is None:
+            return None
+        return max(1, columns - _TRANSCRIPT_FRAME_BORDER_WIDTH)
+
+    def _terminal_size(self) -> tuple[int | None, int | None]:
+        output = getattr(self._application, "output", None)
+        get_size = getattr(output, "get_size", None)
+        if not callable(get_size):
+            return None, None
+        size = get_size()
+        rows = getattr(size, "rows", None)
+        columns = getattr(size, "columns", None)
+        return (
+            rows if isinstance(rows, int) and rows > 0 else None,
+            columns if isinstance(columns, int) and columns > 0 else None,
+        )
+
     def _append_entry_fragments(
         self,
         fragments: StyleAndTextTuples,
-        entry: TuiTranscriptEntry,
+        entry: _RenderedTranscriptLine,
     ) -> None:
         if fragments:
             fragments.append(("", "\n"))
         style = _prompt_toolkit_style(entry.style)
         label_style = f"class:{style} bold" if style else "bold"
         content_style = f"class:{style}" if style else ""
-        fragments.append((label_style, f"{entry.role}: "))
+        if entry.role:
+            fragments.append((label_style, f"{entry.role}: "))
         fragments.append((content_style, entry.content))
 
     def _status_fragments(self) -> StyleAndTextTuples:

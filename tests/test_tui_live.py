@@ -89,6 +89,44 @@ def test_live_fullscreen_tui_sizes_latest_view_to_terminal_rows() -> None:
     assert "message 5" in rendered
 
 
+def test_live_fullscreen_tui_paginates_multiline_wrapped_entry_by_rows() -> None:
+    class FakeSize:
+        rows = 13
+        columns = 16
+
+    class FakeOutput:
+        def get_size(self) -> FakeSize:
+            return FakeSize()
+
+    class FakeApplication:
+        is_done = False
+        output = FakeOutput()
+
+        def invalidate(self) -> None:
+            pass
+
+    renderer = LiveFullscreenTui(run_application=False)
+    renderer._application = FakeApplication()
+
+    renderer.event(AssistantMessage(content="abcdef\nghijklmnopqrstuv"))
+
+    assert renderer._transcript_view_entries() == 3
+    assert renderer._max_transcript_scroll_offset() == 1
+    rendered = "".join(fragment for _style, fragment in renderer._transcript_fragments())
+    assert "abc" not in rendered
+    assert "def" in rendered
+    assert "ghijklmnopqrst" in rendered
+    assert "uv" in rendered
+
+    renderer.scroll_transcript_up(1)
+
+    rendered = "".join(fragment for _style, fragment in renderer._transcript_fragments())
+    assert "abc" in rendered
+    assert "def" in rendered
+    assert "ghijklmnopqrst" in rendered
+    assert "uv" not in rendered
+
+
 def test_live_fullscreen_tui_preserves_scrolled_view_during_streaming() -> None:
     renderer = LiveFullscreenTui(run_application=False)
     renderer.state.transcript_view_entries = 2
