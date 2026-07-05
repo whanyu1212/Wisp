@@ -14,7 +14,13 @@ from anyio.streams.memory import MemoryObjectSendStream
 from rich.console import Console
 
 from wisp.auth.openai_codex import OpenAICodexLoginMethod, login_openai_codex
-from wisp.auth.storage import ApiKeyCredential, AuthCredential, JsonAuthStore, OAuthCredential
+from wisp.auth.storage import (
+    ApiKeyCredential,
+    AuthCredential,
+    AuthStorageError,
+    JsonAuthStore,
+    OAuthCredential,
+)
 from wisp.config import default_auth_path
 from wisp.events import (
     AssistantMessage,
@@ -271,7 +277,12 @@ class TuiShell:
             self.renderer.command_error("Usage: /auth [provider]")
             return
         provider = args[0] if args else self._default_auth_provider()
-        self.renderer.notice(_auth_status_line(provider, self.auth_store.get(provider)))
+        try:
+            credential = self.auth_store.get(provider)
+        except AuthStorageError as exc:
+            self.renderer.command_error(f"Auth storage error: {exc}")
+            return
+        self.renderer.notice(_auth_status_line(provider, credential))
 
     async def _handle_login_command(self, args: tuple[str, ...]) -> None:
         if len(args) > 2:
@@ -304,7 +315,11 @@ class TuiShell:
         except Exception as exc:  # noqa: BLE001 - show login failure in the TUI
             self.renderer.command_error(f"Login failed: {exc}")
             return
-        self.auth_store.set(provider, credential)
+        try:
+            self.auth_store.set(provider, credential)
+        except AuthStorageError as exc:
+            self.renderer.command_error(f"Auth storage error: {exc}")
+            return
         self.renderer.notice(f"Logged in: {provider}")
 
     def _handle_logout_command(self, args: tuple[str, ...]) -> None:
@@ -312,7 +327,12 @@ class TuiShell:
             self.renderer.command_error("Usage: /logout [provider]")
             return
         provider = args[0] if args else self._default_auth_provider()
-        if self.auth_store.delete(provider):
+        try:
+            deleted = self.auth_store.delete(provider)
+        except AuthStorageError as exc:
+            self.renderer.command_error(f"Auth storage error: {exc}")
+            return
+        if deleted:
             self.renderer.notice(f"Logged out: {provider}")
         else:
             self.renderer.notice(f"Not logged in: {provider}")

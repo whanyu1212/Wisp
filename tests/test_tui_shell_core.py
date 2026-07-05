@@ -127,6 +127,95 @@ def test_tui_shell_auth_status_uses_current_provider(tmp_path: Path) -> None:
     anyio.run(run)
 
 
+def test_tui_shell_auth_status_reports_storage_errors(tmp_path: Path) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{not json", encoding="utf-8")
+
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/auth openai-codex", "/quit"]),
+            provider="openai-codex",
+            auth_path=auth_path,
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert "Auth storage error: Invalid auth file JSON:" in rendered
+        assert "openai-codex: not logged in" not in rendered
+        assert controller.prompts == []
+
+    anyio.run(run)
+
+
+def test_tui_shell_logout_reports_storage_errors(tmp_path: Path) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{not json", encoding="utf-8")
+
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/logout openai-codex", "/quit"]),
+            provider="openai-codex",
+            auth_path=auth_path,
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert "Auth storage error: Invalid auth file JSON:" in rendered
+        assert "Logged out: openai-codex" not in rendered
+        assert "Not logged in: openai-codex" not in rendered
+        assert controller.prompts == []
+
+    anyio.run(run)
+
+
+def test_tui_shell_login_reports_storage_errors(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_login(*_args: object, **_kwargs: object) -> OAuthCredential:
+        return OAuthCredential(
+            access="access-token",
+            refresh="refresh-token",
+            expires=4_102_444_800_000,
+            account_id="account-id",
+        )
+
+    monkeypatch.setattr(tui_shell_module, "login_openai_codex", fake_login)
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{not json", encoding="utf-8")
+
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/login openai-codex", "/quit"]),
+            provider="openai-codex",
+            auth_path=auth_path,
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert "Starting openai-codex device-code login..." in rendered
+        assert "Auth storage error: Invalid auth file JSON:" in rendered
+        assert "Logged in: openai-codex" not in rendered
+        assert "access-token" not in rendered
+
+    anyio.run(run)
+
+
 def test_tui_shell_login_and_logout_openai_codex(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
