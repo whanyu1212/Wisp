@@ -12,6 +12,7 @@ import anyio
 from rich.console import Console
 from typer.testing import CliRunner
 
+import wisp.tui.app as tui_app_module
 from wisp import tui as tui_module
 from wisp.cli import app
 from wisp.config import WispConfig
@@ -30,6 +31,8 @@ from wisp.events import (
 from wisp.tui import (
     FullscreenTuiRenderer,
     LineTuiRenderer,
+    LiveFullscreenInputInterrupted,
+    LiveFullscreenTui,
     TuiInteractionState,
     TuiOptions,
     TuiRendererKind,
@@ -38,7 +41,13 @@ from wisp.tui import (
     TuiViewSnapshot,
     create_tui_renderer,
 )
-from wisp.tui.app import _default_prompt_reader, _InputLine, _InputMode, _rpc_command
+from wisp.tui.app import (
+    _default_prompt_reader,
+    _InputInterrupted,
+    _InputLine,
+    _InputMode,
+    _rpc_command,
+)
 
 type EventBatch = list[KnownWispEvent]
 type ScriptedBatch = EventBatch | tuple[float, EventBatch]
@@ -245,6 +254,27 @@ def test_fullscreen_tui_renderer_coalesces_streaming_token_redraws() -> None:
     assert "hello" in output.getvalue()
 
 
+def test_live_fullscreen_tui_refreshes_streaming_token_deltas() -> None:
+    class FakeApplication:
+        is_done = False
+
+        def __init__(self) -> None:
+            self.invalidations = 0
+
+        def invalidate(self) -> None:
+            self.invalidations += 1
+
+    renderer = LiveFullscreenTui(run_application=False)
+    app = FakeApplication()
+    renderer._application = app
+
+    renderer.token_delta("hel")
+    renderer.token_delta("lo")
+
+    assert renderer.state.streaming_text == "hello"
+    assert app.invalidations == 2
+
+
 def test_fullscreen_tui_renderer_applies_view_snapshot() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
 
@@ -259,6 +289,7 @@ def test_fullscreen_tui_renderer_applies_view_snapshot() -> None:
 
     assert renderer.state.status == "waiting for approval"
     assert renderer.state.input_hint == "approve? [y/N] "
+    assert renderer.state.input_mode == "idle"
     assert renderer.state.queued_follow_ups == 2
     assert renderer.state.last_session == "session.jsonl"
 
@@ -280,6 +311,403 @@ def test_fullscreen_tui_renderer_messages_do_not_infer_footer_state() -> None:
     assert renderer.state.status == "running"
     assert renderer.state.input_hint == "wisp(running)> "
     assert renderer.state.queued_follow_ups == 1
+
+
+def test_live_fullscreen_tui_accepts_submitted_input() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+
+        renderer._buffer.insert_text("hello")
+        renderer._accept_input()
+
+        assert await read_task == "hello"
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_queues_submission_accepted_between_reads() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        renderer.view_updated(
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp(running)> ",
+                input_mode="running",
+            )
+        )
+        first_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+
+        renderer._buffer.insert_text("first")
+        renderer._accept_input()
+        renderer._buffer.insert_text("second")
+        renderer._accept_input()
+
+        assert await first_read == "first"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+        assert await renderer.read_prompt("wisp(running)> ") == "second"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_splits_bracketed_paste_into_submissions() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        renderer.view_updated(
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp(running)> ",
+                input_mode="running",
+            )
+        )
+        first_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+
+        renderer._paste_input("first\nsecond\nthird")
+
+        assert await first_read == "first"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+        assert await renderer.read_prompt("wisp(running)> ") == "second"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+        second_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+        assert renderer._buffer.text == "third"
+
+        renderer._accept_input()
+
+        assert await second_read == "third"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+
+    anyio.run(run)
+
+
+def test_tui_shell_reads_live_submission_queued_between_reads() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        shell = TuiShell(
+            ScriptedController(), renderer=renderer, prompt_reader=renderer.read_prompt
+        )
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.running
+        shell._sync_view()
+        send, receive = anyio.create_memory_object_stream[object](10)
+
+        async with anyio.create_task_group() as task_group, send, receive:
+            task_group.start_soon(shell._read_inputs, send.clone())
+            await anyio.sleep(0)
+
+            renderer._buffer.insert_text("first")
+            renderer._accept_input()
+            renderer._buffer.insert_text("second")
+            renderer._accept_input()
+
+            first = await receive.receive()
+            second = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert isinstance(first, _InputLine)
+        assert first.text == "first"
+        assert first.mode is _InputMode.running
+        assert isinstance(second, _InputLine)
+        assert second.text == "second"
+        assert second.mode is _InputMode.running
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_preserves_typed_buffer_between_reads() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        renderer.view_updated(
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp(running)> ",
+                input_mode="running",
+            )
+        )
+        first_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+
+        renderer._buffer.insert_text("first")
+        renderer._accept_input()
+        renderer._buffer.insert_text("sec")
+
+        assert await first_read == "first"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+        second_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+        assert renderer._buffer.text == "sec"
+
+        renderer._buffer.insert_text("ond")
+        renderer._accept_input()
+
+        assert await second_read == "second"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_interrupts_input() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+
+        renderer._interrupt_input()
+
+        try:
+            await read_task
+        except LiveFullscreenInputInterrupted:
+            pass
+        else:  # pragma: no cover - defensive assertion branch
+            raise AssertionError("expected KeyboardInterrupt")
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_closes_input() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+
+        renderer._close_input()
+
+        try:
+            await read_task
+        except EOFError:
+            pass
+        else:  # pragma: no cover - defensive assertion branch
+            raise AssertionError("expected EOFError")
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_close_ends_pending_input() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+
+        await renderer.close()
+
+        try:
+            await read_task
+        except EOFError:
+            pass
+        else:  # pragma: no cover - defensive assertion branch
+            raise AssertionError("expected EOFError")
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_close_cancels_stuck_application() -> None:
+    class StuckApplication:
+        is_done = False
+
+        def exit(self) -> None:
+            raise RuntimeError("not running yet")
+
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        renderer._application = StuckApplication()
+        renderer._application_task = asyncio.create_task(anyio.sleep(10))
+
+        await renderer.close()
+
+        assert renderer._application_task.done()
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_retags_empty_submission_after_mode_change() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        shell = TuiShell(
+            ScriptedController(), renderer=renderer, prompt_reader=renderer.read_prompt
+        )
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.running
+        shell._sync_view()
+        send, receive = anyio.create_memory_object_stream[object](10)
+
+        async with anyio.create_task_group() as task_group, send, receive:
+            task_group.start_soon(shell._read_inputs, send.clone())
+            await anyio.sleep(0)
+
+            shell.state.status = TuiStatus.waiting_for_approval
+            shell.state.pending_approval = ToolApprovalRequested(
+                call_id="call-1",
+                name="bash",
+                arguments={"command": "echo hi"},
+                safety="command",
+            )
+            shell._sync_view()
+            renderer._buffer.insert_text("y")
+            renderer._accept_input()
+
+            signal = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert isinstance(signal, _InputLine)
+        assert signal.text == "y"
+        assert signal.mode is _InputMode.approval
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_keeps_preexisting_text_mode_when_approval_arrives() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = LiveFullscreenTui(run_application=False)
+        shell = TuiShell(controller, renderer=renderer, prompt_reader=renderer.read_prompt)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.running
+        shell._sync_view()
+        send, receive = anyio.create_memory_object_stream[object](10)
+
+        async with anyio.create_task_group() as task_group, send, receive:
+            task_group.start_soon(shell._read_inputs, send.clone())
+            await anyio.sleep(0)
+
+            renderer._buffer.insert_text("run tests")
+            shell.state.status = TuiStatus.waiting_for_approval
+            shell.state.pending_approval = ToolApprovalRequested(
+                call_id="call-1",
+                name="bash",
+                arguments={"command": "echo hi"},
+                safety="command",
+            )
+            shell._sync_view()
+            renderer._accept_input()
+
+            signal = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert isinstance(signal, _InputLine)
+        assert signal.text == "run tests"
+        assert signal.mode is _InputMode.running
+
+        should_exit = await shell._handle_input_line(signal)
+
+        assert should_exit is False
+        assert controller.approvals == []
+        assert list(shell.state.queued_prompts) == ["run tests"]
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_retags_after_preexisting_text_is_cleared() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        shell = TuiShell(
+            ScriptedController(), renderer=renderer, prompt_reader=renderer.read_prompt
+        )
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.running
+        shell._sync_view()
+        send, receive = anyio.create_memory_object_stream[object](10)
+
+        async with anyio.create_task_group() as task_group, send, receive:
+            task_group.start_soon(shell._read_inputs, send.clone())
+            await anyio.sleep(0)
+
+            renderer._buffer.insert_text("run tests")
+            shell.state.status = TuiStatus.waiting_for_approval
+            shell.state.pending_approval = ToolApprovalRequested(
+                call_id="call-1",
+                name="bash",
+                arguments={"command": "echo hi"},
+                safety="command",
+            )
+            shell._sync_view()
+            renderer._buffer.delete_before_cursor(count=len("run tests"))
+            renderer._buffer.insert_text("y")
+            renderer._accept_input()
+
+            signal = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert isinstance(signal, _InputLine)
+        assert signal.text == "y"
+        assert signal.mode is _InputMode.approval
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_captures_mode_at_accept_time() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        renderer.view_updated(
+            TuiViewSnapshot(
+                status="waiting for approval",
+                input_hint="approve? [y/N] ",
+                input_mode="approval",
+            )
+        )
+        read_task = asyncio.create_task(renderer.read_prompt("approve? [y/N] "))
+        await anyio.sleep(0)
+
+        renderer._buffer.insert_text("y")
+        renderer._accept_input()
+        renderer.view_updated(
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp(running)> ",
+                input_mode="running",
+            )
+        )
+
+        assert await read_task == "y"
+        assert renderer.consume_submitted_input_mode("running") == "approval"
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_captures_mode_for_interrupt_and_close() -> None:
+    async def captured_mode_for(action: str) -> str:
+        renderer = LiveFullscreenTui(run_application=False)
+        renderer.view_updated(
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp(running)> ",
+                input_mode="running",
+            )
+        )
+        read_task = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+
+        renderer._buffer.insert_text("run tests")
+        renderer.view_updated(
+            TuiViewSnapshot(
+                status="waiting for approval",
+                input_hint="approve? [y/N] ",
+                input_mode="approval",
+            )
+        )
+        if action == "interrupt":
+            renderer._interrupt_input()
+            expected_exception: type[BaseException] = LiveFullscreenInputInterrupted
+        else:
+            renderer._close_input()
+            expected_exception = EOFError
+
+        try:
+            await read_task
+        except expected_exception:
+            pass
+        else:  # pragma: no cover - defensive assertion branch
+            raise AssertionError(f"expected {expected_exception.__name__}")
+        return renderer.consume_submitted_input_mode("approval")
+
+    async def run() -> None:
+        assert await captured_mode_for("interrupt") == "running"
+        assert await captured_mode_for("close") == "running"
+
+    anyio.run(run)
 
 
 def test_create_tui_renderer_selects_fullscreen_renderer() -> None:
@@ -856,6 +1284,30 @@ def test_tui_shell_does_not_approve_from_stale_running_input() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_denies_approval_on_running_tagged_interrupt_for_safety() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(controller)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.waiting_for_approval
+        shell.state.pending_approval = ToolApprovalRequested(
+            call_id="call-1",
+            name="danger",
+            arguments={"path": "file.txt"},
+            safety="mutating",
+        )
+
+        should_exit = await shell._handle_input_interrupted(
+            _InputInterrupted(mode=_InputMode.running)
+        )
+
+        assert should_exit is False
+        assert controller.approvals == [("call-1", False, "Denied from TUI: interrupted")]
+        assert shell.state.pending_approval is None
+
+    anyio.run(run)
+
+
 def test_tui_shell_denies_tool_approval_on_blank_answer() -> None:
     async def run() -> None:
         controller = ScriptedController()
@@ -1095,6 +1547,116 @@ def test_tui_rpc_command_includes_continue_latest(tmp_path: Path) -> None:
     )
 
     assert "--continue" in command
+
+
+def test_run_tui_uses_live_fullscreen_when_interactive(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    instances: list[object] = []
+
+    class FakeLiveFullscreenTui(FullscreenTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0], clear_screen=False)
+            self.prompts: list[str] = []
+            self.closed = False
+            instances.append(self)
+
+        async def read_prompt(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return "/quit"
+            await anyio.sleep(1)
+            raise EOFError
+
+        async def close(self) -> None:
+            self.closed = True
+
+    async def run() -> None:
+        monkeypatch.setattr(tui_app_module, "_stdio_is_interactive", lambda: True)
+        monkeypatch.setattr(tui_app_module, "LiveFullscreenTui", FakeLiveFullscreenTui)
+        controller = ScriptedController()
+
+        await tui_app_module.run_tui(
+            TuiOptions(
+                config=WispConfig(provider="fake", session_dir=tmp_path),
+                renderer=TuiRendererKind.fullscreen,
+            ),
+            controller=controller,
+        )
+
+        assert controller.shutdown_count == 1
+        assert len(instances) == 1
+        live = instances[0]
+        assert isinstance(live, FakeLiveFullscreenTui)
+        assert live.prompts[0] == "wisp> "
+        assert live.closed is True
+
+    anyio.run(run)
+
+
+def test_run_tui_uses_fullscreen_fallback_with_explicit_prompt_reader(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    class FailingLiveFullscreenTui:
+        def __init__(self) -> None:
+            raise AssertionError("live fullscreen should not be constructed")
+
+    async def run() -> None:
+        monkeypatch.setattr(tui_app_module, "_stdio_is_interactive", lambda: True)
+        monkeypatch.setattr(tui_app_module, "LiveFullscreenTui", FailingLiveFullscreenTui)
+        controller = ScriptedController()
+
+        await tui_app_module.run_tui(
+            TuiOptions(
+                config=WispConfig(provider="fake", session_dir=tmp_path),
+                renderer=TuiRendererKind.fullscreen,
+            ),
+            controller=controller,
+            prompt_reader=await _reader_from(["/quit"]),
+        )
+
+        assert controller.shutdown_count == 1
+
+    anyio.run(run)
+
+
+def test_run_tui_uses_fullscreen_fallback_when_stdio_is_not_interactive(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    class FailingLiveFullscreenTui:
+        def __init__(self) -> None:
+            raise AssertionError("live fullscreen should not be constructed")
+
+    prompts: list[str] = []
+
+    async def fake_default_prompt_reader(prompt: str) -> str:
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return "/quit"
+        await anyio.sleep(1)
+        raise EOFError
+
+    async def run() -> None:
+        monkeypatch.setattr(tui_app_module, "_stdio_is_interactive", lambda: False)
+        monkeypatch.setattr(tui_app_module, "LiveFullscreenTui", FailingLiveFullscreenTui)
+        monkeypatch.setattr(tui_app_module, "_default_prompt_reader", fake_default_prompt_reader)
+        controller = ScriptedController()
+
+        await tui_app_module.run_tui(
+            TuiOptions(
+                config=WispConfig(provider="fake", session_dir=tmp_path),
+                renderer=TuiRendererKind.fullscreen,
+            ),
+            controller=controller,
+        )
+
+        assert controller.shutdown_count == 1
+        assert prompts[0] == "wisp> "
+
+    anyio.run(run)
 
 
 def test_cli_tui_mode_validates_provider_before_prompting() -> None:

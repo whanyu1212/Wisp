@@ -39,6 +39,7 @@ class TuiViewSnapshot:
 
     status: str
     input_hint: str
+    input_mode: str = "idle"
     queued_follow_ups: int = 0
     last_session: str | None = None
 
@@ -237,6 +238,7 @@ class FullscreenTuiState:
 
     status: str = "idle"
     input_hint: str = "wisp> "
+    input_mode: str = "idle"
     queued_follow_ups: int = 0
     last_session: str | None = None
     transcript: list[TuiTranscriptEntry] = field(default_factory=list)
@@ -269,6 +271,7 @@ class FullscreenTuiRenderer:
     def view_updated(self, snapshot: TuiViewSnapshot) -> None:
         self.state.status = snapshot.status
         self.state.input_hint = snapshot.input_hint
+        self.state.input_mode = snapshot.input_mode
         self.state.queued_follow_ups = snapshot.queued_follow_ups
         self.state.last_session = snapshot.last_session
         self._refresh()

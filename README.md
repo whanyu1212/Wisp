@@ -177,10 +177,11 @@ uv run wisp --mode tui --provider openai --allow-tool bash
 The default line-oriented TUI currently provides streamed assistant text, basic
 tool call/result rendering, queued follow-up input while a prompt is running,
 interactive approval prompts for mutating/command tools, Ctrl-C interrupt
-handling, Ctrl-D shutdown, and `/help` plus `/quit` commands. An opt-in
-`--tui-renderer fullscreen` renderer establishes transcript/status/input layout
-regions, but input is still line-oriented; the goal is to dogfood the
-RPC/controller layer while growing toward richer session controls.
+handling, Ctrl-D shutdown, and `/help` plus `/quit` commands. On interactive
+terminals, opt-in `--tui-renderer fullscreen` uses a live prompt-toolkit screen
+with transcript/status/input regions that owns the input line. For piped input,
+embedded tests, or explicit prompt readers, fullscreen falls back to the
+line-oriented input path while preserving the same renderer state model.
 
 Wisp does not cap model/tool rounds by default, matching Pi's permissive agent
 loop. If you want a non-interactive fuse for a run, pass

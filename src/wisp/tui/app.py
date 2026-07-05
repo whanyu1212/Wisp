@@ -32,6 +32,7 @@ from wisp.events import (
 from wisp.rpc import JsonlSubprocessRpcTransport, RpcController
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.tui.live import LiveFullscreenInputInterrupted, LiveFullscreenTui
 from wisp.tui.rendering import (
     TuiRenderer,
     TuiRendererKind,
@@ -85,6 +86,7 @@ class TuiViewState:
 
     status: str = "idle"
     input_hint: str = "wisp> "
+    input_mode: str = "idle"
     queued_follow_ups: int = 0
     last_session: str | None = None
 
@@ -94,6 +96,7 @@ class TuiViewState:
         return TuiViewSnapshot(
             status=self.status,
             input_hint=self.input_hint,
+            input_mode=self.input_mode,
             queued_follow_ups=self.queued_follow_ups,
             last_session=self.last_session,
         )
@@ -178,16 +181,33 @@ async def run_tui(
         transport = await JsonlSubprocessRpcTransport.start(_rpc_command(options), env=_rpc_env())
         selected_controller = RpcController(transport)
 
+    live_tui: LiveFullscreenTui | None = None
+    selected_renderer = create_tui_renderer(options.renderer, selected_console)
+    selected_prompt_reader = prompt_reader
+    if (
+        options.renderer is TuiRendererKind.fullscreen
+        and prompt_reader is None
+        and console is None
+        and _stdio_is_interactive()
+    ):
+        live_tui = LiveFullscreenTui()
+        selected_renderer = live_tui
+        selected_prompt_reader = live_tui.read_prompt
+
     shell = TuiShell(
         selected_controller,
-        renderer=create_tui_renderer(options.renderer, selected_console),
-        prompt_reader=prompt_reader,
+        renderer=selected_renderer,
+        prompt_reader=selected_prompt_reader,
     )
     try:
         await shell.run()
     finally:
-        if owns_controller:
-            await selected_controller.close()
+        try:
+            if live_tui is not None:
+                await live_tui.close()
+        finally:
+            if owns_controller:
+                await selected_controller.close()
 
 
 class TuiShell:
@@ -227,9 +247,11 @@ class TuiShell:
                     return
 
     def _sync_view(self) -> None:
+        mode = _input_mode_for_status(self.state.status)
         self._update_view(
             status=_view_status_for_status(self.state.status),
-            input_hint=_prompt_for_mode(_input_mode_for_status(self.state.status)),
+            input_hint=_prompt_for_mode(mode),
+            input_mode=mode,
             queued_follow_ups=len(self.state.queued_prompts),
         )
 
@@ -238,6 +260,7 @@ class TuiShell:
         *,
         status: str | None = None,
         input_hint: str | None = None,
+        input_mode: _InputMode | None = None,
         queued_follow_ups: int | None = None,
         last_session: str | None = None,
     ) -> None:
@@ -245,6 +268,8 @@ class TuiShell:
             self.view.status = status
         if input_hint is not None:
             self.view.input_hint = input_hint
+        if input_mode is not None:
+            self.view.input_mode = input_mode.value
         if queued_follow_ups is not None:
             self.view.queued_follow_ups = queued_follow_ups
         if last_session is not None:
@@ -258,12 +283,18 @@ class TuiShell:
                 try:
                     text = (await self.prompt_reader(_prompt_for_mode(mode))).strip()
                 except EOFError:
-                    await send.send(_InputClosed(mode=mode))
+                    await send.send(_InputClosed(mode=self._submitted_input_mode(mode)))
                     return
-                except KeyboardInterrupt:
-                    await send.send(_InputInterrupted(mode=mode))
+                except (KeyboardInterrupt, LiveFullscreenInputInterrupted):
+                    await send.send(_InputInterrupted(mode=self._submitted_input_mode(mode)))
                     continue
-                await send.send(_InputLine(text=text, mode=mode))
+                await send.send(_InputLine(text=text, mode=self._submitted_input_mode(mode)))
+
+    def _submitted_input_mode(self, requested_mode: _InputMode) -> _InputMode:
+        consume_mode = getattr(self.renderer, "consume_submitted_input_mode", None)
+        if callable(consume_mode):
+            return _coerce_input_mode(consume_mode(requested_mode.value), fallback=requested_mode)
+        return requested_mode
 
     async def _read_rpc_events(self, send: MemoryObjectSendStream[_TuiSignal]) -> None:
         async with send:
@@ -323,6 +354,8 @@ class TuiShell:
             return False
         self.state.exit_requested = True
         if self.state.pending_approval is not None:
+            # Denying the pending approval is the conservative safety behavior even
+            # when a live renderer reports that EOF began under an older mode.
             return await self._answer_pending_approval(
                 "",
                 approved=False,
@@ -338,6 +371,8 @@ class TuiShell:
 
     async def _handle_input_interrupted(self, signal: _InputInterrupted) -> bool:
         if self.state.pending_approval is not None:
+            # Denying the pending approval is the conservative safety behavior even
+            # when a live renderer reports that Ctrl-C began under an older mode.
             return await self._answer_pending_approval(
                 "",
                 approved=False,
@@ -518,6 +553,7 @@ class TuiShell:
             self._update_view(
                 status="running queued follow-up",
                 input_hint=_prompt_for_mode(_InputMode.running),
+                input_mode=_InputMode.running,
                 queued_follow_ups=len(self.state.queued_prompts),
             )
             self.renderer.running_queued_follow_up(len(self.state.queued_prompts))
@@ -532,6 +568,7 @@ class TuiShell:
             self._update_view(
                 status="error",
                 input_hint=_prompt_for_mode(_InputMode.idle),
+                input_mode=_InputMode.idle,
                 queued_follow_ups=0,
             )
         return False
@@ -631,6 +668,22 @@ def _rpc_env() -> dict[str, str]:
 def _stdin_is_interactive() -> bool:
     isatty = getattr(sys.stdin, "isatty", None)
     return bool(isatty and isatty())
+
+
+def _stdout_is_interactive() -> bool:
+    isatty = getattr(sys.stdout, "isatty", None)
+    return bool(isatty and isatty())
+
+
+def _stdio_is_interactive() -> bool:
+    return _stdin_is_interactive() and _stdout_is_interactive()
+
+
+def _coerce_input_mode(value: str, *, fallback: _InputMode) -> _InputMode:
+    try:
+        return _InputMode(value)
+    except ValueError:
+        return fallback
 
 
 def _input_mode_for_status(status: TuiStatus) -> _InputMode:
