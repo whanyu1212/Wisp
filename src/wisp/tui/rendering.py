@@ -469,13 +469,14 @@ class FullscreenTuiRenderer:
         style: str = "",
         preserve_scroll: bool = True,
     ) -> None:
-        previous_lines = len(self._rendered_transcript_lines())
-        self.state.transcript.append(TuiTranscriptEntry(role, str(content), style))
+        entry = TuiTranscriptEntry(role, str(content), style)
+        appended_lines = len(self._rendered_entry_lines(entry))
+        self.state.transcript.append(entry)
         if len(self.state.transcript) > self.max_transcript_entries:
             excess = len(self.state.transcript) - self.max_transcript_entries
             del self.state.transcript[:excess]
         if preserve_scroll:
-            self._preserve_scroll_after_line_count_change(previous_lines)
+            self._preserve_scroll_after_appended_lines(appended_lines)
         else:
             self._clamp_transcript_scroll()
 
@@ -591,11 +592,13 @@ class FullscreenTuiRenderer:
         return max(0, len(self._rendered_transcript_lines()) - self._transcript_view_entries())
 
     def _preserve_scroll_after_line_count_change(self, previous_lines: int) -> None:
+        self._preserve_scroll_after_appended_lines(
+            len(self._rendered_transcript_lines()) - previous_lines
+        )
+
+    def _preserve_scroll_after_appended_lines(self, appended_lines: int) -> None:
         if self.state.transcript_scroll_offset > 0:
-            self.state.transcript_scroll_offset += max(
-                0,
-                len(self._rendered_transcript_lines()) - previous_lines,
-            )
+            self.state.transcript_scroll_offset += max(0, appended_lines)
         self._clamp_transcript_scroll()
 
     def _clamp_transcript_scroll(self) -> None:

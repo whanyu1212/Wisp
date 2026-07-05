@@ -222,6 +222,34 @@ def test_fullscreen_tui_renderer_preserves_scrolled_view_during_new_output() -> 
     ]
 
 
+def test_fullscreen_tui_renderer_preserves_scrolled_view_when_pruning_cap() -> None:
+    renderer = FullscreenTuiRenderer(
+        _console()[0],
+        clear_screen=False,
+        max_transcript_entries=5,
+        transcript_view_entries=3,
+    )
+    for index in range(5):
+        renderer.event(AssistantMessage(content=f"message {index}"))
+    renderer.scroll_transcript_up(1)
+
+    renderer.event(AssistantMessage(content="message 5"))
+
+    assert [entry.content for entry in renderer.state.transcript] == [
+        "message 1",
+        "message 2",
+        "message 3",
+        "message 4",
+        "message 5",
+    ]
+    assert renderer.state.transcript_scroll_offset == 2
+    assert [entry.content for entry in renderer._visible_transcript_entries()] == [
+        "message 1",
+        "message 2",
+        "message 3",
+    ]
+
+
 def test_fullscreen_tui_renderer_keeps_footer_visible_while_scrolled() -> None:
     console, output = _console()
     renderer = FullscreenTuiRenderer(console, clear_screen=False, transcript_view_entries=2)
