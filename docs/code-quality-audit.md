@@ -12,8 +12,8 @@ Largest files by line count:
 | CLI tests | `tests/test_cli.py` | ~1470 | Print, JSON, RPC, approval policy, tool exposure, and provider errors in one module. |
 | Tools | `src/wisp/tools/builtin.py` | ~1330 | Read/write/edit/bash/grep/find/ls plus subprocess/rg helpers in one module. |
 | CLI | `src/wisp/cli/__init__.py` | ~990 | Typer callback, print mode, JSON mode, RPC server, and stdin readers remain in the package root after helper extraction. |
-| TUI shell | `src/wisp/tui/app.py` | ~720 | Shell state, input loop, RPC event loop, signal handling, and TUI subprocess setup. |
 | TUI rendering | `src/wisp/tui/rendering.py` | ~525 | Renderer protocol, line renderer, fullscreen renderer, shared state. |
+| TUI shell | `src/wisp/tui/shell.py` | ~485 | Shell input loop, RPC event loop, signal handling, and renderer synchronization after app split. |
 
 Largest implementation objects by simple AST span:
 
@@ -62,14 +62,19 @@ Recommended follow-up boundaries:
 
 Acceptance criteria: no behavior changes, CLI tests remain green, public command surface unchanged.
 
-### 3. Split `src/wisp/tui/app.py`
+### 3. Continue splitting the `wisp.tui` package
 
-Recommended boundaries:
+Completed first boundaries:
 
-- `wisp.tui.app` — `run_tui()` wiring and public shell entrypoint
-- `wisp.tui.state` — `TuiStatus`, interaction/view state, input signal dataclasses
-- `wisp.tui.shell` — `TuiShell` state machine
-- `wisp.tui.rpc` — subprocess command/env construction and preflight
+- `wisp.tui.app` — `run_tui()` wiring plus compatibility aliases for existing imports/tests
+- `wisp.tui.launch` — `TuiOptions`, preflight validation, subprocess command/env construction, and stdio detection
+- `wisp.tui.state` — `TuiStatus`, interaction/view state, input signal dataclasses, and input-mode helpers
+- `wisp.tui.shell` — `TuiShell` state machine and controller-facing event loop
+
+Recommended follow-up boundaries:
+
+- `wisp.tui.shell` — smaller input, approval/cancel, and RPC-event handler helpers if the class keeps growing
+- `wisp.tui.rendering` — separate fullscreen layout rendering from renderer protocols/shared transcript types
 
 Acceptance criteria: no behavior changes; TUI shell tests map to state/input/RPC concerns.
 
@@ -91,7 +96,7 @@ Before adding more TUI features, complete these low-risk organization PRs:
 1. **PR #29** — audit report plus TUI/CLI test split.
 2. **PR #30** — extract low-risk CLI helper modules.
 3. **PR #31** — migrate CLI helpers into a `wisp.cli` subpackage.
-4. **PR #32** — split `tui/app.py` around shell state and RPC wiring.
+4. **PR #32** — split `tui/app.py` around shell state and launch wiring.
 5. **PR #33** — split `tools/builtin.py` by tool family.
 
 After that, resume live fullscreen usability work, especially transcript scrollback and clearer status/approval surfaces.
