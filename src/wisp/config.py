@@ -39,7 +39,7 @@ class WispConfig(BaseModel):
         """
 
         if load_env_file:
-            load_dotenv(dotenv_path=Path.cwd() / ".env")
+            load_project_env()
 
         provider_name = _first_non_empty(
             provider,
@@ -53,6 +53,12 @@ class WispConfig(BaseModel):
             model=_first_non_empty(model, os.environ.get("WISP_MODEL")),
             session_dir=session_dir or default_session_dir(),
         )
+
+
+def load_project_env() -> None:
+    """Load Wisp environment defaults from the current working directory."""
+
+    load_dotenv(dotenv_path=Path.cwd() / ".env")
 
 
 def default_session_dir() -> Path:
