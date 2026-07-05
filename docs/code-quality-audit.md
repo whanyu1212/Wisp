@@ -10,7 +10,7 @@ Largest files by line count:
 | --- | --- | ---: | --- |
 | TUI tests | `tests/test_tui.py` | ~1820 | Renderer, live input, shell state, run_tui integration, and CLI env tests in one module. |
 | CLI tests | `tests/test_cli.py` | ~1470 | Print, JSON, RPC, approval policy, tool exposure, and provider errors in one module. |
-| Tools | `src/wisp/tools/builtin.py` | ~1330 | Read/write/edit/bash/grep/find/ls plus subprocess/rg helpers in one module. |
+| Tools | `src/wisp/tools/search.py` | ~620 | Grep/find/ls plus ripgrep/Python search formatting after built-in tool split. |
 | CLI | `src/wisp/cli/__init__.py` | ~990 | Typer callback, print mode, JSON mode, RPC server, and stdin readers remain in the package root after helper extraction. |
 | TUI rendering | `src/wisp/tui/rendering.py` | ~525 | Renderer protocol, line renderer, fullscreen renderer, shared state. |
 | TUI shell | `src/wisp/tui/shell.py` | ~485 | Shell input loop, RPC event loop, signal handling, and renderer synchronization after app split. |
@@ -78,14 +78,21 @@ Recommended follow-up boundaries:
 
 Acceptance criteria: no behavior changes; TUI shell tests map to state/input/RPC concerns.
 
-### 4. Split `src/wisp/tools/builtin.py`
+### 4. Continue splitting built-in tools if needed
 
-Recommended boundaries:
+Completed first boundaries:
 
-- `wisp.tools.file_ops` — read/write/edit and path-safe file helpers
-- `wisp.tools.search` — grep/find/ls and ripgrep parsing/truncation
-- `wisp.tools.shell` — bash execution and subprocess limits
-- `wisp.tools.builtin` — small registry/factory module
+- `wisp.tools.builtin` — compatibility/factory facade for built-in tool classes
+- `wisp.tools.common` — shared argument and truncation helpers
+- `wisp.tools.file_ops` — read/write/edit tools and file-edit helpers
+- `wisp.tools.process` — subprocess result, output-budget, and process cleanup helpers
+- `wisp.tools.shell` — bash tool wrapper
+- `wisp.tools.search` — grep/find/ls tools and ripgrep/Python search formatting
+
+Recommended follow-up boundaries:
+
+- Split `wisp.tools.search` further only if search behavior keeps growing.
+- Split `tests/test_tools.py` into file/process/search suites if tool tests become difficult to review.
 
 Acceptance criteria: tool schemas/names/outputs unchanged.
 
@@ -99,4 +106,4 @@ Before adding more TUI features, complete these low-risk organization PRs:
 4. **PR #32** — split `tui/app.py` around shell state and launch wiring.
 5. **PR #33** — split `tools/builtin.py` by tool family.
 
-After that, resume live fullscreen usability work, especially transcript scrollback and clearer status/approval surfaces.
+After PR #33, resume live fullscreen usability work, especially transcript scrollback and clearer status/approval surfaces.
