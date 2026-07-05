@@ -132,6 +132,148 @@ def test_fullscreen_tui_renderer_messages_do_not_infer_footer_state() -> None:
     assert renderer.state.queued_follow_ups == 1
 
 
+def test_fullscreen_tui_renderer_transcript_view_defaults_to_latest() -> None:
+    renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False, transcript_view_entries=3)
+    for index in range(5):
+        renderer.event(AssistantMessage(content=f"message {index}"))
+
+    assert [entry.content for entry in renderer._visible_transcript_entries()] == [
+        "message 2",
+        "message 3",
+        "message 4",
+    ]
+    assert renderer.state.transcript_scroll_offset == 0
+    assert "message 0" not in renderer._transcript_text().plain
+    assert renderer._transcript_title() == "Transcript (latest)"
+
+
+def test_fullscreen_tui_renderer_scrolls_transcript_and_clamps() -> None:
+    renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False, transcript_view_entries=3)
+    for index in range(5):
+        renderer.event(AssistantMessage(content=f"message {index}"))
+
+    renderer.scroll_transcript_up(1)
+
+    assert renderer.state.transcript_scroll_offset == 1
+    assert [entry.content for entry in renderer._visible_transcript_entries()] == [
+        "message 1",
+        "message 2",
+        "message 3",
+    ]
+
+    renderer.scroll_transcript_top()
+
+    assert renderer.state.transcript_scroll_offset == 2
+    assert [entry.content for entry in renderer._visible_transcript_entries()] == [
+        "message 0",
+        "message 1",
+        "message 2",
+    ]
+
+    renderer.scroll_transcript_down(10)
+
+    assert renderer.state.transcript_scroll_offset == 0
+    assert [entry.content for entry in renderer._visible_transcript_entries()] == [
+        "message 2",
+        "message 3",
+        "message 4",
+    ]
+
+
+def test_fullscreen_tui_renderer_preserves_scrolled_view_during_new_output() -> None:
+    renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False, transcript_view_entries=3)
+    for index in range(5):
+        renderer.event(AssistantMessage(content=f"message {index}"))
+    renderer.scroll_transcript_up(1)
+
+    renderer.event(AssistantMessage(content="message 5"))
+
+    assert renderer.state.transcript_scroll_offset == 2
+    assert [entry.content for entry in renderer._visible_transcript_entries()] == [
+        "message 1",
+        "message 2",
+        "message 3",
+    ]
+
+    renderer.token_delta("streaming")
+
+    assert renderer.state.transcript_scroll_offset == 3
+    assert [entry.content for entry in renderer._visible_transcript_entries()] == [
+        "message 1",
+        "message 2",
+        "message 3",
+    ]
+
+    renderer.end_token_stream()
+
+    assert renderer.state.transcript_scroll_offset == 3
+    assert [entry.content for entry in renderer._visible_transcript_entries()] == [
+        "message 1",
+        "message 2",
+        "message 3",
+    ]
+
+    renderer.scroll_transcript_bottom()
+
+    assert [entry.content for entry in renderer._visible_transcript_entries()] == [
+        "message 4",
+        "message 5",
+        "streaming",
+    ]
+
+
+def test_fullscreen_tui_renderer_preserves_scrolled_view_when_pruning_cap() -> None:
+    renderer = FullscreenTuiRenderer(
+        _console()[0],
+        clear_screen=False,
+        max_transcript_entries=5,
+        transcript_view_entries=3,
+    )
+    for index in range(5):
+        renderer.event(AssistantMessage(content=f"message {index}"))
+    renderer.scroll_transcript_up(1)
+
+    renderer.event(AssistantMessage(content="message 5"))
+
+    assert [entry.content for entry in renderer.state.transcript] == [
+        "message 1",
+        "message 2",
+        "message 3",
+        "message 4",
+        "message 5",
+    ]
+    assert renderer.state.transcript_scroll_offset == 2
+    assert [entry.content for entry in renderer._visible_transcript_entries()] == [
+        "message 1",
+        "message 2",
+        "message 3",
+    ]
+
+
+def test_fullscreen_tui_renderer_keeps_footer_visible_while_scrolled() -> None:
+    console, output = _console()
+    renderer = FullscreenTuiRenderer(console, clear_screen=False, transcript_view_entries=2)
+    renderer.view_updated(
+        TuiViewSnapshot(
+            status="running",
+            input_hint="wisp(running)> ",
+            queued_follow_ups=1,
+        )
+    )
+    for index in range(4):
+        renderer.event(AssistantMessage(content=f"message {index}"))
+
+    renderer.scroll_transcript_up(1)
+
+    rendered = output.getvalue()
+    assert "Transcript" in rendered
+    assert "Status" in rendered
+    assert "Input" in rendered
+    assert "running" in rendered
+    assert "queued follow-ups: 1" in rendered
+    assert "wisp(running)> " in rendered
+
+
 def test_create_tui_renderer_selects_fullscreen_renderer() -> None:
     renderer = create_tui_renderer(TuiRendererKind.fullscreen, _console()[0])
 
