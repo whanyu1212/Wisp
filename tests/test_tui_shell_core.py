@@ -181,10 +181,45 @@ def test_tui_shell_provider_and_model_commands_configure_future_prompts() -> Non
 
         assert controller.configurations == [("openai-codex", None), (None, "gpt-5.5")]
         rendered = output.getvalue()
+        assert "Configuring provider: openai-codex" in rendered
         assert "Provider set to openai-codex" in rendered
+        assert "Configuring model: gpt-5.5" in rendered
         assert "Model set to gpt-5.5" in rendered
-        assert "Current provider: openai-codex" in rendered
-        assert "Current model: gpt-5.5" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_provider_command_waits_for_configure_success() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            configure_events=[
+                [
+                    ErrorEvent(message="Unknown provider: missing"),
+                    RpcCommandFinished(
+                        command_id="configure-1",
+                        command_type="configure",
+                        ok=False,
+                        error="Unknown provider: missing",
+                    ),
+                ]
+            ]
+        )
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/provider missing", "/provider", "/quit"]),
+            provider="fake",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [("missing", None)]
+        assert shell.current_provider == "fake"
+        rendered = output.getvalue()
+        assert "Configuring provider: missing" in rendered
+        assert "Provider unchanged (fake): Unknown provider: missing" in rendered
+        assert "Provider set to missing" not in rendered
 
     anyio.run(run)
 

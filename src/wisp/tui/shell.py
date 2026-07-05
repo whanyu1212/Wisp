@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -85,6 +86,14 @@ class TuiController(Protocol):
 PromptReader = Callable[[str], Awaitable[str]]
 
 
+@dataclass(frozen=True)
+class _PendingConfigure:
+    command_id: str
+    provider: str | None = None
+    model: str | None = None
+    reset_model: bool = False
+
+
 class TuiShell:
     """Small prompt/event shell that drives Wisp through `RpcController`."""
 
@@ -109,6 +118,7 @@ class TuiShell:
         self.view = TuiViewState()
         self.current_provider = provider
         self.current_model = model
+        self.pending_configures: dict[str, _PendingConfigure] = {}
         self.auth_store = JsonAuthStore(auth_path or default_auth_path())
 
     async def run(self) -> None:
@@ -312,33 +322,49 @@ class TuiShell:
             self.renderer.command_error("Usage: /provider [provider]")
             return
         if not args:
-            self.renderer.notice(f"Current provider: {self.current_provider}")
+            line = f"Current provider: {self.current_provider}"
+            pending_provider = self._latest_pending_provider()
+            if pending_provider is not None:
+                line += f" (pending: {pending_provider})"
+            self.renderer.notice(line)
             return
         provider = args[0]
         try:
-            await self.controller.configure(provider=provider)
+            command_id = await self.controller.configure(provider=provider)
         except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
             self.renderer.send_failed("configure", exc)
             return
-        self.current_provider = provider
-        self.current_model = None
-        self.renderer.notice(f"Provider set to {provider}; model reset to provider default.")
+        self.pending_configures[command_id] = _PendingConfigure(
+            command_id=command_id,
+            provider=provider,
+            reset_model=True,
+        )
+        self._update_view(status="configuring")
+        self.renderer.notice(f"Configuring provider: {provider}")
 
     async def _handle_model_command(self, args: tuple[str, ...]) -> None:
         if len(args) > 1:
             self.renderer.command_error("Usage: /model [model]")
             return
         if not args:
-            self.renderer.notice(f"Current model: {self.current_model or 'provider default'}")
+            line = f"Current model: {self.current_model or 'provider default'}"
+            pending_model = self._latest_pending_model()
+            if pending_model is not None:
+                line += f" (pending: {pending_model})"
+            self.renderer.notice(line)
             return
         model = args[0]
         try:
-            await self.controller.configure(model=model)
+            command_id = await self.controller.configure(model=model)
         except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
             self.renderer.send_failed("configure", exc)
             return
-        self.current_model = model
-        self.renderer.notice(f"Model set to {model}")
+        self.pending_configures[command_id] = _PendingConfigure(
+            command_id=command_id,
+            model=model,
+        )
+        self._update_view(status="configuring")
+        self.renderer.notice(f"Configuring model: {model}")
 
     async def _handle_input_closed(self, signal: _InputClosed) -> bool:
         self.state.input_closed = True
@@ -521,13 +547,47 @@ class TuiShell:
                 )
             return False
 
-        self._render_event(event)
         if isinstance(event, RpcCommandFinished):
+            if event.command_id in self.pending_configures:
+                self._finish_pending_configure(event)
+                return False
             if event.command_id == self.state.shutdown_command_id:
+                self._render_event(event)
                 return True
             if event.command_id == self.state.current_command_id:
+                self._render_event(event)
                 return await self._finish_current_prompt(event)
+        self._render_event(event)
         return False
+
+    def _finish_pending_configure(self, event: RpcCommandFinished) -> None:
+        pending = self.pending_configures.pop(event.command_id)
+        if event.ok:
+            if pending.provider is not None:
+                self.current_provider = pending.provider
+                if pending.reset_model:
+                    self.current_model = None
+                self.renderer.notice(
+                    f"Provider set to {pending.provider}; model reset to provider default."
+                )
+            if pending.model is not None:
+                self.current_model = pending.model
+                self.renderer.notice(f"Model set to {pending.model}")
+            self._sync_view()
+            return
+        message = event.error or "configure failed"
+        if pending.provider is not None:
+            self.renderer.command_error(f"Provider unchanged ({self.current_provider}): {message}")
+        elif pending.model is not None:
+            self.renderer.command_error(
+                f"Model unchanged ({self.current_model or 'provider default'}): {message}"
+            )
+        self._update_view(
+            status="error",
+            input_hint=_prompt_for_mode(_InputMode.idle),
+            input_mode=_InputMode.idle,
+            queued_follow_ups=len(self.state.queued_prompts),
+        )
 
     async def _finish_current_prompt(self, event: RpcCommandFinished) -> bool:
         was_cancelled = (not event.ok) and _is_rpc_cancelled_message(event.error)
@@ -574,11 +634,26 @@ class TuiShell:
             self.state.token_stream_started = False
         if self.state.current_command_id is not None:
             self.renderer.rpc_stream_ended_before_command(self.state.current_command_id)
+        elif self.pending_configures:
+            command_id = next(iter(self.pending_configures))
+            self.renderer.rpc_stream_ended_before_command(command_id)
         elif self.state.shutdown_command_id is not None:
             self.renderer.rpc_stream_ended_before_shutdown(self.state.shutdown_command_id)
         elif signal.error is None:
             self.renderer.rpc_stream_ended_unexpectedly()
         return True
+
+    def _latest_pending_provider(self) -> str | None:
+        for pending in reversed(self.pending_configures.values()):
+            if pending.provider is not None:
+                return pending.provider
+        return None
+
+    def _latest_pending_model(self) -> str | None:
+        for pending in reversed(self.pending_configures.values()):
+            if pending.model is not None:
+                return pending.model
+        return None
 
     def _render_help(self) -> None:
         self.renderer.help()
