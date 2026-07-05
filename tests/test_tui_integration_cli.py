@@ -6,9 +6,12 @@ from tests.tui_support import *
 
 
 def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
+    auth_path = tmp_path / "auth.json"
     command = _rpc_command(
         TuiOptions(
-            config=WispConfig(provider="fake", model="model-x", session_dir=tmp_path),
+            config=WispConfig(
+                provider="fake", model="model-x", session_dir=tmp_path, auth_path=auth_path
+            ),
             allow_read_tools=True,
             allowed_tools=("bash",),
             resume="session-123",
@@ -30,6 +33,10 @@ def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
     assert ("--session-dir", str(tmp_path)) == (
         command[command.index("--session-dir")],
         command[command.index("--session-dir") + 1],
+    )
+    assert ("--auth-file", str(auth_path)) == (
+        command[command.index("--auth-file")],
+        command[command.index("--auth-file") + 1],
     )
     assert ("--resume", "session-123") == (
         command[command.index("--resume")],

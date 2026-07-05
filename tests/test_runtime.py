@@ -99,7 +99,7 @@ def test_build_runtime_activates_builtin_providers_and_tools() -> None:
         return runtime.providers.names(), runtime.tools.names()
 
     assert anyio.run(run) == (
-        ("fake", "openai"),
+        ("fake", "openai", "openai-codex"),
         ("read", "write", "edit", "bash", "grep", "find", "ls"),
     )
 
