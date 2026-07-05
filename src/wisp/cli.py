@@ -7,13 +7,12 @@ import os
 import stat
 import sys
 from collections import deque
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
-from typing import Annotated, NoReturn, cast
+from typing import Annotated, cast
 from uuid import uuid4
 
 import anyio
@@ -22,41 +21,21 @@ from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 from rich.console import Console
 
+from wisp import cli_options as _cli_options
+from wisp import cli_output as _cli_output
+from wisp import cli_tools as _cli_tools
 from wisp.agent.loop import Agent
 from wisp.agent.messages import Message
+from wisp.cli_types import OutputMode, _JsonOutputModeError
 from wisp.config import WispConfig, load_project_env
-from wisp.events import (
-    ErrorEvent,
-    RpcCommandFinished,
-    RpcCommandStarted,
-    SessionSaved,
-    TokenDelta,
-    ToolApprovalRequested,
-    ToolApprovalResolved,
-    ToolCallRequested,
-    ToolResultReady,
-    WispEvent,
-)
+from wisp.events import ErrorEvent, RpcCommandFinished, RpcCommandStarted, TokenDelta
 from wisp.providers.base import ProviderError
 from wisp.runtime.extensions import build_runtime
-from wisp.runtime.registry import ToolRegistry, UnknownProviderError, UnknownToolError
+from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.base import Tool
 from wisp.tui.rendering import TuiRendererKind
-
-
-class OutputMode(StrEnum):
-    """CLI output/application modes."""
-
-    text = "text"
-    json = "json"
-    rpc = "rpc"
-    tui = "tui"
-
-
-class _JsonOutputModeError(ProviderError):
-    """Raised after JSONL output has already emitted a model-visible error event."""
 
 
 @dataclass(frozen=True)
@@ -106,6 +85,29 @@ _STDIN_READ_CHUNK_SIZE = 64 * 1024
 _STDIN_THREAD_POLL_INTERVAL = 0.01
 _STDIN_THREAD_QUEUE_SIZE = 100
 _MAX_QUEUED_RPC_COMMANDS = 100
+
+# Compatibility aliases for callers/tests that import private helpers from wisp.cli.
+_env_value = _cli_options._env_value
+_has_callback_cli_args = _cli_options._has_callback_cli_args
+_option_was_provided = _cli_options._option_was_provided
+_output_mode_from_env = _cli_options._output_mode_from_env
+_resolve_cli_mode = _cli_options._resolve_cli_mode
+_resolve_tui_renderer = _cli_options._resolve_tui_renderer
+_tui_renderer_from_env = _cli_options._tui_renderer_from_env
+
+_exit_with_error = _cli_output._exit_with_error
+_format_event_arguments = _cli_output._format_event_arguments
+_format_event_output = _cli_output._format_event_output
+_print_event_line = _cli_output._print_event_line
+_render_json_events = _cli_output._render_json_events
+_render_print_event = _cli_output._render_print_event
+_truncate_inline = _cli_output._truncate_inline
+_write_json_event = _cli_output._write_json_event
+_writes_json_events = _cli_output._writes_json_events
+
+_print_mode_tool_approval_policy = _cli_tools._print_mode_tool_approval_policy
+_print_mode_tool_registry = _cli_tools._print_mode_tool_registry
+_session_for_print_run = _cli_tools._session_for_print_run
 
 
 class _RpcToolApprovalPolicy(ToolApprovalPolicy):
@@ -384,88 +386,6 @@ def main() -> None:
     """Console-script entry point."""
 
     app()
-
-
-def _option_was_provided(ctx: typer.Context, name: str) -> bool:
-    source = ctx.get_parameter_source(name)
-    return getattr(source, "name", None) == "COMMANDLINE"
-
-
-def _has_callback_cli_args(ctx: typer.Context) -> bool:
-    return any(_option_was_provided(ctx, name) for name in ctx.params)
-
-
-def _resolve_cli_mode(
-    mode: OutputMode,
-    *,
-    prompt: str | None,
-    mode_was_provided: bool,
-    console: Console,
-) -> OutputMode:
-    if mode_was_provided or prompt is not None:
-        return mode
-    env_mode = _output_mode_from_env(console)
-    return env_mode or mode
-
-
-def _resolve_tui_renderer(
-    renderer: TuiRendererKind,
-    *,
-    renderer_was_provided: bool,
-    console: Console,
-) -> TuiRendererKind:
-    if renderer_was_provided:
-        return renderer
-    env_renderer = _tui_renderer_from_env(console)
-    return env_renderer or renderer
-
-
-def _output_mode_from_env(console: Console) -> OutputMode | None:
-    value = _env_value("WISP_MODE")
-    if value is None:
-        return None
-    try:
-        return OutputMode(value)
-    except ValueError:
-        allowed = ", ".join(mode.value for mode in OutputMode)
-        _exit_with_error(
-            f"WISP_MODE must be one of: {allowed}", mode=OutputMode.text, console=console
-        )
-
-
-def _tui_renderer_from_env(console: Console) -> TuiRendererKind | None:
-    value = _env_value("WISP_TUI_RENDERER")
-    if value is None:
-        return None
-    try:
-        return TuiRendererKind(value)
-    except ValueError:
-        allowed = ", ".join(renderer.value for renderer in TuiRendererKind)
-        _exit_with_error(
-            f"WISP_TUI_RENDERER must be one of: {allowed}",
-            mode=OutputMode.text,
-            console=console,
-        )
-
-
-def _env_value(name: str) -> str | None:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    stripped = value.strip().lower()
-    return stripped or None
-
-
-def _exit_with_error(message: str, *, mode: OutputMode, console: Console) -> NoReturn:
-    if _writes_json_events(mode):
-        _write_json_event(ErrorEvent(message=message))
-    else:
-        console.print(f"[red]error:[/red] {message}")
-    raise typer.Exit(1)
-
-
-def _writes_json_events(mode: OutputMode) -> bool:
-    return mode in {OutputMode.json, OutputMode.rpc}
 
 
 async def _run_print(
@@ -1068,105 +988,3 @@ def _parse_rpc_command(line: str) -> dict[str, object] | None:
         _write_json_event(ErrorEvent(message="RPC command must be a JSON object"))
         return None
     return cast(dict[str, object], command)
-
-
-async def _render_json_events(events: AsyncIterator[WispEvent]) -> None:
-    rendered_error: str | None = None
-    try:
-        async for event in events:
-            _write_json_event(event)
-            if isinstance(event, ErrorEvent):
-                rendered_error = event.message
-    except Exception as exc:
-        if rendered_error is None:
-            rendered_error = str(exc)
-            _write_json_event(ErrorEvent(message=rendered_error))
-        raise _JsonOutputModeError(rendered_error) from exc
-
-
-def _write_json_event(event: WispEvent) -> None:
-    sys.stdout.write(f"{event.model_dump_json()}\n")
-    sys.stdout.flush()
-
-
-def _render_print_event(event: WispEvent, console: Console) -> None:
-    line = _print_event_line(event)
-    if line is not None:
-        console.print(line, markup=False)
-
-
-def _print_event_line(event: WispEvent) -> str | None:
-    if isinstance(event, ToolCallRequested):
-        return f"→ tool {event.name} {_format_event_arguments(event.arguments)}"
-    if isinstance(event, ToolApprovalRequested):
-        return f"? approval required for {event.name} ({event.safety})"
-    if isinstance(event, ToolApprovalResolved):
-        if event.approved:
-            return f"✓ approved {event.name}"
-        reason = f": {event.reason}" if event.reason else ""
-        return f"! denied {event.name}{reason}"
-    if isinstance(event, ToolResultReady):
-        status = "✗" if event.is_error else "✓"
-        return f"{status} tool {event.name}: {_format_event_output(event.output)}"
-    if isinstance(event, SessionSaved):
-        return f"session saved: {event.path}"
-    return None
-
-
-def _format_event_arguments(arguments: dict[str, object]) -> str:
-    if not arguments:
-        return "{}"
-    try:
-        text = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
-    except TypeError:
-        text = str(arguments)
-    return _truncate_inline(text, 240)
-
-
-def _format_event_output(output: str) -> str:
-    first_line = next((line.strip() for line in output.splitlines() if line.strip()), "")
-    return _truncate_inline(first_line or "(no output)", 240)
-
-
-def _truncate_inline(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return f"{text[: max(0, max_chars - 1)].rstrip()}…"
-
-
-def _print_mode_tool_approval_policy(approve_unsafe_tools: bool) -> ToolApprovalPolicy:
-    if approve_unsafe_tools:
-        return ToolApprovalPolicy.approve_all()
-    return ToolApprovalPolicy.require_approval()
-
-
-def _session_for_print_run(
-    sessions: JsonlSessionStore,
-    *,
-    resume: str | None,
-    continue_latest: bool,
-) -> JsonlSession | None:
-    if resume is not None:
-        return sessions.load(resume)
-    if continue_latest:
-        return sessions.latest()
-    return None
-
-
-def _print_mode_tool_registry(
-    tools: ToolRegistry,
-    *,
-    allow_read_tools: bool = False,
-    allowed_tools: tuple[str, ...] = (),
-) -> ToolRegistry:
-    """Return tools explicitly allowed for non-interactive print mode."""
-
-    allowed_names = set(allowed_tools)
-    for name in allowed_names:
-        tools.get(name)
-
-    filtered = ToolRegistry()
-    for tool in tools.all():
-        if tool.name in allowed_names or (allow_read_tools and tool.safety == "read"):
-            filtered.register(tool)
-    return filtered
