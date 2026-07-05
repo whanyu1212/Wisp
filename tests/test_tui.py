@@ -327,6 +327,129 @@ def test_live_fullscreen_tui_accepts_submitted_input() -> None:
     anyio.run(run)
 
 
+def test_live_fullscreen_tui_queues_submission_accepted_between_reads() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        renderer.view_updated(
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp(running)> ",
+                input_mode="running",
+            )
+        )
+        first_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+
+        renderer._buffer.insert_text("first")
+        renderer._accept_input()
+        renderer._buffer.insert_text("second")
+        renderer._accept_input()
+
+        assert await first_read == "first"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+        assert await renderer.read_prompt("wisp(running)> ") == "second"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_splits_bracketed_paste_into_submissions() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        renderer.view_updated(
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp(running)> ",
+                input_mode="running",
+            )
+        )
+        first_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+
+        renderer._paste_input("first\nsecond\nthird")
+
+        assert await first_read == "first"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+        assert await renderer.read_prompt("wisp(running)> ") == "second"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+        second_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+        assert renderer._buffer.text == "third"
+
+        renderer._accept_input()
+
+        assert await second_read == "third"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+
+    anyio.run(run)
+
+
+def test_tui_shell_reads_live_submission_queued_between_reads() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        shell = TuiShell(
+            ScriptedController(), renderer=renderer, prompt_reader=renderer.read_prompt
+        )
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.running
+        shell._sync_view()
+        send, receive = anyio.create_memory_object_stream[object](10)
+
+        async with anyio.create_task_group() as task_group, send, receive:
+            task_group.start_soon(shell._read_inputs, send.clone())
+            await anyio.sleep(0)
+
+            renderer._buffer.insert_text("first")
+            renderer._accept_input()
+            renderer._buffer.insert_text("second")
+            renderer._accept_input()
+
+            first = await receive.receive()
+            second = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert isinstance(first, _InputLine)
+        assert first.text == "first"
+        assert first.mode is _InputMode.running
+        assert isinstance(second, _InputLine)
+        assert second.text == "second"
+        assert second.mode is _InputMode.running
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_preserves_typed_buffer_between_reads() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        renderer.view_updated(
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp(running)> ",
+                input_mode="running",
+            )
+        )
+        first_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+
+        renderer._buffer.insert_text("first")
+        renderer._accept_input()
+        renderer._buffer.insert_text("sec")
+
+        assert await first_read == "first"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+        second_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        await anyio.sleep(0)
+        assert renderer._buffer.text == "sec"
+
+        renderer._buffer.insert_text("ond")
+        renderer._accept_input()
+
+        assert await second_read == "second"
+        assert renderer.consume_submitted_input_mode("idle") == "running"
+
+    anyio.run(run)
+
+
 def test_live_fullscreen_tui_interrupts_input() -> None:
     async def run() -> None:
         renderer = LiveFullscreenTui(run_application=False)

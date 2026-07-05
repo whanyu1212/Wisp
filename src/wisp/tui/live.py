@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from contextlib import suppress
 
 from prompt_toolkit.application import Application
@@ -10,6 +11,7 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.styles import Style
@@ -40,6 +42,7 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         self._visible_input_mode = "idle"
         self._buffer_input_mode = "idle"
         self._submitted_input_mode: str | None = None
+        self._queued_submissions: deque[tuple[str, str]] = deque()
         self._last_buffer_text = ""
         self._buffer.on_text_changed += self._handle_buffer_text_changed
         self._key_bindings = self._build_key_bindings()
@@ -49,17 +52,20 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
 
         if self._input_future is not None and not self._input_future.done():
             raise RuntimeError("live fullscreen input read already in progress")
-        loop = asyncio.get_running_loop()
-        self._input_future = loop.create_future()
         self.state.input_hint = prompt
         self._visible_input_mode = self.state.input_mode
-        self._buffer_input_mode = self._visible_input_mode
         self._submitted_input_mode = None
-        self._last_buffer_text = ""
-        self._buffer.reset()
+        if not self._buffer.text:
+            self._clear_buffer()
         self._refresh()
         if self.run_application:
             self._ensure_application_started()
+        if self._queued_submissions:
+            text, mode = self._queued_submissions.popleft()
+            self._submitted_input_mode = mode
+            return text
+        loop = asyncio.get_running_loop()
+        self._input_future = loop.create_future()
         return await self._input_future
 
     async def close(self) -> None:
@@ -208,29 +214,51 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
             self._close_input()
             event.app.invalidate()
 
+        @bindings.add(Keys.BracketedPaste)
+        def _paste(event: KeyPressEvent) -> None:
+            self._paste_input(event.data)
+            event.app.invalidate()
+
         return bindings
 
     def _accept_input(self) -> None:
-        if self._input_future is None or self._input_future.done():
-            return
         text = self._buffer.text
-        self._submitted_input_mode = self._buffer_input_mode
-        self._buffer.reset()
+        mode = self._buffer_input_mode
+        self._clear_buffer()
+        if self._input_future is None or self._input_future.done():
+            self._queued_submissions.append((text, mode))
+            return
+        self._submitted_input_mode = mode
         self._input_future.set_result(text)
+
+    def _paste_input(self, text: str) -> None:
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        parts = normalized.split("\n")
+        for index, part in enumerate(parts):
+            is_last = index == len(parts) - 1
+            if part:
+                self._buffer.insert_text(part)
+            if not is_last:
+                self._accept_input()
 
     def _interrupt_input(self) -> None:
         if self._input_future is None or self._input_future.done():
             return
         self._submitted_input_mode = self._buffer_input_mode
-        self._buffer.reset()
+        self._clear_buffer()
         self._input_future.set_exception(LiveFullscreenInputInterrupted())
 
     def _close_input(self) -> None:
         if self._input_future is None or self._input_future.done():
             return
         self._submitted_input_mode = self._buffer_input_mode
-        self._buffer.reset()
+        self._clear_buffer()
         self._input_future.set_exception(EOFError())
+
+    def _clear_buffer(self) -> None:
+        self._buffer.reset()
+        self._last_buffer_text = ""
+        self._buffer_input_mode = self._visible_input_mode
 
     def _handle_buffer_text_changed(self, _buffer: Buffer) -> None:
         text = self._buffer.text
