@@ -1659,6 +1659,114 @@ def test_run_tui_uses_fullscreen_fallback_when_stdio_is_not_interactive(
     anyio.run(run)
 
 
+def test_cli_no_args_shows_help_without_tui_env() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [],
+        env={"WISP_MODE": "", "WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Usage:" in result.output
+    assert "Wisp: a Python, Pi-inspired coding agent." in result.output
+
+
+def test_cli_no_args_uses_env_tui_defaults(monkeypatch: object) -> None:
+    captured: list[TuiOptions] = []
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        captured.append(options)
+
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [],
+        env={
+            "WISP_MODE": "tui",
+            "WISP_TUI_RENDERER": "fullscreen",
+            "WISP_PROVIDER": "fake",
+            "WISP_MODEL": "",
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    assert captured[0].config.provider == "fake"
+    assert captured[0].renderer is TuiRendererKind.fullscreen
+
+
+def test_cli_tui_mode_uses_env_renderer_default(monkeypatch: object) -> None:
+    captured: list[TuiOptions] = []
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        captured.append(options)
+
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "tui"],
+        env={
+            "WISP_MODE": "",
+            "WISP_TUI_RENDERER": "fullscreen",
+            "WISP_PROVIDER": "fake",
+            "WISP_MODEL": "",
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    assert captured[0].renderer is TuiRendererKind.fullscreen
+
+
+def test_cli_prompt_with_explicit_tui_mode_still_errors() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["-p", "hello", "--mode", "tui"],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1
+    assert "--prompt is not used with --mode tui" in result.output
+
+
+def test_cli_rejects_invalid_env_mode_default() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [],
+        env={"WISP_MODE": "missing", "WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1
+    assert "WISP_MODE must be one of: text, json, rpc, tui" in result.output
+
+
+def test_cli_tui_mode_rejects_invalid_env_renderer_default() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "tui"],
+        env={
+            "WISP_TUI_RENDERER": "missing",
+            "WISP_PROVIDER": "fake",
+            "WISP_MODEL": "",
+        },
+    )
+
+    assert result.exit_code == 1
+    assert "WISP_TUI_RENDERER must be one of: line, fullscreen" in result.output
+
+
 def test_cli_tui_mode_validates_provider_before_prompting() -> None:
     runner = CliRunner()
 

@@ -25,6 +25,8 @@ Available environment variables:
 ```env
 WISP_PROVIDER=fake
 WISP_MODEL=
+WISP_MODE=
+WISP_TUI_RENDERER=
 WISP_SESSION_DIR=
 OPENAI_API_KEY=
 ```
@@ -36,7 +38,7 @@ uv run wisp -p "hello" --provider fake
 uv run wisp -p "hello" --provider openai --model gpt-5.5
 ```
 
-`OPENAI_API_KEY` is required only when using the `openai` provider. Sessions default to OS temp storage; set `WISP_SESSION_DIR` or pass `--session-dir` to keep them somewhere durable. Never commit `.env` or real API keys.
+`OPENAI_API_KEY` is required only when using the `openai` provider. Sessions default to OS temp storage; set `WISP_SESSION_DIR` or pass `--session-dir` to keep them somewhere durable. Set `WISP_MODE=tui` to make bare `wisp` launch the TUI, and `WISP_TUI_RENDERER=fullscreen` to make TUI launches use the live fullscreen renderer by default. `wisp -p "hello"` still uses text mode unless `--mode` is passed explicitly. Never commit `.env` or real API keys.
 
 ## Default prompt and project context
 
@@ -173,6 +175,22 @@ uv run wisp --mode tui --provider fake --tui-renderer fullscreen
 uv run wisp --mode tui --provider openai --allow-read-tools
 uv run wisp --mode tui --provider openai --allow-tool bash
 ```
+
+For a shorter daily launch, configure `.env`:
+
+```env
+WISP_PROVIDER=openai
+WISP_MODE=tui
+WISP_TUI_RENDERER=fullscreen
+```
+
+Then run:
+
+```bash
+uv run wisp
+```
+
+If you only set provider and renderer defaults, `uv run wisp --mode tui` is enough.
 
 The default line-oriented TUI currently provides streamed assistant text, basic
 tool call/result rendering, queued follow-up input while a prompt is running,

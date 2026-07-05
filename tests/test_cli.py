@@ -357,6 +357,25 @@ def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
     assert "allowed tools: none exposed to the model" in records[1]["message"]["content"]
 
 
+def test_prompt_implies_text_mode_when_env_defaults_to_tui(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["-p", "hello", "--session-dir", str(tmp_path)],
+        env={
+            "WISP_MODE": "tui",
+            "WISP_TUI_RENDERER": "fullscreen",
+            "WISP_PROVIDER": "fake",
+            "WISP_MODEL": "",
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "fake response to: hello\n"
+    assert "session saved:" in result.stderr
+
+
 def test_print_mode_continue_appends_to_latest_session(tmp_path: Path) -> None:
     runner = CliRunner()
 

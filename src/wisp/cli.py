@@ -13,7 +13,7 @@ from enum import StrEnum
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
-from typing import Annotated, cast
+from typing import Annotated, NoReturn, cast
 from uuid import uuid4
 
 import anyio
@@ -24,7 +24,7 @@ from rich.console import Console
 
 from wisp.agent.loop import Agent
 from wisp.agent.messages import Message
-from wisp.config import WispConfig
+from wisp.config import WispConfig, load_project_env
 from wisp.events import (
     ErrorEvent,
     RpcCommandFinished,
@@ -194,7 +194,7 @@ app = typer.Typer(
     add_completion=False,
     help="Wisp: a Python, Pi-inspired coding agent.",
     invoke_without_command=True,
-    no_args_is_help=True,
+    no_args_is_help=False,
 )
 
 
@@ -271,41 +271,65 @@ def cli_callback(
         return
 
     console = Console(stderr=True)
-    if mode is OutputMode.rpc:
+    load_project_env()
+    mode_was_provided = _option_was_provided(ctx, "mode")
+    resolved_mode = _resolve_cli_mode(
+        mode,
+        prompt=prompt,
+        mode_was_provided=mode_was_provided,
+        console=console,
+    )
+    resolved_tui_renderer = tui_renderer
+    if resolved_mode is OutputMode.tui:
+        resolved_tui_renderer = _resolve_tui_renderer(
+            tui_renderer,
+            renderer_was_provided=_option_was_provided(ctx, "tui_renderer"),
+            console=console,
+        )
+
+    if prompt is None and resolved_mode is not OutputMode.tui and not _has_callback_cli_args(ctx):
+        typer.echo(ctx.get_help())
+        raise typer.Exit(0)
+
+    if resolved_mode is OutputMode.rpc:
         if prompt is not None:
             _exit_with_error(
                 "--prompt is not used with --mode rpc; send prompt commands on stdin",
-                mode=mode,
+                mode=resolved_mode,
                 console=console,
             )
-    elif mode is OutputMode.tui:
+    elif resolved_mode is OutputMode.tui:
         if prompt is not None:
             _exit_with_error(
                 "--prompt is not used with --mode tui; enter prompts in the TUI",
-                mode=mode,
+                mode=resolved_mode,
                 console=console,
             )
     elif prompt is None:
-        # no_args_is_help normally handles this. This branch keeps direct calls
-        # to the callback friendly in tests or embedded usage.
+        # Keep direct calls to the callback friendly in tests or embedded usage.
         raise typer.Exit(0)
 
     if resume is not None and continue_latest:
         _exit_with_error(
             "use either --resume or --continue, not both",
-            mode=mode,
+            mode=resolved_mode,
             console=console,
         )
     if max_tool_iterations is not None and max_tool_iterations < 0:
         _exit_with_error(
             "--max-tool-iterations must be non-negative",
-            mode=mode,
+            mode=resolved_mode,
             console=console,
         )
 
-    config = WispConfig.from_env(provider=provider, model=model, session_dir=session_dir)
+    config = WispConfig.from_env(
+        provider=provider,
+        model=model,
+        session_dir=session_dir,
+        load_env_file=False,
+    )
     try:
-        if mode is OutputMode.rpc:
+        if resolved_mode is OutputMode.rpc:
             anyio.run(
                 _run_rpc,
                 config,
@@ -316,7 +340,7 @@ def cli_callback(
                 approve_unsafe_tools,
                 max_tool_iterations,
             )
-        elif mode is OutputMode.tui:
+        elif resolved_mode is OutputMode.tui:
             from wisp.tui import TuiOptions, run_tui
 
             anyio.run(
@@ -329,7 +353,7 @@ def cli_callback(
                     continue_latest=continue_latest,
                     approve_unsafe_tools=approve_unsafe_tools,
                     max_tool_iterations=max_tool_iterations,
-                    renderer=tui_renderer,
+                    renderer=resolved_tui_renderer,
                 ),
             )
         else:
@@ -344,12 +368,12 @@ def cli_callback(
                 continue_latest,
                 approve_unsafe_tools,
                 max_tool_iterations,
-                mode,
+                resolved_mode,
             )
     except _JsonOutputModeError as exc:
         raise typer.Exit(1) from exc
     except (ProviderError, SessionError, UnknownProviderError, UnknownToolError) as exc:
-        if _writes_json_events(mode):
+        if _writes_json_events(resolved_mode):
             _write_json_event(ErrorEvent(message=str(exc)))
         else:
             console.print(f"[red]error:[/red] {exc}")
@@ -362,7 +386,77 @@ def main() -> None:
     app()
 
 
-def _exit_with_error(message: str, *, mode: OutputMode, console: Console) -> None:
+def _option_was_provided(ctx: typer.Context, name: str) -> bool:
+    source = ctx.get_parameter_source(name)
+    return getattr(source, "name", None) == "COMMANDLINE"
+
+
+def _has_callback_cli_args(ctx: typer.Context) -> bool:
+    return any(_option_was_provided(ctx, name) for name in ctx.params)
+
+
+def _resolve_cli_mode(
+    mode: OutputMode,
+    *,
+    prompt: str | None,
+    mode_was_provided: bool,
+    console: Console,
+) -> OutputMode:
+    if mode_was_provided or prompt is not None:
+        return mode
+    env_mode = _output_mode_from_env(console)
+    return env_mode or mode
+
+
+def _resolve_tui_renderer(
+    renderer: TuiRendererKind,
+    *,
+    renderer_was_provided: bool,
+    console: Console,
+) -> TuiRendererKind:
+    if renderer_was_provided:
+        return renderer
+    env_renderer = _tui_renderer_from_env(console)
+    return env_renderer or renderer
+
+
+def _output_mode_from_env(console: Console) -> OutputMode | None:
+    value = _env_value("WISP_MODE")
+    if value is None:
+        return None
+    try:
+        return OutputMode(value)
+    except ValueError:
+        allowed = ", ".join(mode.value for mode in OutputMode)
+        _exit_with_error(
+            f"WISP_MODE must be one of: {allowed}", mode=OutputMode.text, console=console
+        )
+
+
+def _tui_renderer_from_env(console: Console) -> TuiRendererKind | None:
+    value = _env_value("WISP_TUI_RENDERER")
+    if value is None:
+        return None
+    try:
+        return TuiRendererKind(value)
+    except ValueError:
+        allowed = ", ".join(renderer.value for renderer in TuiRendererKind)
+        _exit_with_error(
+            f"WISP_TUI_RENDERER must be one of: {allowed}",
+            mode=OutputMode.text,
+            console=console,
+        )
+
+
+def _env_value(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    stripped = value.strip().lower()
+    return stripped or None
+
+
+def _exit_with_error(message: str, *, mode: OutputMode, console: Console) -> NoReturn:
     if _writes_json_events(mode):
         _write_json_event(ErrorEvent(message=message))
     else:
