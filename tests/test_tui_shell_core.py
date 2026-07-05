@@ -165,6 +165,58 @@ def test_tui_shell_login_and_logout_openai_codex(
     anyio.run(run)
 
 
+def test_tui_shell_login_defaults_to_pending_provider(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_login(*_args: object, **_kwargs: object) -> OAuthCredential:
+        return OAuthCredential(
+            access="access-token",
+            refresh="refresh-token",
+            expires=4_102_444_800_000,
+            account_id="account-id",
+        )
+
+    monkeypatch.setattr(tui_shell_module, "login_openai_codex", fake_login)
+
+    async def run() -> None:
+        controller = ScriptedController(
+            configure_events=[
+                (
+                    0.2,
+                    [
+                        RpcCommandFinished(
+                            command_id="configure-1",
+                            command_type="configure",
+                            ok=True,
+                        )
+                    ],
+                )
+            ]
+        )
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(
+                ["/provider openai-codex", "/login", "/auth", "/quit"]
+            ),
+            provider="fake",
+            auth_path=tmp_path / "auth.json",
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert "Configuring provider: openai-codex" in rendered
+        assert "Logged in: openai-codex" in rendered
+        assert "openai-codex: oauth configured" in rendered
+        assert "TUI login currently supports only openai-codex" not in rendered
+        assert "fake: oauth configured" not in rendered
+
+    anyio.run(run)
+
+
 def test_tui_shell_provider_and_model_commands_configure_future_prompts() -> None:
     async def run() -> None:
         controller = ScriptedController()

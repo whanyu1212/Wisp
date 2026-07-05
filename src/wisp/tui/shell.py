@@ -270,14 +270,14 @@ class TuiShell:
         if len(args) > 1:
             self.renderer.command_error("Usage: /auth [provider]")
             return
-        provider = args[0] if args else self.current_provider
+        provider = args[0] if args else self._default_auth_provider()
         self.renderer.notice(_auth_status_line(provider, self.auth_store.get(provider)))
 
     async def _handle_login_command(self, args: tuple[str, ...]) -> None:
         if len(args) > 2:
             self.renderer.command_error("Usage: /login [provider] [device-code]")
             return
-        provider = args[0] if args else self.current_provider
+        provider = args[0] if args else self._default_auth_provider()
         if provider != "openai-codex":
             self.renderer.command_error("TUI login currently supports only openai-codex.")
             return
@@ -311,7 +311,7 @@ class TuiShell:
         if len(args) > 1:
             self.renderer.command_error("Usage: /logout [provider]")
             return
-        provider = args[0] if args else self.current_provider
+        provider = args[0] if args else self._default_auth_provider()
         if self.auth_store.delete(provider):
             self.renderer.notice(f"Logged out: {provider}")
         else:
@@ -642,6 +642,9 @@ class TuiShell:
         elif signal.error is None:
             self.renderer.rpc_stream_ended_unexpectedly()
         return True
+
+    def _default_auth_provider(self) -> str:
+        return self._latest_pending_provider() or self.current_provider
 
     def _latest_pending_provider(self) -> str | None:
         for pending in reversed(self.pending_configures.values()):
