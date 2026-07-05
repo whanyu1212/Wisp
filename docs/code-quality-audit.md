@@ -11,7 +11,7 @@ Largest files by line count:
 | TUI tests | `tests/test_tui.py` | ~1820 | Renderer, live input, shell state, run_tui integration, and CLI env tests in one module. |
 | CLI tests | `tests/test_cli.py` | ~1470 | Print, JSON, RPC, approval policy, tool exposure, and provider errors in one module. |
 | Tools | `src/wisp/tools/builtin.py` | ~1330 | Read/write/edit/bash/grep/find/ls plus subprocess/rg helpers in one module. |
-| CLI | `src/wisp/cli.py` | ~1170 | Typer callback, print mode, JSON mode, RPC server, stdin readers, and policy helpers. |
+| CLI | `src/wisp/cli/__init__.py` | ~990 | Typer callback, print mode, JSON mode, RPC server, and stdin readers remain in the package root after helper extraction. |
 | TUI shell | `src/wisp/tui/app.py` | ~720 | Shell state, input loop, RPC event loop, signal handling, and TUI subprocess setup. |
 | TUI rendering | `src/wisp/tui/rendering.py` | ~525 | Renderer protocol, line renderer, fullscreen renderer, shared state. |
 
@@ -45,15 +45,20 @@ This PR starts with test decomposition because it is behavior-preserving and low
 - CLI RPC mode and stdin readers
 - CLI tool policy/error behavior
 
-### 2. Split `src/wisp/cli.py`
+### 2. Continue splitting the `wisp.cli` package
+
+Completed first boundaries:
+
+- `wisp.cli` — compatibility package root, Typer app, print mode, and RPC state machine
+- `wisp.cli.options` — env/default resolution helpers
+- `wisp.cli.output` — JSONL/text event rendering helpers
+- `wisp.cli.tools` — tool exposure, approval policy, and session-selection helpers
+- `wisp.cli.types` — shared CLI mode/error types
 
 Recommended follow-up boundaries:
 
-- `wisp.cli` — Typer app and top-level option dispatch only
-- `wisp.cli_defaults` or `wisp.cli.options` — env/default resolution helpers
-- `wisp.cli_print` — print/JSON prompt execution and event rendering
-- `wisp.rpc.server` — JSONL RPC server loop and stdin readers
-- `wisp.cli_policies` — tool exposure/approval policy helpers
+- `wisp.cli.print_mode` — print/JSON prompt execution
+- `wisp.cli.rpc` — JSONL RPC server loop and stdin readers
 
 Acceptance criteria: no behavior changes, CLI tests remain green, public command surface unchanged.
 
@@ -84,8 +89,9 @@ Acceptance criteria: tool schemas/names/outputs unchanged.
 Before adding more TUI features, complete these low-risk organization PRs:
 
 1. **PR #29** — audit report plus TUI/CLI test split.
-2. **PR #30** — split `cli.py` along dispatch/print/RPC boundaries.
-3. **PR #31** — split `tui/app.py` around shell state and RPC wiring.
-4. **PR #32** — split `tools/builtin.py` by tool family.
+2. **PR #30** — extract low-risk CLI helper modules.
+3. **PR #31** — migrate CLI helpers into a `wisp.cli` subpackage.
+4. **PR #32** — split `tui/app.py` around shell state and RPC wiring.
+5. **PR #33** — split `tools/builtin.py` by tool family.
 
 After that, resume live fullscreen usability work, especially transcript scrollback and clearer status/approval surfaces.

@@ -10,7 +10,6 @@ from typing import NoReturn
 import typer
 from rich.console import Console
 
-from wisp.cli_types import OutputMode, _JsonOutputModeError
 from wisp.events import (
     ErrorEvent,
     SessionSaved,
@@ -20,6 +19,8 @@ from wisp.events import (
     ToolResultReady,
     WispEvent,
 )
+
+from .types import OutputMode, _JsonOutputModeError
 
 
 def _exit_with_error(message: str, *, mode: OutputMode, console: Console) -> NoReturn:
