@@ -8,7 +8,7 @@ from pathlib import Path
 import anyio
 
 from wisp.events import RpcCommandFinished, RpcCommandStarted, wisp_event_from_json
-from wisp.rpc import JsonlSubprocessRpcTransport, RpcController
+from wisp.rpc import ConfigureCommand, JsonlSubprocessRpcTransport, RpcController
 from wisp.rpc.commands import (
     ApprovalCommand,
     CancelCommand,
@@ -92,13 +92,15 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         prompt_id = await controller.prompt("hello")
         cancel_id = await controller.cancel(prompt_id)
         approval_id = await controller.approve("call-1", approved=False, reason="not safe")
+        configure_id = await controller.configure(provider="openai-codex", model="gpt-5.5")
         shutdown_id = await controller.shutdown()
         await controller.close()
 
-        assert [prompt_id, cancel_id, approval_id, shutdown_id] == [
+        assert [prompt_id, cancel_id, approval_id, configure_id, shutdown_id] == [
             "prompt-id",
             "cancel-id",
             "approval-id",
+            "configure-id",
             "shutdown-id",
         ]
         assert transport.commands == [
@@ -110,6 +112,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
                 approved=False,
                 reason="not safe",
             ),
+            ConfigureCommand(id="configure-id", provider="openai-codex", model="gpt-5.5"),
             ShutdownCommand(id="shutdown-id"),
         ]
         assert transport.closed is True

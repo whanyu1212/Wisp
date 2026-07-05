@@ -506,6 +506,7 @@ async def _run_rpc(
                     running_prompt, should_shutdown = _dispatch_rpc_command(
                         command,
                         agent=agent,
+                        runtime=runtime,
                         sessions=sessions,
                         session_state=session_state,
                         task_group=task_group,
@@ -553,6 +554,7 @@ async def _run_rpc(
                 running_prompt, should_shutdown = _dispatch_rpc_command(
                     command,
                     agent=agent,
+                    runtime=runtime,
                     sessions=sessions,
                     session_state=session_state,
                     task_group=task_group,
@@ -570,6 +572,7 @@ def _dispatch_rpc_command(
     command: dict[str, object],
     *,
     agent: Agent,
+    runtime: WispRuntime,
     sessions: JsonlSessionStore,
     session_state: _RpcSessionState,
     task_group: TaskGroup,
@@ -592,6 +595,8 @@ def _dispatch_rpc_command(
         return new_running_prompt, False
     should_shutdown = _handle_rpc_control_command(
         command,
+        agent=agent,
+        runtime=runtime,
         running_prompt=running_prompt,
         approval_policy=approval_policy,
     )
@@ -857,6 +862,8 @@ def _handle_rpc_control_command(
     *,
     running_prompt: _RpcRunningPrompt | None,
     approval_policy: _RpcToolApprovalPolicy,
+    agent: Agent | None = None,
+    runtime: WispRuntime | None = None,
 ) -> bool:
     command_type, command_id, id_error = _rpc_command_identity(command)
     _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
@@ -888,9 +895,75 @@ def _handle_rpc_control_command(
             approval_policy=approval_policy,
         )
         return False
+    if command_type == "configure":
+        if agent is None or runtime is None:
+            _write_rpc_command_error(
+                command_id=command_id,
+                command_type=command_type,
+                message="RPC configure command requires an active agent runtime",
+            )
+            return False
+        _handle_rpc_configure_command(
+            command,
+            command_id=command_id,
+            command_type=command_type,
+            agent=agent,
+            runtime=runtime,
+        )
+        return False
     message = f"Unknown RPC command: {command_type}"
     _write_rpc_command_error(command_id=command_id, command_type=command_type, message=message)
     return False
+
+
+def _handle_rpc_configure_command(
+    command: dict[str, object],
+    *,
+    command_id: str,
+    command_type: str,
+    agent: Agent,
+    runtime: WispRuntime,
+) -> None:
+    provider = command.get("provider")
+    model = command.get("model")
+    has_provider = "provider" in command
+    has_model = "model" in command
+    if not has_provider and not has_model:
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC configure command requires provider or model",
+        )
+        return
+    if provider is not None and not isinstance(provider, str):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC configure command field provider must be a string",
+        )
+        return
+    if model is not None and not isinstance(model, str):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC configure command field model must be a string",
+        )
+        return
+    if isinstance(provider, str):
+        try:
+            agent.provider = runtime.providers.get(provider)
+        except UnknownProviderError as exc:
+            _write_rpc_command_error(
+                command_id=command_id,
+                command_type=command_type,
+                message=str(exc),
+            )
+            return
+        if not has_model:
+            agent.model = None
+    if has_model:
+        agent.model = model
+    _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 
 def _handle_rpc_approval_command(

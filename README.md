@@ -163,9 +163,9 @@ finally:
     await controller.close()
 ```
 
-`RpcController` exposes typed `prompt`, `cancel`, `approve`, and `shutdown`
-methods and yields parsed `WispEvent` objects. This is intended as the stable
-integration layer for future TUI work.
+`RpcController` exposes typed `prompt`, `cancel`, `approve`, `configure`, and
+`shutdown` methods and yields parsed `WispEvent` objects. This is intended as
+the stable integration layer for future TUI work.
 
 ## TUI MVP
 
@@ -199,9 +199,25 @@ If you only set provider and renderer defaults, `uv run wisp --mode tui` is enou
 The default line-oriented TUI currently provides streamed assistant text, basic
 tool call/result rendering, queued follow-up input while a prompt is running,
 interactive approval prompts for mutating/command tools, Ctrl-C interrupt
-handling, Ctrl-D shutdown, and `/help` plus `/quit` commands. On interactive
-terminals, opt-in `--tui-renderer fullscreen` uses a live prompt-toolkit screen
-with transcript/status/input regions that owns the input line. For piped input,
+handling, Ctrl-D shutdown, and slash commands:
+
+```text
+/help
+/auth [provider]
+/login [provider] [device-code]
+/logout [provider]
+/provider [provider]
+/model [model]
+/quit, /exit
+```
+
+`/provider` switches the provider for future prompts and resets the model to the
+provider default. `/model` switches the model string for future prompts; a
+Pi-style model picker/catalog is not implemented yet. TUI login currently uses
+the `openai-codex` device-code flow; browser login is available from the CLI via
+`uv run wisp auth login openai-codex`. On interactive terminals, opt-in
+`--tui-renderer fullscreen` uses a live prompt-toolkit screen with
+transcript/status/input regions that owns the input line. For piped input,
 embedded tests, or explicit prompt readers, fullscreen falls back to the
 line-oriented input path while preserving the same renderer state model.
 

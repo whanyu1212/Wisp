@@ -53,6 +53,10 @@ class TuiRenderer(Protocol):
 
     def help(self) -> None: ...
 
+    def notice(self, message: str) -> None: ...
+
+    def command_error(self, message: str) -> None: ...
+
     def prompt_submitted(self, prompt: str) -> None: ...
 
     def running(self) -> None: ...
@@ -112,14 +116,13 @@ class LineTuiRenderer:
         self.console.print("Type a prompt, /help, /quit, Ctrl-C to interrupt, or Ctrl-D to exit.")
 
     def help(self) -> None:
-        self.console.print("Commands:", markup=False)
-        self.console.print("  /help        show this help", markup=False)
-        self.console.print("  /quit, /exit quit the TUI", markup=False)
-        self.console.print(
-            "While a prompt is running, submitted input is queued as a follow-up.",
-            markup=False,
-        )
-        self.console.print("Tool approvals prompt with approve? [y/N].", markup=False)
+        self.console.print(_tui_help_text(), markup=False)
+
+    def notice(self, message: str) -> None:
+        self.console.print(f"[cyan]{_markup_escape(message)}[/cyan]")
+
+    def command_error(self, message: str) -> None:
+        self.console.print(f"[red]{_markup_escape(message)}[/red]")
 
     def prompt_submitted(self, prompt: str) -> None:
         pass
@@ -292,15 +295,15 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def help(self) -> None:
-        self._append(
-            "help",
-            "Commands:\n"
-            "  /help        show this help\n"
-            "  /quit, /exit quit the TUI\n"
-            "While a prompt is running, submitted input is queued as a follow-up.\n"
-            "Tool approvals prompt with approve? [y/N].",
-            style="cyan",
-        )
+        self._append("help", _tui_help_text(), style="cyan")
+        self._refresh()
+
+    def notice(self, message: str) -> None:
+        self._append("system", message, style="cyan")
+        self._refresh()
+
+    def command_error(self, message: str) -> None:
+        self._append("error", message, style="red")
         self._refresh()
 
     def prompt_submitted(self, prompt: str) -> None:
@@ -642,6 +645,21 @@ def create_tui_renderer(kind: TuiRendererKind, console: Console | None = None) -
     """Create a built-in TUI renderer."""
 
     return _BUILT_IN_RENDERERS[kind](console)
+
+
+def _tui_help_text() -> str:
+    return (
+        "Commands:\n"
+        "  /help                    show this help\n"
+        "  /auth [provider]         show credential status\n"
+        "  /login [provider] [method]  login to a provider\n"
+        "  /logout [provider]       remove stored provider credentials\n"
+        "  /provider [provider]     show or switch provider for future prompts\n"
+        "  /model [model]           show or switch model for future prompts\n"
+        "  /quit, /exit             quit the TUI\n"
+        "While a prompt is running, submitted input is queued as a follow-up.\n"
+        "Tool approvals prompt with approve? [y/N]."
+    )
 
 
 def _wrap_transcript_line(line: str, *, width: int | None) -> list[str]:

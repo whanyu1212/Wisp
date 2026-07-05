@@ -62,17 +62,20 @@ class ScriptedController:
         *,
         approval_events: list[ScriptedBatch] | None = None,
         cancel_events: list[ScriptedBatch] | None = None,
+        configure_events: list[ScriptedBatch] | None = None,
         shutdown_events: list[ScriptedBatch] | None = None,
         close_after_prompt: bool = False,
     ) -> None:
         self.prompt_events = deque(prompt_events or [])
         self.approval_events = deque(approval_events or [])
         self.cancel_events = deque(cancel_events or [])
+        self.configure_events = deque(configure_events or [])
         self.shutdown_events = deque(shutdown_events or [])
         self.close_after_prompt = close_after_prompt
         self.prompts: list[str] = []
         self.approvals: list[tuple[str, bool, str | None]] = []
         self.cancelled: list[str] = []
+        self.configurations: list[tuple[str | None, str | None]] = []
         self.shutdown_count = 0
         self.closed = False
         self._send, self._receive = anyio.create_memory_object_stream[KnownWispEvent](100)
@@ -111,6 +114,27 @@ class ScriptedController:
         await self._emit_scripted(
             self.shutdown_events,
             default=[RpcCommandFinished(command_id=selected_id, command_type="shutdown", ok=True)],
+        )
+        return selected_id
+
+    async def configure(
+        self,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        self.configurations.append((provider, model))
+        selected_id = command_id or f"configure-{len(self.configurations)}"
+        await self._emit_scripted(
+            self.configure_events,
+            default=[
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="configure",
+                    ok=True,
+                )
+            ],
         )
         return selected_id
 

@@ -76,6 +76,9 @@ async def run_tui(
         selected_controller,
         renderer=selected_renderer,
         prompt_reader=selected_prompt_reader,
+        provider=options.config.provider,
+        model=options.config.model,
+        auth_path=options.config.auth_path,
     )
     try:
         await shell.run()

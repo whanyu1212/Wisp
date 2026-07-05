@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 
 import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 from rich.console import Console
 
+from wisp.auth.openai_codex import OpenAICodexLoginMethod, login_openai_codex
+from wisp.auth.storage import (
+    ApiKeyCredential,
+    AuthCredential,
+    AuthStorageError,
+    JsonAuthStore,
+    OAuthCredential,
+)
+from wisp.config import default_auth_path
 from wisp.events import (
     AssistantMessage,
     ErrorEvent,
@@ -18,6 +30,12 @@ from wisp.events import (
     SessionSaved,
     TokenDelta,
     ToolApprovalRequested,
+)
+from wisp.tui.commands import (
+    TuiSlashCommand,
+    TuiSlashCommandError,
+    TuiSlashCommandName,
+    parse_tui_slash_command,
 )
 from wisp.tui.launch import _stdin_is_interactive
 from wisp.tui.live import LiveFullscreenInputInterrupted
@@ -58,12 +76,28 @@ class TuiController(Protocol):
 
     async def shutdown(self, *, command_id: str | None = None) -> str: ...
 
+    async def configure(
+        self,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        command_id: str | None = None,
+    ) -> str: ...
+
     def events(self) -> AsyncIterator[KnownWispEvent]: ...
 
     async def close(self) -> None: ...
 
 
 PromptReader = Callable[[str], Awaitable[str]]
+
+
+@dataclass(frozen=True)
+class _PendingConfigure:
+    command_id: str
+    provider: str | None = None
+    model: str | None = None
+    reset_model: bool = False
 
 
 class TuiShell:
@@ -77,6 +111,9 @@ class TuiShell:
         prompt_reader: PromptReader | None = None,
         state: TuiInteractionState | None = None,
         renderer: TuiRenderer | None = None,
+        provider: str = "fake",
+        model: str | None = None,
+        auth_path: Path | None = None,
     ) -> None:
         self.controller = controller
         self.renderer = (
@@ -85,6 +122,10 @@ class TuiShell:
         self.prompt_reader = prompt_reader or _default_prompt_reader
         self.state = state or TuiInteractionState()
         self.view = TuiViewState()
+        self.current_provider = provider
+        self.current_model = model
+        self.pending_configures: dict[str, _PendingConfigure] = {}
+        self.auth_store = JsonAuthStore(auth_path or default_auth_path())
 
     async def run(self) -> None:
         """Run the interactive prompt/event loop."""
@@ -177,12 +218,14 @@ class TuiShell:
         text = signal.text
         if self.state.status is TuiStatus.exiting:
             return False
+        try:
+            command = parse_tui_slash_command(text)
+        except TuiSlashCommandError as exc:
+            self.renderer.command_error(str(exc))
+            return False
+        if command is not None:
+            return await self._handle_slash_command(command)
         if self.state.pending_approval is not None:
-            if text in {"/quit", "/exit", ":q"}:
-                return await self._handle_quit()
-            if text == "/help":
-                self._render_help()
-                return False
             if signal.mode is _InputMode.approval:
                 return await self._answer_pending_approval(text, exit_after_denial=False)
             if text and self.state.current_command_id is not None:
@@ -192,17 +235,156 @@ class TuiShell:
             return False
         if not text:
             return False
-        if text in {"/quit", "/exit", ":q"}:
-            return await self._handle_quit()
-        if text == "/help":
-            self._render_help()
-            return False
         if self.state.current_command_id is not None:
             self.state.queued_prompts.append(text)
             self._update_view(queued_follow_ups=len(self.state.queued_prompts))
             self.renderer.queued_follow_up(len(self.state.queued_prompts))
             return False
         return await self._start_prompt(text)
+
+    async def _handle_slash_command(self, command: TuiSlashCommand) -> bool:
+        if command.name is TuiSlashCommandName.help:
+            self._render_help()
+            return False
+        if command.name is TuiSlashCommandName.quit:
+            return await self._handle_quit()
+        if self.state.pending_approval is not None:
+            self.renderer.command_error("Cannot run slash commands while approval is pending.")
+            return False
+        if self.state.current_command_id is not None:
+            self.renderer.command_error("Cannot run slash commands while a prompt is running.")
+            return False
+        if command.name is TuiSlashCommandName.auth:
+            self._handle_auth_status_command(command.args)
+            return False
+        if command.name is TuiSlashCommandName.login:
+            await self._handle_login_command(command.args)
+            return False
+        if command.name is TuiSlashCommandName.logout:
+            self._handle_logout_command(command.args)
+            return False
+        if command.name is TuiSlashCommandName.provider:
+            await self._handle_provider_command(command.args)
+            return False
+        if command.name is TuiSlashCommandName.model:
+            await self._handle_model_command(command.args)
+            return False
+        self.renderer.command_error(f"Unknown command: /{command.name.value}")
+        return False
+
+    def _handle_auth_status_command(self, args: tuple[str, ...]) -> None:
+        if len(args) > 1:
+            self.renderer.command_error("Usage: /auth [provider]")
+            return
+        provider = args[0] if args else self._default_auth_provider()
+        try:
+            credential = self.auth_store.get(provider)
+        except AuthStorageError as exc:
+            self.renderer.command_error(f"Auth storage error: {exc}")
+            return
+        self.renderer.notice(_auth_status_line(provider, credential))
+
+    async def _handle_login_command(self, args: tuple[str, ...]) -> None:
+        if len(args) > 2:
+            self.renderer.command_error("Usage: /login [provider] [device-code]")
+            return
+        provider = args[0] if args else self._default_auth_provider()
+        if provider != "openai-codex":
+            self.renderer.command_error("TUI login currently supports only openai-codex.")
+            return
+        method_text = args[1] if len(args) == 2 else OpenAICodexLoginMethod.device_code.value
+        try:
+            method = OpenAICodexLoginMethod(method_text)
+        except ValueError:
+            self.renderer.command_error("Usage: /login [openai-codex] [device-code]")
+            return
+        if method is OpenAICodexLoginMethod.browser:
+            self.renderer.command_error(
+                "Browser login is not available inside the TUI; use `wisp auth login openai-codex`."
+            )
+            return
+        self.renderer.notice("Starting openai-codex device-code login...")
+        try:
+            credential = await login_openai_codex(
+                method=method,
+                on_device_code=lambda info: self.renderer.notice(
+                    f"Open {info.verification_uri} and enter code {info.user_code}"
+                ),
+                open_browser=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - show login failure in the TUI
+            self.renderer.command_error(f"Login failed: {exc}")
+            return
+        try:
+            self.auth_store.set(provider, credential)
+        except AuthStorageError as exc:
+            self.renderer.command_error(f"Auth storage error: {exc}")
+            return
+        self.renderer.notice(f"Logged in: {provider}")
+
+    def _handle_logout_command(self, args: tuple[str, ...]) -> None:
+        if len(args) > 1:
+            self.renderer.command_error("Usage: /logout [provider]")
+            return
+        provider = args[0] if args else self._default_auth_provider()
+        try:
+            deleted = self.auth_store.delete(provider)
+        except AuthStorageError as exc:
+            self.renderer.command_error(f"Auth storage error: {exc}")
+            return
+        if deleted:
+            self.renderer.notice(f"Logged out: {provider}")
+        else:
+            self.renderer.notice(f"Not logged in: {provider}")
+
+    async def _handle_provider_command(self, args: tuple[str, ...]) -> None:
+        if len(args) > 1:
+            self.renderer.command_error("Usage: /provider [provider]")
+            return
+        if not args:
+            line = f"Current provider: {self.current_provider}"
+            pending_provider = self._latest_pending_provider()
+            if pending_provider is not None:
+                line += f" (pending: {pending_provider})"
+            self.renderer.notice(line)
+            return
+        provider = args[0]
+        try:
+            command_id = await self.controller.configure(provider=provider)
+        except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
+            self.renderer.send_failed("configure", exc)
+            return
+        self.pending_configures[command_id] = _PendingConfigure(
+            command_id=command_id,
+            provider=provider,
+            reset_model=True,
+        )
+        self._update_view(status="configuring")
+        self.renderer.notice(f"Configuring provider: {provider}")
+
+    async def _handle_model_command(self, args: tuple[str, ...]) -> None:
+        if len(args) > 1:
+            self.renderer.command_error("Usage: /model [model]")
+            return
+        if not args:
+            line = f"Current model: {self.current_model or 'provider default'}"
+            pending_model = self._latest_pending_model()
+            if pending_model is not None:
+                line += f" (pending: {pending_model})"
+            self.renderer.notice(line)
+            return
+        model = args[0]
+        try:
+            command_id = await self.controller.configure(model=model)
+        except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
+            self.renderer.send_failed("configure", exc)
+            return
+        self.pending_configures[command_id] = _PendingConfigure(
+            command_id=command_id,
+            model=model,
+        )
+        self._update_view(status="configuring")
+        self.renderer.notice(f"Configuring model: {model}")
 
     async def _handle_input_closed(self, signal: _InputClosed) -> bool:
         self.state.input_closed = True
@@ -385,13 +567,47 @@ class TuiShell:
                 )
             return False
 
-        self._render_event(event)
         if isinstance(event, RpcCommandFinished):
+            if event.command_id in self.pending_configures:
+                self._finish_pending_configure(event)
+                return False
             if event.command_id == self.state.shutdown_command_id:
+                self._render_event(event)
                 return True
             if event.command_id == self.state.current_command_id:
+                self._render_event(event)
                 return await self._finish_current_prompt(event)
+        self._render_event(event)
         return False
+
+    def _finish_pending_configure(self, event: RpcCommandFinished) -> None:
+        pending = self.pending_configures.pop(event.command_id)
+        if event.ok:
+            if pending.provider is not None:
+                self.current_provider = pending.provider
+                if pending.reset_model:
+                    self.current_model = None
+                self.renderer.notice(
+                    f"Provider set to {pending.provider}; model reset to provider default."
+                )
+            if pending.model is not None:
+                self.current_model = pending.model
+                self.renderer.notice(f"Model set to {pending.model}")
+            self._sync_view()
+            return
+        message = event.error or "configure failed"
+        if pending.provider is not None:
+            self.renderer.command_error(f"Provider unchanged ({self.current_provider}): {message}")
+        elif pending.model is not None:
+            self.renderer.command_error(
+                f"Model unchanged ({self.current_model or 'provider default'}): {message}"
+            )
+        self._update_view(
+            status="error",
+            input_hint=_prompt_for_mode(_InputMode.idle),
+            input_mode=_InputMode.idle,
+            queued_follow_ups=len(self.state.queued_prompts),
+        )
 
     async def _finish_current_prompt(self, event: RpcCommandFinished) -> bool:
         was_cancelled = (not event.ok) and _is_rpc_cancelled_message(event.error)
@@ -438,11 +654,29 @@ class TuiShell:
             self.state.token_stream_started = False
         if self.state.current_command_id is not None:
             self.renderer.rpc_stream_ended_before_command(self.state.current_command_id)
+        elif self.pending_configures:
+            command_id = next(iter(self.pending_configures))
+            self.renderer.rpc_stream_ended_before_command(command_id)
         elif self.state.shutdown_command_id is not None:
             self.renderer.rpc_stream_ended_before_shutdown(self.state.shutdown_command_id)
         elif signal.error is None:
             self.renderer.rpc_stream_ended_unexpectedly()
         return True
+
+    def _default_auth_provider(self) -> str:
+        return self._latest_pending_provider() or self.current_provider
+
+    def _latest_pending_provider(self) -> str | None:
+        for pending in reversed(self.pending_configures.values()):
+            if pending.provider is not None:
+                return pending.provider
+        return None
+
+    def _latest_pending_model(self) -> str | None:
+        for pending in reversed(self.pending_configures.values()):
+            if pending.model is not None:
+                return pending.model
+        return None
 
     def _render_help(self) -> None:
         self.renderer.help()
@@ -474,6 +708,19 @@ class TuiShell:
 async def _default_prompt_reader(prompt: str) -> str:
     selected_prompt = prompt if _stdin_is_interactive() else ""
     return await anyio.to_thread.run_sync(input, selected_prompt, abandon_on_cancel=True)
+
+
+def _auth_status_line(provider: str, credential: AuthCredential | None) -> str:
+    if credential is None:
+        return f"{provider}: not logged in"
+    if isinstance(credential, ApiKeyCredential):
+        return f"{provider}: api key configured"
+    return f"{provider}: oauth configured ({_oauth_expiry_text(credential)})"
+
+
+def _oauth_expiry_text(credential: OAuthCredential) -> str:
+    expires = datetime.fromtimestamp(credential.expires / 1000, tz=UTC)
+    return f"expires {expires.isoformat()}"
 
 
 def _compact_session_path(path: object) -> str:

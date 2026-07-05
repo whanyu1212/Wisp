@@ -16,6 +16,7 @@ from wisp.events import KnownWispEvent, wisp_event_from_json
 from wisp.rpc.commands import (
     ApprovalCommand,
     CancelCommand,
+    ConfigureCommand,
     PromptCommand,
     RpcCommand,
     ShutdownCommand,
@@ -87,6 +88,19 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("shutdown")
         await self._transport.send(ShutdownCommand(id=selected_id))
+        return selected_id
+
+    async def configure(
+        self,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        """Update provider/model settings for future prompt commands."""
+
+        selected_id = command_id or self._command_id_factory("configure")
+        await self._transport.send(ConfigureCommand(id=selected_id, provider=provider, model=model))
         return selected_id
 
     def events(self) -> AsyncIterator[KnownWispEvent]:
