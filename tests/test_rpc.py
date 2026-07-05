@@ -8,11 +8,10 @@ from pathlib import Path
 import anyio
 
 from wisp.events import RpcCommandFinished, RpcCommandStarted, wisp_event_from_json
-from wisp.rpc import JsonlSubprocessRpcTransport, RpcController
+from wisp.rpc import ConfigureCommand, JsonlSubprocessRpcTransport, RpcController
 from wisp.rpc.commands import (
     ApprovalCommand,
     CancelCommand,
-    ConfigureCommand,
     PromptCommand,
     RpcCommand,
     ShutdownCommand,
