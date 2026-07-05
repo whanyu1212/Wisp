@@ -12,7 +12,8 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
-from wisp.tools import builtin as builtin_tools_module
+from wisp.tools import process as process_tools_module
+from wisp.tools import search as search_tools_module
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
@@ -338,18 +339,18 @@ def test_bash_tool_uses_taskkill_for_windows_process_tree_cleanup(
         return subprocess.CompletedProcess(command, 0)
 
     process = DummyProcess()
-    monkeypatch.setattr(builtin_tools_module.os, "name", "nt")
-    monkeypatch.setattr(builtin_tools_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
 
-    builtin_tools_module._kill_process_tree(process)  # noqa: SLF001
+    process_tools_module._kill_process_tree(process)  # noqa: SLF001
 
     assert calls == [["taskkill", "/F", "/T", "/PID", "123"]]
     assert process.killed is False
 
 
 def test_exec_helper_bounds_stderr_before_buffering(tmp_path: Path) -> None:
-    async def run() -> builtin_tools_module.ProcessResult:
-        return await builtin_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+    async def run() -> process_tools_module.ProcessResult:
+        return await process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
             [
                 sys.executable,
                 "-c",
@@ -439,7 +440,7 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
         max_buffered_stdout_lines: int | None = None,
         max_buffered_stderr_bytes: int | None = None,
         max_buffered_stderr_lines: int | None = None,
-    ) -> builtin_tools_module.ProcessResult:
+    ) -> search_tools_module.ProcessResult:
         assert cwd == tmp_path
         assert callable(stdout_count_filter)
         calls.append(
@@ -452,15 +453,15 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
                 max_buffered_stderr_lines,
             )
         )
-        return builtin_tools_module.ProcessResult(
+        return search_tools_module.ProcessResult(
             exit_code=-9,
             stdout="one.txt:1:e\ntwo.txt:1:e\nthree.txt:1:e\n",
             stderr="",
             stdout_truncated=True,
         )
 
-    monkeypatch.setattr(builtin_tools_module.shutil, "which", lambda _name: "rg")
-    monkeypatch.setattr(builtin_tools_module, "_run_exec_limited_stdout", fake_run)
+    monkeypatch.setattr(search_tools_module.shutil, "which", lambda _name: "rg")
+    monkeypatch.setattr(search_tools_module, "_run_exec_limited_stdout", fake_run)
     context = ToolContext(cwd=tmp_path)
 
     result = run_tool(GrepTool(), {"pattern": "e", "path": ".", "max_results": 2}, context)
@@ -622,7 +623,7 @@ def test_grep_tool_ripgrep_drops_context_for_omitted_merged_match(
         max_buffered_stdout_lines: int | None = None,
         max_buffered_stderr_bytes: int | None = None,
         max_buffered_stderr_lines: int | None = None,
-    ) -> builtin_tools_module.ProcessResult:
+    ) -> search_tools_module.ProcessResult:
         assert cwd == tmp_path
         assert max_stdout_lines == 2
         assert callable(stdout_count_filter)
@@ -630,7 +631,7 @@ def test_grep_tool_ripgrep_drops_context_for_omitted_merged_match(
         assert max_buffered_stdout_lines == 2000
         assert max_buffered_stderr_bytes == 50000
         assert max_buffered_stderr_lines == 2000
-        return builtin_tools_module.ProcessResult(
+        return search_tools_module.ProcessResult(
             exit_code=-9,
             stdout=(
                 "data.txt\x1f1\x1fneedle one\n"
@@ -641,8 +642,8 @@ def test_grep_tool_ripgrep_drops_context_for_omitted_merged_match(
             stdout_truncated=True,
         )
 
-    monkeypatch.setattr(builtin_tools_module.shutil, "which", lambda _name: "rg")
-    monkeypatch.setattr(builtin_tools_module, "_run_exec_limited_stdout", fake_run)
+    monkeypatch.setattr(search_tools_module.shutil, "which", lambda _name: "rg")
+    monkeypatch.setattr(search_tools_module, "_run_exec_limited_stdout", fake_run)
     context = ToolContext(cwd=tmp_path)
 
     result = run_tool(
@@ -1034,22 +1035,22 @@ def test_find_tool_ripgrep_bounds_stdout_before_buffering(
         stdout_line_filter: object = None,
         max_buffered_stderr_bytes: int | None = None,
         max_buffered_stderr_lines: int | None = None,
-    ) -> builtin_tools_module.ProcessResult:
+    ) -> search_tools_module.ProcessResult:
         assert cwd == tmp_path
         assert callable(stdout_line_filter)
         calls.append(
             (command, max_stdout_lines, max_buffered_stderr_bytes, max_buffered_stderr_lines)
         )
         selected = [line for line in ["a.py", "b.txt", "c.py", "d.py"] if stdout_line_filter(line)]
-        return builtin_tools_module.ProcessResult(
+        return search_tools_module.ProcessResult(
             exit_code=-9,
             stdout="\n".join(selected[:max_stdout_lines]) + "\n",
             stderr="",
             stdout_truncated=True,
         )
 
-    monkeypatch.setattr(builtin_tools_module.shutil, "which", lambda _name: "rg")
-    monkeypatch.setattr(builtin_tools_module, "_run_exec_limited_stdout", fake_run)
+    monkeypatch.setattr(search_tools_module.shutil, "which", lambda _name: "rg")
+    monkeypatch.setattr(search_tools_module, "_run_exec_limited_stdout", fake_run)
     context = ToolContext(cwd=tmp_path)
 
     result = run_tool(FindTool(), {"path": ".", "pattern": "*.py", "max_results": 2}, context)
