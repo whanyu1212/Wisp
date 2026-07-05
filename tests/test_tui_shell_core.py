@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from pytest import MonkeyPatch
+
 from tests.tui_support import *
+from wisp.auth.storage import OAuthCredential
+from wisp.tui import shell as tui_shell_module
 
 
 def test_tui_shell_records_submitted_prompt_for_fullscreen_renderer() -> None:
@@ -99,6 +103,113 @@ def test_tui_shell_help_renders_approval_hint_literally() -> None:
         await shell.run()
 
         assert "approve? [y/N]" in output.getvalue()
+
+    anyio.run(run)
+
+
+def test_tui_shell_auth_status_uses_current_provider(tmp_path: Path) -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/auth", "/quit"]),
+            provider="openai-codex",
+            auth_path=tmp_path / "auth.json",
+        )
+
+        await shell.run()
+
+        assert "openai-codex: not logged in" in output.getvalue()
+        assert controller.prompts == []
+
+    anyio.run(run)
+
+
+def test_tui_shell_login_and_logout_openai_codex(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_login(*_args: object, **_kwargs: object) -> OAuthCredential:
+        return OAuthCredential(
+            access="access-token",
+            refresh="refresh-token",
+            expires=4_102_444_800_000,
+            account_id="account-id",
+        )
+
+    monkeypatch.setattr(tui_shell_module, "login_openai_codex", fake_login)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(
+                ["/login openai-codex", "/auth openai-codex", "/logout openai-codex", "/quit"]
+            ),
+            provider="openai-codex",
+            auth_path=tmp_path / "auth.json",
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert "Logged in: openai-codex" in rendered
+        assert "openai-codex: oauth configured" in rendered
+        assert "Logged out: openai-codex" in rendered
+        assert "access-token" not in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_provider_and_model_commands_configure_future_prompts() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(
+                ["/provider openai-codex", "/model gpt-5.5", "/provider", "/model", "/quit"]
+            ),
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [("openai-codex", None), (None, "gpt-5.5")]
+        rendered = output.getvalue()
+        assert "Provider set to openai-codex" in rendered
+        assert "Model set to gpt-5.5" in rendered
+        assert "Current provider: openai-codex" in rendered
+        assert "Current model: gpt-5.5" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_rejects_slash_commands_while_running() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            [
+                (
+                    0.05,
+                    [RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True)],
+                )
+            ]
+        )
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["first", "/model gpt-5.5"]),
+        )
+
+        await shell.run()
+
+        assert controller.configurations == []
+        assert "Cannot run slash commands while a prompt is running." in output.getvalue()
 
     anyio.run(run)
 

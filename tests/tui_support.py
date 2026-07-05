@@ -73,6 +73,7 @@ class ScriptedController:
         self.prompts: list[str] = []
         self.approvals: list[tuple[str, bool, str | None]] = []
         self.cancelled: list[str] = []
+        self.configurations: list[tuple[str | None, str | None]] = []
         self.shutdown_count = 0
         self.closed = False
         self._send, self._receive = anyio.create_memory_object_stream[KnownWispEvent](100)
@@ -113,6 +114,16 @@ class ScriptedController:
             default=[RpcCommandFinished(command_id=selected_id, command_type="shutdown", ok=True)],
         )
         return selected_id
+
+    async def configure(
+        self,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        self.configurations.append((provider, model))
+        return command_id or f"configure-{len(self.configurations)}"
 
     def events(self) -> AsyncIterator[KnownWispEvent]:
         return self._events()

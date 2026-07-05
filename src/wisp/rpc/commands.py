@@ -49,8 +49,16 @@ class ShutdownCommand(RpcCommandModel):
     type: Literal["shutdown"] = "shutdown"
 
 
+class ConfigureCommand(RpcCommandModel):
+    """Update RPC process configuration for future prompt commands."""
+
+    type: Literal["configure"] = "configure"
+    provider: str | None = None
+    model: str | None = None
+
+
 type RpcCommand = Annotated[
-    PromptCommand | CancelCommand | ApprovalCommand | ShutdownCommand,
+    PromptCommand | CancelCommand | ApprovalCommand | ShutdownCommand | ConfigureCommand,
     Field(discriminator="type"),
 ]
 RpcCommandAdapter: TypeAdapter[RpcCommand] = TypeAdapter(RpcCommand)
