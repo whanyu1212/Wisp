@@ -15,7 +15,7 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame
 
-from wisp.tui.rendering import FullscreenTuiRenderer, TuiTranscriptEntry
+from wisp.tui.rendering import FullscreenTuiRenderer, TuiTranscriptEntry, TuiViewSnapshot
 
 
 class LiveFullscreenInputInterrupted(Exception):
@@ -37,6 +37,11 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         self._input_future: asyncio.Future[str] | None = None
         self._application: Application[None] | None = None
         self._application_task: asyncio.Task[None] | None = None
+        self._visible_input_mode = "idle"
+        self._buffer_input_mode = "idle"
+        self._submitted_input_mode: str | None = None
+        self._last_buffer_text = ""
+        self._buffer.on_text_changed += self._handle_buffer_text_changed
         self._key_bindings = self._build_key_bindings()
 
     async def read_prompt(self, prompt: str) -> str:
@@ -47,6 +52,10 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         loop = asyncio.get_running_loop()
         self._input_future = loop.create_future()
         self.state.input_hint = prompt
+        self._visible_input_mode = self.state.input_mode
+        self._buffer_input_mode = self._visible_input_mode
+        self._submitted_input_mode = None
+        self._last_buffer_text = ""
         self._buffer.reset()
         self._refresh()
         if self.run_application:
@@ -76,6 +85,21 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
 
         super().token_delta(delta)
         self._refresh()
+
+    def view_updated(self, snapshot: TuiViewSnapshot) -> None:
+        """Apply a shell view snapshot and keep live input tags in sync."""
+
+        super().view_updated(snapshot)
+        self._visible_input_mode = snapshot.input_mode
+        if not self._buffer.text:
+            self._buffer_input_mode = self._visible_input_mode
+
+    def consume_submitted_input_mode(self, fallback: str) -> str:
+        """Return and clear the mode captured when the current line was accepted."""
+
+        mode = self._submitted_input_mode or fallback
+        self._submitted_input_mode = None
+        return mode
 
     def _refresh(self) -> None:
         if self._application is not None and not self._application.is_done:
@@ -190,20 +214,29 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         if self._input_future is None or self._input_future.done():
             return
         text = self._buffer.text
+        self._submitted_input_mode = self._buffer_input_mode
         self._buffer.reset()
         self._input_future.set_result(text)
 
     def _interrupt_input(self) -> None:
         if self._input_future is None or self._input_future.done():
             return
+        self._submitted_input_mode = self._buffer_input_mode
         self._buffer.reset()
         self._input_future.set_exception(LiveFullscreenInputInterrupted())
 
     def _close_input(self) -> None:
         if self._input_future is None or self._input_future.done():
             return
+        self._submitted_input_mode = self._buffer_input_mode
         self._buffer.reset()
         self._input_future.set_exception(EOFError())
+
+    def _handle_buffer_text_changed(self, _buffer: Buffer) -> None:
+        text = self._buffer.text
+        if not text or not self._last_buffer_text:
+            self._buffer_input_mode = self._visible_input_mode
+        self._last_buffer_text = text
 
     def _header_fragments(self) -> StyleAndTextTuples:
         return [("class:header", "Wisp · RPC-backed TUI")]
