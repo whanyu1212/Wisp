@@ -136,6 +136,13 @@ class TextualTui(App[None]):
             self._prompt_send.send_nowait(signal)
         except anyio.WouldBlock:
             self.write_error(f"input buffer full; {action} ignored")
+            return
+        # Drop any partially typed line so it can't be resubmitted on the next
+        # Enter after the shell has already handled this interrupt/EOF. Only do
+        # this once the signal is actually queued, so a dropped signal doesn't
+        # silently discard the user's text without cancelling anything.
+        if self._input is not None:
+            self._input.value = ""
 
     def set_status(self, message: str) -> None:
         if self._status is not None:

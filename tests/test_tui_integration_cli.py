@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from textual.widgets import RichLog
+from textual.widgets import Input, RichLog
 
 from tests.tui_support import *
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
@@ -174,6 +174,34 @@ def test_run_tui_uses_fullscreen_fallback_when_stdio_is_not_interactive(
 
         assert controller.shutdown_count == 1
         assert prompts[0] == "wisp> "
+
+    anyio.run(run)
+
+
+def test_run_tui_textual_respects_injected_prompt_reader(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    # An injected reader means the caller drives input headlessly; the Textual
+    # app must not be launched (it would seize the terminal and wait for UI
+    # input), and the scripted reader must be consumed instead.
+    def fail_create_textual_tui() -> object:
+        raise AssertionError("textual app should not be constructed with an injected reader")
+
+    async def run() -> None:
+        monkeypatch.setattr(tui_app_module, "create_textual_tui", fail_create_textual_tui)
+        controller = ScriptedController()
+
+        await tui_app_module.run_tui(
+            TuiOptions(
+                config=WispConfig(provider="fake", session_dir=tmp_path),
+                renderer=TuiRendererKind.textual,
+            ),
+            controller=controller,
+            prompt_reader=await _reader_from(["/quit"]),
+        )
+
+        assert controller.shutdown_count == 1
 
     anyio.run(run)
 
@@ -499,6 +527,32 @@ def test_textual_tui_submit_captures_visible_mode_via_hook() -> None:
         return renderer.consume_submitted_input_mode("running")
 
     assert anyio.run(scenario) == "approval"
+
+
+def test_textual_tui_ctrl_c_clears_partial_input() -> None:
+    # A partially typed line must not survive an interrupt; otherwise it would be
+    # resubmitted on the next Enter after the shell has already handled Ctrl-C.
+    async def scenario() -> str:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            async with anyio.create_task_group() as tg:
+
+                async def read() -> None:
+                    try:
+                        await app_instance.read_prompt("wisp> ")
+                    except KeyboardInterrupt:
+                        pass
+
+                tg.start_soon(read)
+                await pilot.pause()
+                await pilot.click("#input")
+                await pilot.press(*"cancel this")
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+            return input_widget.value
+
+    assert anyio.run(scenario) == ""
 
 
 def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) -> None:

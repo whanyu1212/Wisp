@@ -63,11 +63,21 @@ async def run_tui(
     textual_tui = None
     live_tui: LiveFullscreenTui | None = None
     selected_prompt_reader = prompt_reader or _default_prompt_reader
-    if options.renderer is TuiRendererKind.textual:
+    # An injected prompt_reader means the caller is driving input themselves
+    # (scripted/headless embeds and tests). The Textual app seizes the terminal
+    # on launch, so only stand it up when no reader was supplied; otherwise fall
+    # back to a line renderer and consume the injected reader, mirroring how the
+    # fullscreen path declines to start the live UI when a reader is provided.
+    if options.renderer is TuiRendererKind.textual and prompt_reader is None:
         textual_tui, selected_renderer = create_textual_tui()
         selected_prompt_reader = textual_tui.read_prompt
     else:
-        selected_renderer = create_tui_renderer(options.renderer, selected_console)
+        line_console_renderer = (
+            TuiRendererKind.line
+            if options.renderer is TuiRendererKind.textual
+            else options.renderer
+        )
+        selected_renderer = create_tui_renderer(line_console_renderer, selected_console)
     if (
         options.renderer is TuiRendererKind.fullscreen
         and prompt_reader is None
