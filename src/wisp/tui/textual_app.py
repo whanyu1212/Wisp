@@ -58,6 +58,7 @@ class TextualTui(App[None]):
         self._runner: Callable[[], Awaitable[None]] | None = None
         self._runner_error: Exception | None = None
         self._streaming_text = ""
+        self._on_submit: Callable[[], None] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -79,12 +80,22 @@ class TextualTui(App[None]):
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if self._input is not None:
             self._input.value = ""
+        if self._on_submit is not None:
+            self._on_submit()
         await self._prompt_send.send(event.value)
 
+    def set_submit_hook(self, on_submit: Callable[[], None]) -> None:
+        """Register a callback fired the moment an input line is submitted.
+
+        The renderer uses this to snapshot the input mode active at accept time,
+        which can differ from the mode observed when `read_prompt()` began
+        waiting (e.g. a tool approval arriving mid-line).
+        """
+
+        self._on_submit = on_submit
+
     async def read_prompt(self, prompt: str) -> str:
-        self._current_prompt = prompt
-        if self._input is not None:
-            self._input.placeholder = prompt
+        self.set_input_hint(prompt)
         value = await self._prompt_receive.receive()
         if isinstance(value, BaseException):
             raise value
@@ -130,6 +141,11 @@ class TextualTui(App[None]):
         if self._status is not None:
             self._status.update(message)
 
+    def set_input_hint(self, hint: str) -> None:
+        self._current_prompt = hint
+        if self._input is not None:
+            self._input.placeholder = hint
+
     def write_notice(self, message: str) -> None:
         self._write(f"[cyan]{_markup_escape(message)}[/cyan]")
 
@@ -168,14 +184,35 @@ class TextualTuiRenderer:
 
     def __init__(self, app: TextualTui) -> None:
         self.app = app
+        # Mode the shell last reported via view_updated(); this is the mode in
+        # effect while the user types the next line.
+        self._visible_input_mode = "idle"
+        # Mode captured at the instant a line was submitted. It can differ from
+        # the mode the shell polled when read_prompt() began waiting (e.g. a
+        # tool approval that arrived mid-line), so the shell reconciles against
+        # it via consume_submitted_input_mode().
+        self._submitted_input_mode: str | None = None
+        app.set_submit_hook(self._capture_submitted_input_mode)
 
     def view_updated(self, snapshot: TuiViewSnapshot) -> None:
+        self._visible_input_mode = snapshot.input_mode
+        self.app.set_input_hint(snapshot.input_hint)
         parts = [snapshot.status]
         if snapshot.queued_follow_ups:
             parts.append(f"queued: {snapshot.queued_follow_ups}")
         if snapshot.last_session:
             parts.append(f"session: {snapshot.last_session}")
         self.app.set_status(" | ".join(parts))
+
+    def _capture_submitted_input_mode(self) -> None:
+        self._submitted_input_mode = self._visible_input_mode
+
+    def consume_submitted_input_mode(self, fallback: str) -> str:
+        """Return and clear the mode captured when the last line was accepted."""
+
+        mode = self._submitted_input_mode or fallback
+        self._submitted_input_mode = None
+        return mode
 
     def startup(self) -> None:
         self.app.write_notice("Wisp TUI")

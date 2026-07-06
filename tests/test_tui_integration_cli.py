@@ -450,6 +450,57 @@ def test_textual_tui_ctrl_d_closes_read_prompt() -> None:
     assert _read_prompt_signal_for_key("ctrl+d") is EOFError
 
 
+def test_textual_renderer_captures_mode_at_submit_time() -> None:
+    # An approval that arrives after read_prompt() begins waiting must be the
+    # mode the shell reconciles against; otherwise the user's "y" is tagged as
+    # a running follow-up and queued instead of resolving the approval.
+    _, renderer = create_textual_tui()
+    renderer.view_updated(
+        TuiViewSnapshot(
+            status="waiting for approval",
+            input_hint="approve? [y/N] ",
+            input_mode="approval",
+        )
+    )
+
+    # Submit fires while approval mode is visible; the shell then advances the
+    # view to running as it processes the answer.
+    renderer._capture_submitted_input_mode()
+    renderer.view_updated(
+        TuiViewSnapshot(status="running", input_hint="wisp(running)> ", input_mode="running")
+    )
+
+    assert renderer.consume_submitted_input_mode("running") == "approval"
+    # The captured mode is single-use; a later read with no fresh submit falls
+    # back to the shell-provided mode.
+    assert renderer.consume_submitted_input_mode("running") == "running"
+
+
+def test_textual_tui_submit_captures_visible_mode_via_hook() -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="waiting for approval",
+                    input_hint="approve? [y/N] ",
+                    input_mode="approval",
+                )
+            )
+            async with anyio.create_task_group() as tg:
+
+                async def read() -> None:
+                    await app_instance.read_prompt("approve? [y/N] ")
+
+                tg.start_soon(read)
+                await pilot.pause()
+                await pilot.click("#input")
+                await pilot.press("y", "enter")
+        return renderer.consume_submitted_input_mode("running")
+
+    assert anyio.run(scenario) == "approval"
+
+
 def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) -> None:
     captured: list[TuiOptions] = []
 
