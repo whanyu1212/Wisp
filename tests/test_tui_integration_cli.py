@@ -499,6 +499,85 @@ def test_textual_renderer_falls_back_for_unhandled_events() -> None:
     assert "raw" in rendered
 
 
+def _rendered_segment_styles(events: list[object]) -> str:
+    # Return the applied styles of every non-blank transcript segment (as Rich
+    # style strings, e.g. "bold #5cc9a7") so tests can assert theme colors are
+    # actually applied, not just present in markup.
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            for event in events:
+                renderer.event(event)
+            transcript = app_instance.query_one("#transcript", RichLog)
+            return "\n".join(
+                str(segment.style)
+                for strip in transcript.lines
+                for segment in strip
+                if segment.text.strip() and segment.style is not None
+            )
+
+    return anyio.run(scenario)
+
+
+def test_textual_tui_registers_and_activates_wisp_theme() -> None:
+    async def scenario() -> tuple[str, list[str]]:
+        app_instance = TextualTui()
+        async with app_instance.run_test():
+            wisp_themes = [
+                name for name in app_instance.available_themes if name.startswith("wisp")
+            ]
+            return app_instance.theme, wisp_themes
+
+    active, registered = anyio.run(scenario)
+    assert active == "wisp"
+    assert "wisp" in registered
+    assert "wisp-light" in registered
+
+
+def test_textual_transcript_uses_theme_colors() -> None:
+    styles = _rendered_segment_styles(
+        [
+            AssistantMessage(content="hi"),
+            ToolCallRequested(call_id="c1", name="bash", arguments={}),
+            ErrorEvent(message="boom"),
+        ]
+    )
+
+    # Each labeled line must be rendered with the active (dark wisp) theme colors.
+    assert "#5cc9a7" in styles  # assistant -> success
+    assert "#3fb8b8" in styles  # tool -> accent
+    assert "#d16a7c" in styles  # error -> error
+
+
+def test_textual_theme_switch_rederives_transcript_styles() -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            app_instance.theme = "wisp-light"
+            renderer.event(AssistantMessage(content="after switch"))
+            transcript = app_instance.query_one("#transcript", RichLog)
+            return "\n".join(
+                str(segment.style)
+                for strip in transcript.lines
+                for segment in strip
+                if segment.text.strip() and segment.style is not None
+            )
+
+    rendered = anyio.run(scenario)
+    # The post-switch line uses the light theme's success color, not dark's.
+    assert "#2f9d78" in rendered  # light wisp assistant/success
+    assert "#5cc9a7" not in rendered  # dark wisp success must be gone
+
+
+def test_textual_themed_transcript_still_escapes_untrusted_payloads() -> None:
+    # Routing colors through the theme must not weaken the escape invariant.
+    rendered = _render_events_to_transcript(
+        [ToolCallRequested(call_id="c1", name="evil[/blue]", arguments={"k": "[red]x[/red]"})]
+    )
+    assert "evil[/blue]" in rendered
+    assert "[red]x[/red]" in rendered
+
+
 def test_textual_tui_read_prompt_returns_submitted_input() -> None:
     async def scenario() -> str:
         app_instance = TextualTui()

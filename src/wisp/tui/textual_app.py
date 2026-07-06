@@ -29,6 +29,20 @@ from wisp.tui.rendering import (
     _markup_escape,
     _tui_help_text,
 )
+from wisp.tui.theme import WISP_THEMES, role_styles
+
+# Plain Rich color names used only before on_mount resolves the themed palette
+# (e.g. startup notices written during app construction).
+_ROLE_FALLBACK: dict[str, str] = {
+    "notice": "cyan",
+    "error": "red",
+    "dim": "dim",
+    "user": "bold magenta",
+    "assistant": "bold green",
+    "tool": "blue",
+    "approved": "green",
+    "denied": "red",
+}
 
 
 class TextualTui(App[None]):
@@ -41,18 +55,23 @@ class TextualTui(App[None]):
 
     #transcript {
         height: 1fr;
-        border: round $primary;
+        border: round $accent;
     }
 
     #status {
         height: auto;
         padding: 0 1;
-        background: $surface;
-        color: $text;
+        background: $panel;
+        color: $text-muted;
     }
 
     #input {
         height: auto;
+        border: tall $surface;
+    }
+
+    #input:focus {
+        border: tall $accent;
     }
     """
 
@@ -76,6 +95,10 @@ class TextualTui(App[None]):
         self._runner_error: Exception | None = None
         self._streaming_text = ""
         self._on_submit: Callable[[], None] | None = None
+        # Role→Rich-style map for transcript lines, resolved from the active
+        # theme. RichLog markup can't use Textual $variables, so we bridge here
+        # and re-derive on theme change (watch_theme). Populated in on_mount.
+        self._role_styles: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -87,12 +110,23 @@ class TextualTui(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
+        for theme in WISP_THEMES:
+            self.register_theme(theme)
+        self.theme = WISP_THEMES[0].name
+        self._role_styles = role_styles(self.current_theme)
         self._rich_log = self.query_one("#transcript", RichLog)
         self._status = self.query_one("#status", Static)
         self._input = self.query_one("#input", Input)
         self._input.focus()
         if self._runner is not None:
             self.run_worker(self._run_and_exit(), exclusive=True)
+
+    def watch_theme(self, theme_name: str) -> None:
+        # `theme` is a Textual reactive; re-derive transcript role colors so
+        # lines written after a switch track the new palette. Already-written
+        # RichLog lines keep their baked-in colors until Stage 2.
+        if self.is_running:
+            self._role_styles = role_styles(self.current_theme)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if self._input is not None:
@@ -170,28 +204,39 @@ class TextualTui(App[None]):
         if self._input is not None:
             self._input.placeholder = hint
 
+    def _style(self, role: str) -> str:
+        # Resolve a transcript role to a theme-derived Rich style. Falls back to
+        # a plain color name if called before on_mount populates the map.
+        return self._role_styles.get(role, _ROLE_FALLBACK.get(role, ""))
+
+    def _write_styled(self, role: str, message: str) -> None:
+        style = self._style(role)
+        escaped = _markup_escape(message)
+        self._write(f"[{style}]{escaped}[/{style}]" if style else escaped)
+
     def write_notice(self, message: str) -> None:
-        self._write(f"[cyan]{_markup_escape(message)}[/cyan]")
+        self._write_styled("notice", message)
 
     def write_error(self, message: str) -> None:
-        self._write(f"[red]{_markup_escape(message)}[/red]")
+        self._write_styled("error", message)
 
     def write_dim(self, message: str) -> None:
-        self._write(f"[dim]{_markup_escape(message)}[/dim]")
+        self._write_styled("dim", message)
 
     def write_user(self, message: str) -> None:
-        self._write(f"[bold magenta]you:[/bold magenta] {_markup_escape(message)}")
+        self.write_labeled("you:", message, role="user")
 
     def write_assistant(self, message: str) -> None:
-        self._write(f"[bold green]assistant:[/bold green] {_markup_escape(message)}")
+        self.write_labeled("assistant:", message, role="assistant")
 
     def write_event(self, message: str) -> None:
         self._write(_markup_escape(message))
 
-    def write_labeled(self, label: str, message: str = "", *, label_style: str) -> None:
-        # `label` is a fixed literal styled with markup; `message` is untrusted
-        # and escaped, preserving the escape-at-boundary invariant of write_*.
-        text = f"[{label_style}]{label}[/{label_style}]"
+    def write_labeled(self, label: str, message: str = "", *, role: str) -> None:
+        # `label` is a fixed literal styled with the role's theme color; `message`
+        # is untrusted and escaped, preserving the escape-at-boundary invariant.
+        style = self._style(role)
+        text = f"[{style}]{label}[/{style}]" if style else label
         if message:
             text += f" {_markup_escape(message)}"
         self._write(text)
@@ -321,19 +366,17 @@ class TextualTuiRenderer:
         if isinstance(event, AssistantMessage):
             self.app.write_assistant(event.content)
         elif isinstance(event, ToolCallRequested):
-            self.app.write_labeled("→ tool", f"{event.name} {event.arguments}", label_style="blue")
+            self.app.write_labeled("→ tool", f"{event.name} {event.arguments}", role="tool")
         elif isinstance(event, ToolApprovalResolved):
             if event.approved:
-                self.app.write_labeled("✓ approved", event.name, label_style="green")
+                self.app.write_labeled("✓ approved", event.name, role="approved")
             else:
                 suffix = f"{event.name}: {event.reason}" if event.reason else event.name
-                self.app.write_labeled("! denied", suffix, label_style="red")
+                self.app.write_labeled("! denied", suffix, role="denied")
         elif isinstance(event, ToolResultReady):
             label = "✗ tool" if event.is_error else "✓ tool"
-            label_style = "red" if event.is_error else "green"
-            self.app.write_labeled(
-                label, f"{event.name}: {_first_line(event.output)}", label_style=label_style
-            )
+            role = "denied" if event.is_error else "approved"
+            self.app.write_labeled(label, f"{event.name}: {_first_line(event.output)}", role=role)
         elif isinstance(event, ErrorEvent):
             self.app.write_error(f"error: {event.message}")
         elif isinstance(event, SessionSaved):
