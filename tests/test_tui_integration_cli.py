@@ -2,10 +2,36 @@
 
 from __future__ import annotations
 
-from textual.widgets import Input, RichLog
+from textual.containers import VerticalScroll
+from textual.widgets import Input
 
 from tests.tui_support import *
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
+from wisp.tui.widgets import LineMessage, StreamMessage
+
+
+def _transcript_texts(app: TextualTui) -> list[str]:
+    """Plain text of every mounted transcript message (line + streamed)."""
+
+    transcript = app.query_one("#transcript", VerticalScroll)
+    texts: list[str] = []
+    for child in transcript.children:
+        if isinstance(child, LineMessage):
+            texts.append(child.render().plain)  # Textual Content
+        elif isinstance(child, StreamMessage):
+            texts.append(child._markdown.source)
+    return texts
+
+
+def _transcript_styles(app: TextualTui) -> str:
+    """Style strings applied to every LineMessage span (e.g. 'bold #5cc9a7')."""
+
+    transcript = app.query_one("#transcript", VerticalScroll)
+    styles: list[str] = []
+    for child in transcript.children:
+        if isinstance(child, LineMessage):
+            styles.extend(str(span.style) for span in child.render().spans)
+    return "\n".join(styles)
 
 
 def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
@@ -408,16 +434,16 @@ def test_textual_tui_renderer_can_be_constructed() -> None:
     renderer.notice("hello")
 
 
-def test_textual_tui_escapes_markup_in_streamed_output() -> None:
+def test_textual_tui_preserves_brackets_in_streamed_output() -> None:
     async def scenario() -> str:
         app_instance = TextualTui()
-        async with app_instance.run_test():
+        async with app_instance.run_test() as pilot:
             app_instance.append_stream("code has [brackets] and [/close] tags")
             app_instance.flush_stream()
-            # The transcript must render literally; bracketed text must not be
-            # interpreted as Rich markup (which would drop or mangle it).
-            transcript = app_instance.query_one("#transcript", RichLog)
-            return "".join(strip.text for strip in transcript.lines)
+            await pilot.pause()
+            # Streamed assistant text renders as Markdown; bracketed text must
+            # survive intact (Markdown source is not Rich-markup-interpreted).
+            return "\n".join(_transcript_texts(app_instance))
 
     rendered = anyio.run(scenario)
     assert "[brackets]" in rendered
@@ -426,14 +452,14 @@ def test_textual_tui_escapes_markup_in_streamed_output() -> None:
 
 def _render_events_to_transcript(events: list[object]) -> str:
     # Drive TextualTuiRenderer.event() through a live app and return the plain
-    # rendered transcript text (markup already resolved by RichLog).
+    # text of every mounted transcript message.
     async def scenario() -> str:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test():
+        async with app_instance.run_test() as pilot:
             for event in events:
                 renderer.event(event)
-            transcript = app_instance.query_one("#transcript", RichLog)
-            return "\n".join("".join(segment.text for segment in line) for line in transcript.lines)
+            await pilot.pause()
+            return "\n".join(_transcript_texts(app_instance))
 
     return anyio.run(scenario)
 
@@ -500,21 +526,15 @@ def test_textual_renderer_falls_back_for_unhandled_events() -> None:
 
 
 def _rendered_segment_styles(events: list[object]) -> str:
-    # Return the applied styles of every non-blank transcript segment (as Rich
-    # style strings, e.g. "bold #5cc9a7") so tests can assert theme colors are
-    # actually applied, not just present in markup.
+    # Return the applied styles of every LineMessage segment (as Rich style
+    # strings, e.g. "bold #5cc9a7") so tests can assert theme colors are applied.
     async def scenario() -> str:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test():
+        async with app_instance.run_test() as pilot:
             for event in events:
                 renderer.event(event)
-            transcript = app_instance.query_one("#transcript", RichLog)
-            return "\n".join(
-                str(segment.style)
-                for strip in transcript.lines
-                for segment in strip
-                if segment.text.strip() and segment.style is not None
-            )
+            await pilot.pause()
+            return _transcript_styles(app_instance)
 
     return anyio.run(scenario)
 
@@ -552,16 +572,11 @@ def test_textual_transcript_uses_theme_colors() -> None:
 def test_textual_theme_switch_rederives_transcript_styles() -> None:
     async def scenario() -> str:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test():
+        async with app_instance.run_test() as pilot:
             app_instance.theme = "wisp-light"
             renderer.event(AssistantMessage(content="after switch"))
-            transcript = app_instance.query_one("#transcript", RichLog)
-            return "\n".join(
-                str(segment.style)
-                for strip in transcript.lines
-                for segment in strip
-                if segment.text.strip() and segment.style is not None
-            )
+            await pilot.pause()
+            return _transcript_styles(app_instance)
 
     rendered = anyio.run(scenario)
     # The post-switch line uses the light theme's success color, not dark's.
@@ -576,6 +591,87 @@ def test_textual_themed_transcript_still_escapes_untrusted_payloads() -> None:
     )
     assert "evil[/blue]" in rendered
     assert "[red]x[/red]" in rendered
+
+
+def _stream_deltas(deltas: list[str], *, pause_between: bool) -> tuple[list[str], int]:
+    # Stream deltas through the renderer, optionally pausing between each (spaced
+    # arrival) or not (a burst — the mount-race stress case). Returns the final
+    # transcript texts and the number of StreamMessage widgets mounted.
+    async def scenario() -> tuple[list[str], int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            for delta in deltas:
+                renderer.token_delta(delta)
+                if pause_between:
+                    await pilot.pause()
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()  # let the deferred finalize settle
+            transcript = app_instance.query_one("#transcript", VerticalScroll)
+            streams = sum(1 for c in transcript.children if isinstance(c, StreamMessage))
+            return _transcript_texts(app_instance), streams
+
+    return anyio.run(scenario)
+
+
+def test_textual_streaming_accumulates_into_one_markdown_widget() -> None:
+    texts, streams = _stream_deltas(
+        ["# Plan\n", "Use ", "`bash`", " to **list**."], pause_between=True
+    )
+    # Exactly one streaming widget holds the full accumulated markdown.
+    assert streams == 1
+    assert texts == ["# Plan\nUse `bash` to **list**."]
+
+
+def test_textual_streaming_survives_a_burst_without_dropping_text() -> None:
+    # No pauses between deltas: reconcile must not hit the mount race and drop
+    # content (update() on a not-yet-mounted widget silently drops).
+    texts, streams = _stream_deltas(list("The quick brown fox"), pause_between=False)
+    assert streams == 1
+    assert texts == ["The quick brown fox"]
+
+
+def test_textual_end_token_stream_finalizes_the_bubble() -> None:
+    # end_token_stream() is the ONLY place a streamed assistant turn is finalized
+    # (the shell suppresses the trailing AssistantMessage when tokens rendered).
+    # After it, the buffer/live-widget refs are cleared and the text persists.
+    async def scenario() -> tuple[str, object, object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("final answer")
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+            texts = _transcript_texts(app_instance)
+            return (
+                texts[0] if texts else "",
+                app_instance._stream_widget,
+                app_instance._streaming_text,
+            )
+
+    text, live_widget, buffer = anyio.run(scenario)
+    assert text == "final answer"
+    assert live_widget is None  # finalized, no dangling live widget
+    assert buffer == ""  # buffer cleared
+
+
+def test_textual_streamed_and_line_messages_use_distinct_widgets() -> None:
+    async def scenario() -> list[str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("streamed reply")
+            renderer.end_token_stream()
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={}))
+            await pilot.pause()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", VerticalScroll)
+            return [type(c).__name__ for c in transcript.children]
+
+    kinds = anyio.run(scenario)
+    # The assistant stream is a StreamMessage (Markdown); the tool call is a
+    # LineMessage (styled Static) — they are different widget types.
+    assert "StreamMessage" in kinds
+    assert "LineMessage" in kinds
 
 
 def test_textual_tui_read_prompt_returns_submitted_input() -> None:
