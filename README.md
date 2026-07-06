@@ -40,7 +40,7 @@ uv run wisp -p "hello" --provider openai --model gpt-5.5
 uv run wisp -p "hello" --provider openai-codex --model gpt-5.5
 ```
 
-`OPENAI_API_KEY` is required only when using the `openai` provider. To use ChatGPT Plus/Pro subscription access, run `uv run wisp auth login openai-codex` and select `WISP_PROVIDER=openai-codex`; OAuth credentials are stored in `WISP_AUTH_FILE` (default `~/.wisp/auth.json`) with private permissions. Sessions default to OS temp storage; set `WISP_SESSION_DIR` or pass `--session-dir` to keep them somewhere durable. Set `WISP_MODE=tui` to make bare `wisp` launch the TUI, and `WISP_TUI_RENDERER=fullscreen` to make TUI launches use the live fullscreen renderer by default. `wisp -p "hello"` still uses text mode unless `--mode` is passed explicitly. Never commit `.env`, auth files, or real API keys.
+`OPENAI_API_KEY` is required only when using the `openai` provider. To use ChatGPT Plus/Pro subscription access, run `uv run wisp auth login openai-codex` and select `WISP_PROVIDER=openai-codex`; OAuth credentials are stored in `WISP_AUTH_FILE` (default `~/.wisp/auth.json`) with private permissions. Sessions default to OS temp storage; set `WISP_SESSION_DIR` or pass `--session-dir` to keep them somewhere durable. Use `uv run wisp tui` for the fullscreen TUI; `wisp -p "hello"` still uses text mode unless `--mode` is passed explicitly. Never commit `.env`, auth files, or real API keys.
 
 ## Default prompt and project context
 
@@ -167,39 +167,17 @@ finally:
 `shutdown` methods and yields parsed `WispEvent` objects. This is intended as
 the stable integration layer for future TUI work.
 
-## TUI MVP
+## TUI
 
-Wisp also includes a minimal terminal UI shell built on the RPC controller:
-
-```bash
-uv run wisp --mode tui --provider fake
-uv run wisp --mode tui --provider fake --tui-renderer fullscreen
-uv run wisp --mode tui --provider openai --allow-read-tools
-uv run wisp --mode tui --provider openai --allow-tool bash
-```
-
-For a shorter daily launch, configure `.env`:
-
-```env
-WISP_PROVIDER=openai-codex
-WISP_MODE=tui
-WISP_TUI_RENDERER=fullscreen
-WISP_SESSION_DIR=~/.wisp/sessions
-WISP_AUTH_FILE=~/.wisp/auth.json
-```
-
-Then run:
+Wisp includes a fullscreen Textual TUI built on the same RPC controller used by
+other integrations:
 
 ```bash
-uv run wisp
+uv run wisp tui
 ```
 
-If you only set provider and renderer defaults, `uv run wisp --mode tui` is enough.
-
-The default line-oriented TUI currently provides streamed assistant text, basic
-tool call/result rendering, queued follow-up input while a prompt is running,
-interactive approval prompts for mutating/command tools, Ctrl-C interrupt
-handling, Ctrl-D shutdown, and slash commands:
+Use slash commands inside the TUI to adjust runtime settings instead of passing
+provider/model flags up front:
 
 ```text
 /help
@@ -215,11 +193,33 @@ handling, Ctrl-D shutdown, and slash commands:
 provider default. `/model` switches the model string for future prompts; a
 Pi-style model picker/catalog is not implemented yet. TUI login currently uses
 the `openai-codex` device-code flow; browser login is available from the CLI via
-`uv run wisp auth login openai-codex`. On interactive terminals, opt-in
-`--tui-renderer fullscreen` uses a live prompt-toolkit screen with
-transcript/status/input regions that owns the input line. For piped input,
-embedded tests, or explicit prompt readers, fullscreen falls back to the
-line-oriented input path while preserving the same renderer state model.
+`uv run wisp auth login openai-codex`.
+
+For fallback/debugging, use the simple line renderer:
+
+```bash
+uv run wisp tui --line
+```
+
+Session and tool flags still work with the TUI command:
+
+```bash
+uv run wisp tui --continue
+uv run wisp tui --resume <session-id-prefix>
+uv run wisp tui --allow-read-tools
+uv run wisp tui --allow-tool bash
+```
+
+The legacy `--mode tui` entrypoint remains available for compatibility and still
+honors `--tui-renderer line|fullscreen|textual` plus `WISP_TUI_RENDERER`.
+
+For daily local defaults, configure `.env`:
+
+```env
+WISP_PROVIDER=openai-codex
+WISP_SESSION_DIR=~/.wisp/sessions
+WISP_AUTH_FILE=~/.wisp/auth.json
+```
 
 Wisp does not cap model/tool rounds by default, matching Pi's permissive agent
 loop. If you want a non-interactive fuse for a run, pass

@@ -46,7 +46,7 @@ def test_rpc_thread_stdin_reader_uses_bounded_queue(monkeypatch: MonkeyPatch) ->
             created_queue_sizes.append(maxsize)
             super().__init__(maxsize=maxsize)
 
-    monkeypatch.setattr(cli_module, "Queue", RecordingQueue)
+    monkeypatch.setattr(cli_module.rpc, "Queue", RecordingQueue)
 
     async def run_reader() -> None:
         stop_reader = anyio.Event()
@@ -67,7 +67,7 @@ def test_rpc_stdin_reader_uses_thread_reader_for_windows_pipe(
     read_fd, write_fd = os.pipe()
     stdin = os.fdopen(read_fd, "r", encoding="utf-8")
     monkeypatch.setattr(sys, "stdin", stdin)
-    monkeypatch.setattr(cli_module, "_rpc_stdin_needs_thread_reader", lambda _mode: True)
+    monkeypatch.setattr(cli_module.rpc, "_rpc_stdin_needs_thread_reader", lambda _mode: True)
 
     async def fail_wait_readable(_fd: int) -> None:
         raise AssertionError("wait_readable should not be used for Windows pipe stdin")

@@ -232,7 +232,7 @@ def test_rpc_mode_cancels_running_prompt(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "build_runtime", build_cancellable_runtime)
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_cancellable_runtime)
 
     result = runner.invoke(
         app,
@@ -423,7 +423,7 @@ def test_rpc_mode_denies_pending_approval_when_input_closes(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
 
     result = runner.invoke(
         app,
@@ -497,8 +497,8 @@ def test_rpc_mode_rejects_commands_beyond_queue_cap_while_prompt_runs(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "build_runtime", build_cancellable_runtime)
-    monkeypatch.setattr(cli_module, "_MAX_QUEUED_RPC_COMMANDS", 2)
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_cancellable_runtime)
+    monkeypatch.setattr(cli_module.rpc, "_MAX_QUEUED_RPC_COMMANDS", 2)
 
     result = runner.invoke(
         app,
@@ -535,7 +535,7 @@ def test_rpc_mode_processes_queued_shutdown_after_running_prompt_finishes(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "build_runtime", build_cancellable_runtime)
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_cancellable_runtime)
 
     result = runner.invoke(
         app,
@@ -603,7 +603,7 @@ def test_rpc_mode_preserves_failed_prompt_in_next_prompt_history(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "build_runtime", build_failing_runtime)
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_failing_runtime)
 
     result = runner.invoke(
         app,
@@ -633,7 +633,7 @@ def test_rpc_mode_excludes_cancelled_prompt_from_next_prompt_history(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "build_runtime", build_cancellable_runtime)
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_cancellable_runtime)
 
     result = runner.invoke(
         app,
@@ -664,7 +664,7 @@ def test_rpc_mode_queues_prompts_while_canceling_running_prompt(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "build_runtime", build_cancellable_runtime)
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_cancellable_runtime)
 
     result = runner.invoke(
         app,
