@@ -1,4 +1,4 @@
-"""Fake provider used to prove the agent loop before real SDKs exist."""
+"""Deterministic offline provider for tests and no-credential smoke runs."""
 
 from __future__ import annotations
 
