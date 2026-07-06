@@ -45,3 +45,9 @@ dist/
 
 # Local code index
 .codegraph/
+
+# Read-only reference clones for design study (not part of the project)
+reference-apps/
+
+# Local docs / design notes (kept out of the tree)
+docs/
