@@ -150,7 +150,7 @@ def test_print_mode_renders_denied_tool_events_to_stderr(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
 
     result = runner.invoke(
         app,
@@ -173,7 +173,7 @@ def test_print_mode_renders_approved_tool_events_to_stderr(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
 
     result = runner.invoke(
         app,
@@ -203,7 +203,7 @@ def test_print_mode_enforces_explicit_tool_iteration_cap(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
 
     result = runner.invoke(
         app,
@@ -243,7 +243,7 @@ def test_print_mode_keeps_event_separator_out_of_stdout(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "build_runtime", build_mixed_tool_runtime)
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_mixed_tool_runtime)
 
     result = runner.invoke(
         app,

@@ -39,7 +39,7 @@ def test_json_mode_outputs_tool_events_as_jsonl(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
 
     result = runner.invoke(
         app,
@@ -103,7 +103,7 @@ def test_json_mode_emits_error_event_without_stderr_noise(
     monkeypatch: MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    monkeypatch.setattr(cli_module, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
 
     result = runner.invoke(
         app,
