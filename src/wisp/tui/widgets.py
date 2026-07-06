@@ -87,6 +87,12 @@ class LineMessage(Static):
         # by the caller). Static renders it with markup enabled by default.
         super().__init__(markup)
         self.add_class("message", f"message--{role}")
+        # The role label is a fixed literal from _ROLE_LABELS — never untrusted
+        # payload — so it's safe as border chrome. Quiet meta roles (dim/session)
+        # map to "" and get no title, staying borderless per the card CSS.
+        label = _ROLE_LABELS.get(role, "")
+        if label:
+            self.border_title = label
 
 
 class StreamMessage(Widget):
@@ -109,6 +115,9 @@ class StreamMessage(Widget):
     def __init__(self) -> None:
         super().__init__()
         self.add_class("message", "message--assistant")
+        # Match the finalized-assistant card so the streamed and settled turns
+        # look identical (same role label + card CSS).
+        self.border_title = _ROLE_LABELS["assistant"]
         self._markdown = Markdown()
 
     def compose(self) -> ComposeResult:

@@ -7,7 +7,7 @@ from textual.widgets import Input
 
 from tests.tui_support import *
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
-from wisp.tui.widgets import LineMessage, StreamMessage, Transcript
+from wisp.tui.widgets import _ROLE_LABELS, LineMessage, StreamMessage, Transcript
 
 
 def _transcript_texts(app: TextualTui) -> list[str]:
@@ -32,6 +32,34 @@ def _transcript_styles(app: TextualTui) -> str:
         if isinstance(child, LineMessage):
             styles.extend(str(span.style) for span in child.render().spans)
     return "\n".join(styles)
+
+
+def _transcript_role_class(child: object) -> str | None:
+    """The message--<role> class on a transcript child, or None if absent."""
+
+    if not hasattr(child, "classes"):
+        return None
+    return next((c for c in child.classes if c.startswith("message--")), None)
+
+
+def _transcript_cards(app: TextualTui) -> list[tuple[str | None, object]]:
+    """(role class, border_title) for every mounted transcript card."""
+
+    transcript = app.query_one("#transcript", Transcript)
+    return [(_transcript_role_class(c), c.border_title) for c in transcript.children]
+
+
+def _cards_for_events(events: list[object]) -> list[tuple[str | None, object]]:
+    # Drive events through a live app and return each card's role class + title.
+    async def scenario() -> list[tuple[str | None, object]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            for event in events:
+                renderer.event(event)
+            await pilot.pause()
+            return _transcript_cards(app_instance)
+
+    return anyio.run(scenario)
 
 
 def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
@@ -697,6 +725,79 @@ def test_textual_streamed_and_line_messages_use_distinct_widgets() -> None:
     # LineMessage (styled Static) — they are different widget types.
     assert "StreamMessage" in kinds
     assert "LineMessage" in kinds
+
+
+def test_textual_line_messages_carry_role_classes() -> None:
+    # Stage 3: every event type maps to a message--<role> class so the card CSS
+    # can style it. The classes are the styling contract; assert each is present.
+    cards = _cards_for_events(
+        [
+            AssistantMessage(content="hi"),
+            ToolCallRequested(call_id="c1", name="bash", arguments={}),
+            ToolResultReady(call_id="c1", name="bash", output="ok", is_error=False),
+            ToolResultReady(call_id="c2", name="bash", output="boom", is_error=True),
+            ToolApprovalResolved(call_id="c3", name="edit", approved=True, reason=None),
+            ToolApprovalResolved(call_id="c4", name="write", approved=False, reason="no"),
+            ErrorEvent(message="bad"),
+        ]
+    )
+    role_classes = [role for role, _ in cards]
+    assert role_classes == [
+        "message--assistant",
+        "message--tool",
+        "message--approved",  # successful tool result
+        "message--denied",  # errored tool result
+        "message--approved",  # approval granted
+        "message--denied",  # approval refused
+        "message--error",
+    ]
+
+
+def test_textual_line_message_border_title_from_role_labels() -> None:
+    # Stage 3: the card's role label comes ONLY from _ROLE_LABELS (fixed literals),
+    # never from untrusted payload — so it's safe as border chrome.
+    cards = _cards_for_events(
+        [
+            AssistantMessage(content="hi"),
+            ToolCallRequested(call_id="c1", name="bash", arguments={}),
+            ErrorEvent(message="bad"),
+        ]
+    )
+    titles = [title for _, title in cards]
+    assert titles == [_ROLE_LABELS["assistant"], _ROLE_LABELS["tool"], _ROLE_LABELS["error"]]
+
+
+def test_textual_dim_and_session_rows_have_no_card_title() -> None:
+    # Quiet meta rows (running… notices, session-saved) map to an empty label and
+    # stay borderless — no title chrome, so they read as ambient, not as turns.
+    async def scenario() -> list[object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()  # a "dim" row
+            renderer.event(  # a "session" row
+                SessionSaved(session_id="sess-1", path=Path("/tmp/sess.json"))
+            )
+            await pilot.pause()
+            return [title for _, title in _transcript_cards(app_instance)]
+
+    titles = anyio.run(scenario)
+    assert titles == [None, None]
+
+
+def test_textual_stream_message_carries_the_assistant_card() -> None:
+    # The streamed turn wears the same card as a finalized assistant line, so the
+    # bubble looks identical before and after finalize.
+    async def scenario() -> tuple[str | None, object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("partial answer")
+            await pilot.pause()
+            (card,) = _transcript_cards(app_instance)
+            return card
+
+    role, title = anyio.run(scenario)
+    assert role == "message--assistant"
+    assert title == _ROLE_LABELS["assistant"]
 
 
 def _fill_transcript(renderer: TextualTuiRenderer, count: int) -> None:

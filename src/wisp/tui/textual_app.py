@@ -59,6 +59,56 @@ class TextualTui(App[None]):
         border: round $accent;
     }
 
+    /* Message cards: an L-spine (top + left border) carries the role label on
+       the top edge; quiet meta rows stay borderless. Colors come only from
+       theme vars present in BOTH light and dark themes. */
+    .message {
+        height: auto;
+        margin: 0 1;
+        padding: 0 1;
+        border-title-color: $text-muted;
+        border-title-style: bold;
+    }
+
+    .message--user {
+        border-top: hkey $primary;
+        border-left: thick $primary;
+        background: $primary 8%;
+    }
+
+    .message--assistant {
+        border-top: hkey $success;
+        border-left: thick $success;
+        background: $panel;
+    }
+
+    .message--tool {
+        border-top: hkey $accent;
+        border-left: thick $accent;
+        background: $surface;
+    }
+
+    .message--approved {
+        border-left: thick $success;
+    }
+
+    .message--denied,
+    .message--error {
+        border-top: hkey $error;
+        border-left: thick $error;
+        background: $error 8%;
+    }
+
+    .message--notice {
+        border-left: thick $accent;
+    }
+
+    .message--dim,
+    .message--session {
+        border-left: none;
+        background: transparent;
+    }
+
     #status {
         height: auto;
         padding: 0 1;
