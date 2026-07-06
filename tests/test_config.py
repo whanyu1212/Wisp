@@ -11,13 +11,13 @@ from wisp import config as config_module
 from wisp.config import WispConfig, default_auth_path, default_session_dir
 
 
-def test_config_defaults_to_fake_provider(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+def test_config_defaults_to_default_provider(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     monkeypatch.delenv("WISP_PROVIDER", raising=False)
     monkeypatch.delenv("WISP_MODEL", raising=False)
 
     config = WispConfig.from_env(session_dir=tmp_path, load_env_file=False)
 
-    assert config.provider == "fake"
+    assert config.provider == config_module.DEFAULT_PROVIDER
     assert config.model is None
     assert config.session_dir == tmp_path
     assert config.auth_path == default_auth_path()

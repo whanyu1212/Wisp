@@ -11,7 +11,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
-DEFAULT_PROVIDER = "fake"
+DEFAULT_PROVIDER = "openai-codex"
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_TEMP_SESSION_DIR: Path | None = None
 

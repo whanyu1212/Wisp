@@ -1,61 +1,118 @@
 # Wisp
 
-A Python, Pi-inspired coding agent experiment.
+**A Python, Pi-inspired coding agent.**
 
-## Development
+Wisp is a small, auditable coding agent built around one agent core exposed through four
+interchangeable interfaces — a print CLI, machine-readable JSON, a long-lived JSONL-RPC
+protocol, and a fullscreen Textual TUI.
+
+- **Auditable** — every provider-visible message and key event is persisted as JSONL.
+- **Safe by default** — print mode exposes no tools to the model unless you opt in, and
+  mutating tools require explicit approval.
+- **Embeddable** — a typed RPC client/controller is the stable integration layer.
+
+> Requires **Python 3.12+** and [`uv`](https://docs.astral.sh/uv/).
+
+## Quickstart
 
 ```bash
-uv sync
-uv run wisp -p "hello"
-uv run pytest
+uv sync                                    # install dependencies
+uv run wisp auth login openai-codex        # authenticate a provider
+uv run wisp -p "hello"                      # run one turn
 ```
 
-By default, Wisp uses a deterministic fake provider so the agent core, CLI, and JSONL sessions can be tested without API keys.
+Wisp defaults to the `openai-codex` provider. See [Providers & auth](#providers--auth) for
+other options. To try Wisp without any credentials, use the offline `fake` provider:
+
+```bash
+uv run wisp -p "hello" --provider fake
+```
+
+## Interfaces
+
+Wisp runs the same agent core in four modes:
+
+| Mode | Command | Output | Use for |
+|------|---------|--------|---------|
+| **Print** (default) | `wisp -p "…"` | Assistant text on stdout, events on stderr | Interactive/CLI use, piping |
+| **JSON** | `wisp -p "…" --mode json` | One `WispEvent` JSON object per line | Machine-readable integrations |
+| **RPC** | `wisp --mode rpc` | JSONL commands in, `WispEvent` JSONL out | Long-lived integrations |
+| **TUI** | `wisp tui` | Fullscreen Textual UI | Day-to-day interactive sessions |
 
 ## Configuration
 
-Copy `.env.example` to `.env` for local settings:
+Copy the example env file and edit it for local defaults:
 
 ```bash
 cp .env.example .env
 ```
 
-Available environment variables:
-
 ```env
-WISP_PROVIDER=fake
-WISP_MODEL=
-WISP_MODE=
-WISP_TUI_RENDERER=
-WISP_SESSION_DIR=
+WISP_PROVIDER=            # openai-codex (default) | openai | fake
+WISP_MODEL=               # provider default when blank
+WISP_MODE=                # blank = help/text; set to tui to open the TUI directly
+WISP_TUI_RENDERER=        # line | fullscreen | textual
+WISP_SESSION_DIR=         # persist sessions somewhere durable (default: OS temp)
 WISP_AUTH_FILE=~/.wisp/auth.json
-OPENAI_API_KEY=
+OPENAI_API_KEY=           # required only for the openai provider
 ```
 
-CLI flags override environment variables:
+**CLI flags always override environment variables.** Never commit `.env`, auth files, or real
+API keys.
+
+## Providers & auth
 
 ```bash
-uv run wisp -p "hello" --provider fake
-uv run wisp -p "hello" --provider openai --model gpt-5.5
 uv run wisp -p "hello" --provider openai-codex --model gpt-5.5
+uv run wisp -p "hello" --provider openai --model gpt-5.5
+uv run wisp -p "hello" --provider fake
 ```
 
-`OPENAI_API_KEY` is required only when using the `openai` provider. To use ChatGPT Plus/Pro subscription access, run `uv run wisp auth login openai-codex` and select `WISP_PROVIDER=openai-codex`; OAuth credentials are stored in `WISP_AUTH_FILE` (default `~/.wisp/auth.json`) with private permissions. Sessions default to OS temp storage; set `WISP_SESSION_DIR` or pass `--session-dir` to keep them somewhere durable. Use `uv run wisp tui` for the fullscreen TUI; `wisp -p "hello"` still uses text mode unless `--mode` is passed explicitly. Never commit `.env`, auth files, or real API keys.
+- **`openai-codex`** (default) — use a ChatGPT Plus/Pro subscription via OAuth:
 
-## Default prompt and project context
+  ```bash
+  uv run wisp auth login openai-codex
+  ```
 
-Each agent turn sends a small default coding-agent system prompt plus a bounded project context message before the user prompt. The context includes:
+  Credentials are stored in `WISP_AUTH_FILE` (default `~/.wisp/auth.json`) with private
+  permissions.
 
-- current working directory
-- git branch and a capped short status summary when available
-- detected root project files such as `pyproject.toml`, `package.json`, or `README.md`
-- the tools currently exposed to the model, or that no tools are exposed
+- **`openai`** — set `OPENAI_API_KEY`.
+- **`fake`** — a deterministic offline provider for tests and no-credential smoke runs; it
+  echoes a canned response and needs no key.
 
-These prompt/context messages are persisted in the JSONL session so the provider-visible input is auditable. Context is informational only: it does not change the print-mode tool exposure policy described below.
+Sessions default to OS temp storage; set `WISP_SESSION_DIR` (or pass `--session-dir`) to keep
+them somewhere durable.
 
-## Session continuation
+## Tools
 
-Print mode can continue an existing JSONL session:
+Wisp registers built-in local tools through its extension API. File tools are sandboxed to the
+tool context's working directory by default.
+
+| | Tools |
+|---|---|
+| **Read** | `read` · `grep` · `find` · `ls` |
+| **Mutating** | `write` · `edit` |
+| **Command** | `bash` |
+
+**Print mode exposes no tools to the model unless you ask.** Read tools are enabled as a group;
+mutating and command tools require per-tool opt-in:
+
+```bash
+uv run wisp -p "list files" --provider openai --allow-read-tools
+uv run wisp -p "run tests"  --provider openai --allow-tool bash --yes
+```
+
+Because print mode is non-interactive, mutating and command tools are **also** blocked at
+execution time unless you pass `--yes` (alias `--allow-unsafe-tool-execution`). Without it, the
+model receives a clear tool error instead of Wisp executing the operation.
+
+Wisp does not cap model/tool rounds by default (matching Pi's permissive agent loop). Pass
+`--max-tool-iterations <n>` for a non-interactive fuse.
+
+## Sessions
+
+Wisp persists each run as a JSONL session and can continue an existing one:
 
 ```bash
 uv run wisp -p "continue the work" --continue
@@ -63,82 +120,99 @@ uv run wisp -p "continue the work" --resume path/to/session.jsonl
 uv run wisp -p "continue the work" --resume <session-id-prefix>
 ```
 
-By default, Wisp stores sessions under a private, non-precreatable OS temp directory (`<tmp>/wisp-<user>-*/sessions`) created for the current process. `--continue` resumes the newest session in the active session directory. `--resume` accepts a JSONL path, filename, full session id, or unique id prefix. Use `--session-dir` or `WISP_SESSION_DIR` for durable session storage and cross-invocation `--continue`. Wisp rebuilds the current prompt/context for the new turn and reuses prior non-system conversation messages as history, so stale project context from earlier turns is not replayed as instructions.
+- `--continue` resumes the newest session in the active session directory.
+- `--resume` accepts a JSONL path, filename, full session id, or unique id prefix.
+- By default sessions live under a private OS temp directory (`<tmp>/wisp-<user>-*/sessions`).
+  Use `--session-dir` or `WISP_SESSION_DIR` for durable, cross-invocation `--continue`.
 
-Session JSONL files contain provider-facing `message` entries plus selected structured `event` entries for audit/debugging. Wisp persists tool calls, approvals, tool execution start/end, and errors, but not `token.delta` events. Session continuation reads only message entries, so audit events do not become model-visible history.
+Session files contain provider-facing `message` entries plus selected structured `event` entries
+(tool calls, approvals, tool start/end, errors) for audit — but **not** `token.delta` events.
+Continuation reads only message entries, so audit events never become model-visible history, and
+stale project context from earlier turns is not replayed as instructions.
 
-## Local tools
+### Prompt & project context
 
-Wisp registers built-in local tools through the extension API:
+Each turn sends a small default coding-agent system prompt plus a bounded project-context message
+before the user prompt. The context includes the working directory, git branch and a capped
+status summary, detected root files (`pyproject.toml`, `package.json`, `README.md`, …), and the
+tools currently exposed to the model. It is informational only and is persisted to the session so
+the provider-visible input stays auditable.
 
-- `read`
-- `write`
-- `edit`
-- `bash`
-- `grep`
-- `find`
-- `ls`
-
-The tool registry is available to runtime/extensions and the agent tool loop.
-File tools are sandboxed to the tool context working directory by default.
-
-Print-mode CLI does not expose tools to the model unless explicitly requested:
+## TUI
 
 ```bash
-uv run wisp -p "list files" --provider openai --allow-read-tools
-uv run wisp -p "run tests" --provider openai --allow-tool bash --yes
+uv run wisp tui
 ```
 
-Read tools (`read`, `grep`, `find`, `ls`) can be enabled together with
-`--allow-read-tools`. Mutating tools (`write`, `edit`) and command execution
-(`bash`) require explicit `--allow-tool <name>` opt-in.
+A fullscreen Textual TUI built on the same RPC controller other integrations use. Adjust runtime
+settings with slash commands instead of up-front flags:
 
-Because print mode is non-interactive, mutating and command tools are still
-blocked at execution time unless you also pass `--yes` (alias:
-`--allow-unsafe-tool-execution`). Without that override, the model receives a
-clear tool error instead of Wisp executing the operation.
+```text
+/help                       show commands
+/auth [provider]            show credential status
+/login [provider] [device-code]
+/logout [provider]
+/provider [provider]        switch provider for future prompts (resets model to default)
+/model [model]              switch model for future prompts
+/quit, /exit
+```
 
-Print mode keeps assistant text on stdout and writes operational events to
-stderr, including tool calls, approval decisions, tool result summaries, and the
-saved session path. Stderr may include spacing for terminal readability, while
-stdout remains assistant-only and pipe-friendly.
+TUI login currently uses the `openai-codex` device-code flow; browser login is available from the
+CLI (`uv run wisp auth login openai-codex`). A Pi-style model picker/catalog is not implemented yet.
 
-For machine-readable integrations, use JSONL event output:
+Session and tool flags work with the `tui` command too:
+
+```bash
+uv run wisp tui --continue
+uv run wisp tui --resume <session-id-prefix>
+uv run wisp tui --allow-read-tools
+uv run wisp tui --allow-tool bash
+uv run wisp tui --line          # simple line renderer, for fallback/debugging
+```
+
+The legacy `--mode tui` entrypoint remains for compatibility and honors
+`--tui-renderer line|fullscreen|textual` plus `WISP_TUI_RENDERER`.
+
+## Machine-readable output
+
+### JSON mode
 
 ```bash
 uv run wisp -p "hello" --mode json
 ```
 
-JSON mode writes each `WispEvent` as one JSON object per line on stdout,
-including `token.delta`, tool lifecycle events, errors, and `session.saved`.
-Assistant text is not written as raw text in this mode.
+Writes each `WispEvent` as one JSON object per line on stdout — including `token.delta`, tool
+lifecycle events, errors, and `session.saved`. Assistant text is not written as raw text in this
+mode.
 
-For long-lived integrations, use JSONL RPC mode over stdin/stdout:
+### RPC mode
+
+For long-lived integrations, drive Wisp over JSONL-RPC on stdin/stdout:
 
 ```bash
 printf '{"type":"prompt","prompt":"hello"}\n{"type":"shutdown"}\n' | uv run wisp --mode rpc
 ```
 
-RPC mode currently supports sequential commands:
+Commands (the `id` field is optional — Wisp generates one when omitted):
 
-- `{"id":"cmd-1","type":"prompt","prompt":"..."}` runs one agent turn and streams `WispEvent` JSONL.
-- `{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}` requests cancellation of the running prompt.
-- `{"id":"approval-1","type":"approval","call_id":"call-1","approved":true}` approves or denies a pending tool approval request.
-- `{"id":"cmd-2","type":"shutdown"}` exits cleanly.
+| Command | Effect |
+|---------|--------|
+| `{"id":"cmd-1","type":"prompt","prompt":"…"}` | Run one agent turn, streaming `WispEvent` JSONL |
+| `{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}` | Request cancellation of the running prompt |
+| `{"id":"approval-1","type":"approval","call_id":"call-1","approved":true}` | Approve/deny a pending tool request |
+| `{"id":"cmd-2","type":"shutdown"}` | Exit cleanly |
 
-The `id` field is optional; Wisp generates one when omitted. Each command emits
-`rpc.command.started` and `rpc.command.finished` events so clients can group the
-agent events that occur between them. Prompt commands run sequentially; `cancel`
-and `approval` commands are handled while a prompt is running, and other commands
-wait for the current prompt to finish. When an allowed mutating/command tool needs
-approval, Wisp emits `tool.approval.requested` with the tool `call_id`; clients
-respond with an `approval` command using that `call_id`, a boolean `approved`, and
-an optional denial `reason`. Cancellation is best-effort for providers/tools.
-Provider, model, tool exposure, approval, session, and max-iteration CLI flags
-apply to the whole RPC process.
+Each command emits `rpc.command.started` / `rpc.command.finished` so clients can group the events
+between them. Prompts run sequentially; `cancel` and `approval` are handled while a prompt runs.
+When an allowed mutating/command tool needs approval, Wisp emits `tool.approval.requested` with a
+`call_id`; respond with an `approval` command carrying that `call_id`, a boolean `approved`, and an
+optional denial `reason`. Cancellation is best-effort. Provider, model, tool-exposure, approval,
+session, and max-iteration flags apply to the whole RPC process.
 
-Python integrations that do not want to hand-roll JSONL can use the typed RPC
-client/controller helpers:
+### Typed RPC client
+
+Python integrations can skip hand-rolling JSONL and use the typed controller — the intended stable
+integration layer:
 
 ```python
 from wisp.events import RpcCommandFinished
@@ -163,64 +237,15 @@ finally:
     await controller.close()
 ```
 
-`RpcController` exposes typed `prompt`, `cancel`, `approve`, `configure`, and
-`shutdown` methods and yields parsed `WispEvent` objects. This is intended as
-the stable integration layer for future TUI work.
+`RpcController` exposes typed `prompt`, `cancel`, `approve`, `configure`, and `shutdown` methods
+and yields parsed `WispEvent` objects.
 
-## TUI
-
-Wisp includes a fullscreen Textual TUI built on the same RPC controller used by
-other integrations:
+## Development
 
 ```bash
-uv run wisp tui
+uv sync            # install
+uv run pytest      # test
 ```
 
-Use slash commands inside the TUI to adjust runtime settings instead of passing
-provider/model flags up front:
-
-```text
-/help
-/auth [provider]
-/login [provider] [device-code]
-/logout [provider]
-/provider [provider]
-/model [model]
-/quit, /exit
-```
-
-`/provider` switches the provider for future prompts and resets the model to the
-provider default. `/model` switches the model string for future prompts; a
-Pi-style model picker/catalog is not implemented yet. TUI login currently uses
-the `openai-codex` device-code flow; browser login is available from the CLI via
-`uv run wisp auth login openai-codex`.
-
-For fallback/debugging, use the simple line renderer:
-
-```bash
-uv run wisp tui --line
-```
-
-Session and tool flags still work with the TUI command:
-
-```bash
-uv run wisp tui --continue
-uv run wisp tui --resume <session-id-prefix>
-uv run wisp tui --allow-read-tools
-uv run wisp tui --allow-tool bash
-```
-
-The legacy `--mode tui` entrypoint remains available for compatibility and still
-honors `--tui-renderer line|fullscreen|textual` plus `WISP_TUI_RENDERER`.
-
-For daily local defaults, configure `.env`:
-
-```env
-WISP_PROVIDER=openai-codex
-WISP_SESSION_DIR=~/.wisp/sessions
-WISP_AUTH_FILE=~/.wisp/auth.json
-```
-
-Wisp does not cap model/tool rounds by default, matching Pi's permissive agent
-loop. If you want a non-interactive fuse for a run, pass
-`--max-tool-iterations <n>`.
+The test suite runs against the deterministic `fake` provider, so the agent core, CLI, and JSONL
+sessions can be exercised without API keys or network access.

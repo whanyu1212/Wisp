@@ -21,7 +21,7 @@ from wisp.auth.storage import (
     JsonAuthStore,
     OAuthCredential,
 )
-from wisp.config import default_auth_path
+from wisp.config import DEFAULT_PROVIDER, default_auth_path
 from wisp.events import (
     AssistantMessage,
     ErrorEvent,
@@ -111,7 +111,7 @@ class TuiShell:
         prompt_reader: PromptReader | None = None,
         state: TuiInteractionState | None = None,
         renderer: TuiRenderer | None = None,
-        provider: str = "fake",
+        provider: str = DEFAULT_PROVIDER,
         model: str | None = None,
         auth_path: Path | None = None,
     ) -> None:
