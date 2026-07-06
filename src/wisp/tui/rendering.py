@@ -31,6 +31,7 @@ class TuiRendererKind(StrEnum):
 
     line = "line"
     fullscreen = "fullscreen"
+    textual = "textual"
 
 
 @dataclass(frozen=True)

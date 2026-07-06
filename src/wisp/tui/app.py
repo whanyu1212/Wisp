@@ -18,6 +18,7 @@ from .launch import TuiOptions, _preflight_tui_options, _rpc_command, _rpc_env
 from .live import LiveFullscreenTui
 from .rendering import TuiRendererKind, create_tui_renderer
 from .shell import PromptReader, TuiController, TuiShell, _default_prompt_reader
+from .textual_app import create_textual_tui
 
 # Compatibility aliases for callers/tests that import private helpers from wisp.tui.app.
 _stdin_is_interactive = _launch._stdin_is_interactive
@@ -59,9 +60,14 @@ async def run_tui(
         transport = await JsonlSubprocessRpcTransport.start(_rpc_command(options), env=_rpc_env())
         selected_controller = RpcController(transport)
 
+    textual_tui = None
     live_tui: LiveFullscreenTui | None = None
-    selected_renderer = create_tui_renderer(options.renderer, selected_console)
     selected_prompt_reader = prompt_reader or _default_prompt_reader
+    if options.renderer is TuiRendererKind.textual:
+        textual_tui, selected_renderer = create_textual_tui()
+        selected_prompt_reader = textual_tui.read_prompt
+    else:
+        selected_renderer = create_tui_renderer(options.renderer, selected_console)
     if (
         options.renderer is TuiRendererKind.fullscreen
         and prompt_reader is None
@@ -81,9 +87,14 @@ async def run_tui(
         auth_path=options.config.auth_path,
     )
     try:
-        await shell.run()
+        if textual_tui is not None:
+            await textual_tui.run_shell(shell.run)
+        else:
+            await shell.run()
     finally:
         try:
+            if textual_tui is not None:
+                await textual_tui.close()
             if live_tui is not None:
                 await live_tui.close()
         finally:

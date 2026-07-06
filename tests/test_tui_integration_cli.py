@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from textual.widgets import RichLog
+
 from tests.tui_support import *
+from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 
 
 def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
@@ -305,6 +308,146 @@ def test_cli_tui_mode_validates_continue_before_prompting(tmp_path: Path) -> Non
     assert "No sessions found" in result.output
     assert str(tmp_path.name) in result.output
     assert "Wisp TUI MVP" not in result.output
+
+
+def test_cli_tui_command_defaults_to_textual_renderer(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    captured: list[TuiOptions] = []
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        captured.append(options)
+
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["tui", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    assert captured[0].config.provider == "fake"
+    assert captured[0].config.session_dir == tmp_path
+    assert captured[0].renderer is TuiRendererKind.textual
+
+
+def test_cli_tui_command_line_flag_uses_line_renderer(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    captured: list[TuiOptions] = []
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        captured.append(options)
+
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["tui", "--line", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    assert captured[0].renderer is TuiRendererKind.line
+
+
+def test_cli_tui_command_rejects_resume_and_continue() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["tui", "--resume", "session-123", "--continue"],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1
+    assert "use either --resume or --continue, not both" in result.output
+
+
+def test_textual_tui_renderer_can_be_constructed() -> None:
+    app_instance, renderer = create_textual_tui()
+
+    assert isinstance(app_instance, TextualTui)
+    assert isinstance(renderer, TextualTuiRenderer)
+    renderer.view_updated(TuiViewSnapshot(status="idle", input_hint="wisp> "))
+    renderer.notice("hello")
+
+
+def test_textual_tui_escapes_markup_in_streamed_output() -> None:
+    async def scenario() -> str:
+        app_instance = TextualTui()
+        async with app_instance.run_test():
+            app_instance.append_stream("code has [brackets] and [/close] tags")
+            app_instance.flush_stream()
+            # The transcript must render literally; bracketed text must not be
+            # interpreted as Rich markup (which would drop or mangle it).
+            transcript = app_instance.query_one("#transcript", RichLog)
+            return "".join(strip.text for strip in transcript.lines)
+
+    rendered = anyio.run(scenario)
+    assert "[brackets]" in rendered
+    assert "[/close]" in rendered
+
+
+def test_textual_tui_read_prompt_returns_submitted_input() -> None:
+    async def scenario() -> str:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            async with anyio.create_task_group() as tg:
+                results: list[str] = []
+
+                async def read() -> None:
+                    results.append(await app_instance.read_prompt("wisp> "))
+
+                tg.start_soon(read)
+                await pilot.pause()
+                await pilot.click("#input")
+                await pilot.press(*"hello", "enter")
+            return results[0]
+
+    assert anyio.run(scenario) == "hello"
+
+
+def _read_prompt_signal_for_key(key: str) -> type[BaseException] | None:
+    # Press a real key (through the focused Input) and report what read_prompt
+    # raises. Guards the priority bindings: without priority=True the Input
+    # swallows ctrl+d and this hangs.
+    async def scenario() -> type[BaseException] | None:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            captured: list[BaseException] = []
+
+            async with anyio.create_task_group() as tg:
+
+                async def read() -> None:
+                    try:
+                        await app_instance.read_prompt("wisp> ")
+                    except BaseException as exc:  # noqa: BLE001 - assert on type below
+                        captured.append(exc)
+
+                tg.start_soon(read)
+                await pilot.pause()
+                await pilot.press(key)
+                await pilot.pause()
+            return type(captured[0]) if captured else None
+
+    return anyio.run(scenario)
+
+
+def test_textual_tui_ctrl_c_interrupts_read_prompt() -> None:
+    assert _read_prompt_signal_for_key("ctrl+c") is KeyboardInterrupt
+
+
+def test_textual_tui_ctrl_d_closes_read_prompt() -> None:
+    # ctrl+d must reach the app binding even though the Input widget is focused.
+    assert _read_prompt_signal_for_key("ctrl+d") is EOFError
 
 
 def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) -> None:
