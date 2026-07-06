@@ -8,7 +8,7 @@ import anyio
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical
-from textual.widgets import Footer, Header, Input, RichLog, Static
+from textual.widgets import Footer, Header, Input, Static
 
 from wisp.events import (
     AssistantMessage,
@@ -30,6 +30,7 @@ from wisp.tui.rendering import (
     _tui_help_text,
 )
 from wisp.tui.theme import WISP_THEMES, role_styles
+from wisp.tui.widgets import LineMessage, StreamMessage, Transcript
 
 # Plain Rich color names used only before on_mount resolves the themed palette
 # (e.g. startup notices written during app construction).
@@ -88,22 +89,27 @@ class TextualTui(App[None]):
             str | BaseException
         ](100)
         self._status: Static | None = None
-        self._rich_log: RichLog | None = None
+        self._transcript: Transcript | None = None
         self._input: Input | None = None
         self._current_prompt = "wisp> "
         self._runner: Callable[[], Awaitable[None]] | None = None
         self._runner_error: Exception | None = None
-        self._streaming_text = ""
         self._on_submit: Callable[[], None] | None = None
         # Role→Rich-style map for transcript lines, resolved from the active
-        # theme. RichLog markup can't use Textual $variables, so we bridge here
-        # and re-derive on theme change (watch_theme). Populated in on_mount.
+        # theme and re-derived on theme change (watch_theme). Populated in
+        # on_mount. LineMessage widgets carry it as pre-composed markup.
         self._role_styles: dict[str, str] = {}
+        # Streaming state: authoritative buffer + the live assistant widget +
+        # a coalescing flag so the widget reconciles once per refresh, not once
+        # per token (avoids O(n^2) Markdown reparse and the mount race).
+        self._streaming_text = ""
+        self._stream_widget: StreamMessage | None = None
+        self._stream_refresh_pending = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Vertical():
-            yield RichLog(id="transcript", wrap=True, markup=True)
+            yield Transcript(id="transcript")
             yield Static("idle", id="status")
             with Container(id="input-row"):
                 yield Input(placeholder="wisp> ", id="input")
@@ -114,7 +120,7 @@ class TextualTui(App[None]):
             self.register_theme(theme)
         self.theme = WISP_THEMES[0].name
         self._role_styles = role_styles(self.current_theme)
-        self._rich_log = self.query_one("#transcript", RichLog)
+        self._transcript = self.query_one("#transcript", Transcript)
         self._status = self.query_one("#status", Static)
         self._input = self.query_one("#input", Input)
         self._input.focus()
@@ -123,8 +129,8 @@ class TextualTui(App[None]):
 
     def watch_theme(self, theme_name: str) -> None:
         # `theme` is a Textual reactive; re-derive transcript role colors so
-        # lines written after a switch track the new palette. Already-written
-        # RichLog lines keep their baked-in colors until Stage 2.
+        # message widgets mounted after a switch track the new palette. Already-
+        # mounted LineMessage widgets keep their baked-in markup colors.
         if self.is_running:
             self._role_styles = role_styles(self.current_theme)
 
@@ -212,7 +218,7 @@ class TextualTui(App[None]):
     def _write_styled(self, role: str, message: str) -> None:
         style = self._style(role)
         escaped = _markup_escape(message)
-        self._write(f"[{style}]{escaped}[/{style}]" if style else escaped)
+        self._mount_line(role, f"[{style}]{escaped}[/{style}]" if style else escaped)
 
     def write_notice(self, message: str) -> None:
         self._write_styled("notice", message)
@@ -230,7 +236,7 @@ class TextualTui(App[None]):
         self.write_labeled("assistant:", message, role="assistant")
 
     def write_event(self, message: str) -> None:
-        self._write(_markup_escape(message))
+        self._mount_line("dim", _markup_escape(message))
 
     def write_labeled(self, label: str, message: str = "", *, role: str) -> None:
         # `label` is a fixed literal styled with the role's theme color; `message`
@@ -239,21 +245,77 @@ class TextualTui(App[None]):
         text = f"[{style}]{label}[/{style}]" if style else label
         if message:
             text += f" {_markup_escape(message)}"
-        self._write(text)
+        self._mount_line(role, text)
+
+    def _mount_line(self, role: str, markup: str) -> None:
+        # Mount one role-styled LineMessage. Transcript owns the transcript and
+        # its own follow-the-tail intent; we just re-assert the follow after the
+        # mount lays out.
+        if self._transcript is None:
+            return
+        self._transcript.mount(LineMessage(markup, role=role))
+        self._follow_tail_after_refresh()
 
     def append_stream(self, delta: str) -> None:
+        # Accumulate into the authoritative buffer; lazily mount the streaming
+        # assistant widget on the first delta; reconcile via one coalesced
+        # refresh so the Markdown reparses at most once per frame, not per token.
         self._streaming_text += delta
+        if self._stream_widget is None and self._transcript is not None:
+            self._stream_widget = StreamMessage()
+            self._transcript.mount(self._stream_widget)
+        self._schedule_stream_refresh()
 
     def flush_stream(self) -> None:
-        if not self._streaming_text:
-            return
-        streamed = self._streaming_text
+        # Finalize the streamed turn. This is the ONLY place a streamed assistant
+        # bubble is completed: the shell suppresses the trailing AssistantMessage
+        # when tokens were rendered (shell.py de-dup), so it never reaches event().
+        # Capture the widget + final text and reconcile AFTER refresh, because the
+        # widget may have been mounted this same tick — reconciling inline would
+        # hit the mount race and drop the content.
+        widget = self._stream_widget
+        final_text = self._streaming_text
         self._streaming_text = ""
-        self.write_assistant(streamed)
+        self._stream_widget = None
+        self._stream_refresh_pending = False
+        if widget is not None:
+            self.call_after_refresh(self._finalize_stream, widget, final_text)
 
-    def _write(self, message: str) -> None:
-        if self._rich_log is not None:
-            self._rich_log.write(message)
+    async def _finalize_stream(self, widget: StreamMessage, text: str) -> None:
+        await self._follow_tail_after_content(widget.set_content(text))
+
+    def _schedule_stream_refresh(self) -> None:
+        if self._stream_refresh_pending:
+            return
+        self._stream_refresh_pending = True
+        # call_after_refresh runs the reconcile once the pending mount/refresh
+        # settles, sidestepping the mount race (update() on a not-yet-mounted
+        # widget silently drops content). Textual awaits coroutine callbacks, so
+        # the reconcile can await the Markdown mount before following the tail.
+        self.call_after_refresh(self._reconcile_stream)
+
+    async def _reconcile_stream(self) -> None:
+        self._stream_refresh_pending = False
+        if self._stream_widget is not None:
+            await self._follow_tail_after_content(
+                self._stream_widget.set_content(self._streaming_text)
+            )
+
+    async def _follow_tail_after_content(self, await_content: Awaitable[None]) -> None:
+        # Await the Markdown update's AwaitComplete so this update's block children
+        # have mounted, THEN follow the tail — the scroll lands on the grown extent
+        # instead of a partially-mounted one. This replaces guessing a fixed number
+        # of refresh cycles with the update's own completion signal. The Transcript
+        # still decides whether to scroll (it stays put if the user scrolled away).
+        await await_content
+        if self._transcript is not None:
+            self._transcript.follow_tail()
+
+    def _follow_tail_after_refresh(self) -> None:
+        # Non-streamed lines (LineMessage) mount synchronously enough that one
+        # post-refresh pass reaches the settled scroll range; used by _mount_line.
+        if self._transcript is not None:
+            self.call_after_refresh(self._transcript.follow_tail)
 
 
 class TextualTuiRenderer:
@@ -347,8 +409,8 @@ class TextualTuiRenderer:
         self.app.write_notice("cancelled")
 
     def token_delta(self, delta: str) -> None:
-        # RichLog is append-only, so coalesce streamed tokens into one buffer
-        # and flush a single "assistant:" line on end_token_stream().
+        # Stream live into the assistant Markdown widget; append_stream buffers
+        # and coalesces the reconcile. end_token_stream() finalizes the bubble.
         self.app.append_stream(delta)
 
     def end_token_stream(self) -> None:

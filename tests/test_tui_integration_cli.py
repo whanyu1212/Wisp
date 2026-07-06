@@ -2,10 +2,36 @@
 
 from __future__ import annotations
 
-from textual.widgets import Input, RichLog
+from textual.await_complete import AwaitComplete
+from textual.widgets import Input
 
 from tests.tui_support import *
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
+from wisp.tui.widgets import LineMessage, StreamMessage, Transcript
+
+
+def _transcript_texts(app: TextualTui) -> list[str]:
+    """Plain text of every mounted transcript message (line + streamed)."""
+
+    transcript = app.query_one("#transcript", Transcript)
+    texts: list[str] = []
+    for child in transcript.children:
+        if isinstance(child, LineMessage):
+            texts.append(child.render().plain)  # Textual Content
+        elif isinstance(child, StreamMessage):
+            texts.append(child._markdown.source)
+    return texts
+
+
+def _transcript_styles(app: TextualTui) -> str:
+    """Style strings applied to every LineMessage span (e.g. 'bold #5cc9a7')."""
+
+    transcript = app.query_one("#transcript", Transcript)
+    styles: list[str] = []
+    for child in transcript.children:
+        if isinstance(child, LineMessage):
+            styles.extend(str(span.style) for span in child.render().spans)
+    return "\n".join(styles)
 
 
 def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
@@ -408,16 +434,16 @@ def test_textual_tui_renderer_can_be_constructed() -> None:
     renderer.notice("hello")
 
 
-def test_textual_tui_escapes_markup_in_streamed_output() -> None:
+def test_textual_tui_preserves_brackets_in_streamed_output() -> None:
     async def scenario() -> str:
         app_instance = TextualTui()
-        async with app_instance.run_test():
+        async with app_instance.run_test() as pilot:
             app_instance.append_stream("code has [brackets] and [/close] tags")
             app_instance.flush_stream()
-            # The transcript must render literally; bracketed text must not be
-            # interpreted as Rich markup (which would drop or mangle it).
-            transcript = app_instance.query_one("#transcript", RichLog)
-            return "".join(strip.text for strip in transcript.lines)
+            await pilot.pause()
+            # Streamed assistant text renders as Markdown; bracketed text must
+            # survive intact (Markdown source is not Rich-markup-interpreted).
+            return "\n".join(_transcript_texts(app_instance))
 
     rendered = anyio.run(scenario)
     assert "[brackets]" in rendered
@@ -426,14 +452,14 @@ def test_textual_tui_escapes_markup_in_streamed_output() -> None:
 
 def _render_events_to_transcript(events: list[object]) -> str:
     # Drive TextualTuiRenderer.event() through a live app and return the plain
-    # rendered transcript text (markup already resolved by RichLog).
+    # text of every mounted transcript message.
     async def scenario() -> str:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test():
+        async with app_instance.run_test() as pilot:
             for event in events:
                 renderer.event(event)
-            transcript = app_instance.query_one("#transcript", RichLog)
-            return "\n".join("".join(segment.text for segment in line) for line in transcript.lines)
+            await pilot.pause()
+            return "\n".join(_transcript_texts(app_instance))
 
     return anyio.run(scenario)
 
@@ -500,21 +526,15 @@ def test_textual_renderer_falls_back_for_unhandled_events() -> None:
 
 
 def _rendered_segment_styles(events: list[object]) -> str:
-    # Return the applied styles of every non-blank transcript segment (as Rich
-    # style strings, e.g. "bold #5cc9a7") so tests can assert theme colors are
-    # actually applied, not just present in markup.
+    # Return the applied styles of every LineMessage segment (as Rich style
+    # strings, e.g. "bold #5cc9a7") so tests can assert theme colors are applied.
     async def scenario() -> str:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test():
+        async with app_instance.run_test() as pilot:
             for event in events:
                 renderer.event(event)
-            transcript = app_instance.query_one("#transcript", RichLog)
-            return "\n".join(
-                str(segment.style)
-                for strip in transcript.lines
-                for segment in strip
-                if segment.text.strip() and segment.style is not None
-            )
+            await pilot.pause()
+            return _transcript_styles(app_instance)
 
     return anyio.run(scenario)
 
@@ -552,16 +572,11 @@ def test_textual_transcript_uses_theme_colors() -> None:
 def test_textual_theme_switch_rederives_transcript_styles() -> None:
     async def scenario() -> str:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test():
+        async with app_instance.run_test() as pilot:
             app_instance.theme = "wisp-light"
             renderer.event(AssistantMessage(content="after switch"))
-            transcript = app_instance.query_one("#transcript", RichLog)
-            return "\n".join(
-                str(segment.style)
-                for strip in transcript.lines
-                for segment in strip
-                if segment.text.strip() and segment.style is not None
-            )
+            await pilot.pause()
+            return _transcript_styles(app_instance)
 
     rendered = anyio.run(scenario)
     # The post-switch line uses the light theme's success color, not dark's.
@@ -576,6 +591,247 @@ def test_textual_themed_transcript_still_escapes_untrusted_payloads() -> None:
     )
     assert "evil[/blue]" in rendered
     assert "[red]x[/red]" in rendered
+
+
+def _stream_deltas(deltas: list[str], *, pause_between: bool) -> tuple[list[str], int]:
+    # Stream deltas through the renderer, optionally pausing between each (spaced
+    # arrival) or not (a burst — the mount-race stress case). Returns the final
+    # transcript texts and the number of StreamMessage widgets mounted.
+    async def scenario() -> tuple[list[str], int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            for delta in deltas:
+                renderer.token_delta(delta)
+                if pause_between:
+                    await pilot.pause()
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()  # let the deferred finalize settle
+            transcript = app_instance.query_one("#transcript", Transcript)
+            streams = sum(1 for c in transcript.children if isinstance(c, StreamMessage))
+            return _transcript_texts(app_instance), streams
+
+    return anyio.run(scenario)
+
+
+def test_textual_streaming_accumulates_into_one_markdown_widget() -> None:
+    texts, streams = _stream_deltas(
+        ["# Plan\n", "Use ", "`bash`", " to **list**."], pause_between=True
+    )
+    # Exactly one streaming widget holds the full accumulated markdown.
+    assert streams == 1
+    assert texts == ["# Plan\nUse `bash` to **list**."]
+
+
+def test_textual_streaming_survives_a_burst_without_dropping_text() -> None:
+    # No pauses between deltas: reconcile must not hit the mount race and drop
+    # content (update() on a not-yet-mounted widget silently drops).
+    texts, streams = _stream_deltas(list("The quick brown fox"), pause_between=False)
+    assert streams == 1
+    assert texts == ["The quick brown fox"]
+
+
+def test_textual_end_token_stream_finalizes_the_bubble() -> None:
+    # end_token_stream() is the ONLY place a streamed assistant turn is finalized
+    # (the shell suppresses the trailing AssistantMessage when tokens rendered).
+    # After it, the buffer/live-widget refs are cleared and the text persists.
+    async def scenario() -> tuple[str, object, object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("final answer")
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+            texts = _transcript_texts(app_instance)
+            return (
+                texts[0] if texts else "",
+                app_instance._stream_widget,
+                app_instance._streaming_text,
+            )
+
+    text, live_widget, buffer = anyio.run(scenario)
+    assert text == "final answer"
+    assert live_widget is None  # finalized, no dangling live widget
+    assert buffer == ""  # buffer cleared
+
+
+def test_textual_single_tick_turn_keeps_its_content() -> None:
+    # A turn finalized in the same tick it mounts (delta then flush, no refresh
+    # between) must not lose its text. Markdown._on_mount runs `update("")` on the
+    # widget's Mount event — a path separate from set_content's update — and can
+    # run AFTER finalize, clobbering the content back to empty. set_content keeps
+    # Markdown._initial_markdown in sync so that mount re-applies the real text.
+    async def scenario() -> list[str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("first turn")
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+            # Second turn finalized in a single tick: the fresh StreamMessage mounts
+            # and finalizes before any refresh interleaves — the clobber window.
+            renderer.token_delta("second turn")
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+            return _transcript_texts(app_instance)
+
+    texts = anyio.run(scenario)
+    assert texts == ["first turn", "second turn"]  # neither turn lost to the clobber
+
+
+def test_textual_streamed_and_line_messages_use_distinct_widgets() -> None:
+    async def scenario() -> list[str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("streamed reply")
+            renderer.end_token_stream()
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={}))
+            await pilot.pause()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            return [type(c).__name__ for c in transcript.children]
+
+    kinds = anyio.run(scenario)
+    # The assistant stream is a StreamMessage (Markdown); the tool call is a
+    # LineMessage (styled Static) — they are different widget types.
+    assert "StreamMessage" in kinds
+    assert "LineMessage" in kinds
+
+
+def _fill_transcript(renderer: TextualTuiRenderer, count: int) -> None:
+    # Mount enough lines to overflow the viewport so the transcript can scroll.
+    for i in range(count):
+        renderer.event(ToolCallRequested(call_id=f"c{i}", name=f"tool{i}", arguments={}))
+
+
+def test_textual_streaming_keeps_the_growing_tail_visible() -> None:
+    # Regression: an expanding streamed Markdown widget must stay pinned to the
+    # bottom. The bug was measuring "near the bottom?" as the content grew — the
+    # growth itself pushed the bottom away, so the check read False and stopped
+    # following. The transcript must end scrolled to the newest output.
+    async def scenario() -> tuple[float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 20)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            body = "\n\n".join(f"Line {i} of the streamed answer." for i in range(15))
+            for chunk in (body[i : i + 40] for i in range(0, len(body), 40)):
+                renderer.token_delta(chunk)
+                await pilot.pause()
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()  # second pass: catch the settled max_scroll_y
+            return transcript.scroll_y, transcript.max_scroll_y
+
+    scroll_y, max_scroll_y = anyio.run(scenario)
+    assert max_scroll_y > 0  # content actually overflowed
+    assert scroll_y >= max_scroll_y - 3  # pinned to the tail
+
+
+def test_textual_stream_message_set_content_returns_the_markdown_awaitable() -> None:
+    # Contract test for the deeper race Codex flagged: Markdown.update() mounts its
+    # block children asynchronously and returns an AwaitComplete whose completion is
+    # the signal "all blocks mounted, max_scroll_y is final". set_content must hand
+    # that awaitable back (not swallow it) so the finalize path can await it before
+    # following the tail — rather than guessing a fixed number of refresh cycles.
+    async def scenario() -> object:
+        app_instance, _ = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            message = StreamMessage()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.mount(message)
+            await pilot.pause()
+            awaitable = message.set_content("# Title\n\nsome **body** text")
+            await awaitable  # awaiting it must not raise and must settle the mount
+            return awaitable
+
+    result = anyio.run(scenario)
+    assert isinstance(result, AwaitComplete)
+
+
+def test_textual_streaming_keeps_a_large_many_block_reply_pinned_to_the_tail() -> None:
+    # A large, many-block Markdown reply (headings + lists) must still end pinned to
+    # the tail. The finalize path awaits Markdown.update()'s AwaitComplete, so the
+    # scroll lands on the settled extent no matter how many block children mount.
+    async def scenario() -> tuple[float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 20)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            blocks: list[str] = []
+            for i in range(80):
+                blocks.append(f"## Section {i}")
+                blocks.append(f"- point a {i}\n- point b {i}")
+            body = "\n\n".join(blocks)
+            for chunk in (body[i : i + 80] for i in range(0, len(body), 80)):
+                renderer.token_delta(chunk)
+                await pilot.pause()
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+            return transcript.scroll_y, transcript.max_scroll_y
+
+    scroll_y, max_scroll_y = anyio.run(scenario)
+    assert max_scroll_y > 100  # a genuinely large, overflowing reply
+    assert scroll_y >= max_scroll_y - 3  # still pinned to the tail
+
+
+def test_textual_streaming_does_not_yank_a_reader_who_scrolled_up() -> None:
+    # The flip side of tail-follow: if the user scrolled up to read history, new
+    # streamed output must NOT drag them back to the bottom.
+    async def scenario() -> tuple[float, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            transcript.scroll_to(y=6, animate=False)  # user reads back
+            await pilot.pause()
+            for i in range(10):
+                renderer.token_delta(f"new line {i}\n\n")
+                await pilot.pause()
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+            return transcript.scroll_y, transcript._follow
+
+    scroll_y, follow = anyio.run(scenario)
+    assert not follow  # scrolling away cleared the follow intent
+    assert scroll_y <= 7  # stayed roughly where the user left it, not the bottom
+
+
+def test_textual_returning_to_the_bottom_resumes_following() -> None:
+    # After scrolling up and back down, the reader is following again: the next
+    # streamed output should pin to the tail once more.
+    async def scenario() -> tuple[float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            transcript.scroll_to(y=6, animate=False)  # scroll away...
+            await pilot.pause()
+            transcript.scroll_end(animate=False)  # ...then back to the bottom
+            await pilot.pause()
+            renderer.token_delta("resumed answer\n\n")
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+            return transcript.scroll_y, transcript.max_scroll_y
+
+    scroll_y, max_scroll_y = anyio.run(scenario)
+    assert scroll_y >= max_scroll_y - 3  # following resumed
 
 
 def test_textual_tui_read_prompt_returns_submitted_input() -> None:
