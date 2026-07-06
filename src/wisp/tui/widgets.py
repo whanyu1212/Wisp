@@ -17,6 +17,7 @@ Stage 2 replaces the append-only ``RichLog`` transcript with a
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.await_complete import AwaitComplete
 from textual.containers import VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Markdown, Static
@@ -113,8 +114,18 @@ class StreamMessage(Widget):
     def compose(self) -> ComposeResult:
         yield self._markdown
 
-    def set_content(self, text: str) -> None:
-        # Reconcile the Markdown to the authoritative buffer. update() is safe
-        # once mounted; the caller schedules this via call_after_refresh so it
-        # never runs before the mount settles.
-        self._markdown.update(text)
+    def set_content(self, text: str) -> AwaitComplete:
+        # Reconcile the Markdown to the authoritative buffer and return update()'s
+        # AwaitComplete, which resolves once *this update's* block children have
+        # mounted (batched, under a lock). The caller awaits it before following
+        # the tail so the scroll lands on the fully-laid-out extent rather than a
+        # partially-mounted one.
+        #
+        # Also keep Markdown's own _initial_markdown in sync: Markdown._on_mount
+        # runs `update(self._initial_markdown or "")` on its Mount event, which is
+        # a *separate* async path from this call. If a turn is finalized in the
+        # same tick the widget mounts (delta then flush with no refresh between),
+        # that mount can run after our update() and clobber the content back to "".
+        # Seeding _initial_markdown means whichever path runs last applies our text.
+        self._markdown._initial_markdown = text
+        return self._markdown.update(text)

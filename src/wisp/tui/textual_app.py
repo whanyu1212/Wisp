@@ -281,9 +281,8 @@ class TextualTui(App[None]):
         if widget is not None:
             self.call_after_refresh(self._finalize_stream, widget, final_text)
 
-    def _finalize_stream(self, widget: StreamMessage, text: str) -> None:
-        widget.set_content(text)
-        self._follow_tail_after_refresh()
+    async def _finalize_stream(self, widget: StreamMessage, text: str) -> None:
+        await self._follow_tail_after_content(widget.set_content(text))
 
     def _schedule_stream_refresh(self) -> None:
         if self._stream_refresh_pending:
@@ -291,27 +290,32 @@ class TextualTui(App[None]):
         self._stream_refresh_pending = True
         # call_after_refresh runs the reconcile once the pending mount/refresh
         # settles, sidestepping the mount race (update() on a not-yet-mounted
-        # widget silently drops content).
+        # widget silently drops content). Textual awaits coroutine callbacks, so
+        # the reconcile can await the Markdown mount before following the tail.
         self.call_after_refresh(self._reconcile_stream)
 
-    def _reconcile_stream(self) -> None:
+    async def _reconcile_stream(self) -> None:
         self._stream_refresh_pending = False
         if self._stream_widget is not None:
-            self._stream_widget.set_content(self._streaming_text)
-            self._follow_tail_after_refresh()
+            await self._follow_tail_after_content(
+                self._stream_widget.set_content(self._streaming_text)
+            )
+
+    async def _follow_tail_after_content(self, await_content: Awaitable[None]) -> None:
+        # Await the Markdown update's AwaitComplete so this update's block children
+        # have mounted, THEN follow the tail — the scroll lands on the grown extent
+        # instead of a partially-mounted one. This replaces guessing a fixed number
+        # of refresh cycles with the update's own completion signal. The Transcript
+        # still decides whether to scroll (it stays put if the user scrolled away).
+        await await_content
+        if self._transcript is not None:
+            self._transcript.follow_tail()
 
     def _follow_tail_after_refresh(self) -> None:
-        # Re-assert the tail follow after layout settles. The Transcript decides
-        # whether to actually scroll (it stays put if the user scrolled away).
-        # Content growth flows through Textual's layout as: mount/update -> the
-        # Markdown widget mounts its own block children -> the container recomputes
-        # max_scroll_y. A single post-refresh scroll can therefore land on a
-        # max_scroll_y that is still one layer behind, so re-assert twice: the
-        # second pass runs after the child layout has propagated.
-        if self._transcript is None:
-            return
-        self.call_after_refresh(self._transcript.follow_tail)
-        self.call_after_refresh(self._transcript.follow_tail)
+        # Non-streamed lines (LineMessage) mount synchronously enough that one
+        # post-refresh pass reaches the settled scroll range; used by _mount_line.
+        if self._transcript is not None:
+            self.call_after_refresh(self._transcript.follow_tail)
 
 
 class TextualTuiRenderer:

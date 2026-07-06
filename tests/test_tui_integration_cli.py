@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from textual.await_complete import AwaitComplete
 from textual.widgets import Input
 
 from tests.tui_support import *
@@ -654,6 +655,31 @@ def test_textual_end_token_stream_finalizes_the_bubble() -> None:
     assert buffer == ""  # buffer cleared
 
 
+def test_textual_single_tick_turn_keeps_its_content() -> None:
+    # A turn finalized in the same tick it mounts (delta then flush, no refresh
+    # between) must not lose its text. Markdown._on_mount runs `update("")` on the
+    # widget's Mount event — a path separate from set_content's update — and can
+    # run AFTER finalize, clobbering the content back to empty. set_content keeps
+    # Markdown._initial_markdown in sync so that mount re-applies the real text.
+    async def scenario() -> list[str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("first turn")
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+            # Second turn finalized in a single tick: the fresh StreamMessage mounts
+            # and finalizes before any refresh interleaves — the clobber window.
+            renderer.token_delta("second turn")
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+            return _transcript_texts(app_instance)
+
+    texts = anyio.run(scenario)
+    assert texts == ["first turn", "second turn"]  # neither turn lost to the clobber
+
+
 def test_textual_streamed_and_line_messages_use_distinct_widgets() -> None:
     async def scenario() -> list[str]:
         app_instance, renderer = create_textual_tui()
@@ -704,6 +730,57 @@ def test_textual_streaming_keeps_the_growing_tail_visible() -> None:
     scroll_y, max_scroll_y = anyio.run(scenario)
     assert max_scroll_y > 0  # content actually overflowed
     assert scroll_y >= max_scroll_y - 3  # pinned to the tail
+
+
+def test_textual_stream_message_set_content_returns_the_markdown_awaitable() -> None:
+    # Contract test for the deeper race Codex flagged: Markdown.update() mounts its
+    # block children asynchronously and returns an AwaitComplete whose completion is
+    # the signal "all blocks mounted, max_scroll_y is final". set_content must hand
+    # that awaitable back (not swallow it) so the finalize path can await it before
+    # following the tail — rather than guessing a fixed number of refresh cycles.
+    async def scenario() -> object:
+        app_instance, _ = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            message = StreamMessage()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.mount(message)
+            await pilot.pause()
+            awaitable = message.set_content("# Title\n\nsome **body** text")
+            await awaitable  # awaiting it must not raise and must settle the mount
+            return awaitable
+
+    result = anyio.run(scenario)
+    assert isinstance(result, AwaitComplete)
+
+
+def test_textual_streaming_keeps_a_large_many_block_reply_pinned_to_the_tail() -> None:
+    # A large, many-block Markdown reply (headings + lists) must still end pinned to
+    # the tail. The finalize path awaits Markdown.update()'s AwaitComplete, so the
+    # scroll lands on the settled extent no matter how many block children mount.
+    async def scenario() -> tuple[float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 20)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            blocks: list[str] = []
+            for i in range(80):
+                blocks.append(f"## Section {i}")
+                blocks.append(f"- point a {i}\n- point b {i}")
+            body = "\n\n".join(blocks)
+            for chunk in (body[i : i + 80] for i in range(0, len(body), 80)):
+                renderer.token_delta(chunk)
+                await pilot.pause()
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+            return transcript.scroll_y, transcript.max_scroll_y
+
+    scroll_y, max_scroll_y = anyio.run(scenario)
+    assert max_scroll_y > 100  # a genuinely large, overflowing reply
+    assert scroll_y >= max_scroll_y - 3  # still pinned to the tail
 
 
 def test_textual_streaming_does_not_yank_a_reader_who_scrolled_up() -> None:
