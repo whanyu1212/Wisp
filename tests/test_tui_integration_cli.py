@@ -424,6 +424,81 @@ def test_textual_tui_escapes_markup_in_streamed_output() -> None:
     assert "[/close]" in rendered
 
 
+def _render_events_to_transcript(events: list[object]) -> str:
+    # Drive TextualTuiRenderer.event() through a live app and return the plain
+    # rendered transcript text (markup already resolved by RichLog).
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            for event in events:
+                renderer.event(event)
+            transcript = app_instance.query_one("#transcript", RichLog)
+            return "\n".join("".join(segment.text for segment in line) for line in transcript.lines)
+
+    return anyio.run(scenario)
+
+
+def test_textual_renderer_dispatches_events_by_type() -> None:
+    # Stage 0: each event type must render as its own distinct, labeled line,
+    # not a single undifferentiated str(event) repr.
+    rendered = _render_events_to_transcript(
+        [
+            AssistantMessage(content="hello there"),
+            ToolCallRequested(call_id="c1", name="bash", arguments={"cmd": "ls"}),
+            ToolResultReady(call_id="c1", name="bash", output="file-a\nfile-b", is_error=False),
+            ToolApprovalResolved(call_id="c2", name="edit", approved=True, reason=None),
+            ToolApprovalResolved(call_id="c3", name="write", approved=False, reason="too risky"),
+            ErrorEvent(message="boom"),
+            RpcCommandFinished(command_id="cmd-1", command_type="prompt", ok=False, error="nope"),
+        ]
+    )
+
+    assert "assistant: hello there" in rendered
+    assert "→ tool bash" in rendered
+    # ToolResultReady shows only the first non-empty output line.
+    assert "✓ tool bash: file-a" in rendered
+    assert "file-b" not in rendered
+    assert "✓ approved edit" in rendered
+    assert "! denied write: too risky" in rendered
+    assert "error: boom" in rendered
+    assert "command failed: nope" in rendered
+
+
+def test_textual_renderer_distinguishes_tool_call_from_result() -> None:
+    # The old duck-typed event() collapsed these into indistinguishable lines.
+    rendered = _render_events_to_transcript(
+        [
+            ToolCallRequested(call_id="c1", name="grep", arguments={}),
+            ToolResultReady(call_id="c1", name="grep", output="match", is_error=True),
+        ]
+    )
+
+    assert "→ tool grep" in rendered
+    assert "✗ tool grep: match" in rendered
+
+
+def test_textual_renderer_escapes_untrusted_event_payloads() -> None:
+    # Tool-controlled fields must not inject Rich markup into the RichLog.
+    rendered = _render_events_to_transcript(
+        [
+            ToolCallRequested(call_id="c1", name="evil[/blue]", arguments={"k": "[red]x[/red]"}),
+            ToolResultReady(call_id="c1", name="t", output="[bold]out[/bold]", is_error=False),
+        ]
+    )
+
+    assert "evil[/blue]" in rendered
+    assert "[red]x[/red]" in rendered
+    assert "[bold]out[/bold]" in rendered
+
+
+def test_textual_renderer_falls_back_for_unhandled_events() -> None:
+    # An event type with no dedicated branch still renders (escaped) rather than
+    # vanishing — matching the previous fallback behavior.
+    rendered = _render_events_to_transcript([TokenDelta(delta="raw")])
+
+    assert "raw" in rendered
+
+
 def test_textual_tui_read_prompt_returns_submitted_input() -> None:
     async def scenario() -> str:
         app_instance = TextualTui()

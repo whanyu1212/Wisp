@@ -10,8 +10,25 @@ from textual.binding import Binding
 from textual.containers import Container, Vertical
 from textual.widgets import Footer, Header, Input, RichLog, Static
 
-from wisp.events import KnownWispEvent, ToolApprovalRequested
-from wisp.tui.rendering import TuiRenderer, TuiViewSnapshot, _markup_escape, _tui_help_text
+from wisp.events import (
+    AssistantMessage,
+    ErrorEvent,
+    KnownWispEvent,
+    RpcCommandFinished,
+    SessionSaved,
+    ToolApprovalRequested,
+    ToolApprovalResolved,
+    ToolCallRequested,
+    ToolResultReady,
+)
+from wisp.tui.rendering import (
+    TuiRenderer,
+    TuiViewSnapshot,
+    _compact_session_path,
+    _first_line,
+    _markup_escape,
+    _tui_help_text,
+)
 
 
 class TextualTui(App[None]):
@@ -171,6 +188,14 @@ class TextualTui(App[None]):
     def write_event(self, message: str) -> None:
         self._write(_markup_escape(message))
 
+    def write_labeled(self, label: str, message: str = "", *, label_style: str) -> None:
+        # `label` is a fixed literal styled with markup; `message` is untrusted
+        # and escaped, preserving the escape-at-boundary invariant of write_*.
+        text = f"[{label_style}]{label}[/{label_style}]"
+        if message:
+            text += f" {_markup_escape(message)}"
+        self._write(text)
+
     def append_stream(self, delta: str) -> None:
         self._streaming_text += delta
 
@@ -290,15 +315,33 @@ class TextualTuiRenderer:
         )
 
     def event(self, event: KnownWispEvent) -> None:
-        content = getattr(event, "content", None)
-        if isinstance(content, str):
-            self.app.write_assistant(content)
-            return
-        message = getattr(event, "message", None)
-        if isinstance(message, str):
-            self.app.write_error(message)
-            return
-        self.app.write_event(str(event))
+        # Typed dispatch mirroring LineTuiRenderer.event() so tool calls, tool
+        # results, and approvals render as distinct, semantically-styled lines
+        # instead of an undifferentiated str(event) repr.
+        if isinstance(event, AssistantMessage):
+            self.app.write_assistant(event.content)
+        elif isinstance(event, ToolCallRequested):
+            self.app.write_labeled("→ tool", f"{event.name} {event.arguments}", label_style="blue")
+        elif isinstance(event, ToolApprovalResolved):
+            if event.approved:
+                self.app.write_labeled("✓ approved", event.name, label_style="green")
+            else:
+                suffix = f"{event.name}: {event.reason}" if event.reason else event.name
+                self.app.write_labeled("! denied", suffix, label_style="red")
+        elif isinstance(event, ToolResultReady):
+            label = "✗ tool" if event.is_error else "✓ tool"
+            label_style = "red" if event.is_error else "green"
+            self.app.write_labeled(
+                label, f"{event.name}: {_first_line(event.output)}", label_style=label_style
+            )
+        elif isinstance(event, ErrorEvent):
+            self.app.write_error(f"error: {event.message}")
+        elif isinstance(event, SessionSaved):
+            self.app.write_dim(f"session saved: {_compact_session_path(event.path)}")
+        elif isinstance(event, RpcCommandFinished) and not event.ok:
+            self.app.write_error(f"command failed: {event.error or event.command_id}")
+        else:
+            self.app.write_event(str(event))
 
     def rpc_event_reader_failed(self, error: str) -> None:
         self.app.write_error(f"RPC event reader failed: {error}")
