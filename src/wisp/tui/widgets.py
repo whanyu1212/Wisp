@@ -17,8 +17,51 @@ Stage 2 replaces the append-only ``RichLog`` transcript with a
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.containers import VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Markdown, Static
+
+
+class Transcript(VerticalScroll):
+    """Scrollable message container that follows the newest output like `tail -f`.
+
+    Auto-scroll is driven by a sticky ``_follow`` flag rather than a per-append
+    "am I near the bottom?" measurement. That measurement is self-defeating while
+    streaming: the growing content is what pushes the bottom away, so a snapshot
+    taken as it grows reads "not at the bottom" and abandons following the very
+    output it should track.
+
+    Instead the flag tracks whether the viewport is resting at the bottom, updated
+    only when the scroll position *settles* (``watch_scroll_y``):
+
+    - Rest at the bottom → ``True`` (keep following new output).
+    - The user scrolls up and away → ``False`` (they're reading history; don't
+      yank them back). Scrolling back to the bottom flips it ``True`` again.
+
+    Content growth alone never flips the flag: appends don't move ``scroll_y``,
+    and ``follow_tail()``'s programmatic scroll lands *at* the end, which
+    re-derives to ``True`` — self-consistent, so no guard is needed. After each
+    append the app calls ``follow_tail()``, which scrolls to the end iff the flag
+    is set.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self._follow = True
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        # Textual updates scroll_y as the position settles (including at the end
+        # of an animated user scroll). Re-derive follow intent from the resting
+        # position: at the bottom means "keep following", anywhere above means
+        # "the user is reading back, leave them there".
+        super().watch_scroll_y(old_value, new_value)
+        self._follow = self.is_vertical_scroll_end
+
+    def follow_tail(self) -> None:
+        """Scroll to the newest content iff the user hasn't scrolled away."""
+        if self._follow:
+            self.scroll_end(animate=False)
+
 
 # CSS role classes are applied per message so Stage 3 can style cards purely in
 # CSS; the role also names the border_title label.

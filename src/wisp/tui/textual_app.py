@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 import anyio
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical, VerticalScroll
+from textual.containers import Container, Vertical
 from textual.widgets import Footer, Header, Input, Static
 
 from wisp.events import (
@@ -30,7 +30,7 @@ from wisp.tui.rendering import (
     _tui_help_text,
 )
 from wisp.tui.theme import WISP_THEMES, role_styles
-from wisp.tui.widgets import LineMessage, StreamMessage
+from wisp.tui.widgets import LineMessage, StreamMessage, Transcript
 
 # Plain Rich color names used only before on_mount resolves the themed palette
 # (e.g. startup notices written during app construction).
@@ -89,7 +89,7 @@ class TextualTui(App[None]):
             str | BaseException
         ](100)
         self._status: Static | None = None
-        self._transcript: VerticalScroll | None = None
+        self._transcript: Transcript | None = None
         self._input: Input | None = None
         self._current_prompt = "wisp> "
         self._runner: Callable[[], Awaitable[None]] | None = None
@@ -109,7 +109,7 @@ class TextualTui(App[None]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Vertical():
-            yield VerticalScroll(id="transcript")
+            yield Transcript(id="transcript")
             yield Static("idle", id="status")
             with Container(id="input-row"):
                 yield Input(placeholder="wisp> ", id="input")
@@ -120,7 +120,7 @@ class TextualTui(App[None]):
             self.register_theme(theme)
         self.theme = WISP_THEMES[0].name
         self._role_styles = role_styles(self.current_theme)
-        self._transcript = self.query_one("#transcript", VerticalScroll)
+        self._transcript = self.query_one("#transcript", Transcript)
         self._status = self.query_one("#status", Static)
         self._input = self.query_one("#input", Input)
         self._input.focus()
@@ -248,11 +248,13 @@ class TextualTui(App[None]):
         self._mount_line(role, text)
 
     def _mount_line(self, role: str, markup: str) -> None:
-        # Mount one role-styled LineMessage. VerticalScroll owns the transcript.
+        # Mount one role-styled LineMessage. Transcript owns the transcript and
+        # its own follow-the-tail intent; we just re-assert the follow after the
+        # mount lays out.
         if self._transcript is None:
             return
         self._transcript.mount(LineMessage(markup, role=role))
-        self._auto_scroll()
+        self._follow_tail_after_refresh()
 
     def append_stream(self, delta: str) -> None:
         # Accumulate into the authoritative buffer; lazily mount the streaming
@@ -281,7 +283,7 @@ class TextualTui(App[None]):
 
     def _finalize_stream(self, widget: StreamMessage, text: str) -> None:
         widget.set_content(text)
-        self._auto_scroll()
+        self._follow_tail_after_refresh()
 
     def _schedule_stream_refresh(self) -> None:
         if self._stream_refresh_pending:
@@ -296,17 +298,20 @@ class TextualTui(App[None]):
         self._stream_refresh_pending = False
         if self._stream_widget is not None:
             self._stream_widget.set_content(self._streaming_text)
-            self._auto_scroll()
+            self._follow_tail_after_refresh()
 
-    def _auto_scroll(self) -> None:
-        # Follow the tail only when the user is already near the bottom, so
-        # streaming/new lines don't yank them away from earlier output.
-        transcript = self._transcript
-        if transcript is None:
+    def _follow_tail_after_refresh(self) -> None:
+        # Re-assert the tail follow after layout settles. The Transcript decides
+        # whether to actually scroll (it stays put if the user scrolled away).
+        # Content growth flows through Textual's layout as: mount/update -> the
+        # Markdown widget mounts its own block children -> the container recomputes
+        # max_scroll_y. A single post-refresh scroll can therefore land on a
+        # max_scroll_y that is still one layer behind, so re-assert twice: the
+        # second pass runs after the child layout has propagated.
+        if self._transcript is None:
             return
-        max_y = transcript.max_scroll_y
-        if transcript.scroll_y >= max_y - 3:
-            transcript.scroll_end(animate=False)
+        self.call_after_refresh(self._transcript.follow_tail)
+        self.call_after_refresh(self._transcript.follow_tail)
 
 
 class TextualTuiRenderer:

@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from textual.containers import VerticalScroll
 from textual.widgets import Input
 
 from tests.tui_support import *
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
-from wisp.tui.widgets import LineMessage, StreamMessage
+from wisp.tui.widgets import LineMessage, StreamMessage, Transcript
 
 
 def _transcript_texts(app: TextualTui) -> list[str]:
     """Plain text of every mounted transcript message (line + streamed)."""
 
-    transcript = app.query_one("#transcript", VerticalScroll)
+    transcript = app.query_one("#transcript", Transcript)
     texts: list[str] = []
     for child in transcript.children:
         if isinstance(child, LineMessage):
@@ -26,7 +25,7 @@ def _transcript_texts(app: TextualTui) -> list[str]:
 def _transcript_styles(app: TextualTui) -> str:
     """Style strings applied to every LineMessage span (e.g. 'bold #5cc9a7')."""
 
-    transcript = app.query_one("#transcript", VerticalScroll)
+    transcript = app.query_one("#transcript", Transcript)
     styles: list[str] = []
     for child in transcript.children:
         if isinstance(child, LineMessage):
@@ -607,7 +606,7 @@ def _stream_deltas(deltas: list[str], *, pause_between: bool) -> tuple[list[str]
             renderer.end_token_stream()
             await pilot.pause()
             await pilot.pause()  # let the deferred finalize settle
-            transcript = app_instance.query_one("#transcript", VerticalScroll)
+            transcript = app_instance.query_one("#transcript", Transcript)
             streams = sum(1 for c in transcript.children if isinstance(c, StreamMessage))
             return _transcript_texts(app_instance), streams
 
@@ -664,7 +663,7 @@ def test_textual_streamed_and_line_messages_use_distinct_widgets() -> None:
             renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={}))
             await pilot.pause()
             await pilot.pause()
-            transcript = app_instance.query_one("#transcript", VerticalScroll)
+            transcript = app_instance.query_one("#transcript", Transcript)
             return [type(c).__name__ for c in transcript.children]
 
     kinds = anyio.run(scenario)
@@ -672,6 +671,90 @@ def test_textual_streamed_and_line_messages_use_distinct_widgets() -> None:
     # LineMessage (styled Static) — they are different widget types.
     assert "StreamMessage" in kinds
     assert "LineMessage" in kinds
+
+
+def _fill_transcript(renderer: TextualTuiRenderer, count: int) -> None:
+    # Mount enough lines to overflow the viewport so the transcript can scroll.
+    for i in range(count):
+        renderer.event(ToolCallRequested(call_id=f"c{i}", name=f"tool{i}", arguments={}))
+
+
+def test_textual_streaming_keeps_the_growing_tail_visible() -> None:
+    # Regression: an expanding streamed Markdown widget must stay pinned to the
+    # bottom. The bug was measuring "near the bottom?" as the content grew — the
+    # growth itself pushed the bottom away, so the check read False and stopped
+    # following. The transcript must end scrolled to the newest output.
+    async def scenario() -> tuple[float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 20)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            body = "\n\n".join(f"Line {i} of the streamed answer." for i in range(15))
+            for chunk in (body[i : i + 40] for i in range(0, len(body), 40)):
+                renderer.token_delta(chunk)
+                await pilot.pause()
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()  # second pass: catch the settled max_scroll_y
+            return transcript.scroll_y, transcript.max_scroll_y
+
+    scroll_y, max_scroll_y = anyio.run(scenario)
+    assert max_scroll_y > 0  # content actually overflowed
+    assert scroll_y >= max_scroll_y - 3  # pinned to the tail
+
+
+def test_textual_streaming_does_not_yank_a_reader_who_scrolled_up() -> None:
+    # The flip side of tail-follow: if the user scrolled up to read history, new
+    # streamed output must NOT drag them back to the bottom.
+    async def scenario() -> tuple[float, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            transcript.scroll_to(y=6, animate=False)  # user reads back
+            await pilot.pause()
+            for i in range(10):
+                renderer.token_delta(f"new line {i}\n\n")
+                await pilot.pause()
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+            return transcript.scroll_y, transcript._follow
+
+    scroll_y, follow = anyio.run(scenario)
+    assert not follow  # scrolling away cleared the follow intent
+    assert scroll_y <= 7  # stayed roughly where the user left it, not the bottom
+
+
+def test_textual_returning_to_the_bottom_resumes_following() -> None:
+    # After scrolling up and back down, the reader is following again: the next
+    # streamed output should pin to the tail once more.
+    async def scenario() -> tuple[float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            transcript.scroll_to(y=6, animate=False)  # scroll away...
+            await pilot.pause()
+            transcript.scroll_end(animate=False)  # ...then back to the bottom
+            await pilot.pause()
+            renderer.token_delta("resumed answer\n\n")
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+            return transcript.scroll_y, transcript.max_scroll_y
+
+    scroll_y, max_scroll_y = anyio.run(scenario)
+    assert scroll_y >= max_scroll_y - 3  # following resumed
 
 
 def test_textual_tui_read_prompt_returns_submitted_input() -> None:
