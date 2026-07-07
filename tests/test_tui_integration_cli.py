@@ -790,21 +790,33 @@ def test_textual_line_message_border_title_from_role_labels() -> None:
     assert titles == [_ROLE_LABELS["assistant"], _ROLE_LABELS["tool"], _ROLE_LABELS["error"]]
 
 
-def test_textual_dim_and_session_rows_have_no_card_title() -> None:
-    # Quiet meta rows (running… notices, session-saved) map to an empty label and
-    # stay borderless — no title chrome, so they read as ambient, not as turns.
+def test_textual_dim_rows_have_no_card_title() -> None:
+    # Quiet meta rows (running… notices) map to an empty label and stay borderless
+    # — no title chrome, so they read as ambient, not as turns.
     async def scenario() -> list[object]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()  # a "dim" row
-            renderer.event(  # a "session" row
-                SessionSaved(session_id="sess-1", path=Path("/tmp/sess.json"))
-            )
             await pilot.pause()
             return [title for _, title in _transcript_cards(app_instance)]
 
     titles = anyio.run(scenario)
-    assert titles == [None, None]
+    assert titles == [None]
+
+
+def test_textual_session_saved_is_not_rendered() -> None:
+    # SessionSaved is session/RPC audit, not conversation — the active session id
+    # already lives in the status bar, so a per-turn "session saved:" line is pure
+    # redundancy. The Textual renderer drops it, matching the line renderer.
+    async def scenario() -> list[object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(SessionSaved(session_id="sess-1", path=Path("/tmp/sess.json")))
+            await pilot.pause()
+            return _transcript_cards(app_instance)
+
+    cards = anyio.run(scenario)
+    assert cards == []
 
 
 def test_textual_stream_message_carries_the_assistant_card() -> None:
@@ -1296,9 +1308,13 @@ def test_textual_startup_shows_the_wordmark_banner() -> None:
 
     roles, texts = anyio.run(scenario)
     assert "message--banner" in roles  # the wordmark is a banner, not a card
-    # The banner carries the block-drawing wordmark; the tagline follows.
+    # The banner carries the block-drawing wordmark; a single tightened greeting
+    # line follows — tagline + the `/` command door + how to quit, all in one row.
     assert any("▄" in t for t in texts)
-    assert any("a quiet coding agent" in t for t in texts)
+    greeting = [t for t in texts if "a quiet coding agent" in t]
+    assert len(greeting) == 1
+    assert "press / for commands" in greeting[0]
+    assert "/quit to exit" in greeting[0]
 
 
 def test_textual_input_is_pinned_to_the_bottom() -> None:
@@ -1317,6 +1333,45 @@ def test_textual_input_is_pinned_to_the_bottom() -> None:
     # The input sits in the last few rows; the transcript fills most of the height.
     assert input_top >= screen_h - 4
     assert transcript_h >= screen_h // 2
+
+
+def test_textual_input_placeholder_uses_the_prompt_glyph() -> None:
+    # The underline-only input leads with a `❯` glyph, not the verbose `wisp>`
+    # chrome. The shared semantic hint (wisp> / wisp(running)>) is mapped to a terse
+    # glyph placeholder in the Textual layer, so a mode change swaps the cue.
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            await pilot.pause()
+            input_widget = app_instance.query_one("#input", Input)
+            idle_placeholder = input_widget.placeholder
+            renderer.view_updated(TuiViewSnapshot(status="running", input_hint="wisp(running)> "))
+            await pilot.pause()
+            return idle_placeholder, input_widget.placeholder
+
+    idle_placeholder, running_placeholder = anyio.run(scenario)
+    assert idle_placeholder == "❯ "
+    assert running_placeholder == "❯ running…"
+
+
+def test_textual_input_has_no_box_border() -> None:
+    # The input is underline-only — a bottom rule, no four-sided box. Asserting the
+    # border is absent on the top/left/right edges (only bottom is styled) guards
+    # against a regression back to the heavy `tall` box.
+    async def scenario() -> object:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            await pilot.pause()
+            input_widget = app_instance.query_one("#input", Input)
+            return input_widget.styles.border
+
+    border = anyio.run(scenario)
+    # Textual's Edges exposes each side as an (edge_type, color) tuple; only the
+    # bottom edge carries a rule. top/left/right have an empty ("") edge type.
+    assert border.top[0] == ""
+    assert border.left[0] == ""
+    assert border.right[0] == ""
+    assert border.bottom[0] == "heavy"
 
 
 def test_textual_ctrl_y_copies_the_selection_to_the_clipboard() -> None:

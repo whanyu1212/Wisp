@@ -16,7 +16,6 @@ from wisp.events import (
     ErrorEvent,
     KnownWispEvent,
     RpcCommandFinished,
-    SessionSaved,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
@@ -25,7 +24,6 @@ from wisp.events import (
 from wisp.tui.rendering import (
     TuiRenderer,
     TuiViewSnapshot,
-    _compact_session_path,
     _first_line,
     _markup_escape,
     _tui_help_text,
@@ -62,6 +60,31 @@ _WORDMARK = (
     "  ▀████▀████▀   ▄███▄ ███████▀ ███"
 )
 _TAGLINE = "a quiet coding agent"
+
+# The input's prompt glyph. The shell hands the Textual renderer a semantic hint
+# (`wisp> `, `wisp(running)> `, `approve? [y/N] `) shared with the line/fullscreen
+# renderers; the underline-only input reads better with a single terminal-native
+# glyph than the verbose `wisp>` chrome, so we swap it in the Textual layer only.
+_PROMPT_GLYPH = "❯"
+
+# Semantic-hint → terse Textual placeholder. The status bar already spells out the
+# mode, so the input line just needs the glyph plus a one-word state cue.
+_INPUT_PLACEHOLDERS: dict[str, str] = {
+    "wisp> ": f"{_PROMPT_GLYPH} ",
+    "wisp(running)> ": f"{_PROMPT_GLYPH} running…",
+    "wisp(exiting)> ": f"{_PROMPT_GLYPH} exiting…",
+    "approve? [y/N] ": f"{_PROMPT_GLYPH} approve? [y/N]",
+}
+
+
+def _input_placeholder(hint: str) -> str:
+    """Map a shared semantic prompt hint to the Textual input's glyph placeholder.
+
+    Falls back to prefixing the glyph for any hint not in the table (e.g. a future
+    mode), so the input always leads with `❯` regardless of the source string.
+    """
+
+    return _INPUT_PLACEHOLDERS.get(hint, f"{_PROMPT_GLYPH} {hint}")
 
 
 class TextualTui(App[None]):
@@ -144,13 +167,19 @@ class TextualTui(App[None]):
         color: $accent;
     }
 
+    /* Underline-only input: no box, just a bottom rule that matches the
+       left-rule card language — quiet by default, accent when focused. The
+       `❯` prompt glyph (in the placeholder) is the visual anchor, not a frame. */
     #input {
         height: auto;
-        border: tall $surface;
+        border: none;
+        border-bottom: heavy $surface-lighten-2;
+        padding: 0 1;
     }
 
     #input:focus {
-        border: tall $accent;
+        border: none;
+        border-bottom: heavy $accent;
     }
     """
 
@@ -213,7 +242,7 @@ class TextualTui(App[None]):
             with Horizontal(id="status-bar"):
                 yield Static("idle", id="status")
                 yield LoadingIndicator(id="activity")
-            yield Input(placeholder="wisp> ", id="input")
+            yield Input(placeholder=_input_placeholder("wisp> "), id="input")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -419,7 +448,7 @@ class TextualTui(App[None]):
     def set_input_hint(self, hint: str) -> None:
         self._current_prompt = hint
         if self._input is not None:
-            self._input.placeholder = hint
+            self._input.placeholder = _input_placeholder(hint)
 
     def _style(self, role: str) -> str:
         # Resolve a transcript role to a theme-derived Rich style. Falls back to
@@ -571,9 +600,11 @@ class TextualTuiRenderer:
         return mode
 
     def startup(self) -> None:
+        # One tight greeting under the wordmark: identity + the two things worth
+        # knowing on first launch (the `/` command door, how to leave). Keeping it
+        # to a single dim line lets the wordmark breathe without a wall of hints.
         self.app.write_banner(_WORDMARK)
-        self.app.write_dim(_TAGLINE)
-        self.app.write_dim("Press / for commands · drag to select, ^y to copy · /quit to exit")
+        self.app.write_dim(f"{_TAGLINE} · press / for commands · /quit to exit")
 
     def help(self) -> None:
         self.app.write_notice(_tui_help_text())
@@ -659,14 +690,13 @@ class TextualTuiRenderer:
             self.app.write_labeled(label, f"{event.name}: {_first_line(event.output)}", role=role)
         elif isinstance(event, ErrorEvent):
             self.app.write_error(f"error: {event.message}")
-        elif isinstance(event, SessionSaved):
-            self.app.write_dim(f"session saved: {_compact_session_path(event.path)}")
         elif isinstance(event, RpcCommandFinished) and not event.ok:
             self.app.write_error(f"command failed: {event.error or event.command_id}")
         # Framing/plumbing events (RpcCommandStarted, a successful RpcCommandFinished,
-        # AgentStarted, ToolExecutionStarted/Ended) are intentionally not rendered —
-        # matching the line renderer, which drops them. They are session/RPC audit,
-        # not conversation, so dumping their repr into the transcript is just noise.
+        # AgentStarted, ToolExecutionStarted/Ended, SessionSaved) are intentionally
+        # not rendered. They are session/RPC audit, not conversation — and the active
+        # session id already lives in the status bar, so a per-turn "session saved:"
+        # line is pure redundancy. Dropping them keeps the transcript conversational.
 
     def rpc_event_reader_failed(self, error: str) -> None:
         self.app.write_error(f"RPC event reader failed: {error}")
