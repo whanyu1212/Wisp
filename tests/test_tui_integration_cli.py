@@ -327,6 +327,9 @@ def test_cli_no_args_uses_env_tui_defaults(monkeypatch: object) -> None:
     assert len(captured) == 1
     assert captured[0].config.provider == "fake"
     assert captured[0].renderer is TuiRendererKind.fullscreen
+    # The legacy WISP_MODE=tui path defaults to the full toolset too — otherwise
+    # this door to the same TUI would launch a toolless agent.
+    assert captured[0].all_tools is True
 
 
 def test_cli_tui_mode_uses_env_renderer_default(monkeypatch: object) -> None:
@@ -352,6 +355,30 @@ def test_cli_tui_mode_uses_env_renderer_default(monkeypatch: object) -> None:
     assert result.exit_code == 0, result.output
     assert len(captured) == 1
     assert captured[0].renderer is TuiRendererKind.fullscreen
+    # Legacy `--mode tui` defaults the full toolset on, matching `wisp tui`.
+    assert captured[0].all_tools is True
+
+
+def test_cli_legacy_tui_mode_no_all_tools_flag_wins(monkeypatch: object) -> None:
+    # An explicit --no-all-tools on the legacy path opts out of the TUI's
+    # full-registry default, falling back to the opt-in tool filter.
+    captured: list[TuiOptions] = []
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        captured.append(options)
+
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "tui", "--no-all-tools"],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    assert captured[0].all_tools is False
 
 
 def test_cli_prompt_with_explicit_tui_mode_still_errors() -> None:
