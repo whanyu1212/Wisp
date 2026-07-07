@@ -4,13 +4,20 @@ from __future__ import annotations
 
 from textual.await_complete import AwaitComplete
 from textual.command import CommandPalette
-from textual.widgets import Input, LoadingIndicator, Static
+from textual.widgets import Input, Static
 
 from tests.tui_support import *
 from wisp.events import AgentStarted, RpcCommandStarted
 from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
-from wisp.tui.widgets import _ROLE_LABELS, LineMessage, StreamMessage, Transcript
+from wisp.tui.widgets import (
+    _ROLE_LABELS,
+    LineMessage,
+    StreamMessage,
+    ToolCard,
+    Transcript,
+    WorkingMessage,
+)
 
 
 def _transcript_texts(app: TextualTui) -> list[str]:
@@ -19,7 +26,7 @@ def _transcript_texts(app: TextualTui) -> list[str]:
     transcript = app.query_one("#transcript", Transcript)
     texts: list[str] = []
     for child in transcript.children:
-        if isinstance(child, LineMessage):
+        if isinstance(child, LineMessage | WorkingMessage | ToolCard):
             texts.append(child.render().plain)  # Textual Content
         elif isinstance(child, StreamMessage):
             texts.append(child._markdown.source)
@@ -27,12 +34,12 @@ def _transcript_texts(app: TextualTui) -> list[str]:
 
 
 def _transcript_styles(app: TextualTui) -> str:
-    """Style strings applied to every LineMessage span (e.g. 'bold #5cc9a7')."""
+    """Style strings applied to every LineMessage/ToolCard span (e.g. 'bold #5cc9a7')."""
 
     transcript = app.query_one("#transcript", Transcript)
     styles: list[str] = []
     for child in transcript.children:
-        if isinstance(child, LineMessage):
+        if isinstance(child, LineMessage | ToolCard):
             styles.extend(str(span.style) for span in child.render().spans)
     return "\n".join(styles)
 
@@ -575,14 +582,16 @@ def _render_events_to_transcript(events: list[object]) -> str:
 
 
 def test_textual_renderer_dispatches_events_by_type() -> None:
-    # Stage 0: each event type must render as its own distinct, labeled line,
-    # not a single undifferentiated str(event) repr.
+    # Each event type renders distinctly. A tool call is ONE evolving card keyed by
+    # call_id: the request mounts it, the result mutates it in place (request +
+    # result do not stack two lines). A stand-alone denial (safety-gated tool that
+    # had a prior request) flips its card to denied with the reason.
     rendered = _render_events_to_transcript(
         [
             AssistantMessage(content="hello there"),
             ToolCallRequested(call_id="c1", name="bash", arguments={"cmd": "ls"}),
             ToolResultReady(call_id="c1", name="bash", output="file-a\nfile-b", is_error=False),
-            ToolApprovalResolved(call_id="c2", name="edit", approved=True, reason=None),
+            ToolCallRequested(call_id="c3", name="write", arguments={"path": "x"}),
             ToolApprovalResolved(call_id="c3", name="write", approved=False, reason="too risky"),
             ErrorEvent(message="boom"),
             RpcCommandFinished(command_id="cmd-1", command_type="prompt", ok=False, error="nope"),
@@ -590,12 +599,13 @@ def test_textual_renderer_dispatches_events_by_type() -> None:
     )
 
     assert "assistant: hello there" in rendered
-    assert "→ tool bash" in rendered
-    # ToolResultReady shows only the first non-empty output line.
-    assert "✓ tool bash: file-a" in rendered
-    assert "file-b" not in rendered
-    assert "✓ approved edit" in rendered
-    assert "! denied write: too risky" in rendered
+    # One card for c1: done glyph + name + first output line (not two lines).
+    assert "✓ bash" in rendered
+    assert "file-a" in rendered
+    assert "file-b" not in rendered  # only the first non-empty output line shows
+    # The denied card carries the reason.
+    assert "✗ write" in rendered
+    assert "too risky" in rendered
     assert "error: boom" in rendered
     assert "command failed: nope" in rendered
 
@@ -619,31 +629,114 @@ def test_textual_renderer_suppresses_rpc_framing_events() -> None:
     assert "command_id" not in rendered
 
 
-def test_textual_renderer_distinguishes_tool_call_from_result() -> None:
-    # The old duck-typed event() collapsed these into indistinguishable lines.
-    rendered = _render_events_to_transcript(
-        [
-            ToolCallRequested(call_id="c1", name="grep", arguments={}),
-            ToolResultReady(call_id="c1", name="grep", output="match", is_error=True),
-        ]
-    )
+def test_textual_renderer_collapses_call_and_result_into_one_card() -> None:
+    # Request then result for one call_id mutate a single card in place (one line,
+    # not two). An errored result flips the glyph to ✗ and shows the output line.
+    async def scenario() -> tuple[list[str], int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="grep", arguments={}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(call_id="c1", name="grep", output="match", is_error=True)
+            )
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            cards = [c for c in transcript.children if isinstance(c, ToolCard)]
+            return [c.render().plain for c in cards], len(cards)
 
-    assert "→ tool grep" in rendered
-    assert "✗ tool grep: match" in rendered
+    texts, count = anyio.run(scenario)
+    assert count == 1  # one card carried the whole lifecycle
+    assert texts[0].startswith("✗ grep")
+    assert "match" in texts[0]
+
+
+def test_textual_tool_card_shows_true_elapsed_from_event_timestamps() -> None:
+    # A resolved card freezes at the wall-clock duration between the request and
+    # result event timestamps (not the live tick count), so the resting number is
+    # honest. Construct the events a known 2.5s apart and assert the formatted
+    # duration lands on the card.
+    from datetime import timedelta
+
+    from wisp.events import utc_now
+
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            start = utc_now()
+            renderer.event(
+                ToolCallRequested(call_id="c1", name="grep", arguments={}, timestamp=start)
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="grep",
+                    output="match",
+                    is_error=False,
+                    timestamp=start + timedelta(seconds=2.5),
+                )
+            )
+            await pilot.pause()
+            card = next(
+                c
+                for c in app_instance.query_one("#transcript", Transcript).children
+                if isinstance(c, ToolCard)
+            )
+            return card.render().plain
+
+    text = anyio.run(scenario)
+    assert text.endswith("· 2.5s"), text  # true delta, not the virtual-clock tick count
+
+
+def test_textual_tool_card_without_a_request_shows_no_duration() -> None:
+    # A result arriving with no prior request (e.g. a resumed session) can't
+    # compute a duration; the card is simply never mounted, so nothing is shown
+    # rather than a bogus 0s. Assert no ToolCard appears.
+    async def scenario() -> int:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolResultReady(call_id="orphan", name="grep", output="x", is_error=False)
+            )
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            return sum(1 for c in transcript.children if isinstance(c, ToolCard))
+
+    assert anyio.run(scenario) == 0
 
 
 def test_textual_renderer_escapes_untrusted_event_payloads() -> None:
-    # Tool-controlled fields must not inject Rich markup into the RichLog.
-    rendered = _render_events_to_transcript(
-        [
-            ToolCallRequested(call_id="c1", name="evil[/blue]", arguments={"k": "[red]x[/red]"}),
-            ToolResultReady(call_id="c1", name="t", output="[bold]out[/bold]", is_error=False),
-        ]
-    )
+    # Tool-controlled fields (name, arguments, output) must not inject Rich markup.
+    # The pending card shows the escaped name + arg summary; after the result the
+    # same card shows the escaped output line.
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1", name="evil[/blue]", arguments={"k": "[red]x[/red]"}
+                )
+            )
+            await pilot.pause()
+            card = next(
+                c
+                for c in app_instance.query_one("#transcript", Transcript).children
+                if isinstance(c, ToolCard)
+            )
+            pending = card.render().plain
+            renderer.event(
+                ToolResultReady(call_id="c1", name="t", output="[bold]out[/bold]", is_error=False)
+            )
+            await pilot.pause()
+            return pending, card.render().plain
 
-    assert "evil[/blue]" in rendered
-    assert "[red]x[/red]" in rendered
-    assert "[bold]out[/bold]" in rendered
+    pending, done = anyio.run(scenario)
+    # Rich markup control chars survive verbatim as literal text (rendered), which
+    # means they were escaped at the boundary, not interpreted as style tags.
+    assert "evil[/blue]" in pending
+    assert "[red]x[/red]" in pending
+    assert "[bold]out[/bold]" in done
 
 
 def test_textual_renderer_ignores_unhandled_framing_events() -> None:
@@ -685,18 +778,23 @@ def test_textual_tui_registers_and_activates_wisp_theme() -> None:
 
 
 def test_textual_transcript_uses_theme_colors() -> None:
+    # LineMessage/StreamMessage carry their color as a role-styled Rich span.
     styles = _rendered_segment_styles(
         [
             AssistantMessage(content="hi"),
-            ToolCallRequested(call_id="c1", name="bash", arguments={}),
             ErrorEvent(message="boom"),
         ]
     )
 
-    # Each labeled line must be rendered with the active (dark wisp) theme colors.
     assert "#5cc9a7" in styles  # assistant -> success
-    assert "#3fb8b8" in styles  # tool -> accent
     assert "#d16a7c" in styles  # error -> error
+
+
+def test_textual_tool_card_carries_role_class_for_left_rule_color() -> None:
+    # A ToolCard's color lives in its `message--<role>` CSS class (which drives the
+    # left-rule color), not in a text span — so assert the class, not a span color.
+    cards = _cards_for_events([ToolCallRequested(call_id="c1", name="bash", arguments={})])
+    assert cards == [("message--tool", "tool")]
 
 
 def test_textual_theme_switch_rederives_transcript_styles() -> None:
@@ -824,21 +922,24 @@ def test_textual_streamed_and_line_messages_use_distinct_widgets() -> None:
 
     kinds = anyio.run(scenario)
     # The assistant stream is a StreamMessage (Markdown); the tool call is a
-    # LineMessage (styled Static) — they are different widget types.
+    # ToolCard (stateful styled Static) — they are different widget types.
     assert "StreamMessage" in kinds
-    assert "LineMessage" in kinds
+    assert "ToolCard" in kinds
 
 
 def test_textual_line_messages_carry_role_classes() -> None:
-    # Stage 3: every event type maps to a message--<role> class so the card CSS
-    # can style it. The classes are the styling contract; assert each is present.
+    # Every event type maps to a message--<role> class so the card CSS can style
+    # it. Tool cards evolve in place, so drive each through its full lifecycle and
+    # assert the terminal role class. c1 succeeds (→ approved), c2 errors (→
+    # denied), c4 is denied at approval (→ denied). One card per call_id.
     cards = _cards_for_events(
         [
             AssistantMessage(content="hi"),
             ToolCallRequested(call_id="c1", name="bash", arguments={}),
             ToolResultReady(call_id="c1", name="bash", output="ok", is_error=False),
+            ToolCallRequested(call_id="c2", name="bash", arguments={}),
             ToolResultReady(call_id="c2", name="bash", output="boom", is_error=True),
-            ToolApprovalResolved(call_id="c3", name="edit", approved=True, reason=None),
+            ToolCallRequested(call_id="c4", name="write", arguments={}),
             ToolApprovalResolved(call_id="c4", name="write", approved=False, reason="no"),
             ErrorEvent(message="bad"),
         ]
@@ -846,11 +947,9 @@ def test_textual_line_messages_carry_role_classes() -> None:
     role_classes = [role for role, _ in cards]
     assert role_classes == [
         "message--assistant",
-        "message--tool",
-        "message--approved",  # successful tool result
-        "message--denied",  # errored tool result
-        "message--approved",  # approval granted
-        "message--denied",  # approval refused
+        "message--approved",  # c1 succeeded
+        "message--denied",  # c2 errored
+        "message--denied",  # c4 denied at approval
         "message--error",
     ]
 
@@ -869,18 +968,79 @@ def test_textual_line_message_border_title_from_role_labels() -> None:
     assert titles == [_ROLE_LABELS["assistant"], _ROLE_LABELS["tool"], _ROLE_LABELS["error"]]
 
 
-def test_textual_dim_rows_have_no_card_title() -> None:
-    # Quiet meta rows (running… notices) map to an empty label and stay borderless
-    # — no title chrome, so they read as ambient, not as turns.
-    async def scenario() -> list[object]:
+def test_textual_running_mounts_transient_working_row() -> None:
+    # Running state should surface inline in the transcript as a dim, untitled
+    # working row while we're waiting for the first visible output.
+    async def scenario() -> list[tuple[str | None, object]]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
-            renderer.running()  # a "dim" row
+            renderer.running()
             await pilot.pause()
-            return [title for _, title in _transcript_cards(app_instance)]
+            return _transcript_cards(app_instance)
 
-    titles = anyio.run(scenario)
-    assert titles == [None]
+    cards = anyio.run(scenario)
+    assert cards == [("message--dim", None)]
+
+
+def test_textual_working_row_animates_spinner_and_counts_elapsed() -> None:
+    # The heartbeat is a smooth braille spinner + a live elapsed-seconds counter,
+    # both driven off one monotonic tick counter (frame = ticks % len, seconds =
+    # ticks × interval). Advance ticks directly and assert the spinner rotates
+    # through all its frames and the counter reaches whole seconds.
+    async def scenario() -> tuple[int, str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            row = next(c for c in transcript.children if isinstance(c, WorkingMessage))
+
+            start = row.render().plain
+            glyphs: set[str] = {start[0]}
+            # One full spinner cycle plus enough ticks to cross 1s (interval 0.08s).
+            for _ in range(len(WorkingMessage._FRAMES) + 3):
+                row._tick()
+                glyphs.add(row.render().plain[0])
+            return len(glyphs), start, row.render().plain
+
+    distinct_glyphs, start, later = anyio.run(scenario)
+    assert distinct_glyphs == len(WorkingMessage._FRAMES)  # every frame shown → smooth
+    assert start.endswith("0s")
+    assert later.endswith("1s")  # counter advanced with elapsed time
+    assert start[0] in WorkingMessage._FRAMES  # a braille frame, not the old dot
+
+
+def test_format_duration_scales_units() -> None:
+    from wisp.tui.widgets import _format_duration
+
+    assert _format_duration(0.34) == "0.3s"  # sub-10s keeps a decimal
+    assert _format_duration(9.9) == "9.9s"
+    assert _format_duration(10.4) == "10s"  # past 10s the decimal is noise
+    assert _format_duration(63.2) == "1m03s"  # rolls to Nm SSs past a minute
+    assert _format_duration(-1.0) == "0.0s"  # clock skew clamps to 0
+
+
+def test_textual_pending_tool_card_ticks_a_live_counter() -> None:
+    # A running card shows a live whole-second counter (per-card timer) until it
+    # resolves. Advance ticks directly and assert the counter climbs.
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="grep", arguments={}))
+            await pilot.pause()
+            card = next(
+                c
+                for c in app_instance.query_one("#transcript", Transcript).children
+                if isinstance(c, ToolCard)
+            )
+            start = card.render().plain
+            for _ in range(3):
+                card._tick()
+            return start, card.render().plain
+
+    start, ticked = anyio.run(scenario)
+    assert start.endswith("· 0.0s")  # counter starts at zero on mount
+    assert ticked.endswith("· 3.0s")  # three 1s ticks
 
 
 def test_textual_session_saved_is_not_rendered() -> None:
@@ -936,65 +1096,33 @@ def test_textual_card_css_resolves_under_the_light_theme() -> None:
     assert border_color.hex.lower() == "#2f8f8f"
 
 
-def _status_after_snapshots(snapshots: list[TuiViewSnapshot]) -> tuple[list[bool], str, bool]:
-    # Apply each snapshot in order, pausing between, and return the spinner's
-    # display state after each, plus the final status text and whether the Input
-    # kept focus (the spinner must never steal it).
-    async def scenario() -> tuple[list[bool], str, bool]:
+def _status_after_snapshots(snapshots: list[TuiViewSnapshot]) -> tuple[str, bool]:
+    # Apply each snapshot in order and return the final footer text plus whether
+    # the Input kept focus.
+    async def scenario() -> tuple[str, bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
-            activity = app_instance.query_one("#activity", LoadingIndicator)
             status = app_instance.query_one("#status", Static)
-            displays: list[bool] = []
             for snapshot in snapshots:
                 renderer.view_updated(snapshot)
                 await pilot.pause()
-                displays.append(bool(activity.display))
             focus_ok = app_instance.focused is app_instance.query_one("#input", Input)
-            return displays, status.render().plain, focus_ok
+            return status.render().plain, focus_ok
 
     return anyio.run(scenario)
 
 
-def test_textual_status_bar_shows_spinner_while_running() -> None:
-    # Stage 4: the activity spinner is visible only while a prompt runs.
-    displays, _, focus_ok = _status_after_snapshots(
+def test_textual_footer_updates_without_stealing_input_focus() -> None:
+    status_text, focus_ok = _status_after_snapshots(
         [TuiViewSnapshot(status="running", input_hint="wisp(running)> ", input_mode="running")]
     )
-    assert displays == [True]
-    assert focus_ok  # spinner did not steal focus from the Input
+    assert "running" in status_text
+    assert focus_ok
 
 
-def test_textual_status_bar_hides_spinner_at_idle() -> None:
-    # Hidden at mount (before any snapshot) and in idle mode.
-    async def scenario() -> tuple[bool, bool]:
-        app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test() as pilot:
-            activity = app_instance.query_one("#activity", LoadingIndicator)
-            at_mount = bool(activity.display)
-            renderer.view_updated(TuiViewSnapshot(status="idle", input_hint="wisp> "))
-            await pilot.pause()
-            return at_mount, bool(activity.display)
-
-    at_mount, at_idle = anyio.run(scenario)
-    assert at_mount is False
-    assert at_idle is False
-
-
-def test_textual_status_bar_toggles_spinner_off_after_running() -> None:
-    # running -> idle: the spinner comes on then goes off.
-    displays, _, _ = _status_after_snapshots(
-        [
-            TuiViewSnapshot(status="running", input_hint="wisp(running)> ", input_mode="running"),
-            TuiViewSnapshot(status="idle", input_hint="wisp> ", input_mode="idle"),
-        ]
-    )
-    assert displays == [True, False]
-
-
-def test_textual_status_bar_renders_status_queued_and_session() -> None:
-    # The status text keeps the pipe-joined status + queued + session summary.
-    _, status_text, _ = _status_after_snapshots(
+def test_textual_status_bar_renders_compact_footer_summary() -> None:
+    # The footer keeps cwd/session on the first line and status/model on the second.
+    status_text, _ = _status_after_snapshots(
         [
             TuiViewSnapshot(
                 status="running",
@@ -1002,19 +1130,48 @@ def test_textual_status_bar_renders_status_queued_and_session() -> None:
                 input_mode="running",
                 queued_follow_ups=2,
                 last_session="sess.json",
+                provider="openai",
+                model="gpt-test",
             )
         ]
     )
-    assert status_text == "running | queued: 2 | session: sess.json"
+    assert "\n" in status_text
+    assert "session: sess.json" in status_text
+    assert "running • queued 2" in status_text
+    assert "openai/gpt-test" in status_text
 
 
-def test_textual_status_bar_does_not_spin_during_approval() -> None:
-    # Locked decision: the spinner is running-only. Approval mode gets its own
-    # input hint, not the spinner.
-    displays, _, _ = _status_after_snapshots(
-        [TuiViewSnapshot(status="approval", input_hint="approve? y/N ", input_mode="approval")]
-    )
-    assert displays == [False]
+def test_textual_footer_stays_below_input_without_stealing_focus() -> None:
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.view_updated(TuiViewSnapshot(status="idle", input_hint="wisp> "))
+            await pilot.pause()
+            input_widget = app_instance.query_one("#input", Input)
+            footer = app_instance.query_one("#status", Static)
+            return input_widget.region.y < footer.region.y, app_instance.focused is input_widget
+
+    below_input, focus_ok = anyio.run(scenario)
+    assert below_input
+    assert focus_ok
+
+
+def test_textual_working_row_disappears_on_first_stream_output() -> None:
+    async def scenario() -> tuple[list[str], list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            await pilot.pause()
+            before = _transcript_texts(app_instance)
+            renderer.token_delta("hello")
+            await pilot.pause()
+            after = _transcript_texts(app_instance)
+            return before, after
+
+    before, after = anyio.run(scenario)
+    assert any("Working" in text for text in before)
+    assert all("Working" not in text for text in after)
+    assert any("hello" in text for text in after)
 
 
 def _fill_transcript(renderer: TextualTuiRenderer, count: int) -> None:
@@ -1453,53 +1610,28 @@ def test_textual_input_has_no_box_border() -> None:
     assert border.bottom[0] == "heavy"
 
 
-def test_textual_ctrl_y_copies_the_selection_to_the_clipboard() -> None:
-    # ctrl+c is bound to interrupt (shadowing Textual's default copy), so copy is
-    # on ctrl+y. A mouse-drag selection, copied with ctrl+y, reaches the clipboard.
-    from textual.geometry import Offset
-    from textual.selection import Selection
+def test_textual_run_shell_disables_mouse_for_native_copy() -> None:
+    # Copy is delegated to the terminal: the shell must start with mouse reporting
+    # off so the emulator keeps click-drag selection and the OS copy shortcut
+    # (Cmd+C / right-click-copy) works natively. Assert run_async is invoked with
+    # mouse=False rather than driving a real terminal.
+    captured: dict[str, object] = {}
 
-    async def scenario() -> str | None:
-        app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test(size=(74, 22)) as pilot:
-            renderer.event(AssistantMessage(content="yank me"))
-            await pilot.pause()
-            transcript = app_instance.query_one("#transcript", Transcript)
-            message = next(c for c in transcript.children if isinstance(c, LineMessage))
-            app_instance.screen.selections = {message: Selection(Offset(0, 0), Offset(40, 0))}
-            await pilot.pause()
-
-            captured: list[str] = []
-            original = app_instance.copy_to_clipboard
-
-            def spy(text: str) -> None:
-                captured.append(text)
-                original(text)
-
-            app_instance.copy_to_clipboard = spy  # type: ignore[method-assign]
-            await pilot.press("ctrl+y")
-            await pilot.pause()
-            return captured[0] if captured else None
-
-    copied = anyio.run(scenario)
-    assert copied is not None
-    assert "yank me" in copied
-
-
-def test_textual_ctrl_y_with_no_selection_is_a_noop() -> None:
-    # Pressing copy with nothing selected must not crash (Textual raises SkipAction).
-    async def scenario() -> str:
+    async def scenario() -> None:
         app_instance = TextualTui()
-        async with app_instance.run_test(size=(74, 22)) as pilot:
-            input_widget = app_instance.query_one("#input", Input)
-            input_widget.focus()
-            await pilot.pause()
-            await pilot.press("ctrl+y")  # no selection
-            await pilot.press(*"ok")
-            await pilot.pause()
-            return input_widget.value
 
-    assert anyio.run(scenario) == "ok"
+        async def fake_run_async(*args: object, **kwargs: object) -> None:
+            captured["mouse"] = kwargs.get("mouse")
+
+        app_instance.run_async = fake_run_async  # type: ignore[method-assign]
+
+        async def runner() -> None:
+            return None
+
+        await app_instance.run_shell(runner)
+
+    anyio.run(scenario)
+    assert captured["mouse"] is False
 
 
 def test_textual_header_shows_the_wisp_wordmark() -> None:

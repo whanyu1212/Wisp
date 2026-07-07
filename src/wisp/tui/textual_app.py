@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable
+from datetime import datetime
 
 import anyio
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Input, LoadingIndicator, Static
+from textual.widgets import Header, Input, Static
 
 from wisp.events import (
     AssistantMessage,
@@ -27,9 +28,10 @@ from wisp.tui.rendering import (
     _first_line,
     _markup_escape,
     _tui_help_text,
+    format_tui_footer_text,
 )
 from wisp.tui.theme import WISP_THEMES, role_styles
-from wisp.tui.widgets import LineMessage, StreamMessage, Transcript
+from wisp.tui.widgets import LineMessage, StreamMessage, ToolCard, Transcript, WorkingMessage
 
 # Plain Rich color names used only before on_mount resolves the themed palette
 # (e.g. startup notices written during app construction).
@@ -44,11 +46,6 @@ _ROLE_FALLBACK: dict[str, str] = {
     "denied": "red",
     "banner": "cyan",
 }
-
-# Input modes (TuiViewSnapshot.input_mode values, from state._InputMode) during
-# which the activity spinner is shown. Running-only: the approval prompt gets its
-# own input hint instead. Kept as the single source of truth for the spinner.
-_BUSY_MODES = frozenset({"running"})
 
 # The Wisp wordmark, shown once at startup. Block-drawing glyphs only (width-1,
 # universally supported); 40 cols wide, fits a standard terminal.
@@ -67,7 +64,7 @@ _TAGLINE = "a quiet coding agent"
 # glyph than the verbose `wisp>` chrome, so we swap it in the Textual layer only.
 _PROMPT_GLYPH = "❯"
 
-# Semantic-hint → terse Textual placeholder. The status bar already spells out the
+# Semantic-hint → terse Textual placeholder. The footer already spells out the
 # mode, so the input line just needs the glyph plus a one-word state cue.
 _INPUT_PLACEHOLDERS: dict[str, str] = {
     "wisp> ": f"{_PROMPT_GLYPH} ",
@@ -158,13 +155,8 @@ class TextualTui(App[None]):
 
     #status {
         width: 1fr;
+        min-height: 2;
         height: auto;
-    }
-
-    #activity {
-        width: auto;
-        height: 1;
-        color: $accent;
     }
 
     /* Underline-only input: no box, just a bottom rule that matches the
@@ -192,15 +184,12 @@ class TextualTui(App[None]):
     # ctrl+e still move the cursor to line start/end); pageup/pagedown have no
     # competing Input binding, so they bubble normally.
     #
-    # Copy: ctrl+c is ours (interrupt), which shadows Textual's default
-    # ctrl+c copy. Bind copy to ctrl+y ("yank") and super+c (macOS Cmd+C)
-    # instead, both to the screen's copy_text action, so a mouse-drag selection
-    # can be copied to the system clipboard. priority=True to fire while the
-    # Input has focus.
+    # Copy is handled by the terminal, not the app: the shell runs with mouse
+    # reporting off (see run_shell), so drag-select + the OS copy shortcut work
+    # natively. That leaves ctrl+c with its traditional interrupt meaning.
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", priority=True),
         Binding("ctrl+d", "eof", "EOF", priority=True),
-        Binding("ctrl+y,super+c", "screen.copy_text", "Copy selection", priority=True),
         Binding("pageup", "scroll_transcript_page_up", "Scroll up", show=False),
         Binding("pagedown", "scroll_transcript_page_down", "Scroll down", show=False),
         Binding("home", "scroll_transcript_home", "Scroll to top", priority=True, show=False),
@@ -213,7 +202,6 @@ class TextualTui(App[None]):
             str | BaseException
         ](100)
         self._status: Static | None = None
-        self._activity: LoadingIndicator | None = None
         self._transcript: Transcript | None = None
         self._input: Input | None = None
         self._current_prompt = "wisp> "
@@ -230,20 +218,22 @@ class TextualTui(App[None]):
         self._streaming_text = ""
         self._stream_widget: StreamMessage | None = None
         self._stream_refresh_pending = False
+        self._working_widget: WorkingMessage | None = None
+        # call_id → ToolCard, so the request, approval, and result events for one
+        # tool call all mutate the same card instead of stacking three lines.
+        self._tool_cards: dict[str, ToolCard] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with Vertical():
-            # transcript takes all remaining height (1fr); the status bar and the
-            # input hug the bottom (height: auto). The input is yielded directly —
-            # a wrapping Container would default to height: 1fr and float the input
-            # into the middle of the screen.
+            # Transcript takes all remaining height (1fr). The input and compact
+            # footer hug the bottom, matching Pi's editor-above-footer visual shape.
+            # The input is yielded directly — a wrapping Container would default to
+            # height: 1fr and float the input into the middle of the screen.
             yield Transcript(id="transcript")
+            yield Input(placeholder=_input_placeholder("wisp> "), id="input")
             with Horizontal(id="status-bar"):
                 yield Static("idle", id="status")
-                yield LoadingIndicator(id="activity")
-            yield Input(placeholder=_input_placeholder("wisp> "), id="input")
-        yield Footer()
 
     async def on_mount(self) -> None:
         # The Header renders these as the wordmark in the top bar: a quiet,
@@ -256,8 +246,6 @@ class TextualTui(App[None]):
         self._role_styles = role_styles(self.current_theme)
         self._transcript = self.query_one("#transcript", Transcript)
         self._status = self.query_one("#status", Static)
-        self._activity = self.query_one("#activity", LoadingIndicator)
-        self._activity.display = False  # hidden until a prompt runs
         self._input = self.query_one("#input", Input)
         self._input.focus()  # keep the Input as the resting focus
         if self._runner is not None:
@@ -374,7 +362,16 @@ class TextualTui(App[None]):
 
     async def run_shell(self, runner: Callable[[], Awaitable[None]]) -> None:
         self._runner = runner
-        await self.run_async()
+        # mouse=False stops Textual from putting the terminal into mouse-reporting
+        # mode (the `?1000h`/`?1003h` sequences). With reporting off, the terminal
+        # emulator keeps ownership of click-drag, so selecting text and the OS copy
+        # shortcut (Cmd+C on macOS, right-click-copy elsewhere) work natively —
+        # exactly as in any other terminal program. The trade-off is that no mouse
+        # events reach the app: no wheel-scroll of the transcript (PageUp/PageDown/
+        # Home/End cover that) and no click-to-focus (the Input is the resting focus
+        # and the palette opens via `/` or ctrl+p). We accept that to make copy
+        # behave the way users expect from a terminal.
+        await self.run_async(mouse=False)
         # Textual restores the terminal before returning; re-raise any error
         # from the shell worker here so it surfaces as a normal traceback
         # instead of being swallowed by the app teardown.
@@ -439,16 +436,54 @@ class TextualTui(App[None]):
         if self._status is not None:
             self._status.update(message)
 
-    def set_running(self, running: bool) -> None:
-        # Toggle the activity spinner's visibility (display, never mount/unmount —
-        # avoids the mount race). Driven off the snapshot's input_mode.
-        if self._activity is not None:
-            self._activity.display = running
-
     def set_input_hint(self, hint: str) -> None:
         self._current_prompt = hint
         if self._input is not None:
             self._input.placeholder = _input_placeholder(hint)
+
+    def show_working_indicator(self) -> None:
+        if self._transcript is None or self._working_widget is not None:
+            return
+        self._working_widget = WorkingMessage()
+        self._transcript.mount(self._working_widget)
+        self._follow_tail_after_refresh()
+
+    def hide_working_indicator(self) -> None:
+        widget = self._working_widget
+        self._working_widget = None
+        if widget is not None:
+            widget.remove()
+
+    def mount_tool_call(self, call_id: str, name: str, arguments: object) -> None:
+        # Mount a fresh card for a tool call and register it by call_id. The
+        # working indicator is retired: this card now carries the "in progress"
+        # signal (pending glyph + dim rule) for the rest of the call's lifecycle.
+        if self._transcript is None:
+            return
+        self.hide_working_indicator()
+        card = ToolCard(name, arguments)
+        self._tool_cards[call_id] = card
+        self._transcript.mount(card)
+        self._follow_tail_after_refresh()
+
+    def resolve_tool_call(
+        self, call_id: str, status: str, *, detail: str = "", elapsed: float | None = None
+    ) -> None:
+        # Transition the card for this call_id in place. If the request card was
+        # never seen (a result arriving with no prior request, e.g. after a
+        # resume), there is nothing to mutate — drop it rather than mint a
+        # half-formed card, keeping the registry the single source of truth.
+        # `elapsed` is the true wall-clock duration; it freezes the live counter.
+        card = self._tool_cards.get(call_id)
+        if card is None:
+            return
+        card.set_state(status, detail=detail, elapsed=elapsed)
+        # A terminal state (done/denied/error) ends the call's lifecycle; forget
+        # the card so the registry doesn't grow across a long session. The widget
+        # stays mounted in the transcript — we just stop tracking it.
+        if status != "pending":
+            del self._tool_cards[call_id]
+        self._follow_tail_after_refresh()
 
     def _style(self, role: str) -> str:
         # Resolve a transcript role to a theme-derived Rich style. Falls back to
@@ -505,6 +540,7 @@ class TextualTui(App[None]):
         # Accumulate into the authoritative buffer; lazily mount the streaming
         # assistant widget on the first delta; reconcile via one coalesced
         # refresh so the Markdown reparses at most once per frame, not per token.
+        self.hide_working_indicator()
         self._streaming_text += delta
         if self._stream_widget is None and self._transcript is not None:
             self._stream_widget = StreamMessage()
@@ -518,6 +554,7 @@ class TextualTui(App[None]):
         # Capture the widget + final text and reconcile AFTER refresh, because the
         # widget may have been mounted this same tick — reconciling inline would
         # hit the mount race and drop the content.
+        self.hide_working_indicator()
         widget = self._stream_widget
         final_text = self._streaming_text
         self._streaming_text = ""
@@ -577,17 +614,29 @@ class TextualTuiRenderer:
         # it via consume_submitted_input_mode().
         self._submitted_input_mode: str | None = None
         app.set_submit_hook(self._capture_submitted_input_mode)
+        # call_id → request event timestamp, so a tool card can show the true
+        # wall-clock duration (result.timestamp − request.timestamp) when it
+        # resolves. Every WispEvent carries a UTC timestamp, so this needs no clock.
+        self._tool_started: dict[str, datetime] = {}
 
     def view_updated(self, snapshot: TuiViewSnapshot) -> None:
         self._visible_input_mode = snapshot.input_mode
         self.app.set_input_hint(snapshot.input_hint)
-        parts = [snapshot.status]
-        if snapshot.queued_follow_ups:
-            parts.append(f"queued: {snapshot.queued_follow_ups}")
-        if snapshot.last_session:
-            parts.append(f"session: {snapshot.last_session}")
-        self.app.set_status(" | ".join(parts))
-        self.app.set_running(snapshot.input_mode in _BUSY_MODES)
+        width = self.app.size.width if self.app.size.width > 0 else None
+        self.app.set_status(format_tui_footer_text(snapshot, width=width))
+        if snapshot.input_mode != "running":
+            self.app.hide_working_indicator()
+
+    def _tool_elapsed(self, call_id: str, finished: datetime) -> float | None:
+        # True wall-clock duration for a resolving tool call: result timestamp −
+        # request timestamp. Pops the start time so the map doesn't grow and a
+        # duplicate result (denial then error result for the same call) doesn't
+        # double-count. Returns None when the request was never seen (e.g. resume),
+        # leaving the card timer-less rather than showing a bogus duration.
+        started = self._tool_started.pop(call_id, None)
+        if started is None:
+            return None
+        return (finished - started).total_seconds()
 
     def _capture_submitted_input_mode(self) -> None:
         self._submitted_input_mode = self._visible_input_mode
@@ -619,7 +668,7 @@ class TextualTuiRenderer:
         self.app.write_user(prompt)
 
     def running(self) -> None:
-        self.app.write_dim("running...")
+        self.app.show_working_indicator()
 
     def queued_follow_up(self, count: int) -> None:
         self.app.write_dim(f"queued follow-up #{count}")
@@ -649,12 +698,15 @@ class TextualTuiRenderer:
         self.app.write_notice("Quit requested; denying pending tool request.")
 
     def send_failed(self, action: str, error: object) -> None:
+        self.app.hide_working_indicator()
         self.app.write_error(f"failed to send {action}: {error}")
 
     def shutdown_failed(self, error: object) -> None:
+        self.app.hide_working_indicator()
         self.app.write_error(f"shutdown failed: {error}")
 
     def cancelled(self) -> None:
+        self.app.hide_working_indicator()
         self.app.write_notice("cancelled")
 
     def token_delta(self, delta: str) -> None:
@@ -666,6 +718,7 @@ class TextualTuiRenderer:
         self.app.flush_stream()
 
     def approval_request(self, event: ToolApprovalRequested) -> None:
+        self.app.hide_working_indicator()
         self.app.write_notice(
             f"? approval required {event.name} ({event.safety}) {event.arguments}"
         )
@@ -675,39 +728,59 @@ class TextualTuiRenderer:
         # results, and approvals render as distinct, semantically-styled lines
         # instead of an undifferentiated str(event) repr.
         if isinstance(event, AssistantMessage):
+            self.app.hide_working_indicator()
             self.app.write_assistant(event.content)
         elif isinstance(event, ToolCallRequested):
-            self.app.write_labeled("→ tool", f"{event.name} {event.arguments}", role="tool")
+            # Mount the evolving card; approval/result mutate it in place. Record
+            # the request time so the card can show its true duration on resolve.
+            self._tool_started[event.call_id] = event.timestamp
+            self.app.mount_tool_call(event.call_id, event.name, event.arguments)
         elif isinstance(event, ToolApprovalResolved):
-            if event.approved:
-                self.app.write_labeled("✓ approved", event.name, role="approved")
-            else:
-                suffix = f"{event.name}: {event.reason}" if event.reason else event.name
-                self.app.write_labeled("! denied", suffix, role="denied")
+            # Only a denial changes the card here: an approval leaves it pending
+            # until the result lands (the tool still has to run). A denial short-
+            # circuits to an error result, but flip the card to "denied" now so the
+            # reason shows immediately rather than as a generic error line.
+            if not event.approved:
+                self.app.resolve_tool_call(
+                    event.call_id,
+                    "denied",
+                    detail=event.reason or "denied",
+                    elapsed=self._tool_elapsed(event.call_id, event.timestamp),
+                )
         elif isinstance(event, ToolResultReady):
-            label = "✗ tool" if event.is_error else "✓ tool"
-            role = "denied" if event.is_error else "approved"
-            self.app.write_labeled(label, f"{event.name}: {_first_line(event.output)}", role=role)
+            status = "error" if event.is_error else "done"
+            self.app.resolve_tool_call(
+                event.call_id,
+                status,
+                detail=_first_line(event.output),
+                elapsed=self._tool_elapsed(event.call_id, event.timestamp),
+            )
         elif isinstance(event, ErrorEvent):
+            self.app.hide_working_indicator()
             self.app.write_error(f"error: {event.message}")
         elif isinstance(event, RpcCommandFinished) and not event.ok:
+            self.app.hide_working_indicator()
             self.app.write_error(f"command failed: {event.error or event.command_id}")
         # Framing/plumbing events (RpcCommandStarted, a successful RpcCommandFinished,
         # AgentStarted, ToolExecutionStarted/Ended, SessionSaved) are intentionally
         # not rendered. They are session/RPC audit, not conversation — and the active
-        # session id already lives in the status bar, so a per-turn "session saved:"
+        # session id already lives in the footer, so a per-turn "session saved:"
         # line is pure redundancy. Dropping them keeps the transcript conversational.
 
     def rpc_event_reader_failed(self, error: str) -> None:
+        self.app.hide_working_indicator()
         self.app.write_error(f"RPC event reader failed: {error}")
 
     def rpc_stream_ended_before_command(self, command_id: str) -> None:
+        self.app.hide_working_indicator()
         self.app.write_error(f"RPC stream ended before command finished: {command_id}")
 
     def rpc_stream_ended_before_shutdown(self, command_id: str) -> None:
+        self.app.hide_working_indicator()
         self.app.write_error(f"RPC stream ended before shutdown finished: {command_id}")
 
     def rpc_stream_ended_unexpectedly(self) -> None:
+        self.app.hide_working_indicator()
         self.app.write_error("RPC stream ended unexpectedly")
 
 

@@ -145,7 +145,9 @@ the provider-visible input stays auditable.
 uv run wisp tui
 ```
 
-A fullscreen Textual TUI built on the same RPC controller other integrations use. Adjust runtime
+A fullscreen Textual TUI built on the same RPC controller other integrations use. Its compact
+Pi-style footer shows the current working directory/session plus status, queued follow-ups, and
+provider/model; token/cost/context metrics will appear once Wisp exposes usage events. Adjust runtime
 settings with slash commands instead of up-front flags:
 
 ```text

@@ -16,11 +16,54 @@ Stage 2 replaces the append-only ``RichLog`` transcript with a
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from textual.app import ComposeResult
 from textual.await_complete import AwaitComplete
 from textual.containers import VerticalScroll
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Markdown, Static
+
+from wisp.tui.rendering import _markup_escape
+
+
+def _format_duration(seconds: float) -> str:
+    """Human-terse elapsed time for a tool card: `0.3s`, `1.2s`, `12s`, `1m03s`.
+
+    Sub-10s calls keep one decimal (a file read is often ~0.3s and the decimal is
+    meaningful there); past 10s the decimal is noise, so it's dropped; past a
+    minute it rolls to `Nm SSs`. Negative inputs (clock skew across the RPC
+    boundary) clamp to 0.
+    """
+
+    seconds = max(seconds, 0.0)
+    if seconds < 10:
+        return f"{seconds:.1f}s"
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m{secs:02d}s"
+
+
+def _summarize_arguments(arguments: object, *, limit: int = 48) -> str:
+    """Render a tool call's arguments as a terse `k=v, k=v` summary.
+
+    Values are stringified and clipped so a card stays one line; a long single
+    value (a pasted blob, a big path) is truncated with an ellipsis rather than
+    wrapping the card. Non-mapping arguments fall back to their repr.
+    """
+
+    if not isinstance(arguments, Mapping):
+        text = str(arguments)
+        return text if len(text) <= limit else f"{text[: limit - 1]}…"
+    parts: list[str] = []
+    for key, value in arguments.items():
+        text = str(value)
+        if len(text) > limit:
+            text = f"{text[: limit - 1]}…"
+        parts.append(f"{key}={text}")
+    return ", ".join(parts)
 
 
 class Transcript(VerticalScroll):
@@ -93,6 +136,148 @@ class LineMessage(Static):
         label = _ROLE_LABELS.get(role, "")
         if label:
             self.border_title = label
+
+
+class ToolCard(Static):
+    """One evolving transcript card for a single tool call, keyed by call_id.
+
+    A tool call emits up to three events sharing a call_id — request, an optional
+    approval resolution (only for safety-gated tools), and a result. Rather than
+    mint a separate line per event, one ``ToolCard`` is mounted on the request and
+    then *mutated in place* as the later events arrive. The card carries its status
+    in a leading glyph plus the role CSS class (which colors the left rule), so the
+    whole lifecycle reads as one line transitioning pending → running → done/error
+    instead of three stacked cards the reader has to reconcile.
+
+    Parallel calls each own a stable card regardless of finish order, because the
+    registry (in ``TextualTui``) routes every event to the card for its call_id.
+    """
+
+    # status → (leading glyph, role class). The role class drives the left-rule
+    # color via the shared `.message--{role}` CSS in TextualTui.
+    _STATUS: dict[str, tuple[str, str]] = {
+        "pending": ("⋯", "tool"),
+        "denied": ("✗", "denied"),
+        "error": ("✗", "denied"),
+        "done": ("✓", "approved"),
+    }
+    _TICK = 1.0  # the running counter only needs whole-second granularity
+
+    def __init__(self, name: str, arguments: object) -> None:
+        super().__init__("")
+        self._name = name
+        self._summary = _summarize_arguments(arguments)
+        self._detail = ""
+        self._role = ""
+        self._glyph = "⋯"
+        # While running, `_elapsed` is a live whole-second tick count (looks alive,
+        # exact precision doesn't matter mid-flight). On resolve it's replaced by
+        # the true wall-clock duration derived from event timestamps (see
+        # `set_state(elapsed=…)`), so the number that rests on screen is honest.
+        self._elapsed: float | None = None
+        self._timer: Timer | None = None
+        self.set_state("pending")
+
+    def on_mount(self) -> None:
+        # A pending card ticks a running counter; a card that mounts already
+        # resolved (e.g. rebuilt from history) has no timer to start.
+        if self._role == "tool":
+            self._elapsed = 0.0
+            self._timer = self.set_interval(self._TICK, self._tick)
+            self._repaint()
+
+    def on_unmount(self) -> None:
+        self._stop_timer()
+
+    def _stop_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _tick(self) -> None:
+        self._elapsed = (self._elapsed or 0.0) + self._TICK
+        self._repaint()
+
+    def set_state(self, status: str, *, detail: str = "", elapsed: float | None = None) -> None:
+        """Transition the card to a new status, swapping glyph, color, and detail.
+
+        ``detail`` overrides the argument summary (used to show a denial reason or
+        a one-line result). ``elapsed`` is the true wall-clock duration (from the
+        request/result event timestamps); passing it freezes the live counter at
+        the honest value and stops the per-card timer. The role CSS class is
+        swapped rather than added so the left-rule color reflects only the current
+        state.
+        """
+
+        glyph, role = self._STATUS.get(status, self._STATUS["pending"])
+        self._glyph = glyph
+        if detail:
+            self._detail = detail
+        if elapsed is not None:
+            # Terminal state: freeze at the true duration and stop ticking.
+            self._elapsed = elapsed
+            self._stop_timer()
+        if role != self._role:
+            if self._role:
+                self.remove_class(f"message--{self._role}")
+            self.add_class("message", f"message--{role}")
+            self._role = role
+        self.border_title = _ROLE_LABELS.get(role, "tool")
+        self._repaint()
+
+    def _repaint(self) -> None:
+        # name is a fixed tool identifier; summary/detail are escaped as untrusted
+        # payload (a path or output line the model or a file supplied), preserving
+        # the escape-at-boundary invariant the transcript relies on.
+        body = self._detail or self._summary
+        text = f"{self._glyph} [b]{_markup_escape(self._name)}[/b]"
+        if body:
+            text += f"  [dim]{_markup_escape(body)}[/dim]"
+        if self._elapsed is not None:
+            text += f" [dim]· {_format_duration(self._elapsed)}[/dim]"
+        self.update(text)
+
+
+class WorkingMessage(Static):
+    """Transient working indicator: a spinner, a steady label, and an elapsed timer.
+
+    The spinner is the classic 10-frame braille cycle, whose lit dots rotate
+    around a single cell so the eye reads smooth rotation rather than a blink.
+    Elapsed seconds are derived from the tick count (frames × interval), not a
+    wall clock — keeping the TUI layer clock-free and the counter monotonic. The
+    spinner animates every frame; the label re-renders only when the whole-second
+    count changes, so the counter ticks once a second without stuttering the
+    spinner.
+    """
+
+    _FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+    _INTERVAL = 0.08  # ~12.5 fps: fluid braille rotation without churning the CPU
+
+    def __init__(self) -> None:
+        super().__init__("")
+        self.add_class("message", "message--dim")
+        # A single monotonic tick counter drives everything: the spinner frame is
+        # ticks % len(frames), and elapsed seconds is ticks × interval.
+        self._ticks = 0
+        self._timer: Timer | None = None
+        self._render_frame()
+
+    def on_mount(self) -> None:
+        self._timer = self.set_interval(self._INTERVAL, self._tick)
+
+    def on_unmount(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _tick(self) -> None:
+        self._ticks += 1
+        self._render_frame()
+
+    def _render_frame(self) -> None:
+        spinner = self._FRAMES[self._ticks % len(self._FRAMES)]
+        seconds = int(self._ticks * self._INTERVAL)
+        self.update(f"[$accent]{spinner}[/$accent] Working… [dim]{seconds}s[/dim]")
 
 
 class StreamMessage(Widget):

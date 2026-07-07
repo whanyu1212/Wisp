@@ -330,6 +330,37 @@ def test_tui_shell_provider_and_model_commands_configure_future_prompts() -> Non
     anyio.run(run)
 
 
+def test_tui_shell_provider_and_model_updates_footer_snapshots() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.snapshots: list[TuiViewSnapshot] = []
+
+        def view_updated(self, snapshot: TuiViewSnapshot) -> None:
+            self.snapshots.append(snapshot)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from(["/provider openai", "/model gpt-test", "/quit"]),
+            provider="fake",
+        )
+
+        await shell.run()
+
+        assert any(
+            snapshot.provider == "openai" and snapshot.model is None
+            for snapshot in renderer.snapshots
+        )
+        assert renderer.snapshots[-1].provider == "openai"
+        assert renderer.snapshots[-1].model == "gpt-test"
+
+    anyio.run(run)
+
+
 def test_tui_shell_provider_command_waits_for_configure_success() -> None:
     async def run() -> None:
         controller = ScriptedController(
