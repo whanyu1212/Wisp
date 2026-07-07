@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from textual.await_complete import AwaitComplete
-from textual.widgets import Input
+from textual.widgets import Input, LoadingIndicator, Static
 
 from tests.tui_support import *
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
-from wisp.tui.widgets import LineMessage, StreamMessage, Transcript
+from wisp.tui.widgets import _ROLE_LABELS, LineMessage, StreamMessage, Transcript
 
 
 def _transcript_texts(app: TextualTui) -> list[str]:
@@ -32,6 +32,34 @@ def _transcript_styles(app: TextualTui) -> str:
         if isinstance(child, LineMessage):
             styles.extend(str(span.style) for span in child.render().spans)
     return "\n".join(styles)
+
+
+def _transcript_role_class(child: object) -> str | None:
+    """The message--<role> class on a transcript child, or None if absent."""
+
+    if not hasattr(child, "classes"):
+        return None
+    return next((c for c in child.classes if c.startswith("message--")), None)
+
+
+def _transcript_cards(app: TextualTui) -> list[tuple[str | None, object]]:
+    """(role class, border_title) for every mounted transcript card."""
+
+    transcript = app.query_one("#transcript", Transcript)
+    return [(_transcript_role_class(c), c.border_title) for c in transcript.children]
+
+
+def _cards_for_events(events: list[object]) -> list[tuple[str | None, object]]:
+    # Drive events through a live app and return each card's role class + title.
+    async def scenario() -> list[tuple[str | None, object]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            for event in events:
+                renderer.event(event)
+            await pilot.pause()
+            return _transcript_cards(app_instance)
+
+    return anyio.run(scenario)
 
 
 def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
@@ -699,6 +727,182 @@ def test_textual_streamed_and_line_messages_use_distinct_widgets() -> None:
     assert "LineMessage" in kinds
 
 
+def test_textual_line_messages_carry_role_classes() -> None:
+    # Stage 3: every event type maps to a message--<role> class so the card CSS
+    # can style it. The classes are the styling contract; assert each is present.
+    cards = _cards_for_events(
+        [
+            AssistantMessage(content="hi"),
+            ToolCallRequested(call_id="c1", name="bash", arguments={}),
+            ToolResultReady(call_id="c1", name="bash", output="ok", is_error=False),
+            ToolResultReady(call_id="c2", name="bash", output="boom", is_error=True),
+            ToolApprovalResolved(call_id="c3", name="edit", approved=True, reason=None),
+            ToolApprovalResolved(call_id="c4", name="write", approved=False, reason="no"),
+            ErrorEvent(message="bad"),
+        ]
+    )
+    role_classes = [role for role, _ in cards]
+    assert role_classes == [
+        "message--assistant",
+        "message--tool",
+        "message--approved",  # successful tool result
+        "message--denied",  # errored tool result
+        "message--approved",  # approval granted
+        "message--denied",  # approval refused
+        "message--error",
+    ]
+
+
+def test_textual_line_message_border_title_from_role_labels() -> None:
+    # Stage 3: the card's role label comes ONLY from _ROLE_LABELS (fixed literals),
+    # never from untrusted payload — so it's safe as border chrome.
+    cards = _cards_for_events(
+        [
+            AssistantMessage(content="hi"),
+            ToolCallRequested(call_id="c1", name="bash", arguments={}),
+            ErrorEvent(message="bad"),
+        ]
+    )
+    titles = [title for _, title in cards]
+    assert titles == [_ROLE_LABELS["assistant"], _ROLE_LABELS["tool"], _ROLE_LABELS["error"]]
+
+
+def test_textual_dim_and_session_rows_have_no_card_title() -> None:
+    # Quiet meta rows (running… notices, session-saved) map to an empty label and
+    # stay borderless — no title chrome, so they read as ambient, not as turns.
+    async def scenario() -> list[object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()  # a "dim" row
+            renderer.event(  # a "session" row
+                SessionSaved(session_id="sess-1", path=Path("/tmp/sess.json"))
+            )
+            await pilot.pause()
+            return [title for _, title in _transcript_cards(app_instance)]
+
+    titles = anyio.run(scenario)
+    assert titles == [None, None]
+
+
+def test_textual_stream_message_carries_the_assistant_card() -> None:
+    # The streamed turn wears the same card as a finalized assistant line, so the
+    # bubble looks identical before and after finalize.
+    async def scenario() -> tuple[str | None, object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("partial answer")
+            await pilot.pause()
+            (card,) = _transcript_cards(app_instance)
+            return card
+
+    role, title = anyio.run(scenario)
+    assert role == "message--assistant"
+    assert title == _ROLE_LABELS["assistant"]
+
+
+def test_textual_card_css_resolves_under_the_light_theme() -> None:
+    # The app starts on the dark theme, so card CSS is only exercised in light on a
+    # runtime switch. Guard that the card colors resolve (bad CSS fails app startup)
+    # AND track the light palette, not dark's — so a future theme edit that drops a
+    # variable the cards use is caught in CI, not only at runtime.
+    async def scenario() -> tuple[object, object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 16)) as pilot:
+            app_instance.theme = "wisp-light"
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={}))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            (tool_card,) = transcript.children
+            _kind, color = tool_card.styles.border_top
+            return color, tool_card.styles.background
+
+    border_color, background = anyio.run(scenario)
+    # tool cards use $accent; light wisp accent is #2f8f8f, dark is #3fb8b8.
+    assert border_color.hex.lower() == "#2f8f8f"
+    assert background is not None  # $surface resolved, no startup failure
+
+
+def _status_after_snapshots(snapshots: list[TuiViewSnapshot]) -> tuple[list[bool], str, bool]:
+    # Apply each snapshot in order, pausing between, and return the spinner's
+    # display state after each, plus the final status text and whether the Input
+    # kept focus (the spinner must never steal it).
+    async def scenario() -> tuple[list[bool], str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            activity = app_instance.query_one("#activity", LoadingIndicator)
+            status = app_instance.query_one("#status", Static)
+            displays: list[bool] = []
+            for snapshot in snapshots:
+                renderer.view_updated(snapshot)
+                await pilot.pause()
+                displays.append(bool(activity.display))
+            focus_ok = app_instance.focused is app_instance.query_one("#input", Input)
+            return displays, status.render().plain, focus_ok
+
+    return anyio.run(scenario)
+
+
+def test_textual_status_bar_shows_spinner_while_running() -> None:
+    # Stage 4: the activity spinner is visible only while a prompt runs.
+    displays, _, focus_ok = _status_after_snapshots(
+        [TuiViewSnapshot(status="running", input_hint="wisp(running)> ", input_mode="running")]
+    )
+    assert displays == [True]
+    assert focus_ok  # spinner did not steal focus from the Input
+
+
+def test_textual_status_bar_hides_spinner_at_idle() -> None:
+    # Hidden at mount (before any snapshot) and in idle mode.
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            activity = app_instance.query_one("#activity", LoadingIndicator)
+            at_mount = bool(activity.display)
+            renderer.view_updated(TuiViewSnapshot(status="idle", input_hint="wisp> "))
+            await pilot.pause()
+            return at_mount, bool(activity.display)
+
+    at_mount, at_idle = anyio.run(scenario)
+    assert at_mount is False
+    assert at_idle is False
+
+
+def test_textual_status_bar_toggles_spinner_off_after_running() -> None:
+    # running -> idle: the spinner comes on then goes off.
+    displays, _, _ = _status_after_snapshots(
+        [
+            TuiViewSnapshot(status="running", input_hint="wisp(running)> ", input_mode="running"),
+            TuiViewSnapshot(status="idle", input_hint="wisp> ", input_mode="idle"),
+        ]
+    )
+    assert displays == [True, False]
+
+
+def test_textual_status_bar_renders_status_queued_and_session() -> None:
+    # The status text keeps the pipe-joined status + queued + session summary.
+    _, status_text, _ = _status_after_snapshots(
+        [
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp> ",
+                input_mode="running",
+                queued_follow_ups=2,
+                last_session="sess.json",
+            )
+        ]
+    )
+    assert status_text == "running | queued: 2 | session: sess.json"
+
+
+def test_textual_status_bar_does_not_spin_during_approval() -> None:
+    # Locked decision: the spinner is running-only. Approval mode gets its own
+    # input hint, not the spinner.
+    displays, _, _ = _status_after_snapshots(
+        [TuiViewSnapshot(status="approval", input_hint="approve? y/N ", input_mode="approval")]
+    )
+    assert displays == [False]
+
+
 def _fill_transcript(renderer: TextualTuiRenderer, count: int) -> None:
     # Mount enough lines to overflow the viewport so the transcript can scroll.
     for i in range(count):
@@ -832,6 +1036,88 @@ def test_textual_returning_to_the_bottom_resumes_following() -> None:
 
     scroll_y, max_scroll_y = anyio.run(scenario)
     assert scroll_y >= max_scroll_y - 3  # following resumed
+
+
+def test_textual_scrollback_keys_reach_transcript_and_compose_with_follow() -> None:
+    # Stage 5 load-bearing test: with the Input focused (default), scrollback keys
+    # must reach the transcript AND keep the follow flag correct. PageUp scrolls up
+    # and clears follow; End returns to the bottom and restores it; a subsequent
+    # stream then re-pins to the tail. Focus never leaves the Input.
+    async def scenario() -> dict[str, object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            input_widget = app_instance.query_one("#input", Input)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            start_y = transcript.scroll_y
+
+            await pilot.press("pageup")
+            await pilot.pause()
+            after_pageup_y = transcript.scroll_y
+            after_pageup_follow = transcript._follow
+            focus_after_pageup = app_instance.focused is input_widget
+
+            await pilot.press("end")
+            await pilot.pause()
+            after_end_y = transcript.scroll_y
+            after_end_follow = transcript._follow
+
+            renderer.token_delta("tail line\n\n")
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+
+            return {
+                "scrolled_up": after_pageup_y < start_y,
+                "follow_cleared": after_pageup_follow is False,
+                "focus_kept": focus_after_pageup,
+                "end_at_bottom": after_end_y >= transcript.max_scroll_y - 3,
+                "follow_restored": after_end_follow is True,
+                "stream_repinned": transcript.scroll_y >= transcript.max_scroll_y - 3,
+            }
+
+    r = anyio.run(scenario)
+    assert r["scrolled_up"], "PageUp did not scroll the transcript"
+    assert r["follow_cleared"], "scrolling up should clear the follow flag"
+    assert r["focus_kept"], "scrollback must not steal focus from the Input"
+    assert r["end_at_bottom"], "End did not return to the bottom"
+    assert r["follow_restored"], "returning to the bottom should restore follow"
+    assert r["stream_repinned"], "a stream after End should re-pin to the tail"
+
+
+def test_textual_home_key_scrolls_transcript_over_input_cursor() -> None:
+    # home is priority-bound to the transcript, so it jumps the transcript to the
+    # top even while the Input has typed text — it does not move the input cursor.
+    async def scenario() -> tuple[float, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            input_widget = app_instance.query_one("#input", Input)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            await pilot.press(*"hello")  # type into the Input
+            await pilot.press("home")
+            await pilot.pause()
+            return transcript.scroll_y, input_widget.value
+
+    scroll_y, value = anyio.run(scenario)
+    assert scroll_y == 0  # transcript jumped to the top
+    assert value == "hello"  # input text untouched
+
+
+def test_textual_scroll_actions_are_safe_before_mount() -> None:
+    # The scroll actions are None-guarded, so invoking them before on_mount wires
+    # the transcript is a no-op, not a crash.
+    app = TextualTui()
+    app.action_scroll_transcript_page_up()
+    app.action_scroll_transcript_page_down()
+    app.action_scroll_transcript_home()
+    app.action_scroll_transcript_end()
 
 
 def test_textual_tui_read_prompt_returns_submitted_input() -> None:

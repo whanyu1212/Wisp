@@ -7,8 +7,8 @@ from collections.abc import Awaitable, Callable
 import anyio
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
-from textual.widgets import Footer, Header, Input, Static
+from textual.containers import Container, Horizontal, Vertical
+from textual.widgets import Footer, Header, Input, LoadingIndicator, Static
 
 from wisp.events import (
     AssistantMessage,
@@ -45,6 +45,11 @@ _ROLE_FALLBACK: dict[str, str] = {
     "denied": "red",
 }
 
+# Input modes (TuiViewSnapshot.input_mode values, from state._InputMode) during
+# which the activity spinner is shown. Running-only: the approval prompt gets its
+# own input hint instead. Kept as the single source of truth for the spinner.
+_BUSY_MODES = frozenset({"running"})
+
 
 class TextualTui(App[None]):
     """Minimal Textual shell that adapts Wisp's existing TUI loop."""
@@ -59,11 +64,73 @@ class TextualTui(App[None]):
         border: round $accent;
     }
 
-    #status {
+    /* Message cards: an L-spine (top + left border) carries the role label on
+       the top edge; quiet meta rows stay borderless. Colors come only from
+       theme vars present in BOTH light and dark themes. */
+    .message {
+        height: auto;
+        margin: 0 1;
+        padding: 0 1;
+        border-title-color: $text-muted;
+        border-title-style: bold;
+    }
+
+    .message--user {
+        border-top: hkey $primary;
+        border-left: thick $primary;
+        background: $primary 8%;
+    }
+
+    .message--assistant {
+        border-top: hkey $success;
+        border-left: thick $success;
+        background: $panel;
+    }
+
+    .message--tool {
+        border-top: hkey $accent;
+        border-left: thick $accent;
+        background: $surface;
+    }
+
+    .message--approved {
+        border-left: thick $success;
+    }
+
+    .message--denied,
+    .message--error {
+        border-top: hkey $error;
+        border-left: thick $error;
+        background: $error 8%;
+    }
+
+    .message--notice {
+        border-left: thick $accent;
+    }
+
+    .message--dim,
+    .message--session {
+        border-left: none;
+        background: transparent;
+    }
+
+    #status-bar {
         height: auto;
         padding: 0 1;
         background: $panel;
         color: $text-muted;
+        align-vertical: middle;
+    }
+
+    #status {
+        width: 1fr;
+        height: auto;
+    }
+
+    #activity {
+        width: auto;
+        height: 1;
+        color: $accent;
     }
 
     #input {
@@ -78,9 +145,19 @@ class TextualTui(App[None]):
 
     # priority=True so these fire even while the Input widget has focus;
     # otherwise Input swallows ctrl+d before it reaches the app bindings.
+    #
+    # Scrollback: the transcript is not in the focused Input's ancestor chain, so
+    # its own scroll bindings never fire — forward the keys from the app instead.
+    # home/end are priority=True to beat Input's cursor-jump bindings (ctrl+a /
+    # ctrl+e still move the cursor to line start/end); pageup/pagedown have no
+    # competing Input binding, so they bubble normally.
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", priority=True),
         Binding("ctrl+d", "eof", "EOF", priority=True),
+        Binding("pageup", "scroll_transcript_page_up", "Scroll up", show=False),
+        Binding("pagedown", "scroll_transcript_page_down", "Scroll down", show=False),
+        Binding("home", "scroll_transcript_home", "Scroll to top", priority=True, show=False),
+        Binding("end", "scroll_transcript_end", "Scroll to bottom", priority=True, show=False),
     ]
 
     def __init__(self) -> None:
@@ -89,6 +166,7 @@ class TextualTui(App[None]):
             str | BaseException
         ](100)
         self._status: Static | None = None
+        self._activity: LoadingIndicator | None = None
         self._transcript: Transcript | None = None
         self._input: Input | None = None
         self._current_prompt = "wisp> "
@@ -110,7 +188,9 @@ class TextualTui(App[None]):
         yield Header(show_clock=True)
         with Vertical():
             yield Transcript(id="transcript")
-            yield Static("idle", id="status")
+            with Horizontal(id="status-bar"):
+                yield Static("idle", id="status")
+                yield LoadingIndicator(id="activity")
             with Container(id="input-row"):
                 yield Input(placeholder="wisp> ", id="input")
         yield Footer()
@@ -122,8 +202,10 @@ class TextualTui(App[None]):
         self._role_styles = role_styles(self.current_theme)
         self._transcript = self.query_one("#transcript", Transcript)
         self._status = self.query_one("#status", Static)
+        self._activity = self.query_one("#activity", LoadingIndicator)
+        self._activity.display = False  # hidden until a prompt runs
         self._input = self.query_one("#input", Input)
-        self._input.focus()
+        self._input.focus()  # keep the Input as the resting focus
         if self._runner is not None:
             self.run_worker(self._run_and_exit(), exclusive=True)
 
@@ -186,6 +268,26 @@ class TextualTui(App[None]):
     def action_eof(self) -> None:
         self._signal_input(EOFError(), action="EOF")
 
+    # Scrollback: delegate to the Transcript's own scroll actions. The Transcript
+    # keeps its follow-the-tail flag correct via watch_scroll_y — scrolling up
+    # clears it, scrolling to the end restores it — so we never touch _follow here.
+    # None-guarded like _mount_line for calls before on_mount wires the widget.
+    def action_scroll_transcript_page_up(self) -> None:
+        if self._transcript is not None:
+            self._transcript.action_page_up()
+
+    def action_scroll_transcript_page_down(self) -> None:
+        if self._transcript is not None:
+            self._transcript.action_page_down()
+
+    def action_scroll_transcript_home(self) -> None:
+        if self._transcript is not None:
+            self._transcript.action_scroll_home()
+
+    def action_scroll_transcript_end(self) -> None:
+        if self._transcript is not None:
+            self._transcript.action_scroll_end()
+
     def _signal_input(self, signal: BaseException, *, action: str) -> None:
         # send_nowait raises WouldBlock if the buffer is full; degrade to a
         # notice rather than crashing the Textual action handler.
@@ -204,6 +306,12 @@ class TextualTui(App[None]):
     def set_status(self, message: str) -> None:
         if self._status is not None:
             self._status.update(message)
+
+    def set_running(self, running: bool) -> None:
+        # Toggle the activity spinner's visibility (display, never mount/unmount —
+        # avoids the mount race). Driven off the snapshot's input_mode.
+        if self._activity is not None:
+            self._activity.display = running
 
     def set_input_hint(self, hint: str) -> None:
         self._current_prompt = hint
@@ -342,6 +450,7 @@ class TextualTuiRenderer:
         if snapshot.last_session:
             parts.append(f"session: {snapshot.last_session}")
         self.app.set_status(" | ".join(parts))
+        self.app.set_running(snapshot.input_mode in _BUSY_MODES)
 
     def _capture_submitted_input_mode(self) -> None:
         self._submitted_input_mode = self._visible_input_mode
