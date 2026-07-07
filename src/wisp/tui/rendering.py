@@ -521,9 +521,7 @@ class FullscreenTuiRenderer:
                 border_style="cyan",
             )
         )
-        layout["editor"].update(
-            Panel(self._input_text(), title="Editor", border_style="green")
-        )
+        layout["editor"].update(Panel(self._input_text(), title="Editor", border_style="green"))
         layout["footer"].update(self._footer_text())
         return layout
 

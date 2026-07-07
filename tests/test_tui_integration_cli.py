@@ -714,9 +714,7 @@ def test_textual_renderer_escapes_untrusted_event_payloads() -> None:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.event(
-                ToolCallRequested(
-                    call_id="c1", name="evil[/blue]", arguments={"k": "[red]x[/red]"}
-                )
+                ToolCallRequested(call_id="c1", name="evil[/blue]", arguments={"k": "[red]x[/red]"})
             )
             await pilot.pause()
             card = next(
