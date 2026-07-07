@@ -7,6 +7,7 @@ from textual.command import CommandPalette
 from textual.widgets import Input, LoadingIndicator, Static
 
 from tests.tui_support import *
+from wisp.events import AgentStarted, RpcCommandStarted
 from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 from wisp.tui.widgets import _ROLE_LABELS, LineMessage, StreamMessage, Transcript
@@ -520,6 +521,25 @@ def test_textual_renderer_dispatches_events_by_type() -> None:
     assert "command failed: nope" in rendered
 
 
+def test_textual_renderer_suppresses_rpc_framing_events() -> None:
+    # Framing/plumbing events are session/RPC audit, not conversation — they must
+    # NOT leak their repr into the transcript (regression: a catch-all else once
+    # dumped str(event) for every unhandled type). Only the assistant line shows.
+    rendered = _render_events_to_transcript(
+        [
+            RpcCommandStarted(command_id="cmd-1", command_type="prompt"),
+            AgentStarted(session_id="s1"),
+            RpcCommandFinished(command_id="cmd-1", command_type="prompt", ok=True),
+            AssistantMessage(content="the answer"),
+        ]
+    )
+
+    assert rendered == "assistant: the answer"  # framing events produced no lines
+    assert "RpcCommand" not in rendered
+    assert "AgentStarted" not in rendered
+    assert "command_id" not in rendered
+
+
 def test_textual_renderer_distinguishes_tool_call_from_result() -> None:
     # The old duck-typed event() collapsed these into indistinguishable lines.
     rendered = _render_events_to_transcript(
@@ -547,12 +567,13 @@ def test_textual_renderer_escapes_untrusted_event_payloads() -> None:
     assert "[bold]out[/bold]" in rendered
 
 
-def test_textual_renderer_falls_back_for_unhandled_events() -> None:
-    # An event type with no dedicated branch still renders (escaped) rather than
-    # vanishing — matching the previous fallback behavior.
+def test_textual_renderer_ignores_unhandled_framing_events() -> None:
+    # An event type with no dedicated branch is dropped, not dumped as its repr.
+    # TokenDelta is streaming plumbing (assistant text arrives via the streaming
+    # path, not event()); showing it in the transcript was the noise bug.
     rendered = _render_events_to_transcript([TokenDelta(delta="raw")])
 
-    assert "raw" in rendered
+    assert rendered == ""  # nothing rendered
 
 
 def _rendered_segment_styles(events: list[object]) -> str:
@@ -769,21 +790,33 @@ def test_textual_line_message_border_title_from_role_labels() -> None:
     assert titles == [_ROLE_LABELS["assistant"], _ROLE_LABELS["tool"], _ROLE_LABELS["error"]]
 
 
-def test_textual_dim_and_session_rows_have_no_card_title() -> None:
-    # Quiet meta rows (running… notices, session-saved) map to an empty label and
-    # stay borderless — no title chrome, so they read as ambient, not as turns.
+def test_textual_dim_rows_have_no_card_title() -> None:
+    # Quiet meta rows (running… notices) map to an empty label and stay borderless
+    # — no title chrome, so they read as ambient, not as turns.
     async def scenario() -> list[object]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()  # a "dim" row
-            renderer.event(  # a "session" row
-                SessionSaved(session_id="sess-1", path=Path("/tmp/sess.json"))
-            )
             await pilot.pause()
             return [title for _, title in _transcript_cards(app_instance)]
 
     titles = anyio.run(scenario)
-    assert titles == [None, None]
+    assert titles == [None]
+
+
+def test_textual_session_saved_is_not_rendered() -> None:
+    # SessionSaved is session/RPC audit, not conversation — the active session id
+    # already lives in the status bar, so a per-turn "session saved:" line is pure
+    # redundancy. The Textual renderer drops it, matching the line renderer.
+    async def scenario() -> list[object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(SessionSaved(session_id="sess-1", path=Path("/tmp/sess.json")))
+            await pilot.pause()
+            return _transcript_cards(app_instance)
+
+    cards = anyio.run(scenario)
+    assert cards == []
 
 
 def test_textual_stream_message_carries_the_assistant_card() -> None:
@@ -1275,9 +1308,119 @@ def test_textual_startup_shows_the_wordmark_banner() -> None:
 
     roles, texts = anyio.run(scenario)
     assert "message--banner" in roles  # the wordmark is a banner, not a card
-    # The banner carries the block-drawing wordmark; the tagline follows.
+    # The banner carries the block-drawing wordmark; a single tightened greeting
+    # line follows — tagline + the `/` command door + how to quit, all in one row.
     assert any("▄" in t for t in texts)
-    assert any("a quiet coding agent" in t for t in texts)
+    greeting = [t for t in texts if "a quiet coding agent" in t]
+    assert len(greeting) == 1
+    assert "press / for commands" in greeting[0]
+    assert "/quit to exit" in greeting[0]
+
+
+def test_textual_input_is_pinned_to_the_bottom() -> None:
+    # Regression: a wrapping Container defaulted to height:1fr and floated the
+    # input into the middle. The transcript should own the free space (1fr) while
+    # the input hugs the bottom rows.
+    async def scenario() -> tuple[int, int, int]:
+        app_instance = TextualTui()
+        async with app_instance.run_test(size=(74, 24)) as pilot:
+            await pilot.pause()
+            input_widget = app_instance.query_one("#input", Input)
+            transcript = app_instance.query_one("#transcript", Transcript)
+            return app_instance.size.height, input_widget.region.y, transcript.region.height
+
+    screen_h, input_top, transcript_h = anyio.run(scenario)
+    # The input sits in the last few rows; the transcript fills most of the height.
+    assert input_top >= screen_h - 4
+    assert transcript_h >= screen_h // 2
+
+
+def test_textual_input_placeholder_uses_the_prompt_glyph() -> None:
+    # The underline-only input leads with a `❯` glyph, not the verbose `wisp>`
+    # chrome. The shared semantic hint (wisp> / wisp(running)>) is mapped to a terse
+    # glyph placeholder in the Textual layer, so a mode change swaps the cue.
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            await pilot.pause()
+            input_widget = app_instance.query_one("#input", Input)
+            idle_placeholder = input_widget.placeholder
+            renderer.view_updated(TuiViewSnapshot(status="running", input_hint="wisp(running)> "))
+            await pilot.pause()
+            return idle_placeholder, input_widget.placeholder
+
+    idle_placeholder, running_placeholder = anyio.run(scenario)
+    assert idle_placeholder == "❯ "
+    assert running_placeholder == "❯ running…"
+
+
+def test_textual_input_has_no_box_border() -> None:
+    # The input is underline-only — a bottom rule, no four-sided box. Asserting the
+    # border is absent on the top/left/right edges (only bottom is styled) guards
+    # against a regression back to the heavy `tall` box.
+    async def scenario() -> object:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            await pilot.pause()
+            input_widget = app_instance.query_one("#input", Input)
+            return input_widget.styles.border
+
+    border = anyio.run(scenario)
+    # Textual's Edges exposes each side as an (edge_type, color) tuple; only the
+    # bottom edge carries a rule. top/left/right have an empty ("") edge type.
+    assert border.top[0] == ""
+    assert border.left[0] == ""
+    assert border.right[0] == ""
+    assert border.bottom[0] == "heavy"
+
+
+def test_textual_ctrl_y_copies_the_selection_to_the_clipboard() -> None:
+    # ctrl+c is bound to interrupt (shadowing Textual's default copy), so copy is
+    # on ctrl+y. A mouse-drag selection, copied with ctrl+y, reaches the clipboard.
+    from textual.geometry import Offset
+    from textual.selection import Selection
+
+    async def scenario() -> str | None:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(74, 22)) as pilot:
+            renderer.event(AssistantMessage(content="yank me"))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            message = next(c for c in transcript.children if isinstance(c, LineMessage))
+            app_instance.screen.selections = {message: Selection(Offset(0, 0), Offset(40, 0))}
+            await pilot.pause()
+
+            captured: list[str] = []
+            original = app_instance.copy_to_clipboard
+
+            def spy(text: str) -> None:
+                captured.append(text)
+                original(text)
+
+            app_instance.copy_to_clipboard = spy  # type: ignore[method-assign]
+            await pilot.press("ctrl+y")
+            await pilot.pause()
+            return captured[0] if captured else None
+
+    copied = anyio.run(scenario)
+    assert copied is not None
+    assert "yank me" in copied
+
+
+def test_textual_ctrl_y_with_no_selection_is_a_noop() -> None:
+    # Pressing copy with nothing selected must not crash (Textual raises SkipAction).
+    async def scenario() -> str:
+        app_instance = TextualTui()
+        async with app_instance.run_test(size=(74, 22)) as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            await pilot.press("ctrl+y")  # no selection
+            await pilot.press(*"ok")
+            await pilot.pause()
+            return input_widget.value
+
+    assert anyio.run(scenario) == "ok"
 
 
 def test_textual_header_shows_the_wisp_wordmark() -> None:
