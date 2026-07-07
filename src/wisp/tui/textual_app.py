@@ -162,9 +162,16 @@ class TextualTui(App[None]):
     # home/end are priority=True to beat Input's cursor-jump bindings (ctrl+a /
     # ctrl+e still move the cursor to line start/end); pageup/pagedown have no
     # competing Input binding, so they bubble normally.
+    #
+    # Copy: ctrl+c is ours (interrupt), which shadows Textual's default
+    # ctrl+c copy. Bind copy to ctrl+y ("yank") and super+c (macOS Cmd+C)
+    # instead, both to the screen's copy_text action, so a mouse-drag selection
+    # can be copied to the system clipboard. priority=True to fire while the
+    # Input has focus.
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", priority=True),
         Binding("ctrl+d", "eof", "EOF", priority=True),
+        Binding("ctrl+y,super+c", "screen.copy_text", "Copy selection", priority=True),
         Binding("pageup", "scroll_transcript_page_up", "Scroll up", show=False),
         Binding("pagedown", "scroll_transcript_page_down", "Scroll down", show=False),
         Binding("home", "scroll_transcript_home", "Scroll to top", priority=True, show=False),
@@ -566,7 +573,7 @@ class TextualTuiRenderer:
     def startup(self) -> None:
         self.app.write_banner(_WORDMARK)
         self.app.write_dim(_TAGLINE)
-        self.app.write_dim("Press / for commands · /quit to exit")
+        self.app.write_dim("Press / for commands · drag to select, ^y to copy · /quit to exit")
 
     def help(self) -> None:
         self.app.write_notice(_tui_help_text())

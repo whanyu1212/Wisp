@@ -1319,6 +1319,55 @@ def test_textual_input_is_pinned_to_the_bottom() -> None:
     assert transcript_h >= screen_h // 2
 
 
+def test_textual_ctrl_y_copies_the_selection_to_the_clipboard() -> None:
+    # ctrl+c is bound to interrupt (shadowing Textual's default copy), so copy is
+    # on ctrl+y. A mouse-drag selection, copied with ctrl+y, reaches the clipboard.
+    from textual.geometry import Offset
+    from textual.selection import Selection
+
+    async def scenario() -> str | None:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(74, 22)) as pilot:
+            renderer.event(AssistantMessage(content="yank me"))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            message = next(c for c in transcript.children if isinstance(c, LineMessage))
+            app_instance.screen.selections = {message: Selection(Offset(0, 0), Offset(40, 0))}
+            await pilot.pause()
+
+            captured: list[str] = []
+            original = app_instance.copy_to_clipboard
+
+            def spy(text: str) -> None:
+                captured.append(text)
+                original(text)
+
+            app_instance.copy_to_clipboard = spy  # type: ignore[method-assign]
+            await pilot.press("ctrl+y")
+            await pilot.pause()
+            return captured[0] if captured else None
+
+    copied = anyio.run(scenario)
+    assert copied is not None
+    assert "yank me" in copied
+
+
+def test_textual_ctrl_y_with_no_selection_is_a_noop() -> None:
+    # Pressing copy with nothing selected must not crash (Textual raises SkipAction).
+    async def scenario() -> str:
+        app_instance = TextualTui()
+        async with app_instance.run_test(size=(74, 22)) as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            await pilot.press("ctrl+y")  # no selection
+            await pilot.press(*"ok")
+            await pilot.pause()
+            return input_widget.value
+
+    assert anyio.run(scenario) == "ok"
+
+
 def test_textual_header_shows_the_wisp_wordmark() -> None:
     # The header title is the lowercase wordmark; the clock chrome is gone.
     async def scenario() -> tuple[str, str]:
