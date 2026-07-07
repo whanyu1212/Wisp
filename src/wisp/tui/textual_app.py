@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable, Iterable
 import anyio
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, LoadingIndicator, Static
 
@@ -198,12 +198,15 @@ class TextualTui(App[None]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with Vertical():
+            # transcript takes all remaining height (1fr); the status bar and the
+            # input hug the bottom (height: auto). The input is yielded directly —
+            # a wrapping Container would default to height: 1fr and float the input
+            # into the middle of the screen.
             yield Transcript(id="transcript")
             with Horizontal(id="status-bar"):
                 yield Static("idle", id="status")
                 yield LoadingIndicator(id="activity")
-            with Container(id="input-row"):
-                yield Input(placeholder="wisp> ", id="input")
+            yield Input(placeholder="wisp> ", id="input")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -444,9 +447,6 @@ class TextualTui(App[None]):
     def write_assistant(self, message: str) -> None:
         self.write_labeled("assistant:", message, role="assistant")
 
-    def write_event(self, message: str) -> None:
-        self._mount_line("dim", _markup_escape(message))
-
     def write_labeled(self, label: str, message: str = "", *, role: str) -> None:
         # `label` is a fixed literal styled with the role's theme color; `message`
         # is untrusted and escaped, preserving the escape-at-boundary invariant.
@@ -656,8 +656,10 @@ class TextualTuiRenderer:
             self.app.write_dim(f"session saved: {_compact_session_path(event.path)}")
         elif isinstance(event, RpcCommandFinished) and not event.ok:
             self.app.write_error(f"command failed: {event.error or event.command_id}")
-        else:
-            self.app.write_event(str(event))
+        # Framing/plumbing events (RpcCommandStarted, a successful RpcCommandFinished,
+        # AgentStarted, ToolExecutionStarted/Ended) are intentionally not rendered —
+        # matching the line renderer, which drops them. They are session/RPC audit,
+        # not conversation, so dumping their repr into the transcript is just noise.
 
     def rpc_event_reader_failed(self, error: str) -> None:
         self.app.write_error(f"RPC event reader failed: {error}")

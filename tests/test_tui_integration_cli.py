@@ -7,6 +7,7 @@ from textual.command import CommandPalette
 from textual.widgets import Input, LoadingIndicator, Static
 
 from tests.tui_support import *
+from wisp.events import AgentStarted, RpcCommandStarted
 from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 from wisp.tui.widgets import _ROLE_LABELS, LineMessage, StreamMessage, Transcript
@@ -520,6 +521,25 @@ def test_textual_renderer_dispatches_events_by_type() -> None:
     assert "command failed: nope" in rendered
 
 
+def test_textual_renderer_suppresses_rpc_framing_events() -> None:
+    # Framing/plumbing events are session/RPC audit, not conversation — they must
+    # NOT leak their repr into the transcript (regression: a catch-all else once
+    # dumped str(event) for every unhandled type). Only the assistant line shows.
+    rendered = _render_events_to_transcript(
+        [
+            RpcCommandStarted(command_id="cmd-1", command_type="prompt"),
+            AgentStarted(session_id="s1"),
+            RpcCommandFinished(command_id="cmd-1", command_type="prompt", ok=True),
+            AssistantMessage(content="the answer"),
+        ]
+    )
+
+    assert rendered == "assistant: the answer"  # framing events produced no lines
+    assert "RpcCommand" not in rendered
+    assert "AgentStarted" not in rendered
+    assert "command_id" not in rendered
+
+
 def test_textual_renderer_distinguishes_tool_call_from_result() -> None:
     # The old duck-typed event() collapsed these into indistinguishable lines.
     rendered = _render_events_to_transcript(
@@ -547,12 +567,13 @@ def test_textual_renderer_escapes_untrusted_event_payloads() -> None:
     assert "[bold]out[/bold]" in rendered
 
 
-def test_textual_renderer_falls_back_for_unhandled_events() -> None:
-    # An event type with no dedicated branch still renders (escaped) rather than
-    # vanishing — matching the previous fallback behavior.
+def test_textual_renderer_ignores_unhandled_framing_events() -> None:
+    # An event type with no dedicated branch is dropped, not dumped as its repr.
+    # TokenDelta is streaming plumbing (assistant text arrives via the streaming
+    # path, not event()); showing it in the transcript was the noise bug.
     rendered = _render_events_to_transcript([TokenDelta(delta="raw")])
 
-    assert "raw" in rendered
+    assert rendered == ""  # nothing rendered
 
 
 def _rendered_segment_styles(events: list[object]) -> str:
@@ -1278,6 +1299,24 @@ def test_textual_startup_shows_the_wordmark_banner() -> None:
     # The banner carries the block-drawing wordmark; the tagline follows.
     assert any("▄" in t for t in texts)
     assert any("a quiet coding agent" in t for t in texts)
+
+
+def test_textual_input_is_pinned_to_the_bottom() -> None:
+    # Regression: a wrapping Container defaulted to height:1fr and floated the
+    # input into the middle. The transcript should own the free space (1fr) while
+    # the input hugs the bottom rows.
+    async def scenario() -> tuple[int, int, int]:
+        app_instance = TextualTui()
+        async with app_instance.run_test(size=(74, 24)) as pilot:
+            await pilot.pause()
+            input_widget = app_instance.query_one("#input", Input)
+            transcript = app_instance.query_one("#transcript", Transcript)
+            return app_instance.size.height, input_widget.region.y, transcript.region.height
+
+    screen_h, input_top, transcript_h = anyio.run(scenario)
+    # The input sits in the last few rows; the transcript fills most of the height.
+    assert input_top >= screen_h - 4
+    assert transcript_h >= screen_h // 2
 
 
 def test_textual_header_shows_the_wisp_wordmark() -> None:
