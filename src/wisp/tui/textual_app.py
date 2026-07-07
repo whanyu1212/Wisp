@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 
 import anyio
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
+from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, LoadingIndicator, Static
 
 from wisp.events import (
@@ -217,11 +218,80 @@ class TextualTui(App[None]):
             self._role_styles = role_styles(self.current_theme)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.submit_command_line(event.value)
+
+    def submit_command_line(self, text: str) -> None:
+        """Submit a line as if the user typed it and pressed Enter.
+
+        The single entry point for both a real Input submission and a command
+        palette selection, so `/command` semantics stay sourced only from the
+        shell's typed-line handling. Clears the Input, fires the submit hook (so
+        the input mode is captured), then queues the line. send_nowait degrades
+        to a notice on a full buffer rather than crashing the action handler.
+        """
         if self._input is not None:
             self._input.value = ""
         if self._on_submit is not None:
             self._on_submit()
-        await self._prompt_send.send(event.value)
+        try:
+            self._prompt_send.send_nowait(text)
+        except anyio.WouldBlock:
+            self.write_error("input buffer full; command dropped")
+
+    def prefill_command(self, prefix: str) -> None:
+        """Put a command prefix in the Input, cursor at the end, without submitting.
+
+        Used by palette entries for argument-bearing commands (`/model `,
+        `/provider `): the user completes the value and presses Enter through the
+        normal typed path.
+        """
+        if self._input is not None:
+            self._input.value = prefix
+            self._input.cursor_position = len(prefix)
+            self._input.focus()
+
+    def get_system_commands(self, screen: Screen[object]) -> Iterable[SystemCommand]:
+        # Surface the TUI's slash commands in the ctrl+p command palette. Each
+        # entry routes through submit_command_line / prefill_command — the same
+        # typed-line path — so the shell remains the single source of command
+        # semantics (pending-approval / running guards included). Keep Textual's
+        # built-ins (Theme, Keys, …) EXCEPT its raw "Quit": that calls action_quit
+        # -> app.exit() directly, bypassing the shell's graceful shutdown (session
+        # save + RPC teardown). We surface our own "/quit" instead.
+        for command in super().get_system_commands(screen):
+            if command.title != "Quit":
+                yield command
+        yield SystemCommand(
+            "Help", "Show the TUI commands", lambda: self.submit_command_line("/help")
+        )
+        yield SystemCommand("Quit", "Quit the TUI", lambda: self.submit_command_line("/quit"))
+        yield SystemCommand(
+            "Auth status", "Show credential status", lambda: self.submit_command_line("/auth")
+        )
+        yield SystemCommand(
+            "Provider: show current",
+            "Show the active provider",
+            lambda: self.submit_command_line("/provider"),
+        )
+        yield SystemCommand(
+            "Provider: switch…",
+            "Prefill /provider to switch provider",
+            lambda: self.prefill_command("/provider "),
+        )
+        yield SystemCommand(
+            "Model: show current",
+            "Show the active model",
+            lambda: self.submit_command_line("/model"),
+        )
+        yield SystemCommand(
+            "Model: switch…",
+            "Prefill /model to switch model",
+            lambda: self.prefill_command("/model "),
+        )
+        yield SystemCommand("Login…", "Prefill /login", lambda: self.prefill_command("/login "))
+        yield SystemCommand(
+            "Logout", "Remove stored credentials", lambda: self.submit_command_line("/logout")
+        )
 
     def set_submit_hook(self, on_submit: Callable[[], None]) -> None:
         """Register a callback fired the moment an input line is submitted.

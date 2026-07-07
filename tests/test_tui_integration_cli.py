@@ -6,6 +6,7 @@ from textual.await_complete import AwaitComplete
 from textual.widgets import Input, LoadingIndicator, Static
 
 from tests.tui_support import *
+from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 from wisp.tui.widgets import _ROLE_LABELS, LineMessage, StreamMessage, Transcript
 
@@ -1137,6 +1138,94 @@ def test_textual_tui_read_prompt_returns_submitted_input() -> None:
             return results[0]
 
     assert anyio.run(scenario) == "hello"
+
+
+def test_textual_command_palette_exposes_wisp_commands() -> None:
+    # The command palette surfaces the TUI's slash commands alongside Textual's
+    # built-ins. Our graceful /quit replaces Textual's raw Quit (which would
+    # bypass the shell's shutdown), so there is exactly one Quit entry.
+    async def scenario() -> list[str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            await pilot.pause()
+            return [
+                command.title for command in app_instance.get_system_commands(app_instance.screen)
+            ]
+
+    titles = anyio.run(scenario)
+    for expected in (
+        "Help",
+        "Quit",
+        "Auth status",
+        "Provider: show current",
+        "Provider: switch…",
+        "Model: show current",
+        "Model: switch…",
+        "Login…",
+        "Logout",
+    ):
+        assert expected in titles
+    assert "Theme" in titles  # a Textual built-in survived (yield-from super)
+    assert titles.count("Quit") == 1  # Textual's raw Quit was filtered out
+
+
+def test_textual_command_palette_entries_route_through_the_typed_path() -> None:
+    # A palette selection must reach read_prompt exactly as typing the command
+    # would, so the shell stays the single source of command semantics.
+    async def scenario() -> str:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            async with anyio.create_task_group() as tg:
+                results: list[str] = []
+
+                async def read() -> None:
+                    results.append(await app_instance.read_prompt("wisp> "))
+
+                tg.start_soon(read)
+                await pilot.pause()
+                app_instance.submit_command_line("/help")
+            return results[0]
+
+    assert anyio.run(scenario) == "/help"
+
+
+def test_textual_prefill_command_sets_input_without_submitting() -> None:
+    # An arg-bearing palette entry (Model: switch…) prefills the Input for the
+    # user to complete — it must NOT submit, so a pending read stays pending.
+    async def scenario() -> tuple[str, int, bool]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            async with anyio.create_task_group() as tg:
+                results: list[str] = []
+
+                async def read() -> None:
+                    results.append(await app_instance.read_prompt("wisp> "))
+
+                tg.start_soon(read)
+                await pilot.pause()
+                app_instance.prefill_command("/model ")
+                await pilot.pause()
+                input_widget = app_instance.query_one("#input", Input)
+                value = input_widget.value
+                cursor = input_widget.cursor_position
+                submitted = bool(results)  # nothing should have been sent yet
+                app_instance.submit_command_line("/quit")  # unblock the reader
+            return value, cursor, submitted
+
+    value, cursor, submitted = anyio.run(scenario)
+    assert value == "/model "
+    assert cursor == len("/model ")
+    assert submitted is False
+
+
+def test_textual_palette_command_strings_are_valid_slash_commands() -> None:
+    # Guard against drift: every command the palette submits (not the prefill
+    # stubs) must parse as a real slash command.
+    for text in ("/help", "/quit", "/auth", "/provider", "/model", "/logout"):
+        assert parse_tui_slash_command(text) is not None
+    # The prefill stubs are valid command prefixes (parse once a value is added).
+    assert parse_tui_slash_command("/model gpt-5.5") is not None
+    assert parse_tui_slash_command("/provider fake") is not None
 
 
 def _read_prompt_signal_for_key(key: str) -> type[BaseException] | None:
