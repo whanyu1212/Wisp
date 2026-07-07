@@ -800,6 +800,28 @@ def test_textual_stream_message_carries_the_assistant_card() -> None:
     assert title == _ROLE_LABELS["assistant"]
 
 
+def test_textual_card_css_resolves_under_the_light_theme() -> None:
+    # The app starts on the dark theme, so card CSS is only exercised in light on a
+    # runtime switch. Guard that the card colors resolve (bad CSS fails app startup)
+    # AND track the light palette, not dark's — so a future theme edit that drops a
+    # variable the cards use is caught in CI, not only at runtime.
+    async def scenario() -> tuple[object, object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 16)) as pilot:
+            app_instance.theme = "wisp-light"
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={}))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            (tool_card,) = transcript.children
+            _kind, color = tool_card.styles.border_top
+            return color, tool_card.styles.background
+
+    border_color, background = anyio.run(scenario)
+    # tool cards use $accent; light wisp accent is #2f8f8f, dark is #3fb8b8.
+    assert border_color.hex.lower() == "#2f8f8f"
+    assert background is not None  # $surface resolved, no startup failure
+
+
 def _status_after_snapshots(snapshots: list[TuiViewSnapshot]) -> tuple[list[bool], str, bool]:
     # Apply each snapshot in order, pausing between, and return the spinner's
     # display state after each, plus the final status text and whether the Input
