@@ -44,12 +44,24 @@ _ROLE_FALLBACK: dict[str, str] = {
     "tool": "blue",
     "approved": "green",
     "denied": "red",
+    "banner": "cyan",
 }
 
 # Input modes (TuiViewSnapshot.input_mode values, from state._InputMode) during
 # which the activity spinner is shown. Running-only: the approval prompt gets its
 # own input hint instead. Kept as the single source of truth for the spinner.
 _BUSY_MODES = frozenset({"running"})
+
+# The Wisp wordmark, shown once at startup. Block-drawing glyphs only (width-1,
+# universally supported); 40 cols wide, fits a standard terminal.
+_WORDMARK = (
+    "▄▄▄▄  ▄▄▄  ▄▄▄▄ ▄▄▄▄▄  ▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄\n"
+    "▀███  ███  ███▀  ███  █████▀▀▀ ███▀▀███▄\n"
+    " ███  ███  ███   ███   ▀████▄  ███▄▄███▀\n"
+    " ███▄▄███▄▄███   ███     ▀████ ███▀▀▀▀\n"
+    "  ▀████▀████▀   ▄███▄ ███████▀ ███"
+)
+_TAGLINE = "a quiet coding agent"
 
 
 class TextualTui(App[None]):
@@ -62,57 +74,55 @@ class TextualTui(App[None]):
 
     #transcript {
         height: 1fr;
-        border: round $accent;
+        border: none;
+        padding: 0 1;
+        scrollbar-size-vertical: 1;
     }
 
-    /* Message cards: an L-spine (top + left border) carries the role label on
-       the top edge; quiet meta rows stay borderless. Colors come only from
-       theme vars present in BOTH light and dark themes. */
+    /* Minimalist messages: a single thin left rule in the role's color carries
+       the label; no top border, no fill. Quiet by default, colored only where it
+       means something. Colors come only from theme vars present in both themes. */
     .message {
         height: auto;
-        margin: 0 1;
-        padding: 0 1;
+        margin: 1 0 0 0;
+        padding: 0 0 0 1;
+        border-left: vkey $secondary;
         border-title-color: $text-muted;
-        border-title-style: bold;
     }
 
     .message--user {
-        border-top: hkey $primary;
-        border-left: thick $primary;
-        background: $primary 8%;
+        border-left: vkey $primary;
     }
 
     .message--assistant {
-        border-top: hkey $success;
-        border-left: thick $success;
-        background: $panel;
+        border-left: vkey $success;
     }
 
-    .message--tool {
-        border-top: hkey $accent;
-        border-left: thick $accent;
-        background: $surface;
+    .message--tool,
+    .message--notice {
+        border-left: vkey $accent;
     }
 
     .message--approved {
-        border-left: thick $success;
+        border-left: vkey $success;
     }
 
     .message--denied,
     .message--error {
-        border-top: hkey $error;
-        border-left: thick $error;
-        background: $error 8%;
-    }
-
-    .message--notice {
-        border-left: thick $accent;
+        border-left: vkey $error;
     }
 
     .message--dim,
     .message--session {
         border-left: none;
-        background: transparent;
+        padding-left: 2;
+        color: $text-muted;
+    }
+
+    .message--banner {
+        border-left: none;
+        margin: 1 0 0 0;
+        padding-left: 1;
     }
 
     #status-bar {
@@ -186,7 +196,7 @@ class TextualTui(App[None]):
         self._stream_refresh_pending = False
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
+        yield Header(show_clock=False)
         with Vertical():
             yield Transcript(id="transcript")
             with Horizontal(id="status-bar"):
@@ -197,6 +207,10 @@ class TextualTui(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
+        # The Header renders these as the wordmark in the top bar: a quiet,
+        # lowercase identity that complements the startup splash.
+        self.title = "wisp"
+        self.sub_title = _TAGLINE
         for theme in WISP_THEMES:
             self.register_theme(theme)
         self.theme = WISP_THEMES[0].name
@@ -219,6 +233,15 @@ class TextualTui(App[None]):
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         self.submit_command_line(event.value)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        # A bare "/" on an otherwise-empty input opens the command palette
+        # (Claude-Code style): "/" is the discoverable door to every command.
+        # Clear it so a stray slash isn't left behind, then open the palette,
+        # where the user types to filter and Enter runs or prefills the command.
+        if event.value == "/" and event.input is self._input:
+            event.input.value = ""
+            self.action_command_palette()
 
     def submit_command_line(self, text: str) -> None:
         """Submit a line as if the user typed it and pressed Enter.
@@ -398,6 +421,14 @@ class TextualTui(App[None]):
         escaped = _markup_escape(message)
         self._mount_line(role, f"[{style}]{escaped}[/{style}]" if style else escaped)
 
+    def write_banner(self, art: str) -> None:
+        # The startup wordmark: accent-colored, borderless (the "banner" role has
+        # no card chrome), rendered verbatim. Block glyphs aren't markup-special,
+        # but escape anyway to keep the escape-at-boundary invariant uniform.
+        style = self._style("banner")
+        escaped = _markup_escape(art)
+        self._mount_line("banner", f"[{style}]{escaped}[/{style}]" if style else escaped)
+
     def write_notice(self, message: str) -> None:
         self._write_styled("notice", message)
 
@@ -533,8 +564,9 @@ class TextualTuiRenderer:
         return mode
 
     def startup(self) -> None:
-        self.app.write_notice("Wisp TUI")
-        self.app.write_notice("Use /help for commands, /quit to exit.")
+        self.app.write_banner(_WORDMARK)
+        self.app.write_dim(_TAGLINE)
+        self.app.write_dim("Press / for commands · /quit to exit")
 
     def help(self) -> None:
         self.app.write_notice(_tui_help_text())

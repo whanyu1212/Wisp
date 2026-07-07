@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from textual.await_complete import AwaitComplete
+from textual.command import CommandPalette
 from textual.widgets import Input, LoadingIndicator, Static
 
 from tests.tui_support import *
@@ -803,10 +804,11 @@ def test_textual_stream_message_carries_the_assistant_card() -> None:
 
 def test_textual_card_css_resolves_under_the_light_theme() -> None:
     # The app starts on the dark theme, so card CSS is only exercised in light on a
-    # runtime switch. Guard that the card colors resolve (bad CSS fails app startup)
-    # AND track the light palette, not dark's — so a future theme edit that drops a
-    # variable the cards use is caught in CI, not only at runtime.
-    async def scenario() -> tuple[object, object]:
+    # runtime switch. Guard that the message's left-rule color resolves (bad CSS
+    # fails app startup) AND tracks the light palette, not dark's — so a future
+    # theme edit that drops a variable the rules use is caught in CI, not only at
+    # runtime.
+    async def scenario() -> object:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(60, 16)) as pilot:
             app_instance.theme = "wisp-light"
@@ -814,13 +816,12 @@ def test_textual_card_css_resolves_under_the_light_theme() -> None:
             await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
             (tool_card,) = transcript.children
-            _kind, color = tool_card.styles.border_top
-            return color, tool_card.styles.background
+            _kind, color = tool_card.styles.border_left
+            return color
 
-    border_color, background = anyio.run(scenario)
-    # tool cards use $accent; light wisp accent is #2f8f8f, dark is #3fb8b8.
+    border_color = anyio.run(scenario)
+    # tool messages use a $accent left rule; light wisp accent is #2f8f8f, dark #3fb8b8.
     assert border_color.hex.lower() == "#2f8f8f"
-    assert background is not None  # $surface resolved, no startup failure
 
 
 def _status_after_snapshots(snapshots: list[TuiViewSnapshot]) -> tuple[list[bool], str, bool]:
@@ -1226,6 +1227,70 @@ def test_textual_palette_command_strings_are_valid_slash_commands() -> None:
     # The prefill stubs are valid command prefixes (parse once a value is added).
     assert parse_tui_slash_command("/model gpt-5.5") is not None
     assert parse_tui_slash_command("/provider fake") is not None
+
+
+def test_textual_slash_on_empty_input_opens_the_palette() -> None:
+    # Typing "/" as the whole input opens the command palette (Claude-Code style)
+    # and clears the stray slash from the input.
+    async def scenario() -> tuple[bool, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            await pilot.press("/")
+            await pilot.pause()
+            return CommandPalette.is_open(app_instance), input_widget.value
+
+    palette_open, value = anyio.run(scenario)
+    assert palette_open
+    assert value == ""  # the "/" was consumed, not left in the input
+
+
+def test_textual_slash_mid_text_does_not_open_the_palette() -> None:
+    # A "/" that isn't the entire input (e.g. a URL, or a path) must not hijack.
+    async def scenario() -> bool:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "http:/"  # value is not exactly "/"
+            await pilot.pause()
+            return CommandPalette.is_open(app_instance)
+
+    assert anyio.run(scenario) is False
+
+
+def test_textual_startup_shows_the_wordmark_banner() -> None:
+    # startup() renders the wordmark as an accent-colored, borderless banner plus
+    # the tagline — the greeting, distinct from a normal message card.
+    async def scenario() -> tuple[list[str | None], list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(72, 20)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            roles = [_transcript_role_class(c) for c in transcript.children]
+            texts = _transcript_texts(app_instance)
+            return roles, texts
+
+    roles, texts = anyio.run(scenario)
+    assert "message--banner" in roles  # the wordmark is a banner, not a card
+    # The banner carries the block-drawing wordmark; the tagline follows.
+    assert any("▄" in t for t in texts)
+    assert any("a quiet coding agent" in t for t in texts)
+
+
+def test_textual_header_shows_the_wisp_wordmark() -> None:
+    # The header title is the lowercase wordmark; the clock chrome is gone.
+    async def scenario() -> tuple[str, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            await pilot.pause()
+            return app_instance.title, app_instance.sub_title
+
+    title, sub_title = anyio.run(scenario)
+    assert title == "wisp"
+    assert sub_title == "a quiet coding agent"
 
 
 def _read_prompt_signal_for_key(key: str) -> type[BaseException] | None:
