@@ -133,6 +133,16 @@ def cli_callback(
             help="TUI renderer to use with --mode tui.",
         ),
     ] = TuiRendererKind.line,
+    all_tools: Annotated[
+        bool,
+        typer.Option(
+            "--all-tools/--no-all-tools",
+            help=(
+                "Expose the full tool registry in agent modes (unsafe calls still prompt). "
+                "Defaults on for --mode tui, off otherwise."
+            ),
+        ),
+    ] = False,
     allow_read_tools: Annotated[
         bool,
         typer.Option(help="Expose sandboxed read-only tools in agent modes."),
@@ -185,12 +195,18 @@ def cli_callback(
         console=console,
     )
     resolved_tui_renderer = tui_renderer
+    resolved_all_tools = all_tools
     if resolved_mode is OutputMode.tui:
         resolved_tui_renderer = _resolve_tui_renderer(
             tui_renderer,
             renderer_was_provided=_option_was_provided(ctx, "tui_renderer"),
             console=console,
         )
+        # The interactive TUI defaults to the full toolset — matching the dedicated
+        # `tui` command — so the legacy `--mode tui` / WISP_MODE=tui path isn't a
+        # toolless agent. An explicit --all-tools/--no-all-tools still wins.
+        if not _option_was_provided(ctx, "all_tools"):
+            resolved_all_tools = True
 
     if prompt is None and resolved_mode is not OutputMode.tui and not _has_callback_cli_args(ctx):
         typer.echo(ctx.get_help())
@@ -234,6 +250,7 @@ def cli_callback(
             anyio.run(
                 _run_rpc,
                 config,
+                resolved_all_tools,
                 allow_read_tools,
                 tuple(allow_tool or ()),
                 resume,
@@ -244,6 +261,7 @@ def cli_callback(
         elif resolved_mode is OutputMode.tui:
             _run_tui_from_cli_options(
                 config=config,
+                all_tools=resolved_all_tools,
                 allow_read_tools=allow_read_tools,
                 allowed_tools=tuple(allow_tool or ()),
                 resume=resume,
@@ -258,6 +276,7 @@ def cli_callback(
                 _run_print,
                 prompt,
                 config,
+                resolved_all_tools,
                 allow_read_tools,
                 tuple(allow_tool or ()),
                 resume,
@@ -290,6 +309,13 @@ def tui_command(
         Path | None,
         typer.Option(help="Path to Wisp's private provider auth JSON file."),
     ] = None,
+    all_tools: Annotated[
+        bool,
+        typer.Option(
+            "--all-tools/--no-all-tools",
+            help="Expose the full tool registry (default on; unsafe calls still prompt).",
+        ),
+    ] = True,
     allow_read_tools: Annotated[
         bool,
         typer.Option(help="Expose sandboxed read-only tools in agent modes."),
@@ -347,6 +373,7 @@ def tui_command(
     try:
         _run_tui_from_cli_options(
             config=config,
+            all_tools=all_tools,
             allow_read_tools=allow_read_tools,
             allowed_tools=tuple(allow_tool or ()),
             resume=resume,
@@ -393,6 +420,7 @@ def _validate_session_and_iteration_options(
 def _run_tui_from_cli_options(
     *,
     config: WispConfig,
+    all_tools: bool,
     allow_read_tools: bool,
     allowed_tools: tuple[str, ...],
     resume: str | None,
@@ -407,6 +435,7 @@ def _run_tui_from_cli_options(
         run_tui,
         TuiOptions(
             config=config,
+            all_tools=all_tools,
             allow_read_tools=allow_read_tools,
             allowed_tools=allowed_tools,
             resume=resume,
@@ -421,6 +450,7 @@ def _run_tui_from_cli_options(
 async def _run_print(
     prompt: str,
     config: WispConfig,
+    all_tools: bool = False,
     allow_read_tools: bool = False,
     allowed_tools: tuple[str, ...] = (),
     resume: str | None = None,
@@ -441,6 +471,7 @@ async def _run_print(
         model=config.model,
         tool_registry=_print_mode_tool_registry(
             runtime.tools,
+            all_tools=all_tools,
             allow_read_tools=allow_read_tools,
             allowed_tools=allowed_tools,
         ),

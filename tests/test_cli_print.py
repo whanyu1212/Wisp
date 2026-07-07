@@ -354,6 +354,18 @@ def test_print_mode_can_expose_explicit_tools() -> None:
     assert filtered.names() == ("write", "bash")
 
 
+def test_print_mode_all_tools_exposes_the_full_registry() -> None:
+    # all_tools admits every tier (read/mutating/command) — the interactive TUI's
+    # default, where availability is broad and the approval policy gates unsafe use.
+    registry = ToolRegistry()
+    for tool in (ReadTool(), WriteTool(), EditTool(), BashTool(), GrepTool()):
+        registry.register(tool)
+
+    filtered = _print_mode_tool_registry(registry, all_tools=True)
+
+    assert filtered.names() == ("read", "write", "edit", "bash", "grep")
+
+
 def test_print_mode_reports_unknown_allowed_tool(tmp_path: Path) -> None:
     runner = CliRunner()
 

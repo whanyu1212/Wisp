@@ -188,6 +188,7 @@ class _RpcToolApprovalPolicy(ToolApprovalPolicy):
 
 async def _run_rpc(
     config: WispConfig,
+    all_tools: bool = False,
     allow_read_tools: bool = False,
     allowed_tools: tuple[str, ...] = (),
     resume: str | None = None,
@@ -208,6 +209,7 @@ async def _run_rpc(
         model=config.model,
         tool_registry=_print_mode_tool_registry(
             runtime.tools,
+            all_tools=all_tools,
             allow_read_tools=allow_read_tools,
             allowed_tools=allowed_tools,
         ),

@@ -17,6 +17,7 @@ class TuiOptions:
     """Options used to start the Wisp TUI shell."""
 
     config: WispConfig
+    all_tools: bool = False
     allow_read_tools: bool = False
     allowed_tools: tuple[str, ...] = ()
     resume: str | None = None
@@ -58,6 +59,8 @@ def _rpc_command(options: TuiOptions) -> tuple[str, ...]:
         command.extend(("--resume", options.resume))
     if options.continue_latest:
         command.append("--continue")
+    if options.all_tools:
+        command.append("--all-tools")
     if options.allow_read_tools:
         command.append("--allow-read-tools")
     for tool_name in options.allowed_tools:
