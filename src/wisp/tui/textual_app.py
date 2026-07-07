@@ -145,9 +145,19 @@ class TextualTui(App[None]):
 
     # priority=True so these fire even while the Input widget has focus;
     # otherwise Input swallows ctrl+d before it reaches the app bindings.
+    #
+    # Scrollback: the transcript is not in the focused Input's ancestor chain, so
+    # its own scroll bindings never fire — forward the keys from the app instead.
+    # home/end are priority=True to beat Input's cursor-jump bindings (ctrl+a /
+    # ctrl+e still move the cursor to line start/end); pageup/pagedown have no
+    # competing Input binding, so they bubble normally.
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", priority=True),
         Binding("ctrl+d", "eof", "EOF", priority=True),
+        Binding("pageup", "scroll_transcript_page_up", "Scroll up", show=False),
+        Binding("pagedown", "scroll_transcript_page_down", "Scroll down", show=False),
+        Binding("home", "scroll_transcript_home", "Scroll to top", priority=True, show=False),
+        Binding("end", "scroll_transcript_end", "Scroll to bottom", priority=True, show=False),
     ]
 
     def __init__(self) -> None:
@@ -257,6 +267,26 @@ class TextualTui(App[None]):
 
     def action_eof(self) -> None:
         self._signal_input(EOFError(), action="EOF")
+
+    # Scrollback: delegate to the Transcript's own scroll actions. The Transcript
+    # keeps its follow-the-tail flag correct via watch_scroll_y — scrolling up
+    # clears it, scrolling to the end restores it — so we never touch _follow here.
+    # None-guarded like _mount_line for calls before on_mount wires the widget.
+    def action_scroll_transcript_page_up(self) -> None:
+        if self._transcript is not None:
+            self._transcript.action_page_up()
+
+    def action_scroll_transcript_page_down(self) -> None:
+        if self._transcript is not None:
+            self._transcript.action_page_down()
+
+    def action_scroll_transcript_home(self) -> None:
+        if self._transcript is not None:
+            self._transcript.action_scroll_home()
+
+    def action_scroll_transcript_end(self) -> None:
+        if self._transcript is not None:
+            self._transcript.action_scroll_end()
 
     def _signal_input(self, signal: BaseException, *, action: str) -> None:
         # send_nowait raises WouldBlock if the buffer is full; degrade to a

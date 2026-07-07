@@ -1016,6 +1016,88 @@ def test_textual_returning_to_the_bottom_resumes_following() -> None:
     assert scroll_y >= max_scroll_y - 3  # following resumed
 
 
+def test_textual_scrollback_keys_reach_transcript_and_compose_with_follow() -> None:
+    # Stage 5 load-bearing test: with the Input focused (default), scrollback keys
+    # must reach the transcript AND keep the follow flag correct. PageUp scrolls up
+    # and clears follow; End returns to the bottom and restores it; a subsequent
+    # stream then re-pins to the tail. Focus never leaves the Input.
+    async def scenario() -> dict[str, object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            input_widget = app_instance.query_one("#input", Input)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            start_y = transcript.scroll_y
+
+            await pilot.press("pageup")
+            await pilot.pause()
+            after_pageup_y = transcript.scroll_y
+            after_pageup_follow = transcript._follow
+            focus_after_pageup = app_instance.focused is input_widget
+
+            await pilot.press("end")
+            await pilot.pause()
+            after_end_y = transcript.scroll_y
+            after_end_follow = transcript._follow
+
+            renderer.token_delta("tail line\n\n")
+            renderer.end_token_stream()
+            await pilot.pause()
+            await pilot.pause()
+
+            return {
+                "scrolled_up": after_pageup_y < start_y,
+                "follow_cleared": after_pageup_follow is False,
+                "focus_kept": focus_after_pageup,
+                "end_at_bottom": after_end_y >= transcript.max_scroll_y - 3,
+                "follow_restored": after_end_follow is True,
+                "stream_repinned": transcript.scroll_y >= transcript.max_scroll_y - 3,
+            }
+
+    r = anyio.run(scenario)
+    assert r["scrolled_up"], "PageUp did not scroll the transcript"
+    assert r["follow_cleared"], "scrolling up should clear the follow flag"
+    assert r["focus_kept"], "scrollback must not steal focus from the Input"
+    assert r["end_at_bottom"], "End did not return to the bottom"
+    assert r["follow_restored"], "returning to the bottom should restore follow"
+    assert r["stream_repinned"], "a stream after End should re-pin to the tail"
+
+
+def test_textual_home_key_scrolls_transcript_over_input_cursor() -> None:
+    # home is priority-bound to the transcript, so it jumps the transcript to the
+    # top even while the Input has typed text — it does not move the input cursor.
+    async def scenario() -> tuple[float, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            input_widget = app_instance.query_one("#input", Input)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            await pilot.press(*"hello")  # type into the Input
+            await pilot.press("home")
+            await pilot.pause()
+            return transcript.scroll_y, input_widget.value
+
+    scroll_y, value = anyio.run(scenario)
+    assert scroll_y == 0  # transcript jumped to the top
+    assert value == "hello"  # input text untouched
+
+
+def test_textual_scroll_actions_are_safe_before_mount() -> None:
+    # The scroll actions are None-guarded, so invoking them before on_mount wires
+    # the transcript is a no-op, not a crash.
+    app = TextualTui()
+    app.action_scroll_transcript_page_up()
+    app.action_scroll_transcript_page_down()
+    app.action_scroll_transcript_home()
+    app.action_scroll_transcript_end()
+
+
 def test_textual_tui_read_prompt_returns_submitted_input() -> None:
     async def scenario() -> str:
         app_instance = TextualTui()
