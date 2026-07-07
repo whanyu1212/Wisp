@@ -160,13 +160,20 @@ settings with slash commands instead of up-front flags:
 TUI login currently uses the `openai-codex` device-code flow; browser login is available from the
 CLI (`uv run wisp auth login openai-codex`). A Pi-style model picker/catalog is not implemented yet.
 
+Unlike print mode, the interactive TUI exposes the **full tool registry by
+default** — otherwise it would be a chatbot that can't read files or run
+commands. Mutating and command tools (`write`, `edit`, `bash`) still pause for a
+y/N approval prompt on each call; pass `--yes` to auto-approve, or `--no-all-tools`
+to fall back to the opt-in `--allow-read-tools` / `--allow-tool` filter.
+
 Session and tool flags work with the `tui` command too:
 
 ```bash
 uv run wisp tui --continue
 uv run wisp tui --resume <session-id-prefix>
-uv run wisp tui --allow-read-tools
-uv run wisp tui --allow-tool bash
+uv run wisp tui --no-all-tools                  # opt-in tool filter instead of the full registry
+uv run wisp tui --no-all-tools --allow-read-tools
+uv run wisp tui --yes                           # auto-approve mutating/command tools
 uv run wisp tui --line          # simple line renderer, for fallback/debugging
 ```
 

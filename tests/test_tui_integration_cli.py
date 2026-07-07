@@ -125,6 +125,32 @@ def test_tui_rpc_command_includes_continue_latest(tmp_path: Path) -> None:
     assert "--continue" in command
 
 
+def test_tui_rpc_command_passes_all_tools_to_the_subprocess(tmp_path: Path) -> None:
+    # The TUI defaults to the full tool registry; the flag must reach the RPC
+    # child so the spawned agent actually has tools (unsafe calls still prompt).
+    command = _rpc_command(
+        TuiOptions(
+            config=WispConfig(provider="fake", session_dir=tmp_path),
+            all_tools=True,
+        )
+    )
+
+    assert "--all-tools" in command
+    # all_tools is availability, not auto-approval — unsafe calls still prompt.
+    assert "--yes" not in command
+
+
+def test_tui_rpc_command_omits_all_tools_when_disabled(tmp_path: Path) -> None:
+    command = _rpc_command(
+        TuiOptions(
+            config=WispConfig(provider="fake", session_dir=tmp_path),
+            all_tools=False,
+        )
+    )
+
+    assert "--all-tools" not in command
+
+
 def test_run_tui_uses_live_fullscreen_when_interactive(
     tmp_path: Path,
     monkeypatch: object,
@@ -418,6 +444,32 @@ def test_cli_tui_command_defaults_to_textual_renderer(
     assert captured[0].config.provider == "fake"
     assert captured[0].config.session_dir == tmp_path
     assert captured[0].renderer is TuiRendererKind.textual
+    # `wisp tui` gives the agent the full toolset by default — otherwise it's a
+    # toolless chatbot that can't read files or run commands.
+    assert captured[0].all_tools is True
+
+
+def test_cli_tui_command_no_all_tools_flag_disables_the_full_registry(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    captured: list[TuiOptions] = []
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        captured.append(options)
+
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["tui", "--no-all-tools", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    assert captured[0].all_tools is False
 
 
 def test_cli_tui_command_line_flag_uses_line_renderer(
