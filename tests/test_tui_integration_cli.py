@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from textual.await_complete import AwaitComplete
-from textual.widgets import Input
+from textual.widgets import Input, LoadingIndicator, Static
 
 from tests.tui_support import *
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
@@ -798,6 +798,87 @@ def test_textual_stream_message_carries_the_assistant_card() -> None:
     role, title = anyio.run(scenario)
     assert role == "message--assistant"
     assert title == _ROLE_LABELS["assistant"]
+
+
+def _status_after_snapshots(snapshots: list[TuiViewSnapshot]) -> tuple[list[bool], str, bool]:
+    # Apply each snapshot in order, pausing between, and return the spinner's
+    # display state after each, plus the final status text and whether the Input
+    # kept focus (the spinner must never steal it).
+    async def scenario() -> tuple[list[bool], str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            activity = app_instance.query_one("#activity", LoadingIndicator)
+            status = app_instance.query_one("#status", Static)
+            displays: list[bool] = []
+            for snapshot in snapshots:
+                renderer.view_updated(snapshot)
+                await pilot.pause()
+                displays.append(bool(activity.display))
+            focus_ok = app_instance.focused is app_instance.query_one("#input", Input)
+            return displays, status.render().plain, focus_ok
+
+    return anyio.run(scenario)
+
+
+def test_textual_status_bar_shows_spinner_while_running() -> None:
+    # Stage 4: the activity spinner is visible only while a prompt runs.
+    displays, _, focus_ok = _status_after_snapshots(
+        [TuiViewSnapshot(status="running", input_hint="wisp(running)> ", input_mode="running")]
+    )
+    assert displays == [True]
+    assert focus_ok  # spinner did not steal focus from the Input
+
+
+def test_textual_status_bar_hides_spinner_at_idle() -> None:
+    # Hidden at mount (before any snapshot) and in idle mode.
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            activity = app_instance.query_one("#activity", LoadingIndicator)
+            at_mount = bool(activity.display)
+            renderer.view_updated(TuiViewSnapshot(status="idle", input_hint="wisp> "))
+            await pilot.pause()
+            return at_mount, bool(activity.display)
+
+    at_mount, at_idle = anyio.run(scenario)
+    assert at_mount is False
+    assert at_idle is False
+
+
+def test_textual_status_bar_toggles_spinner_off_after_running() -> None:
+    # running -> idle: the spinner comes on then goes off.
+    displays, _, _ = _status_after_snapshots(
+        [
+            TuiViewSnapshot(status="running", input_hint="wisp(running)> ", input_mode="running"),
+            TuiViewSnapshot(status="idle", input_hint="wisp> ", input_mode="idle"),
+        ]
+    )
+    assert displays == [True, False]
+
+
+def test_textual_status_bar_renders_status_queued_and_session() -> None:
+    # The status text keeps the pipe-joined status + queued + session summary.
+    _, status_text, _ = _status_after_snapshots(
+        [
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp> ",
+                input_mode="running",
+                queued_follow_ups=2,
+                last_session="sess.json",
+            )
+        ]
+    )
+    assert status_text == "running | queued: 2 | session: sess.json"
+
+
+def test_textual_status_bar_does_not_spin_during_approval() -> None:
+    # Locked decision: the spinner is running-only. Approval mode gets its own
+    # input hint, not the spinner.
+    displays, _, _ = _status_after_snapshots(
+        [TuiViewSnapshot(status="approval", input_hint="approve? y/N ", input_mode="approval")]
+    )
+    assert displays == [False]
 
 
 def _fill_transcript(renderer: TextualTuiRenderer, count: int) -> None:

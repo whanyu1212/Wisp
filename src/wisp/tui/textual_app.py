@@ -7,8 +7,8 @@ from collections.abc import Awaitable, Callable
 import anyio
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
-from textual.widgets import Footer, Header, Input, Static
+from textual.containers import Container, Horizontal, Vertical
+from textual.widgets import Footer, Header, Input, LoadingIndicator, Static
 
 from wisp.events import (
     AssistantMessage,
@@ -44,6 +44,11 @@ _ROLE_FALLBACK: dict[str, str] = {
     "approved": "green",
     "denied": "red",
 }
+
+# Input modes (TuiViewSnapshot.input_mode values, from state._InputMode) during
+# which the activity spinner is shown. Running-only: the approval prompt gets its
+# own input hint instead. Kept as the single source of truth for the spinner.
+_BUSY_MODES = frozenset({"running"})
 
 
 class TextualTui(App[None]):
@@ -109,11 +114,23 @@ class TextualTui(App[None]):
         background: transparent;
     }
 
-    #status {
+    #status-bar {
         height: auto;
         padding: 0 1;
         background: $panel;
         color: $text-muted;
+        align-vertical: middle;
+    }
+
+    #status {
+        width: 1fr;
+        height: auto;
+    }
+
+    #activity {
+        width: auto;
+        height: 1;
+        color: $accent;
     }
 
     #input {
@@ -139,6 +156,7 @@ class TextualTui(App[None]):
             str | BaseException
         ](100)
         self._status: Static | None = None
+        self._activity: LoadingIndicator | None = None
         self._transcript: Transcript | None = None
         self._input: Input | None = None
         self._current_prompt = "wisp> "
@@ -160,7 +178,9 @@ class TextualTui(App[None]):
         yield Header(show_clock=True)
         with Vertical():
             yield Transcript(id="transcript")
-            yield Static("idle", id="status")
+            with Horizontal(id="status-bar"):
+                yield Static("idle", id="status")
+                yield LoadingIndicator(id="activity")
             with Container(id="input-row"):
                 yield Input(placeholder="wisp> ", id="input")
         yield Footer()
@@ -172,8 +192,10 @@ class TextualTui(App[None]):
         self._role_styles = role_styles(self.current_theme)
         self._transcript = self.query_one("#transcript", Transcript)
         self._status = self.query_one("#status", Static)
+        self._activity = self.query_one("#activity", LoadingIndicator)
+        self._activity.display = False  # hidden until a prompt runs
         self._input = self.query_one("#input", Input)
-        self._input.focus()
+        self._input.focus()  # keep the Input as the resting focus
         if self._runner is not None:
             self.run_worker(self._run_and_exit(), exclusive=True)
 
@@ -254,6 +276,12 @@ class TextualTui(App[None]):
     def set_status(self, message: str) -> None:
         if self._status is not None:
             self._status.update(message)
+
+    def set_running(self, running: bool) -> None:
+        # Toggle the activity spinner's visibility (display, never mount/unmount —
+        # avoids the mount race). Driven off the snapshot's input_mode.
+        if self._activity is not None:
+            self._activity.display = running
 
     def set_input_hint(self, hint: str) -> None:
         self._current_prompt = hint
@@ -392,6 +420,7 @@ class TextualTuiRenderer:
         if snapshot.last_session:
             parts.append(f"session: {snapshot.last_session}")
         self.app.set_status(" | ".join(parts))
+        self.app.set_running(snapshot.input_mode in _BUSY_MODES)
 
     def _capture_submitted_input_mode(self) -> None:
         self._submitted_input_mode = self._visible_input_mode
