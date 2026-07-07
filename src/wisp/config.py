@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import getpass
-import hashlib
 import os
-import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -13,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 DEFAULT_PROVIDER = "openai-codex"
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
-_DEFAULT_TEMP_SESSION_DIR: Path | None = None
+_DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
 
 
 class WispConfig(BaseModel):
@@ -76,30 +73,15 @@ def default_auth_path() -> Path:
 def default_session_dir() -> Path:
     """Return the default JSONL session directory.
 
-    Sessions default to OS temp storage so early dogfooding does not leave
-    durable transcripts behind unless the user opts in with WISP_SESSION_DIR or
-    --session-dir.
+    Sessions persist to ``~/.wisp/sessions`` by default so transcripts survive
+    across runs and can be resumed. Set ``WISP_SESSION_DIR`` (or pass
+    ``--session-dir``) to store them elsewhere — including a temp path for
+    ephemeral sessions.
     """
 
     if env_dir := os.environ.get("WISP_SESSION_DIR"):
         return Path(env_dir).expanduser()
-    return _default_temp_session_dir()
-
-
-def _default_temp_session_dir() -> Path:
-    global _DEFAULT_TEMP_SESSION_DIR
-    if _DEFAULT_TEMP_SESSION_DIR is None:
-        root = Path(tempfile.mkdtemp(prefix=f"wisp-{_temp_session_owner()}-"))
-        _DEFAULT_TEMP_SESSION_DIR = root / "sessions"
-    return _DEFAULT_TEMP_SESSION_DIR
-
-
-def _temp_session_owner() -> str:
-    getuid = getattr(os, "getuid", None)
-    if getuid is not None:
-        return str(getuid())
-    username = getpass.getuser()
-    return hashlib.sha256(username.encode("utf-8")).hexdigest()[:12]
+    return _DEFAULT_SESSION_DIR.expanduser()
 
 
 def _first_non_empty(*values: str | None, default: str | None = None) -> str | None:

@@ -52,7 +52,7 @@ WISP_PROVIDER=            # openai-codex (default) | openai | fake
 WISP_MODEL=               # provider default when blank
 WISP_MODE=                # blank = help/text; set to tui to open the TUI directly
 WISP_TUI_RENDERER=        # line | fullscreen | textual
-WISP_SESSION_DIR=         # persist sessions somewhere durable (default: OS temp)
+WISP_SESSION_DIR=         # where transcripts are stored (default: ~/.wisp/sessions)
 WISP_AUTH_FILE=~/.wisp/auth.json
 OPENAI_API_KEY=           # required only for the openai provider
 ```
@@ -81,8 +81,9 @@ uv run wisp -p "hello" --provider fake
 - **`fake`** — a deterministic offline provider for tests and no-credential smoke runs; it
   echoes a canned response and needs no key.
 
-Sessions default to OS temp storage; set `WISP_SESSION_DIR` (or pass `--session-dir`) to keep
-them somewhere durable.
+Sessions persist to `~/.wisp/sessions` by default so transcripts survive across runs and can be
+resumed; set `WISP_SESSION_DIR` (or pass `--session-dir`) to store them elsewhere (including a
+temp path for ephemeral sessions).
 
 ## Tools
 
@@ -122,8 +123,8 @@ uv run wisp -p "continue the work" --resume <session-id-prefix>
 
 - `--continue` resumes the newest session in the active session directory.
 - `--resume` accepts a JSONL path, filename, full session id, or unique id prefix.
-- By default sessions live under a private OS temp directory (`<tmp>/wisp-<user>-*/sessions`).
-  Use `--session-dir` or `WISP_SESSION_DIR` for durable, cross-invocation `--continue`.
+- By default sessions live under `~/.wisp/sessions`, so `--continue`/`--resume` work across
+  invocations. Point `--session-dir` or `WISP_SESSION_DIR` elsewhere to override.
 
 Session files contain provider-facing `message` entries plus selected structured `event` entries
 (tool calls, approvals, tool start/end, errors) for audit — but **not** `token.delta` events.
