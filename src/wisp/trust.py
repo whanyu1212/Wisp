@@ -1,0 +1,116 @@
+"""Project trust boundary.
+
+Wisp records, per project directory, whether the user has trusted it. Trusting a
+project is the prerequisite for loading project-local or executable resources
+(context files, project extensions) — an untrusted project is still fully usable,
+it simply does not have its local configuration ingested.
+
+The trust record is **global**: it lives at ``~/.wisp/trust.json`` and is keyed by
+the canonical (resolved, absolute) project path. It is deliberately never read from
+the project directory — otherwise an untrusted project could mark *itself* trusted
+and defeat the boundary. This mirrors editor "workspace trust" models.
+
+The store degrades gracefully: a missing file means "nothing trusted yet", and a
+malformed file is treated the same way (with a warning) rather than crashing
+startup. Writes are atomic (temp file + rename) so a crash mid-write cannot corrupt
+the registry.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+GLOBAL_TRUST_PATH = Path("~/.wisp/trust.json")
+
+
+def _default_trust_path() -> Path:
+    if env_path := os.environ.get("WISP_TRUST_FILE"):
+        return Path(env_path).expanduser()
+    return GLOBAL_TRUST_PATH.expanduser()
+
+
+def _canonical_key(project_path: Path) -> str:
+    """Return the canonical registry key for a project directory.
+
+    Resolving collapses ``.``/``..`` and dereferences symlinks so that every way
+    of naming the same directory maps to a single key.
+    """
+
+    return project_path.expanduser().resolve(strict=False).as_posix()
+
+
+def is_trusted(project_path: Path, *, trust_path: Path | None = None) -> bool | None:
+    """Return the recorded trust decision for ``project_path``.
+
+    ``True``/``False`` is an explicit prior decision; ``None`` means undecided (no
+    record yet), which callers surface as a first-run prompt.
+    """
+
+    records = _load_trust_records(trust_path if trust_path is not None else _default_trust_path())
+    entry = records.get(_canonical_key(project_path))
+    if not isinstance(entry, dict):
+        return None
+    trusted = entry.get("trusted")
+    return trusted if isinstance(trusted, bool) else None
+
+
+def record_trust(
+    project_path: Path,
+    trusted: bool,
+    *,
+    trust_path: Path | None = None,
+) -> None:
+    """Persist a trust decision for ``project_path`` to the global registry."""
+
+    path = trust_path if trust_path is not None else _default_trust_path()
+    records = _load_trust_records(path)
+    records[_canonical_key(project_path)] = {
+        "trusted": trusted,
+        "decided_at": datetime.now(UTC).isoformat(),
+    }
+    _write_trust_records(path, records)
+
+
+def _load_trust_records(path: Path) -> dict[str, object]:
+    """Load the trust registry, returning an empty mapping on any problem.
+
+    A missing file is normal. A file that exists but cannot be parsed is a
+    corruption we surface (stderr warning) and then ignore, so a damaged registry
+    never blocks startup — it just means nothing is trusted until re-decided.
+    """
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        _warn(f"could not read trust file {path}: {exc}")
+        return {}
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _warn(f"ignoring malformed trust file {path}: {exc}")
+        return {}
+
+    if not isinstance(data, dict):
+        _warn(f"ignoring trust file {path}: expected a JSON object")
+        return {}
+    return data
+
+
+def _write_trust_records(path: Path, records: dict[str, object]) -> None:
+    """Atomically write the trust registry (temp file + rename)."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(records, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _warn(message: str) -> None:
+    print(f"wisp: warning: {message}", file=sys.stderr)

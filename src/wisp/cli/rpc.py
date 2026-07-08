@@ -14,6 +14,7 @@ import sys
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from typing import cast
@@ -26,7 +27,13 @@ from anyio.streams.memory import MemoryObjectSendStream
 from wisp.agent.loop import Agent
 from wisp.agent.messages import Message
 from wisp.config import WispConfig
-from wisp.events import ErrorEvent, RpcCommandFinished, RpcCommandStarted
+from wisp.events import (
+    ErrorEvent,
+    RpcCommandFinished,
+    RpcCommandStarted,
+    TrustRequested,
+    TrustResolved,
+)
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownProviderError
@@ -34,9 +41,11 @@ from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.base import Tool
 from wisp.tools.context import ToolContext
+from wisp.trust import is_trusted, record_trust
 
 from . import output as _cli_output
 from . import tools as _cli_tools
+from . import trust as _cli_trust
 from .types import _JsonOutputModeError
 
 _render_json_events = _cli_output._render_json_events
@@ -187,6 +196,104 @@ class _RpcToolApprovalPolicy(ToolApprovalPolicy):
         pending.event.set()
 
 
+@dataclass
+class _RpcPendingTrust:
+    request_id: str
+    event: anyio.Event
+    trusted: bool | None = None
+    reason: str | None = None
+    resolved: bool = False
+
+
+class _RpcTrustGate:
+    """Resolves project trust once, prompting the RPC client when undecided.
+
+    Mirrors the approval policy's pending-request pattern: the project-trust
+    question is a yes/no keyed by ``request_id`` that the client answers with a
+    ``TrustCommand``. The decision is resolved lazily on first need (before the
+    first prompt runs) and cached, so a project is prompted for at most once per
+    process. Precedence: a ``WISP_TRUST`` override and a stored decision are
+    honored without prompting; only an undecided project emits ``TrustRequested``
+    and blocks. Input closing before an answer resolves to untrusted (safe).
+    """
+
+    def __init__(self, project_path: Path) -> None:
+        self._project_path = project_path
+        self._pending: _RpcPendingTrust | None = None
+        self._decision: bool | None = None
+        self._resolved = False
+        self._input_closed = False
+
+    async def resolve(self) -> bool:
+        """Return whether the project is trusted, prompting the client if needed."""
+
+        if self._resolved:
+            assert self._decision is not None
+            return self._decision
+
+        override = _cli_trust.trust_override_from_env()
+        if override is not None:
+            return self._finish(override)
+
+        stored = is_trusted(self._project_path)
+        if stored is not None:
+            return self._finish(stored)
+
+        if self._input_closed:
+            return self._finish(False)
+
+        # Undecided: prompt the client. Only this path emits trust events, so a
+        # project resolved by env override or a stored decision produces a clean
+        # event stream.
+        pending = _RpcPendingTrust(request_id=uuid4().hex, event=anyio.Event())
+        self._pending = pending
+        _write_json_event(
+            TrustRequested(request_id=pending.request_id, project_path=self._project_path)
+        )
+        await pending.event.wait()
+        trusted = pending.trusted is True
+        if trusted:
+            record_trust(self._project_path, True)
+        elif pending.reason is None:
+            # An explicit "no" answer is persisted; a denial forced by input close
+            # (which sets a reason) is left undecided for a later interactive run.
+            record_trust(self._project_path, False)
+        self._pending = None
+        _write_json_event(
+            TrustResolved(
+                request_id=pending.request_id,
+                project_path=self._project_path,
+                trusted=trusted,
+                reason=pending.reason,
+            )
+        )
+        return self._finish(trusted)
+
+    def resolve_request(self, *, request_id: str, trusted: bool, reason: str | None = None) -> bool:
+        pending = self._pending
+        if pending is None or pending.resolved or pending.request_id != request_id:
+            return False
+        pending.resolved = True
+        pending.trusted = trusted
+        pending.reason = reason
+        pending.event.set()
+        return True
+
+    def deny_pending_on_input_closed(self) -> None:
+        self._input_closed = True
+        pending = self._pending
+        if pending is not None and not pending.resolved:
+            pending.resolved = True
+            pending.trusted = False
+            pending.reason = "RPC input closed before trust response"
+            pending.event.set()
+
+    def _finish(self, trusted: bool) -> bool:
+        self._decision = trusted
+        self._resolved = True
+        return trusted
+
+
 async def _run_rpc(
     config: WispConfig,
     all_tools: bool = False,
@@ -203,6 +310,7 @@ async def _run_rpc(
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     session_state = _rpc_session_state(session)
     approval_policy = _RpcToolApprovalPolicy(_print_mode_tool_approval_policy(approve_unsafe_tools))
+    trust_gate = _RpcTrustGate(Path.cwd())
     agent = Agent(
         provider=provider,
         sessions=sessions,
@@ -241,6 +349,7 @@ async def _run_rpc(
                         send=send,
                         running_prompt=running_prompt,
                         approval_policy=approval_policy,
+                        trust_gate=trust_gate,
                     )
                     if should_shutdown:
                         stop_reader.set()
@@ -256,6 +365,7 @@ async def _run_rpc(
                 if isinstance(control_event, _RpcInputClosed):
                     stdin_closed = True
                     approval_policy.deny_pending_on_input_closed()
+                    trust_gate.deny_pending_on_input_closed()
                     continue
                 if isinstance(control_event, _RpcPromptCompleted):
                     if (
@@ -270,7 +380,11 @@ async def _run_rpc(
 
                 command = control_event.command
                 command_type = _rpc_command_type(command)
-                if running_prompt is not None and command_type not in {"approval", "cancel"}:
+                if running_prompt is not None and command_type not in {
+                    "approval",
+                    "cancel",
+                    "trust",
+                }:
                     if len(queued_commands) >= _MAX_QUEUED_RPC_COMMANDS:
                         _reject_rpc_command(
                             command,
@@ -289,6 +403,7 @@ async def _run_rpc(
                     send=send,
                     running_prompt=running_prompt,
                     approval_policy=approval_policy,
+                    trust_gate=trust_gate,
                 )
                 if should_shutdown:
                     stop_reader.set()
@@ -307,6 +422,7 @@ def _dispatch_rpc_command(
     send: MemoryObjectSendStream[_RpcControlEvent],
     running_prompt: _RpcRunningPrompt | None,
     approval_policy: _RpcToolApprovalPolicy,
+    trust_gate: _RpcTrustGate,
 ) -> tuple[_RpcRunningPrompt | None, bool]:
     command_type = _rpc_command_type(command)
     if command_type == "prompt":
@@ -317,6 +433,7 @@ def _dispatch_rpc_command(
             session_state=session_state,
             task_group=task_group,
             send=send,
+            trust_gate=trust_gate,
         )
         if new_session is not None:
             session_state.session = new_session
@@ -327,6 +444,7 @@ def _dispatch_rpc_command(
         runtime=runtime,
         running_prompt=running_prompt,
         approval_policy=approval_policy,
+        trust_gate=trust_gate,
     )
     return running_prompt, should_shutdown
 
@@ -464,6 +582,7 @@ def _start_rpc_prompt_command(
     session_state: _RpcSessionState,
     task_group: TaskGroup,
     send: MemoryObjectSendStream[_RpcControlEvent],
+    trust_gate: _RpcTrustGate,
 ) -> tuple[_RpcRunningPrompt | None, JsonlSession | None]:
     command_type, command_id, id_error = _rpc_command_identity(command)
     _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
@@ -497,6 +616,7 @@ def _start_rpc_prompt_command(
         command_type,
         cancel_scope,
         send.clone(),
+        trust_gate,
     )
     return _RpcRunningPrompt(command_id=command_id, cancel_scope=cancel_scope), selected_session
 
@@ -511,11 +631,17 @@ async def _run_rpc_prompt_command(
     command_type: str,
     cancel_scope: anyio.CancelScope,
     send: MemoryObjectSendStream[_RpcControlEvent],
+    trust_gate: _RpcTrustGate,
 ) -> None:
     error: str | None = None
     try:
         with cancel_scope:
             try:
+                # Resolve project trust before the first turn runs; the decision is
+                # cached so subsequent prompts don't re-prompt. Trust commands are
+                # processed by the main loop while this awaits, so this cannot
+                # deadlock the reader.
+                agent.trusted = await trust_gate.resolve()
                 await _render_json_events(
                     agent.run(prompt, session=session, history=committed_history)
                 )
@@ -592,6 +718,7 @@ def _handle_rpc_control_command(
     approval_policy: _RpcToolApprovalPolicy,
     agent: Agent | None = None,
     runtime: WispRuntime | None = None,
+    trust_gate: _RpcTrustGate | None = None,
 ) -> bool:
     command_type, command_id, id_error = _rpc_command_identity(command)
     _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
@@ -621,6 +748,21 @@ def _handle_rpc_control_command(
             command_id=command_id,
             command_type=command_type,
             approval_policy=approval_policy,
+        )
+        return False
+    if command_type == "trust":
+        if trust_gate is None:
+            _write_rpc_command_error(
+                command_id=command_id,
+                command_type=command_type,
+                message="RPC trust command requires an active trust gate",
+            )
+            return False
+        _handle_rpc_trust_command(
+            command,
+            command_id=command_id,
+            command_type=command_type,
+            trust_gate=trust_gate,
         )
         return False
     if command_type == "configure":
@@ -734,6 +876,51 @@ def _handle_rpc_approval_command(
             command_id=command_id,
             command_type=command_type,
             message=f"No pending tool approval with call_id: {call_id}",
+        )
+        return
+    _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def _handle_rpc_trust_command(
+    command: dict[str, object],
+    *,
+    command_id: str,
+    command_type: str,
+    trust_gate: _RpcTrustGate,
+) -> None:
+    request_id = command.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC trust command requires string field: request_id",
+        )
+        return
+    trusted = command.get("trusted")
+    if not isinstance(trusted, bool):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC trust command requires boolean field: trusted",
+        )
+        return
+    reason = command.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC trust command field reason must be a string",
+        )
+        return
+    if not trust_gate.resolve_request(
+        request_id=request_id,
+        trusted=trusted,
+        reason=reason,
+    ):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=f"No pending trust request with request_id: {request_id}",
         )
         return
     _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))

@@ -30,6 +30,7 @@ from wisp.events import (
     SessionSaved,
     TokenDelta,
     ToolApprovalRequested,
+    TrustRequested,
 )
 from wisp.tui.commands import (
     TuiSlashCommand,
@@ -70,6 +71,15 @@ class TuiController(Protocol):
         call_id: str,
         *,
         approved: bool = True,
+        reason: str | None = None,
+        command_id: str | None = None,
+    ) -> str: ...
+
+    async def trust(
+        self,
+        request_id: str,
+        *,
+        trusted: bool,
         reason: str | None = None,
         command_id: str | None = None,
     ) -> str: ...
@@ -227,6 +237,14 @@ class TuiShell:
             return False
         if command is not None:
             return await self._handle_slash_command(command)
+        if self.state.pending_trust is not None:
+            if signal.mode is _InputMode.trust:
+                return await self._answer_pending_trust(text)
+            if text and self.state.current_command_id is not None:
+                self.state.queued_prompts.append(text)
+                self._update_view(queued_follow_ups=len(self.state.queued_prompts))
+                self.renderer.queued_follow_up(len(self.state.queued_prompts))
+            return False
         if self.state.pending_approval is not None:
             if signal.mode is _InputMode.approval:
                 return await self._answer_pending_approval(text, exit_after_denial=False)
@@ -393,6 +411,9 @@ class TuiShell:
         if self.state.status is TuiStatus.exiting:
             return False
         self.state.exit_requested = True
+        if self.state.pending_trust is not None:
+            # Resolve pending trust as untrusted (safe) so the RPC side unblocks.
+            return await self._answer_pending_trust("", trusted=False, reason="Trust prompt closed")
         if self.state.pending_approval is not None:
             # Denying the pending approval is the conservative safety behavior even
             # when a live renderer reports that EOF began under an older mode.
@@ -410,6 +431,10 @@ class TuiShell:
         return await self._request_shutdown()
 
     async def _handle_input_interrupted(self, signal: _InputInterrupted) -> bool:
+        if self.state.pending_trust is not None:
+            return await self._answer_pending_trust(
+                "", trusted=False, reason="Trust prompt interrupted"
+            )
         if self.state.pending_approval is not None:
             # Denying the pending approval is the conservative safety behavior even
             # when a live renderer reports that Ctrl-C began under an older mode.
@@ -428,6 +453,10 @@ class TuiShell:
         self.state.exit_requested = True
         self.state.queued_prompts.clear()
         self._update_view(queued_follow_ups=0)
+        if self.state.pending_trust is not None:
+            return await self._answer_pending_trust(
+                "", trusted=False, reason="Trust prompt: quit requested"
+            )
         if self.state.pending_approval is not None:
             return await self._answer_pending_approval(
                 "",
@@ -544,6 +573,47 @@ class TuiShell:
             return False
         return True
 
+    async def _answer_pending_trust(
+        self,
+        answer: str,
+        *,
+        trusted: bool | None = None,
+        reason: str | None = None,
+    ) -> bool:
+        trust = self.state.pending_trust
+        if trust is None:
+            return False
+        selected_trusted = (
+            trusted if trusted is not None else answer.strip().lower() in {"y", "yes"}
+        )
+        selected_reason = reason if not selected_trusted else None
+        ok = await self._send_trust(
+            trust.request_id,
+            trusted=selected_trusted,
+            reason=selected_reason,
+        )
+        self.state.pending_trust = None
+        if not ok:
+            return True
+        self.state.status = TuiStatus.running if self.state.current_command_id else TuiStatus.idle
+        self._sync_view()
+        return False
+
+    async def _send_trust(
+        self,
+        request_id: str,
+        *,
+        trusted: bool,
+        reason: str | None,
+    ) -> bool:
+        try:
+            await self.controller.trust(request_id, trusted=trusted, reason=reason)
+        except Exception as exc:
+            self._update_view(status="error")
+            self.renderer.send_failed("trust", exc)
+            return False
+        return True
+
     async def _handle_rpc_event(self, event: KnownWispEvent) -> bool:
         if isinstance(event, TokenDelta):
             self.state.token_stream_started = True
@@ -567,6 +637,16 @@ class TuiShell:
                     reason="Denied from TUI: input closed",
                     exit_after_denial=True,
                 )
+            return False
+
+        if isinstance(event, TrustRequested):
+            self.state.pending_trust = event
+            self.state.status = TuiStatus.waiting_for_trust
+            self._sync_view()
+            self.renderer.trust_request(event)
+            if self.state.input_closed:
+                # No way to answer: default to untrusted (safe) so the run proceeds.
+                return await self._answer_pending_trust("", trusted=False)
             return False
 
         if isinstance(event, RpcCommandFinished):

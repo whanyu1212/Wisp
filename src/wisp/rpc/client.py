@@ -20,6 +20,7 @@ from wisp.rpc.commands import (
     PromptCommand,
     RpcCommand,
     ShutdownCommand,
+    TrustCommand,
 )
 
 
@@ -78,6 +79,27 @@ class RpcController:
                 id=selected_id,
                 call_id=call_id,
                 approved=approved,
+                reason=reason,
+            )
+        )
+        return selected_id
+
+    async def trust(
+        self,
+        request_id: str,
+        *,
+        trusted: bool,
+        reason: str | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        """Resolve a pending project-trust request."""
+
+        selected_id = command_id or self._command_id_factory("trust")
+        await self._transport.send(
+            TrustCommand(
+                id=selected_id,
+                request_id=request_id,
+                trusted=trusted,
                 reason=reason,
             )
         )

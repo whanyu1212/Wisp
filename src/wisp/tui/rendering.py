@@ -24,6 +24,7 @@ from wisp.events import (
     ToolApprovalResolved,
     ToolCallRequested,
     ToolResultReady,
+    TrustRequested,
 )
 
 
@@ -95,6 +96,8 @@ class TuiRenderer(Protocol):
     def end_token_stream(self) -> None: ...
 
     def approval_request(self, event: ToolApprovalRequested) -> None: ...
+
+    def trust_request(self, event: TrustRequested) -> None: ...
 
     def event(self, event: KnownWispEvent) -> None: ...
 
@@ -182,6 +185,13 @@ class LineTuiRenderer:
             "[yellow]? approval required[/yellow] "
             f"{_markup_escape(event.name)} ({_markup_escape(event.safety)}) "
             f"{_markup_escape(event.arguments)}"
+        )
+
+    def trust_request(self, event: TrustRequested) -> None:
+        self.console.print(
+            "[yellow]? trust this project?[/yellow] "
+            f"{_markup_escape(event.project_path)}\n"
+            "Trusting lets Wisp load this project's local configuration."
         )
 
     def event(self, event: KnownWispEvent) -> None:
@@ -397,6 +407,14 @@ class FullscreenTuiRenderer:
         self._append(
             "approval",
             f"? approval required {event.name} ({event.safety}) {event.arguments}",
+            style="yellow",
+        )
+        self._refresh()
+
+    def trust_request(self, event: TrustRequested) -> None:
+        self._append(
+            "trust",
+            f"? trust this project? {event.project_path}",
             style="yellow",
         )
         self._refresh()

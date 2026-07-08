@@ -25,9 +25,11 @@ from . import options as _cli_options
 from . import output as _cli_output
 from . import rpc as _cli_rpc
 from . import tools as _cli_tools
+from . import trust as _cli_trust
 from .types import OutputMode, _JsonOutputModeError
 
 # Compatibility aliases for callers/tests that import private helpers from wisp.cli.
+_resolve_cli_trust = _cli_trust.resolve_cli_trust
 _env_value = _cli_options._env_value
 _has_callback_cli_args = _cli_options._has_callback_cli_args
 _option_was_provided = _cli_options._option_was_provided
@@ -465,6 +467,7 @@ async def _run_print(
     sessions = JsonlSessionStore(config.session_dir)
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     history = session.read_messages() if session is not None else ()
+    trust = _resolve_cli_trust(Path.cwd())
     agent = Agent(
         provider=provider,
         sessions=sessions,
@@ -479,6 +482,7 @@ async def _run_print(
         tool_context=ToolContext.from_config(config),
         tool_approval_policy=_print_mode_tool_approval_policy(approve_unsafe_tools),
         max_tool_iterations=max_tool_iterations,
+        trusted=trust.trusted,
     )
 
     events = agent.run(prompt, session=session, history=history)

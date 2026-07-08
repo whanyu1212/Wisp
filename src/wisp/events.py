@@ -69,6 +69,20 @@ class ToolApprovalResolved(WispEvent):
     reason: str | None = None
 
 
+class TrustRequested(WispEvent):
+    type: Literal["trust.requested"] = "trust.requested"
+    request_id: str
+    project_path: Path
+
+
+class TrustResolved(WispEvent):
+    type: Literal["trust.resolved"] = "trust.resolved"
+    request_id: str
+    project_path: Path
+    trusted: bool
+    reason: str | None = None
+
+
 class ToolExecutionEnded(WispEvent):
     type: Literal["tool.execution.ended"] = "tool.execution.ended"
     call_id: str
@@ -118,6 +132,8 @@ type KnownWispEvent = Annotated[
     | ToolExecutionStarted
     | ToolApprovalRequested
     | ToolApprovalResolved
+    | TrustRequested
+    | TrustResolved
     | ToolExecutionEnded
     | ToolResultReady
     | SessionSaved
