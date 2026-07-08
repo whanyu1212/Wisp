@@ -50,14 +50,18 @@ def test_fullscreen_tui_renderer_renders_layout_regions(tmp_path: Path) -> None:
             status="idle",
             input_hint="wisp> ",
             last_session="session.jsonl",
+            cwd=str(tmp_path),
+            provider="openai",
+            model="gpt-test",
         )
     )
     renderer.event(SessionSaved(session_id="session", path=tmp_path / "session.jsonl"))
 
     rendered = output.getvalue()
     assert "Transcript" in rendered
-    assert "Status" in rendered
-    assert "Input" in rendered
+    assert "Editor" in rendered
+    assert "openai/gpt-test" in rendered
+    assert "session: session.jsonl" in rendered
     assert "hello" in rendered
     assert "session saved: session.jsonl" in rendered
     assert renderer.state.last_session == "session.jsonl"
@@ -103,6 +107,9 @@ def test_fullscreen_tui_renderer_applies_view_snapshot() -> None:
             input_hint="approve? [y/N] ",
             queued_follow_ups=2,
             last_session="session.jsonl",
+            cwd="/tmp/project",
+            provider="openai",
+            model="gpt-test",
         )
     )
 
@@ -111,6 +118,29 @@ def test_fullscreen_tui_renderer_applies_view_snapshot() -> None:
     assert renderer.state.input_mode == "idle"
     assert renderer.state.queued_follow_ups == 2
     assert renderer.state.last_session == "session.jsonl"
+    assert renderer.state.cwd == "/tmp/project"
+    assert renderer.state.provider == "openai"
+    assert renderer.state.model == "gpt-test"
+
+
+def test_tui_footer_formatter_compacts_and_truncates() -> None:
+    lines = format_tui_footer_lines(
+        TuiViewSnapshot(
+            status="running",
+            input_hint="wisp(running)> ",
+            queued_follow_ups=12,
+            last_session="session.jsonl",
+            cwd="/very/long/project/path/that/will/not/fit",
+            provider="openai",
+            model="gpt-4.1",
+        ),
+        width=32,
+    )
+
+    assert len(lines) == 2
+    assert all(len(line) <= 32 for line in lines)
+    assert "…" in lines[0]
+    assert lines[1].endswith("openai/gpt-4.1")
 
 
 def test_fullscreen_tui_renderer_messages_do_not_infer_footer_state() -> None:
@@ -258,6 +288,8 @@ def test_fullscreen_tui_renderer_keeps_footer_visible_while_scrolled() -> None:
             status="running",
             input_hint="wisp(running)> ",
             queued_follow_ups=1,
+            provider="openai",
+            model="gpt-test",
         )
     )
     for index in range(4):
@@ -267,10 +299,9 @@ def test_fullscreen_tui_renderer_keeps_footer_visible_while_scrolled() -> None:
 
     rendered = output.getvalue()
     assert "Transcript" in rendered
-    assert "Status" in rendered
-    assert "Input" in rendered
-    assert "running" in rendered
-    assert "queued follow-ups: 1" in rendered
+    assert "Editor" in rendered
+    assert "running • queued 1" in rendered
+    assert "openai/gpt-test" in rendered
     assert "wisp(running)> " in rendered
 
 

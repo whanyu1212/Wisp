@@ -17,7 +17,12 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame
 
-from wisp.tui.rendering import FullscreenTuiRenderer, TuiViewSnapshot, _RenderedTranscriptLine
+from wisp.tui.rendering import (
+    FullscreenTuiRenderer,
+    TuiViewSnapshot,
+    _RenderedTranscriptLine,
+    format_tui_footer_lines,
+)
 
 _HEADER_FRAME_HEIGHT = 3
 _FOOTER_HEIGHT = 5
@@ -152,29 +157,22 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
                     ),
                     title="Transcript",
                 ),
-                VSplit(
-                    [
-                        Frame(
+                Frame(
+                    VSplit(
+                        [
                             Window(
-                                FormattedTextControl(self._status_fragments),
-                                width=32,
+                                FormattedTextControl(self._input_prompt_fragments),
+                                dont_extend_width=True,
                             ),
-                            title="Status",
-                        ),
-                        Frame(
-                            VSplit(
-                                [
-                                    Window(
-                                        FormattedTextControl(self._input_prompt_fragments),
-                                        dont_extend_width=True,
-                                    ),
-                                    Window(input_control),
-                                ]
-                            ),
-                            title="Input",
-                        ),
-                    ],
-                    height=5,
+                            Window(input_control),
+                        ]
+                    ),
+                    title="Editor",
+                    height=3,
+                ),
+                Window(
+                    FormattedTextControl(self._footer_fragments),
+                    height=2,
                 ),
             ]
         )
@@ -334,12 +332,13 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
             fragments.append((label_style, f"{entry.role}: "))
         fragments.append((content_style, entry.content))
 
-    def _status_fragments(self) -> StyleAndTextTuples:
-        fragments: StyleAndTextTuples = [("class:status", self.state.status)]
-        if self.state.queued_follow_ups:
-            fragments.append(("class:dim", f"\nqueued follow-ups: {self.state.queued_follow_ups}"))
-        if self.state.last_session:
-            fragments.append(("class:dim", f"\nsession: {self.state.last_session}"))
+    def _footer_fragments(self) -> StyleAndTextTuples:
+        _rows, columns = self._terminal_size()
+        fragments: StyleAndTextTuples = []
+        for index, line in enumerate(format_tui_footer_lines(self._view_snapshot(), width=columns)):
+            if index:
+                fragments.append(("", "\n"))
+            fragments.append(("class:dim", line))
         return fragments
 
     def _input_prompt_fragments(self) -> StyleAndTextTuples:

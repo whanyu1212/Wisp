@@ -220,6 +220,27 @@ def test_live_fullscreen_tui_splits_bracketed_paste_into_submissions() -> None:
     anyio.run(run)
 
 
+def test_live_fullscreen_tui_footer_fragments_use_compact_footer() -> None:
+    renderer = LiveFullscreenTui(run_application=False)
+    renderer.view_updated(
+        TuiViewSnapshot(
+            status="running",
+            input_hint="wisp(running)> ",
+            input_mode="running",
+            queued_follow_ups=2,
+            last_session="sess.jsonl",
+            provider="openai",
+            model="gpt-test",
+        )
+    )
+
+    footer = "".join(fragment for _style, fragment in renderer._footer_fragments())
+
+    assert "running • queued 2" in footer
+    assert "session: sess.jsonl" in footer
+    assert "openai/gpt-test" in footer
+
+
 def test_tui_shell_reads_live_submission_queued_between_reads() -> None:
     async def run() -> None:
         renderer = LiveFullscreenTui(run_application=False)

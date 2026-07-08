@@ -121,7 +121,7 @@ class TuiShell:
         )
         self.prompt_reader = prompt_reader or _default_prompt_reader
         self.state = state or TuiInteractionState()
-        self.view = TuiViewState()
+        self.view = TuiViewState(provider=provider, model=model)
         self.current_provider = provider
         self.current_model = model
         self.pending_configures: dict[str, _PendingConfigure] = {}
@@ -144,6 +144,8 @@ class TuiShell:
                     return
 
     def _sync_view(self) -> None:
+        self.view.provider = self.current_provider
+        self.view.model = self.current_model
         mode = _input_mode_for_status(self.state.status)
         self._update_view(
             status=_view_status_for_status(self.state.status),

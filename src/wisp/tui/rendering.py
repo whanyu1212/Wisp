@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
+from rich.cells import cell_len, set_cell_size
 from rich.console import Console
 from rich.layout import Layout
 from rich.markup import escape
@@ -43,6 +44,9 @@ class TuiViewSnapshot:
     input_mode: str = "idle"
     queued_follow_ups: int = 0
     last_session: str | None = None
+    cwd: str = ""
+    provider: str | None = None
+    model: str | None = None
 
 
 class TuiRenderer(Protocol):
@@ -252,6 +256,9 @@ class FullscreenTuiState:
     input_mode: str = "idle"
     queued_follow_ups: int = 0
     last_session: str | None = None
+    cwd: str = ""
+    provider: str | None = None
+    model: str | None = None
     transcript: list[TuiTranscriptEntry] = field(default_factory=list)
     streaming_text: str = ""
     transcript_scroll_offset: int = 0
@@ -262,7 +269,7 @@ class FullscreenTuiRenderer:
     """Panel-based full-screen layout foundation for the Wisp TUI.
 
     The interaction loop is still line-oriented; this renderer establishes the
-    transcript/status/input regions that a future richer TUI can make live.
+    transcript/editor/footer regions that a future richer TUI can make live.
     """
 
     def __init__(
@@ -290,6 +297,9 @@ class FullscreenTuiRenderer:
         self.state.input_mode = snapshot.input_mode
         self.state.queued_follow_ups = snapshot.queued_follow_ups
         self.state.last_session = snapshot.last_session
+        self.state.cwd = snapshot.cwd
+        self.state.provider = snapshot.provider
+        self.state.model = snapshot.model
         self._refresh()
 
     def startup(self) -> None:
@@ -494,7 +504,8 @@ class FullscreenTuiRenderer:
         layout.split_column(
             Layout(name="header", size=3),
             Layout(name="transcript", ratio=1),
-            Layout(name="footer", size=6),
+            Layout(name="editor", size=3),
+            Layout(name="footer", size=2),
         )
         layout["header"].update(
             Panel(
@@ -510,13 +521,8 @@ class FullscreenTuiRenderer:
                 border_style="cyan",
             )
         )
-        layout["footer"].split_row(Layout(name="status"), Layout(name="input"))
-        layout["footer"]["status"].update(
-            Panel(self._status_text(), title="Status", border_style="magenta")
-        )
-        layout["footer"]["input"].update(
-            Panel(self._input_text(), title="Input", border_style="green")
-        )
+        layout["editor"].update(Panel(self._input_text(), title="Editor", border_style="green"))
+        layout["footer"].update(self._footer_text())
         return layout
 
     def _transcript_text(self) -> Text:
@@ -619,21 +625,115 @@ class FullscreenTuiRenderer:
             text.append(f"{entry.role}: ", style=label_style)
         text.append(entry.content, style=entry.style)
 
-    def _status_text(self) -> Text:
+    def _footer_text(self) -> Text:
+        lines = format_tui_footer_lines(self._view_snapshot(), width=max(1, self.console.width))
         text = Text()
-        text.append(self.state.status, style="bold")
-        if self.state.queued_follow_ups:
-            text.append(f"\nqueued follow-ups: {self.state.queued_follow_ups}", style="dim")
-        if self.state.last_session:
-            text.append(f"\nsession: {self.state.last_session}", style="dim")
+        for index, line in enumerate(lines):
+            if index:
+                text.append("\n")
+            text.append(line, style="dim")
         return text
 
-    def _input_text(self) -> Text:
-        text = Text(self.state.input_hint)
-        text.append(
-            "\n/help for commands · /quit to exit · Ctrl-C interrupt · Ctrl-D EOF", style="dim"
+    def _view_snapshot(self) -> TuiViewSnapshot:
+        return TuiViewSnapshot(
+            status=self.state.status,
+            input_hint=self.state.input_hint,
+            input_mode=self.state.input_mode,
+            queued_follow_ups=self.state.queued_follow_ups,
+            last_session=self.state.last_session,
+            cwd=self.state.cwd,
+            provider=self.state.provider,
+            model=self.state.model,
         )
+
+    def _input_text(self) -> Text:
+        return Text(self.state.input_hint)
+
+
+def format_tui_footer_lines(
+    snapshot: TuiViewSnapshot, *, width: int | None = None
+) -> tuple[str, str]:
+    """Return Pi-style compact footer lines for a renderer snapshot."""
+
+    display_width = max(1, width) if width is not None else None
+    context_left = _sanitize_footer_text(_format_cwd_for_footer(snapshot.cwd))
+    context_right = (
+        _sanitize_footer_text(f"session: {snapshot.last_session}") if snapshot.last_session else ""
+    )
+
+    status_parts = [snapshot.status]
+    if snapshot.queued_follow_ups:
+        status_parts.append(f"queued {snapshot.queued_follow_ups}")
+    status_left = _sanitize_footer_text(" • ".join(status_parts))
+    model_right = _sanitize_footer_text(_footer_model_text(snapshot.provider, snapshot.model))
+
+    return (
+        _align_footer_line(context_left, context_right, display_width),
+        _align_footer_line(status_left, model_right, display_width),
+    )
+
+
+def format_tui_footer_text(snapshot: TuiViewSnapshot, *, width: int | None = None) -> str:
+    """Return footer lines joined for renderers that take plain text."""
+
+    return "\n".join(format_tui_footer_lines(snapshot, width=width))
+
+
+def _format_cwd_for_footer(cwd: str) -> str:
+    selected = cwd or os.getcwd()
+    expanded = os.path.abspath(os.path.expanduser(selected))
+    home = os.path.expanduser("~")
+    try:
+        if home and os.path.commonpath([expanded, home]) == home:
+            relative = os.path.relpath(expanded, home)
+            return "~" if relative == "." else f"~{os.sep}{relative}"
+    except ValueError:
+        return selected
+    return selected
+
+
+def _footer_model_text(provider: str | None, model: str | None) -> str:
+    if provider and model:
+        return f"{provider}/{model}"
+    if provider:
+        return f"{provider}/default"
+    return model or ""
+
+
+def _align_footer_line(left: str, right: str, width: int | None) -> str:
+    if not right:
+        return _truncate_to_cell_width(left, width)
+    if width is None:
+        return f"{left}  {right}" if left else right
+
+    left_width = cell_len(left)
+    right_width = cell_len(right)
+    if left_width + 2 + right_width <= width:
+        return left + " " * (width - left_width - right_width) + right
+    if right_width >= width:
+        return _truncate_to_cell_width(right, width)
+
+    available_left = width - right_width - 2
+    if available_left > 0:
+        truncated_left = _truncate_to_cell_width(left, available_left)
+        padding = " " * max(1, width - cell_len(truncated_left) - right_width)
+        return truncated_left + padding + right
+    return _truncate_to_cell_width(right, width)
+
+
+def _truncate_to_cell_width(text: str, width: int | None, ellipsis: str = "…") -> str:
+    if width is None or cell_len(text) <= width:
         return text
+    if width <= 0:
+        return ""
+    ellipsis_width = cell_len(ellipsis)
+    if width <= ellipsis_width:
+        return set_cell_size(ellipsis, width)
+    return set_cell_size(text, width - ellipsis_width) + ellipsis
+
+
+def _sanitize_footer_text(text: str) -> str:
+    return " ".join(text.replace("\r", " ").replace("\n", " ").replace("\t", " ").split())
 
 
 _BUILT_IN_RENDERERS: dict[TuiRendererKind, type[LineTuiRenderer] | type[FullscreenTuiRenderer]] = {

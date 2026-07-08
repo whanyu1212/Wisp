@@ -42,6 +42,8 @@ from wisp.tui import (
     TuiStatus,
     TuiViewSnapshot,
     create_tui_renderer,
+    format_tui_footer_lines,
+    format_tui_footer_text,
 )
 from wisp.tui.app import (
     _default_prompt_reader,
@@ -233,6 +235,8 @@ __all__ = [
     "builtins",
     "create_tui_renderer",
     "deque",
+    "format_tui_footer_lines",
+    "format_tui_footer_text",
     "io",
     "sys",
     "tui_app_module",

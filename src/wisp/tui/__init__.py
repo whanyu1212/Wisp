@@ -12,6 +12,8 @@ from wisp.tui.rendering import (
     TuiTranscriptEntry,
     TuiViewSnapshot,
     create_tui_renderer,
+    format_tui_footer_lines,
+    format_tui_footer_text,
 )
 from wisp.tui.shell import TuiShell
 from wisp.tui.state import TuiInteractionState, TuiStatus, TuiViewState
@@ -32,5 +34,7 @@ __all__ = [
     "TuiViewSnapshot",
     "TuiViewState",
     "create_tui_renderer",
+    "format_tui_footer_lines",
+    "format_tui_footer_text",
     "run_tui",
 ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 
 from wisp.events import KnownWispEvent, ToolApprovalRequested
 from wisp.tui.rendering import TuiViewSnapshot
@@ -44,6 +45,9 @@ class TuiViewState:
     input_mode: str = "idle"
     queued_follow_ups: int = 0
     last_session: str | None = None
+    cwd: str = field(default_factory=lambda: str(Path.cwd()))
+    provider: str | None = None
+    model: str | None = None
 
     def snapshot(self) -> TuiViewSnapshot:
         """Return an immutable renderer-facing view snapshot."""
@@ -54,6 +58,9 @@ class TuiViewState:
             input_mode=self.input_mode,
             queued_follow_ups=self.queued_follow_ups,
             last_session=self.last_session,
+            cwd=self.cwd,
+            provider=self.provider,
+            model=self.model,
         )
 
 
