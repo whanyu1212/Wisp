@@ -33,6 +33,7 @@ from wisp.runtime.registry import UnknownProviderError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.base import Tool
+from wisp.tools.context import ToolContext
 
 from . import output as _cli_output
 from . import tools as _cli_tools
@@ -213,6 +214,7 @@ async def _run_rpc(
             allow_read_tools=allow_read_tools,
             allowed_tools=allowed_tools,
         ),
+        tool_context=ToolContext.from_config(config),
         tool_approval_policy=approval_policy,
         max_tool_iterations=max_tool_iterations,
     )

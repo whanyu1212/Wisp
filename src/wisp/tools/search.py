@@ -12,7 +12,7 @@ from pathlib import Path
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _optional_string, _required_string
 from wisp.tools.context import ToolContext
-from wisp.tools.paths import display_tool_path, resolve_tool_path
+from wisp.tools.paths import display_tool_path, is_protected_path, resolve_tool_path
 from wisp.tools.process import ProcessResult as ProcessResult
 from wisp.tools.process import _run_exec_limited_stdout
 from wisp.tools.result import ToolError, ToolResult
@@ -207,11 +207,16 @@ async def _run_rg_grep(
         command.extend(("--glob", glob))
     command.extend(("--", pattern, _command_path(path, context)))
 
+    def _is_reportable_match(line: str) -> bool:
+        # Count a match only if it survives the protected-path post-filter, so the
+        # reported match count and truncation flag never reflect a hidden secret.
+        return _is_grep_match_line(line) and not _rg_grep_line_is_protected(line, context)
+
     result = await _run_exec_limited_stdout(
         command,
         cwd=context.cwd,
         max_stdout_lines=max_results + 1,
-        stdout_count_filter=_is_grep_match_line,
+        stdout_count_filter=_is_reportable_match,
         max_buffered_stdout_bytes=max(0, context.max_output_bytes),
         max_buffered_stdout_lines=max(0, context.max_output_lines),
         max_buffered_stderr_bytes=max(0, context.max_output_bytes),
@@ -231,8 +236,28 @@ async def _run_rg_grep(
     )
 
 
-def _rg_sandbox_args(context: ToolContext) -> tuple[str, str]:
-    return ("--no-config", "--follow" if context.allow_outside_cwd else "--no-follow")
+def _rg_sandbox_args(context: ToolContext) -> tuple[str, ...]:
+    base = ("--no-config", "--follow" if context.allow_outside_cwd else "--no-follow")
+    return base + _rg_protected_exclusions(context)
+
+
+def _rg_protected_exclusions(context: ToolContext) -> tuple[str, ...]:
+    """Emit ``--glob '!pattern'`` args so rg never reads protected secrets.
+
+    rg's ``--glob`` uses gitignore-style patterns; a leading ``!`` excludes.
+    Applying these at the rg level means a protected file's contents are never
+    streamed into our buffer, mirroring the Python walk's ``is_protected_path``
+    skip. Bare patterns are also emitted as ``**/pattern`` so they exclude at any
+    depth, matching :func:`is_protected_path` semantics.
+    """
+
+    args: list[str] = []
+    for pattern in context.protected_paths:
+        normalized = pattern.replace("\\", "/")
+        args.extend(("--glob", f"!{normalized}"))
+        if "/" not in normalized:
+            args.extend(("--glob", f"!**/{normalized}"))
+    return tuple(args)
 
 
 def _bounded_rg_context_lines(requested_context_lines: int, context: ToolContext) -> int:
@@ -259,15 +284,22 @@ async def _run_rg_find(
     if path.is_file():
         candidates = [path]
     else:
+
+        def _reportable_file(line: str) -> bool:
+            # Filter protected paths at the subprocess boundary so they never
+            # consume a slot in the ``max_results + 1`` line budget — otherwise a
+            # run of protected files could exhaust the budget before any reportable
+            # file is seen, yielding a false "no matches".
+            candidate = _path_from_rg_line(line, context)
+            return _matches_glob(candidate, pattern, context) and not is_protected_path(
+                candidate, context
+            )
+
         result = await _run_exec_limited_stdout(
             [rg_path, *_rg_sandbox_args(context), "--files", "--", _command_path(path, context)],
             cwd=context.cwd,
             max_stdout_lines=max_results + 1,
-            stdout_line_filter=lambda line: _matches_glob(
-                _path_from_rg_line(line, context),
-                pattern,
-                context,
-            ),
+            stdout_line_filter=_reportable_file,
             max_buffered_stderr_bytes=max(0, context.max_output_bytes),
             max_buffered_stderr_lines=max(0, context.max_output_lines),
         )
@@ -283,7 +315,7 @@ async def _run_rg_find(
     matches = [
         display_tool_path(candidate, context)
         for candidate in candidates
-        if _matches_glob(candidate, pattern, context)
+        if _matches_glob(candidate, pattern, context) and not is_protected_path(candidate, context)
     ]
     matches.sort()
     return _result_from_lines(
@@ -381,6 +413,10 @@ def _iter_files(path: Path, context: ToolContext) -> Iterable[Path]:
 
 
 def _is_path_within_tool_cwd(path: Path, context: ToolContext) -> bool:
+    # Protected secrets (.env, keys) are excluded from find/grep results at any
+    # depth so their names and contents never surface, even inside the sandbox.
+    if is_protected_path(path, context):
+        return False
     if context.allow_outside_cwd:
         return True
     try:
@@ -550,6 +586,75 @@ def _path_from_rg_line(line: str, context: ToolContext) -> Path:
     return path.resolve(strict=False)
 
 
+def _rg_grep_line_is_protected(line: str, context: ToolContext) -> bool:
+    """Return whether a grep output line belongs to a protected file.
+
+    The ``rg --glob '!...'`` exclusions are only a best-effort speedup: they use
+    gitignore glob semantics (case-sensitive, last-match-wins) that differ from
+    :func:`is_protected_path`, and a caller-supplied ``--glob`` can re-include an
+    excluded file. So ``is_protected_path`` is the single source of truth: every
+    emitted record is post-filtered by extracting its file path and dropping the
+    line if that path is protected.
+
+    Extraction **fails closed**. rg's field separators are not escape-safe — a
+    filename may itself contain the separator byte, and buffering may truncate a
+    record mid-field — so a record whose path cannot be extracted *unambiguously*
+    is treated as protected and dropped. This trades a rare false drop (a genuine
+    non-secret line with a pathological name) for a guarantee that no secret line
+    leaks through an ambiguous parse. Lines that are plainly not file records
+    (no path field at all) are kept.
+    """
+
+    if not context.protected_paths:
+        return False
+
+    extraction = _grep_line_path_text(line)
+    if extraction is None:
+        return False  # not a file record (e.g. a separator line); nothing to protect
+    path_text, unambiguous = extraction
+    if not unambiguous:
+        return True  # fail closed: ambiguous/truncated record — assume protected
+    path = Path(path_text)
+    if not path.is_absolute():
+        path = context.cwd / path
+    return is_protected_path(path, context)
+
+
+def _grep_line_path_text(line: str) -> tuple[str, bool] | None:
+    """Extract the file-path field from a grep output line.
+
+    Returns ``None`` when the line carries no path field (not a file record).
+    Otherwise returns ``(path_text, unambiguous)`` where ``unambiguous`` is False
+    if the record cannot be split cleanly — e.g. the field-separated form does not
+    have exactly a ``path SEP linenumber SEP text`` shape (a filename containing
+    the separator byte, or a record truncated by output buffering). Callers must
+    treat an ambiguous result as protected (fail closed).
+
+    Accepted trade-off: a legitimate match whose *text* happens to contain the raw
+    separator byte (``\\x1f`` / ``\\x1e``, control chars that essentially never
+    occur in source or config) is reported as ambiguous and dropped. Losing such a
+    rare match is preferable to leaking a secret through a mis-parsed path.
+    """
+
+    for separator in (RG_MATCH_SEPARATOR, RG_CONTEXT_SEPARATOR):
+        if separator not in line:
+            continue
+        parts = line.split(separator)
+        # A well-formed field-separated record is exactly:
+        #   path SEP linenumber SEP text
+        # More separators than that means the filename (or text) contains the
+        # separator byte -> the path boundary is ambiguous. Fewer means the record
+        # was truncated before the text field arrived.
+        if len(parts) == 3 and parts[1].isdigit():
+            return parts[0], True
+        return "", False
+    for separator in (":", "-"):
+        index = _find_line_number_separator(line, separator)
+        if index != -1:
+            return line[:index], True
+    return None
+
+
 def _result_from_grep_lines(
     lines: Sequence[str],
     *,
@@ -568,6 +673,19 @@ def _result_from_grep_lines(
             pending_context_after_limit.clear()
             truncated_by_count = True
             break
+        # Drop any line from a protected file that rg's --glob exclusions failed to
+        # filter (case mismatch, or a caller --glob re-including it). is_protected_path
+        # is the authoritative gate for both search engines.
+        if _rg_grep_line_is_protected(line, context):
+            pending_context_after_limit.clear()
+            continue
+        # A bare "--" group separator is only meaningful between two kept groups.
+        # Emit it only when real content precedes it; otherwise dropping protected
+        # groups would leave orphaned separators (and a "--" with count == 0).
+        if line == "--":
+            if kept and kept[-1] != "--":
+                kept.append("--")
+            continue
         line_kind = _grep_line_kind(line, context)
         if line_kind == "match":
             if match_count >= max_results:
@@ -590,6 +708,9 @@ def _result_from_grep_lines(
         pending_context_after_limit.clear()
         kept.append(_normalize_rg_line(line))
     kept.extend(pending_context_after_limit)
+    # Drop a trailing orphan separator left when the final group was dropped.
+    while kept and kept[-1] == "--":
+        kept.pop()
     effective_match_count = max(match_count, known_match_count or 0)
     if effective_match_count > match_count:
         truncated_by_count = True

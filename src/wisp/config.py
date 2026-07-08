@@ -8,6 +8,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
+from wisp.settings import DEFAULT_PROTECTED_PATHS, ResolvedSettings, resolve_settings
+
 DEFAULT_PROVIDER = "openai-codex"
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
@@ -22,6 +24,7 @@ class WispConfig(BaseModel):
     model: str | None = None
     session_dir: Path = Field(default_factory=lambda: default_session_dir())
     auth_path: Path = Field(default_factory=lambda: default_auth_path())
+    protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS
 
     @classmethod
     def from_env(
@@ -33,26 +36,33 @@ class WispConfig(BaseModel):
         auth_path: Path | None = None,
         load_env_file: bool = True,
     ) -> WispConfig:
-        """Build config from environment variables with explicit overrides.
+        """Build config from environment, settings files, and explicit overrides.
 
-        Precedence is: explicit argument > environment > default.
+        Precedence, highest to lowest: explicit argument > environment variable >
+        project ``./.wisp/settings.json`` > user ``~/.wisp/settings.json`` >
+        built-in default. Settings files only fill keys left unset by the argument
+        and environment layers.
         """
 
         if load_env_file:
             load_project_env()
 
+        settings = resolve_settings()
+
         provider_name = _first_non_empty(
             provider,
             os.environ.get("WISP_PROVIDER"),
+            settings.provider,
             default=DEFAULT_PROVIDER,
         )
         assert provider_name is not None
 
         return cls(
             provider=provider_name,
-            model=_first_non_empty(model, os.environ.get("WISP_MODEL")),
-            session_dir=session_dir or default_session_dir(),
-            auth_path=auth_path or default_auth_path(),
+            model=_first_non_empty(model, os.environ.get("WISP_MODEL"), settings.model),
+            session_dir=session_dir or default_session_dir(settings=settings),
+            auth_path=auth_path or default_auth_path(settings=settings),
+            protected_paths=_resolve_protected_paths(settings),
         )
 
 
@@ -62,26 +72,49 @@ def load_project_env() -> None:
     load_dotenv(dotenv_path=Path.cwd() / ".env")
 
 
-def default_auth_path() -> Path:
-    """Return the default provider credential file path."""
+def default_auth_path(*, settings: ResolvedSettings | None = None) -> Path:
+    """Return the default provider credential file path.
+
+    Precedence: ``WISP_AUTH_FILE`` env var > settings-file ``auth_path`` > default.
+    """
 
     if env_path := os.environ.get("WISP_AUTH_FILE"):
         return Path(env_path).expanduser()
+    if settings is not None and settings.auth_path:
+        return Path(settings.auth_path).expanduser()
     return _DEFAULT_AUTH_PATH.expanduser()
 
 
-def default_session_dir() -> Path:
+def default_session_dir(*, settings: ResolvedSettings | None = None) -> Path:
     """Return the default JSONL session directory.
 
     Sessions persist to ``~/.wisp/sessions`` by default so transcripts survive
     across runs and can be resumed. Set ``WISP_SESSION_DIR`` (or pass
-    ``--session-dir``) to store them elsewhere — including a temp path for
-    ephemeral sessions.
+    ``--session-dir``), or ``session_dir`` in a settings file, to store them
+    elsewhere — including a temp path for ephemeral sessions.
+
+    Precedence: ``WISP_SESSION_DIR`` env var > settings-file ``session_dir`` >
+    default.
     """
 
     if env_dir := os.environ.get("WISP_SESSION_DIR"):
         return Path(env_dir).expanduser()
+    if settings is not None and settings.session_dir:
+        return Path(settings.session_dir).expanduser()
     return _DEFAULT_SESSION_DIR.expanduser()
+
+
+def _resolve_protected_paths(settings: ResolvedSettings) -> tuple[str, ...]:
+    """Return the protected-path globs, honoring a settings-file override.
+
+    A settings file may set ``protected_paths`` to any list — including an empty
+    list to disable the guard entirely. When the key is absent (``None``), the
+    built-in default list applies.
+    """
+
+    if settings.protected_paths is not None:
+        return settings.protected_paths
+    return DEFAULT_PROTECTED_PATHS
 
 
 def _first_non_empty(*values: str | None, default: str | None = None) -> str | None:
