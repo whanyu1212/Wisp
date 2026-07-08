@@ -30,7 +30,11 @@ def resolve_tool_path(path: str | None, context: ToolContext, *, default: str = 
             resolved.relative_to(cwd)
         except ValueError as exc:
             raise ToolError(f"Path is outside the tool working directory: {selected}") from exc
-    if is_protected_path(resolved, context):
+    # Check the lexical candidate (pre-symlink-dereference), not the resolved
+    # target: a protected name such as ``.env`` must be denied even when it is a
+    # symlink to an innocuously named file. is_protected_path also re-checks the
+    # resolved target, so a link *to* a secret is caught as well.
+    if is_protected_path(candidate, context):
         raise ToolError(f"Access to protected path denied: {selected}")
     return resolved
 
@@ -53,18 +57,35 @@ def is_protected_path(path: Path, context: ToolContext) -> bool:
 
     The suffix semantics are what let a slash-bearing default protect
     ``/home/user/.wisp/auth.json`` regardless of the current working directory.
+
+    Both the **lexical** path (as requested, without following symlinks) and the
+    **symlink-resolved** target are checked, and either matching protects the
+    path. This blocks a ``.env -> secret.txt`` symlink (lexical name matches) as
+    well as an innocuously named link pointing *at* a secret (target matches).
     """
 
     patterns = context.protected_paths
     if not patterns:
         return False
 
-    resolved = path.resolve(strict=False)
     cwd = context.cwd.resolve(strict=False)
-    name = resolved.name
-    abs_text = PurePosixPath(resolved.as_posix()).as_posix()
+    # Lexical form: make absolute against cwd WITHOUT dereferencing symlinks, so a
+    # protected name that links elsewhere is still matched by its requested name.
+    lexical = path if path.is_absolute() else cwd / path
+    resolved = path.resolve(strict=False)
+    for candidate in (lexical, resolved):
+        if _candidate_is_protected(candidate, patterns, cwd):
+            return True
+    return False
+
+
+def _candidate_is_protected(path: Path, patterns: tuple[str, ...], cwd: Path) -> bool:
+    """Match one concrete path against the protected patterns (see is_protected_path)."""
+
+    name = path.name
+    abs_text = PurePosixPath(path.as_posix()).as_posix()
     try:
-        rel_text: str | None = resolved.relative_to(cwd).as_posix()
+        rel_text: str | None = path.relative_to(cwd).as_posix()
     except ValueError:
         rel_text = None  # outside cwd; rely on basename + absolute-suffix matching
 

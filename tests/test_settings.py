@@ -169,7 +169,9 @@ def test_from_env_defaults_protected_paths(tmp_path: Path, monkeypatch: MonkeyPa
 
     config = WispConfig.from_env(load_env_file=False)
 
-    assert config.protected_paths == DEFAULT_PROTECTED_PATHS
+    # The built-in defaults are present; the active auth file is always appended.
+    assert set(DEFAULT_PROTECTED_PATHS).issubset(config.protected_paths)
+    assert any(config.auth_path.name in pattern for pattern in config.protected_paths)
 
 
 def test_from_env_settings_can_disable_protected_paths(
@@ -180,4 +182,7 @@ def test_from_env_settings_can_disable_protected_paths(
 
     config = WispConfig.from_env(load_env_file=False)
 
-    assert config.protected_paths == ()
+    # Disabling the general guard clears the project globs, but Wisp still protects
+    # its own active credential file.
+    auth_pattern = config.auth_path.resolve().as_posix()
+    assert config.protected_paths == (auth_pattern,)

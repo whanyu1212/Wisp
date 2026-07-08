@@ -354,3 +354,75 @@ def test_protected_matches_do_not_starve_a_later_real_match(tmp_path: Path) -> N
     assert "zzz.py" in result.text  # the real match survives
     assert "NEEDLE_SECRET" not in result.text  # no secret leaked
     assert "aaa" not in result.text
+
+
+# --- Re-review round 2 (PR #58 commit 9696c36): symlink + custom auth file ---
+
+
+def test_protected_symlink_name_is_denied_before_dereferencing(tmp_path: Path) -> None:
+    # P1: a protected NAME that is a symlink to an innocuous target must be denied
+    # by its requested name, not silently allowed via the resolved target.
+    (tmp_path / "actualdata").write_text("API_KEY=sk-secret\n", encoding="utf-8")
+    (tmp_path / ".env").symlink_to(tmp_path / "actualdata")
+    context = _context(tmp_path)
+
+    with pytest.raises(ToolError, match="protected path"):
+        run_tool(ReadTool(), {"path": ".env"}, context)
+
+
+def test_symlink_pointing_at_secret_target_is_also_denied(tmp_path: Path) -> None:
+    # The other direction: an innocuously named symlink pointing AT a protected
+    # target is caught via the resolved path.
+    (tmp_path / "hidden.key").write_text("k\n", encoding="utf-8")
+    (tmp_path / "notes.txt").symlink_to(tmp_path / "hidden.key")
+    context = _context(tmp_path)
+
+    assert is_protected_path(tmp_path / "notes.txt", context) is True
+
+
+def test_grep_skips_protected_symlink(tmp_path: Path) -> None:
+    (tmp_path / "actualdata").write_text("API_KEY=sk-needle\n", encoding="utf-8")
+    (tmp_path / ".env").symlink_to(tmp_path / "actualdata")
+    context = ToolContext(cwd=tmp_path, protected_paths=(".env",))
+
+    result = run_tool(GrepTool(), {"pattern": "sk-needle", "path": "."}, context)
+
+    # The .env symlink is skipped; the real (unprotected) file is fine to surface.
+    assert ".env" not in result.text
+
+
+def test_configured_auth_file_is_protected(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    # P2: a custom credential file (via WISP_AUTH_FILE) is Wisp's active secret and
+    # must be protected even though it isn't named like the default auth.json.
+    from wisp.config import WispConfig
+
+    auth_file = tmp_path / "codex-auth.json"
+    auth_file.write_text('{"token": "sk-super-secret"}\n', encoding="utf-8")
+    monkeypatch.setenv("WISP_AUTH_FILE", str(auth_file))
+
+    config = WispConfig.from_env(load_env_file=False)
+    context = ToolContext.from_config(config, cwd=tmp_path)
+
+    assert any("codex-auth.json" in pattern for pattern in config.protected_paths)
+    with pytest.raises(ToolError, match="protected path"):
+        run_tool(ReadTool(), {"path": "codex-auth.json"}, context)
+
+
+def test_auth_file_protected_even_when_guard_disabled(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # Disabling the general guard must not expose Wisp's own credential file.
+    from wisp.config import WispConfig
+
+    auth_file = tmp_path / "codex-auth.json"
+    auth_file.write_text('{"token": "sk-secret"}\n', encoding="utf-8")
+    monkeypatch.setenv("WISP_AUTH_FILE", str(auth_file))
+    (tmp_path / ".wisp").mkdir()
+    (tmp_path / ".wisp" / "settings.json").write_text('{"protected_paths": []}', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    config = WispConfig.from_env(load_env_file=False)
+    context = ToolContext.from_config(config, cwd=tmp_path)
+
+    with pytest.raises(ToolError, match="protected path"):
+        run_tool(ReadTool(), {"path": "codex-auth.json"}, context)

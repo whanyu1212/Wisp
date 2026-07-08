@@ -57,12 +57,14 @@ class WispConfig(BaseModel):
         )
         assert provider_name is not None
 
+        resolved_auth_path = auth_path or default_auth_path(settings=settings)
+
         return cls(
             provider=provider_name,
             model=_first_non_empty(model, os.environ.get("WISP_MODEL"), settings.model),
             session_dir=session_dir or default_session_dir(settings=settings),
-            auth_path=auth_path or default_auth_path(settings=settings),
-            protected_paths=_resolve_protected_paths(settings),
+            auth_path=resolved_auth_path,
+            protected_paths=_resolve_protected_paths(settings, auth_path=resolved_auth_path),
         )
 
 
@@ -104,17 +106,36 @@ def default_session_dir(*, settings: ResolvedSettings | None = None) -> Path:
     return _DEFAULT_SESSION_DIR.expanduser()
 
 
-def _resolve_protected_paths(settings: ResolvedSettings) -> tuple[str, ...]:
+def _resolve_protected_paths(
+    settings: ResolvedSettings, *, auth_path: Path | None = None
+) -> tuple[str, ...]:
     """Return the protected-path globs, honoring a settings-file override.
 
     A settings file may set ``protected_paths`` to any list — including an empty
     list to disable the guard entirely. When the key is absent (``None``), the
     built-in default list applies.
+
+    Wisp's *active* credential file (``auth_path``) is always appended, even when
+    the user disabled the general guard: it is Wisp's own secret, so a custom
+    ``--auth-file`` / ``WISP_AUTH_FILE`` / settings ``auth_path`` is protected the
+    same way the default ``~/.wisp/auth.json`` is — not just the hard-coded default
+    pattern.
     """
 
     if settings.protected_paths is not None:
-        return settings.protected_paths
-    return DEFAULT_PROTECTED_PATHS
+        base = settings.protected_paths
+    else:
+        base = DEFAULT_PROTECTED_PATHS
+
+    if auth_path is None:
+        return base
+
+    # Protect the exact resolved credential file as an absolute-path pattern, so it
+    # is caught wherever it lives (inside or outside cwd) regardless of its name.
+    auth_pattern = auth_path.expanduser().resolve(strict=False).as_posix()
+    if auth_pattern in base:
+        return base
+    return (*base, auth_pattern)
 
 
 def _first_non_empty(*values: str | None, default: str | None = None) -> str | None:
