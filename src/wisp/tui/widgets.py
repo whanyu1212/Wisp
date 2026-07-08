@@ -123,9 +123,14 @@ class SlashSuggest(OptionList):
     recovered by id — no parallel index to keep in sync.
     """
 
+    # overlay: screen floats the menu over the transcript WITHOUT reflowing it,
+    # while keeping its natural compose position (just above #input, where it's
+    # yielded). It is deliberately NOT put on a separate `layer:` — a lone child on
+    # the overlay layer gets laid out at the TOP of the app by that layer's own
+    # vertical layout, detaching it from the prompt (the bug Codex caught).
+    # constrain: inside keeps it fully on-screen at any terminal size.
     DEFAULT_CSS = """
     SlashSuggest {
-        layer: overlay;
         overlay: screen;
         constrain: inside;
         display: none;

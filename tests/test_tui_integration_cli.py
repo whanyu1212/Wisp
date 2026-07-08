@@ -1614,6 +1614,33 @@ def test_textual_slash_shows_inline_menu_and_filters() -> None:
     assert value == "/mozzz"  # input untouched throughout
 
 
+def test_textual_slash_menu_is_anchored_near_the_input() -> None:
+    # The menu must render near the prompt, not float at the top of the app. Using
+    # a separate `layer:` detaches it to the top (a real regression); overlay:screen
+    # alone keeps its compose position just above #input. Assert it renders in the
+    # lower half of the screen, adjacent to the input, with the input unmoved.
+    async def scenario() -> tuple[int, int, int, int]:
+        app_instance = TextualTui()
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+            await pilot.press("/")
+            await pilot.pause()
+            return (
+                suggest.region.y,
+                suggest.region.y + suggest.region.height,
+                input_widget.region.y,
+                app_instance.size.height,
+            )
+
+    menu_top, menu_bottom, input_y, height = anyio.run(scenario)
+    assert menu_top >= height // 2  # menu is in the lower half, not floating at top
+    assert input_y >= height - 4  # input stays pinned near the bottom (not shoved)
+    assert abs(menu_bottom - input_y) <= 5  # menu sits adjacent to the input
+
+
 def test_textual_tab_completes_highlighted_command() -> None:
     # Tab fills the highlighted command: a trailing space for arg-taking commands
     # (so the user types the value), none for arg-less ones.
