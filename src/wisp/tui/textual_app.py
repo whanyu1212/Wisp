@@ -233,7 +233,14 @@ class TextualTui(App[None]):
             yield Transcript(id="transcript")
             yield Input(placeholder=_input_placeholder("wisp> "), id="input")
             with Horizontal(id="status-bar"):
-                yield Static("idle", id="status")
+                # markup=False: the footer is always plain data (cwd, session,
+                # provider/model, status) — never intentional markup. Static
+                # renders markup by default, so a cwd or model name containing
+                # bracket syntax (e.g. a dir named `[x]`, or `/model [bold]`)
+                # would be interpreted as style tags and could restyle/hide/raise.
+                # Disabling markup on the widget makes the footer literal for every
+                # set_status() call without escaping at each site.
+                yield Static("idle", id="status", markup=False)
 
     async def on_mount(self) -> None:
         # The Header renders these as the wordmark in the top bar: a quiet,

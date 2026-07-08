@@ -1220,6 +1220,37 @@ def test_textual_footer_fits_the_status_content_region() -> None:
     assert all(w <= 78 for w in line_widths)  # no line overflows the render region
 
 
+def test_textual_footer_renders_markup_in_cwd_and_model_literally() -> None:
+    # The footer is plain data (cwd, session, provider/model), but Static renders
+    # markup by default — so a cwd or model name containing bracket syntax would be
+    # interpreted as style tags (restyle/hide/raise). The #status widget is built
+    # with markup=False, so such content must render verbatim with no style spans.
+    async def scenario() -> tuple[str, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="running",
+                    input_hint="wisp> ",
+                    input_mode="running",
+                    cwd="/tmp/[/red]evil[bold]",
+                    last_session="s1",
+                    provider="openai",
+                    model="gpt[/]x",
+                )
+            )
+            await pilot.pause()
+            rendered = app_instance.query_one("#status", Static).render()
+            return rendered.plain, len(rendered.spans)
+
+    plain, span_count = anyio.run(scenario)
+    assert "[/red]" in plain  # cwd markup survives as literal text
+    assert "[bold]" in plain
+    assert "[/]" in plain  # model markup survives as literal text
+    assert span_count == 0  # nothing interpreted as a style span
+
+
 def test_textual_footer_stays_below_input_without_stealing_focus() -> None:
     async def scenario() -> tuple[bool, bool]:
         app_instance, renderer = create_textual_tui()
