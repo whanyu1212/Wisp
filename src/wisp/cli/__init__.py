@@ -12,7 +12,7 @@ from rich.console import Console
 
 from wisp.agent.loop import Agent
 from wisp.cli.auth import auth_app
-from wisp.config import WispConfig, load_project_env
+from wisp.config import WispConfig
 from wisp.events import ErrorEvent, TokenDelta
 from wisp.providers.base import ProviderError
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
@@ -30,6 +30,7 @@ from .types import OutputMode, _JsonOutputModeError
 
 # Compatibility aliases for callers/tests that import private helpers from wisp.cli.
 _resolve_cli_trust = _cli_trust.resolve_cli_trust
+_resolve_trust_and_load_env = _cli_trust.resolve_trust_and_load_env
 _env_value = _cli_options._env_value
 _has_callback_cli_args = _cli_options._has_callback_cli_args
 _option_was_provided = _cli_options._option_was_provided
@@ -189,7 +190,8 @@ def cli_callback(
         return
 
     console = Console(stderr=True)
-    load_project_env()
+    # Mode is resolved from CLI flags / real-env WISP_MODE only (never from .env), so
+    # it is safe to determine the mode before loading the project .env.
     mode_was_provided = _option_was_provided(ctx, "mode")
     resolved_mode = _resolve_cli_mode(
         mode,
@@ -241,6 +243,18 @@ def cli_callback(
         console=console,
     )
 
+    # Resolve project trust and gate the project .env on it (a repo's .env is
+    # project-local config and must not be applied from an untrusted project). Trust
+    # is read from safe sources only — the global store and the real-env WISP_TRUST —
+    # never from .env. print/JSON resolve interactively here (the prompt goes to
+    # stderr, keeping JSON stdout clean); rpc/tui resolve trust out-of-band, so they
+    # only apply .env when a non-interactive signal already says trusted.
+    if resolved_mode in (OutputMode.rpc, OutputMode.tui):
+        _cli_trust.load_env_if_trusted_noninteractive(Path.cwd())
+        cli_trust_decision = None
+    else:
+        cli_trust_decision = _resolve_trust_and_load_env(Path.cwd())
+
     config = WispConfig.from_env(
         provider=provider,
         model=model,
@@ -287,6 +301,7 @@ def cli_callback(
                 approve_unsafe_tools,
                 max_tool_iterations,
                 resolved_mode,
+                cli_trust_decision.trusted if cli_trust_decision is not None else False,
             )
     except _JsonOutputModeError as exc:
         raise typer.Exit(1) from exc
@@ -359,7 +374,10 @@ def tui_command(
     """Start Wisp's fullscreen TUI."""
 
     console = Console(stderr=True)
-    load_project_env()
+    # The TUI resolves trust out-of-band (its RPC subprocess prompts via TrustCommand),
+    # so gate .env on the non-interactive trust signals here; an undecided project's
+    # .env is not applied until the prompt is answered on a later run.
+    _cli_trust.load_env_if_trusted_noninteractive(Path.cwd())
     _validate_session_and_iteration_options(
         resume=resume,
         continue_latest=continue_latest,
@@ -461,13 +479,13 @@ async def _run_print(
     approve_unsafe_tools: bool = False,
     max_tool_iterations: int | None = None,
     mode: OutputMode = OutputMode.text,
+    trusted: bool = False,
 ) -> None:
     runtime = await _build_runtime_for_config(config)
     provider = runtime.providers.get(config.provider)
     sessions = JsonlSessionStore(config.session_dir)
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     history = session.read_messages() if session is not None else ()
-    trust = _resolve_cli_trust(Path.cwd())
     agent = Agent(
         provider=provider,
         sessions=sessions,
@@ -482,7 +500,7 @@ async def _run_print(
         tool_context=ToolContext.from_config(config),
         tool_approval_policy=_print_mode_tool_approval_policy(approve_unsafe_tools),
         max_tool_iterations=max_tool_iterations,
-        trusted=trust.trusted,
+        trusted=trusted,
     )
 
     events = agent.run(prompt, session=session, history=history)

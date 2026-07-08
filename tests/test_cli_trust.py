@@ -7,7 +7,12 @@ from pathlib import Path
 
 from pytest import MonkeyPatch
 
-from wisp.cli.trust import resolve_cli_trust, trust_override_from_env
+from wisp.cli.trust import (
+    load_env_if_trusted_noninteractive,
+    resolve_cli_trust,
+    resolve_trust_and_load_env,
+    trust_override_from_env,
+)
 from wisp.trust import is_trusted, record_trust
 
 
@@ -125,3 +130,74 @@ def test_real_env_trust_survives_project_env_load(tmp_path: Path, monkeypatch: M
 
     # The real env value wins; .env cannot override it.
     assert os.environ.get("WISP_TRUST") == "1"
+
+
+# --- .env is gated on trust (review of PR #59: finding 1) ---
+
+
+def _write_env(directory: Path) -> None:
+    (directory / ".env").write_text(
+        "WISP_PROVIDER=from-dotenv\nWISP_SESSION_DIR=/tmp/from-dotenv\n", encoding="utf-8"
+    )
+
+
+def test_untrusted_project_env_is_not_loaded(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    # A repo we have not trusted must not get its .env applied (non-interactive path).
+    trust_file = tmp_path / "trust.json"
+    project = tmp_path / "repo"
+    project.mkdir()
+    _write_env(project)
+    monkeypatch.delenv("WISP_TRUST", raising=False)
+    monkeypatch.delenv("WISP_PROVIDER", raising=False)
+    monkeypatch.chdir(project)
+
+    load_env_if_trusted_noninteractive(project, trust_path=trust_file)
+
+    assert os.environ.get("WISP_PROVIDER") is None
+
+
+def test_trusted_project_env_is_loaded(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    trust_file = tmp_path / "trust.json"
+    project = tmp_path / "repo"
+    project.mkdir()
+    _write_env(project)
+    record_trust(project, True, trust_path=trust_file)
+    monkeypatch.delenv("WISP_TRUST", raising=False)
+    monkeypatch.delenv("WISP_PROVIDER", raising=False)
+    monkeypatch.chdir(project)
+
+    load_env_if_trusted_noninteractive(project, trust_path=trust_file)
+
+    assert os.environ.get("WISP_PROVIDER") == "from-dotenv"
+
+
+def test_wisp_trust_override_loads_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    trust_file = tmp_path / "trust.json"
+    project = tmp_path / "repo"
+    project.mkdir()
+    _write_env(project)
+    monkeypatch.setenv("WISP_TRUST", "1")
+    monkeypatch.delenv("WISP_PROVIDER", raising=False)
+    monkeypatch.chdir(project)
+
+    load_env_if_trusted_noninteractive(project, trust_path=trust_file)
+
+    assert os.environ.get("WISP_PROVIDER") == "from-dotenv"
+
+
+def test_resolve_trust_and_load_env_skips_env_when_untrusted(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    trust_file = tmp_path / "trust.json"
+    project = tmp_path / "repo"
+    project.mkdir()
+    _write_env(project)
+    monkeypatch.delenv("WISP_TRUST", raising=False)
+    monkeypatch.delenv("WISP_PROVIDER", raising=False)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)  # non-interactive => untrusted
+    monkeypatch.chdir(project)
+
+    decision = resolve_trust_and_load_env(project, trust_path=trust_file)
+
+    assert decision.trusted is False
+    assert os.environ.get("WISP_PROVIDER") is None
