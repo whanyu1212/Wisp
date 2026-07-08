@@ -75,11 +75,13 @@ SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
 )
 
 
-# A leading token is a *command attempt* only if it's a single slash-word: a
-# slash followed by a command-like word with no inner slashes (`/help`, `/mdoel`).
-# Anything path-like (`/etc/hosts`), spaced (`/ note`), or multi-segment is prose
-# that merely starts with a slash — a valid literal message, not a mistyped
-# command — so it must reach the model instead of raising "Unknown command".
+# The *whole* input is a command attempt only if it's a lone slash-word: a slash
+# followed by a command-like word, nothing else (`/help`, `/mdoel`). The moment
+# more follows — another word (`/todo remember this`), an inner slash
+# (`/etc/hosts`), or a space (`/ note`) — it's prose that merely starts with a
+# slash, a valid literal message rather than a mistyped command, so it reaches the
+# model instead of raising "Unknown command". Matching the whole input (not just
+# the first token) is what lets multi-word slash prose through.
 _COMMAND_ATTEMPT = re.compile(r"^/[A-Za-z][A-Za-z-]*$")
 
 
@@ -105,10 +107,11 @@ def parse_tui_slash_command(text: str) -> TuiSlashCommand | None:
         return None
     name = _ALIASES.get(parts[0])
     if name is None:
-        # An unknown token is only a "command attempt" (worth erroring on) when it
-        # looks like a mistyped command — a lone `/word`. Path-like or spaced
-        # leading slashes are literal prompts and pass through as None.
-        if _COMMAND_ATTEMPT.match(parts[0]):
+        # An unknown input is only a "command attempt" (worth erroring on) when the
+        # WHOLE input is a lone `/word` — a plausible mistyped command. A slash word
+        # followed by anything (more words, a path, prose) is a literal prompt and
+        # passes through as None so it reaches the model.
+        if _COMMAND_ATTEMPT.match(stripped):
             raise TuiSlashCommandError(f"Unknown command: {parts[0]}")
         return None
     return TuiSlashCommand(name=name, args=tuple(parts[1:]))
