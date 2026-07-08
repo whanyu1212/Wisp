@@ -1,11 +1,11 @@
-"""Entrypoint helpers for resolving project trust and gating the project ``.env``.
+"""Entrypoint helpers for resolving project trust.
 
 Each output mode resolves trust the same way — consult the store, prompt on a
 first run — but surfaces the prompt differently (a ``typer.confirm`` in the text
 CLI, an RPC command over stdin, a ``[y/N]`` line in the TUI). This module holds the
-shared, mode-agnostic pieces: the environment override, the text-mode prompter, and
-the trust-gated loading of a project's ``.env`` (project-local configuration that an
-untrusted repo must not be allowed to apply).
+shared, mode-agnostic pieces: the environment override and the text-mode prompter.
+The resolved decision is threaded into :meth:`wisp.config.WispConfig.from_env`, which
+gates the project-local settings file on it.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from pathlib import Path
 
 import typer
 
-from wisp.config import load_project_env
 from wisp.trust import is_trusted
 from wisp.trust_flow import TrustDecision, resolve_trust
 
@@ -42,42 +41,22 @@ def trust_override_from_env() -> bool | None:
     return None
 
 
-def load_env_if_trusted_noninteractive(
-    project_path: Path, *, trust_path: Path | None = None
-) -> None:
-    """Load the project ``.env`` only if trust is already decided as trusted.
+def trusted_noninteractive(project_path: Path, *, trust_path: Path | None = None) -> bool:
+    """Return the trust decision from non-interactive, project-safe signals only.
 
-    For entrypoints (RPC, TUI) that resolve trust asynchronously or out-of-band, we
-    still must decide ``.env`` at startup. This consults only the non-interactive,
-    project-safe signals — a ``WISP_TRUST`` override or a stored decision — and loads
-    ``.env`` when they say trusted. An undecided project does **not** get its ``.env``
-    applied for this run (the safe default); the interactive/out-of-band prompt still
-    runs and governs project-local resource loading (context files, extensions).
+    For entrypoints (RPC, TUI) that surface the trust prompt asynchronously or
+    out-of-band, config must still be built at startup with *some* trust value. This
+    consults only signals that a project cannot forge — a ``WISP_TRUST`` override or a
+    stored decision — and returns ``True`` only when they say trusted. An undecided
+    project is treated as untrusted here (the safe default), so its local settings are
+    not applied at startup; the out-of-band prompt still runs and, once answered,
+    governs project-local resource loading for the rest of the session.
     """
 
     override = trust_override_from_env()
-    if override is True or (override is None and is_trusted(project_path, trust_path=trust_path)):
-        load_project_env()
-
-
-def resolve_trust_and_load_env(
-    project_path: Path, *, trust_path: Path | None = None
-) -> TrustDecision:
-    """Resolve project trust, then load the project ``.env`` only if trusted.
-
-    A project's ``.env`` is project-local configuration (it can set the provider,
-    session directory, credential paths, and API keys). Applying it from an
-    untrusted repo would let a cloned project inject configuration, so ``.env`` is
-    gated on trust exactly like context files and project extensions. Trust itself
-    is resolved from safe sources only (the global store and the real-process
-    ``WISP_TRUST``), never from ``.env`` — so the gate cannot be bootstrapped by the
-    very file it guards.
-    """
-
-    decision = resolve_cli_trust(project_path, trust_path=trust_path)
-    if decision.trusted:
-        load_project_env()
-    return decision
+    if override is not None:
+        return override
+    return is_trusted(project_path, trust_path=trust_path) is True
 
 
 def resolve_cli_trust(project_path: Path, *, trust_path: Path | None = None) -> TrustDecision:
@@ -108,7 +87,8 @@ def _text_trust_prompter(project_path: Path) -> bool | None:
         return typer.confirm(
             f"Do you trust the files in {project_path}?\n"
             "Trusting lets Wisp load this project's local configuration "
-            "(context files, project extensions, .env). You can still use Wisp either way.",
+            "(its .wisp/settings.json, context files, project extensions). "
+            "You can still use Wisp either way.",
             default=False,
             err=True,
         )

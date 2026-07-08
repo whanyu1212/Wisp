@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from wisp.settings import DEFAULT_PROTECTED_PATHS, ResolvedSettings, resolve_settings
@@ -51,7 +50,7 @@ class WispConfig(BaseModel):
         model: str | None = None,
         session_dir: Path | None = None,
         auth_path: Path | None = None,
-        load_env_file: bool = True,
+        trusted: bool = False,
     ) -> WispConfig:
         """Build config from environment, settings files, and explicit overrides.
 
@@ -59,12 +58,19 @@ class WispConfig(BaseModel):
         project ``./.wisp/settings.json`` > user ``~/.wisp/settings.json`` >
         built-in default. Settings files only fill keys left unset by the argument
         and environment layers.
+
+        ``trusted`` is the project-trust decision (resolved beforehand from safe
+        sources — the global trust store or the real-process ``WISP_TRUST``, never
+        from project-controlled config). It gates the project ``.wisp/settings.json``
+        layer, which can set ``provider``, ``model``, ``session_dir``, or ``auth_path``
+        and would otherwise let an untrusted repo redirect Wisp's credential file or
+        override user defaults. It defaults to ``False`` so a caller that forgets to
+        pass a decision fails closed — an untrusted project contributes no local
+        settings. Higher-precedence layers (explicit args, environment, user settings)
+        are unaffected by trust.
         """
 
-        if load_env_file:
-            load_project_env()
-
-        settings = resolve_settings()
+        settings = resolve_settings(trust_project=trusted)
 
         provider_name = _first_non_empty(
             provider,
@@ -81,32 +87,6 @@ class WispConfig(BaseModel):
             auth_path=auth_path or default_auth_path(settings=settings),
             protected_paths=_resolve_protected_paths(settings),
         )
-
-
-# Environment variables that influence the project TRUST decision. A project's own
-# ``.env`` is project-controlled, so it must never be able to set these — otherwise a
-# malicious repo could ship ``.env`` with ``WISP_TRUST=1`` (or point ``WISP_TRUST_FILE``
-# at a project-local file) and trust itself, defeating the trust boundary. These keys
-# are honored only from the real process environment.
-_TRUST_PROTECTED_ENV_KEYS = ("WISP_TRUST", "WISP_TRUST_FILE")
-
-
-def load_project_env() -> None:
-    """Load Wisp environment defaults from the current working directory.
-
-    The project ``.env`` may set ordinary Wisp variables, but is prevented from
-    setting the trust-critical keys (:data:`_TRUST_PROTECTED_ENV_KEYS`): their real
-    process-environment values are snapshotted and restored around the load so a
-    project's ``.env`` can neither introduce nor override them.
-    """
-
-    preserved = {key: os.environ.get(key) for key in _TRUST_PROTECTED_ENV_KEYS}
-    load_dotenv(dotenv_path=Path.cwd() / ".env")
-    for key, original in preserved.items():
-        if original is None:
-            os.environ.pop(key, None)  # .env introduced it — remove it
-        else:
-            os.environ[key] = original  # .env may have overridden it — restore
 
 
 def default_auth_path(*, settings: ResolvedSettings | None = None) -> Path:

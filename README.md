@@ -41,24 +41,60 @@ Wisp runs the same agent core in four modes:
 
 ## Configuration
 
-Copy the example env file and edit it for local defaults:
+Wisp reads configuration from the environment and from a settings file. Set the
+variables you need in your shell (or your shell profile / a process manager):
 
 ```bash
-cp .env.example .env
+export WISP_PROVIDER=          # openai-codex (default) | openai | fake
+export WISP_MODEL=             # provider default when blank
+export WISP_MODE=              # blank = help/text; set to tui to open the TUI directly
+export WISP_TUI_RENDERER=      # line | fullscreen | textual
+export WISP_SESSION_DIR=       # where transcripts are stored (default: ~/.wisp/sessions)
+export WISP_AUTH_FILE=~/.wisp/auth.json
+export OPENAI_API_KEY=         # required only for the openai provider
 ```
 
-```env
-WISP_PROVIDER=            # openai-codex (default) | openai | fake
-WISP_MODEL=               # provider default when blank
-WISP_MODE=                # blank = help/text; set to tui to open the TUI directly
-WISP_TUI_RENDERER=        # line | fullscreen | textual
-WISP_SESSION_DIR=         # where transcripts are stored (default: ~/.wisp/sessions)
-WISP_AUTH_FILE=~/.wisp/auth.json
-OPENAI_API_KEY=           # required only for the openai provider
+For durable defaults, use a settings file instead of exporting every session. The
+user (global) file lives at `~/.wisp/settings.json`; a project may add
+`./.wisp/settings.json`, applied **only after you trust the project** (see
+[Project trust](#project-trust)):
+
+```json
+{ "provider": "openai", "model": "gpt-5.5", "session_dir": "~/.wisp/sessions" }
 ```
 
-**CLI flags always override environment variables.** Never commit `.env`, auth files, or real
-API keys.
+Precedence, highest to lowest: **CLI flag > environment variable > project
+`./.wisp/settings.json` > user `~/.wisp/settings.json` > built-in default.** Never
+commit auth files or real API keys.
+
+> **Migration note:** Wisp no longer reads a project `.env` file. Move any values you
+> kept there into your shell environment (`export …`) or, for durable defaults, into
+> `~/.wisp/settings.json`. A project `.env` on disk is still treated as a secret and
+> is never surfaced to the model.
+
+## Project trust
+
+Project-local configuration — the `./.wisp/settings.json` file, context files, and
+project extensions — is applied **only for projects you trust**. The first time you
+run Wisp in an untrusted directory it asks:
+
+```
+Do you trust the files in /path/to/project?
+```
+
+Answer **yes** and the decision is remembered (globally, in `~/.wisp/trust.json`, keyed
+by resolved path) so you are not asked again. Until then Wisp still runs — it just
+ignores the project's local configuration, so a freshly cloned repository can't
+redirect Wisp's credential file or override your defaults before you have looked at it.
+
+- **Non-interactive runs** (CI, scripts, RPC/TUI) default to *untrusted*. Set
+  `WISP_TRUST=1` to opt a run in (or `WISP_TRUST=0` to force out). This is read only
+  from the real process environment, never from project files.
+- The `protected_paths` secret guard is a **user-only** policy: a project settings
+  file can never weaken it, even once trusted.
+- `WISP_TRUST_FILE` may relocate the global trust store, but only to an **absolute
+  path**; keep it outside any repository, since a store inside a project you clone
+  would let that project decide its own trust. A relative value is rejected.
 
 ## Providers & auth
 

@@ -28,9 +28,32 @@ GLOBAL_TRUST_PATH = Path("~/.wisp/trust.json")
 
 
 def _default_trust_path() -> Path:
+    """Return the location of the global trust store.
+
+    Defaults to :data:`GLOBAL_TRUST_PATH` (``~/.wisp/trust.json``). ``WISP_TRUST_FILE``
+    relocates it, but only when the override is **absolute**: a *relative* value (e.g.
+    ``WISP_TRUST_FILE=.wisp/trust.json``) resolves against the current project
+    directory, which would let a repo ship its own ``trust.json`` and mark itself
+    trusted — the exact self-trust bypass this boundary exists to prevent. A relative
+    override is rejected (with a warning) in favor of the global store.
+
+    The chosen path is canonicalized (symlinks and ``..`` collapsed) so reads and
+    writes always agree on one unambiguous location, regardless of how it was spelled.
+    An absolute override is otherwise honored as-is: pointing it at a repo-controlled
+    location is a deliberate user action, not something the project can trigger.
+    """
+
+    candidate = GLOBAL_TRUST_PATH
     if env_path := os.environ.get("WISP_TRUST_FILE"):
-        return Path(env_path).expanduser()
-    return GLOBAL_TRUST_PATH.expanduser()
+        override = Path(env_path)
+        if override.is_absolute():
+            candidate = override
+        else:
+            _warn(
+                f"ignoring relative WISP_TRUST_FILE={env_path!r}: the trust store must be an "
+                "absolute path so a project cannot supply its own; using the global store"
+            )
+    return candidate.expanduser().resolve(strict=False)
 
 
 def _canonical_key(project_path: Path) -> str:

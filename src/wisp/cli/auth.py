@@ -12,7 +12,7 @@ from rich.console import Console
 
 from wisp.auth.openai_codex import OpenAICodexLoginMethod, login_openai_codex
 from wisp.auth.storage import ApiKeyCredential, AuthCredential, JsonAuthStore, OAuthCredential
-from wisp.config import WispConfig, load_project_env
+from wisp.config import WispConfig
 
 SUPPORTED_LOGIN_PROVIDERS = ("openai-codex",)
 
@@ -108,8 +108,11 @@ async def _login_openai_codex(
 
 
 def _store_from_options(auth_file: Path | None) -> JsonAuthStore:
-    load_project_env()
-    config = WispConfig.from_env(auth_path=auth_file, load_env_file=False)
+    # Auth is fail-closed on project trust (trusted defaults to False): the credential
+    # file location is honored from the --auth-file flag, the real-env WISP_AUTH_FILE,
+    # or user settings only — never from a project's .wisp/settings.json, so an
+    # untrusted repo cannot redirect where a freshly-minted credential is written.
+    config = WispConfig.from_env(auth_path=auth_file)
     return JsonAuthStore(config.auth_path)
 
 

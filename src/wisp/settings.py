@@ -110,6 +110,7 @@ def resolve_settings(
     *,
     project_dir: Path | None = None,
     home_dir: Path | None = None,
+    trust_project: bool = False,
 ) -> ResolvedSettings:
     """Resolve the file-based settings layers into a single merged view.
 
@@ -117,24 +118,43 @@ def resolve_settings(
     settings file so project keys win. ``project_dir`` defaults to the current
     working directory and ``home_dir`` to the user's home — both are parameters so
     tests can point them at a ``tmp_path``.
+
+    ``trust_project`` gates the project layer on the project-trust decision. A
+    project ``.wisp/settings.json`` is project-controlled configuration: it can set
+    ``provider``, ``model``, ``session_dir``, and ``auth_path``, redirecting Wisp's
+    credential file or overriding user defaults. Applying it from an untrusted repo
+    is the same class of bypass as loading an untrusted ``.env``, so when
+    ``trust_project`` is ``False`` the project file is ignored entirely and only the
+    user layer contributes. Trust is decided *before* this is called (from the
+    global store / real-env ``WISP_TRUST``), never from a project-controlled source.
+
+    It defaults to ``False`` (fail-closed): a caller that has not resolved trust must
+    not accidentally ingest project settings. Production config construction passes an
+    explicit decision via :meth:`wisp.config.WispConfig.from_env`.
     """
 
     home = home_dir if home_dir is not None else Path.home()
     project = project_dir if project_dir is not None else Path.cwd()
 
     user_file = (home / ".wisp" / PROJECT_SETTINGS_FILENAME).expanduser()
-    project_file = project / PROJECT_SETTINGS_DIRNAME / PROJECT_SETTINGS_FILENAME
-
     user_settings = _load_settings_file(user_file)
-    project_settings = _load_settings_file(project_file)
+
+    # An untrusted project contributes nothing: skip its settings file entirely so a
+    # cloned repo cannot inject provider/model/session_dir/auth_path. This is
+    # fail-closed — an undecided project is treated as untrusted here.
+    project_settings = (
+        _load_settings_file(project / PROJECT_SETTINGS_DIRNAME / PROJECT_SETTINGS_FILENAME)
+        if trust_project
+        else WispSettings()
+    )
 
     # Project layer wins over user layer, key by key. ``_coalesce`` keeps the first
     # non-None value, so a key absent from the project file falls through to the
     # user file, and a key absent from both stays None.
     #
     # ``protected_paths`` is a SECURITY policy and is deliberately taken from the
-    # USER layer only. A project ``.wisp/settings.json`` is project-controlled, so
-    # honoring its ``protected_paths`` would let an untrusted repo ship
+    # USER layer only — even for a trusted project. A project ``.wisp/settings.json``
+    # is project-controlled, so honoring its ``protected_paths`` would let a repo ship
     # ``{"protected_paths": []}`` to disable the secret-file guard and expose its own
     # ``.env`` to the model. The project may not weaken (or set) this policy.
     return ResolvedSettings(

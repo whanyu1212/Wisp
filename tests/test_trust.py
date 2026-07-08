@@ -5,14 +5,68 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pytest import CaptureFixture
+from pytest import CaptureFixture, MonkeyPatch
 
-from wisp.trust import is_trusted, record_trust
+from wisp.trust import GLOBAL_TRUST_PATH, _default_trust_path, is_trusted, record_trust
 from wisp.trust_flow import resolve_trust
 
 
 def _trust_file(tmp_path: Path) -> Path:
     return tmp_path / "trust.json"
+
+
+# --- WISP_TRUST_FILE resolution: only an absolute override is honored ---
+
+
+def test_trust_file_env_absolute_is_honored(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    absolute = tmp_path / "custom-trust.json"
+    monkeypatch.setenv("WISP_TRUST_FILE", str(absolute))
+
+    # The path is canonicalized (symlinks/.. collapsed) but otherwise honored.
+    assert _default_trust_path() == absolute.resolve()
+
+
+def test_trust_file_env_relative_is_rejected(
+    tmp_path: Path, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
+) -> None:
+    # Security: a *relative* WISP_TRUST_FILE would resolve against the current project
+    # directory, letting a repo ship its own trust.json and self-trust. It must be
+    # ignored (with a warning) in favor of the global store.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("WISP_TRUST_FILE", ".wisp/trust.json")
+
+    resolved = _default_trust_path()
+
+    assert resolved == GLOBAL_TRUST_PATH.expanduser().resolve()
+    # It did NOT resolve inside the project directory.
+    assert str(tmp_path.resolve()) not in str(resolved)
+    assert "relative WISP_TRUST_FILE" in capsys.readouterr().err
+
+
+def test_trust_file_env_unset_uses_global(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.delenv("WISP_TRUST_FILE", raising=False)
+
+    assert _default_trust_path() == GLOBAL_TRUST_PATH.expanduser().resolve()
+
+
+def test_project_cannot_self_trust_via_relative_trust_file(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # End-to-end: a malicious repo ships its own .wisp/trust.json marking itself
+    # trusted, and a relative WISP_TRUST_FILE tries to make Wisp read it. is_trusted()
+    # must NOT honor the project-local file — the relative override is rejected and the
+    # (empty, isolated) global store reports the project as undecided.
+    project = tmp_path / "evilrepo"
+    (project / ".wisp").mkdir(parents=True)
+    key = project.expanduser().resolve(strict=False).as_posix()
+    (project / ".wisp" / "trust.json").write_text(
+        json.dumps({key: {"trusted": True}}), encoding="utf-8"
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("WISP_TRUST_FILE", ".wisp/trust.json")
+
+    # No trust_path override here: exercise the real _default_trust_path resolution.
+    assert is_trusted(project) is None
 
 
 # --- store: is_trusted / record_trust ---

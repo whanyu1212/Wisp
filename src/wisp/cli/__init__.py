@@ -30,7 +30,6 @@ from .types import OutputMode, _JsonOutputModeError
 
 # Compatibility aliases for callers/tests that import private helpers from wisp.cli.
 _resolve_cli_trust = _cli_trust.resolve_cli_trust
-_resolve_trust_and_load_env = _cli_trust.resolve_trust_and_load_env
 _env_value = _cli_options._env_value
 _has_callback_cli_args = _cli_options._has_callback_cli_args
 _option_was_provided = _cli_options._option_was_provided
@@ -190,8 +189,8 @@ def cli_callback(
         return
 
     console = Console(stderr=True)
-    # Mode is resolved from CLI flags / real-env WISP_MODE only (never from .env), so
-    # it is safe to determine the mode before loading the project .env.
+    # Mode is resolved from CLI flags / real-env WISP_MODE only, before trust is
+    # resolved and project-local config is applied.
     mode_was_provided = _option_was_provided(ctx, "mode")
     resolved_mode = _resolve_cli_mode(
         mode,
@@ -243,24 +242,24 @@ def cli_callback(
         console=console,
     )
 
-    # Resolve project trust and gate the project .env on it (a repo's .env is
-    # project-local config and must not be applied from an untrusted project). Trust
-    # is read from safe sources only — the global store and the real-env WISP_TRUST —
-    # never from .env. print/JSON resolve interactively here (the prompt goes to
-    # stderr, keeping JSON stdout clean); rpc/tui resolve trust out-of-band, so they
-    # only apply .env when a non-interactive signal already says trusted.
+    # Resolve project trust and gate project-local config (the .wisp/settings.json
+    # layer) on it: an untrusted repo must not be able to redirect the credential
+    # file or override user defaults. Trust is read from safe sources only — the
+    # global store and the real-env WISP_TRUST — never from project-controlled files.
+    # print/JSON resolve interactively here (the prompt goes to stderr, keeping JSON
+    # stdout clean); rpc/tui prompt out-of-band, so at startup they use only the
+    # non-interactive signals (an undecided project is untrusted until answered).
     if resolved_mode in (OutputMode.rpc, OutputMode.tui):
-        _cli_trust.load_env_if_trusted_noninteractive(Path.cwd())
-        cli_trust_decision = None
+        trusted = _cli_trust.trusted_noninteractive(Path.cwd())
     else:
-        cli_trust_decision = _resolve_trust_and_load_env(Path.cwd())
+        trusted = _resolve_cli_trust(Path.cwd()).trusted
 
     config = WispConfig.from_env(
         provider=provider,
         model=model,
         session_dir=session_dir,
         auth_path=auth_file,
-        load_env_file=False,
+        trusted=trusted,
     )
     try:
         if resolved_mode is OutputMode.rpc:
@@ -301,7 +300,7 @@ def cli_callback(
                 approve_unsafe_tools,
                 max_tool_iterations,
                 resolved_mode,
-                cli_trust_decision.trusted if cli_trust_decision is not None else False,
+                trusted,
             )
     except _JsonOutputModeError as exc:
         raise typer.Exit(1) from exc
@@ -375,9 +374,9 @@ def tui_command(
 
     console = Console(stderr=True)
     # The TUI resolves trust out-of-band (its RPC subprocess prompts via TrustCommand),
-    # so gate .env on the non-interactive trust signals here; an undecided project's
-    # .env is not applied until the prompt is answered on a later run.
-    _cli_trust.load_env_if_trusted_noninteractive(Path.cwd())
+    # so gate the project settings layer on the non-interactive trust signals here; an
+    # undecided project's local settings are not applied until the prompt is answered.
+    trusted = _cli_trust.trusted_noninteractive(Path.cwd())
     _validate_session_and_iteration_options(
         resume=resume,
         continue_latest=continue_latest,
@@ -388,7 +387,7 @@ def tui_command(
     config = WispConfig.from_env(
         session_dir=session_dir,
         auth_path=auth_file,
-        load_env_file=False,
+        trusted=trusted,
     )
     renderer = TuiRendererKind.line if line else TuiRendererKind.textual
     try:
