@@ -83,26 +83,48 @@ def test_unknown_keys_are_ignored(tmp_path: Path) -> None:
     assert settings.provider == "p"
 
 
-def test_protected_paths_empty_list_is_preserved(tmp_path: Path) -> None:
-    # An explicit empty list means "protect nothing" and must not fall through
-    # to the user layer or the built-in default.
+def test_user_protected_paths_empty_list_is_preserved(tmp_path: Path) -> None:
+    # An explicit empty list in the USER settings means "protect nothing" and must
+    # not fall through to the built-in default.
     home = tmp_path / "home"
-    project = tmp_path / "proj"
-    _write_settings(home, protected_paths=[".env"])
-    _write_settings(project, protected_paths=[])
+    _write_settings(home, protected_paths=[])
 
-    settings = resolve_settings(project_dir=project, home_dir=home)
+    settings = resolve_settings(project_dir=tmp_path / "proj", home_dir=home)
 
     assert settings.protected_paths == ()
 
 
-def test_protected_paths_absent_falls_through(tmp_path: Path) -> None:
+def test_user_protected_paths_are_used(tmp_path: Path) -> None:
     home = tmp_path / "home"
     _write_settings(home, protected_paths=["secret.txt"])
 
     settings = resolve_settings(project_dir=tmp_path / "proj", home_dir=home)
 
     assert settings.protected_paths == ("secret.txt",)
+
+
+def test_project_protected_paths_are_ignored(tmp_path: Path) -> None:
+    # Security: a project-controlled settings file must NOT be able to set or
+    # weaken protected_paths (it could otherwise disable the secret guard). Only
+    # the user layer is honored for this key.
+    home = tmp_path / "home"
+    project = tmp_path / "proj"
+    _write_settings(home, protected_paths=["from-user.txt"])
+    _write_settings(project, protected_paths=[])  # attempt to disable — ignored
+
+    settings = resolve_settings(project_dir=project, home_dir=home)
+
+    assert settings.protected_paths == ("from-user.txt",)
+
+
+def test_project_cannot_introduce_protected_paths(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "proj"
+    _write_settings(project, protected_paths=["project-only.txt"])
+
+    settings = resolve_settings(project_dir=project, home_dir=home)
+
+    assert settings.protected_paths is None  # project value ignored; user unset
 
 
 # --- Precedence through WispConfig.from_env (CLI > env > file > default) ---
@@ -174,15 +196,27 @@ def test_from_env_defaults_protected_paths(tmp_path: Path, monkeypatch: MonkeyPa
     assert any(config.auth_path.name in pattern for pattern in config.protected_paths)
 
 
-def test_from_env_settings_can_disable_protected_paths(
+def test_from_env_user_settings_can_disable_protected_paths(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
+    # The USER (global) settings file may disable the general guard; Wisp still
+    # protects its own active credential file.
     monkeypatch.chdir(tmp_path)
-    _write_settings(tmp_path, protected_paths=[])
+    _write_settings(Path.home(), protected_paths=[])
 
     config = WispConfig.from_env(load_env_file=False)
 
-    # Disabling the general guard clears the project globs, but Wisp still protects
-    # its own active credential file.
     auth_pattern = config.auth_path.resolve().as_posix()
     assert config.protected_paths == (auth_pattern,)
+
+
+def test_from_env_project_settings_cannot_disable_protected_paths(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # Security: a project-controlled settings file must NOT disable the guard.
+    monkeypatch.chdir(tmp_path)
+    _write_settings(tmp_path, protected_paths=[])  # project attempt — ignored
+
+    config = WispConfig.from_env(load_env_file=False)
+
+    assert set(DEFAULT_PROTECTED_PATHS).issubset(config.protected_paths)

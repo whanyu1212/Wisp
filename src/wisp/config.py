@@ -83,10 +83,30 @@ class WispConfig(BaseModel):
         )
 
 
-def load_project_env() -> None:
-    """Load Wisp environment defaults from the current working directory."""
+# Environment variables that influence the project TRUST decision. A project's own
+# ``.env`` is project-controlled, so it must never be able to set these — otherwise a
+# malicious repo could ship ``.env`` with ``WISP_TRUST=1`` (or point ``WISP_TRUST_FILE``
+# at a project-local file) and trust itself, defeating the trust boundary. These keys
+# are honored only from the real process environment.
+_TRUST_PROTECTED_ENV_KEYS = ("WISP_TRUST", "WISP_TRUST_FILE")
 
+
+def load_project_env() -> None:
+    """Load Wisp environment defaults from the current working directory.
+
+    The project ``.env`` may set ordinary Wisp variables, but is prevented from
+    setting the trust-critical keys (:data:`_TRUST_PROTECTED_ENV_KEYS`): their real
+    process-environment values are snapshotted and restored around the load so a
+    project's ``.env`` can neither introduce nor override them.
+    """
+
+    preserved = {key: os.environ.get(key) for key in _TRUST_PROTECTED_ENV_KEYS}
     load_dotenv(dotenv_path=Path.cwd() / ".env")
+    for key, original in preserved.items():
+        if original is None:
+            os.environ.pop(key, None)  # .env introduced it — remove it
+        else:
+            os.environ[key] = original  # .env may have overridden it — restore
 
 
 def default_auth_path(*, settings: ResolvedSettings | None = None) -> Path:

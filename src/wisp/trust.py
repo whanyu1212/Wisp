@@ -64,7 +64,15 @@ def record_trust(
     *,
     trust_path: Path | None = None,
 ) -> None:
-    """Persist a trust decision for ``project_path`` to the global registry."""
+    """Persist a trust decision for ``project_path`` to the global registry.
+
+    The store is re-read immediately before writing and only this project's key is
+    updated, so a concurrent process that recorded a *different* project's decision
+    in the meantime is merged rather than clobbered. Trust decisions are rare,
+    user-driven events, so this narrow read-merge-write is sufficient; the residual
+    race (two processes deciding the *same* project simultaneously) simply resolves
+    to one of the two identical-in-intent writes.
+    """
 
     path = trust_path if trust_path is not None else _default_trust_path()
     records = _load_trust_records(path)

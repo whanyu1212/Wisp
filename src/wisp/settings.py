@@ -131,14 +131,18 @@ def resolve_settings(
     # Project layer wins over user layer, key by key. ``_coalesce`` keeps the first
     # non-None value, so a key absent from the project file falls through to the
     # user file, and a key absent from both stays None.
+    #
+    # ``protected_paths`` is a SECURITY policy and is deliberately taken from the
+    # USER layer only. A project ``.wisp/settings.json`` is project-controlled, so
+    # honoring its ``protected_paths`` would let an untrusted repo ship
+    # ``{"protected_paths": []}`` to disable the secret-file guard and expose its own
+    # ``.env`` to the model. The project may not weaken (or set) this policy.
     return ResolvedSettings(
         provider=_coalesce(project_settings.provider, user_settings.provider),
         model=_coalesce(project_settings.model, user_settings.model),
         session_dir=_coalesce(project_settings.session_dir, user_settings.session_dir),
         auth_path=_coalesce(project_settings.auth_path, user_settings.auth_path),
-        protected_paths=_coalesce_paths(
-            project_settings.protected_paths, user_settings.protected_paths
-        ),
+        protected_paths=_coalesce_paths(user_settings.protected_paths),
     )
 
 
