@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 from dataclasses import dataclass
 from enum import StrEnum
@@ -74,8 +75,22 @@ SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
 )
 
 
+# A leading token is a *command attempt* only if it's a single slash-word: a
+# slash followed by a command-like word with no inner slashes (`/help`, `/mdoel`).
+# Anything path-like (`/etc/hosts`), spaced (`/ note`), or multi-segment is prose
+# that merely starts with a slash — a valid literal message, not a mistyped
+# command — so it must reach the model instead of raising "Unknown command".
+_COMMAND_ATTEMPT = re.compile(r"^/[A-Za-z][A-Za-z-]*$")
+
+
 def parse_tui_slash_command(text: str) -> TuiSlashCommand | None:
-    """Parse a TUI slash command, returning ``None`` for normal prompts."""
+    """Parse a TUI slash command, returning ``None`` for normal prompts.
+
+    Returns a command for a known slash word, ``None`` for a normal prompt
+    (including slash-prefixed prose like ``/etc/hosts is broken``), and raises
+    ``TuiSlashCommandError`` only for a genuine command attempt that is unknown
+    or malformed.
+    """
 
     stripped = text.strip()
     if not stripped:
@@ -90,7 +105,12 @@ def parse_tui_slash_command(text: str) -> TuiSlashCommand | None:
         return None
     name = _ALIASES.get(parts[0])
     if name is None:
-        raise TuiSlashCommandError(f"Unknown command: {parts[0]}")
+        # An unknown token is only a "command attempt" (worth erroring on) when it
+        # looks like a mistyped command — a lone `/word`. Path-like or spaced
+        # leading slashes are literal prompts and pass through as None.
+        if _COMMAND_ATTEMPT.match(parts[0]):
+            raise TuiSlashCommandError(f"Unknown command: {parts[0]}")
+        return None
     return TuiSlashCommand(name=name, args=tuple(parts[1:]))
 
 

@@ -26,8 +26,19 @@ def test_parse_tui_slash_command_aliases_quit() -> None:
 
 
 def test_parse_tui_slash_command_rejects_unknown_command() -> None:
+    # A bare slash-word that isn't known is a mistyped command → error (helpful).
     with pytest.raises(TuiSlashCommandError, match="Unknown command"):
         parse_tui_slash_command("/missing")
+
+
+def test_parse_tui_slash_command_treats_slash_prose_as_prompt() -> None:
+    # Slash-prefixed prose is a literal message, not a command attempt: path-like
+    # tokens, spaced slashes, and multi-segment paths all pass through as prompts
+    # (None) so they reach the model instead of raising "Unknown command".
+    assert parse_tui_slash_command("/etc/hosts is broken") is None
+    assert parse_tui_slash_command("/ note to self") is None
+    assert parse_tui_slash_command("/some/path") is None
+    assert parse_tui_slash_command("/usr/local/bin") is None
 
 
 def test_parse_tui_slash_command_rejects_bad_quotes() -> None:
