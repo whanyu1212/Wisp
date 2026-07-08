@@ -356,6 +356,51 @@ def test_protected_matches_do_not_starve_a_later_real_match(tmp_path: Path) -> N
     assert "aaa" not in result.text
 
 
+def test_protected_group_separators_do_not_starve_context_grep(tmp_path: Path) -> None:
+    # PR #58 review (5907c8b): with context > 0, rg emits bare "--" group
+    # separators. Dropping protected records but keeping their separators could let
+    # a large run of protected groups exhaust the line buffer and lose a later
+    # match. Separators around dropped groups must be suppressed before buffering.
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    # Case-variant .KEY names: is_protected_path (case-insensitive) protects them,
+    # but rg's case-sensitive glob misses them, so rg emits records + "--".
+    for i in range(50):
+        (tmp_path / f"aaa{i:02d}.KEY").write_text("pre\nNEEDLE_SECRET=x\npost\n", encoding="utf-8")
+    (tmp_path / "zzz.py").write_text("found_NEEDLE\n", encoding="utf-8")
+
+    # Tiny line budget: 50 protected groups' separators alone would overflow it.
+    context = ToolContext(
+        cwd=tmp_path,
+        protected_paths=("*.key",),
+        max_output_lines=10,
+        max_output_bytes=100_000,
+    )
+
+    result = run_tool(GrepTool(), {"pattern": "NEEDLE", "path": ".", "context": 1}, context)
+
+    assert "zzz.py" in result.text  # the real match survives the separator flood
+    assert "NEEDLE_SECRET" not in result.text  # no secret leaked
+    assert "aaa" not in result.text
+
+
+def test_context_grep_preserves_separators_between_kept_groups(tmp_path: Path) -> None:
+    # The separator suppression must not eat legitimate separators between two kept
+    # context groups.
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    (tmp_path / "file1.py").write_text("a\nNEEDLE_one\nb\n", encoding="utf-8")
+    (tmp_path / "file2.py").write_text("c\nNEEDLE_two\nd\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path, protected_paths=(".env",))
+
+    result = run_tool(GrepTool(), {"pattern": "NEEDLE", "path": ".", "context": 1}, context)
+
+    assert result.data["count"] == 2
+    assert "--" in result.text  # separator between the two real groups is kept
+    assert "NEEDLE_one" in result.text
+    assert "NEEDLE_two" in result.text
+
+
 # --- Re-review round 2 (PR #58 commit 9696c36): symlink + custom auth file ---
 
 

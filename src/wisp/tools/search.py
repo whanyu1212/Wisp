@@ -207,13 +207,29 @@ async def _run_rg_grep(
         command.extend(("--glob", glob))
     command.extend(("--", pattern, _command_path(path, context)))
 
+    # Group-aware, stateful pre-buffer filter. rg emits records (match/context,
+    # each carrying the file path) fenced by bare "--" group separators when
+    # context > 0. We must drop protected records BEFORE buffering — rg can still
+    # emit them (a case-variant name its case-sensitive glob missed, or a caller
+    # glob that re-includes a secret) and buffering them would let a large protected
+    # match set exhaust the stdout buffer and kill rg before a later ordinary match
+    # is read. The "--" separators carry no path, so they must be suppressed by
+    # tracking whether the group they close actually kept anything; otherwise a run
+    # of all-protected groups floods the buffer with separators alone.
+    kept_since_separator = False
+
     def _keep_line(line: str) -> bool:
-        # Drop protected records BEFORE they are buffered. rg can still emit them
-        # (case-variant names its glob missed, or a caller glob that re-includes a
-        # secret), and buffering them would let a large protected match set exhaust
-        # the stdout buffer and kill rg before an ordinary later match is read —
-        # silently losing the real result. The find path filters the same way.
-        return not _rg_grep_line_is_protected(line, context)
+        nonlocal kept_since_separator
+        if line == "--":
+            # Emit a separator only after a group that kept content; drop it when the
+            # preceding group was entirely protected (or already separated).
+            emit = kept_since_separator
+            kept_since_separator = False
+            return emit
+        if _rg_grep_line_is_protected(line, context):
+            return False
+        kept_since_separator = True
+        return True
 
     def _is_reportable_match(line: str) -> bool:
         # Of the lines that survive _keep_line, count only match records so the
