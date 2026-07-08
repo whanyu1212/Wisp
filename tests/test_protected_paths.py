@@ -426,3 +426,49 @@ def test_auth_file_protected_even_when_guard_disabled(
 
     with pytest.raises(ToolError, match="protected path"):
         run_tool(ReadTool(), {"path": "codex-auth.json"}, context)
+
+
+def test_directly_constructed_config_protects_auth_file(tmp_path: Path) -> None:
+    # Re-review: building WispConfig directly (embedding/SDK), bypassing from_env,
+    # must still protect the credential file. Enforced as a model invariant.
+    from wisp.config import WispConfig
+
+    auth_file = tmp_path / "codex-auth.json"
+    auth_file.write_text('{"token": "sk-super-secret"}\n', encoding="utf-8")
+
+    config = WispConfig(auth_path=auth_file)
+    context = ToolContext.from_config(config, cwd=tmp_path)
+
+    assert any("codex-auth.json" in pattern for pattern in config.protected_paths)
+    with pytest.raises(ToolError, match="protected path"):
+        run_tool(ReadTool(), {"path": "codex-auth.json"}, context)
+
+
+def test_directly_constructed_config_protects_auth_even_with_empty_guard(
+    tmp_path: Path,
+) -> None:
+    from wisp.config import WispConfig
+
+    auth_file = tmp_path / "codex-auth.json"
+    auth_file.write_text('{"token": "sk-secret"}\n', encoding="utf-8")
+
+    config = WispConfig(auth_path=auth_file, protected_paths=())
+    context = ToolContext.from_config(config, cwd=tmp_path)
+
+    with pytest.raises(ToolError, match="protected path"):
+        run_tool(ReadTool(), {"path": "codex-auth.json"}, context)
+
+
+def test_from_config_backstops_auth_protection_after_model_copy(tmp_path: Path) -> None:
+    # model_copy skips validators; ToolContext.from_config must still protect the
+    # (new) auth file so a validation-skipping copy can't expose the credential.
+    from wisp.config import WispConfig
+
+    auth_file = tmp_path / "codex-auth.json"
+    auth_file.write_text('{"token": "sk-secret"}\n', encoding="utf-8")
+
+    config = WispConfig().model_copy(update={"auth_path": auth_file})
+    context = ToolContext.from_config(config, cwd=tmp_path)
+
+    with pytest.raises(ToolError, match="protected path"):
+        run_tool(ReadTool(), {"path": "codex-auth.json"}, context)
