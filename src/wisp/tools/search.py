@@ -207,15 +207,24 @@ async def _run_rg_grep(
         command.extend(("--glob", glob))
     command.extend(("--", pattern, _command_path(path, context)))
 
+    def _keep_line(line: str) -> bool:
+        # Drop protected records BEFORE they are buffered. rg can still emit them
+        # (case-variant names its glob missed, or a caller glob that re-includes a
+        # secret), and buffering them would let a large protected match set exhaust
+        # the stdout buffer and kill rg before an ordinary later match is read —
+        # silently losing the real result. The find path filters the same way.
+        return not _rg_grep_line_is_protected(line, context)
+
     def _is_reportable_match(line: str) -> bool:
-        # Count a match only if it survives the protected-path post-filter, so the
-        # reported match count and truncation flag never reflect a hidden secret.
-        return _is_grep_match_line(line) and not _rg_grep_line_is_protected(line, context)
+        # Of the lines that survive _keep_line, count only match records so the
+        # reported count and truncation flag are accurate.
+        return _is_grep_match_line(line)
 
     result = await _run_exec_limited_stdout(
         command,
         cwd=context.cwd,
         max_stdout_lines=max_results + 1,
+        stdout_line_filter=_keep_line,
         stdout_count_filter=_is_reportable_match,
         max_buffered_stdout_bytes=max(0, context.max_output_bytes),
         max_buffered_stdout_lines=max(0, context.max_output_lines),

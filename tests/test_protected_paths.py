@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -324,3 +325,32 @@ def test_separator_between_two_kept_groups_is_preserved() -> None:
 
     assert result.text == "app.py:1:hit1\n--\napp.py:5:hit2"
     assert result.data["count"] == 2
+
+
+def test_protected_matches_do_not_starve_a_later_real_match(tmp_path: Path) -> None:
+    # PR #58 review P2: protected records must be dropped BEFORE buffering. A large
+    # set of protected matches preceding an ordinary match must not exhaust the
+    # stdout buffer and kill rg before the real match is read. Only the rg engine
+    # buffers a single stream, so this scenario is rg-specific.
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+    big_secret = "NEEDLE_SECRET=" + ("x" * 400) + "\n"
+    for i in range(30):
+        directory = tmp_path / f"aaa{i:02d}"
+        directory.mkdir()
+        (directory / ".env").write_text(big_secret, encoding="utf-8")
+    (tmp_path / "zzz.py").write_text("found_NEEDLE_here\n", encoding="utf-8")
+
+    # A small stdout buffer: the protected bytes would overflow it if buffered.
+    context = ToolContext(
+        cwd=tmp_path,
+        protected_paths=(".env",),
+        max_output_bytes=2000,
+        max_output_lines=100,
+    )
+
+    result = run_tool(GrepTool(), {"pattern": "NEEDLE", "path": "."}, context)
+
+    assert "zzz.py" in result.text  # the real match survives
+    assert "NEEDLE_SECRET" not in result.text  # no secret leaked
+    assert "aaa" not in result.text
