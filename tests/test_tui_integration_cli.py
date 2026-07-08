@@ -1041,6 +1041,55 @@ def test_textual_pending_tool_card_ticks_a_live_counter() -> None:
     assert ticked.endswith("· 3.0s")  # three 1s ticks
 
 
+def test_textual_cancel_drains_pending_tool_cards() -> None:
+    # A prompt that ends without results (cancel/failure/stream death) must not
+    # leave tool cards spinning forever. cancelled() marks every pending card
+    # cancelled, stops its timer, and clears both the app and renderer registries.
+    async def scenario() -> tuple[list[str], list[bool], int, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="a", name="read_file", arguments={"p": "x"}))
+            renderer.event(ToolCallRequested(call_id="b", name="grep", arguments={}))
+            await pilot.pause()
+            cards = [
+                c
+                for c in app_instance.query_one("#transcript", Transcript).children
+                if isinstance(c, ToolCard)
+            ]
+            renderer.cancelled()
+            await pilot.pause()
+            return (
+                [c.render().plain for c in cards],
+                [c._timer is None for c in cards],
+                len(app_instance._tool_cards),
+                len(renderer._tool_started),
+            )
+
+    texts, timers_stopped, app_registry, started_registry = anyio.run(scenario)
+    assert all(t.startswith("⊘ ") and "cancelled" in t for t in texts)  # cancelled glyph + label
+    assert all(timers_stopped)  # no card keeps ticking
+    assert app_registry == 0  # app _tool_cards drained
+    assert started_registry == 0  # renderer _tool_started drained
+
+
+def test_textual_rpc_command_failure_drains_pending_tool_cards() -> None:
+    # A non-ok RpcCommandFinished after a request but before a result must also
+    # drain the pending card rather than leave it spinning.
+    async def scenario() -> int:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={}))
+            await pilot.pause()
+            assert len(app_instance._tool_cards) == 1
+            renderer.event(
+                RpcCommandFinished(command_id="cmd1", command_type="prompt", ok=False, error="boom")
+            )
+            await pilot.pause()
+            return len(app_instance._tool_cards)
+
+    assert anyio.run(scenario) == 0
+
+
 def test_textual_session_saved_is_not_rendered() -> None:
     # SessionSaved is session/RPC audit, not conversation — the active session id
     # already lives in the status bar, so a per-turn "session saved:" line is pure
@@ -1137,6 +1186,38 @@ def test_textual_status_bar_renders_compact_footer_summary() -> None:
     assert "session: sess.json" in status_text
     assert "running • queued 2" in status_text
     assert "openai/gpt-test" in status_text
+
+
+def test_textual_footer_fits_the_status_content_region() -> None:
+    # The footer is sized to the #status content region (padding-excluded), not
+    # the app width. The status bar has horizontal padding, so sizing from app
+    # width would over-pad each line and make the two-line footer wrap/clip. At an
+    # 80-col terminal the render region is 78; no footer line may exceed it.
+    from rich.cells import cell_len
+
+    async def scenario() -> tuple[int | None, list[int]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="running",
+                    input_hint="wisp> ",
+                    input_mode="running",
+                    cwd="/Users/hanyuwu/Wisp",
+                    last_session="dac1357f",
+                    provider="openai-codex",
+                    model="gpt-5.5",
+                )
+            )
+            await pilot.pause()
+            status = app_instance.query_one("#status", Static)
+            lines = status.render().plain.split("\n")
+            return app_instance.status_width(), [cell_len(ln) for ln in lines]
+
+    region_width, line_widths = anyio.run(scenario)
+    assert region_width == 78  # app width 80 minus the status-bar's 1-cell side padding
+    assert all(w <= 78 for w in line_widths)  # no line overflows the render region
 
 
 def test_textual_footer_stays_below_input_without_stealing_focus() -> None:

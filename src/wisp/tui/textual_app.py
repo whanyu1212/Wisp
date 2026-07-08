@@ -436,6 +436,17 @@ class TextualTui(App[None]):
         if self._status is not None:
             self._status.update(message)
 
+    def status_width(self) -> int | None:
+        # The width the footer text actually renders into: the #status widget's
+        # content region (padding-excluded), NOT app.size.width. The status bar
+        # has horizontal padding, so sizing from the app width over-pads each
+        # footer line and makes it wrap/clip past the real region. Falls back to
+        # None (no padding) before layout gives the widget a positive width.
+        if self._status is None:
+            return None
+        width = self._status.content_size.width
+        return width if width > 0 else None
+
     def set_input_hint(self, hint: str) -> None:
         self._current_prompt = hint
         if self._input is not None:
@@ -484,6 +495,20 @@ class TextualTui(App[None]):
         if status != "pending":
             del self._tool_cards[call_id]
         self._follow_tail_after_refresh()
+
+    def fail_pending_tool_calls(self, detail: str = "cancelled") -> None:
+        # Drain every still-pending tool card when a turn ends without results —
+        # a cancel, a send/shutdown failure, or an RPC stream that dies after
+        # ToolCallRequested but before ToolResultReady. Without this the card
+        # keeps spinning forever (timer running) while the user continues in the
+        # same session. Mark each cancelled (which stops its timer) and clear the
+        # registry so nothing leaks into the next turn. The renderer clears its
+        # own request-timestamp map alongside this call.
+        if not self._tool_cards:
+            return
+        for card in self._tool_cards.values():
+            card.set_state("cancelled", detail=detail)
+        self._tool_cards.clear()
 
     def _style(self, role: str) -> str:
         # Resolve a transcript role to a theme-derived Rich style. Falls back to
@@ -622,8 +647,10 @@ class TextualTuiRenderer:
     def view_updated(self, snapshot: TuiViewSnapshot) -> None:
         self._visible_input_mode = snapshot.input_mode
         self.app.set_input_hint(snapshot.input_hint)
-        width = self.app.size.width if self.app.size.width > 0 else None
-        self.app.set_status(format_tui_footer_text(snapshot, width=width))
+        # Size the footer to the #status content region, not the app width — the
+        # status bar's horizontal padding makes the render area narrower, so app
+        # width would over-pad and wrap/clip the two-line footer.
+        self.app.set_status(format_tui_footer_text(snapshot, width=self.app.status_width()))
         if snapshot.input_mode != "running":
             self.app.hide_working_indicator()
 
@@ -637,6 +664,13 @@ class TextualTuiRenderer:
         if started is None:
             return None
         return (finished - started).total_seconds()
+
+    def _abort_pending_tools(self, detail: str = "cancelled") -> None:
+        # A turn ended without results (cancel / failure / stream death): drain any
+        # still-pending tool cards and forget their request timestamps so neither
+        # a spinning card nor a stale start time leaks into the next turn.
+        self._tool_started.clear()
+        self.app.fail_pending_tool_calls(detail)
 
     def _capture_submitted_input_mode(self) -> None:
         self._submitted_input_mode = self._visible_input_mode
@@ -699,14 +733,17 @@ class TextualTuiRenderer:
 
     def send_failed(self, action: str, error: object) -> None:
         self.app.hide_working_indicator()
+        self._abort_pending_tools(f"send failed: {action}")
         self.app.write_error(f"failed to send {action}: {error}")
 
     def shutdown_failed(self, error: object) -> None:
         self.app.hide_working_indicator()
+        self._abort_pending_tools("shutdown failed")
         self.app.write_error(f"shutdown failed: {error}")
 
     def cancelled(self) -> None:
         self.app.hide_working_indicator()
+        self._abort_pending_tools("cancelled")
         self.app.write_notice("cancelled")
 
     def token_delta(self, delta: str) -> None:
@@ -760,6 +797,7 @@ class TextualTuiRenderer:
             self.app.write_error(f"error: {event.message}")
         elif isinstance(event, RpcCommandFinished) and not event.ok:
             self.app.hide_working_indicator()
+            self._abort_pending_tools("command failed")
             self.app.write_error(f"command failed: {event.error or event.command_id}")
         # Framing/plumbing events (RpcCommandStarted, a successful RpcCommandFinished,
         # AgentStarted, ToolExecutionStarted/Ended, SessionSaved) are intentionally
@@ -769,18 +807,22 @@ class TextualTuiRenderer:
 
     def rpc_event_reader_failed(self, error: str) -> None:
         self.app.hide_working_indicator()
+        self._abort_pending_tools("event reader failed")
         self.app.write_error(f"RPC event reader failed: {error}")
 
     def rpc_stream_ended_before_command(self, command_id: str) -> None:
         self.app.hide_working_indicator()
+        self._abort_pending_tools("stream ended")
         self.app.write_error(f"RPC stream ended before command finished: {command_id}")
 
     def rpc_stream_ended_before_shutdown(self, command_id: str) -> None:
         self.app.hide_working_indicator()
+        self._abort_pending_tools("stream ended")
         self.app.write_error(f"RPC stream ended before shutdown finished: {command_id}")
 
     def rpc_stream_ended_unexpectedly(self) -> None:
         self.app.hide_working_indicator()
+        self._abort_pending_tools("stream ended")
         self.app.write_error("RPC stream ended unexpectedly")
 
 

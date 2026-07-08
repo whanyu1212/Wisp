@@ -159,6 +159,7 @@ class ToolCard(Static):
         "pending": ("⋯", "tool"),
         "denied": ("✗", "denied"),
         "error": ("✗", "denied"),
+        "cancelled": ("⊘", "denied"),
         "done": ("✓", "approved"),
     }
     _TICK = 1.0  # the running counter only needs whole-second granularity
@@ -213,9 +214,13 @@ class ToolCard(Static):
         self._glyph = glyph
         if detail:
             self._detail = detail
-        if elapsed is not None:
-            # Terminal state: freeze at the true duration and stop ticking.
-            self._elapsed = elapsed
+        if status != "pending":
+            # Any terminal state (done/error/denied/cancelled) ends the call: stop
+            # the live counter so a resolved card can never keep ticking. Freeze at
+            # the true wall-clock duration when we have it; otherwise leave the last
+            # ticked value (e.g. a cancel with no result timestamp to diff against).
+            if elapsed is not None:
+                self._elapsed = elapsed
             self._stop_timer()
         if role != self._role:
             if self._role:
