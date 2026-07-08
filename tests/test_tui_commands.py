@@ -47,6 +47,16 @@ def test_parse_tui_slash_command_treats_slash_prose_as_prompt() -> None:
         parse_tui_slash_command("/todo")
 
 
-def test_parse_tui_slash_command_rejects_bad_quotes() -> None:
+def test_parse_tui_slash_command_prose_with_lone_quote_is_a_prompt() -> None:
+    # Prose is classified before shlex tokenizes, so slash-prose containing a lone
+    # quote is a prompt — not a shlex "No closing quotation" error. A user's
+    # message can legally contain an unmatched quote.
+    assert parse_tui_slash_command('/todo remember "this') is None
+    assert parse_tui_slash_command('/etc/hosts "broken') is None
+
+
+def test_parse_tui_slash_command_rejects_bad_quotes_for_known_command() -> None:
+    # A quote error is only a command error when a KNOWN command is being invoked;
+    # then malformed quoting in its args is a real syntax error.
     with pytest.raises(TuiSlashCommandError):
         parse_tui_slash_command('/model "unterminated')

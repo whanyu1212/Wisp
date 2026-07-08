@@ -99,21 +99,29 @@ def parse_tui_slash_command(text: str) -> TuiSlashCommand | None:
         return None
     if not stripped.startswith("/") and stripped != ":q":
         return None
+
+    # Classify BEFORE tokenizing. shlex.split is command-argument machinery — it
+    # can raise on an unterminated quote, which is a real error for a known
+    # command but would wrongly reject prose that merely contains a lone quote
+    # (`/todo remember "this`). So decide what the line *is* from the bare first
+    # word first, and only shlex the paths that are actually commands.
+    first_word = stripped.split(maxsplit=1)[0]
+    name = _ALIASES.get(first_word)
+    if name is None:
+        # Not a known command. It's a mistyped-command error only when the WHOLE
+        # input is a lone `/word`; any slash word followed by more (words, a path,
+        # a quote) is a literal prompt and passes through as None to the model —
+        # never touching shlex.
+        if _COMMAND_ATTEMPT.match(stripped):
+            raise TuiSlashCommandError(f"Unknown command: {first_word}")
+        return None
+
+    # Known command: now tokenize for args. A quote error here IS a command error
+    # (the user is invoking a real command with malformed quoting).
     try:
         parts = shlex.split(stripped)
     except ValueError as exc:
         raise TuiSlashCommandError(str(exc)) from exc
-    if not parts:
-        return None
-    name = _ALIASES.get(parts[0])
-    if name is None:
-        # An unknown input is only a "command attempt" (worth erroring on) when the
-        # WHOLE input is a lone `/word` — a plausible mistyped command. A slash word
-        # followed by anything (more words, a path, prose) is a literal prompt and
-        # passes through as None so it reaches the model.
-        if _COMMAND_ATTEMPT.match(stripped):
-            raise TuiSlashCommandError(f"Unknown command: {parts[0]}")
-        return None
     return TuiSlashCommand(name=name, args=tuple(parts[1:]))
 
 
