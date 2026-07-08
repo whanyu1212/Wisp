@@ -44,6 +44,36 @@ _ALIASES: dict[str, TuiSlashCommandName] = {
 }
 
 
+@dataclass(frozen=True)
+class SlashCommandSpec:
+    """A user-facing slash command for the inline completion menu.
+
+    One row per command the menu offers: the canonical ``/``-prefixed spelling,
+    a one-line description, and whether it takes an argument (so Tab-completion
+    knows to leave a trailing space for the value). This is the single source of
+    truth the menu and completion read, kept alongside the parser so all three
+    stay in sync.
+    """
+
+    command: str  # canonical spelling, e.g. "/model"
+    description: str
+    takes_args: bool = False
+
+
+# Ordered for display: the everyday commands first, session/auth after. Only
+# user-facing spellings appear (aliases like /exit, :q are still parsed, but the
+# menu shows one canonical entry per command).
+SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
+    SlashCommandSpec("/help", "Show the TUI commands"),
+    SlashCommandSpec("/model", "Show or switch the active model", takes_args=True),
+    SlashCommandSpec("/provider", "Show or switch the active provider", takes_args=True),
+    SlashCommandSpec("/auth", "Show credential status"),
+    SlashCommandSpec("/login", "Log in to a provider", takes_args=True),
+    SlashCommandSpec("/logout", "Remove stored credentials"),
+    SlashCommandSpec("/quit", "Quit the TUI"),
+)
+
+
 def parse_tui_slash_command(text: str) -> TuiSlashCommand | None:
     """Parse a TUI slash command, returning ``None`` for normal prompts."""
 
@@ -65,6 +95,8 @@ def parse_tui_slash_command(text: str) -> TuiSlashCommand | None:
 
 
 __all__ = [
+    "SLASH_COMMAND_SPECS",
+    "SlashCommandSpec",
     "TuiSlashCommand",
     "TuiSlashCommandError",
     "TuiSlashCommandName",

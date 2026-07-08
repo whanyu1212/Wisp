@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from textual.await_complete import AwaitComplete
-from textual.command import CommandPalette
 from textual.widgets import Input, Static
 
 from tests.tui_support import *
@@ -13,6 +12,7 @@ from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_
 from wisp.tui.widgets import (
     _ROLE_LABELS,
     LineMessage,
+    SlashSuggest,
     StreamMessage,
     ToolCard,
     Transcript,
@@ -1520,58 +1520,9 @@ def test_textual_tui_read_prompt_returns_submitted_input() -> None:
     assert anyio.run(scenario) == "hello"
 
 
-def test_textual_command_palette_exposes_wisp_commands() -> None:
-    # The command palette surfaces the TUI's slash commands alongside Textual's
-    # built-ins. Our graceful /quit replaces Textual's raw Quit (which would
-    # bypass the shell's shutdown), so there is exactly one Quit entry.
-    async def scenario() -> list[str]:
-        app_instance = TextualTui()
-        async with app_instance.run_test() as pilot:
-            await pilot.pause()
-            return [
-                command.title for command in app_instance.get_system_commands(app_instance.screen)
-            ]
-
-    titles = anyio.run(scenario)
-    for expected in (
-        "Help",
-        "Quit",
-        "Auth status",
-        "Provider: show current",
-        "Provider: switch…",
-        "Model: show current",
-        "Model: switch…",
-        "Login…",
-        "Logout",
-    ):
-        assert expected in titles
-    assert "Theme" in titles  # a Textual built-in survived (yield-from super)
-    assert titles.count("Quit") == 1  # Textual's raw Quit was filtered out
-
-
-def test_textual_command_palette_entries_route_through_the_typed_path() -> None:
-    # A palette selection must reach read_prompt exactly as typing the command
-    # would, so the shell stays the single source of command semantics.
-    async def scenario() -> str:
-        app_instance = TextualTui()
-        async with app_instance.run_test() as pilot:
-            async with anyio.create_task_group() as tg:
-                results: list[str] = []
-
-                async def read() -> None:
-                    results.append(await app_instance.read_prompt("wisp> "))
-
-                tg.start_soon(read)
-                await pilot.pause()
-                app_instance.submit_command_line("/help")
-            return results[0]
-
-    assert anyio.run(scenario) == "/help"
-
-
 def test_textual_prefill_command_sets_input_without_submitting() -> None:
-    # An arg-bearing palette entry (Model: switch…) prefills the Input for the
-    # user to complete — it must NOT submit, so a pending read stays pending.
+    # Tab-completion prefills the Input for the user to complete — it must NOT
+    # submit, so a pending read stays pending.
     async def scenario() -> tuple[str, int, bool]:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
@@ -1598,45 +1549,153 @@ def test_textual_prefill_command_sets_input_without_submitting() -> None:
     assert submitted is False
 
 
-def test_textual_palette_command_strings_are_valid_slash_commands() -> None:
-    # Guard against drift: every command the palette submits (not the prefill
-    # stubs) must parse as a real slash command.
-    for text in ("/help", "/quit", "/auth", "/provider", "/model", "/logout"):
-        assert parse_tui_slash_command(text) is not None
-    # The prefill stubs are valid command prefixes (parse once a value is added).
+def test_slash_command_specs_are_valid_slash_commands() -> None:
+    # Guard against drift: every command the inline menu offers must parse as a
+    # real slash command. Arg-taking specs parse once a value is added.
+    from wisp.tui.commands import SLASH_COMMAND_SPECS
+
+    for spec in SLASH_COMMAND_SPECS:
+        assert parse_tui_slash_command(spec.command) is not None, spec.command
     assert parse_tui_slash_command("/model gpt-5.5") is not None
     assert parse_tui_slash_command("/provider fake") is not None
 
 
-def test_textual_slash_on_empty_input_opens_the_palette() -> None:
-    # Typing "/" as the whole input opens the command palette (Claude-Code style)
-    # and clears the stray slash from the input.
-    async def scenario() -> tuple[bool, str]:
+def test_textual_leading_slash_is_typable_as_text() -> None:
+    # THE BUG FIX: a message starting with "/" must be typable literally — the
+    # input is never cleared/hijacked, and no modal palette exists.
+    async def scenario() -> str:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
             input_widget = app_instance.query_one("#input", Input)
             input_widget.focus()
             await pilot.pause()
-            await pilot.press("/")
+            await pilot.press(*"/etc/hosts")
             await pilot.pause()
-            return CommandPalette.is_open(app_instance), input_widget.value
+            return input_widget.value
 
-    palette_open, value = anyio.run(scenario)
-    assert palette_open
-    assert value == ""  # the "/" was consumed, not left in the input
+    assert anyio.run(scenario) == "/etc/hosts"
 
 
-def test_textual_slash_mid_text_does_not_open_the_palette() -> None:
-    # A "/" that isn't the entire input (e.g. a URL, or a path) must not hijack.
-    async def scenario() -> bool:
+def test_textual_command_palette_is_disabled() -> None:
+    # The modal palette is gone: "/" is the only command affordance, so Textual's
+    # framework ctrl+p palette must be off (it clashes with terminal history).
+    assert TextualTui.ENABLE_COMMAND_PALETTE is False
+
+
+def test_textual_slash_shows_inline_menu_and_filters() -> None:
+    # "/" shows the full command list inline; typing filters it; a non-matching
+    # token hides it. The input is never mutated.
+    async def scenario() -> tuple[int, str | None, bool, str]:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
             input_widget = app_instance.query_one("#input", Input)
-            input_widget.value = "http:/"  # value is not exactly "/"
+            input_widget.focus()
             await pilot.pause()
-            return CommandPalette.is_open(app_instance)
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+            await pilot.press("/")
+            await pilot.pause()
+            all_count = suggest.option_count
+            await pilot.press(*"mo")
+            await pilot.pause()
+            highlighted = suggest.highlighted_spec()
+            await pilot.press(*"zzz")  # "/mozzz" matches nothing
+            await pilot.pause()
+            return (
+                all_count,
+                (highlighted.command if highlighted else None),
+                suggest.is_open,
+                input_widget.value,
+            )
 
-    assert anyio.run(scenario) is False
+    all_count, highlighted, open_after_nomatch, value = anyio.run(scenario)
+    assert all_count >= 5  # the full list showed on a bare "/"
+    assert highlighted == "/model"  # "/mo" filtered to /model
+    assert open_after_nomatch is False  # no match -> menu hidden
+    assert value == "/mozzz"  # input untouched throughout
+
+
+def test_textual_tab_completes_highlighted_command() -> None:
+    # Tab fills the highlighted command: a trailing space for arg-taking commands
+    # (so the user types the value), none for arg-less ones.
+    async def scenario() -> tuple[str, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            await pilot.press(*"/mo")
+            await pilot.pause()
+            await pilot.press("tab")
+            await pilot.pause()
+            model_value = input_widget.value
+            input_widget.value = ""
+            await pilot.pause()
+            await pilot.press(*"/he")
+            await pilot.pause()
+            await pilot.press("tab")
+            await pilot.pause()
+            return model_value, input_widget.value
+
+    model_value, help_value = anyio.run(scenario)
+    assert model_value == "/model "  # arg-taking -> trailing space
+    assert help_value == "/help"  # arg-less -> no space
+
+
+def test_textual_menu_dismisses_on_escape_space_and_backspace() -> None:
+    # Each dismissal path hides the menu and leaves the typed text intact.
+    async def scenario() -> list[tuple[bool, str]]:
+        app_instance = TextualTui()
+        results: list[tuple[bool, str]] = []
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+
+            async def dismiss(setup: str, *keys: str) -> None:
+                input_widget.value = ""
+                suggest.hide()
+                await pilot.pause()
+                await pilot.press(*setup)
+                await pilot.pause()
+                assert suggest.is_open, f"menu should be open after {setup!r}"
+                await pilot.press(*keys)
+                await pilot.pause()
+                results.append((suggest.is_open, input_widget.value))
+
+            await dismiss("/mo", "escape")  # Escape keeps "/mo"
+            await dismiss("/model", "space")  # space -> "/model "
+            await dismiss("/h", "backspace", "backspace")  # backspace past "/"
+        return results
+
+    (esc_open, esc_val), (space_open, space_val), (bs_open, bs_val) = anyio.run(scenario)
+    assert esc_open is False and esc_val == "/mo"
+    assert space_open is False and space_val == "/model "
+    assert bs_open is False and bs_val == ""
+
+
+def test_textual_enter_runs_completed_command_through_typed_path() -> None:
+    # Enter runs the current line as-is through submit_command_line — the same path
+    # as typing it by hand — and closes the menu.
+    async def scenario() -> tuple[str, bool]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+            await pilot.press(*"/he")
+            await pilot.pause()
+            await pilot.press("tab")  # -> /help
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            queued = await app_instance._prompt_receive.receive()
+            return queued, suggest.is_open
+
+    queued, menu_open = anyio.run(scenario)
+    assert queued == "/help"
+    assert menu_open is False
 
 
 def test_textual_startup_shows_the_wordmark_banner() -> None:
