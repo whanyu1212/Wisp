@@ -435,6 +435,7 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
         *,
         cwd: Path,
         max_stdout_lines: int,
+        stdout_line_filter: object = None,
         stdout_count_filter: object = None,
         max_buffered_stdout_bytes: int | None = None,
         max_buffered_stdout_lines: int | None = None,
@@ -462,7 +463,9 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
 
     monkeypatch.setattr(search_tools_module.shutil, "which", lambda _name: "rg")
     monkeypatch.setattr(search_tools_module, "_run_exec_limited_stdout", fake_run)
-    context = ToolContext(cwd=tmp_path)
+    # This test asserts the exact rg argv for stdout bounding; opt out of the
+    # protected-path default so its --glob exclusions don't clutter the assertion.
+    context = ToolContext(cwd=tmp_path, protected_paths=())
 
     result = run_tool(GrepTool(), {"pattern": "e", "path": ".", "max_results": 2}, context)
 
@@ -618,6 +621,7 @@ def test_grep_tool_ripgrep_drops_context_for_omitted_merged_match(
         *,
         cwd: Path,
         max_stdout_lines: int,
+        stdout_line_filter: object = None,
         stdout_count_filter: object = None,
         max_buffered_stdout_bytes: int | None = None,
         max_buffered_stdout_lines: int | None = None,
@@ -1051,7 +1055,9 @@ def test_find_tool_ripgrep_bounds_stdout_before_buffering(
 
     monkeypatch.setattr(search_tools_module.shutil, "which", lambda _name: "rg")
     monkeypatch.setattr(search_tools_module, "_run_exec_limited_stdout", fake_run)
-    context = ToolContext(cwd=tmp_path)
+    # This test asserts the exact rg argv for stdout bounding; opt out of the
+    # protected-path default so its --glob exclusions don't clutter the assertion.
+    context = ToolContext(cwd=tmp_path, protected_paths=())
 
     result = run_tool(FindTool(), {"path": ".", "pattern": "*.py", "max_results": 2}, context)
 

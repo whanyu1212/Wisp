@@ -18,6 +18,7 @@ from wisp.providers.base import ProviderError
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalDecision as ToolApprovalDecision
+from wisp.tools.context import ToolContext
 from wisp.tui.rendering import TuiRendererKind
 
 from . import options as _cli_options
@@ -475,6 +476,7 @@ async def _run_print(
             allow_read_tools=allow_read_tools,
             allowed_tools=allowed_tools,
         ),
+        tool_context=ToolContext.from_config(config),
         tool_approval_policy=_print_mode_tool_approval_policy(approve_unsafe_tools),
         max_tool_iterations=max_tool_iterations,
     )
