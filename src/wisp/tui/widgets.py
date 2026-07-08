@@ -23,8 +23,10 @@ from textual.await_complete import AwaitComplete
 from textual.containers import VerticalScroll
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import Markdown, Static
+from textual.widgets import Markdown, OptionList, Static
+from textual.widgets.option_list import Option
 
+from wisp.tui.commands import SLASH_COMMAND_SPECS, SlashCommandSpec
 from wisp.tui.rendering import _markup_escape
 
 
@@ -105,6 +107,110 @@ class Transcript(VerticalScroll):
         """Scroll to the newest content iff the user hasn't scrolled away."""
         if self._follow:
             self.scroll_end(animate=False)
+
+
+class SlashSuggest(OptionList):
+    """Inline slash-command completion menu, Claude-Code style.
+
+    A non-modal dropdown anchored above the input: when the line starts with `/`,
+    it lists the matching commands and filters live as the user types. The input
+    is never touched — this widget is a hint + completion shortcut layer. It floats
+    on the overlay layer so it doesn't reflow the transcript.
+
+    The command table is `SLASH_COMMAND_SPECS` (shared with the parser), so the
+    menu, Tab-completion, and `/command` execution all derive from one source. Each
+    option's id is the command spelling (`/model`), so the highlighted spec is
+    recovered by id — no parallel index to keep in sync.
+    """
+
+    # overlay: screen floats the menu over the transcript WITHOUT reflowing it,
+    # while keeping its natural compose position (just above #input, where it's
+    # yielded). It is deliberately NOT put on a separate `layer:` — a lone child on
+    # the overlay layer gets laid out at the TOP of the app by that layer's own
+    # vertical layout, detaching it from the prompt (the bug Codex caught).
+    # constrain: inside keeps it fully on-screen at any terminal size.
+    DEFAULT_CSS = """
+    SlashSuggest {
+        overlay: screen;
+        constrain: inside;
+        display: none;
+        width: auto;
+        max-width: 60;
+        height: auto;
+        max-height: 8;
+        border: round $accent;
+        background: $panel;
+        padding: 0 1;
+    }
+    SlashSuggest > .option-list--option-highlighted {
+        background: $accent 30%;
+    }
+    """
+
+    def __init__(self, id: str | None = None) -> None:  # noqa: A002 - Textual's param name
+        super().__init__(id=id)
+        # spelling → spec, so the highlighted option's id maps back to its command.
+        self._by_command: dict[str, SlashCommandSpec] = {
+            spec.command: spec for spec in SLASH_COMMAND_SPECS
+        }
+        self._visible_specs: tuple[SlashCommandSpec, ...] = ()
+
+    @staticmethod
+    def query_from_value(value: str) -> str | None:
+        """The command token to filter on, or None if the value isn't a bare `/…`.
+
+        A menu is warranted only while the *first* token is a slash word still
+        being typed: the value starts with `/` and has no space yet (a space means
+        the user has moved on to arguments or prose). Returns the lowercased token
+        including the leading slash, e.g. `/mo`.
+        """
+
+        if not value.startswith("/") or " " in value:
+            return None
+        return value.lower()
+
+    def matches(self, query: str) -> tuple[SlashCommandSpec, ...]:
+        """Specs whose command starts with `query` (prefix match on the spelling)."""
+
+        return tuple(spec for spec in SLASH_COMMAND_SPECS if spec.command.startswith(query))
+
+    def show_for(self, value: str) -> int:
+        """Filter and display the menu for the current input value.
+
+        Returns the number of matches. Hides the menu (returns 0) when the value
+        isn't a bare slash token or nothing matches — the caller relies on the
+        count to know whether the menu is live.
+        """
+
+        query = self.query_from_value(value)
+        specs = self.matches(query) if query is not None else ()
+        self._visible_specs = specs
+        self.clear_options()
+        if not specs:
+            self.display = False
+            return 0
+        self.add_options(
+            [Option(f"{spec.command}  {spec.description}", id=spec.command) for spec in specs]
+        )
+        self.highlighted = 0
+        self.display = True
+        return len(specs)
+
+    def hide(self) -> None:
+        self.display = False
+        self._visible_specs = ()
+
+    @property
+    def is_open(self) -> bool:
+        return self.display
+
+    def highlighted_spec(self) -> SlashCommandSpec | None:
+        """The spec under the highlight, for Tab-completion; None if menu empty."""
+
+        if self.highlighted is None:
+            return None
+        option = self.get_option_at_index(self.highlighted)
+        return self._by_command.get(option.id or "")
 
 
 # CSS role classes are applied per message so Stage 3 can style cards purely in

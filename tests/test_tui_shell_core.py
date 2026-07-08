@@ -90,6 +90,33 @@ def test_tui_shell_runs_prompt_then_shutdown() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_sends_slash_prefixed_prose_to_the_model() -> None:
+    # A leading slash that isn't a known command (a path, or slash-prose) must
+    # reach the model as a normal prompt, not be rejected as "Unknown command".
+    async def run() -> None:
+        controller = ScriptedController(
+            [
+                [
+                    AssistantMessage(content="looking into it"),
+                    RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
+                ]
+            ]
+        )
+        console, _ = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/etc/hosts is broken"]),
+        )
+
+        await shell.run()
+
+        # It reached the model verbatim rather than raising a command error.
+        assert controller.prompts == ["/etc/hosts is broken"]
+
+    anyio.run(run)
+
+
 def test_tui_shell_help_renders_approval_hint_literally() -> None:
     async def run() -> None:
         controller = ScriptedController()

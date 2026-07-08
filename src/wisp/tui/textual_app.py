@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 import anyio
-from textual.app import App, ComposeResult, SystemCommand
+from textual import events
+from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import Screen
 from textual.widgets import Header, Input, Static
 
 from wisp.events import (
@@ -31,7 +31,14 @@ from wisp.tui.rendering import (
     format_tui_footer_text,
 )
 from wisp.tui.theme import WISP_THEMES, role_styles
-from wisp.tui.widgets import LineMessage, StreamMessage, ToolCard, Transcript, WorkingMessage
+from wisp.tui.widgets import (
+    LineMessage,
+    SlashSuggest,
+    StreamMessage,
+    ToolCard,
+    Transcript,
+    WorkingMessage,
+)
 
 # Plain Rich color names used only before on_mount resolves the themed palette
 # (e.g. startup notices written during app construction).
@@ -86,6 +93,12 @@ def _input_placeholder(hint: str) -> str:
 
 class TextualTui(App[None]):
     """Minimal Textual shell that adapts Wisp's existing TUI loop."""
+
+    # No modal command palette: `/` is the single command affordance (an inline
+    # SlashSuggest menu). Disabling this turns off Textual's framework ctrl+p
+    # binding at the source — ctrl+p means "previous command" in a terminal, so we
+    # don't want it opening a menu.
+    ENABLE_COMMAND_PALETTE = False
 
     CSS = """
     Screen {
@@ -204,6 +217,7 @@ class TextualTui(App[None]):
         self._status: Static | None = None
         self._transcript: Transcript | None = None
         self._input: Input | None = None
+        self._suggest: SlashSuggest | None = None
         self._current_prompt = "wisp> "
         self._runner: Callable[[], Awaitable[None]] | None = None
         self._runner_error: Exception | None = None
@@ -231,6 +245,9 @@ class TextualTui(App[None]):
             # The input is yielded directly — a wrapping Container would default to
             # height: 1fr and float the input into the middle of the screen.
             yield Transcript(id="transcript")
+            # The slash-command menu floats on the overlay layer anchored near the
+            # input; yielded here so it shares the Vertical's coordinate space.
+            yield SlashSuggest(id="suggest")
             yield Input(placeholder=_input_placeholder("wisp> "), id="input")
             with Horizontal(id="status-bar"):
                 # markup=False: the footer is always plain data (cwd, session,
@@ -254,6 +271,7 @@ class TextualTui(App[None]):
         self._transcript = self.query_one("#transcript", Transcript)
         self._status = self.query_one("#status", Static)
         self._input = self.query_one("#input", Input)
+        self._suggest = self.query_one("#suggest", SlashSuggest)
         self._input.focus()  # keep the Input as the resting focus
         if self._runner is not None:
             self.run_worker(self._run_and_exit(), exclusive=True)
@@ -266,16 +284,20 @@ class TextualTui(App[None]):
             self._role_styles = role_styles(self.current_theme)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
+        # Enter runs the line as-is through the typed path; the menu (if open) is
+        # just a hint, so close it. `/command` parsing lives in the shell.
+        if self._suggest is not None:
+            self._suggest.hide()
         self.submit_command_line(event.value)
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        # A bare "/" on an otherwise-empty input opens the command palette
-        # (Claude-Code style): "/" is the discoverable door to every command.
-        # Clear it so a stray slash isn't left behind, then open the palette,
-        # where the user types to filter and Enter runs or prefills the command.
-        if event.value == "/" and event.input is self._input:
-            event.input.value = ""
-            self.action_command_palette()
+        # Keep the inline slash menu in sync with the input WITHOUT ever touching
+        # the input value — the line is the single source of truth (Claude-Code
+        # model), so a leading `/` is always typable as text (`/etc/hosts`). The
+        # menu shows only while the value is a bare slash token still being typed;
+        # show_for() hides it otherwise (no `/`, a space, or no match).
+        if event.input is self._input and self._suggest is not None:
+            self._suggest.show_for(event.value)
 
     def submit_command_line(self, text: str) -> None:
         """Submit a line as if the user typed it and pressed Enter.
@@ -298,57 +320,52 @@ class TextualTui(App[None]):
     def prefill_command(self, prefix: str) -> None:
         """Put a command prefix in the Input, cursor at the end, without submitting.
 
-        Used by palette entries for argument-bearing commands (`/model `,
-        `/provider `): the user completes the value and presses Enter through the
-        normal typed path.
+        Tab-completion fills the highlighted command here (`/model `, `/help`); the
+        user then adds any argument and presses Enter through the normal typed path.
         """
         if self._input is not None:
             self._input.value = prefix
             self._input.cursor_position = len(prefix)
             self._input.focus()
 
-    def get_system_commands(self, screen: Screen[object]) -> Iterable[SystemCommand]:
-        # Surface the TUI's slash commands in the ctrl+p command palette. Each
-        # entry routes through submit_command_line / prefill_command — the same
-        # typed-line path — so the shell remains the single source of command
-        # semantics (pending-approval / running guards included). Keep Textual's
-        # built-ins (Theme, Keys, …) EXCEPT its raw "Quit": that calls action_quit
-        # -> app.exit() directly, bypassing the shell's graceful shutdown (session
-        # save + RPC teardown). We surface our own "/quit" instead.
-        for command in super().get_system_commands(screen):
-            if command.title != "Quit":
-                yield command
-        yield SystemCommand(
-            "Help", "Show the TUI commands", lambda: self.submit_command_line("/help")
-        )
-        yield SystemCommand("Quit", "Quit the TUI", lambda: self.submit_command_line("/quit"))
-        yield SystemCommand(
-            "Auth status", "Show credential status", lambda: self.submit_command_line("/auth")
-        )
-        yield SystemCommand(
-            "Provider: show current",
-            "Show the active provider",
-            lambda: self.submit_command_line("/provider"),
-        )
-        yield SystemCommand(
-            "Provider: switch…",
-            "Prefill /provider to switch provider",
-            lambda: self.prefill_command("/provider "),
-        )
-        yield SystemCommand(
-            "Model: show current",
-            "Show the active model",
-            lambda: self.submit_command_line("/model"),
-        )
-        yield SystemCommand(
-            "Model: switch…",
-            "Prefill /model to switch model",
-            lambda: self.prefill_command("/model "),
-        )
-        yield SystemCommand("Login…", "Prefill /login", lambda: self.prefill_command("/login "))
-        yield SystemCommand(
-            "Logout", "Remove stored credentials", lambda: self.submit_command_line("/logout")
-        )
+    async def on_key(self, event: events.Key) -> None:
+        # Menu-scoped keys, handled only while the slash menu is open so normal
+        # input (Tab focus, Escape, arrows in the Input) is untouched otherwise.
+        # Enter is intentionally NOT intercepted — on_input_submitted runs the line.
+        suggest = self._suggest
+        if suggest is None or not suggest.is_open:
+            return
+        if event.key == "down":
+            suggest.action_cursor_down()
+            event.prevent_default()
+            event.stop()
+        elif event.key == "up":
+            suggest.action_cursor_up()
+            event.prevent_default()
+            event.stop()
+        elif event.key == "tab":
+            self._complete_from_menu()
+            event.prevent_default()
+            event.stop()
+        elif event.key == "escape":
+            # Dismiss but keep whatever the user typed.
+            suggest.hide()
+            event.prevent_default()
+            event.stop()
+
+    def _complete_from_menu(self) -> None:
+        # Fill the highlighted command into the input. Arg-taking commands get a
+        # trailing space so the user types the value next; arg-less ones don't, so
+        # a following Enter runs them immediately. Hiding the menu happens via the
+        # resulting on_input_changed (the value gains a space or fully matches).
+        suggest = self._suggest
+        if suggest is None:
+            return
+        spec = suggest.highlighted_spec()
+        if spec is None:
+            return
+        self.prefill_command(f"{spec.command} " if spec.takes_args else spec.command)
+        suggest.hide()
 
     def set_submit_hook(self, on_submit: Callable[[], None]) -> None:
         """Register a callback fired the moment an input line is submitted.
