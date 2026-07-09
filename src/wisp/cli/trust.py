@@ -32,7 +32,8 @@ def _canonical_project(project_path: Path) -> str:
 
 
 def _selected_project_root(project: Path | None) -> Path:
-    return resolve_project_context_root(project or Path("."))
+    selected = project or Path(".")
+    return resolve_project_context_root(selected.expanduser())
 
 
 @trust_app.command("status")

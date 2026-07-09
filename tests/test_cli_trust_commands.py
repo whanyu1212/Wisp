@@ -15,6 +15,10 @@ def _env(trust_file: Path) -> dict[str, str]:
     return {"WISP_TRUST_FILE": str(trust_file)}
 
 
+def _env_with_home(trust_file: Path, home: Path) -> dict[str, str]:
+    return {**_env(trust_file), "HOME": str(home)}
+
+
 def _canonical(path: Path) -> str:
     return path.expanduser().resolve(strict=False).as_posix()
 
@@ -93,6 +97,35 @@ def test_trust_commands_resolve_explicit_subdirectory_to_project_root(
     assert forget.stdout == f"forgot trust decision: {_canonical(project)}\n"
     assert is_trusted(project, trust_path=trust_file) is None
     assert is_trusted(subdir, trust_path=trust_file) is None
+
+
+def test_trust_commands_expand_home_relative_project_paths(tmp_path: Path) -> None:
+    trust_file = tmp_path / "trust.json"
+    home = tmp_path / "home"
+    project = home / "work" / "repo"
+    project.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    runner = CliRunner()
+
+    allow = runner.invoke(
+        app,
+        ["trust", "allow", "~/work/repo"],
+        env=_env_with_home(trust_file, home),
+    )
+
+    assert allow.exit_code == 0, allow.output
+    assert allow.stdout == f"trusted: {project.resolve(strict=False).as_posix()}\n"
+    assert is_trusted(project, trust_path=trust_file) is True
+    assert is_trusted(Path.cwd() / "~" / "work" / "repo", trust_path=trust_file) is None
+
+    status = runner.invoke(
+        app,
+        ["trust", "status", "~/work/repo"],
+        env=_env_with_home(trust_file, home),
+    )
+
+    assert status.exit_code == 0, status.output
+    assert status.stdout == f"trusted: {project.resolve(strict=False).as_posix()}\n"
 
 
 def test_trust_revoke_records_untrusted_and_status_reports_it(tmp_path: Path) -> None:
