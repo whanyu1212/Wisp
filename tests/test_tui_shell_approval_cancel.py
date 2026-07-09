@@ -293,6 +293,50 @@ def test_tui_shell_does_not_approve_from_stale_running_input() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_answers_trust_from_stale_running_yes_no_input() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(controller)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.waiting_for_trust
+        shell.state.pending_trust = TrustRequested(
+            request_id="req-1",
+            project_path=Path("/some/project"),
+        )
+
+        should_exit = await shell._handle_input_line(_InputLine(text="y", mode=_InputMode.running))
+
+        assert should_exit is False
+        assert controller.trusts == [("req-1", True, None, False)]
+        assert shell.state.pending_trust is None
+        assert list(shell.state.queued_prompts) == []
+
+    anyio.run(run)
+
+
+def test_tui_shell_queues_non_answer_from_stale_running_trust_input() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(controller)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.waiting_for_trust
+        shell.state.pending_trust = TrustRequested(
+            request_id="req-1",
+            project_path=Path("/some/project"),
+        )
+
+        should_exit = await shell._handle_input_line(
+            _InputLine(text="follow up", mode=_InputMode.running)
+        )
+
+        assert should_exit is False
+        assert controller.trusts == []
+        assert shell.state.pending_trust is not None
+        assert list(shell.state.queued_prompts) == ["follow up"]
+
+    anyio.run(run)
+
+
 def test_tui_shell_denies_approval_on_running_tagged_interrupt_for_safety() -> None:
     async def run() -> None:
         controller = ScriptedController()

@@ -102,6 +102,7 @@ class TuiController(Protocol):
 
 
 PromptReader = Callable[[str], Awaitable[str]]
+_TRUST_ANSWERS = {"y", "yes", "n", "no"}
 
 
 @dataclass(frozen=True)
@@ -240,7 +241,7 @@ class TuiShell:
         if command is not None:
             return await self._handle_slash_command(command)
         if self.state.pending_trust is not None:
-            if signal.mode is _InputMode.trust:
+            if signal.mode is _InputMode.trust or _is_trust_answer(text):
                 return await self._answer_pending_trust(text)
             if text and self.state.current_command_id is not None:
                 self.state.queued_prompts.append(text)
@@ -854,3 +855,7 @@ def _compact_session_path(path: object) -> str:
 
 def _is_rpc_cancelled_message(message: str | None) -> bool:
     return bool(message and message.startswith("RPC command cancelled:"))
+
+
+def _is_trust_answer(text: str) -> bool:
+    return text.strip().lower() in _TRUST_ANSWERS
