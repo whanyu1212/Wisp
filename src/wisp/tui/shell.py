@@ -26,6 +26,7 @@ from wisp.events import (
     AssistantMessage,
     ErrorEvent,
     KnownWispEvent,
+    ProjectConfigApplied,
     RpcCommandFinished,
     SessionSaved,
     TokenDelta,
@@ -652,6 +653,20 @@ class TuiShell:
                 return await self._answer_pending_trust(
                     "", trusted=False, reason="Trust prompt: input closed"
                 )
+            return False
+
+        if isinstance(event, ProjectConfigApplied):
+            # The RPC side applied a trusted project's config mid-session (first-run
+            # approval). Adopt the provider/model/auth it now runs with, so the header
+            # and /provider,/model,/auth,/login stop showing the untrusted-startup ones.
+            self.current_provider = event.provider
+            self.current_model = event.model
+            self.auth_store = JsonAuthStore(event.auth_path)
+            self.renderer.notice(
+                f"Applied trusted project config: provider {event.provider}"
+                f"{f', model {event.model}' if event.model else ''}."
+            )
+            self._sync_view()
             return False
 
         if isinstance(event, RpcCommandFinished):

@@ -13,7 +13,7 @@ import stat
 import sys
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
@@ -29,6 +29,7 @@ from wisp.agent.messages import Message
 from wisp.config import WispConfig
 from wisp.events import (
     ErrorEvent,
+    ProjectConfigApplied,
     RpcCommandFinished,
     RpcCommandStarted,
     TrustRequested,
@@ -364,11 +365,24 @@ async def _run_rpc(
         # swap the pieces the agent reads fresh each turn (provider, model, tool policy)
         # so this session honors the trusted settings instead of running with defaults.
         #
+        # The enclosing ``runtime`` also adopts the trusted provider registry (built
+        # from the trusted ``auth_path``) that the RPC loop passes to later
+        # ``configure`` / ``/provider`` switches. Without this, a subsequent provider
+        # switch would resolve against the untrusted-startup credential store and could
+        # silently drop the trusted project's auth file.
+        #
+        # Only ``providers`` is swapped, via ``replace`` — NOT the whole runtime. A
+        # rebuilt runtime has its own fresh ``EventBus``/``ExtensionAPI``; wholesale
+        # reassignment would leave the loop's runtime pointing at a different bus than
+        # the one the already-built agent emits on, splitting the event stream. Keeping
+        # the original ``events``/``api``/``tools`` preserves a single shared bus.
+        #
         # ``session_dir`` is intentionally NOT relocated here: the session store is owned
         # by the RPC loop (which already created the first prompt's session before trust
         # resolved), so a mid-run swap would be both incomplete and racy. A trusted
         # project's ``session_dir`` takes effect on the next launch — the trust decision
         # persists, so this is a one-time lag.
+        nonlocal runtime
         if startup_trusted or config_overrides is None:
             return  # config already reflects the trusted project; nothing to rebuild.
         trusted_config = config_overrides.build(trusted=True)
@@ -378,6 +392,17 @@ async def _run_rpc(
         agent.provider = trusted_runtime.providers.get(trusted_config.provider)
         agent.model = trusted_config.model
         agent.tool_context = ToolContext.from_config(trusted_config)
+        runtime = replace(runtime, providers=trusted_runtime.providers)
+        # Tell an out-of-process front-end (the TUI) the config it displays/mutates
+        # changed, so its header and /provider,/model,/auth,/login stop showing the
+        # untrusted-startup values.
+        _write_json_event(
+            ProjectConfigApplied(
+                provider=trusted_config.provider,
+                model=trusted_config.model,
+                auth_path=trusted_config.auth_path,
+            )
+        )
 
     trust_gate = _RpcTrustGate(Path.cwd(), on_first_trusted=_rebuild_agent_for_trusted_project)
     agent = Agent(

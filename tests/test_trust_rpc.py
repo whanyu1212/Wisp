@@ -186,6 +186,45 @@ def test_rpc_gate_does_not_cache_after_failed_rebuild(
     anyio.run(scenario)
 
 
+def test_trusted_rebuild_preserves_event_bus_identity() -> None:
+    # Regression: the first-run rebuild adopts the trusted runtime's PROVIDERS only
+    # (via dataclasses.replace), NOT the whole runtime. A rebuilt runtime has its own
+    # fresh EventBus/ExtensionAPI; wholesale reassignment would leave the RPC loop's
+    # runtime on a different bus than the one the already-built agent emits on,
+    # splitting the event stream. This asserts the swap the rebuild performs keeps
+    # events/api/tools shared while switching providers.
+    from dataclasses import replace
+
+    from wisp.runtime.extensions import build_runtime
+
+    async def scenario() -> None:
+        original = await build_runtime()
+        trusted = await build_runtime()
+        assert original.events is not trusted.events  # premise: distinct buses
+
+        rebuilt = replace(original, providers=trusted.providers)
+
+        assert rebuilt.events is original.events  # agent's bus preserved
+        assert rebuilt.api is original.api
+        assert rebuilt.tools is original.tools
+        assert rebuilt.providers is trusted.providers  # trusted providers adopted
+
+    anyio.run(scenario)
+
+
+def test_rpc_run_uses_replace_for_trusted_runtime_swap() -> None:
+    # Guard against a regression back to wholesale `runtime = trusted_runtime`, which
+    # would reintroduce the event-bus split. The rebuild must swap providers via
+    # replace(...) and must not reassign the whole runtime.
+    import inspect
+
+    from wisp.cli import rpc
+
+    src = inspect.getsource(rpc._run_rpc)
+    assert "replace(runtime, providers=trusted_runtime.providers)" in src
+    assert "runtime = trusted_runtime" not in src  # no wholesale swap
+
+
 def test_rpc_prompt_command_reports_rebuild_provider_error(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

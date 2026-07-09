@@ -8,6 +8,7 @@ from pathlib import Path
 import anyio
 
 from wisp.events import (
+    ProjectConfigApplied,
     RpcCommandFinished,
     RpcCommandStarted,
     TrustRequested,
@@ -87,6 +88,17 @@ def test_trust_events_round_trip_through_json() -> None:
 
     assert wisp_event_from_json(requested.model_dump_json()) == requested
     assert wisp_event_from_json(resolved.model_dump_json()) == resolved
+
+
+def test_project_config_applied_round_trips_through_json() -> None:
+    applied = ProjectConfigApplied(
+        provider="openai", model="gpt-5.5", auth_path=Path("/home/u/.wisp/auth.json")
+    )
+
+    assert wisp_event_from_json(applied.model_dump_json()) == applied
+    # model is optional (provider default).
+    minimal = ProjectConfigApplied(provider="fake", auth_path=Path("/tmp/auth.json"))
+    assert wisp_event_from_json(minimal.model_dump_json()) == minimal
 
 
 def test_rpc_commands_allow_protocol_optional_id() -> None:
