@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from wisp.events import KnownWispEvent, ToolApprovalRequested
+from wisp.events import KnownWispEvent, ToolApprovalRequested, TrustRequested
 from wisp.tui.rendering import TuiViewSnapshot
 
 
@@ -17,6 +17,7 @@ class TuiStatus(StrEnum):
     idle = "idle"
     running = "running"
     waiting_for_approval = "waiting_for_approval"
+    waiting_for_trust = "waiting_for_trust"
     exiting = "exiting"
 
 
@@ -28,6 +29,7 @@ class TuiInteractionState:
     current_command_id: str | None = None
     shutdown_command_id: str | None = None
     pending_approval: ToolApprovalRequested | None = None
+    pending_trust: TrustRequested | None = None
     queued_prompts: deque[str] = field(default_factory=deque)
     exit_requested: bool = False
     input_closed: bool = False
@@ -68,6 +70,7 @@ class _InputMode(StrEnum):
     idle = "idle"
     running = "running"
     approval = "approval"
+    trust = "trust"
     exiting = "exiting"
 
 
@@ -110,6 +113,8 @@ def _coerce_input_mode(value: str, *, fallback: _InputMode) -> _InputMode:
 def _input_mode_for_status(status: TuiStatus) -> _InputMode:
     if status is TuiStatus.waiting_for_approval:
         return _InputMode.approval
+    if status is TuiStatus.waiting_for_trust:
+        return _InputMode.trust
     if status is TuiStatus.running:
         return _InputMode.running
     if status is TuiStatus.exiting:
@@ -120,12 +125,16 @@ def _input_mode_for_status(status: TuiStatus) -> _InputMode:
 def _view_status_for_status(status: TuiStatus) -> str:
     if status is TuiStatus.waiting_for_approval:
         return "waiting for approval"
+    if status is TuiStatus.waiting_for_trust:
+        return "waiting for trust"
     return status.value
 
 
 def _prompt_for_mode(mode: _InputMode) -> str:
     if mode is _InputMode.approval:
         return "approve? [y/N] "
+    if mode is _InputMode.trust:
+        return "trust this project? [y/N] "
     if mode is _InputMode.running:
         return "wisp(running)> "
     if mode is _InputMode.exiting:

@@ -445,7 +445,7 @@ def test_configured_auth_file_is_protected(tmp_path: Path, monkeypatch: MonkeyPa
     auth_file.write_text('{"token": "sk-super-secret"}\n', encoding="utf-8")
     monkeypatch.setenv("WISP_AUTH_FILE", str(auth_file))
 
-    config = WispConfig.from_env(load_env_file=False)
+    config = WispConfig.from_env()
     context = ToolContext.from_config(config, cwd=tmp_path)
 
     assert any("codex-auth.json" in pattern for pattern in config.protected_paths)
@@ -466,7 +466,7 @@ def test_auth_file_protected_even_when_guard_disabled(
     (tmp_path / ".wisp" / "settings.json").write_text('{"protected_paths": []}', encoding="utf-8")
     monkeypatch.chdir(tmp_path)
 
-    config = WispConfig.from_env(load_env_file=False)
+    config = WispConfig.from_env()
     context = ToolContext.from_config(config, cwd=tmp_path)
 
     with pytest.raises(ToolError, match="protected path"):
@@ -517,3 +517,26 @@ def test_from_config_backstops_auth_protection_after_model_copy(tmp_path: Path) 
 
     with pytest.raises(ToolError, match="protected path"):
         run_tool(ReadTool(), {"path": "codex-auth.json"}, context)
+
+
+def test_project_settings_cannot_disable_secret_guard(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # Security (review finding 3): a project ./.wisp/settings.json shipping
+    # {"protected_paths": []} must NOT disable the guard end to end. read(.env)
+    # stays blocked because project protected_paths are ignored.
+    import json
+
+    from wisp.config import WispConfig
+
+    wisp_dir = tmp_path / ".wisp"
+    wisp_dir.mkdir()
+    (wisp_dir / "settings.json").write_text(json.dumps({"protected_paths": []}), encoding="utf-8")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-secret\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    config = WispConfig.from_env()
+    context = ToolContext.from_config(config, cwd=tmp_path)
+
+    with pytest.raises(ToolError, match="protected path"):
+        run_tool(ReadTool(), {"path": ".env"}, context)

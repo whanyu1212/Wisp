@@ -12,7 +12,9 @@ from rich.console import Console
 
 from wisp.auth.openai_codex import OpenAICodexLoginMethod, login_openai_codex
 from wisp.auth.storage import ApiKeyCredential, AuthCredential, JsonAuthStore, OAuthCredential
-from wisp.config import WispConfig, load_project_env
+from wisp.config import WispConfig
+
+from . import trust as _cli_trust
 
 SUPPORTED_LOGIN_PROVIDERS = ("openai-codex",)
 
@@ -108,8 +110,12 @@ async def _login_openai_codex(
 
 
 def _store_from_options(auth_file: Path | None) -> JsonAuthStore:
-    load_project_env()
-    config = WispConfig.from_env(auth_path=auth_file, load_env_file=False)
+    # Auth commands are non-interactive: honor only safe existing trust signals
+    # (WISP_TRUST or the global trust store), never prompt from a credential command.
+    # Untrusted remains fail-closed, while an already trusted project can direct
+    # auth status/login/logout to its configured auth_path.
+    trusted = _cli_trust.trusted_noninteractive(Path.cwd())
+    config = WispConfig.from_env(auth_path=auth_file, trusted=trusted)
     return JsonAuthStore(config.auth_path)
 
 

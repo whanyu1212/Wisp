@@ -5,7 +5,11 @@ from pathlib import Path
 from pytest import MonkeyPatch
 
 from wisp.agent import prompt as prompt_module
-from wisp.agent.prompt import build_project_context, build_prompt_messages
+from wisp.agent.prompt import (
+    build_project_context,
+    build_prompt_messages,
+    build_untrusted_project_context,
+)
 from wisp.providers.base import ToolSpec
 
 
@@ -27,10 +31,48 @@ def test_build_prompt_messages_includes_default_instructions_and_context(tmp_pat
     assert "allowed tools:\n  - read: Read a UTF-8 text file." in messages[1].content
 
 
+def test_build_prompt_messages_can_skip_project_context(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    tool = ToolSpec(
+        name="read",
+        description="Read a UTF-8 text file.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    messages = build_prompt_messages(
+        cwd=tmp_path,
+        tools=[tool],
+        include_project_context=False,
+    )
+
+    context = messages[1].content
+    assert str(tmp_path.resolve(strict=False)) not in context
+    assert "pyproject.toml" not in context
+    assert "git:" not in context
+    assert "project context: skipped because this project is not trusted" in context
+    assert "allowed tools:\n  - read: Read a UTF-8 text file." in context
+
+
 def test_project_context_reports_no_allowed_tools(tmp_path: Path) -> None:
     context = build_project_context(cwd=tmp_path, tools=[])
 
     assert "allowed tools: none exposed to the model" in context
+
+
+def test_untrusted_project_context_reports_tools_without_local_context(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    tool = ToolSpec(
+        name="grep",
+        description="Search text files.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    context = build_untrusted_project_context(tools=[tool])
+
+    assert str(tmp_path.resolve(strict=False)) not in context
+    assert "README.md" not in context
+    assert "git:" not in context
+    assert "allowed tools:\n  - grep: Search text files." in context
 
 
 def test_project_context_scans_git_root_from_subdirectory(

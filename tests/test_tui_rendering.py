@@ -37,6 +37,33 @@ def test_tui_shell_uses_injected_renderer() -> None:
     anyio.run(run)
 
 
+def test_tui_trust_on_closed_input_sends_transient_denial() -> None:
+    # Regression: when input has already closed and a TrustRequested arrives, the shell
+    # must answer trusted=False as a transient denial. The RPC gate persists explicit
+    # "no" answers, including those with explanatory reasons.
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = LineTuiRenderer(_console()[0])
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from([]),
+        )
+        shell.state.input_closed = True
+
+        await shell._handle_rpc_event(
+            TrustRequested(request_id="req-1", project_path="/some/project")
+        )
+
+        assert controller.trusts == [("req-1", False, "Trust prompt: input closed", True)]
+        request_id, trusted, reason, transient = controller.trusts[0]
+        assert trusted is False
+        assert reason is not None
+        assert transient is True
+
+    anyio.run(run)
+
+
 def test_fullscreen_tui_renderer_renders_layout_regions(tmp_path: Path) -> None:
     console, output = _console()
     renderer = FullscreenTuiRenderer(console, clear_screen=False)

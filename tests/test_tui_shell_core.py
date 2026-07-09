@@ -134,6 +134,37 @@ def test_tui_shell_help_renders_approval_hint_literally() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_adopts_trusted_project_config(tmp_path: Path) -> None:
+    # A ProjectConfigApplied event (first-run trust approval applied the project's
+    # settings.json on the RPC side) must update the TUI's provider/model/auth so the
+    # header and /provider,/model,/auth,/login stop showing the untrusted-startup ones.
+    async def run() -> None:
+        controller = ScriptedController()
+        startup_auth = tmp_path / "startup-auth.json"
+        trusted_auth = tmp_path / "trusted-auth.json"
+        shell = TuiShell(
+            controller,
+            renderer=LineTuiRenderer(_console()[0]),
+            prompt_reader=await _reader_from([]),
+            provider="startup-provider",
+            model=None,
+            auth_path=startup_auth,
+        )
+
+        await shell._handle_rpc_event(
+            ProjectConfigApplied(
+                provider="trusted-provider", model="trusted-model", auth_path=trusted_auth
+            )
+        )
+
+        assert shell.current_provider == "trusted-provider"
+        assert shell.current_model == "trusted-model"
+        assert shell.auth_store.path == trusted_auth
+        assert shell.view.provider == "trusted-provider"  # header resynced
+
+    anyio.run(run)
+
+
 def test_tui_shell_auth_status_uses_current_provider(tmp_path: Path) -> None:
     async def run() -> None:
         controller = ScriptedController()

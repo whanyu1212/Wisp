@@ -12,8 +12,9 @@ import os
 import stat
 import sys
 from collections import deque
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, replace
+from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from typing import cast
@@ -26,17 +27,27 @@ from anyio.streams.memory import MemoryObjectSendStream
 from wisp.agent.loop import Agent
 from wisp.agent.messages import Message
 from wisp.config import WispConfig
-from wisp.events import ErrorEvent, RpcCommandFinished, RpcCommandStarted
+from wisp.events import (
+    ErrorEvent,
+    ProjectConfigApplied,
+    RpcCommandFinished,
+    RpcCommandStarted,
+    TrustRequested,
+    TrustResolved,
+)
+from wisp.providers.base import ProviderError
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
-from wisp.runtime.registry import UnknownProviderError
-from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
+from wisp.runtime.registry import UnknownProviderError, UnknownToolError
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.base import Tool
 from wisp.tools.context import ToolContext
+from wisp.trust import is_trusted, record_trust
 
 from . import output as _cli_output
 from . import tools as _cli_tools
+from . import trust as _cli_trust
 from .types import _JsonOutputModeError
 
 _render_json_events = _cli_output._render_json_events
@@ -187,6 +198,171 @@ class _RpcToolApprovalPolicy(ToolApprovalPolicy):
         pending.event.set()
 
 
+@dataclass
+class _RpcPendingTrust:
+    request_id: str
+    event: anyio.Event
+    trusted: bool | None = None
+    reason: str | None = None
+    transient: bool = False
+    resolved: bool = False
+
+
+class _RpcTrustGate:
+    """Resolves project trust once, prompting the RPC client when undecided.
+
+    Mirrors the approval policy's pending-request pattern: the project-trust
+    question is a yes/no keyed by ``request_id`` that the client answers with a
+    ``TrustCommand``. The decision is resolved lazily on first need (before the
+    first prompt runs) and cached, so a project is prompted for at most once per
+    process. Precedence: a ``WISP_TRUST`` override and a stored decision are
+    honored without prompting; only an undecided project emits ``TrustRequested``
+    and blocks. Input closing before an answer resolves to untrusted (safe).
+    """
+
+    def __init__(
+        self,
+        project_path: Path,
+        *,
+        on_first_trusted: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self._project_path = project_path
+        # Invoked at most once, the first time trust resolves to True, so a first-run
+        # session that approves trust can rebuild the config-derived runtime with the
+        # project's now-trusted ``.wisp/settings.json`` before the first turn runs.
+        self._on_first_trusted = on_first_trusted
+        self._pending: _RpcPendingTrust | None = None
+        self._decision: bool | None = None
+        self._resolved = False
+        self._input_closed = False
+
+    async def resolve(self) -> bool:
+        """Return whether the project is trusted, prompting the client if needed."""
+
+        if self._resolved:
+            assert self._decision is not None
+            return self._decision
+
+        override = _cli_trust.trust_override_from_env()
+        if override is not None:
+            return await self._finish(override)
+
+        stored = is_trusted(self._project_path)
+        if stored is not None:
+            return await self._finish(stored)
+
+        if self._input_closed:
+            return await self._finish(False)
+
+        # Undecided: prompt the client. Only this path emits trust events, so a
+        # project resolved by env override or a stored decision produces a clean
+        # event stream.
+        pending = _RpcPendingTrust(request_id=uuid4().hex, event=anyio.Event())
+        self._pending = pending
+        _write_json_event(
+            TrustRequested(request_id=pending.request_id, project_path=self._project_path)
+        )
+        await pending.event.wait()
+        trusted = pending.trusted is True
+        if trusted:
+            record_trust(self._project_path, True)
+        elif not pending.transient:
+            # Explicit "no" answers are persisted even when they carry explanatory
+            # text. Forced UI/input-close denials opt into transient behavior.
+            record_trust(self._project_path, False)
+        self._pending = None
+        _write_json_event(
+            TrustResolved(
+                request_id=pending.request_id,
+                project_path=self._project_path,
+                trusted=trusted,
+                reason=pending.reason,
+            )
+        )
+        return await self._finish(trusted)
+
+    def resolve_request(
+        self,
+        *,
+        request_id: str,
+        trusted: bool,
+        reason: str | None = None,
+        transient: bool = False,
+    ) -> bool:
+        pending = self._pending
+        if pending is None or pending.resolved or pending.request_id != request_id:
+            return False
+        pending.resolved = True
+        pending.trusted = trusted
+        pending.reason = reason
+        pending.transient = transient
+        pending.event.set()
+        return True
+
+    def deny_pending_on_input_closed(self) -> None:
+        self._input_closed = True
+        pending = self._pending
+        if pending is not None and not pending.resolved:
+            pending.resolved = True
+            pending.trusted = False
+            pending.reason = "RPC input closed before trust response"
+            pending.transient = True
+            pending.event.set()
+
+    async def _finish(self, trusted: bool) -> bool:
+        # Run the first-trusted rebuild BEFORE caching the decision. If the rebuild
+        # raises (e.g. a trusted project's settings.json names an unknown provider), we
+        # must NOT mark the gate resolved: otherwise the caller reports this prompt as
+        # failed, but every later prompt would return the cached decision, skip the
+        # rebuild, and silently run with the stale untrusted startup config. Leaving the
+        # gate unresolved makes each subsequent prompt re-attempt the rebuild and fail
+        # the same way, instead of quietly succeeding with the wrong provider.
+        if trusted and self._on_first_trusted is not None and not self._resolved:
+            await self._on_first_trusted()
+        self._decision = trusted
+        self._resolved = True
+        return trusted
+
+
+@dataclass(frozen=True)
+class _ConfigOverrides:
+    """The explicit CLI overrides used to build the RPC config.
+
+    Retained so a first-run session that approves trust can rebuild the config from the
+    *same* inputs with the project ``.wisp/settings.json`` layer applied, rather than
+    trying to reconstruct the original arguments from the already-merged config.
+    """
+
+    provider: str | None = None
+    model: str | None = None
+    session_dir: Path | None = None
+    auth_path: Path | None = None
+
+    def build(self, *, trusted: bool) -> WispConfig:
+        return WispConfig.from_env(
+            provider=self.provider,
+            model=self.model,
+            session_dir=self.session_dir,
+            auth_path=self.auth_path,
+            trusted=trusted,
+        )
+
+
+@dataclass
+class _RpcConfigureOverrides:
+    """Successful in-session RPC configure choices that outrank project settings."""
+
+    provider: str | None = None
+    model: str | None = None
+    has_model: bool = False
+
+    def effective_provider(self, default: str) -> str:
+        return self.provider or default
+
+    def effective_model(self, default: str | None) -> str | None:
+        return self.model if self.has_model else default
+
+
 async def _run_rpc(
     config: WispConfig,
     all_tools: bool = False,
@@ -196,6 +372,8 @@ async def _run_rpc(
     continue_latest: bool = False,
     approve_unsafe_tools: bool = False,
     max_tool_iterations: int | None = None,
+    startup_trusted: bool = False,
+    config_overrides: _ConfigOverrides | None = None,
 ) -> None:
     runtime = await _build_runtime_for_config(config)
     provider = runtime.providers.get(config.provider)
@@ -203,6 +381,58 @@ async def _run_rpc(
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     session_state = _rpc_session_state(session)
     approval_policy = _RpcToolApprovalPolicy(_print_mode_tool_approval_policy(approve_unsafe_tools))
+    configure_overrides = _RpcConfigureOverrides()
+
+    async def _rebuild_agent_for_trusted_project() -> None:
+        # First-run RPC/TUI: trust was undecided at startup, so ``config`` was built
+        # untrusted and the project's ``.wisp/settings.json`` was skipped. Now that the
+        # client has approved trust — and we are still before the first turn — re-derive
+        # config from the *same* explicit overrides with the project layer applied and
+        # swap the pieces the agent reads fresh each turn (provider, model, tool policy)
+        # so this session honors the trusted settings instead of running with defaults.
+        #
+        # The enclosing ``runtime`` also adopts the trusted provider registry (built
+        # from the trusted ``auth_path``) that the RPC loop passes to later
+        # ``configure`` / ``/provider`` switches. Without this, a subsequent provider
+        # switch would resolve against the untrusted-startup credential store and could
+        # silently drop the trusted project's auth file.
+        #
+        # Only ``providers`` is swapped, via ``replace`` — NOT the whole runtime. A
+        # rebuilt runtime has its own fresh ``EventBus``/``ExtensionAPI``; wholesale
+        # reassignment would leave the loop's runtime pointing at a different bus than
+        # the one the already-built agent emits on, splitting the event stream. Keeping
+        # the original ``events``/``api``/``tools`` preserves a single shared bus.
+        #
+        # ``session_dir`` is intentionally NOT relocated here: the session store is owned
+        # by the RPC loop (which already created the first prompt's session before trust
+        # resolved), so a mid-run swap would be both incomplete and racy. A trusted
+        # project's ``session_dir`` takes effect on the next launch — the trust decision
+        # persists, so this is a one-time lag.
+        nonlocal runtime
+        if startup_trusted or config_overrides is None:
+            return  # config already reflects the trusted project; nothing to rebuild.
+        trusted_config = config_overrides.build(trusted=True)
+        if trusted_config == config:
+            return  # the project has no settings.json; the trusted build is identical.
+        trusted_runtime = await _build_runtime_for_config(trusted_config)
+        effective_provider = configure_overrides.effective_provider(trusted_config.provider)
+        effective_model = configure_overrides.effective_model(trusted_config.model)
+        agent.provider = trusted_runtime.providers.get(effective_provider)
+        agent.model = effective_model
+        agent.tool_context = ToolContext.from_config(trusted_config)
+        runtime = replace(runtime, providers=trusted_runtime.providers)
+        # Tell an out-of-process front-end (the TUI) the config it displays/mutates
+        # changed, so its header and /provider,/model,/auth,/login stop showing the
+        # untrusted-startup values.
+        _write_json_event(
+            ProjectConfigApplied(
+                provider=effective_provider,
+                model=effective_model,
+                auth_path=trusted_config.auth_path,
+            )
+        )
+
+    trust_gate = _RpcTrustGate(Path.cwd(), on_first_trusted=_rebuild_agent_for_trusted_project)
     agent = Agent(
         provider=provider,
         sessions=sessions,
@@ -241,6 +471,8 @@ async def _run_rpc(
                         send=send,
                         running_prompt=running_prompt,
                         approval_policy=approval_policy,
+                        trust_gate=trust_gate,
+                        configure_overrides=configure_overrides,
                     )
                     if should_shutdown:
                         stop_reader.set()
@@ -256,6 +488,7 @@ async def _run_rpc(
                 if isinstance(control_event, _RpcInputClosed):
                     stdin_closed = True
                     approval_policy.deny_pending_on_input_closed()
+                    trust_gate.deny_pending_on_input_closed()
                     continue
                 if isinstance(control_event, _RpcPromptCompleted):
                     if (
@@ -270,7 +503,11 @@ async def _run_rpc(
 
                 command = control_event.command
                 command_type = _rpc_command_type(command)
-                if running_prompt is not None and command_type not in {"approval", "cancel"}:
+                if running_prompt is not None and command_type not in {
+                    "approval",
+                    "cancel",
+                    "trust",
+                }:
                     if len(queued_commands) >= _MAX_QUEUED_RPC_COMMANDS:
                         _reject_rpc_command(
                             command,
@@ -289,6 +526,8 @@ async def _run_rpc(
                     send=send,
                     running_prompt=running_prompt,
                     approval_policy=approval_policy,
+                    trust_gate=trust_gate,
+                    configure_overrides=configure_overrides,
                 )
                 if should_shutdown:
                     stop_reader.set()
@@ -307,6 +546,8 @@ def _dispatch_rpc_command(
     send: MemoryObjectSendStream[_RpcControlEvent],
     running_prompt: _RpcRunningPrompt | None,
     approval_policy: _RpcToolApprovalPolicy,
+    trust_gate: _RpcTrustGate,
+    configure_overrides: _RpcConfigureOverrides,
 ) -> tuple[_RpcRunningPrompt | None, bool]:
     command_type = _rpc_command_type(command)
     if command_type == "prompt":
@@ -317,6 +558,7 @@ def _dispatch_rpc_command(
             session_state=session_state,
             task_group=task_group,
             send=send,
+            trust_gate=trust_gate,
         )
         if new_session is not None:
             session_state.session = new_session
@@ -327,6 +569,8 @@ def _dispatch_rpc_command(
         runtime=runtime,
         running_prompt=running_prompt,
         approval_policy=approval_policy,
+        trust_gate=trust_gate,
+        configure_overrides=configure_overrides,
     )
     return running_prompt, should_shutdown
 
@@ -464,6 +708,7 @@ def _start_rpc_prompt_command(
     session_state: _RpcSessionState,
     task_group: TaskGroup,
     send: MemoryObjectSendStream[_RpcControlEvent],
+    trust_gate: _RpcTrustGate,
 ) -> tuple[_RpcRunningPrompt | None, JsonlSession | None]:
     command_type, command_id, id_error = _rpc_command_identity(command)
     _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
@@ -497,6 +742,7 @@ def _start_rpc_prompt_command(
         command_type,
         cancel_scope,
         send.clone(),
+        trust_gate,
     )
     return _RpcRunningPrompt(command_id=command_id, cancel_scope=cancel_scope), selected_session
 
@@ -511,15 +757,29 @@ async def _run_rpc_prompt_command(
     command_type: str,
     cancel_scope: anyio.CancelScope,
     send: MemoryObjectSendStream[_RpcControlEvent],
+    trust_gate: _RpcTrustGate,
 ) -> None:
     error: str | None = None
     try:
         with cancel_scope:
             try:
+                # Resolve project trust before the first turn runs; the decision is
+                # cached so subsequent prompts don't re-prompt. Trust commands are
+                # processed by the main loop while this awaits, so this cannot
+                # deadlock the reader.
+                agent.trusted = await trust_gate.resolve()
                 await _render_json_events(
                     agent.run(prompt, session=session, history=committed_history)
                 )
             except _JsonOutputModeError as exc:
+                error = str(exc)
+            except (ProviderError, SessionError, UnknownProviderError, UnknownToolError) as exc:
+                # A first-run approval can rebuild the agent from a trusted project's
+                # settings.json that names an unknown provider (or an otherwise bad
+                # runtime); resolve() raises here, before agent.run(). Report it as a
+                # normal command failure — matching startup and print modes — instead of
+                # letting it escape and tear down the RPC process with a silent stream
+                # end and no rpc.command.finished error.
                 error = str(exc)
             except anyio.get_cancelled_exc_class():
                 error = f"RPC command cancelled: {command_id}"
@@ -592,6 +852,8 @@ def _handle_rpc_control_command(
     approval_policy: _RpcToolApprovalPolicy,
     agent: Agent | None = None,
     runtime: WispRuntime | None = None,
+    trust_gate: _RpcTrustGate | None = None,
+    configure_overrides: _RpcConfigureOverrides | None = None,
 ) -> bool:
     command_type, command_id, id_error = _rpc_command_identity(command)
     _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
@@ -623,6 +885,21 @@ def _handle_rpc_control_command(
             approval_policy=approval_policy,
         )
         return False
+    if command_type == "trust":
+        if trust_gate is None:
+            _write_rpc_command_error(
+                command_id=command_id,
+                command_type=command_type,
+                message="RPC trust command requires an active trust gate",
+            )
+            return False
+        _handle_rpc_trust_command(
+            command,
+            command_id=command_id,
+            command_type=command_type,
+            trust_gate=trust_gate,
+        )
+        return False
     if command_type == "configure":
         if agent is None or runtime is None:
             _write_rpc_command_error(
@@ -637,6 +914,7 @@ def _handle_rpc_control_command(
             command_type=command_type,
             agent=agent,
             runtime=runtime,
+            configure_overrides=configure_overrides,
         )
         return False
     message = f"Unknown RPC command: {command_type}"
@@ -651,6 +929,7 @@ def _handle_rpc_configure_command(
     command_type: str,
     agent: Agent,
     runtime: WispRuntime,
+    configure_overrides: _RpcConfigureOverrides | None = None,
 ) -> None:
     provider = command.get("provider")
     model = command.get("model")
@@ -687,10 +966,18 @@ def _handle_rpc_configure_command(
                 message=str(exc),
             )
             return
+        if configure_overrides is not None:
+            configure_overrides.provider = provider
         if not has_model:
             agent.model = None
+            if configure_overrides is not None:
+                configure_overrides.model = None
+                configure_overrides.has_model = True
     if has_model:
         agent.model = model
+        if configure_overrides is not None:
+            configure_overrides.model = model
+            configure_overrides.has_model = True
     _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 
@@ -734,6 +1021,60 @@ def _handle_rpc_approval_command(
             command_id=command_id,
             command_type=command_type,
             message=f"No pending tool approval with call_id: {call_id}",
+        )
+        return
+    _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def _handle_rpc_trust_command(
+    command: dict[str, object],
+    *,
+    command_id: str,
+    command_type: str,
+    trust_gate: _RpcTrustGate,
+) -> None:
+    request_id = command.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC trust command requires string field: request_id",
+        )
+        return
+    trusted = command.get("trusted")
+    if not isinstance(trusted, bool):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC trust command requires boolean field: trusted",
+        )
+        return
+    reason = command.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC trust command field reason must be a string",
+        )
+        return
+    transient = command.get("transient")
+    if transient is not None and not isinstance(transient, bool):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC trust command field transient must be a boolean",
+        )
+        return
+    if not trust_gate.resolve_request(
+        request_id=request_id,
+        trusted=trusted,
+        reason=reason,
+        transient=transient is True,
+    ):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=f"No pending trust request with request_id: {request_id}",
         )
         return
     _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))

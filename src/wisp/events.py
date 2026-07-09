@@ -69,6 +69,36 @@ class ToolApprovalResolved(WispEvent):
     reason: str | None = None
 
 
+class TrustRequested(WispEvent):
+    type: Literal["trust.requested"] = "trust.requested"
+    request_id: str
+    project_path: Path
+
+
+class TrustResolved(WispEvent):
+    type: Literal["trust.resolved"] = "trust.resolved"
+    request_id: str
+    project_path: Path
+    trusted: bool
+    reason: str | None = None
+
+
+class ProjectConfigApplied(WispEvent):
+    """A trusted project's local config was applied mid-session.
+
+    Emitted by the RPC process after a first-run trust approval rebuilds the runtime
+    from the project's ``.wisp/settings.json``. It lets an out-of-process front-end
+    (the TUI) refresh the provider/model/auth it displays and mutates, so its header
+    and ``/provider`` / ``/model`` / ``/auth`` / ``/login`` commands match the config
+    the agent is actually running with.
+    """
+
+    type: Literal["project.config.applied"] = "project.config.applied"
+    provider: str
+    model: str | None = None
+    auth_path: Path
+
+
 class ToolExecutionEnded(WispEvent):
     type: Literal["tool.execution.ended"] = "tool.execution.ended"
     call_id: str
@@ -118,6 +148,9 @@ type KnownWispEvent = Annotated[
     | ToolExecutionStarted
     | ToolApprovalRequested
     | ToolApprovalResolved
+    | TrustRequested
+    | TrustResolved
+    | ProjectConfigApplied
     | ToolExecutionEnded
     | ToolResultReady
     | SessionSaved

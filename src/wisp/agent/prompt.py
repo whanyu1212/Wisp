@@ -50,19 +50,22 @@ def build_prompt_messages(
     cwd: Path,
     tools: Sequence[ToolSpec] = (),
     max_context_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
+    include_project_context: bool = True,
 ) -> tuple[Message, ...]:
     """Build provider-facing system messages for a Wisp turn."""
 
+    context = (
+        build_project_context(
+            cwd=cwd,
+            tools=tools,
+            max_chars=max_context_chars,
+        )
+        if include_project_context
+        else build_untrusted_project_context(tools=tools, max_chars=max_context_chars)
+    )
     return (
         Message(role="system", content=DEFAULT_SYSTEM_PROMPT),
-        Message(
-            role="system",
-            content=build_project_context(
-                cwd=cwd,
-                tools=tools,
-                max_chars=max_context_chars,
-            ),
-        ),
+        Message(role="system", content=context),
     )
 
 
@@ -86,6 +89,21 @@ def build_project_context(
         _tool_summary(tools),
     ]
     return _truncate_context("\n".join(section for section in sections if section), max_chars)
+
+
+def build_untrusted_project_context(
+    *,
+    tools: Sequence[ToolSpec] = (),
+    max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
+) -> str:
+    """Build a provider-facing context block without reading project-local state."""
+
+    sections = [
+        "[WISP PROJECT CONTEXT]",
+        "project context: skipped because this project is not trusted",
+        _tool_summary(tools),
+    ]
+    return _truncate_context("\n".join(sections), max_chars)
 
 
 def _project_root(cwd: Path) -> Path:

@@ -1,7 +1,10 @@
 """Extension activation helpers.
 
 This module intentionally supports only built-in/static extension factories for
-now. Loading arbitrary project code belongs behind a future trust boundary.
+now. Loading arbitrary *project-local* extensions must be gated on project trust
+(see :mod:`wisp.trust` and ``Agent.trusted``): an untrusted project's code must not
+be loaded. That gate now exists; wiring project-local extension discovery behind it
+is future work (roadmap ``Extension System``).
 """
 
 from __future__ import annotations

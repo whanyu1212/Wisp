@@ -72,6 +72,7 @@ class Agent:
         prompt_messages: Sequence[Message] | None = None,
         project_context_max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
         max_tool_iterations: int | None = None,
+        trusted: bool = False,
     ) -> None:
         self.provider = provider
         self.sessions = sessions
@@ -81,6 +82,10 @@ class Agent:
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
         self.tool_context = tool_context or ToolContext.default()
+        # Whether the current project directory is trusted. Untrusted by default
+        # (safe): features that load project-local resources (context files,
+        # project extensions) check this before doing so. See wisp.trust.
+        self.trusted = trusted
         self.tools = (
             tuple(tools)
             if tools is not None
@@ -309,6 +314,7 @@ class Agent:
             cwd=self.tool_context.cwd,
             tools=self.tools,
             max_context_chars=self.project_context_max_chars,
+            include_project_context=self.trusted,
         )
 
     def _conversation_history(self, history: Sequence[Message]) -> tuple[Message, ...]:

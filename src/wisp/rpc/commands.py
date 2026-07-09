@@ -43,6 +43,16 @@ class ApprovalCommand(RpcCommandModel):
     reason: str | None = None
 
 
+class TrustCommand(RpcCommandModel):
+    """Resolve a pending project-trust request."""
+
+    type: Literal["trust"] = "trust"
+    request_id: str
+    trusted: bool
+    reason: str | None = None
+    transient: bool | None = None
+
+
 class ShutdownCommand(RpcCommandModel):
     """Ask the RPC process to exit cleanly."""
 
@@ -58,7 +68,12 @@ class ConfigureCommand(RpcCommandModel):
 
 
 type RpcCommand = Annotated[
-    PromptCommand | CancelCommand | ApprovalCommand | ShutdownCommand | ConfigureCommand,
+    PromptCommand
+    | CancelCommand
+    | ApprovalCommand
+    | TrustCommand
+    | ShutdownCommand
+    | ConfigureCommand,
     Field(discriminator="type"),
 ]
 RpcCommandAdapter: TypeAdapter[RpcCommand] = TypeAdapter(RpcCommand)

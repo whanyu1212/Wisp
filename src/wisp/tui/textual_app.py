@@ -21,6 +21,7 @@ from wisp.events import (
     ToolApprovalResolved,
     ToolCallRequested,
     ToolResultReady,
+    TrustRequested,
 )
 from wisp.tui.rendering import (
     TuiRenderer,
@@ -783,6 +784,10 @@ class TextualTuiRenderer:
         self.app.write_notice(
             f"? approval required {event.name} ({event.safety}) {event.arguments}"
         )
+
+    def trust_request(self, event: TrustRequested) -> None:
+        self.app.hide_working_indicator()
+        self.app.write_notice(f"? trust this project? {event.project_path}")
 
     def event(self, event: KnownWispEvent) -> None:
         # Typed dispatch mirroring LineTuiRenderer.event() so tool calls, tool

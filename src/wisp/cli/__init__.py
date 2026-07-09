@@ -12,7 +12,7 @@ from rich.console import Console
 
 from wisp.agent.loop import Agent
 from wisp.cli.auth import auth_app
-from wisp.config import WispConfig, load_project_env
+from wisp.config import WispConfig
 from wisp.events import ErrorEvent, TokenDelta
 from wisp.providers.base import ProviderError
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
@@ -25,9 +25,11 @@ from . import options as _cli_options
 from . import output as _cli_output
 from . import rpc as _cli_rpc
 from . import tools as _cli_tools
+from . import trust as _cli_trust
 from .types import OutputMode, _JsonOutputModeError
 
 # Compatibility aliases for callers/tests that import private helpers from wisp.cli.
+_resolve_cli_trust = _cli_trust.resolve_cli_trust
 _env_value = _cli_options._env_value
 _has_callback_cli_args = _cli_options._has_callback_cli_args
 _option_was_provided = _cli_options._option_was_provided
@@ -187,7 +189,8 @@ def cli_callback(
         return
 
     console = Console(stderr=True)
-    load_project_env()
+    # Mode is resolved from CLI flags / real-env WISP_MODE only, before trust is
+    # resolved and project-local config is applied.
     mode_was_provided = _option_was_provided(ctx, "mode")
     resolved_mode = _resolve_cli_mode(
         mode,
@@ -239,13 +242,25 @@ def cli_callback(
         console=console,
     )
 
-    config = WispConfig.from_env(
+    # Resolve project trust and gate project-local config (the .wisp/settings.json
+    # layer) on it: an untrusted repo must not be able to redirect the credential
+    # file or override user defaults. Trust is read from safe sources only — the
+    # global store and the real-env WISP_TRUST — never from project-controlled files.
+    # print/JSON resolve interactively here (the prompt goes to stderr, keeping JSON
+    # stdout clean); rpc/tui prompt out-of-band, so at startup they use only the
+    # non-interactive signals (an undecided project is untrusted until answered).
+    if resolved_mode in (OutputMode.rpc, OutputMode.tui):
+        trusted = _cli_trust.trusted_noninteractive(Path.cwd())
+    else:
+        trusted = _resolve_cli_trust(Path.cwd()).trusted
+
+    config_overrides = _cli_rpc._ConfigOverrides(
         provider=provider,
         model=model,
         session_dir=session_dir,
         auth_path=auth_file,
-        load_env_file=False,
     )
+    config = config_overrides.build(trusted=trusted)
     try:
         if resolved_mode is OutputMode.rpc:
             anyio.run(
@@ -258,6 +273,8 @@ def cli_callback(
                 continue_latest,
                 approve_unsafe_tools,
                 max_tool_iterations,
+                trusted,
+                config_overrides,
             )
         elif resolved_mode is OutputMode.tui:
             _run_tui_from_cli_options(
@@ -270,6 +287,13 @@ def cli_callback(
                 approve_unsafe_tools=approve_unsafe_tools,
                 max_tool_iterations=max_tool_iterations,
                 renderer=resolved_tui_renderer,
+                # Forward the user's explicit --provider/--model/--session-dir/--auth-file
+                # (each None unless set) so the legacy `--mode tui` path keeps honoring
+                # them; the launcher no longer launders the resolved config into flags.
+                user_provider=provider,
+                user_model=model,
+                user_session_dir=session_dir,
+                user_auth_file=auth_file,
             )
         else:
             assert prompt is not None
@@ -285,6 +309,7 @@ def cli_callback(
                 approve_unsafe_tools,
                 max_tool_iterations,
                 resolved_mode,
+                trusted,
             )
     except _JsonOutputModeError as exc:
         raise typer.Exit(1) from exc
@@ -357,7 +382,10 @@ def tui_command(
     """Start Wisp's fullscreen TUI."""
 
     console = Console(stderr=True)
-    load_project_env()
+    # The TUI resolves trust out-of-band (its RPC subprocess prompts via TrustCommand),
+    # so gate the project settings layer on the non-interactive trust signals here; an
+    # undecided project's local settings are not applied until the prompt is answered.
+    trusted = _cli_trust.trusted_noninteractive(Path.cwd())
     _validate_session_and_iteration_options(
         resume=resume,
         continue_latest=continue_latest,
@@ -368,7 +396,7 @@ def tui_command(
     config = WispConfig.from_env(
         session_dir=session_dir,
         auth_path=auth_file,
-        load_env_file=False,
+        trusted=trusted,
     )
     renderer = TuiRendererKind.line if line else TuiRendererKind.textual
     try:
@@ -382,6 +410,11 @@ def tui_command(
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
             renderer=renderer,
+            # These default to None on the `tui` command, so they are non-None only when
+            # the user explicitly set them — exactly the values that should override a
+            # trusted project's settings in the RPC subprocess.
+            user_session_dir=session_dir,
+            user_auth_file=auth_file,
         )
     except (ProviderError, SessionError, UnknownProviderError, UnknownToolError) as exc:
         console.print(f"[red]error:[/red] {exc}")
@@ -429,6 +462,10 @@ def _run_tui_from_cli_options(
     approve_unsafe_tools: bool,
     max_tool_iterations: int | None,
     renderer: TuiRendererKind,
+    user_provider: str | None = None,
+    user_model: str | None = None,
+    user_session_dir: Path | None = None,
+    user_auth_file: Path | None = None,
 ) -> None:
     from wisp.tui import TuiOptions, run_tui
 
@@ -444,6 +481,10 @@ def _run_tui_from_cli_options(
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
             renderer=renderer,
+            user_provider=user_provider,
+            user_model=user_model,
+            user_session_dir=user_session_dir,
+            user_auth_file=user_auth_file,
         ),
     )
 
@@ -459,6 +500,7 @@ async def _run_print(
     approve_unsafe_tools: bool = False,
     max_tool_iterations: int | None = None,
     mode: OutputMode = OutputMode.text,
+    trusted: bool = False,
 ) -> None:
     runtime = await _build_runtime_for_config(config)
     provider = runtime.providers.get(config.provider)
@@ -479,6 +521,7 @@ async def _run_print(
         tool_context=ToolContext.from_config(config),
         tool_approval_policy=_print_mode_tool_approval_policy(approve_unsafe_tools),
         max_tool_iterations=max_tool_iterations,
+        trusted=trusted,
     )
 
     events = agent.run(prompt, session=session, history=history)

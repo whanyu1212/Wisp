@@ -12,7 +12,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
         input='{"id":"cmd-1","type":"prompt","prompt":"hello"}\n',
-        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
     )
 
     assert result.exit_code == 0, result.output
