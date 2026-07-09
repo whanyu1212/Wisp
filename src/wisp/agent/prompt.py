@@ -262,9 +262,7 @@ def _project_directory_chain(
         current = current / part
         directories.append(current)
     return tuple(
-        directory
-        for directory in directories
-        if _is_relative_to(directory, trusted_context_root)
+        directory for directory in directories if _is_relative_to(directory, trusted_context_root)
     )
 
 
