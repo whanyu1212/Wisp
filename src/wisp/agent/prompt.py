@@ -58,6 +58,7 @@ def build_prompt_messages(
     max_context_file_chars: int = DEFAULT_CONTEXT_FILE_MAX_CHARS,
     include_project_context: bool = True,
     protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS,
+    trusted_context_root: Path | None = None,
 ) -> tuple[Message, ...]:
     """Build provider-facing system messages for a Wisp turn."""
 
@@ -67,7 +68,7 @@ def build_prompt_messages(
             tools=tools,
             max_chars=max_context_chars,
             max_context_file_chars=max_context_file_chars,
-            trusted_context_root=cwd,
+            trusted_context_root=trusted_context_root,
             protected_paths=protected_paths,
         )
         if include_project_context
@@ -95,7 +96,7 @@ def build_project_context(
     resolved_trusted_context_root = (
         trusted_context_root.resolve(strict=False)
         if trusted_context_root is not None
-        else resolved_cwd
+        else project_root
     )
     root_section = f"project root: {project_root}" if project_root != resolved_cwd else ""
     sections = [
@@ -148,6 +149,12 @@ def _project_root(cwd: Path) -> Path:
         if any((candidate / name).exists() for name in PROJECT_CONTEXT_FILE_CANDIDATES):
             return candidate
     return cwd
+
+
+def resolve_project_context_root(cwd: Path) -> Path:
+    """Return the project root used for trust and project-context discovery."""
+
+    return _project_root(cwd.resolve(strict=False))
 
 
 def _git_summary(cwd: Path) -> str:

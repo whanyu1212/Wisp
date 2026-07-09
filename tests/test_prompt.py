@@ -9,6 +9,7 @@ from wisp.agent.prompt import (
     build_project_context,
     build_prompt_messages,
     build_untrusted_project_context,
+    resolve_project_context_root,
 )
 from wisp.providers.base import ToolSpec
 
@@ -122,7 +123,7 @@ def test_project_context_includes_nested_context_files_root_to_cwd(tmp_path: Pat
     assert "App Claude rules." not in context
 
 
-def test_project_context_defaults_to_trusted_cwd_for_context_files(tmp_path: Path) -> None:
+def test_project_context_defaults_to_project_root_for_context_files(tmp_path: Path) -> None:
     project = tmp_path / "project"
     subdir = project / "packages" / "app"
     subdir.mkdir(parents=True)
@@ -131,6 +132,22 @@ def test_project_context_defaults_to_trusted_cwd_for_context_files(tmp_path: Pat
     (subdir / "AGENTS.md").write_text("Trusted cwd rules.\n", encoding="utf-8")
 
     context = build_project_context(cwd=subdir)
+
+    assert "--- AGENTS.md ---\nParent agent rules." in context
+    assert "--- packages/app/AGENTS.md ---\nTrusted cwd rules." in context
+
+
+def test_project_context_can_restrict_context_files_to_explicit_trusted_root(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    subdir = project / "packages" / "app"
+    subdir.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (project / "AGENTS.md").write_text("Parent agent rules.\n", encoding="utf-8")
+    (subdir / "AGENTS.md").write_text("Trusted cwd rules.\n", encoding="utf-8")
+
+    context = build_project_context(cwd=subdir, trusted_context_root=subdir)
 
     assert "Parent agent rules." not in context
     assert "--- packages/app/AGENTS.md ---\nTrusted cwd rules." in context
@@ -148,7 +165,30 @@ def test_project_context_uses_context_file_as_root_marker(
     context = build_project_context(cwd=subdir)
 
     assert f"project root: {project.resolve(strict=False)}" in context
-    assert "Root-only agent guidance." not in context
+    assert "--- AGENTS.md ---\nRoot-only agent guidance." in context
+
+
+def test_build_prompt_messages_loads_root_context_when_started_in_subdirectory(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    subdir = project / "packages" / "app"
+    subdir.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (project / "AGENTS.md").write_text("Repo root guidance.\n", encoding="utf-8")
+
+    messages = build_prompt_messages(cwd=subdir)
+
+    assert "--- AGENTS.md ---\nRepo root guidance." in messages[1].content
+
+
+def test_resolve_project_context_root_detects_parent_project(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    subdir = project / "packages" / "app"
+    subdir.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+
+    assert resolve_project_context_root(subdir) == project.resolve(strict=False)
 
 
 def test_project_context_file_budget_truncates_only_instructions(tmp_path: Path) -> None:

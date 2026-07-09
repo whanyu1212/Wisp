@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
 
 from wisp.agent.messages import Message
-from wisp.agent.prompt import DEFAULT_CONTEXT_MAX_CHARS, build_prompt_messages
+from wisp.agent.prompt import (
+    DEFAULT_CONTEXT_MAX_CHARS,
+    build_prompt_messages,
+    resolve_project_context_root,
+)
 from wisp.events import (
     AgentStarted,
     AssistantMessage,
@@ -71,6 +76,7 @@ class Agent:
         tool_approval_policy: ToolApprovalPolicy | None = None,
         prompt_messages: Sequence[Message] | None = None,
         project_context_max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
+        project_context_root: Path | None = None,
         max_tool_iterations: int | None = None,
         trusted: bool = False,
     ) -> None:
@@ -95,6 +101,7 @@ class Agent:
         )
         self.prompt_messages = tuple(prompt_messages) if prompt_messages is not None else None
         self.project_context_max_chars = project_context_max_chars
+        self.project_context_root = project_context_root
         self.max_tool_iterations = max_tool_iterations
 
     async def run(
@@ -316,6 +323,8 @@ class Agent:
             max_context_chars=self.project_context_max_chars,
             include_project_context=self.trusted,
             protected_paths=self.tool_context.protected_paths,
+            trusted_context_root=self.project_context_root
+            or resolve_project_context_root(self.tool_context.cwd),
         )
 
     def _conversation_history(self, history: Sequence[Message]) -> tuple[Message, ...]:

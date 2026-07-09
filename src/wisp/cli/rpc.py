@@ -26,6 +26,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 
 from wisp.agent.loop import Agent
 from wisp.agent.messages import Message
+from wisp.agent.prompt import resolve_project_context_root
 from wisp.config import WispConfig
 from wisp.events import (
     ErrorEvent,
@@ -374,6 +375,7 @@ async def _run_rpc(
     max_tool_iterations: int | None = None,
     startup_trusted: bool = False,
     config_overrides: _ConfigOverrides | None = None,
+    project_context_root: Path | None = None,
 ) -> None:
     runtime = await _build_runtime_for_config(config)
     provider = runtime.providers.get(config.provider)
@@ -382,6 +384,7 @@ async def _run_rpc(
     session_state = _rpc_session_state(session)
     approval_policy = _RpcToolApprovalPolicy(_print_mode_tool_approval_policy(approve_unsafe_tools))
     configure_overrides = _RpcConfigureOverrides()
+    selected_project_context_root = project_context_root or resolve_project_context_root(Path.cwd())
 
     async def _rebuild_agent_for_trusted_project() -> None:
         # First-run RPC/TUI: trust was undecided at startup, so ``config`` was built
@@ -432,7 +435,10 @@ async def _run_rpc(
             )
         )
 
-    trust_gate = _RpcTrustGate(Path.cwd(), on_first_trusted=_rebuild_agent_for_trusted_project)
+    trust_gate = _RpcTrustGate(
+        selected_project_context_root,
+        on_first_trusted=_rebuild_agent_for_trusted_project,
+    )
     agent = Agent(
         provider=provider,
         sessions=sessions,
@@ -447,6 +453,7 @@ async def _run_rpc(
         tool_context=ToolContext.from_config(config),
         tool_approval_policy=approval_policy,
         max_tool_iterations=max_tool_iterations,
+        project_context_root=selected_project_context_root,
     )
 
     queued_commands: deque[dict[str, object]] = deque()

@@ -11,6 +11,7 @@ import typer
 from rich.console import Console
 
 from wisp.agent.loop import Agent
+from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.auth import auth_app
 from wisp.config import WispConfig
 from wisp.events import ErrorEvent, TokenDelta
@@ -250,10 +251,12 @@ def cli_callback(
     # print/JSON resolve interactively here (the prompt goes to stderr, keeping JSON
     # stdout clean); rpc/tui prompt out-of-band, so at startup they use only the
     # non-interactive signals (an undecided project is untrusted until answered).
+    cwd = Path.cwd()
+    project_context_root = resolve_project_context_root(cwd)
     if resolved_mode in (OutputMode.rpc, OutputMode.tui):
-        trusted = _cli_trust.trusted_noninteractive(Path.cwd())
+        trusted = _cli_trust.trusted_noninteractive(project_context_root)
     else:
-        trusted = _resolve_cli_trust(Path.cwd()).trusted
+        trusted = _resolve_cli_trust(project_context_root).trusted
 
     config_overrides = _cli_rpc._ConfigOverrides(
         provider=provider,
@@ -276,6 +279,7 @@ def cli_callback(
                 max_tool_iterations,
                 trusted,
                 config_overrides,
+                project_context_root,
             )
         elif resolved_mode is OutputMode.tui:
             _run_tui_from_cli_options(
@@ -311,6 +315,7 @@ def cli_callback(
                 max_tool_iterations,
                 resolved_mode,
                 trusted,
+                project_context_root,
             )
     except _JsonOutputModeError as exc:
         raise typer.Exit(1) from exc
@@ -386,7 +391,8 @@ def tui_command(
     # The TUI resolves trust out-of-band (its RPC subprocess prompts via TrustCommand),
     # so gate the project settings layer on the non-interactive trust signals here; an
     # undecided project's local settings are not applied until the prompt is answered.
-    trusted = _cli_trust.trusted_noninteractive(Path.cwd())
+    project_context_root = resolve_project_context_root(Path.cwd())
+    trusted = _cli_trust.trusted_noninteractive(project_context_root)
     _validate_session_and_iteration_options(
         resume=resume,
         continue_latest=continue_latest,
@@ -502,6 +508,7 @@ async def _run_print(
     max_tool_iterations: int | None = None,
     mode: OutputMode = OutputMode.text,
     trusted: bool = False,
+    project_context_root: Path | None = None,
 ) -> None:
     runtime = await _build_runtime_for_config(config)
     provider = runtime.providers.get(config.provider)
@@ -523,6 +530,7 @@ async def _run_print(
         tool_approval_policy=_print_mode_tool_approval_policy(approve_unsafe_tools),
         max_tool_iterations=max_tool_iterations,
         trusted=trusted,
+        project_context_root=project_context_root,
     )
 
     events = agent.run(prompt, session=session, history=history)
