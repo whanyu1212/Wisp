@@ -108,7 +108,7 @@ def test_project_context_includes_nested_context_files_root_to_cwd(tmp_path: Pat
     (subdir / "AGENTS.md").write_text("App agent rules.\n", encoding="utf-8")
     (subdir / "CLAUDE.md").write_text("App Claude rules.\n", encoding="utf-8")
 
-    context = build_project_context(cwd=subdir)
+    context = build_project_context(cwd=subdir, trusted_context_root=project)
 
     expected_order = [
         "--- AGENTS.md ---",
@@ -120,6 +120,20 @@ def test_project_context_includes_nested_context_files_root_to_cwd(tmp_path: Pat
     assert positions == sorted(positions)
     assert "Root Claude rules." not in context
     assert "App Claude rules." not in context
+
+
+def test_project_context_defaults_to_trusted_cwd_for_context_files(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    subdir = project / "packages" / "app"
+    subdir.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (project / "AGENTS.md").write_text("Parent agent rules.\n", encoding="utf-8")
+    (subdir / "AGENTS.md").write_text("Trusted cwd rules.\n", encoding="utf-8")
+
+    context = build_project_context(cwd=subdir)
+
+    assert "Parent agent rules." not in context
+    assert "--- packages/app/AGENTS.md ---\nTrusted cwd rules." in context
 
 
 def test_project_context_uses_context_file_as_root_marker(
@@ -134,7 +148,7 @@ def test_project_context_uses_context_file_as_root_marker(
     context = build_project_context(cwd=subdir)
 
     assert f"project root: {project.resolve(strict=False)}" in context
-    assert "--- AGENTS.md ---\nRoot-only agent guidance." in context
+    assert "Root-only agent guidance." not in context
 
 
 def test_project_context_file_budget_truncates_only_instructions(tmp_path: Path) -> None:
@@ -152,6 +166,29 @@ def test_project_context_file_budget_truncates_only_instructions(tmp_path: Path)
     assert "[context truncated]" in context
     assert "project files:\n  pyproject.toml" in context
     assert "allowed tools:\n  - read: Read a UTF-8 text file." in context
+
+
+def test_project_context_skips_symlink_context_file(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=leak\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").symlink_to(tmp_path / ".env")
+    (tmp_path / "CLAUDE.md").write_text("fallback instructions\n", encoding="utf-8")
+
+    context = build_project_context(cwd=tmp_path)
+
+    assert "SECRET=leak" not in context
+    assert "--- CLAUDE.md ---\nfallback instructions" in context
+
+
+def test_project_context_skips_protected_context_file(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("SECRET=leak\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text("safe fallback\n", encoding="utf-8")
+
+    context = build_project_context(cwd=tmp_path, protected_paths=("AGENTS.md",))
+
+    assert "SECRET=leak" not in context
+    assert "--- CLAUDE.md ---\nsafe fallback" in context
 
 
 def test_long_project_context_file_cannot_hide_allowed_tools(tmp_path: Path) -> None:

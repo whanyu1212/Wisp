@@ -315,6 +315,7 @@ class Agent:
             tools=self.tools,
             max_context_chars=self.project_context_max_chars,
             include_project_context=self.trusted,
+            protected_paths=self.tool_context.protected_paths,
         )
 
     def _conversation_history(self, history: Sequence[Message]) -> tuple[Message, ...]:

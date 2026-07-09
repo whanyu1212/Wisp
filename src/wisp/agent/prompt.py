@@ -8,6 +8,9 @@ from pathlib import Path
 
 from wisp.agent.messages import Message
 from wisp.providers.base import ToolSpec
+from wisp.settings import DEFAULT_PROTECTED_PATHS
+from wisp.tools.context import ToolContext
+from wisp.tools.paths import is_protected_path
 
 DEFAULT_CONTEXT_MAX_CHARS = 32_768
 DEFAULT_CONTEXT_FILE_MAX_CHARS = 28_000
@@ -54,6 +57,7 @@ def build_prompt_messages(
     max_context_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
     max_context_file_chars: int = DEFAULT_CONTEXT_FILE_MAX_CHARS,
     include_project_context: bool = True,
+    protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS,
 ) -> tuple[Message, ...]:
     """Build provider-facing system messages for a Wisp turn."""
 
@@ -63,6 +67,8 @@ def build_prompt_messages(
             tools=tools,
             max_chars=max_context_chars,
             max_context_file_chars=max_context_file_chars,
+            trusted_context_root=cwd,
+            protected_paths=protected_paths,
         )
         if include_project_context
         else build_untrusted_project_context(tools=tools, max_chars=max_context_chars)
@@ -79,11 +85,18 @@ def build_project_context(
     tools: Sequence[ToolSpec] = (),
     max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
     max_context_file_chars: int = DEFAULT_CONTEXT_FILE_MAX_CHARS,
+    trusted_context_root: Path | None = None,
+    protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS,
 ) -> str:
     """Collect a bounded, low-noise project context block."""
 
     resolved_cwd = cwd.resolve(strict=False)
     project_root = _project_root(resolved_cwd)
+    resolved_trusted_context_root = (
+        trusted_context_root.resolve(strict=False)
+        if trusted_context_root is not None
+        else resolved_cwd
+    )
     root_section = f"project root: {project_root}" if project_root != resolved_cwd else ""
     sections = [
         "[WISP PROJECT CONTEXT]",
@@ -98,6 +111,8 @@ def build_project_context(
     context_file_section = _project_context_files_section(
         project_root=project_root,
         cwd=resolved_cwd,
+        trusted_context_root=resolved_trusted_context_root,
+        protected_paths=protected_paths,
         max_chars=min(max_context_file_chars, _remaining_context_budget(base_context, max_chars)),
     )
     if context_file_section:
@@ -170,13 +185,28 @@ def _project_files_summary(cwd: Path) -> str:
     return "project files:\n  " + "\n  ".join(shown) + suffix
 
 
-def _project_context_files_section(*, project_root: Path, cwd: Path, max_chars: int) -> str:
+def _project_context_files_section(
+    *,
+    project_root: Path,
+    cwd: Path,
+    trusted_context_root: Path,
+    protected_paths: tuple[str, ...],
+    max_chars: int,
+) -> str:
     if max_chars < 1:
         return ""
 
     blocks: list[str] = []
-    for directory in _project_directory_chain(project_root=project_root, cwd=cwd):
-        path = _project_context_file_from_dir(directory)
+    for directory in _project_directory_chain(
+        project_root=project_root,
+        cwd=cwd,
+        trusted_context_root=trusted_context_root,
+    ):
+        path = _project_context_file_from_dir(
+            directory,
+            trusted_context_root=trusted_context_root,
+            protected_paths=protected_paths,
+        )
         if path is None:
             continue
         relative_path = _relative_project_path(path, project_root)
@@ -187,15 +217,40 @@ def _project_context_files_section(*, project_root: Path, cwd: Path, max_chars: 
     return _truncate_context("project instructions:\n" + "\n\n".join(blocks), max_chars)
 
 
-def _project_context_file_from_dir(directory: Path) -> Path | None:
+def _project_context_file_from_dir(
+    directory: Path,
+    *,
+    trusted_context_root: Path,
+    protected_paths: tuple[str, ...],
+) -> Path | None:
+    context = ToolContext(cwd=trusted_context_root, protected_paths=protected_paths)
     for name in PROJECT_CONTEXT_FILE_CANDIDATES:
         path = directory / name
-        if path.is_file():
+        if _is_allowed_project_context_file(path, trusted_context_root, context):
             return path
     return None
 
 
-def _project_directory_chain(*, project_root: Path, cwd: Path) -> tuple[Path, ...]:
+def _is_allowed_project_context_file(
+    path: Path,
+    trusted_context_root: Path,
+    context: ToolContext,
+) -> bool:
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        path.resolve(strict=False).relative_to(trusted_context_root)
+    except ValueError:
+        return False
+    return not is_protected_path(path, context)
+
+
+def _project_directory_chain(
+    *,
+    project_root: Path,
+    cwd: Path,
+    trusted_context_root: Path,
+) -> tuple[Path, ...]:
     try:
         relative = cwd.relative_to(project_root)
     except ValueError:
@@ -206,7 +261,19 @@ def _project_directory_chain(*, project_root: Path, cwd: Path) -> tuple[Path, ..
     for part in relative.parts:
         current = current / part
         directories.append(current)
-    return tuple(directories)
+    return tuple(
+        directory
+        for directory in directories
+        if _is_relative_to(directory, trusted_context_root)
+    )
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
 
 
 def _relative_project_path(path: Path, project_root: Path) -> str:
