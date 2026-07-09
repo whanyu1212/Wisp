@@ -178,13 +178,16 @@ stale project context from earlier turns is not replayed as instructions.
 
 ### Prompt & project context
 
-Each turn sends a small default coding-agent system prompt plus a bounded project-context message
-before the user prompt. The context includes the working directory, git branch and a capped
-status summary, detected root files (`pyproject.toml`, `package.json`, `README.md`, …), trusted
-project instructions from `AGENTS.md` / `CLAUDE.md`, and the tools currently exposed to the
-model. Context files are loaded from the detected project root down to the current working
-directory, with root instructions before nested ones and `AGENTS.md` before `CLAUDE.md` in each
-directory.
+Each turn sends a default coding-agent system prompt plus a bounded project-context message before
+the user prompt. The context includes the working directory, git branch and a capped status
+summary, detected root files (`pyproject.toml`, `package.json`, `README.md`, …), the tools
+currently exposed to the model, and trusted project instructions from context files.
+
+Context files are loaded from the detected project root down to the current working directory,
+with root instructions before nested ones. In each directory Wisp uses the first Pi-compatible
+match in this order: `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`. Project instructions are
+bounded separately from the tool list so large instruction files cannot hide the tools available
+to the model.
 
 Wisp intentionally trust-gates project-local context files. If the project is untrusted, Wisp
 does not read or mention those files and sends only the safe untrusted-context notice plus the

@@ -66,7 +66,7 @@ def test_project_context_reports_no_allowed_tools(tmp_path: Path) -> None:
     assert "allowed tools: none exposed to the model" in context
 
 
-def test_project_context_includes_root_context_files_in_order(tmp_path: Path) -> None:
+def test_project_context_uses_first_root_context_file_by_pi_precedence(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
     (tmp_path / "AGENTS.md").write_text("Prefer small typed Python modules.\n", encoding="utf-8")
     (tmp_path / "CLAUDE.md").write_text("Legacy Claude-compatible notes.\n", encoding="utf-8")
@@ -75,8 +75,27 @@ def test_project_context_includes_root_context_files_in_order(tmp_path: Path) ->
 
     assert "project instructions:" in context
     assert "--- AGENTS.md ---\nPrefer small typed Python modules." in context
-    assert "--- CLAUDE.md ---\nLegacy Claude-compatible notes." in context
-    assert context.index("--- AGENTS.md ---") < context.index("--- CLAUDE.md ---")
+    assert "--- CLAUDE.md ---" not in context
+    assert "Legacy Claude-compatible notes." not in context
+
+
+def test_project_context_falls_back_to_claude_context_file(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text("Claude-compatible notes.\n", encoding="utf-8")
+
+    context = build_project_context(cwd=tmp_path)
+
+    assert "--- CLAUDE.md ---\nClaude-compatible notes." in context
+
+
+def test_project_context_supports_uppercase_context_file_names(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "AGENTS.MD").write_text("Uppercase agent notes.\n", encoding="utf-8")
+
+    context = build_project_context(cwd=tmp_path)
+
+    assert "Uppercase agent notes." in context
+    assert "--- AGENTS.md ---" in context or "--- AGENTS.MD ---" in context
 
 
 def test_project_context_includes_nested_context_files_root_to_cwd(tmp_path: Path) -> None:
@@ -94,15 +113,13 @@ def test_project_context_includes_nested_context_files_root_to_cwd(tmp_path: Pat
     expected_order = [
         "--- AGENTS.md ---",
         "Root agent rules.",
-        "--- CLAUDE.md ---",
-        "Root Claude rules.",
         "--- packages/app/AGENTS.md ---",
         "App agent rules.",
-        "--- packages/app/CLAUDE.md ---",
-        "App Claude rules.",
     ]
     positions = [context.index(item) for item in expected_order]
     assert positions == sorted(positions)
+    assert "Root Claude rules." not in context
+    assert "App Claude rules." not in context
 
 
 def test_project_context_uses_context_file_as_root_marker(
@@ -135,6 +152,24 @@ def test_project_context_file_budget_truncates_only_instructions(tmp_path: Path)
     assert "[context truncated]" in context
     assert "project files:\n  pyproject.toml" in context
     assert "allowed tools:\n  - read: Read a UTF-8 text file." in context
+
+
+def test_long_project_context_file_cannot_hide_allowed_tools(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("A" * 5_000, encoding="utf-8")
+    tool = ToolSpec(
+        name="read",
+        description="Read a UTF-8 text file.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    context = build_project_context(cwd=tmp_path, tools=[tool], max_chars=1_200)
+
+    assert len(context) <= 1_200
+    assert "allowed tools:\n  - read: Read a UTF-8 text file." in context
+    assert "project instructions:" in context
+    assert "[context truncated]" in context
+    assert context.index("allowed tools:") < context.index("project instructions:")
 
 
 def test_untrusted_project_context_reports_tools_without_local_context(tmp_path: Path) -> None:

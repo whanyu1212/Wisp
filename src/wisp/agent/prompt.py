@@ -9,8 +9,8 @@ from pathlib import Path
 from wisp.agent.messages import Message
 from wisp.providers.base import ToolSpec
 
-DEFAULT_CONTEXT_MAX_CHARS = 4_000
-DEFAULT_CONTEXT_FILE_MAX_CHARS = 16_000
+DEFAULT_CONTEXT_MAX_CHARS = 32_768
+DEFAULT_CONTEXT_FILE_MAX_CHARS = 28_000
 MAX_GIT_STATUS_LINES = 12
 MAX_PROJECT_FILES = 16
 
@@ -44,7 +44,7 @@ PROJECT_FILE_CANDIDATES = (
     "README.md",
     ".gitignore",
 )
-PROJECT_CONTEXT_FILE_CANDIDATES = ("AGENTS.md", "CLAUDE.md")
+PROJECT_CONTEXT_FILE_CANDIDATES = ("AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD")
 
 
 def build_prompt_messages(
@@ -91,13 +91,17 @@ def build_project_context(
         root_section,
         _git_summary(resolved_cwd),
         _project_files_summary(project_root),
-        _project_context_files_section(
-            project_root=project_root,
-            cwd=resolved_cwd,
-            max_chars=max_context_file_chars,
-        ),
         _tool_summary(tools),
     ]
+
+    base_context = "\n".join(section for section in sections if section)
+    context_file_section = _project_context_files_section(
+        project_root=project_root,
+        cwd=resolved_cwd,
+        max_chars=min(max_context_file_chars, _remaining_context_budget(base_context, max_chars)),
+    )
+    if context_file_section:
+        sections.append(context_file_section)
     return _truncate_context("\n".join(section for section in sections if section), max_chars)
 
 
@@ -172,16 +176,23 @@ def _project_context_files_section(*, project_root: Path, cwd: Path, max_chars: 
 
     blocks: list[str] = []
     for directory in _project_directory_chain(project_root=project_root, cwd=cwd):
-        for name in PROJECT_CONTEXT_FILE_CANDIDATES:
-            path = directory / name
-            if not path.is_file():
-                continue
-            relative_path = _relative_project_path(path, project_root)
-            blocks.append(f"--- {relative_path} ---\n{_read_context_file(path)}")
+        path = _project_context_file_from_dir(directory)
+        if path is None:
+            continue
+        relative_path = _relative_project_path(path, project_root)
+        blocks.append(f"--- {relative_path} ---\n{_read_context_file(path)}")
 
     if not blocks:
         return ""
     return _truncate_context("project instructions:\n" + "\n\n".join(blocks), max_chars)
+
+
+def _project_context_file_from_dir(directory: Path) -> Path | None:
+    for name in PROJECT_CONTEXT_FILE_CANDIDATES:
+        path = directory / name
+        if path.is_file():
+            return path
+    return None
 
 
 def _project_directory_chain(*, project_root: Path, cwd: Path) -> tuple[Path, ...]:
@@ -253,3 +264,10 @@ def _truncate_context(text: str, max_chars: int) -> str:
         return marker[:max_chars]
     budget = max_chars - len(marker) - 1
     return f"{text[:budget].rstrip()}\n{marker}"
+
+
+def _remaining_context_budget(prefix: str, max_chars: int) -> int:
+    if max_chars < 1:
+        return 0
+    separator_chars = 1 if prefix else 0
+    return max(0, max_chars - len(prefix) - separator_chars)
