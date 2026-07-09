@@ -7,7 +7,13 @@ from pathlib import Path
 
 from pytest import CaptureFixture, MonkeyPatch
 
-from wisp.trust import GLOBAL_TRUST_PATH, _default_trust_path, is_trusted, record_trust
+from wisp.trust import (
+    GLOBAL_TRUST_PATH,
+    _default_trust_path,
+    forget_trust,
+    is_trusted,
+    record_trust,
+)
 from wisp.trust_flow import resolve_trust
 
 
@@ -173,6 +179,50 @@ def test_records_persist_across_multiple_projects(tmp_path: Path) -> None:
     record_trust(b, False, trust_path=trust_file)
 
     assert is_trusted(a, trust_path=trust_file) is True
+    assert is_trusted(b, trust_path=trust_file) is False
+
+
+def test_forget_trust_removes_trusted_record(tmp_path: Path) -> None:
+    trust_file = _trust_file(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    record_trust(project, True, trust_path=trust_file)
+
+    assert forget_trust(project, trust_path=trust_file) is True
+    assert is_trusted(project, trust_path=trust_file) is None
+
+
+def test_forget_trust_removes_untrusted_record(tmp_path: Path) -> None:
+    trust_file = _trust_file(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    record_trust(project, False, trust_path=trust_file)
+
+    assert forget_trust(project, trust_path=trust_file) is True
+    assert is_trusted(project, trust_path=trust_file) is None
+
+
+def test_forget_trust_without_record_is_idempotent(tmp_path: Path) -> None:
+    trust_file = _trust_file(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+
+    assert forget_trust(project, trust_path=trust_file) is False
+    assert is_trusted(project, trust_path=trust_file) is None
+
+
+def test_forget_trust_preserves_other_projects(tmp_path: Path) -> None:
+    trust_file = _trust_file(tmp_path)
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    record_trust(a, True, trust_path=trust_file)
+    record_trust(b, False, trust_path=trust_file)
+
+    assert forget_trust(a, trust_path=trust_file) is True
+
+    assert is_trusted(a, trust_path=trust_file) is None
     assert is_trusted(b, trust_path=trust_file) is False
 
 

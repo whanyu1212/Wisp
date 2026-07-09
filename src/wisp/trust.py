@@ -106,6 +106,24 @@ def record_trust(
     _write_trust_records(path, records)
 
 
+def forget_trust(project_path: Path, *, trust_path: Path | None = None) -> bool:
+    """Remove any persisted trust decision for ``project_path``.
+
+    Returns ``True`` when a record existed and was removed. Removing the record
+    restores the undecided state, so an interactive entrypoint can prompt again on
+    a later run.
+    """
+
+    path = trust_path if trust_path is not None else _default_trust_path()
+    records = _load_trust_records(path)
+    key = _canonical_key(project_path)
+    if key not in records:
+        return False
+    del records[key]
+    _write_trust_records(path, records)
+    return True
+
+
 def _load_trust_records(path: Path) -> dict[str, object]:
     """Load the trust registry, returning an empty mapping on any problem.
 
