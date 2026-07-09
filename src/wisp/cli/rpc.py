@@ -338,6 +338,21 @@ class _ConfigOverrides:
         )
 
 
+@dataclass
+class _RpcConfigureOverrides:
+    """Successful in-session RPC configure choices that outrank project settings."""
+
+    provider: str | None = None
+    model: str | None = None
+    has_model: bool = False
+
+    def effective_provider(self, default: str) -> str:
+        return self.provider or default
+
+    def effective_model(self, default: str | None) -> str | None:
+        return self.model if self.has_model else default
+
+
 async def _run_rpc(
     config: WispConfig,
     all_tools: bool = False,
@@ -356,6 +371,7 @@ async def _run_rpc(
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     session_state = _rpc_session_state(session)
     approval_policy = _RpcToolApprovalPolicy(_print_mode_tool_approval_policy(approve_unsafe_tools))
+    configure_overrides = _RpcConfigureOverrides()
 
     async def _rebuild_agent_for_trusted_project() -> None:
         # First-run RPC/TUI: trust was undecided at startup, so ``config`` was built
@@ -389,8 +405,10 @@ async def _run_rpc(
         if trusted_config == config:
             return  # the project has no settings.json; the trusted build is identical.
         trusted_runtime = await _build_runtime_for_config(trusted_config)
-        agent.provider = trusted_runtime.providers.get(trusted_config.provider)
-        agent.model = trusted_config.model
+        effective_provider = configure_overrides.effective_provider(trusted_config.provider)
+        effective_model = configure_overrides.effective_model(trusted_config.model)
+        agent.provider = trusted_runtime.providers.get(effective_provider)
+        agent.model = effective_model
         agent.tool_context = ToolContext.from_config(trusted_config)
         runtime = replace(runtime, providers=trusted_runtime.providers)
         # Tell an out-of-process front-end (the TUI) the config it displays/mutates
@@ -398,8 +416,8 @@ async def _run_rpc(
         # untrusted-startup values.
         _write_json_event(
             ProjectConfigApplied(
-                provider=trusted_config.provider,
-                model=trusted_config.model,
+                provider=effective_provider,
+                model=effective_model,
                 auth_path=trusted_config.auth_path,
             )
         )
@@ -444,6 +462,7 @@ async def _run_rpc(
                         running_prompt=running_prompt,
                         approval_policy=approval_policy,
                         trust_gate=trust_gate,
+                        configure_overrides=configure_overrides,
                     )
                     if should_shutdown:
                         stop_reader.set()
@@ -498,6 +517,7 @@ async def _run_rpc(
                     running_prompt=running_prompt,
                     approval_policy=approval_policy,
                     trust_gate=trust_gate,
+                    configure_overrides=configure_overrides,
                 )
                 if should_shutdown:
                     stop_reader.set()
@@ -517,6 +537,7 @@ def _dispatch_rpc_command(
     running_prompt: _RpcRunningPrompt | None,
     approval_policy: _RpcToolApprovalPolicy,
     trust_gate: _RpcTrustGate,
+    configure_overrides: _RpcConfigureOverrides,
 ) -> tuple[_RpcRunningPrompt | None, bool]:
     command_type = _rpc_command_type(command)
     if command_type == "prompt":
@@ -539,6 +560,7 @@ def _dispatch_rpc_command(
         running_prompt=running_prompt,
         approval_policy=approval_policy,
         trust_gate=trust_gate,
+        configure_overrides=configure_overrides,
     )
     return running_prompt, should_shutdown
 
@@ -821,6 +843,7 @@ def _handle_rpc_control_command(
     agent: Agent | None = None,
     runtime: WispRuntime | None = None,
     trust_gate: _RpcTrustGate | None = None,
+    configure_overrides: _RpcConfigureOverrides | None = None,
 ) -> bool:
     command_type, command_id, id_error = _rpc_command_identity(command)
     _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
@@ -881,6 +904,7 @@ def _handle_rpc_control_command(
             command_type=command_type,
             agent=agent,
             runtime=runtime,
+            configure_overrides=configure_overrides,
         )
         return False
     message = f"Unknown RPC command: {command_type}"
@@ -895,6 +919,7 @@ def _handle_rpc_configure_command(
     command_type: str,
     agent: Agent,
     runtime: WispRuntime,
+    configure_overrides: _RpcConfigureOverrides | None = None,
 ) -> None:
     provider = command.get("provider")
     model = command.get("model")
@@ -931,10 +956,18 @@ def _handle_rpc_configure_command(
                 message=str(exc),
             )
             return
+        if configure_overrides is not None:
+            configure_overrides.provider = provider
         if not has_model:
             agent.model = None
+            if configure_overrides is not None:
+                configure_overrides.model = None
+                configure_overrides.has_model = True
     if has_model:
         agent.model = model
+        if configure_overrides is not None:
+            configure_overrides.model = model
+            configure_overrides.has_model = True
     _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 

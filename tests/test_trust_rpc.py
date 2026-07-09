@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import json
+from contextlib import redirect_stdout
+from typing import Any, cast
 
 import pytest
 
@@ -53,6 +56,90 @@ def test_rpc_trust_env_override_skips_prompt(tmp_path: Path) -> None:
     types = [r["type"] for r in _jsonl_records(result.stdout)]
     assert "trust.requested" not in types
     assert "trust.resolved" not in types
+
+
+@pytest.mark.parametrize(
+    ("configure_command", "expected_provider", "expected_model"),
+    [
+        (
+            {"id": "configure-1", "type": "configure", "provider": "fake"},
+            "fake",
+            None,
+        ),
+        (
+            {"id": "configure-1", "type": "configure", "model": "configured-model"},
+            "fake",
+            "configured-model",
+        ),
+        (
+            {
+                "id": "configure-1",
+                "type": "configure",
+                "provider": "fake",
+                "model": "configured-model",
+            },
+            "fake",
+            "configured-model",
+        ),
+    ],
+)
+def test_rpc_trusted_rebuild_preserves_configure_overrides(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    configure_command: dict[str, object],
+    expected_provider: str,
+    expected_model: str | None,
+) -> None:
+    # The startup config is intentionally untrusted, but WISP_TRUST=1 makes the lazy
+    # RPC gate approve trust before the first prompt. A configure command that arrives
+    # before that prompt must outrank the trusted project's provider/model defaults.
+    from wisp.cli import rpc
+    from wisp.config import WispConfig
+
+    project_auth = tmp_path / "project-auth.json"
+    (tmp_path / ".wisp").mkdir()
+    (tmp_path / ".wisp" / "settings.json").write_text(
+        json.dumps(
+            {
+                "provider": "fake",
+                "model": "project-model",
+                "auth_path": str(project_auth),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("WISP_PROVIDER", "fake")
+    monkeypatch.setenv("WISP_MODEL", "")
+    monkeypatch.setenv("WISP_TRUST", "1")
+
+    session_dir = tmp_path / "sessions"
+    config = WispConfig.from_env(session_dir=session_dir, trusted=False)
+
+    async def fake_read_rpc_stdin(send: Any, _stop_reader: Any) -> None:
+        async with send:
+            await send.send(rpc._RpcInputCommand(configure_command))
+            await send.send(rpc._RpcInputCommand({"id": "p1", "type": "prompt", "prompt": "hello"}))
+            await send.send(rpc._RpcInputClosed())
+
+    monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
+
+    async def scenario() -> list[dict[str, object]]:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            await rpc._run_rpc(
+                config,
+                startup_trusted=False,
+                config_overrides=rpc._ConfigOverrides(session_dir=session_dir),
+            )
+        return _jsonl_records(output.getvalue())
+
+    records = anyio.run(scenario)
+    applied = next(record for record in records if record["type"] == "project.config.applied")
+
+    assert applied["provider"] == expected_provider
+    assert applied["model"] == expected_model
+    assert applied["auth_path"] == str(project_auth)
 
 
 def test_rpc_trust_stored_decision_skips_prompt(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -253,12 +340,12 @@ def test_rpc_prompt_command_reports_rebuild_provider_error(
             raise AssertionError("agent.run must not be reached when the rebuild fails")
 
     async def scenario() -> list[dict[str, object]]:
-        send, receive = anyio.create_memory_object_stream[object](10)
+        send, receive = anyio.create_memory_object_stream[Any](10)
         buf = io.StringIO()
         with redirect_stdout(buf):
             async with anyio.create_task_group() as tg:
                 tg.start_soon(
-                    _run_rpc_prompt_command,
+                    cast(Any, _run_rpc_prompt_command),
                     _Agent(),
                     session,
                     (),
@@ -279,7 +366,9 @@ def test_rpc_prompt_command_reports_rebuild_provider_error(
     finished = [r for r in records if r.get("type") == "rpc.command.finished"]
     assert finished, f"no rpc.command.finished emitted; got {[r.get('type') for r in records]}"
     assert finished[0]["ok"] is False
-    assert "no-such-provider" in (finished[0].get("error") or "")
+    error = finished[0].get("error")
+    assert isinstance(error, str)
+    assert "no-such-provider" in error
 
 
 def test_rpc_gate_does_not_fire_callback_when_untrusted(
