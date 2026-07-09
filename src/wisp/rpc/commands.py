@@ -50,6 +50,7 @@ class TrustCommand(RpcCommandModel):
     request_id: str
     trusted: bool
     reason: str | None = None
+    transient: bool | None = None
 
 
 class ShutdownCommand(RpcCommandModel):

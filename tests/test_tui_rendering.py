@@ -37,11 +37,10 @@ def test_tui_shell_uses_injected_renderer() -> None:
     anyio.run(run)
 
 
-def test_tui_trust_on_closed_input_sends_reason_not_persisted_denial() -> None:
+def test_tui_trust_on_closed_input_sends_transient_denial() -> None:
     # Regression: when input has already closed and a TrustRequested arrives, the shell
-    # must answer trusted=False WITH a reason. A reasonless denial is persisted by the
-    # RPC gate (recorded as an explicit "no"), which would suppress future trust prompts
-    # for a project the user never actually answered.
+    # must answer trusted=False as a transient denial. The RPC gate persists explicit
+    # "no" answers, including those with explanatory reasons.
     async def run() -> None:
         controller = ScriptedController()
         renderer = LineTuiRenderer(_console()[0])
@@ -56,10 +55,11 @@ def test_tui_trust_on_closed_input_sends_reason_not_persisted_denial() -> None:
             TrustRequested(request_id="req-1", project_path="/some/project")
         )
 
-        assert controller.trusts == [("req-1", False, "Trust prompt: input closed")]
-        request_id, trusted, reason = controller.trusts[0]
+        assert controller.trusts == [("req-1", False, "Trust prompt: input closed", True)]
+        request_id, trusted, reason, transient = controller.trusts[0]
         assert trusted is False
-        assert reason is not None  # a reason keeps the gate from persisting the denial
+        assert reason is not None
+        assert transient is True
 
     anyio.run(run)
 

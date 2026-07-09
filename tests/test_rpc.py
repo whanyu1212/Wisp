@@ -82,6 +82,28 @@ def test_trust_command_serializes_as_jsonl_and_parses() -> None:
     assert rpc_command_from_json(line) == command
 
 
+def test_transient_trust_command_serializes_as_jsonl_and_parses() -> None:
+    command = TrustCommand(
+        id="trust-1",
+        request_id="req-1",
+        trusted=False,
+        reason="Trust prompt closed",
+        transient=True,
+    )
+
+    line = command.to_json_line()
+
+    assert json.loads(line) == {
+        "id": "trust-1",
+        "type": "trust",
+        "request_id": "req-1",
+        "trusted": False,
+        "reason": "Trust prompt closed",
+        "transient": True,
+    }
+    assert rpc_command_from_json(line) == command
+
+
 def test_trust_events_round_trip_through_json() -> None:
     requested = TrustRequested(request_id="req-1", project_path=Path("/repo"))
     resolved = TrustResolved(request_id="req-1", project_path=Path("/repo"), trusted=True)

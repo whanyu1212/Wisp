@@ -204,6 +204,7 @@ class _RpcPendingTrust:
     event: anyio.Event
     trusted: bool | None = None
     reason: str | None = None
+    transient: bool = False
     resolved: bool = False
 
 
@@ -265,9 +266,9 @@ class _RpcTrustGate:
         trusted = pending.trusted is True
         if trusted:
             record_trust(self._project_path, True)
-        elif pending.reason is None:
-            # An explicit "no" answer is persisted; a denial forced by input close
-            # (which sets a reason) is left undecided for a later interactive run.
+        elif not pending.transient:
+            # Explicit "no" answers are persisted even when they carry explanatory
+            # text. Forced UI/input-close denials opt into transient behavior.
             record_trust(self._project_path, False)
         self._pending = None
         _write_json_event(
@@ -280,13 +281,21 @@ class _RpcTrustGate:
         )
         return await self._finish(trusted)
 
-    def resolve_request(self, *, request_id: str, trusted: bool, reason: str | None = None) -> bool:
+    def resolve_request(
+        self,
+        *,
+        request_id: str,
+        trusted: bool,
+        reason: str | None = None,
+        transient: bool = False,
+    ) -> bool:
         pending = self._pending
         if pending is None or pending.resolved or pending.request_id != request_id:
             return False
         pending.resolved = True
         pending.trusted = trusted
         pending.reason = reason
+        pending.transient = transient
         pending.event.set()
         return True
 
@@ -297,6 +306,7 @@ class _RpcTrustGate:
             pending.resolved = True
             pending.trusted = False
             pending.reason = "RPC input closed before trust response"
+            pending.transient = True
             pending.event.set()
 
     async def _finish(self, trusted: bool) -> bool:
@@ -1047,10 +1057,19 @@ def _handle_rpc_trust_command(
             message="RPC trust command field reason must be a string",
         )
         return
+    transient = command.get("transient")
+    if transient is not None and not isinstance(transient, bool):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC trust command field transient must be a boolean",
+        )
+        return
     if not trust_gate.resolve_request(
         request_id=request_id,
         trusted=trusted,
         reason=reason,
+        transient=transient is True,
     ):
         _write_rpc_command_error(
             command_id=command_id,

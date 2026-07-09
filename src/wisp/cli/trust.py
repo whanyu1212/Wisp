@@ -92,5 +92,5 @@ def _text_trust_prompter(project_path: Path) -> bool | None:
             default=False,
             err=True,
         )
-    except (EOFError, typer.Abort):
+    except EOFError:
         return None

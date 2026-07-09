@@ -167,12 +167,17 @@ def test_rpc_trust_input_closed_yields_untrusted_no_hang(tmp_path: Path) -> None
     # A prompt with no trust answer and immediate EOF must resolve to untrusted
     # (safe) and terminate — never hang waiting for a trust response.
     runner = CliRunner()
+    trust_file = tmp_path / "trust.json"
 
     result = runner.invoke(
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
         input='{"id":"p1","type":"prompt","prompt":"hello"}\n',
-        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+        env={
+            "WISP_PROVIDER": "fake",
+            "WISP_MODEL": "",
+            "WISP_TRUST_FILE": str(trust_file),
+        },
     )
 
     assert result.exit_code == 0, result.output
@@ -181,6 +186,86 @@ def test_rpc_trust_input_closed_yields_untrusted_no_hang(tmp_path: Path) -> None
     assert resolved and resolved[0]["trusted"] is False
     # The forced-untrusted decision from input close is not persisted, so a later
     # interactive run still prompts.
+    from wisp.trust import is_trusted
+
+    assert is_trusted(Path.cwd(), trust_path=trust_file) is None
+
+
+def test_rpc_trust_denial_with_reason_persists(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    from wisp.cli.rpc import _RpcTrustGate
+    from wisp.trust import is_trusted
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    trust_file = tmp_path / "trust.json"
+    monkeypatch.setenv("WISP_TRUST_FILE", str(trust_file))
+    gate = _RpcTrustGate(project)
+
+    async def scenario() -> bool:
+        decision: bool | None = None
+        done = anyio.Event()
+
+        async def resolve() -> None:
+            nonlocal decision
+            decision = await gate.resolve()
+            done.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(resolve)
+            while gate._pending is None:
+                await anyio.sleep(0)
+            assert gate.resolve_request(
+                request_id=gate._pending.request_id,
+                trusted=False,
+                reason="user declined",
+            )
+            await done.wait()
+            task_group.cancel_scope.cancel()
+        assert decision is not None
+        return decision
+
+    assert anyio.run(scenario) is False
+    assert is_trusted(project, trust_path=trust_file) is False
+
+
+def test_rpc_trust_transient_denial_with_reason_does_not_persist(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from wisp.cli.rpc import _RpcTrustGate
+    from wisp.trust import is_trusted
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    trust_file = tmp_path / "trust.json"
+    monkeypatch.setenv("WISP_TRUST_FILE", str(trust_file))
+    gate = _RpcTrustGate(project)
+
+    async def scenario() -> bool:
+        decision: bool | None = None
+        done = anyio.Event()
+
+        async def resolve() -> None:
+            nonlocal decision
+            decision = await gate.resolve()
+            done.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(resolve)
+            while gate._pending is None:
+                await anyio.sleep(0)
+            assert gate.resolve_request(
+                request_id=gate._pending.request_id,
+                trusted=False,
+                reason="Trust prompt closed",
+                transient=True,
+            )
+            await done.wait()
+            task_group.cancel_scope.cancel()
+        assert decision is not None
+        return decision
+
+    assert anyio.run(scenario) is False
+    assert is_trusted(project, trust_path=trust_file) is None
 
 
 def test_rpc_trust_command_round_trip(tmp_path: Path) -> None:

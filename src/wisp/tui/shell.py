@@ -82,6 +82,7 @@ class TuiController(Protocol):
         *,
         trusted: bool,
         reason: str | None = None,
+        transient: bool = False,
         command_id: str | None = None,
     ) -> str: ...
 
@@ -414,7 +415,12 @@ class TuiShell:
         self.state.exit_requested = True
         if self.state.pending_trust is not None:
             # Resolve pending trust as untrusted (safe) so the RPC side unblocks.
-            return await self._answer_pending_trust("", trusted=False, reason="Trust prompt closed")
+            return await self._answer_pending_trust(
+                "",
+                trusted=False,
+                reason="Trust prompt closed",
+                transient=True,
+            )
         if self.state.pending_approval is not None:
             # Denying the pending approval is the conservative safety behavior even
             # when a live renderer reports that EOF began under an older mode.
@@ -434,7 +440,10 @@ class TuiShell:
     async def _handle_input_interrupted(self, signal: _InputInterrupted) -> bool:
         if self.state.pending_trust is not None:
             return await self._answer_pending_trust(
-                "", trusted=False, reason="Trust prompt interrupted"
+                "",
+                trusted=False,
+                reason="Trust prompt interrupted",
+                transient=True,
             )
         if self.state.pending_approval is not None:
             # Denying the pending approval is the conservative safety behavior even
@@ -456,7 +465,10 @@ class TuiShell:
         self._update_view(queued_follow_ups=0)
         if self.state.pending_trust is not None:
             return await self._answer_pending_trust(
-                "", trusted=False, reason="Trust prompt: quit requested"
+                "",
+                trusted=False,
+                reason="Trust prompt: quit requested",
+                transient=True,
             )
         if self.state.pending_approval is not None:
             return await self._answer_pending_approval(
@@ -580,6 +592,7 @@ class TuiShell:
         *,
         trusted: bool | None = None,
         reason: str | None = None,
+        transient: bool = False,
     ) -> bool:
         trust = self.state.pending_trust
         if trust is None:
@@ -592,6 +605,7 @@ class TuiShell:
             trust.request_id,
             trusted=selected_trusted,
             reason=selected_reason,
+            transient=transient and not selected_trusted,
         )
         self.state.pending_trust = None
         if not ok:
@@ -606,9 +620,15 @@ class TuiShell:
         *,
         trusted: bool,
         reason: str | None,
+        transient: bool,
     ) -> bool:
         try:
-            await self.controller.trust(request_id, trusted=trusted, reason=reason)
+            await self.controller.trust(
+                request_id,
+                trusted=trusted,
+                reason=reason,
+                transient=transient,
+            )
         except Exception as exc:
             self._update_view(status="error")
             self.renderer.send_failed("trust", exc)
@@ -647,11 +667,13 @@ class TuiShell:
             self.renderer.trust_request(event)
             if self.state.input_closed:
                 # No way to answer: default to untrusted (safe) so the run proceeds.
-                # Pass a reason so the gate treats this as a forced close, NOT an
-                # explicit user "no" — a reasonless denial would be persisted and
-                # suppress future trust prompts for this project.
+                # Mark it transient so the gate does not persist a denial the user
+                # never explicitly chose.
                 return await self._answer_pending_trust(
-                    "", trusted=False, reason="Trust prompt: input closed"
+                    "",
+                    trusted=False,
+                    reason="Trust prompt: input closed",
+                    transient=True,
                 )
             return False
 

@@ -90,6 +90,7 @@ class RpcController:
         *,
         trusted: bool,
         reason: str | None = None,
+        transient: bool = False,
         command_id: str | None = None,
     ) -> str:
         """Resolve a pending project-trust request."""
@@ -101,6 +102,7 @@ class RpcController:
                 request_id=request_id,
                 trusted=trusted,
                 reason=reason,
+                transient=True if transient else None,
             )
         )
         return selected_id

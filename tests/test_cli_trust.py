@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+import typer
 from pytest import MonkeyPatch
 
 from wisp.cli.trust import (
+    _text_trust_prompter,
     resolve_cli_trust,
     trust_override_from_env,
     trusted_noninteractive,
@@ -77,6 +80,33 @@ def test_cli_trust_uses_stored_decision(tmp_path: Path, monkeypatch: MonkeyPatch
     decision = resolve_cli_trust(project, trust_path=trust_file)
 
     assert decision.trusted is True
+
+
+def test_text_trust_prompt_eof_defaults_to_untrusted(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+
+    def raise_eof(*_args: object, **_kwargs: object) -> bool:
+        raise EOFError
+
+    monkeypatch.setattr(typer, "confirm", raise_eof)
+
+    assert _text_trust_prompter(project) is None
+
+
+def test_text_trust_prompt_abort_propagates(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+
+    def raise_abort(*_args: object, **_kwargs: object) -> bool:
+        raise typer.Abort()
+
+    monkeypatch.setattr(typer, "confirm", raise_abort)
+
+    with pytest.raises(typer.Abort):
+        _text_trust_prompter(project)
 
 
 # --- trusted_noninteractive: the RPC/TUI startup gate (no prompting) ---

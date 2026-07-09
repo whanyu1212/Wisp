@@ -78,7 +78,7 @@ class ScriptedController:
         self.close_after_prompt = close_after_prompt
         self.prompts: list[str] = []
         self.approvals: list[tuple[str, bool, str | None]] = []
-        self.trusts: list[tuple[str, bool, str | None]] = []
+        self.trusts: list[tuple[str, bool, str | None, bool]] = []
         self.cancelled: list[str] = []
         self.configurations: list[tuple[str | None, str | None]] = []
         self.shutdown_count = 0
@@ -119,9 +119,10 @@ class ScriptedController:
         *,
         trusted: bool,
         reason: str | None = None,
+        transient: bool = False,
         command_id: str | None = None,
     ) -> str:
-        self.trusts.append((request_id, trusted, reason))
+        self.trusts.append((request_id, trusted, reason, transient))
         await self._emit_scripted(self.prompt_events, default=[])
         return command_id or f"trust-{len(self.trusts)}"
 
