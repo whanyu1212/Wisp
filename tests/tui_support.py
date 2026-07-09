@@ -29,6 +29,7 @@ from wisp.events import (
     ToolApprovalResolved,
     ToolCallRequested,
     ToolResultReady,
+    TrustRequested,
 )
 from wisp.tui import (
     FullscreenTuiRenderer,
@@ -76,6 +77,7 @@ class ScriptedController:
         self.close_after_prompt = close_after_prompt
         self.prompts: list[str] = []
         self.approvals: list[tuple[str, bool, str | None]] = []
+        self.trusts: list[tuple[str, bool, str | None]] = []
         self.cancelled: list[str] = []
         self.configurations: list[tuple[str | None, str | None]] = []
         self.shutdown_count = 0
@@ -109,6 +111,18 @@ class ScriptedController:
         self.approvals.append((call_id, approved, reason))
         await self._emit_scripted(self.approval_events, default=[])
         return command_id or f"approval-{len(self.approvals)}"
+
+    async def trust(
+        self,
+        request_id: str,
+        *,
+        trusted: bool,
+        reason: str | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        self.trusts.append((request_id, trusted, reason))
+        await self._emit_scripted(self.prompt_events, default=[])
+        return command_id or f"trust-{len(self.trusts)}"
 
     async def shutdown(self, *, command_id: str | None = None) -> str:
         self.shutdown_count += 1
@@ -215,6 +229,7 @@ __all__ = [
     "ToolApprovalResolved",
     "ToolCallRequested",
     "ToolResultReady",
+    "TrustRequested",
     "TuiInteractionState",
     "TuiOptions",
     "TuiRendererKind",

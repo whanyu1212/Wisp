@@ -12,7 +12,7 @@ import os
 import stat
 import sys
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
@@ -217,8 +217,17 @@ class _RpcTrustGate:
     and blocks. Input closing before an answer resolves to untrusted (safe).
     """
 
-    def __init__(self, project_path: Path) -> None:
+    def __init__(
+        self,
+        project_path: Path,
+        *,
+        on_first_trusted: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self._project_path = project_path
+        # Invoked at most once, the first time trust resolves to True, so a first-run
+        # session that approves trust can rebuild the config-derived runtime with the
+        # project's now-trusted ``.wisp/settings.json`` before the first turn runs.
+        self._on_first_trusted = on_first_trusted
         self._pending: _RpcPendingTrust | None = None
         self._decision: bool | None = None
         self._resolved = False
@@ -233,14 +242,14 @@ class _RpcTrustGate:
 
         override = _cli_trust.trust_override_from_env()
         if override is not None:
-            return self._finish(override)
+            return await self._finish(override)
 
         stored = is_trusted(self._project_path)
         if stored is not None:
-            return self._finish(stored)
+            return await self._finish(stored)
 
         if self._input_closed:
-            return self._finish(False)
+            return await self._finish(False)
 
         # Undecided: prompt the client. Only this path emits trust events, so a
         # project resolved by env override or a stored decision produces a clean
@@ -267,7 +276,7 @@ class _RpcTrustGate:
                 reason=pending.reason,
             )
         )
-        return self._finish(trusted)
+        return await self._finish(trusted)
 
     def resolve_request(self, *, request_id: str, trusted: bool, reason: str | None = None) -> bool:
         pending = self._pending
@@ -288,10 +297,36 @@ class _RpcTrustGate:
             pending.reason = "RPC input closed before trust response"
             pending.event.set()
 
-    def _finish(self, trusted: bool) -> bool:
+    async def _finish(self, trusted: bool) -> bool:
         self._decision = trusted
         self._resolved = True
+        if trusted and self._on_first_trusted is not None:
+            await self._on_first_trusted()
         return trusted
+
+
+@dataclass(frozen=True)
+class _ConfigOverrides:
+    """The explicit CLI overrides used to build the RPC config.
+
+    Retained so a first-run session that approves trust can rebuild the config from the
+    *same* inputs with the project ``.wisp/settings.json`` layer applied, rather than
+    trying to reconstruct the original arguments from the already-merged config.
+    """
+
+    provider: str | None = None
+    model: str | None = None
+    session_dir: Path | None = None
+    auth_path: Path | None = None
+
+    def build(self, *, trusted: bool) -> WispConfig:
+        return WispConfig.from_env(
+            provider=self.provider,
+            model=self.model,
+            session_dir=self.session_dir,
+            auth_path=self.auth_path,
+            trusted=trusted,
+        )
 
 
 async def _run_rpc(
@@ -303,6 +338,8 @@ async def _run_rpc(
     continue_latest: bool = False,
     approve_unsafe_tools: bool = False,
     max_tool_iterations: int | None = None,
+    startup_trusted: bool = False,
+    config_overrides: _ConfigOverrides | None = None,
 ) -> None:
     runtime = await _build_runtime_for_config(config)
     provider = runtime.providers.get(config.provider)
@@ -310,7 +347,31 @@ async def _run_rpc(
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     session_state = _rpc_session_state(session)
     approval_policy = _RpcToolApprovalPolicy(_print_mode_tool_approval_policy(approve_unsafe_tools))
-    trust_gate = _RpcTrustGate(Path.cwd())
+
+    async def _rebuild_agent_for_trusted_project() -> None:
+        # First-run RPC/TUI: trust was undecided at startup, so ``config`` was built
+        # untrusted and the project's ``.wisp/settings.json`` was skipped. Now that the
+        # client has approved trust — and we are still before the first turn — re-derive
+        # config from the *same* explicit overrides with the project layer applied and
+        # swap the pieces the agent reads fresh each turn (provider, model, tool policy)
+        # so this session honors the trusted settings instead of running with defaults.
+        #
+        # ``session_dir`` is intentionally NOT relocated here: the session store is owned
+        # by the RPC loop (which already created the first prompt's session before trust
+        # resolved), so a mid-run swap would be both incomplete and racy. A trusted
+        # project's ``session_dir`` takes effect on the next launch — the trust decision
+        # persists, so this is a one-time lag.
+        if startup_trusted or config_overrides is None:
+            return  # config already reflects the trusted project; nothing to rebuild.
+        trusted_config = config_overrides.build(trusted=True)
+        if trusted_config == config:
+            return  # the project has no settings.json; the trusted build is identical.
+        trusted_runtime = await _build_runtime_for_config(trusted_config)
+        agent.provider = trusted_runtime.providers.get(trusted_config.provider)
+        agent.model = trusted_config.model
+        agent.tool_context = ToolContext.from_config(trusted_config)
+
+    trust_gate = _RpcTrustGate(Path.cwd(), on_first_trusted=_rebuild_agent_for_trusted_project)
     agent = Agent(
         provider=provider,
         sessions=sessions,

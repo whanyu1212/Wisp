@@ -72,13 +72,10 @@ def _cards_for_events(events: list[object]) -> list[tuple[str | None, object]]:
     return anyio.run(scenario)
 
 
-def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
-    auth_path = tmp_path / "auth.json"
+def test_tui_rpc_command_forwards_tool_and_session_flags(tmp_path: Path) -> None:
     command = _rpc_command(
         TuiOptions(
-            config=WispConfig(
-                provider="fake", model="model-x", session_dir=tmp_path, auth_path=auth_path
-            ),
+            config=WispConfig(provider="fake", model="model-x", session_dir=tmp_path),
             allow_read_tools=True,
             allowed_tools=("bash",),
             resume="session-123",
@@ -89,22 +86,6 @@ def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
 
     assert command[:4] == (command[0], "-m", "wisp", "--mode")
     assert "rpc" in command
-    assert ("--provider", "fake") == (
-        command[command.index("--provider")],
-        command[command.index("--provider") + 1],
-    )
-    assert ("--model", "model-x") == (
-        command[command.index("--model")],
-        command[command.index("--model") + 1],
-    )
-    assert ("--session-dir", str(tmp_path)) == (
-        command[command.index("--session-dir")],
-        command[command.index("--session-dir") + 1],
-    )
-    assert ("--auth-file", str(auth_path)) == (
-        command[command.index("--auth-file")],
-        command[command.index("--auth-file") + 1],
-    )
     assert ("--resume", "session-123") == (
         command[command.index("--resume")],
         command[command.index("--resume") + 1],
@@ -118,6 +99,61 @@ def test_tui_rpc_command_includes_runtime_flags(tmp_path: Path) -> None:
     assert ("--max-tool-iterations", "3") == (
         command[command.index("--max-tool-iterations")],
         command[command.index("--max-tool-iterations") + 1],
+    )
+
+
+def test_tui_rpc_command_omits_trust_gated_config_flags(tmp_path: Path) -> None:
+    # Provider/model/session-dir/auth-file are trust-gated: the parent must NOT launder
+    # its untrusted-startup resolution into subprocess CLI flags (which would outrank a
+    # trusted project's settings.json). With no explicit user override, they are absent.
+    command = _rpc_command(
+        TuiOptions(
+            config=WispConfig(
+                provider="fake",
+                model="model-x",
+                session_dir=tmp_path,
+                auth_path=tmp_path / "auth.json",
+            ),
+        )
+    )
+
+    assert "--provider" not in command
+    assert "--model" not in command
+    assert "--session-dir" not in command
+    assert "--auth-file" not in command
+
+
+def test_tui_rpc_command_forwards_explicit_user_overrides(tmp_path: Path) -> None:
+    # An explicit provider/model/session-dir/auth-file the user passed on the command IS
+    # forwarded: each is a legitimate highest-precedence override the subprocess cannot
+    # otherwise know about.
+    user_sessions = tmp_path / "user-sessions"
+    user_auth = tmp_path / "user-auth.json"
+    command = _rpc_command(
+        TuiOptions(
+            config=WispConfig(provider="fake", session_dir=tmp_path),
+            user_provider="fake",
+            user_model="model-x",
+            user_session_dir=user_sessions,
+            user_auth_file=user_auth,
+        )
+    )
+
+    assert ("--provider", "fake") == (
+        command[command.index("--provider")],
+        command[command.index("--provider") + 1],
+    )
+    assert ("--model", "model-x") == (
+        command[command.index("--model")],
+        command[command.index("--model") + 1],
+    )
+    assert ("--session-dir", str(user_sessions)) == (
+        command[command.index("--session-dir")],
+        command[command.index("--session-dir") + 1],
+    )
+    assert ("--auth-file", str(user_auth)) == (
+        command[command.index("--auth-file")],
+        command[command.index("--auth-file") + 1],
     )
 
 
@@ -478,9 +514,88 @@ def test_cli_tui_command_defaults_to_textual_renderer(
     assert captured[0].config.provider == "fake"
     assert captured[0].config.session_dir == tmp_path
     assert captured[0].renderer is TuiRendererKind.textual
+    # An explicit --session-dir is carried as a user override so the RPC subprocess
+    # honors it (the launcher no longer launders resolved config into flags).
+    assert captured[0].user_session_dir == tmp_path
     # `wisp tui` gives the agent the full toolset by default — otherwise it's a
     # toolless chatbot that can't read files or run commands.
     assert captured[0].all_tools is True
+
+
+def test_cli_tui_command_forwards_explicit_auth_file_as_user_override(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    captured: list[TuiOptions] = []
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        captured.append(options)
+
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+    auth_file = tmp_path / "auth.json"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["tui", "--auth-file", str(auth_file)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured[0].user_auth_file == auth_file
+
+
+def test_cli_legacy_mode_tui_forwards_explicit_session_dir_override(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    # Regression: the legacy `--mode tui` callback path must also forward an explicit
+    # --session-dir as a user override; otherwise it is dropped now that the launcher
+    # no longer serializes the resolved config into subprocess flags.
+    captured: list[TuiOptions] = []
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        captured.append(options)
+
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "tui", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    assert captured[0].user_session_dir == tmp_path
+
+
+def test_cli_legacy_mode_tui_forwards_explicit_provider_and_model(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    # Regression: `wisp --mode tui --provider --model` must reach the RPC subprocess.
+    # Otherwise the parent validates/displays them but the child re-resolves and could
+    # run a DIFFERENT provider/model than the user asked for.
+    captured: list[TuiOptions] = []
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        captured.append(options)
+
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "tui", "--provider", "fake", "--model", "model-x"],
+        env={"WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    assert captured[0].user_provider == "fake"
+    assert captured[0].user_model == "model-x"
 
 
 def test_cli_tui_command_no_all_tools_flag_disables_the_full_registry(

@@ -238,9 +238,14 @@ def test_from_env_user_settings_can_disable_protected_paths(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     # The USER (global) settings file may disable the general guard; Wisp still
-    # protects its own active credential file.
+    # protects its own active credential file. Point HOME at an explicit temp dir so
+    # the user-settings write is self-evidently isolated from the real home.
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.chdir(tmp_path)
-    _write_settings(Path.home(), protected_paths=[])
+    _write_settings(home, protected_paths=[])
 
     config = WispConfig.from_env()
 

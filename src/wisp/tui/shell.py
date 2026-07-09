@@ -646,7 +646,12 @@ class TuiShell:
             self.renderer.trust_request(event)
             if self.state.input_closed:
                 # No way to answer: default to untrusted (safe) so the run proceeds.
-                return await self._answer_pending_trust("", trusted=False)
+                # Pass a reason so the gate treats this as a forced close, NOT an
+                # explicit user "no" — a reasonless denial would be persisted and
+                # suppress future trust prompts for this project.
+                return await self._answer_pending_trust(
+                    "", trusted=False, reason="Trust prompt: input closed"
+                )
             return False
 
         if isinstance(event, RpcCommandFinished):

@@ -104,6 +104,73 @@ def test_rpc_trust_command_round_trip(tmp_path: Path) -> None:
     assert gate.resolve_request(request_id="nope", trusted=True) is False
 
 
+def test_rpc_gate_fires_on_first_trusted_callback(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    # The rebuild hook runs exactly once when trust first resolves to True, so a
+    # first-run session that approves trust can apply the project's settings before
+    # the first turn.
+    from wisp.cli.rpc import _RpcTrustGate
+
+    monkeypatch.setenv("WISP_TRUST", "1")
+    calls = 0
+
+    async def on_trusted() -> None:
+        nonlocal calls
+        calls += 1
+
+    gate = _RpcTrustGate(Path.cwd(), on_first_trusted=on_trusted)
+
+    async def scenario() -> None:
+        assert await gate.resolve() is True
+        assert calls == 1
+        # Cached: a second resolve does not re-run the hook.
+        assert await gate.resolve() is True
+        assert calls == 1
+
+    anyio.run(scenario)
+
+
+def test_rpc_gate_does_not_fire_callback_when_untrusted(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from wisp.cli.rpc import _RpcTrustGate
+
+    monkeypatch.setenv("WISP_TRUST", "0")
+    fired = False
+
+    async def on_trusted() -> None:
+        nonlocal fired
+        fired = True
+
+    gate = _RpcTrustGate(Path.cwd(), on_first_trusted=on_trusted)
+
+    async def scenario() -> None:
+        assert await gate.resolve() is False
+
+    anyio.run(scenario)
+    assert fired is False
+
+
+def test_config_overrides_gates_project_settings_on_trust(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # _ConfigOverrides.build(trusted=...) is the rebuild's re-derivation: untrusted
+    # ignores the project settings.json, trusted applies it.
+    import json as _json
+
+    from wisp.cli.rpc import _ConfigOverrides
+
+    monkeypatch.delenv("WISP_PROVIDER", raising=False)
+    (tmp_path / ".wisp").mkdir()
+    (tmp_path / ".wisp" / "settings.json").write_text(
+        _json.dumps({"provider": "from-project-settings"}), encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    overrides = _ConfigOverrides()
+
+    assert overrides.build(trusted=False).provider != "from-project-settings"
+    assert overrides.build(trusted=True).provider == "from-project-settings"
+
+
 def test_trust_command_serializes_over_rpc() -> None:
     from wisp.rpc.commands import TrustCommand, rpc_command_from_json
 

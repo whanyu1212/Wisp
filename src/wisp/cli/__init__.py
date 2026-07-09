@@ -254,13 +254,13 @@ def cli_callback(
     else:
         trusted = _resolve_cli_trust(Path.cwd()).trusted
 
-    config = WispConfig.from_env(
+    config_overrides = _cli_rpc._ConfigOverrides(
         provider=provider,
         model=model,
         session_dir=session_dir,
         auth_path=auth_file,
-        trusted=trusted,
     )
+    config = config_overrides.build(trusted=trusted)
     try:
         if resolved_mode is OutputMode.rpc:
             anyio.run(
@@ -273,6 +273,8 @@ def cli_callback(
                 continue_latest,
                 approve_unsafe_tools,
                 max_tool_iterations,
+                trusted,
+                config_overrides,
             )
         elif resolved_mode is OutputMode.tui:
             _run_tui_from_cli_options(
@@ -285,6 +287,13 @@ def cli_callback(
                 approve_unsafe_tools=approve_unsafe_tools,
                 max_tool_iterations=max_tool_iterations,
                 renderer=resolved_tui_renderer,
+                # Forward the user's explicit --provider/--model/--session-dir/--auth-file
+                # (each None unless set) so the legacy `--mode tui` path keeps honoring
+                # them; the launcher no longer launders the resolved config into flags.
+                user_provider=provider,
+                user_model=model,
+                user_session_dir=session_dir,
+                user_auth_file=auth_file,
             )
         else:
             assert prompt is not None
@@ -401,6 +410,11 @@ def tui_command(
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
             renderer=renderer,
+            # These default to None on the `tui` command, so they are non-None only when
+            # the user explicitly set them — exactly the values that should override a
+            # trusted project's settings in the RPC subprocess.
+            user_session_dir=session_dir,
+            user_auth_file=auth_file,
         )
     except (ProviderError, SessionError, UnknownProviderError, UnknownToolError) as exc:
         console.print(f"[red]error:[/red] {exc}")
@@ -448,6 +462,10 @@ def _run_tui_from_cli_options(
     approve_unsafe_tools: bool,
     max_tool_iterations: int | None,
     renderer: TuiRendererKind,
+    user_provider: str | None = None,
+    user_model: str | None = None,
+    user_session_dir: Path | None = None,
+    user_auth_file: Path | None = None,
 ) -> None:
     from wisp.tui import TuiOptions, run_tui
 
@@ -463,6 +481,10 @@ def _run_tui_from_cli_options(
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
             renderer=renderer,
+            user_provider=user_provider,
+            user_model=user_model,
+            user_session_dir=user_session_dir,
+            user_auth_file=user_auth_file,
         ),
     )
 
