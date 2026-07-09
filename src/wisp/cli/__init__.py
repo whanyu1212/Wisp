@@ -100,6 +100,7 @@ app = typer.Typer(
     no_args_is_help=False,
 )
 app.add_typer(auth_app, name="auth")
+app.add_typer(_cli_trust.trust_app, name="trust")
 
 
 @app.callback()

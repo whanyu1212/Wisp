@@ -13,14 +13,86 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
-from wisp.trust import is_trusted
+from wisp.trust import _canonical_key, forget_trust, is_trusted, record_trust
 from wisp.trust_flow import TrustDecision, resolve_trust
 
 _TRUTHY = {"1", "true", "yes", "on", "trust"}
 _FALSY = {"0", "false", "no", "off", "untrust"}
+
+trust_app = typer.Typer(help="Manage Wisp project trust decisions.")
+
+
+def _canonical_project(project_path: Path) -> str:
+    return _canonical_key(project_path)
+
+
+@trust_app.command("status")
+def trust_status(
+    project: Annotated[
+        Path | None,
+        typer.Argument(help="Project path to inspect. Defaults to the current directory."),
+    ] = None,
+) -> None:
+    """Show the persisted trust decision for a project."""
+
+    selected = project or Path(".")
+    canonical = _canonical_project(selected)
+    trusted = is_trusted(selected)
+    if trusted is True:
+        typer.echo(f"trusted: {canonical}")
+    elif trusted is False:
+        typer.echo(f"untrusted: {canonical}")
+    else:
+        typer.echo(f"undecided: {canonical}")
+
+
+@trust_app.command("allow")
+def trust_allow(
+    project: Annotated[
+        Path | None,
+        typer.Argument(help="Project path to trust. Defaults to the current directory."),
+    ] = None,
+) -> None:
+    """Persistently trust a project."""
+
+    selected = project or Path(".")
+    record_trust(selected, True)
+    typer.echo(f"trusted: {_canonical_project(selected)}")
+
+
+@trust_app.command("revoke")
+def trust_revoke(
+    project: Annotated[
+        Path | None,
+        typer.Argument(help="Project path to mark untrusted. Defaults to the current directory."),
+    ] = None,
+) -> None:
+    """Persistently mark a project as untrusted."""
+
+    selected = project or Path(".")
+    record_trust(selected, False)
+    typer.echo(f"untrusted: {_canonical_project(selected)}")
+
+
+@trust_app.command("forget")
+def trust_forget(
+    project: Annotated[
+        Path | None,
+        typer.Argument(help="Project path whose trust decision should be forgotten."),
+    ] = None,
+) -> None:
+    """Forget a persisted trust decision so Wisp can prompt again later."""
+
+    selected = project or Path(".")
+    canonical = _canonical_project(selected)
+    if forget_trust(selected):
+        typer.echo(f"forgot trust decision: {canonical}")
+    else:
+        typer.echo(f"no trust decision: {canonical}")
 
 
 def trust_override_from_env() -> bool | None:

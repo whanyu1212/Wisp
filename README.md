@@ -87,9 +87,18 @@ by resolved path) so you are not asked again. Until then Wisp still runs — it 
 ignores the project's local configuration, so a freshly cloned repository can't
 redirect Wisp's credential file or override your defaults before you have looked at it.
 
+Manage persisted project decisions with:
+
+```bash
+uv run wisp trust status [path]   # trusted, untrusted, or undecided
+uv run wisp trust allow [path]    # persistently trust a project
+uv run wisp trust revoke [path]   # persistently mark a project untrusted
+uv run wisp trust forget [path]   # remove the decision so Wisp can prompt again
+```
+
 - **Non-interactive runs** (CI, scripts, RPC/TUI) default to *untrusted*. Set
   `WISP_TRUST=1` to opt a run in (or `WISP_TRUST=0` to force out). This is read only
-  from the real process environment, never from project files.
+  from the real process environment, never from project files, and is not persisted.
 - The `protected_paths` secret guard is a **user-only** policy: a project settings
   file can never weaken it, even once trusted.
 - `WISP_TRUST_FILE` may relocate the global trust store, but only to an **absolute
