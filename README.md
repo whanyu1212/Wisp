@@ -74,9 +74,9 @@ commit auth files or real API keys.
 
 ## Project trust
 
-Project-local configuration — the `./.wisp/settings.json` file, context files, and
-project extensions — is applied **only for projects you trust**. The first time you
-run Wisp in an untrusted directory it asks:
+Project-local configuration — the `./.wisp/settings.json` file, context files
+(`AGENTS.md` / `CLAUDE.md`), and project extensions — is applied **only for projects you
+trust**. The first time you run Wisp in an untrusted directory it asks:
 
 ```
 Do you trust the files in /path/to/project?
@@ -180,9 +180,16 @@ stale project context from earlier turns is not replayed as instructions.
 
 Each turn sends a small default coding-agent system prompt plus a bounded project-context message
 before the user prompt. The context includes the working directory, git branch and a capped
-status summary, detected root files (`pyproject.toml`, `package.json`, `README.md`, …), and the
-tools currently exposed to the model. It is informational only and is persisted to the session so
-the provider-visible input stays auditable.
+status summary, detected root files (`pyproject.toml`, `package.json`, `README.md`, …), trusted
+project instructions from `AGENTS.md` / `CLAUDE.md`, and the tools currently exposed to the
+model. Context files are loaded from the detected project root down to the current working
+directory, with root instructions before nested ones and `AGENTS.md` before `CLAUDE.md` in each
+directory.
+
+Wisp intentionally trust-gates project-local context files. If the project is untrusted, Wisp
+does not read or mention those files and sends only the safe untrusted-context notice plus the
+exposed tool list. This is stricter than Pi's broader context loading, but keeps project guidance
+inside the same trust boundary as project settings and future project extensions.
 
 ## TUI
 
