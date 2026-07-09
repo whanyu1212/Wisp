@@ -34,10 +34,11 @@ from wisp.events import (
     TrustRequested,
     TrustResolved,
 )
+from wisp.providers.base import ProviderError
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
-from wisp.runtime.registry import UnknownProviderError
-from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
+from wisp.runtime.registry import UnknownProviderError, UnknownToolError
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.base import Tool
 from wisp.tools.context import ToolContext
@@ -298,10 +299,17 @@ class _RpcTrustGate:
             pending.event.set()
 
     async def _finish(self, trusted: bool) -> bool:
+        # Run the first-trusted rebuild BEFORE caching the decision. If the rebuild
+        # raises (e.g. a trusted project's settings.json names an unknown provider), we
+        # must NOT mark the gate resolved: otherwise the caller reports this prompt as
+        # failed, but every later prompt would return the cached decision, skip the
+        # rebuild, and silently run with the stale untrusted startup config. Leaving the
+        # gate unresolved makes each subsequent prompt re-attempt the rebuild and fail
+        # the same way, instead of quietly succeeding with the wrong provider.
+        if trusted and self._on_first_trusted is not None and not self._resolved:
+            await self._on_first_trusted()
         self._decision = trusted
         self._resolved = True
-        if trusted and self._on_first_trusted is not None:
-            await self._on_first_trusted()
         return trusted
 
 
@@ -707,6 +715,14 @@ async def _run_rpc_prompt_command(
                     agent.run(prompt, session=session, history=committed_history)
                 )
             except _JsonOutputModeError as exc:
+                error = str(exc)
+            except (ProviderError, SessionError, UnknownProviderError, UnknownToolError) as exc:
+                # A first-run approval can rebuild the agent from a trusted project's
+                # settings.json that names an unknown provider (or an otherwise bad
+                # runtime); resolve() raises here, before agent.run(). Report it as a
+                # normal command failure — matching startup and print modes — instead of
+                # letting it escape and tear down the RPC process with a silent stream
+                # end and no rpc.command.finished error.
                 error = str(exc)
             except anyio.get_cancelled_exc_class():
                 error = f"RPC command cancelled: {command_id}"

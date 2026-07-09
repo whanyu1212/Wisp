@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tests.cli_support import *
 
 
@@ -127,6 +129,118 @@ def test_rpc_gate_fires_on_first_trusted_callback(tmp_path: Path, monkeypatch: M
         assert calls == 1
 
     anyio.run(scenario)
+
+
+def test_rpc_gate_propagates_rebuild_error(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    # If the first-run rebuild fails (e.g. a trusted project's settings.json names an
+    # unknown provider), the error must propagate OUT of resolve() so the prompt task's
+    # handler can report it as a normal rpc.command.finished failure — not escape and
+    # tear down the RPC process with a silent stream end.
+    from wisp.cli.rpc import _RpcTrustGate
+    from wisp.runtime.registry import UnknownProviderError
+
+    monkeypatch.setenv("WISP_TRUST", "1")
+
+    async def on_trusted() -> None:
+        raise UnknownProviderError("no-such-provider")
+
+    gate = _RpcTrustGate(Path.cwd(), on_first_trusted=on_trusted)
+
+    async def scenario() -> None:
+        with pytest.raises(UnknownProviderError):
+            await gate.resolve()
+
+    anyio.run(scenario)
+
+
+def test_rpc_gate_does_not_cache_after_failed_rebuild(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # A failed rebuild must NOT cache the decision: otherwise the caller reports this
+    # prompt as failed, but the NEXT prompt returns the cached trust, skips the rebuild,
+    # and silently runs the stale untrusted startup provider. Each prompt must re-attempt
+    # the rebuild and fail the same way instead.
+    from wisp.cli.rpc import _RpcTrustGate
+    from wisp.runtime.registry import UnknownProviderError
+
+    monkeypatch.setenv("WISP_TRUST", "1")
+    attempts = 0
+
+    async def on_trusted() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise UnknownProviderError("no-such-provider")
+
+    gate = _RpcTrustGate(Path.cwd(), on_first_trusted=on_trusted)
+
+    async def scenario() -> None:
+        with pytest.raises(UnknownProviderError):
+            await gate.resolve()
+        assert gate._resolved is False  # not cached — a retry is possible
+        # A second prompt re-attempts the rebuild (and fails again) rather than
+        # returning a cached "trusted" and running stale config.
+        with pytest.raises(UnknownProviderError):
+            await gate.resolve()
+        assert attempts == 2
+
+    anyio.run(scenario)
+
+
+def test_rpc_prompt_command_reports_rebuild_provider_error(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # End-to-end through _run_rpc_prompt_command: a resolve() that raises
+    # UnknownProviderError (the rebuild's failure mode) is caught and surfaced as an
+    # rpc.command.finished with ok=false + error, never a silent process teardown.
+    import io
+    from contextlib import redirect_stdout
+
+    from wisp.cli.rpc import _RpcTrustGate, _run_rpc_prompt_command
+    from wisp.runtime.registry import UnknownProviderError
+    from wisp.sessions.jsonl import JsonlSessionStore
+
+    async def on_trusted() -> None:
+        raise UnknownProviderError("no-such-provider")
+
+    monkeypatch.setenv("WISP_TRUST", "1")
+    gate = _RpcTrustGate(Path.cwd(), on_first_trusted=on_trusted)
+    sessions = JsonlSessionStore(tmp_path)
+    session = sessions.create()
+
+    class _Agent:
+        trusted = False
+
+        def run(self, *a: object, **k: object) -> object:  # pragma: no cover - never reached
+            raise AssertionError("agent.run must not be reached when the rebuild fails")
+
+    async def scenario() -> list[dict[str, object]]:
+        send, receive = anyio.create_memory_object_stream[object](10)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(
+                    _run_rpc_prompt_command,
+                    _Agent(),
+                    session,
+                    (),
+                    0,
+                    "hello",
+                    "p1",
+                    "prompt",
+                    anyio.CancelScope(),
+                    send.clone(),
+                    gate,
+                )
+                async with receive:
+                    async for _ in receive:
+                        break
+        return [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
+
+    records = anyio.run(scenario)
+    finished = [r for r in records if r.get("type") == "rpc.command.finished"]
+    assert finished, f"no rpc.command.finished emitted; got {[r.get('type') for r in records]}"
+    assert finished[0]["ok"] is False
+    assert "no-such-provider" in (finished[0].get("error") or "")
 
 
 def test_rpc_gate_does_not_fire_callback_when_untrusted(
