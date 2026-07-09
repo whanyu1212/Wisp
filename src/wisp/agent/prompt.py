@@ -203,6 +203,7 @@ def _project_context_files_section(
     if max_chars < 1:
         return ""
 
+    section_prefix = "project instructions:\n"
     blocks: list[str] = []
     for directory in _project_directory_chain(
         project_root=project_root,
@@ -217,11 +218,17 @@ def _project_context_files_section(
         if path is None:
             continue
         relative_path = _relative_project_path(path, project_root)
-        blocks.append(f"--- {relative_path} ---\n{_read_context_file(path)}")
+        separator = "\n\n" if blocks else ""
+        block_header = f"--- {relative_path} ---\n"
+        used_chars = len(section_prefix) + len("\n\n".join(blocks))
+        body_budget = max_chars - used_chars - len(separator) - len(block_header)
+        if body_budget < 1:
+            break
+        blocks.append(f"{block_header}{_read_context_file(path, max_chars=body_budget)}")
 
     if not blocks:
         return ""
-    return _truncate_context("project instructions:\n" + "\n\n".join(blocks), max_chars)
+    return _truncate_context(section_prefix + "\n\n".join(blocks), max_chars)
 
 
 def _project_context_file_from_dir(
@@ -289,9 +296,12 @@ def _relative_project_path(path: Path, project_root: Path) -> str:
     return relative.as_posix()
 
 
-def _read_context_file(path: Path) -> str:
+def _read_context_file(path: Path, *, max_chars: int) -> str:
+    if max_chars < 1:
+        return ""
     try:
-        return path.read_text(encoding="utf-8", errors="replace").rstrip()
+        with path.open(encoding="utf-8", errors="replace") as file:
+            return _truncate_context(file.read(max_chars + 1).rstrip(), max_chars)
     except OSError as exc:
         return f"[could not read: {exc}]"
 

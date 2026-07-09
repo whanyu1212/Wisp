@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 from pytest import MonkeyPatch
@@ -206,6 +207,33 @@ def test_project_context_file_budget_truncates_only_instructions(tmp_path: Path)
     assert "[context truncated]" in context
     assert "project files:\n  pyproject.toml" in context
     assert "allowed tools:\n  - read: Read a UTF-8 text file." in context
+
+
+def test_project_context_file_read_is_bounded(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    reads: list[int] = []
+
+    class TrackingText(io.StringIO):
+        def read(self, size: int | None = -1) -> str:
+            reads.append(-1 if size is None else size)
+            return super().read(size)
+
+    def fake_open(
+        self: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> TrackingText:
+        return TrackingText("A" * 1_000)
+
+    monkeypatch.setattr(Path, "open", fake_open)
+
+    content = prompt_module._read_context_file(tmp_path / "AGENTS.md", max_chars=80)
+
+    assert reads == [81]
+    assert len(content) <= 80
+    assert "[context truncated]" in content
 
 
 def test_project_context_skips_symlink_context_file(tmp_path: Path) -> None:

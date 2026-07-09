@@ -17,6 +17,7 @@ from typing import Annotated
 
 import typer
 
+from wisp.agent.prompt import resolve_project_context_root
 from wisp.trust import _canonical_key, forget_trust, is_trusted, record_trust
 from wisp.trust_flow import TrustDecision, resolve_trust
 
@@ -30,6 +31,10 @@ def _canonical_project(project_path: Path) -> str:
     return _canonical_key(project_path)
 
 
+def _selected_project_root(project: Path | None) -> Path:
+    return resolve_project_context_root(project or Path("."))
+
+
 @trust_app.command("status")
 def trust_status(
     project: Annotated[
@@ -39,7 +44,7 @@ def trust_status(
 ) -> None:
     """Show the persisted trust decision for a project."""
 
-    selected = project or Path(".")
+    selected = _selected_project_root(project)
     canonical = _canonical_project(selected)
     trusted = is_trusted(selected)
     if trusted is True:
@@ -59,7 +64,7 @@ def trust_allow(
 ) -> None:
     """Persistently trust a project."""
 
-    selected = project or Path(".")
+    selected = _selected_project_root(project)
     record_trust(selected, True)
     typer.echo(f"trusted: {_canonical_project(selected)}")
 
@@ -73,7 +78,7 @@ def trust_revoke(
 ) -> None:
     """Persistently mark a project as untrusted."""
 
-    selected = project or Path(".")
+    selected = _selected_project_root(project)
     record_trust(selected, False)
     typer.echo(f"untrusted: {_canonical_project(selected)}")
 
@@ -87,7 +92,7 @@ def trust_forget(
 ) -> None:
     """Forget a persisted trust decision so Wisp can prompt again later."""
 
-    selected = project or Path(".")
+    selected = _selected_project_root(project)
     canonical = _canonical_project(selected)
     if forget_trust(selected):
         typer.echo(f"forgot trust decision: {canonical}")
