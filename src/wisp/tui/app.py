@@ -57,7 +57,10 @@ async def run_tui(
     owns_controller = selected_controller is None
     if selected_controller is None:
         await _preflight_tui_options(options)
-        transport = await JsonlSubprocessRpcTransport.start(_rpc_command(options), env=_rpc_env())
+        transport = await JsonlSubprocessRpcTransport.start(
+            _rpc_command(options),
+            env=_rpc_env(options),
+        )
         selected_controller = RpcController(transport)
 
     textual_tui = None

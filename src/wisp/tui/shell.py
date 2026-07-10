@@ -35,6 +35,7 @@ from wisp.events import (
     ToolApprovalRequested,
     TrustRequested,
 )
+from wisp.rpc.commands import ApprovalScope
 from wisp.tui.commands import (
     TuiSlashCommand,
     TuiSlashCommandError,
@@ -75,6 +76,7 @@ class TuiController(Protocol):
         *,
         approved: bool = True,
         reason: str | None = None,
+        scope: ApprovalScope | None = None,
         command_id: str | None = None,
     ) -> str: ...
 
@@ -242,6 +244,17 @@ class TuiShell:
             return False
         if command is not None:
             return await self._handle_slash_command(command)
+        if (
+            self.state.status is TuiStatus.confirming_all_tools
+            and self.state.pending_approval is not None
+        ):
+            if signal.mode is _InputMode.all_tools_confirmation:
+                return await self._answer_all_tools_confirmation(text)
+            if text and self.state.current_command_id is not None:
+                self.state.queued_prompts.append(text)
+                self._update_view(queued_follow_ups=len(self.state.queued_prompts))
+                self.renderer.queued_follow_up(len(self.state.queued_prompts))
+            return False
         if self.state.pending_trust is not None:
             if signal.mode is _InputMode.trust or _is_trust_answer(text):
                 return await self._answer_pending_trust(text)
@@ -545,13 +558,31 @@ class TuiShell:
         *,
         approved: bool | None = None,
         reason: str | None = None,
+        scope: ApprovalScope | None = None,
         exit_after_denial: bool,
     ) -> bool:
         approval = self.state.pending_approval
         if approval is None:
             return False
+        normalized = answer.strip().lower()
+        if approved is None and normalized in {"a", "all", "yolo"}:
+            self.state.status = TuiStatus.confirming_all_tools
+            self._sync_view()
+            self.renderer.approval_all_confirmation(approval)
+            return False
+        selected_scope: ApprovalScope = scope or (
+            "tool_session" if normalized in {"t", "tool"} else "once"
+        )
         selected_approved = (
-            approved if approved is not None else answer.strip().lower() in {"y", "yes"}
+            approved
+            if approved is not None
+            else normalized
+            in {
+                "y",
+                "yes",
+                "t",
+                "tool",
+            }
         )
         selected_reason = None if selected_approved else reason or "Denied from TUI"
         if reason == "Denied from TUI: input closed":
@@ -564,6 +595,7 @@ class TuiShell:
             approval.call_id,
             approved=selected_approved,
             reason=selected_reason,
+            scope=(selected_scope if selected_approved and selected_scope != "once" else None),
         )
         self.state.pending_approval = None
         if not ok:
@@ -574,15 +606,40 @@ class TuiShell:
         self._sync_view()
         return False
 
+    async def _answer_all_tools_confirmation(self, answer: str) -> bool:
+        approval = self.state.pending_approval
+        if approval is None:
+            return False
+        if answer.strip().lower() in {"y", "yes", "confirm-all"}:
+            return await self._answer_pending_approval(
+                "",
+                approved=True,
+                scope="all_session",
+                exit_after_denial=False,
+            )
+        self.state.status = TuiStatus.waiting_for_approval
+        self._sync_view()
+        self.renderer.approval_request(approval)
+        return False
+
     async def _send_approval(
         self,
         call_id: str,
         *,
         approved: bool,
         reason: str | None,
+        scope: ApprovalScope | None,
     ) -> bool:
         try:
-            await self.controller.approve(call_id, approved=approved, reason=reason)
+            if scope is None:
+                await self.controller.approve(call_id, approved=approved, reason=reason)
+            else:
+                await self.controller.approve(
+                    call_id,
+                    approved=approved,
+                    reason=reason,
+                    scope=scope,
+                )
         except Exception as exc:
             self._update_view(status="error")
             self.renderer.send_failed("approval", exc)

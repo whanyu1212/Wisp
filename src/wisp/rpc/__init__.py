@@ -3,6 +3,7 @@
 from wisp.rpc.client import JsonlSubprocessRpcTransport, RpcController, RpcTransport
 from wisp.rpc.commands import (
     ApprovalCommand,
+    ApprovalScope,
     CancelCommand,
     ConfigureCommand,
     PromptCommand,
@@ -12,6 +13,7 @@ from wisp.rpc.commands import (
 
 __all__ = [
     "ApprovalCommand",
+    "ApprovalScope",
     "CancelCommand",
     "ConfigureCommand",
     "JsonlSubprocessRpcTransport",

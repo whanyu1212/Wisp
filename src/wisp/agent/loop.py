@@ -429,8 +429,10 @@ class Agent:
             tool = self.tool_registry.get(tool_call.name)
         except UnknownToolError:
             return
-        if not self.tool_policy.allows(tool) or not self.tool_approval_policy.requires_approval(
-            tool
+        if (
+            not self.tool_policy.allows(tool)
+            or not self.tool_approval_policy.requires_approval(tool)
+            or self.tool_approval_policy.approves(tool)
         ):
             return
         self.tool_approval_policy.prepare_approval(

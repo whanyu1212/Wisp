@@ -503,6 +503,12 @@ class TextualTui(App[None]):
             self._input.display = False
         panel.show_approval(event, cwd=cwd)
 
+    def show_approval_all_confirmation(self, event: ToolApprovalRequested) -> None:
+        panel = self._decision_panel
+        if panel is None:
+            return
+        panel.show_all_confirmation(event)
+
     def show_trust(self, event: TrustRequested) -> None:
         panel = self._decision_panel
         if panel is None:
@@ -832,6 +838,9 @@ class TextualTuiRenderer:
     def approval_request(self, event: ToolApprovalRequested) -> None:
         self.app.hide_working_indicator()
         self.app.show_approval(event, cwd=self._visible_cwd)
+
+    def approval_all_confirmation(self, event: ToolApprovalRequested) -> None:
+        self.app.show_approval_all_confirmation(event)
 
     def trust_request(self, event: TrustRequested) -> None:
         self.app.hide_working_indicator()

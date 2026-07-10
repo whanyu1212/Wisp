@@ -19,12 +19,17 @@ class TuiOptions:
 
     ``config`` is the parent's startup view of configuration, used for preflight
     validation and the header display. It is deliberately **not** serialized into the
-    RPC subprocess's arguments: the subprocess owns config resolution so that a
-    trusted project's ``.wisp/settings.json`` can set the provider / model / session
-    dir / auth file after the trust prompt is answered. Only values the *user* set
+    RPC subprocess's arguments: the subprocess owns config resolution and receives
+    the trust decision resolved by the parent before TUI startup, so a trusted
+    project's ``.wisp/settings.json`` can set provider / model / session dir / auth
+    file consistently in both processes. Only values the *user* set
     explicitly on the command (``user_provider`` / ``user_model`` / ``user_session_dir``
     / ``user_auth_file``) are forwarded, since those are legitimate highest-precedence
     overrides the subprocess cannot re-derive.
+
+    ``project_trusted`` carries the parent CLI's already-resolved decision into the
+    child process. It remains optional so direct/embedded ``run_tui`` callers can
+    retain the RPC trust-request fallback.
     """
 
     config: WispConfig
@@ -36,6 +41,7 @@ class TuiOptions:
     approve_unsafe_tools: bool = False
     max_tool_iterations: int | None = None
     renderer: TuiRendererKind = TuiRendererKind.line
+    project_trusted: bool | None = None
     user_provider: str | None = None
     user_model: str | None = None
     user_session_dir: Path | None = None
@@ -60,8 +66,8 @@ async def _preflight_tui_options(options: TuiOptions) -> None:
 def _rpc_command(options: TuiOptions) -> tuple[str, ...]:
     # Do NOT pass --provider / --model / --session-dir / --auth-file from the resolved
     # config: those are trust-gated (a trusted project's settings.json may set them), and
-    # the subprocess resolves them itself after the trust prompt. Forwarding the parent's
-    # untrusted-startup values as CLI flags would outrank the project settings (CLI is
+    # the subprocess resolves them itself using the parent's process-scoped trust decision.
+    # Forwarding the parent's resolved values as CLI flags would outrank project settings (CLI is
     # highest precedence) and defeat the whole gate. Only forward the user's explicit
     # overrides, which the subprocess cannot otherwise know about.
     command: list[str] = [
@@ -96,8 +102,11 @@ def _rpc_command(options: TuiOptions) -> tuple[str, ...]:
     return tuple(command)
 
 
-def _rpc_env() -> dict[str, str]:
-    return dict(os.environ)
+def _rpc_env(options: TuiOptions | None = None) -> dict[str, str]:
+    env = dict(os.environ)
+    if options is not None and options.project_trusted is not None:
+        env["WISP_TRUST"] = "1" if options.project_trusted else "0"
+    return env
 
 
 def _stdin_is_interactive() -> bool:

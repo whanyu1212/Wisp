@@ -44,7 +44,7 @@ class ToolApprovalPolicy:
         return cls(approved_tools=frozenset(names))
 
     def requires_approval(self, tool: Tool) -> bool:
-        """Return whether this tool requires approval before execution."""
+        """Return whether this tool safety class requires approval."""
 
         return tool.safety in APPROVAL_REQUIRED_SAFETY
 

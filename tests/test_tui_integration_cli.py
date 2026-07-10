@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import os
+
 from pytest import MonkeyPatch
 from textual.await_complete import AwaitComplete
 from textual.widgets import Input, Static
 
+import wisp.cli as cli_module
 from tests.tui_support import *
 from wisp.events import AgentStarted, RpcCommandStarted
+from wisp.trust_flow import TrustDecision
 from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 from wisp.tui.widgets import (
@@ -195,6 +199,22 @@ def test_tui_rpc_command_omits_all_tools_when_disabled(tmp_path: Path) -> None:
     assert "--all-tools" not in command
 
 
+def test_tui_rpc_env_carries_preflight_trust_without_mutating_parent(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WISP_TRUST", "1")
+    options = TuiOptions(
+        config=WispConfig(provider="fake", session_dir=tmp_path),
+        project_trusted=False,
+    )
+
+    child_env = tui_app_module._rpc_env(options)
+
+    assert child_env["WISP_TRUST"] == "0"
+    assert os.environ["WISP_TRUST"] == "1"
+
+
 def test_run_tui_uses_live_fullscreen_when_interactive(
     tmp_path: Path,
     monkeypatch: object,
@@ -374,6 +394,64 @@ def test_cli_no_args_uses_env_tui_defaults(monkeypatch: object) -> None:
     # The legacy WISP_MODE=tui path defaults to the full toolset too — otherwise
     # this door to the same TUI would launch a toolless agent.
     assert captured[0].all_tools is True
+
+
+def test_cli_legacy_tui_resolves_trust_before_starting_ui(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    def fake_resolve(project_path: Path) -> TrustDecision:
+        order.append("trust")
+        return TrustDecision(project_path=project_path, trusted=False)
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        order.append("tui")
+        assert options.config.provider == "fake"
+        assert options.project_trusted is False
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "_resolve_cli_trust", fake_resolve)
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "tui"],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert order == ["trust", "tui"]
+
+
+def test_cli_tui_command_resolves_trust_before_starting_ui(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    def fake_resolve(project_path: Path) -> TrustDecision:
+        order.append("trust")
+        return TrustDecision(project_path=project_path, trusted=True)
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        order.append("tui")
+        assert options.config.provider == "fake"
+        assert options.project_trusted is True
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "_resolve_cli_trust", fake_resolve)
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+
+    result = CliRunner().invoke(
+        app,
+        ["tui"],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert order == ["trust", "tui"]
 
 
 def test_cli_tui_mode_uses_env_renderer_default(monkeypatch: object) -> None:

@@ -69,12 +69,11 @@ def test_json_mode_outputs_tool_events_as_jsonl(
     types = [record["type"] for record in records]
     assert "tool.execution.started" in types
     assert "tool.call" in types
-    assert "tool.approval.requested" in types
-    assert "tool.approval.resolved" in types
+    assert "tool.approval.requested" not in types
+    assert "tool.approval.resolved" not in types
     assert "tool.execution.ended" in types
     assert "tool.result" in types
     assert records[types.index("tool.call")]["arguments"] == {"path": "file.txt"}
-    assert records[types.index("tool.approval.resolved")]["approved"] is True
     assert records[types.index("tool.result")]["output"] == "changed file.txt"
     assert (
         records[types.index("message.completed", types.index("tool.result"))]["content"] == "done"

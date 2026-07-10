@@ -15,6 +15,7 @@ from anyio.abc import Process
 from wisp.events import KnownWispEvent, wisp_event_from_json
 from wisp.rpc.commands import (
     ApprovalCommand,
+    ApprovalScope,
     CancelCommand,
     ConfigureCommand,
     PromptCommand,
@@ -69,6 +70,7 @@ class RpcController:
         *,
         approved: bool = True,
         reason: str | None = None,
+        scope: ApprovalScope | None = None,
         command_id: str | None = None,
     ) -> str:
         """Approve or deny a pending tool approval request."""
@@ -80,6 +82,7 @@ class RpcController:
                 call_id=call_id,
                 approved=approved,
                 reason=reason,
+                scope=scope,
             )
         )
         return selected_id

@@ -32,6 +32,7 @@ from wisp.events import (
     ToolResultReady,
     TrustRequested,
 )
+from wisp.rpc.commands import ApprovalScope
 from wisp.tui import (
     FullscreenTuiRenderer,
     LineTuiRenderer,
@@ -90,6 +91,7 @@ class ScriptedController:
         self.close_after_prompt = close_after_prompt
         self.prompts: list[str] = []
         self.approvals: list[tuple[str, bool, str | None]] = []
+        self.approval_scopes: list[ApprovalScope | None] = []
         self.trusts: list[tuple[str, bool, str | None, bool]] = []
         self.cancelled: list[str] = []
         self.configurations: list[tuple[str | None, str | None]] = []
@@ -119,9 +121,11 @@ class ScriptedController:
         *,
         approved: bool = True,
         reason: str | None = None,
+        scope: ApprovalScope | None = None,
         command_id: str | None = None,
     ) -> str:
         self.approvals.append((call_id, approved, reason))
+        self.approval_scopes.append(scope)
         await self._emit_scripted(self.approval_events, default=[])
         return command_id or f"approval-{len(self.approvals)}"
 

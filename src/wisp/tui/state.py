@@ -17,6 +17,7 @@ class TuiStatus(StrEnum):
     idle = "idle"
     running = "running"
     waiting_for_approval = "waiting_for_approval"
+    confirming_all_tools = "confirming_all_tools"
     waiting_for_trust = "waiting_for_trust"
     exiting = "exiting"
 
@@ -70,6 +71,7 @@ class _InputMode(StrEnum):
     idle = "idle"
     running = "running"
     approval = "approval"
+    all_tools_confirmation = "all_tools_confirmation"
     trust = "trust"
     exiting = "exiting"
 
@@ -113,6 +115,8 @@ def _coerce_input_mode(value: str, *, fallback: _InputMode) -> _InputMode:
 def _input_mode_for_status(status: TuiStatus) -> _InputMode:
     if status is TuiStatus.waiting_for_approval:
         return _InputMode.approval
+    if status is TuiStatus.confirming_all_tools:
+        return _InputMode.all_tools_confirmation
     if status is TuiStatus.waiting_for_trust:
         return _InputMode.trust
     if status is TuiStatus.running:
@@ -125,6 +129,8 @@ def _input_mode_for_status(status: TuiStatus) -> _InputMode:
 def _view_status_for_status(status: TuiStatus) -> str:
     if status is TuiStatus.waiting_for_approval:
         return "waiting for approval"
+    if status is TuiStatus.confirming_all_tools:
+        return "confirming YOLO mode"
     if status is TuiStatus.waiting_for_trust:
         return "waiting for trust"
     return status.value
@@ -132,7 +138,9 @@ def _view_status_for_status(status: TuiStatus) -> str:
 
 def _prompt_for_mode(mode: _InputMode) -> str:
     if mode is _InputMode.approval:
-        return "approve? [y/N] "
+        return "approve? [y once/t tool/a all/N] "
+    if mode is _InputMode.all_tools_confirmation:
+        return "enable YOLO for this run? [y/N] "
     if mode is _InputMode.trust:
         return "trust this project? [y/N] "
     if mode is _InputMode.running:
