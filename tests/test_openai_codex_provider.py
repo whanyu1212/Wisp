@@ -3,18 +3,27 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import anyio
+import httpx
 import pytest
 
 from wisp.agent.messages import Message
 from wisp.auth.storage import JsonAuthStore, OAuthCredential
 from wisp.providers.auth import StoredProviderAuthResolver
-from wisp.providers.base import ProviderConfigurationError, ToolCall, ToolCallResult, ToolSpec
+from wisp.providers.base import (
+    ProviderConfigurationError,
+    ProviderError,
+    ToolCall,
+    ToolCallResult,
+    ToolSpec,
+)
 from wisp.providers.events import (
     ProviderResponseCompleted,
+    ProviderResponseFailed,
     ProviderResponseStarted,
     ProviderTextDelta,
     ProviderToolCallCompleted,
@@ -34,16 +43,21 @@ class StubOpenAICodexProvider(OpenAICodexProvider):
         self.seen_body: Mapping[str, object] | None = None
         self.seen_headers: Mapping[str, str] | None = None
 
+    @asynccontextmanager
     async def _create_stream(
         self,
         *,
         body: Mapping[str, object],
         headers: Mapping[str, str],
-    ) -> AsyncIterator[dict[str, object]]:
+    ) -> AsyncIterator[AsyncIterator[dict[str, object]]]:
         self.seen_body = body
         self.seen_headers = headers
-        for event in self.events:
-            yield event
+
+        async def stream() -> AsyncIterator[dict[str, object]]:
+            for event in self.events:
+                yield event
+
+        yield stream()
 
 
 def test_openai_codex_provider_streams_text_with_subscription_headers(tmp_path: Path) -> None:
@@ -169,6 +183,90 @@ def test_openai_codex_provider_requires_login(tmp_path: Path) -> None:
 
     with pytest.raises(ProviderConfigurationError, match="wisp auth login openai-codex"):
         anyio.run(run)
+
+
+def test_openai_codex_provider_does_not_start_before_http_success(tmp_path: Path) -> None:
+    store = _store_with_oauth(tmp_path)
+
+    async def run() -> list[object]:
+        transport = httpx.MockTransport(
+            lambda _request: httpx.Response(401, text="invalid credentials")
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            provider = OpenAICodexProvider(
+                auth_resolver=StoredProviderAuthResolver(store),
+                client=client,
+            )
+            events: list[object] = []
+            with pytest.raises(ProviderError, match=r"OpenAI Codex API error \(401\)"):
+                async for event in provider.stream([Message(role="user", content="hi")]):
+                    events.append(event)
+            return events
+
+    assert anyio.run(run) == []
+
+
+def test_openai_codex_provider_normalizes_post_start_sse_failure(tmp_path: Path) -> None:
+    store = _store_with_oauth(tmp_path)
+
+    async def run() -> list[object]:
+        transport = httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                text="data: not-json\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            provider = OpenAICodexProvider(
+                auth_resolver=StoredProviderAuthResolver(store),
+                client=client,
+            )
+            return [event async for event in provider.stream([Message(role="user", content="hi")])]
+
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="gpt-5.5"),
+        ProviderResponseFailed(message="Invalid OpenAI Codex SSE event: Expecting value"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("native_event", "message"),
+    [
+        ({"type": "error", "message": "boom"}, "OpenAI Codex error: boom"),
+        (
+            {
+                "type": "response.failed",
+                "response": {"error": {"message": "boom"}},
+            },
+            "OpenAI Codex response failed: boom",
+        ),
+        (
+            {
+                "type": "response.incomplete",
+                "response": {"incomplete_details": {"reason": "max_output_tokens"}},
+            },
+            "OpenAI Codex response incomplete: max_output_tokens",
+        ),
+    ],
+)
+def test_openai_codex_provider_emits_one_native_failed_terminal(
+    tmp_path: Path,
+    native_event: dict[str, object],
+    message: str,
+) -> None:
+    provider = StubOpenAICodexProvider(
+        [native_event],
+        auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
+    )
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hi")])]
+
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="gpt-test"),
+        ProviderResponseFailed(message=message),
+    ]
 
 
 def _store_with_oauth(tmp_path: Path) -> JsonAuthStore:

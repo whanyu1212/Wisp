@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from json import JSONDecodeError
 from typing import cast
 
@@ -89,86 +90,105 @@ class OpenAICodexProvider:
         emitted_tool_item_ids: set[str] = set()
         chunks: list[str] = []
         tool_calls: list[ToolCall] = []
+        failure: ProviderResponseFailed | None = None
+        response_started = False
 
-        yield ProviderResponseStarted(model=selected_model)
+        try:
+            async with self._create_stream(body=body, headers=headers) as stream:
+                response_started = True
+                yield ProviderResponseStarted(model=selected_model)
 
-        async for event in self._create_stream(body=body, headers=headers):
-            event_type = _string_value(event.get("type"))
-            if event_type in {"response.created", "response.in_progress"}:
-                event_response = event.get("response")
-                if isinstance(event_response, dict):
-                    response_id = _string_value(event_response.get("id")) or response_id
-            elif event_type in {"response.output_text.delta", "response.refusal.delta"}:
-                delta = _string_value(event.get("delta"))
-                if delta is not None:
-                    chunks.append(delta)
-                    yield ProviderTextDelta(delta=delta)
-            elif event_type == "response.function_call_arguments.done":
-                item_id = _string_value(event.get("item_id"))
-                arguments = _string_value(event.get("arguments")) or "{}"
-                if item_id is not None:
-                    completed_tool_arguments[item_id] = arguments
-                    pending = pending_tool_calls.get(item_id)
-                    if pending is not None:
-                        tool_call = _tool_call_from_codex(
-                            pending,
-                            raw_arguments=arguments,
-                            response_id=response_id,
-                        )
-                        tool_calls.append(tool_call)
-                        yield ProviderToolCallCompleted(
-                            tool_call=tool_call,
-                            content_index=len(tool_calls) - 1,
-                        )
-                        emitted_tool_item_ids.add(item_id)
-            elif event_type in {"response.output_item.added", "response.output_item.done"}:
-                item = event.get("item")
-                if isinstance(item, dict) and item.get("type") == "function_call":
-                    item_id = _string_value(item.get("id"))
-                    if item_id is not None:
-                        pending_tool_calls[item_id] = dict(item)
-                    already_emitted = item_id is not None and item_id in emitted_tool_item_ids
-                    if event_type == "response.output_item.done" and not already_emitted:
-                        raw_arguments = (
-                            completed_tool_arguments.get(
-                                item_id, _string_value(item.get("arguments")) or "{}"
-                            )
-                            if item_id is not None
-                            else _string_value(item.get("arguments")) or "{}"
-                        )
-                        tool_call = _tool_call_from_codex(
-                            item,
-                            raw_arguments=raw_arguments,
-                            response_id=response_id,
-                        )
-                        tool_calls.append(tool_call)
-                        yield ProviderToolCallCompleted(
-                            tool_call=tool_call,
-                            content_index=len(tool_calls) - 1,
-                        )
+                async for event in stream:
+                    event_type = _string_value(event.get("type"))
+                    if event_type in {"response.created", "response.in_progress"}:
+                        event_response = event.get("response")
+                        if isinstance(event_response, dict):
+                            response_id = _string_value(event_response.get("id")) or response_id
+                    elif event_type in {"response.output_text.delta", "response.refusal.delta"}:
+                        delta = _string_value(event.get("delta"))
+                        if delta is not None:
+                            chunks.append(delta)
+                            yield ProviderTextDelta(delta=delta)
+                    elif event_type == "response.function_call_arguments.done":
+                        item_id = _string_value(event.get("item_id"))
+                        arguments = _string_value(event.get("arguments")) or "{}"
                         if item_id is not None:
-                            emitted_tool_item_ids.add(item_id)
-            elif event_type == "error":
-                yield ProviderResponseFailed(
-                    message=_codex_error_message(event),
-                    partial_content="".join(chunks),
-                    response_id=response_id,
-                )
-                return
-            elif event_type == "response.failed":
-                yield ProviderResponseFailed(
-                    message=_codex_failed_message(event),
-                    partial_content="".join(chunks),
-                    response_id=response_id,
-                )
-                return
-            elif event_type == "response.incomplete":
-                yield ProviderResponseFailed(
-                    message=_codex_incomplete_message(event),
-                    partial_content="".join(chunks),
-                    response_id=response_id,
-                )
-                return
+                            completed_tool_arguments[item_id] = arguments
+                            pending = pending_tool_calls.get(item_id)
+                            if pending is not None:
+                                tool_call = _tool_call_from_codex(
+                                    pending,
+                                    raw_arguments=arguments,
+                                    response_id=response_id,
+                                )
+                                tool_calls.append(tool_call)
+                                yield ProviderToolCallCompleted(
+                                    tool_call=tool_call,
+                                    content_index=len(tool_calls) - 1,
+                                )
+                                emitted_tool_item_ids.add(item_id)
+                    elif event_type in {"response.output_item.added", "response.output_item.done"}:
+                        item = event.get("item")
+                        if isinstance(item, dict) and item.get("type") == "function_call":
+                            item_id = _string_value(item.get("id"))
+                            if item_id is not None:
+                                pending_tool_calls[item_id] = dict(item)
+                            already_emitted = (
+                                item_id is not None and item_id in emitted_tool_item_ids
+                            )
+                            if event_type == "response.output_item.done" and not already_emitted:
+                                raw_arguments = (
+                                    completed_tool_arguments.get(
+                                        item_id, _string_value(item.get("arguments")) or "{}"
+                                    )
+                                    if item_id is not None
+                                    else _string_value(item.get("arguments")) or "{}"
+                                )
+                                tool_call = _tool_call_from_codex(
+                                    item,
+                                    raw_arguments=raw_arguments,
+                                    response_id=response_id,
+                                )
+                                tool_calls.append(tool_call)
+                                yield ProviderToolCallCompleted(
+                                    tool_call=tool_call,
+                                    content_index=len(tool_calls) - 1,
+                                )
+                                if item_id is not None:
+                                    emitted_tool_item_ids.add(item_id)
+                    elif event_type == "error":
+                        failure = ProviderResponseFailed(
+                            message=_codex_error_message(event),
+                            partial_content="".join(chunks),
+                            response_id=response_id,
+                        )
+                        break
+                    elif event_type == "response.failed":
+                        failure = ProviderResponseFailed(
+                            message=_codex_failed_message(event),
+                            partial_content="".join(chunks),
+                            response_id=response_id,
+                        )
+                        break
+                    elif event_type == "response.incomplete":
+                        failure = ProviderResponseFailed(
+                            message=_codex_incomplete_message(event),
+                            partial_content="".join(chunks),
+                            response_id=response_id,
+                        )
+                        break
+        except (ProviderError, httpx.HTTPError) as exc:
+            if not response_started:
+                raise
+            failure = failure or ProviderResponseFailed(
+                message=str(exc),
+                partial_content="".join(chunks),
+                response_id=response_id,
+            )
+
+        if failure is not None:
+            yield failure
+            return
 
         yield ProviderResponseCompleted(
             content="".join(chunks),
@@ -177,12 +197,13 @@ class OpenAICodexProvider:
             finish_reason="tool_calls" if tool_calls else "stop",
         )
 
+    @asynccontextmanager
     async def _create_stream(
         self,
         *,
         body: Mapping[str, object],
         headers: Mapping[str, str],
-    ) -> AsyncIterator[dict[str, object]]:
+    ) -> AsyncIterator[AsyncIterator[dict[str, object]]]:
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=None)
         try:
@@ -198,8 +219,7 @@ class OpenAICodexProvider:
                         f"OpenAI Codex API error ({response.status_code}): "
                         f"{text.decode('utf-8', errors='replace') or response.reason_phrase}"
                     )
-                async for event in _sse_events(response.aiter_lines()):
-                    yield event
+                yield _sse_events(response.aiter_lines())
         finally:
             if owns_client:
                 await client.aclose()

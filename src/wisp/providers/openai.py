@@ -8,7 +8,7 @@ from copy import deepcopy
 from json import JSONDecodeError, loads
 from typing import Literal, cast
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAIError
 from openai.types.responses import (
     EasyInputMessageParam,
     FunctionToolParam,
@@ -89,47 +89,25 @@ class OpenAIProvider:
         emitted_tool_item_ids: set[str] = set()
         chunks: list[str] = []
         tool_calls: list[ToolCall] = []
+        failure: ProviderResponseFailed | None = None
 
         yield ProviderResponseStarted(model=selected_model)
 
-        async for event in stream:
-            if isinstance(event, ResponseCreatedEvent):
-                response_id = event.response.id
-            elif isinstance(event, ResponseTextDeltaEvent | ResponseRefusalDeltaEvent):
-                chunks.append(event.delta)
-                yield ProviderTextDelta(delta=event.delta)
-            elif isinstance(event, ResponseFunctionCallArgumentsDoneEvent):
-                completed_tool_arguments[event.item_id] = event.arguments
-                pending = pending_tool_calls.get(event.item_id)
-                if pending is not None:
-                    tool_call = _tool_call_from_openai(
-                        call_id=pending.call_id,
-                        name=pending.name,
-                        raw_arguments=event.arguments,
-                        response_id=response_id,
-                    )
-                    tool_calls.append(tool_call)
-                    yield ProviderToolCallCompleted(
-                        tool_call=tool_call,
-                        content_index=len(tool_calls) - 1,
-                    )
-                    emitted_tool_item_ids.add(event.item_id)
-            elif isinstance(event, ResponseOutputItemAddedEvent | ResponseOutputItemDoneEvent):
-                if isinstance(event.item, ResponseFunctionToolCall):
-                    item_id = event.item.id
-                    if item_id is not None:
-                        pending_tool_calls[item_id] = event.item
-                    already_emitted = item_id is not None and item_id in emitted_tool_item_ids
-                    if isinstance(event, ResponseOutputItemDoneEvent) and not already_emitted:
-                        raw_arguments = (
-                            completed_tool_arguments.get(item_id, event.item.arguments)
-                            if item_id is not None
-                            else event.item.arguments
-                        )
+        try:
+            async for event in stream:
+                if isinstance(event, ResponseCreatedEvent):
+                    response_id = event.response.id
+                elif isinstance(event, ResponseTextDeltaEvent | ResponseRefusalDeltaEvent):
+                    chunks.append(event.delta)
+                    yield ProviderTextDelta(delta=event.delta)
+                elif isinstance(event, ResponseFunctionCallArgumentsDoneEvent):
+                    completed_tool_arguments[event.item_id] = event.arguments
+                    pending = pending_tool_calls.get(event.item_id)
+                    if pending is not None:
                         tool_call = _tool_call_from_openai(
-                            call_id=event.item.call_id,
-                            name=event.item.name,
-                            raw_arguments=raw_arguments,
+                            call_id=pending.call_id,
+                            name=pending.name,
+                            raw_arguments=event.arguments,
                             response_id=response_id,
                         )
                         tool_calls.append(tool_call)
@@ -137,29 +115,63 @@ class OpenAIProvider:
                             tool_call=tool_call,
                             content_index=len(tool_calls) - 1,
                         )
+                        emitted_tool_item_ids.add(event.item_id)
+                elif isinstance(event, ResponseOutputItemAddedEvent | ResponseOutputItemDoneEvent):
+                    if isinstance(event.item, ResponseFunctionToolCall):
+                        item_id = event.item.id
                         if item_id is not None:
-                            emitted_tool_item_ids.add(item_id)
-            elif isinstance(event, ResponseErrorEvent):
-                yield ProviderResponseFailed(
-                    message=f"OpenAI API error: {event.message}",
-                    partial_content="".join(chunks),
-                    response_id=response_id,
-                )
-                return
-            elif isinstance(event, ResponseFailedEvent):
-                yield ProviderResponseFailed(
-                    message=_failed_response_message(event.response),
-                    partial_content="".join(chunks),
-                    response_id=response_id,
-                )
-                return
-            elif isinstance(event, ResponseIncompleteEvent):
-                yield ProviderResponseFailed(
-                    message=_incomplete_response_message(event.response),
-                    partial_content="".join(chunks),
-                    response_id=response_id,
-                )
-                return
+                            pending_tool_calls[item_id] = event.item
+                        already_emitted = item_id is not None and item_id in emitted_tool_item_ids
+                        if isinstance(event, ResponseOutputItemDoneEvent) and not already_emitted:
+                            raw_arguments = (
+                                completed_tool_arguments.get(item_id, event.item.arguments)
+                                if item_id is not None
+                                else event.item.arguments
+                            )
+                            tool_call = _tool_call_from_openai(
+                                call_id=event.item.call_id,
+                                name=event.item.name,
+                                raw_arguments=raw_arguments,
+                                response_id=response_id,
+                            )
+                            tool_calls.append(tool_call)
+                            yield ProviderToolCallCompleted(
+                                tool_call=tool_call,
+                                content_index=len(tool_calls) - 1,
+                            )
+                            if item_id is not None:
+                                emitted_tool_item_ids.add(item_id)
+                elif isinstance(event, ResponseErrorEvent):
+                    failure = ProviderResponseFailed(
+                        message=f"OpenAI API error: {event.message}",
+                        partial_content="".join(chunks),
+                        response_id=response_id,
+                    )
+                    break
+                elif isinstance(event, ResponseFailedEvent):
+                    failure = ProviderResponseFailed(
+                        message=_failed_response_message(event.response),
+                        partial_content="".join(chunks),
+                        response_id=response_id,
+                    )
+                    break
+                elif isinstance(event, ResponseIncompleteEvent):
+                    failure = ProviderResponseFailed(
+                        message=_incomplete_response_message(event.response),
+                        partial_content="".join(chunks),
+                        response_id=response_id,
+                    )
+                    break
+        except OpenAIError as exc:
+            failure = failure or ProviderResponseFailed(
+                message=f"OpenAI stream error: {exc}",
+                partial_content="".join(chunks),
+                response_id=response_id,
+            )
+
+        if failure is not None:
+            yield failure
+            return
 
         yield ProviderResponseCompleted(
             content="".join(chunks),

@@ -4,8 +4,9 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any, cast
 
 import anyio
+import httpx
 import pytest
-from openai import AsyncOpenAI
+from openai import APIConnectionError, AsyncOpenAI
 from openai.types.responses import (
     Response,
     ResponseCreatedEvent,
@@ -69,6 +70,26 @@ class StubOpenAIProvider(OpenAIProvider):
         async def stream() -> AsyncIterator[ResponseStreamEvent]:
             for event in self.events:
                 yield event
+
+        return stream()
+
+
+class FailingOpenAIProvider(OpenAIProvider):
+    def __init__(self) -> None:
+        super().__init__(api_key="test-key", default_model="default-test-model")
+
+    async def _create_stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[ResponseStreamEvent]:
+        async def stream() -> AsyncIterator[ResponseStreamEvent]:
+            yield _text_delta("partial")
+            raise APIConnectionError(request=httpx.Request("POST", "https://api.openai.com"))
 
         return stream()
 
@@ -471,6 +492,24 @@ def test_openai_provider_emits_failed_terminal_on_incomplete_response_event() ->
         ProviderResponseStarted(model="default-test-model"),
         ProviderResponseFailed(message="OpenAI response incomplete: max_output_tokens"),
     ]
+
+
+def test_openai_provider_normalizes_post_start_sdk_failure() -> None:
+    provider = FailingOpenAIProvider()
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
+
+    events = anyio.run(run)
+
+    assert events[:2] == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderTextDelta(delta="partial"),
+    ]
+    assert events[2] == ProviderResponseFailed(
+        message="OpenAI stream error: Connection error.",
+        partial_content="partial",
+    )
 
 
 def test_openai_provider_requires_api_key(monkeypatch: MonkeyPatch) -> None:

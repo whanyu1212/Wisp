@@ -341,7 +341,9 @@ Providers yield typed events from `wisp.providers`. Each provider stream must em
 `ProviderResponseStarted`, followed by zero or more text/thinking deltas and completed tool calls,
 then exactly one `ProviderResponseCompleted` or `ProviderResponseFailed`. The agent rejects events
 before the start, missing or duplicate terminal boundaries, post-terminal events, and mismatched
-tool-call summaries. Use `ScriptedProvider` to exercise deterministic multi-turn and failure cases
+tool-call summaries. Configuration and request-opening failures may raise before the start event;
+after a response starts, adapters normalize expected transport and provider failures into a failed
+terminal event. Use `ScriptedProvider` to exercise deterministic multi-turn and failure cases
 without a live model.
 
 ```bash

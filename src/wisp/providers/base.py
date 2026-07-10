@@ -67,5 +67,5 @@ class Provider(Protocol):
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        """Yield one typed, terminal provider-response event stream."""
+        """Yield one typed response stream after setup, ending in exactly one terminal event."""
         ...

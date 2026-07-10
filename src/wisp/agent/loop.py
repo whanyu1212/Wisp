@@ -214,6 +214,11 @@ class Agent:
                     ):
                         _require_provider_response_started(response_started)
                         terminal_response = provider_event
+                    else:
+                        raise ProviderProtocolError(
+                            "Provider emitted unsupported event type: "
+                            f"{type(provider_event).__name__}"
+                        )
 
                 if not response_started:
                     raise ProviderProtocolError("Provider stream ended before response_started")

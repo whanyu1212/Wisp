@@ -245,6 +245,13 @@ def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
             ],
             "Provider terminal tool calls do not match streamed tool calls",
         ),
+        (
+            [
+                ProviderResponseStarted(model="test"),
+                cast(ProviderEvent, object()),
+            ],
+            "Provider emitted unsupported event type: object",
+        ),
     ],
 )
 def test_agent_rejects_malformed_provider_lifecycle(
