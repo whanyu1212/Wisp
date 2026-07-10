@@ -25,10 +25,12 @@ from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseFailed,
     ProviderResponseStarted,
+    ProviderRetrying,
     ProviderTextDelta,
     ProviderToolCallCompleted,
 )
 from wisp.providers.openai_codex import OpenAICodexProvider
+from wisp.retry import RetryPolicy
 
 
 class StubOpenAICodexProvider(OpenAICodexProvider):
@@ -204,6 +206,105 @@ def test_openai_codex_provider_does_not_start_before_http_success(tmp_path: Path
             return events
 
     assert anyio.run(run) == []
+
+
+def test_openai_codex_provider_retries_transient_http_opening_failure(tmp_path: Path) -> None:
+    store = _store_with_oauth(tmp_path)
+    attempts = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(503, headers={"retry-after": "0"})
+        return httpx.Response(
+            200,
+            text='data: {"type":"response.output_text.delta","delta":"recovered"}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def run() -> list[object]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAICodexProvider(
+                auth_resolver=StoredProviderAuthResolver(store),
+                client=client,
+                retry_policy=RetryPolicy(
+                    max_retries=1,
+                    base_delay_seconds=0.0001,
+                    max_delay_seconds=1,
+                ),
+            )
+            return [event async for event in provider.stream([Message(role="user", content="hi")])]
+
+    events = anyio.run(run)
+
+    assert attempts == 2
+    assert isinstance(events[0], ProviderRetrying)
+    assert events[0].reason == "server_error"
+    assert events[0].status_code == 503
+    assert events[1:] == [
+        ProviderResponseStarted(model="gpt-5.5"),
+        ProviderTextDelta(delta="recovered"),
+        ProviderResponseCompleted(content="recovered"),
+    ]
+
+
+def test_openai_codex_provider_does_not_retry_terminal_quota_error(tmp_path: Path) -> None:
+    store = _store_with_oauth(tmp_path)
+    attempts = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(429, json={"error": {"code": "insufficient_quota"}})
+
+    async def run() -> list[object]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAICodexProvider(
+                auth_resolver=StoredProviderAuthResolver(store),
+                client=client,
+            )
+            events: list[object] = []
+            with pytest.raises(ProviderError, match=r"OpenAI Codex API error \(429\)"):
+                async for event in provider.stream([Message(role="user", content="hi")]):
+                    events.append(event)
+            return events
+
+    assert anyio.run(run) == []
+    assert attempts == 1
+
+
+def test_openai_codex_provider_raises_after_exhausting_opening_retries(tmp_path: Path) -> None:
+    store = _store_with_oauth(tmp_path)
+    attempts = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(503)
+
+    async def run() -> list[object]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAICodexProvider(
+                auth_resolver=StoredProviderAuthResolver(store),
+                client=client,
+                retry_policy=RetryPolicy(
+                    max_retries=1,
+                    base_delay_seconds=0.0001,
+                    max_delay_seconds=1,
+                ),
+            )
+            events: list[object] = []
+            with pytest.raises(ProviderError, match=r"OpenAI Codex API error \(503\)"):
+                async for event in provider.stream([Message(role="user", content="hi")]):
+                    events.append(event)
+            return events
+
+    events = anyio.run(run)
+
+    assert attempts == 2
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderRetrying)
 
 
 def test_openai_codex_provider_normalizes_post_start_sse_failure(tmp_path: Path) -> None:

@@ -43,7 +43,10 @@ class TuiOptions:
 
 
 async def _preflight_tui_options(options: TuiOptions) -> None:
-    runtime = await build_runtime(auth_path=options.config.auth_path)
+    runtime = await build_runtime(
+        auth_path=options.config.auth_path,
+        retry_policy=options.config.retry_policy,
+    )
     runtime.providers.get(options.config.provider)
     for tool_name in set(options.allowed_tools):
         runtime.tools.get(tool_name)

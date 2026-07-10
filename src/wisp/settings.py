@@ -28,6 +28,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from wisp.retry import RetrySettings
+
 GLOBAL_SETTINGS_PATH = Path("~/.wisp/settings.json")
 PROJECT_SETTINGS_DIRNAME = ".wisp"
 PROJECT_SETTINGS_FILENAME = "settings.json"
@@ -86,6 +88,7 @@ class WispSettings(BaseModel):
     session_dir: str | None = None
     auth_path: str | None = None
     protected_paths: list[str] | None = None
+    retry: RetrySettings | None = None
 
 
 class ResolvedSettings(BaseModel):
@@ -104,6 +107,7 @@ class ResolvedSettings(BaseModel):
     session_dir: str | None = None
     auth_path: str | None = None
     protected_paths: tuple[str, ...] | None = None
+    retry: RetrySettings | None = None
 
 
 def resolve_settings(
@@ -157,12 +161,15 @@ def resolve_settings(
     # is project-controlled, so honoring its ``protected_paths`` would let a repo ship
     # ``{"protected_paths": []}`` to disable the secret-file guard and expose its own
     # ``.env`` to the model. The project may not weaken (or set) this policy.
+    # Retry policy is also user-only: a project must not be able to increase API
+    # spending or force a user to wait longer by changing its local settings.
     return ResolvedSettings(
         provider=_coalesce(project_settings.provider, user_settings.provider),
         model=_coalesce(project_settings.model, user_settings.model),
         session_dir=_coalesce(project_settings.session_dir, user_settings.session_dir),
         auth_path=_coalesce(project_settings.auth_path, user_settings.auth_path),
         protected_paths=_coalesce_paths(user_settings.protected_paths),
+        retry=user_settings.retry,
     )
 
 

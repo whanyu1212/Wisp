@@ -6,6 +6,7 @@ from pytest import MonkeyPatch
 
 from tests.tui_support import *
 from wisp.auth.storage import OAuthCredential
+from wisp.events import MessageStarted, ProviderRetrying
 from wisp.tui import shell as tui_shell_module
 
 
@@ -58,6 +59,38 @@ def test_tui_shell_runs_with_fullscreen_renderer() -> None:
         assert controller.prompts == ["hello"]
         assert "Transcript" in output.getvalue()
         assert "fullscreen response" in output.getvalue()
+
+    anyio.run(run)
+
+
+def test_tui_shell_shows_retry_status_until_response_starts() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.snapshots: list[TuiViewSnapshot] = []
+
+        def view_updated(self, snapshot: TuiViewSnapshot) -> None:
+            self.snapshots.append(snapshot)
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        shell.state.status = TuiStatus.running
+
+        await shell._handle_rpc_event(
+            ProviderRetrying(
+                turn=1,
+                provider="openai",
+                attempt=2,
+                max_attempts=3,
+                delay_seconds=0.5,
+                reason="rate_limit",
+            )
+        )
+        assert renderer.snapshots[-1].status == "retrying 2/3 in 0.5s"
+
+        await shell._handle_rpc_event(MessageStarted(turn=1))
+        assert renderer.snapshots[-1].status == "running"
 
     anyio.run(run)
 

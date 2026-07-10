@@ -51,6 +51,9 @@ export WISP_MODE=              # blank = help/text; set to tui to open the TUI d
 export WISP_TUI_RENDERER=      # line | fullscreen | textual
 export WISP_SESSION_DIR=       # where transcripts are stored (default: ~/.wisp/sessions)
 export WISP_AUTH_FILE=~/.wisp/auth.json
+export WISP_RETRY_MAX_RETRIES= # default: 2 (set 0 to disable retries)
+export WISP_RETRY_BASE_DELAY_SECONDS= # default: 0.5
+export WISP_RETRY_MAX_DELAY_SECONDS=  # default: 30
 export OPENAI_API_KEY=         # required only for the openai provider
 ```
 
@@ -60,12 +63,22 @@ user (global) file lives at `~/.wisp/settings.json`; a project may add
 [Project trust](#project-trust)):
 
 ```json
-{ "provider": "openai", "model": "gpt-5.5", "session_dir": "~/.wisp/sessions" }
+{
+  "provider": "openai",
+  "model": "gpt-5.5",
+  "session_dir": "~/.wisp/sessions",
+  "retry": { "max_retries": 2, "base_delay_seconds": 0.5, "max_delay_seconds": 30 }
+}
 ```
 
 Precedence, highest to lowest: **CLI flag > environment variable > project
 `./.wisp/settings.json` > user `~/.wisp/settings.json` > built-in default.** Never
 commit auth files or real API keys.
+
+Retry settings are user-only, even in a trusted project: a repository cannot increase API spending
+or prolong waits. Wisp retries only a request that failed before the provider started streaming.
+It uses bounded exponential backoff with small jitter, honors reasonable `Retry-After` requests,
+and emits retry progress in JSON/RPC and the TUI. It never replays an already-started response.
 
 > **Migration note:** Wisp no longer reads a project `.env` file. Move any values you
 > kept there into your shell environment (`export …`) or, for durable defaults, into
@@ -240,12 +253,13 @@ The legacy `--mode tui` entrypoint remains for compatibility and honors
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 2`. A successful prompt follows this
+Every outbound `WispEvent` includes `"schema_version": 3`. A successful prompt follows this
 lifecycle (tool events repeat inside a turn when the model requests tools):
 
 ```text
 agent.started
   turn.started
+    provider.retrying *
     message.started
     message.delta *
     message.completed
@@ -260,11 +274,10 @@ agent.completed
 calls. A failed provider response or tool loop emits `error`, a failed `turn.completed`, and a
 failed `agent.completed`; it does not emit `message.completed` for an incomplete response.
 
-Schema v2 replaces the former `token.delta` event with `message.delta` and the former
-`assistant.message` event with `message.completed`. It also adds explicit turn, message-start, and
-agent-completion events, and emits `tool.call` before `tool.execution.started`. JSON/RPC consumers
-should branch on `schema_version` and reject versions they do not support; Wisp's typed RPC client
-does this automatically.
+Schema v3 adds `provider.retrying` before `message.started`, with the next attempt number, bounded
+delay, retry reason, and optional HTTP status. It also retains schema v2's explicit turn/message
+lifecycle and tool ordering. JSON/RPC consumers should branch on `schema_version` and reject
+versions they do not support; Wisp's typed RPC client does this automatically.
 
 ### JSON mode
 
@@ -337,14 +350,14 @@ and yields parsed `WispEvent` objects.
 
 ## Development
 
-Providers yield typed events from `wisp.providers`. Each provider stream must emit exactly one
-`ProviderResponseStarted`, followed by zero or more text/thinking deltas and completed tool calls,
-then exactly one `ProviderResponseCompleted` or `ProviderResponseFailed`. The agent rejects events
-before the start, missing or duplicate terminal boundaries, post-terminal events, and mismatched
-tool-call summaries. Configuration and request-opening failures may raise before the start event;
-after a response starts, adapters normalize expected transport and provider failures into a failed
-terminal event. Use `ScriptedProvider` to exercise deterministic multi-turn and failure cases
-without a live model.
+Providers yield typed events from `wisp.providers`. A stream may emit zero or more
+`ProviderRetrying` events before exactly one `ProviderResponseStarted`, followed by zero or more
+text/thinking deltas and completed tool calls, then exactly one `ProviderResponseCompleted` or
+`ProviderResponseFailed`. The agent rejects retries after start, missing or duplicate terminal
+boundaries, post-terminal events, and mismatched tool-call summaries. Configuration and
+request-opening failures may raise before the start event; after a response starts, adapters
+normalize expected transport and provider failures into a failed terminal event. Use
+`ScriptedProvider` to exercise deterministic multi-turn and failure cases without a live model.
 
 ```bash
 uv sync            # install

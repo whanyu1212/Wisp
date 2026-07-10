@@ -34,6 +34,7 @@ from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseFailed,
     ProviderResponseStarted,
+    ProviderRetrying,
     ProviderTextDelta,
     ProviderToolCallCompleted,
 )
@@ -229,6 +230,43 @@ def test_agent_preserves_provider_text_content_index(tmp_path: Path) -> None:
     assert delta.content_index == 1
 
 
+def test_agent_maps_pre_start_provider_retry_progress(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderRetrying(
+                    attempt=2,
+                    max_attempts=3,
+                    delay_seconds=0.5,
+                    reason="rate_limit",
+                    status_code=429,
+                ),
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="done"),
+            ]
+        ]
+    )
+
+    async def run_agent() -> list[object]:
+        agent = Agent(provider=provider, sessions=JsonlSessionStore(tmp_path))
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+    retry_index = next(
+        index for index, event in enumerate(events) if event.type == "provider.retrying"
+    )
+    message_start_index = next(
+        index for index, event in enumerate(events) if event.type == "message.started"
+    )
+    retry = events[retry_index]
+
+    assert retry_index < message_start_index
+    assert retry.turn == 1
+    assert retry.provider == "scripted"
+    assert retry.attempt == 2
+    assert retry.status_code == 429
+
+
 @pytest.mark.parametrize(
     ("provider_events", "error_message"),
     [
@@ -255,6 +293,18 @@ def test_agent_preserves_provider_text_content_index(tmp_path: Path) -> None:
                 ProviderTextDelta(delta="too late"),
             ],
             "Provider emitted an event after its terminal response",
+        ),
+        (
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderRetrying(
+                    attempt=2,
+                    max_attempts=3,
+                    delay_seconds=0.5,
+                    reason="network",
+                ),
+            ],
+            "Provider emitted retry progress after response_started",
         ),
         (
             [

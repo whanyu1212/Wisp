@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tests.tui_support import *
+from wisp.events import ProviderRetrying
 
 
 def test_tui_shell_uses_injected_renderer() -> None:
@@ -35,6 +36,44 @@ def test_tui_shell_uses_injected_renderer() -> None:
         assert controller.prompts == ["hello"]
 
     anyio.run(run)
+
+
+def test_line_tui_renderer_prints_retry_progress() -> None:
+    console, output = _console()
+    renderer = LineTuiRenderer(console)
+
+    renderer.event(
+        ProviderRetrying(
+            turn=1,
+            provider="openai",
+            attempt=2,
+            max_attempts=3,
+            delay_seconds=0.5,
+            reason="rate_limit",
+            status_code=429,
+        )
+    )
+
+    rendered = output.getvalue()
+    assert "retrying openai: rate_limit (429)" in rendered
+    assert "attempt 2/3 in 0.5s" in rendered
+
+
+def test_fullscreen_tui_renderer_keeps_retry_progress_out_of_transcript() -> None:
+    renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+
+    renderer.event(
+        ProviderRetrying(
+            turn=1,
+            provider="openai",
+            attempt=2,
+            max_attempts=3,
+            delay_seconds=0.5,
+            reason="rate_limit",
+        )
+    )
+
+    assert renderer.state.transcript == []
 
 
 def test_tui_trust_on_closed_input_sends_transient_denial() -> None:

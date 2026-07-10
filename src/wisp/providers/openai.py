@@ -8,7 +8,8 @@ from copy import deepcopy
 from json import JSONDecodeError, loads
 from typing import Literal, cast
 
-from openai import AsyncOpenAI, OpenAIError
+import anyio
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, OpenAIError
 from openai.types.responses import (
     EasyInputMessageParam,
     FunctionToolParam,
@@ -39,10 +40,12 @@ from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseFailed,
     ProviderResponseStarted,
+    ProviderRetrying,
     ProviderTextDelta,
     ProviderToolCallCompleted,
     ToolCall,
 )
+from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
 DEFAULT_OPENAI_MODEL = "gpt-5.5"
 OpenAIRole = Literal["user", "assistant", "system", "developer"]
@@ -59,10 +62,12 @@ class OpenAIProvider:
         api_key: str | None = None,
         default_model: str = DEFAULT_OPENAI_MODEL,
         client: AsyncOpenAI | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.default_model: str | None = default_model
         self._api_key = _normalize_optional(api_key)
         self._client = client
+        self._retry_policy = retry_policy or RetryPolicy()
 
     async def stream(
         self,
@@ -76,13 +81,38 @@ class OpenAIProvider:
         """Stream a normalized OpenAI response lifecycle."""
 
         selected_model = model or self.default_model or DEFAULT_OPENAI_MODEL
-        stream = await self._create_stream(
-            messages,
-            model=selected_model,
-            tools=tools,
-            tool_results=tool_results,
-            previous_response_id=previous_response_id,
-        )
+        stream: AsyncIterator[ResponseStreamEvent] | None = None
+        for retry_number in range(self._retry_policy.max_retries + 1):
+            try:
+                stream = await self._create_stream(
+                    messages,
+                    model=selected_model,
+                    tools=tools,
+                    tool_results=tool_results,
+                    previous_response_id=previous_response_id,
+                )
+                break
+            except OpenAIError as exc:
+                decision = _openai_retry_decision(exc)
+                if decision is None or retry_number >= self._retry_policy.max_retries:
+                    raise
+                delay = retry_delay_seconds(
+                    self._retry_policy,
+                    retry_number=retry_number + 1,
+                    retry_after_seconds=decision.retry_after_seconds,
+                )
+                if delay is None:
+                    raise
+                yield ProviderRetrying(
+                    attempt=retry_number + 2,
+                    max_attempts=self._retry_policy.max_retries + 1,
+                    delay_seconds=delay,
+                    reason=decision.reason,
+                    status_code=decision.status_code,
+                )
+                await anyio.sleep(delay)
+        if stream is None:
+            raise AssertionError("OpenAI retry loop completed without a stream or error")
         response_id: str | None = previous_response_id
         pending_tool_calls: dict[str, ResponseFunctionToolCall] = {}
         completed_tool_arguments: dict[str, str] = {}
@@ -239,8 +269,23 @@ class OpenAIProvider:
                 "OPENAI_API_KEY is required when using the openai provider"
             )
 
-        self._client = AsyncOpenAI(api_key=api_key)
+        # Wisp emits retry progress itself. A caller-injected client stays caller-owned.
+        self._client = AsyncOpenAI(api_key=api_key, max_retries=0)
         return self._client
+
+
+def _openai_retry_decision(exc: OpenAIError) -> RetryDecision | None:
+    if isinstance(exc, APITimeoutError):
+        return RetryDecision(reason="timeout")
+    if isinstance(exc, APIConnectionError):
+        return RetryDecision(reason="network")
+    if isinstance(exc, APIStatusError):
+        return http_retry_decision(
+            status_code=exc.status_code,
+            headers=exc.response.headers,
+            error_body=exc.body,
+        )
+    return None
 
 
 def _tool_call_from_openai(

@@ -8,6 +8,7 @@ from typing import Literal
 
 JsonObject = Mapping[str, object]
 ProviderFinishReason = Literal["stop", "tool_calls", "length"]
+RetryReason = Literal["network", "timeout", "rate_limit", "server_error", "transient_http"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,17 @@ class ProviderResponseStarted:
 
     model: str
     response_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRetrying:
+    """A request-opening failure is waiting before its next provider attempt."""
+
+    attempt: int
+    max_attempts: int
+    delay_seconds: float
+    reason: RetryReason
+    status_code: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +87,7 @@ class ProviderResponseFailed:
 
 type ProviderEvent = (
     ProviderResponseStarted
+    | ProviderRetrying
     | ProviderTextDelta
     | ProviderThinkingDelta
     | ProviderToolCallCompleted
@@ -90,8 +103,10 @@ __all__ = [
     "ProviderResponseCompleted",
     "ProviderResponseFailed",
     "ProviderResponseStarted",
+    "ProviderRetrying",
     "ProviderTextDelta",
     "ProviderThinkingDelta",
     "ProviderToolCallCompleted",
     "ToolCall",
+    "RetryReason",
 ]

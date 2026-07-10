@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
+import wisp.providers.events as provider_events
 from wisp.agent.messages import Message
 from wisp.agent.prompt import (
     DEFAULT_CONTEXT_MAX_CHARS,
@@ -18,6 +19,7 @@ from wisp.events import (
     MessageCompleted,
     MessageDelta,
     MessageStarted,
+    ProviderRetrying,
     SessionSaved,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -187,6 +189,22 @@ class Agent:
                             )
                         response_started = True
                         yield await emit(MessageStarted(turn=turn))
+                    elif isinstance(provider_event, provider_events.ProviderRetrying):
+                        if response_started:
+                            raise ProviderProtocolError(
+                                "Provider emitted retry progress after response_started"
+                            )
+                        yield await emit(
+                            ProviderRetrying(
+                                turn=turn,
+                                provider=self.provider.name,
+                                attempt=provider_event.attempt,
+                                max_attempts=provider_event.max_attempts,
+                                delay_seconds=provider_event.delay_seconds,
+                                reason=provider_event.reason,
+                                status_code=provider_event.status_code,
+                            )
+                        )
                     elif isinstance(provider_event, ProviderTextDelta):
                         _require_provider_response_started(response_started)
                         yield await emit(

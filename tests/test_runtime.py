@@ -5,6 +5,8 @@ import pytest
 
 from wisp.events import AgentStarted
 from wisp.providers.fake import FakeProvider
+from wisp.providers.openai import OpenAIProvider
+from wisp.retry import RetryPolicy
 from wisp.runtime import (
     EventBus,
     ExtensionAPI,
@@ -102,6 +104,18 @@ def test_build_runtime_activates_builtin_providers_and_tools() -> None:
         ("fake", "openai", "openai-codex"),
         ("read", "write", "edit", "bash", "grep", "find", "ls"),
     )
+
+
+def test_build_runtime_passes_retry_policy_to_builtin_providers() -> None:
+    policy = RetryPolicy(max_retries=1, base_delay_seconds=1, max_delay_seconds=2)
+
+    async def run() -> RetryPolicy:
+        runtime = await build_runtime(retry_policy=policy)
+        provider = runtime.providers.get("openai")
+        assert isinstance(provider, OpenAIProvider)
+        return provider._retry_policy  # noqa: SLF001
+
+    assert anyio.run(run) == policy
 
 
 def test_event_bus_emits_to_named_and_wildcard_handlers() -> None:
