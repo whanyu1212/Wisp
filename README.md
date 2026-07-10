@@ -74,9 +74,9 @@ commit auth files or real API keys.
 
 ## Project trust
 
-Project-local configuration — the `./.wisp/settings.json` file, context files, and
-project extensions — is applied **only for projects you trust**. The first time you
-run Wisp in an untrusted directory it asks:
+Project-local configuration — the `./.wisp/settings.json` file, context files
+(`AGENTS.md` / `CLAUDE.md`), and project extensions — is applied **only for projects you
+trust**. The first time you run Wisp in an untrusted directory it asks:
 
 ```
 Do you trust the files in /path/to/project?
@@ -178,11 +178,21 @@ stale project context from earlier turns is not replayed as instructions.
 
 ### Prompt & project context
 
-Each turn sends a small default coding-agent system prompt plus a bounded project-context message
-before the user prompt. The context includes the working directory, git branch and a capped
-status summary, detected root files (`pyproject.toml`, `package.json`, `README.md`, …), and the
-tools currently exposed to the model. It is informational only and is persisted to the session so
-the provider-visible input stays auditable.
+Each turn sends a default coding-agent system prompt plus a bounded project-context message before
+the user prompt. The context includes the working directory, git branch and a capped status
+summary, detected root files (`pyproject.toml`, `package.json`, `README.md`, …), the tools
+currently exposed to the model, and trusted project instructions from context files.
+
+Context files are loaded from the trusted context root down to the current working directory,
+with parent instructions before nested ones. In each directory Wisp uses the first Pi-compatible
+match in this order: `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`. Symlinked, protected,
+or out-of-scope context files are skipped. Project instructions are bounded separately from the
+tool list so large instruction files cannot hide the tools available to the model.
+
+Wisp intentionally trust-gates project-local context files. If the project is untrusted, Wisp
+does not read or mention those files and sends only the safe untrusted-context notice plus the
+exposed tool list. This is stricter than Pi's broader context loading, but keeps project guidance
+inside the same trust boundary as project settings and future project extensions.
 
 ## TUI
 

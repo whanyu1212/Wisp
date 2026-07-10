@@ -253,6 +253,8 @@ def test_agent_skips_project_context_when_untrusted(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (project / "AGENTS.md").write_text("Never show untrusted agent rules.\n", encoding="utf-8")
+    (project / "CLAUDE.md").write_text("Never show untrusted Claude rules.\n", encoding="utf-8")
     tool = ToolSpec(
         name="lookup",
         description="Look something up.",
@@ -276,6 +278,10 @@ def test_agent_skips_project_context_when_untrusted(tmp_path: Path) -> None:
     assert "project context: skipped because this project is not trusted" in context
     assert str(project.resolve(strict=False)) not in context
     assert "pyproject.toml" not in context
+    assert "AGENTS.md" not in context
+    assert "CLAUDE.md" not in context
+    assert "Never show untrusted agent rules." not in context
+    assert "Never show untrusted Claude rules." not in context
     assert "allowed tools:\n  - lookup: Look something up." in context
 
 
@@ -284,6 +290,7 @@ def test_agent_includes_project_context_when_trusted(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (project / "AGENTS.md").write_text("Trusted agent rules.\n", encoding="utf-8")
 
     async def run_agent() -> list[object]:
         agent = Agent(
@@ -300,6 +307,7 @@ def test_agent_includes_project_context_when_trusted(tmp_path: Path) -> None:
     context = provider.seen_messages[1].content
     assert f"cwd: {project.resolve(strict=False)}" in context
     assert "project files:\n  pyproject.toml" in context
+    assert "--- AGENTS.md ---\nTrusted agent rules." in context
 
 
 def test_agent_executes_tool_calls_and_continues_to_final_response(tmp_path: Path) -> None:

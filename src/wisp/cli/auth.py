@@ -10,6 +10,7 @@ import anyio
 import typer
 from rich.console import Console
 
+from wisp.agent.prompt import resolve_project_context_root
 from wisp.auth.openai_codex import OpenAICodexLoginMethod, login_openai_codex
 from wisp.auth.storage import ApiKeyCredential, AuthCredential, JsonAuthStore, OAuthCredential
 from wisp.config import WispConfig
@@ -114,8 +115,13 @@ def _store_from_options(auth_file: Path | None) -> JsonAuthStore:
     # (WISP_TRUST or the global trust store), never prompt from a credential command.
     # Untrusted remains fail-closed, while an already trusted project can direct
     # auth status/login/logout to its configured auth_path.
-    trusted = _cli_trust.trusted_noninteractive(Path.cwd())
-    config = WispConfig.from_env(auth_path=auth_file, trusted=trusted)
+    project_root = resolve_project_context_root(Path.cwd())
+    trusted = _cli_trust.trusted_noninteractive(project_root)
+    config = WispConfig.from_env(
+        auth_path=auth_file,
+        project_dir=project_root,
+        trusted=trusted,
+    )
     return JsonAuthStore(config.auth_path)
 
 

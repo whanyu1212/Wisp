@@ -50,6 +50,7 @@ class WispConfig(BaseModel):
         model: str | None = None,
         session_dir: Path | None = None,
         auth_path: Path | None = None,
+        project_dir: Path | None = None,
         trusted: bool = False,
     ) -> WispConfig:
         """Build config from environment, settings files, and explicit overrides.
@@ -59,18 +60,19 @@ class WispConfig(BaseModel):
         built-in default. Settings files only fill keys left unset by the argument
         and environment layers.
 
-        ``trusted`` is the project-trust decision (resolved beforehand from safe
-        sources — the global trust store or the real-process ``WISP_TRUST``, never
-        from project-controlled config). It gates the project ``.wisp/settings.json``
-        layer, which can set ``provider``, ``model``, ``session_dir``, or ``auth_path``
-        and would otherwise let an untrusted repo redirect Wisp's credential file or
-        override user defaults. It defaults to ``False`` so a caller that forgets to
-        pass a decision fails closed — an untrusted project contributes no local
-        settings. Higher-precedence layers (explicit args, environment, user settings)
-        are unaffected by trust.
+        ``project_dir`` selects the directory whose project settings layer is read;
+        it defaults to the current working directory. ``trusted`` is the project-trust
+        decision (resolved beforehand from safe sources — the global trust store or
+        the real-process ``WISP_TRUST``, never from project-controlled config). It
+        gates the project ``.wisp/settings.json`` layer, which can set ``provider``,
+        ``model``, ``session_dir``, or ``auth_path`` and would otherwise let an
+        untrusted repo redirect Wisp's credential file or override user defaults. It
+        defaults to ``False`` so a caller that forgets to pass a decision fails closed
+        — an untrusted project contributes no local settings. Higher-precedence layers
+        (explicit args, environment, user settings) are unaffected by trust.
         """
 
-        settings = resolve_settings(trust_project=trusted)
+        settings = resolve_settings(project_dir=project_dir, trust_project=trusted)
 
         provider_name = _first_non_empty(
             provider,

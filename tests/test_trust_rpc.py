@@ -96,9 +96,13 @@ def test_rpc_trusted_rebuild_preserves_configure_overrides(
     from wisp.cli import rpc
     from wisp.config import WispConfig
 
-    project_auth = tmp_path / "project-auth.json"
-    (tmp_path / ".wisp").mkdir()
-    (tmp_path / ".wisp" / "settings.json").write_text(
+    project = tmp_path / "project"
+    nested = project / "src"
+    nested.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'example'\n", encoding="utf-8")
+    project_auth = project / "project-auth.json"
+    (project / ".wisp").mkdir()
+    (project / ".wisp" / "settings.json").write_text(
         json.dumps(
             {
                 "provider": "fake",
@@ -108,12 +112,12 @@ def test_rpc_trusted_rebuild_preserves_configure_overrides(
         ),
         encoding="utf-8",
     )
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(nested)
     monkeypatch.setenv("WISP_PROVIDER", "fake")
     monkeypatch.setenv("WISP_MODEL", "")
     monkeypatch.setenv("WISP_TRUST", "1")
 
-    session_dir = tmp_path / "sessions"
+    session_dir = project / "sessions"
     config = WispConfig.from_env(session_dir=session_dir, trusted=False)
 
     async def fake_read_rpc_stdin(send: Any, _stop_reader: Any) -> None:

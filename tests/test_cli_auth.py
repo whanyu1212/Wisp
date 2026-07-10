@@ -126,6 +126,30 @@ def test_auth_commands_use_trusted_project_auth_path(
     assert logout.stdout == "logged out: openai-codex\n"
 
 
+def test_auth_commands_use_trusted_root_settings_from_subdirectory(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    nested = project / "packages" / "app"
+    nested.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'example'\n", encoding="utf-8")
+    project_auth = project / ".wisp" / "auth.json"
+    _write_project_settings(project, auth_path=str(project_auth))
+    _trust_project(project, tmp_path / "trust.json", monkeypatch)
+    monkeypatch.chdir(nested)
+    monkeypatch.setattr(cli_auth_module, "_login_openai_codex", _fake_oauth_login)
+
+    result = CliRunner().invoke(
+        app,
+        ["auth", "login", "openai-codex", "--method", "device-code"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"credentials saved: {project_auth}" in result.stdout
+    assert project_auth.exists()
+
+
 def test_auth_commands_ignore_untrusted_project_auth_path(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

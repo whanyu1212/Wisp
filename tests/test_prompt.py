@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 from pytest import MonkeyPatch
@@ -9,6 +10,7 @@ from wisp.agent.prompt import (
     build_project_context,
     build_prompt_messages,
     build_untrusted_project_context,
+    resolve_project_context_root,
 )
 from wisp.providers.base import ToolSpec
 
@@ -33,6 +35,8 @@ def test_build_prompt_messages_includes_default_instructions_and_context(tmp_pat
 
 def test_build_prompt_messages_can_skip_project_context(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("Do project-specific things.\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text("Legacy Claude guidance.\n", encoding="utf-8")
     tool = ToolSpec(
         name="read",
         description="Read a UTF-8 text file.",
@@ -48,6 +52,10 @@ def test_build_prompt_messages_can_skip_project_context(tmp_path: Path) -> None:
     context = messages[1].content
     assert str(tmp_path.resolve(strict=False)) not in context
     assert "pyproject.toml" not in context
+    assert "AGENTS.md" not in context
+    assert "CLAUDE.md" not in context
+    assert "Do project-specific things." not in context
+    assert "Legacy Claude guidance." not in context
     assert "git:" not in context
     assert "project context: skipped because this project is not trusted" in context
     assert "allowed tools:\n  - read: Read a UTF-8 text file." in context
@@ -56,7 +64,217 @@ def test_build_prompt_messages_can_skip_project_context(tmp_path: Path) -> None:
 def test_project_context_reports_no_allowed_tools(tmp_path: Path) -> None:
     context = build_project_context(cwd=tmp_path, tools=[])
 
+    assert "project instructions:" not in context
     assert "allowed tools: none exposed to the model" in context
+
+
+def test_project_context_uses_first_root_context_file_by_pi_precedence(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("Prefer small typed Python modules.\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text("Legacy Claude-compatible notes.\n", encoding="utf-8")
+
+    context = build_project_context(cwd=tmp_path)
+
+    assert "project instructions:" in context
+    assert "--- AGENTS.md ---\nPrefer small typed Python modules." in context
+    assert "--- CLAUDE.md ---" not in context
+    assert "Legacy Claude-compatible notes." not in context
+
+
+def test_project_context_falls_back_to_claude_context_file(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text("Claude-compatible notes.\n", encoding="utf-8")
+
+    context = build_project_context(cwd=tmp_path)
+
+    assert "--- CLAUDE.md ---\nClaude-compatible notes." in context
+
+
+def test_project_context_supports_uppercase_context_file_names(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "AGENTS.MD").write_text("Uppercase agent notes.\n", encoding="utf-8")
+
+    context = build_project_context(cwd=tmp_path)
+
+    assert "Uppercase agent notes." in context
+    assert "--- AGENTS.md ---" in context or "--- AGENTS.MD ---" in context
+
+
+def test_project_context_includes_nested_context_files_root_to_cwd(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    subdir = project / "packages" / "app"
+    subdir.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (project / "AGENTS.md").write_text("Root agent rules.\n", encoding="utf-8")
+    (project / "CLAUDE.md").write_text("Root Claude rules.\n", encoding="utf-8")
+    (subdir / "AGENTS.md").write_text("App agent rules.\n", encoding="utf-8")
+    (subdir / "CLAUDE.md").write_text("App Claude rules.\n", encoding="utf-8")
+
+    context = build_project_context(cwd=subdir, trusted_context_root=project)
+
+    expected_order = [
+        "--- AGENTS.md ---",
+        "Root agent rules.",
+        "--- packages/app/AGENTS.md ---",
+        "App agent rules.",
+    ]
+    positions = [context.index(item) for item in expected_order]
+    assert positions == sorted(positions)
+    assert "Root Claude rules." not in context
+    assert "App Claude rules." not in context
+
+
+def test_project_context_defaults_to_project_root_for_context_files(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    subdir = project / "packages" / "app"
+    subdir.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (project / "AGENTS.md").write_text("Parent agent rules.\n", encoding="utf-8")
+    (subdir / "AGENTS.md").write_text("Trusted cwd rules.\n", encoding="utf-8")
+
+    context = build_project_context(cwd=subdir)
+
+    assert "--- AGENTS.md ---\nParent agent rules." in context
+    assert "--- packages/app/AGENTS.md ---\nTrusted cwd rules." in context
+
+
+def test_project_context_can_restrict_context_files_to_explicit_trusted_root(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    subdir = project / "packages" / "app"
+    subdir.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (project / "AGENTS.md").write_text("Parent agent rules.\n", encoding="utf-8")
+    (subdir / "AGENTS.md").write_text("Trusted cwd rules.\n", encoding="utf-8")
+
+    context = build_project_context(cwd=subdir, trusted_context_root=subdir)
+
+    assert "Parent agent rules." not in context
+    assert "--- packages/app/AGENTS.md ---\nTrusted cwd rules." in context
+
+
+def test_project_context_uses_context_file_as_root_marker(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    subdir = project / "src"
+    subdir.mkdir(parents=True)
+    (project / "AGENTS.md").write_text("Root-only agent guidance.\n", encoding="utf-8")
+    monkeypatch.setattr(prompt_module, "_run_git", lambda _cwd, *args: None)
+
+    context = build_project_context(cwd=subdir)
+
+    assert f"project root: {project.resolve(strict=False)}" in context
+    assert "--- AGENTS.md ---\nRoot-only agent guidance." in context
+
+
+def test_build_prompt_messages_loads_root_context_when_started_in_subdirectory(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    subdir = project / "packages" / "app"
+    subdir.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (project / "AGENTS.md").write_text("Repo root guidance.\n", encoding="utf-8")
+
+    messages = build_prompt_messages(cwd=subdir)
+
+    assert "--- AGENTS.md ---\nRepo root guidance." in messages[1].content
+
+
+def test_resolve_project_context_root_detects_parent_project(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    subdir = project / "packages" / "app"
+    subdir.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+
+    assert resolve_project_context_root(subdir) == project.resolve(strict=False)
+
+
+def test_project_context_file_budget_truncates_only_instructions(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("A" * 200, encoding="utf-8")
+    tool = ToolSpec(
+        name="read",
+        description="Read a UTF-8 text file.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    context = build_project_context(cwd=tmp_path, tools=[tool], max_context_file_chars=80)
+
+    assert "project instructions:" in context
+    assert "[context truncated]" in context
+    assert "project files:\n  pyproject.toml" in context
+    assert "allowed tools:\n  - read: Read a UTF-8 text file." in context
+
+
+def test_project_context_file_read_is_bounded(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    reads: list[int] = []
+
+    class TrackingText(io.StringIO):
+        def read(self, size: int | None = -1) -> str:
+            reads.append(-1 if size is None else size)
+            return super().read(size)
+
+    def fake_open(
+        self: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> TrackingText:
+        return TrackingText("A" * 1_000)
+
+    monkeypatch.setattr(Path, "open", fake_open)
+
+    content = prompt_module._read_context_file(tmp_path / "AGENTS.md", max_chars=80)
+
+    assert reads == [81]
+    assert len(content) <= 80
+    assert "[context truncated]" in content
+
+
+def test_project_context_skips_symlink_context_file(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=leak\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").symlink_to(tmp_path / ".env")
+    (tmp_path / "CLAUDE.md").write_text("fallback instructions\n", encoding="utf-8")
+
+    context = build_project_context(cwd=tmp_path)
+
+    assert "SECRET=leak" not in context
+    assert "--- CLAUDE.md ---\nfallback instructions" in context
+
+
+def test_project_context_skips_protected_context_file(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("SECRET=leak\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text("safe fallback\n", encoding="utf-8")
+
+    context = build_project_context(cwd=tmp_path, protected_paths=("AGENTS.md",))
+
+    assert "SECRET=leak" not in context
+    assert "--- CLAUDE.md ---\nsafe fallback" in context
+
+
+def test_long_project_context_file_cannot_hide_allowed_tools(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("A" * 5_000, encoding="utf-8")
+    tool = ToolSpec(
+        name="read",
+        description="Read a UTF-8 text file.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    context = build_project_context(cwd=tmp_path, tools=[tool], max_chars=1_200)
+
+    assert len(context) <= 1_200
+    assert "allowed tools:\n  - read: Read a UTF-8 text file." in context
+    assert "project instructions:" in context
+    assert "[context truncated]" in context
+    assert context.index("allowed tools:") < context.index("project instructions:")
 
 
 def test_untrusted_project_context_reports_tools_without_local_context(tmp_path: Path) -> None:
@@ -127,7 +345,7 @@ def test_project_context_includes_bounded_git_status(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    responses = {
+    responses: dict[tuple[str, ...], str] = {
         ("rev-parse", "--is-inside-work-tree"): "true",
         ("branch", "--show-current"): "feature/test",
         ("status", "--short"): "\n".join(f" M file-{index}.py" for index in range(20)),
