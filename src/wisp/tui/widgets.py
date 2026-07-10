@@ -16,18 +16,165 @@ Stage 2 replaces the append-only ``RichLog`` transcript with a
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 
+from textual import events
 from textual.app import ComposeResult
 from textual.await_complete import AwaitComplete
-from textual.containers import VerticalScroll
+from textual.containers import Vertical, VerticalScroll
+from textual.message import Message
 from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Markdown, OptionList, Static
 from textual.widgets.option_list import Option
 
+from wisp.events import ToolApprovalRequested, TrustRequested
 from wisp.tui.commands import SLASH_COMMAND_SPECS, SlashCommandSpec
-from wisp.tui.rendering import _markup_escape
+from wisp.tui.rendering import _format_cwd_for_footer, _markup_escape
+
+_DECISION_PREVIEW_LINES = 5
+_DECISION_PREVIEW_CHARS = 320
+
+
+@dataclass(frozen=True)
+class _DecisionContent:
+    title: str
+    meta: str
+    detail: str
+
+
+def _bounded_decision_preview(
+    lines: list[str],
+    *,
+    max_lines: int = _DECISION_PREVIEW_LINES,
+    max_chars: int = _DECISION_PREVIEW_CHARS,
+) -> str:
+    """Return a compact preview with an explicit final truncation marker."""
+
+    normalized: list[str] = []
+    for line in lines:
+        normalized.extend(line.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
+
+    selected: list[str] = []
+    used_chars = 0
+    truncated = False
+    for line in normalized:
+        if len(selected) >= max_lines or used_chars >= max_chars:
+            truncated = True
+            break
+        remaining = max_chars - used_chars
+        if len(line) > remaining:
+            selected.append(line[:remaining])
+            used_chars += remaining
+            truncated = True
+            break
+        selected.append(line)
+        used_chars += len(line)
+
+    if len(selected) < len(normalized):
+        truncated = True
+    if not selected:
+        selected.append("")
+    if truncated:
+        if len(selected) >= max_lines:
+            selected[-1] = "... preview truncated"
+        else:
+            selected.append("... preview truncated")
+    return "\n".join(selected)
+
+
+def _safety_label(safety: str) -> str:
+    return {
+        "read": "read-only access",
+        "mutating": "file mutation",
+        "command": "command execution",
+    }.get(safety, safety)
+
+
+def _approval_content(event: ToolApprovalRequested, *, cwd: str) -> _DecisionContent:
+    arguments = event.arguments
+    cwd_text = _format_cwd_for_footer(cwd)
+    safety = _safety_label(event.safety)
+
+    if event.name == "bash":
+        command = arguments.get("command")
+        command_text = command if isinstance(command, str) else ""
+        lines = [
+            f"$ {line}" if index == 0 else f"  {line}"
+            for index, line in enumerate(command_text.splitlines() or [""])
+        ]
+        timeout = arguments.get("timeout")
+        if timeout is not None:
+            lines.append(f"timeout: {timeout}s")
+        return _DecisionContent(
+            title="Run command?",
+            meta=f"bash - {safety}\ncwd: {cwd_text}",
+            detail=_bounded_decision_preview(lines),
+        )
+
+    if event.name == "write":
+        path = arguments.get("path")
+        path_text = path if isinstance(path, str) else "unknown path"
+        content = arguments.get("content")
+        content_text = content if isinstance(content, str) else ""
+        line_count = len(content_text.splitlines())
+        byte_count = len(content_text.encode("utf-8"))
+        lines = [f"content: {line_count} lines, {byte_count} bytes"]
+        lines.extend(content_text.splitlines())
+        return _DecisionContent(
+            title="Write file?",
+            meta=f"{path_text}\n{safety} - cwd: {cwd_text}",
+            detail=_bounded_decision_preview(lines),
+        )
+
+    if event.name == "edit":
+        path = arguments.get("path")
+        path_text = path if isinstance(path, str) else "unknown path"
+        edits = arguments.get("edits")
+        edit_items = edits if isinstance(edits, list) else []
+        lines = [f"replacements: {len(edit_items)}"]
+        for item in edit_items[:2]:
+            if not isinstance(item, Mapping):
+                continue
+            old_text = item.get("oldText")
+            new_text = item.get("newText")
+            old_line = old_text if isinstance(old_text, str) else ""
+            new_line = new_text if isinstance(new_text, str) else ""
+            lines.append(f"- {old_line}")
+            lines.append(f"+ {new_line}")
+        if len(edit_items) > 2:
+            lines.append(f"... {len(edit_items) - 2} more replacements")
+        return _DecisionContent(
+            title="Edit file?",
+            meta=f"{path_text}\n{safety} - cwd: {cwd_text}",
+            detail=_bounded_decision_preview(lines),
+        )
+
+    try:
+        serialized = json.dumps(
+            arguments,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+    except (TypeError, ValueError):
+        serialized = json.dumps(str(arguments), ensure_ascii=False)
+    return _DecisionContent(
+        title=f"Allow {event.name}?",
+        meta=f"{safety} - cwd: {cwd_text}",
+        detail=_bounded_decision_preview(serialized.splitlines()),
+    )
+
+
+def _trust_content(event: TrustRequested) -> _DecisionContent:
+    return _DecisionContent(
+        title="Trust this project?",
+        meta=str(event.project_path),
+        detail="Trusting allows project-local settings and instructions to load.",
+    )
 
 
 def _format_duration(seconds: float) -> str:
@@ -66,6 +213,144 @@ def _summarize_arguments(arguments: object, *, limit: int = 48) -> str:
             text = f"{text[: limit - 1]}…"
         parts.append(f"{key}={text}")
     return ", ".join(parts)
+
+
+class DecisionPanel(Vertical):
+    """Deny-first approval/trust selector that temporarily replaces the composer."""
+
+    DEFAULT_CSS = """
+    DecisionPanel {
+        display: none;
+        height: auto;
+        max-height: 12;
+        margin: 0 1;
+        padding: 0 1;
+        border-left: heavy $warning;
+        background: $surface;
+    }
+
+    DecisionPanel #decision-title {
+        height: 1;
+        color: $warning;
+        text-style: bold;
+    }
+
+    DecisionPanel #decision-meta {
+        height: auto;
+        max-height: 2;
+        color: $text-muted;
+    }
+
+    DecisionPanel #decision-detail {
+        height: auto;
+        max-height: 5;
+        padding: 0 1;
+        color: $text;
+    }
+
+    DecisionPanel #decision-options {
+        height: 2;
+        border: none;
+        background: transparent;
+        padding: 0;
+        scrollbar-size: 0 0;
+    }
+
+    DecisionPanel #decision-options > .option-list--option-highlighted {
+        background: $accent 30%;
+    }
+    """
+
+    class Selected(Message):
+        """A decision answer ready for the existing TUI prompt stream."""
+
+        def __init__(self, answer: str) -> None:
+            super().__init__()
+            self.answer = answer
+
+    def __init__(self, id: str | None = None) -> None:  # noqa: A002 - Textual's param name
+        super().__init__(id=id)
+        self._title = Static("", id="decision-title", markup=False)
+        self._meta = Static("", id="decision-meta", markup=False)
+        self._detail = Static("", id="decision-detail", markup=False)
+        self._options = OptionList(id="decision-options")
+        self._submitted = False
+
+    def compose(self) -> ComposeResult:
+        yield self._title
+        yield self._meta
+        yield self._detail
+        yield self._options
+
+    @property
+    def is_open(self) -> bool:
+        return self.display
+
+    def show_approval(self, event: ToolApprovalRequested, *, cwd: str) -> None:
+        content = _approval_content(event, cwd=cwd)
+        self._show(
+            content,
+            approve_label="Y  Approve once",
+            deny_label="N  Deny (default)",
+        )
+
+    def show_trust(self, event: TrustRequested) -> None:
+        self._show(
+            _trust_content(event),
+            approve_label="Y  Trust project",
+            deny_label="N  Keep untrusted (default)",
+        )
+
+    def _show(
+        self,
+        content: _DecisionContent,
+        *,
+        approve_label: str,
+        deny_label: str,
+    ) -> None:
+        self._submitted = False
+        self._title.update(content.title)
+        self._meta.update(content.meta)
+        self._detail.update(content.detail)
+        self._options.clear_options()
+        self._options.add_options(
+            [
+                Option(approve_label, id="approve"),
+                Option(deny_label, id="deny"),
+            ]
+        )
+        self._options.highlighted = 1
+        self.display = True
+        self._options.focus()
+
+    def hide(self) -> None:
+        self.display = False
+        self._submitted = False
+
+    def submit_answer(self, answer: str) -> None:
+        if self._submitted or not self.is_open:
+            return
+        self._submitted = True
+        self.post_message(self.Selected(answer))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list is not self._options:
+            return
+        event.stop()
+        self.submit_answer("y" if event.option.id == "approve" else "n")
+
+    def on_key(self, event: events.Key) -> None:
+        if not self.is_open:
+            return
+        key = event.key.lower()
+        if key == "y":
+            self.submit_answer("y")
+        elif key in {"n", "escape"}:
+            self.submit_answer("n")
+        else:
+            return
+        event.prevent_default()
+        event.stop()
 
 
 class Transcript(VerticalScroll):

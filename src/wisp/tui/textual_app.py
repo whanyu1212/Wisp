@@ -33,6 +33,7 @@ from wisp.tui.rendering import (
 )
 from wisp.tui.theme import WISP_THEMES, role_styles
 from wisp.tui.widgets import (
+    DecisionPanel,
     LineMessage,
     SlashSuggest,
     StreamMessage,
@@ -219,6 +220,7 @@ class TextualTui(App[None]):
         self._transcript: Transcript | None = None
         self._input: Input | None = None
         self._suggest: SlashSuggest | None = None
+        self._decision_panel: DecisionPanel | None = None
         self._current_prompt = "wisp> "
         self._runner: Callable[[], Awaitable[None]] | None = None
         self._runner_error: Exception | None = None
@@ -249,6 +251,7 @@ class TextualTui(App[None]):
             # The slash-command menu floats on the overlay layer anchored near the
             # input; yielded here so it shares the Vertical's coordinate space.
             yield SlashSuggest(id="suggest")
+            yield DecisionPanel(id="decision-panel")
             yield Input(placeholder=_input_placeholder("wisp> "), id="input")
             with Horizontal(id="status-bar"):
                 # markup=False: the footer is always plain data (cwd, session,
@@ -273,6 +276,7 @@ class TextualTui(App[None]):
         self._status = self.query_one("#status", Static)
         self._input = self.query_one("#input", Input)
         self._suggest = self.query_one("#suggest", SlashSuggest)
+        self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
         self._input.focus()  # keep the Input as the resting focus
         if self._runner is not None:
             self.run_worker(self._run_and_exit(), exclusive=True)
@@ -311,12 +315,24 @@ class TextualTui(App[None]):
         """
         if self._input is not None:
             self._input.value = ""
+        self._submit_line(text)
+
+    def _submit_decision_line(self, text: str) -> None:
+        # The decision overlay temporarily hides the composer. Keep its draft
+        # untouched so approval never discards a follow-up the user was typing.
+        self._submit_line(text)
+
+    def _submit_line(self, text: str) -> None:
         if self._on_submit is not None:
             self._on_submit()
         try:
             self._prompt_send.send_nowait(text)
         except anyio.WouldBlock:
             self.write_error("input buffer full; command dropped")
+
+    def on_decision_panel_selected(self, event: DecisionPanel.Selected) -> None:
+        event.stop()
+        self._submit_decision_line(event.answer)
 
     def prefill_command(self, prefix: str) -> None:
         """Put a command prefix in the Input, cursor at the end, without submitting.
@@ -476,6 +492,35 @@ class TextualTui(App[None]):
         self._current_prompt = hint
         if self._input is not None:
             self._input.placeholder = _input_placeholder(hint)
+
+    def show_approval(self, event: ToolApprovalRequested, *, cwd: str) -> None:
+        panel = self._decision_panel
+        if panel is None:
+            return
+        if self._suggest is not None:
+            self._suggest.hide()
+        if self._input is not None:
+            self._input.display = False
+        panel.show_approval(event, cwd=cwd)
+
+    def show_trust(self, event: TrustRequested) -> None:
+        panel = self._decision_panel
+        if panel is None:
+            return
+        if self._suggest is not None:
+            self._suggest.hide()
+        if self._input is not None:
+            self._input.display = False
+        panel.show_trust(event)
+
+    def hide_decision(self) -> None:
+        panel = self._decision_panel
+        if panel is None or not panel.is_open:
+            return
+        panel.hide()
+        if self._input is not None:
+            self._input.display = True
+            self._input.focus()
 
     def show_working_indicator(self) -> None:
         if self._transcript is None or self._working_widget is not None:
@@ -658,6 +703,7 @@ class TextualTuiRenderer:
         # Mode the shell last reported via view_updated(); this is the mode in
         # effect while the user types the next line.
         self._visible_input_mode = "idle"
+        self._visible_cwd = ""
         # Mode captured at the instant a line was submitted. It can differ from
         # the mode the shell polled when read_prompt() began waiting (e.g. a
         # tool approval that arrived mid-line), so the shell reconciles against
@@ -671,6 +717,7 @@ class TextualTuiRenderer:
 
     def view_updated(self, snapshot: TuiViewSnapshot) -> None:
         self._visible_input_mode = snapshot.input_mode
+        self._visible_cwd = snapshot.cwd
         self.app.set_input_hint(snapshot.input_hint)
         # Size the footer to the #status content region, not the app width — the
         # status bar's horizontal padding makes the render area narrower, so app
@@ -678,6 +725,8 @@ class TextualTuiRenderer:
         self.app.set_status(format_tui_footer_text(snapshot, width=self.app.status_width()))
         if snapshot.input_mode != "running":
             self.app.hide_working_indicator()
+        if snapshot.input_mode not in {"approval", "trust"}:
+            self.app.hide_decision()
 
     def _tool_elapsed(self, call_id: str, finished: datetime) -> float | None:
         # True wall-clock duration for a resolving tool call: result timestamp −
@@ -758,6 +807,7 @@ class TextualTuiRenderer:
 
     def send_failed(self, action: str, error: object) -> None:
         self.app.hide_working_indicator()
+        self.app.hide_decision()
         self._abort_pending_tools(f"send failed: {action}")
         self.app.write_error(f"failed to send {action}: {error}")
 
@@ -781,13 +831,11 @@ class TextualTuiRenderer:
 
     def approval_request(self, event: ToolApprovalRequested) -> None:
         self.app.hide_working_indicator()
-        self.app.write_notice(
-            f"? approval required {event.name} ({event.safety}) {event.arguments}"
-        )
+        self.app.show_approval(event, cwd=self._visible_cwd)
 
     def trust_request(self, event: TrustRequested) -> None:
         self.app.hide_working_indicator()
-        self.app.write_notice(f"? trust this project? {event.project_path}")
+        self.app.show_trust(event)
 
     def event(self, event: KnownWispEvent) -> None:
         # Typed dispatch mirroring LineTuiRenderer.event() so tool calls, tool
