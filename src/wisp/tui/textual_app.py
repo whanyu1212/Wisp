@@ -10,7 +10,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Header, Input, Static
+from textual.widgets import Header, Static, TextArea
 
 from wisp.events import (
     ErrorEvent,
@@ -35,6 +35,7 @@ from wisp.tui.theme import WISP_THEMES, role_styles
 from wisp.tui.widgets import (
     DecisionPanel,
     LineMessage,
+    PromptEditor,
     SlashSuggest,
     StreamMessage,
     ToolCard,
@@ -179,6 +180,7 @@ class TextualTui(App[None]):
        `❯` prompt glyph (in the placeholder) is the visual anchor, not a frame. */
     #input {
         height: auto;
+        max-height: 8;
         border: none;
         border-bottom: heavy $surface-lighten-2;
         padding: 0 1;
@@ -190,14 +192,13 @@ class TextualTui(App[None]):
     }
     """
 
-    # priority=True so these fire even while the Input widget has focus;
-    # otherwise Input swallows ctrl+d before it reaches the app bindings.
+    # priority=True so these fire even while the PromptEditor has focus;
+    # otherwise the editor swallows ctrl+d before it reaches the app bindings.
     #
-    # Scrollback: the transcript is not in the focused Input's ancestor chain, so
+    # Scrollback: the transcript is not in the focused editor's ancestor chain, so
     # its own scroll bindings never fire — forward the keys from the app instead.
-    # home/end are priority=True to beat Input's cursor-jump bindings (ctrl+a /
-    # ctrl+e still move the cursor to line start/end); pageup/pagedown have no
-    # competing Input binding, so they bubble normally.
+    # These are priority bindings because TextArea consumes all four keys. Ctrl+A /
+    # Ctrl+E remain available for moving within the prompt.
     #
     # Copy is handled by the terminal, not the app: the shell runs with mouse
     # reporting off (see run_shell), so drag-select + the OS copy shortcut work
@@ -205,8 +206,10 @@ class TextualTui(App[None]):
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", priority=True),
         Binding("ctrl+d", "eof", "EOF", priority=True),
-        Binding("pageup", "scroll_transcript_page_up", "Scroll up", show=False),
-        Binding("pagedown", "scroll_transcript_page_down", "Scroll down", show=False),
+        Binding("pageup", "scroll_transcript_page_up", "Scroll up", priority=True, show=False),
+        Binding(
+            "pagedown", "scroll_transcript_page_down", "Scroll down", priority=True, show=False
+        ),
         Binding("home", "scroll_transcript_home", "Scroll to top", priority=True, show=False),
         Binding("end", "scroll_transcript_end", "Scroll to bottom", priority=True, show=False),
     ]
@@ -218,7 +221,7 @@ class TextualTui(App[None]):
         ](100)
         self._status: Static | None = None
         self._transcript: Transcript | None = None
-        self._input: Input | None = None
+        self._input: PromptEditor | None = None
         self._suggest: SlashSuggest | None = None
         self._decision_panel: DecisionPanel | None = None
         self._current_prompt = "wisp> "
@@ -252,7 +255,7 @@ class TextualTui(App[None]):
             # input; yielded here so it shares the Vertical's coordinate space.
             yield SlashSuggest(id="suggest")
             yield DecisionPanel(id="decision-panel")
-            yield Input(placeholder=_input_placeholder("wisp> "), id="input")
+            yield PromptEditor(placeholder=_input_placeholder("wisp> "), id="input")
             with Horizontal(id="status-bar"):
                 # markup=False: the footer is always plain data (cwd, session,
                 # provider/model, status) — never intentional markup. Static
@@ -274,10 +277,10 @@ class TextualTui(App[None]):
         self._role_styles = role_styles(self.current_theme)
         self._transcript = self.query_one("#transcript", Transcript)
         self._status = self.query_one("#status", Static)
-        self._input = self.query_one("#input", Input)
+        self._input = self.query_one("#input", PromptEditor)
         self._suggest = self.query_one("#suggest", SlashSuggest)
         self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
-        self._input.focus()  # keep the Input as the resting focus
+        self._input.focus()  # keep the editor as the resting focus
         if self._runner is not None:
             self.run_worker(self._run_and_exit(), exclusive=True)
 
@@ -288,28 +291,28 @@ class TextualTui(App[None]):
         if self.is_running:
             self._role_styles = role_styles(self.current_theme)
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def on_prompt_editor_submitted(self, event: PromptEditor.Submitted) -> None:
         # Enter runs the line as-is through the typed path; the menu (if open) is
         # just a hint, so close it. `/command` parsing lives in the shell.
         if self._suggest is not None:
             self._suggest.hide()
         self.submit_command_line(event.value)
 
-    def on_input_changed(self, event: Input.Changed) -> None:
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
         # Keep the inline slash menu in sync with the input WITHOUT ever touching
         # the input value — the line is the single source of truth (Claude-Code
         # model), so a leading `/` is always typable as text (`/etc/hosts`). The
         # menu shows only while the value is a bare slash token still being typed;
         # show_for() hides it otherwise (no `/`, a space, or no match).
-        if event.input is self._input and self._suggest is not None:
-            self._suggest.show_for(event.value)
+        if event.text_area is self._input and self._suggest is not None:
+            self._suggest.show_for(event.text_area.text)
 
     def submit_command_line(self, text: str) -> None:
         """Submit a line as if the user typed it and pressed Enter.
 
-        The single entry point for both a real Input submission and a command
+        The single entry point for both a real editor submission and a command
         palette selection, so `/command` semantics stay sourced only from the
-        shell's typed-line handling. Clears the Input, fires the submit hook (so
+        shell's typed-line handling. Clears the editor, fires the submit hook (so
         the input mode is captured), then queues the line. send_nowait degrades
         to a notice on a full buffer rather than crashing the action handler.
         """
@@ -335,7 +338,7 @@ class TextualTui(App[None]):
         self._submit_decision_line(event.answer)
 
     def prefill_command(self, prefix: str) -> None:
-        """Put a command prefix in the Input, cursor at the end, without submitting.
+        """Put a command prefix in the editor, cursor at the end, without submitting.
 
         Tab-completion fills the highlighted command here (`/model `, `/help`); the
         user then adds any argument and presses Enter through the normal typed path.
@@ -347,7 +350,7 @@ class TextualTui(App[None]):
 
     async def on_key(self, event: events.Key) -> None:
         # Menu-scoped keys, handled only while the slash menu is open so normal
-        # input (Tab focus, Escape, arrows in the Input) is untouched otherwise.
+        # input (Tab focus, Escape, arrows in the editor) is untouched otherwise.
         # Enter is intentionally NOT intercepted — on_input_submitted runs the line.
         suggest = self._suggest
         if suggest is None or not suggest.is_open:
@@ -409,7 +412,7 @@ class TextualTui(App[None]):
         # shortcut (Cmd+C on macOS, right-click-copy elsewhere) work natively —
         # exactly as in any other terminal program. The trade-off is that no mouse
         # events reach the app: no wheel-scroll of the transcript (PageUp/PageDown/
-        # Home/End cover that) and no click-to-focus (the Input is the resting focus
+        # Home/End cover that) and no click-to-focus (the editor is the resting focus
         # and the palette opens via `/` or ctrl+p). We accept that to make copy
         # behave the way users expect from a terminal.
         await self.run_async(mouse=False)
@@ -507,6 +510,10 @@ class TextualTui(App[None]):
         panel = self._decision_panel
         if panel is None:
             return
+        if self._suggest is not None:
+            self._suggest.hide()
+        if self._input is not None:
+            self._input.display = False
         panel.show_all_confirmation(event)
 
     def show_trust(self, event: TrustRequested) -> None:

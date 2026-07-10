@@ -27,7 +27,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.message import Message
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import Markdown, OptionList, Static
+from textual.widgets import Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from wisp.events import ToolApprovalRequested, TrustRequested
@@ -36,6 +36,68 @@ from wisp.tui.rendering import _format_cwd_for_footer, _markup_escape
 
 _DECISION_PREVIEW_LINES = 5
 _DECISION_PREVIEW_CHARS = 320
+
+
+class PromptEditor(TextArea):
+    """Multiline prompt editor with Pi-compatible submission keys."""
+
+    class Submitted(Message):
+        """The complete prompt accepted by the editor."""
+
+        def __init__(self, value: str) -> None:
+            super().__init__()
+            self.value = value
+
+    def __init__(
+        self,
+        *,
+        placeholder: str = "",
+        id: str | None = None,  # noqa: A002 - Textual's parameter name
+    ) -> None:
+        super().__init__(
+            placeholder=placeholder,
+            id=id,
+            soft_wrap=True,
+            show_line_numbers=False,
+            highlight_cursor_line=False,
+            tab_behavior="focus",
+        )
+
+    @property
+    def value(self) -> str:
+        """Compatibility alias for the previous ``Input.value`` contract."""
+
+        return self.text
+
+    @value.setter
+    def value(self, text: str) -> None:
+        self.text = text
+
+    @property
+    def cursor_position(self) -> int:
+        """Return the cursor as a flat offset for ``Input`` compatibility."""
+
+        row, column = self.cursor_location
+        lines = self.text.split("\n")
+        return sum(len(line) + 1 for line in lines[:row]) + column
+
+    @cursor_position.setter
+    def cursor_position(self, offset: int) -> None:
+        bounded = max(0, min(offset, len(self.text)))
+        before = self.text[:bounded]
+        self.move_cursor((before.count("\n"), len(before.rsplit("\n", 1)[-1])))
+
+    async def on_key(self, event: events.Key) -> None:
+        """Submit on Enter and reserve Pi's newline keys for multiline input."""
+
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.Submitted(self.text))
+        elif event.key in {"shift+enter", "ctrl+j"}:
+            event.stop()
+            event.prevent_default()
+            self.insert("\n")
 
 
 @dataclass(frozen=True)

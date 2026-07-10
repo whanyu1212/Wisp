@@ -217,7 +217,10 @@ uv run wisp tui
 A fullscreen Textual TUI built on the same RPC controller other integrations use. Its compact
 Pi-style footer shows the current working directory/session plus status, queued follow-ups, and
 provider/model; token/cost/context metrics will appear once Wisp exposes usage events. Adjust runtime
-settings with slash commands instead of up-front flags:
+settings with slash commands instead of up-front flags. The prompt editor accepts multiline text:
+press Enter to submit, or Shift+Enter / Ctrl+J to insert a newline. Pasted newlines are preserved.
+
+Available slash commands:
 
 ```text
 /help                       show commands

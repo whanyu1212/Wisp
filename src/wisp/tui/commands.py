@@ -89,11 +89,14 @@ def parse_tui_slash_command(text: str) -> TuiSlashCommand | None:
     """Parse a TUI slash command, returning ``None`` for normal prompts.
 
     Returns a command for a known slash word, ``None`` for a normal prompt
-    (including slash-prefixed prose like ``/etc/hosts is broken``), and raises
-    ``TuiSlashCommandError`` only for a genuine command attempt that is unknown
-    or malformed.
+    (including multiline input and slash-prefixed prose like ``/etc/hosts is
+    broken``), and raises ``TuiSlashCommandError`` only for a genuine command
+    attempt that is unknown or malformed. Commands are deliberately single-line
+    so pasted prompt content can never be interpreted as TUI control syntax.
     """
 
+    if "\n" in text or "\r" in text:
+        return None
     stripped = text.strip()
     if not stripped:
         return None

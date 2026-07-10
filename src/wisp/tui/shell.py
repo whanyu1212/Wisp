@@ -197,7 +197,7 @@ class TuiShell:
             while True:
                 mode = _input_mode_for_status(self.state.status)
                 try:
-                    text = (await self.prompt_reader(_prompt_for_mode(mode))).strip()
+                    text = await self.prompt_reader(_prompt_for_mode(mode))
                 except EOFError:
                     await send.send(_InputClosed(mode=self._submitted_input_mode(mode)))
                     return
@@ -235,6 +235,7 @@ class TuiShell:
 
     async def _handle_input_line(self, signal: _InputLine) -> bool:
         text = signal.text
+        has_content = bool(text.strip())
         if self.state.status is TuiStatus.exiting:
             return False
         try:
@@ -250,7 +251,7 @@ class TuiShell:
         ):
             if signal.mode is _InputMode.all_tools_confirmation:
                 return await self._answer_all_tools_confirmation(text)
-            if text and self.state.current_command_id is not None:
+            if has_content and self.state.current_command_id is not None:
                 self.state.queued_prompts.append(text)
                 self._update_view(queued_follow_ups=len(self.state.queued_prompts))
                 self.renderer.queued_follow_up(len(self.state.queued_prompts))
@@ -258,7 +259,7 @@ class TuiShell:
         if self.state.pending_trust is not None:
             if signal.mode is _InputMode.trust or _is_trust_answer(text):
                 return await self._answer_pending_trust(text)
-            if text and self.state.current_command_id is not None:
+            if has_content and self.state.current_command_id is not None:
                 self.state.queued_prompts.append(text)
                 self._update_view(queued_follow_ups=len(self.state.queued_prompts))
                 self.renderer.queued_follow_up(len(self.state.queued_prompts))
@@ -266,12 +267,12 @@ class TuiShell:
         if self.state.pending_approval is not None:
             if signal.mode is _InputMode.approval:
                 return await self._answer_pending_approval(text, exit_after_denial=False)
-            if text and self.state.current_command_id is not None:
+            if has_content and self.state.current_command_id is not None:
                 self.state.queued_prompts.append(text)
                 self._update_view(queued_follow_ups=len(self.state.queued_prompts))
                 self.renderer.queued_follow_up(len(self.state.queued_prompts))
             return False
-        if not text:
+        if not has_content:
             return False
         if self.state.current_command_id is not None:
             self.state.queued_prompts.append(text)

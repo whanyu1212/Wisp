@@ -10,6 +10,18 @@ def test_parse_tui_slash_command_returns_none_for_prompt() -> None:
     assert parse_tui_slash_command("") is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/help\nplease explain this",
+        "/model\r\ngpt-test should be discussed",
+        "/quit\n",
+    ],
+)
+def test_parse_tui_slash_command_treats_multiline_input_as_prompt(text: str) -> None:
+    assert parse_tui_slash_command(text) is None
+
+
 def test_parse_tui_slash_command_parses_args_and_quotes() -> None:
     command = parse_tui_slash_command('/model "gpt test"')
 
