@@ -1,4 +1,4 @@
-"""Schema-v2 events emitted by the Wisp agent core."""
+"""Schema-v3 events emitted by the Wisp agent core."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-EVENT_SCHEMA_VERSION = 2
+EVENT_SCHEMA_VERSION = 3
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
 FinishReason = Literal["stop", "tool_calls", "length", "error", "cancelled"]
+RetryReason = Literal["network", "timeout", "rate_limit", "server_error", "transient_http"]
 
 
 def utc_now() -> datetime:
@@ -25,7 +26,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     timestamp: datetime = Field(default_factory=utc_now)
 
 
@@ -48,6 +49,19 @@ class AgentStarted(WispEvent):
 class TurnStarted(WispEvent):
     type: Literal["turn.started"] = "turn.started"
     turn: int
+
+
+class ProviderRetrying(WispEvent):
+    """A provider request failed before streaming and will be retried."""
+
+    type: Literal["provider.retrying"] = "provider.retrying"
+    turn: int
+    provider: str
+    attempt: int
+    max_attempts: int
+    delay_seconds: float
+    reason: RetryReason
+    status_code: int | None = None
 
 
 class MessageStarted(WispEvent):
@@ -193,6 +207,7 @@ class ErrorEvent(WispEvent):
 type KnownWispEvent = Annotated[
     AgentStarted
     | TurnStarted
+    | ProviderRetrying
     | MessageStarted
     | MessageDelta
     | MessageCompleted
@@ -217,7 +232,7 @@ KnownWispEventAdapter: TypeAdapter[KnownWispEvent] = TypeAdapter(KnownWispEvent)
 JsonObjectAdapter: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 
-def _require_schema_v2(data: JsonObject) -> None:
+def _require_schema_v3(data: JsonObject) -> None:
     version = data.get("schema_version")
     if version != EVENT_SCHEMA_VERSION:
         raise ValueError(
@@ -226,15 +241,15 @@ def _require_schema_v2(data: JsonObject) -> None:
 
 
 def wisp_event_from_json(line: str) -> KnownWispEvent:
-    """Parse one schema-v2 JSONL event line into a typed Wisp event."""
+    """Parse one schema-v3 JSONL event line into a typed Wisp event."""
 
     data = JsonObjectAdapter.validate_json(line)
-    _require_schema_v2(data)
+    _require_schema_v3(data)
     return KnownWispEventAdapter.validate_python(data)
 
 
 def wisp_event_from_dict(data: JsonObject) -> KnownWispEvent:
-    """Parse one schema-v2 event dictionary into a typed Wisp event."""
+    """Parse one schema-v3 event dictionary into a typed Wisp event."""
 
-    _require_schema_v2(data)
+    _require_schema_v3(data)
     return KnownWispEventAdapter.validate_python(data)

@@ -28,9 +28,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from wisp.retry import RetrySettings
+
 GLOBAL_SETTINGS_PATH = Path("~/.wisp/settings.json")
 PROJECT_SETTINGS_DIRNAME = ".wisp"
 PROJECT_SETTINGS_FILENAME = "settings.json"
+_USER_ONLY_SETTINGS_FIELDS = frozenset({"protected_paths", "retry"})
 
 # Default glob patterns whose contents tools refuse to read. These guard secrets
 # from being pulled into model context by an over-eager read/grep. Bare patterns
@@ -86,6 +89,7 @@ class WispSettings(BaseModel):
     session_dir: str | None = None
     auth_path: str | None = None
     protected_paths: list[str] | None = None
+    retry: RetrySettings | None = None
 
 
 class ResolvedSettings(BaseModel):
@@ -104,6 +108,7 @@ class ResolvedSettings(BaseModel):
     session_dir: str | None = None
     auth_path: str | None = None
     protected_paths: tuple[str, ...] | None = None
+    retry: RetrySettings | None = None
 
 
 def resolve_settings(
@@ -143,7 +148,10 @@ def resolve_settings(
     # cloned repo cannot inject provider/model/session_dir/auth_path. This is
     # fail-closed — an undecided project is treated as untrusted here.
     project_settings = (
-        _load_settings_file(project / PROJECT_SETTINGS_DIRNAME / PROJECT_SETTINGS_FILENAME)
+        _load_settings_file(
+            project / PROJECT_SETTINGS_DIRNAME / PROJECT_SETTINGS_FILENAME,
+            ignored_fields=_USER_ONLY_SETTINGS_FIELDS,
+        )
         if trust_project
         else WispSettings()
     )
@@ -157,16 +165,23 @@ def resolve_settings(
     # is project-controlled, so honoring its ``protected_paths`` would let a repo ship
     # ``{"protected_paths": []}`` to disable the secret-file guard and expose its own
     # ``.env`` to the model. The project may not weaken (or set) this policy.
+    # Retry policy is also user-only: a project must not be able to increase API
+    # spending or force a user to wait longer by changing its local settings.
     return ResolvedSettings(
         provider=_coalesce(project_settings.provider, user_settings.provider),
         model=_coalesce(project_settings.model, user_settings.model),
         session_dir=_coalesce(project_settings.session_dir, user_settings.session_dir),
         auth_path=_coalesce(project_settings.auth_path, user_settings.auth_path),
         protected_paths=_coalesce_paths(user_settings.protected_paths),
+        retry=user_settings.retry,
     )
 
 
-def _load_settings_file(path: Path) -> WispSettings:
+def _load_settings_file(
+    path: Path,
+    *,
+    ignored_fields: frozenset[str] = frozenset(),
+) -> WispSettings:
     """Load one settings file, returning empty settings on any problem.
 
     A missing file is normal (returns empty settings silently). A file that exists
@@ -191,6 +206,12 @@ def _load_settings_file(path: Path) -> WispSettings:
     if not isinstance(data, dict):
         _warn(f"ignoring settings file {path}: expected a JSON object")
         return WispSettings()
+
+    # Project-owned policy fields are ignored before schema validation. An invalid
+    # value for a field the project cannot control must not suppress otherwise-valid
+    # provider, model, session, or auth settings from a trusted project.
+    if ignored_fields:
+        data = {key: value for key, value in data.items() if key not in ignored_fields}
 
     try:
         return WispSettings.model_validate(data)

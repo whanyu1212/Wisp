@@ -1,5 +1,7 @@
 """Provider implementations."""
 
+from wisp.retry import RetryPolicy, RetrySettings
+
 from .base import ToolCallResult, ToolSpec
 from .events import (
     ProviderEvent,
@@ -7,6 +9,7 @@ from .events import (
     ProviderResponseCompleted,
     ProviderResponseFailed,
     ProviderResponseStarted,
+    ProviderRetrying,
     ProviderTextDelta,
     ProviderThinkingDelta,
     ProviderToolCallCompleted,
@@ -26,10 +29,13 @@ __all__ = [
     "ProviderResponseCompleted",
     "ProviderResponseFailed",
     "ProviderResponseStarted",
+    "ProviderRetrying",
     "ProviderTextDelta",
     "ProviderThinkingDelta",
     "ProviderToolCallCompleted",
     "ScriptedProvider",
+    "RetryPolicy",
+    "RetrySettings",
     "ToolCall",
     "ToolCallResult",
     "ToolSpec",

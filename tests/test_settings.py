@@ -25,6 +25,7 @@ def test_resolve_settings_empty_when_no_files(tmp_path: Path) -> None:
     assert settings.provider is None
     assert settings.model is None
     assert settings.protected_paths is None
+    assert settings.retry is None
 
 
 def test_project_settings_override_user_settings(tmp_path: Path) -> None:
@@ -142,6 +143,48 @@ def test_project_cannot_introduce_protected_paths(tmp_path: Path) -> None:
     settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
 
     assert settings.protected_paths is None  # project value ignored; user unset
+
+
+def test_retry_settings_are_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(home, retry={"max_retries": 3})
+    _write_settings(project, retry={"max_retries": 10, "max_delay_seconds": 300})
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.retry is not None
+    assert settings.retry.max_retries == 3
+    assert settings.retry.max_delay_seconds is None
+
+
+def test_invalid_project_user_only_fields_do_not_discard_project_settings(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(
+        home,
+        protected_paths=["from-user.txt"],
+        retry={"max_retries": 3},
+    )
+    _write_settings(
+        project,
+        provider="project-provider",
+        model="project-model",
+        protected_paths=42,
+        retry={"max_retries": 20},
+    )
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.provider == "project-provider"
+    assert settings.model == "project-model"
+    assert settings.protected_paths == ("from-user.txt",)
+    assert settings.retry is not None
+    assert settings.retry.max_retries == 3
+    assert capsys.readouterr().err == ""
 
 
 # --- Precedence through WispConfig.from_env (CLI > env > file > default) ---
@@ -264,3 +307,22 @@ def test_from_env_project_settings_cannot_disable_protected_paths(
     config = WispConfig.from_env(trusted=True)
 
     assert set(DEFAULT_PROTECTED_PATHS).issubset(config.protected_paths)
+
+
+def test_retry_policy_prefers_environment_then_user_settings(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.chdir(tmp_path)
+    _write_settings(home, retry={"max_retries": 3, "base_delay_seconds": 1})
+    _write_settings(tmp_path, retry={"max_retries": 10, "max_delay_seconds": 300})
+    monkeypatch.setenv("WISP_RETRY_MAX_RETRIES", "1")
+
+    config = WispConfig.from_env(trusted=True)
+
+    assert config.retry_policy.max_retries == 1
+    assert config.retry_policy.base_delay_seconds == 1
+    assert config.retry_policy.max_delay_seconds == 30

@@ -18,6 +18,7 @@ from wisp.events import (
     ErrorEvent,
     KnownWispEvent,
     MessageCompleted,
+    ProviderRetrying,
     RpcCommandFinished,
     SessionSaved,
     ToolApprovalRequested,
@@ -195,7 +196,13 @@ class LineTuiRenderer:
         )
 
     def event(self, event: KnownWispEvent) -> None:
-        if isinstance(event, MessageCompleted) and event.content:
+        if isinstance(event, ProviderRetrying):
+            status = f" ({event.status_code})" if event.status_code is not None else ""
+            self.console.print(
+                f"[dim]retrying {event.provider}: {event.reason}{status}; "
+                f"attempt {event.attempt}/{event.max_attempts} in {event.delay_seconds:.1f}s[/dim]"
+            )
+        elif isinstance(event, MessageCompleted) and event.content:
             self.console.print(event.content, markup=False, highlight=False)
         elif isinstance(event, ToolCallRequested):
             self.console.print(

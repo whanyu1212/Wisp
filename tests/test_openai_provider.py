@@ -36,10 +36,12 @@ from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseFailed,
     ProviderResponseStarted,
+    ProviderRetrying,
     ProviderTextDelta,
     ProviderToolCallCompleted,
 )
 from wisp.providers.openai import OpenAIProvider
+from wisp.retry import RetryPolicy
 
 
 class StubOpenAIProvider(OpenAIProvider):
@@ -90,6 +92,35 @@ class FailingOpenAIProvider(OpenAIProvider):
         async def stream() -> AsyncIterator[ResponseStreamEvent]:
             yield _text_delta("partial")
             raise APIConnectionError(request=httpx.Request("POST", "https://api.openai.com"))
+
+        return stream()
+
+
+class FlakyOpenAIProvider(OpenAIProvider):
+    def __init__(self, failures: int, *, retry_policy: RetryPolicy) -> None:
+        super().__init__(
+            api_key="test-key",
+            default_model="default-test-model",
+            retry_policy=retry_policy,
+        )
+        self.failures = failures
+        self.attempts = 0
+
+    async def _create_stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[ResponseStreamEvent]:
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise APIConnectionError(request=httpx.Request("POST", "https://api.openai.com"))
+
+        async def stream() -> AsyncIterator[ResponseStreamEvent]:
+            yield _text_delta("recovered")
 
         return stream()
 
@@ -510,6 +541,72 @@ def test_openai_provider_normalizes_post_start_sdk_failure() -> None:
         message="OpenAI stream error: Connection error.",
         partial_content="partial",
     )
+
+
+def test_openai_provider_retries_request_opening_failure_before_start() -> None:
+    provider = FlakyOpenAIProvider(
+        1,
+        retry_policy=RetryPolicy(max_retries=1, base_delay_seconds=0.0001, max_delay_seconds=1),
+    )
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
+
+    events = anyio.run(run)
+
+    assert provider.attempts == 2
+    assert isinstance(events[0], ProviderRetrying)
+    assert events[0].attempt == 2
+    assert events[0].max_attempts == 2
+    assert events[0].reason == "network"
+    assert events[1:] == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderTextDelta(delta="recovered"),
+        ProviderResponseCompleted(content="recovered"),
+    ]
+
+
+def test_openai_provider_raises_after_exhausting_opening_retries() -> None:
+    provider = FlakyOpenAIProvider(
+        2,
+        retry_policy=RetryPolicy(max_retries=1, base_delay_seconds=0.0001, max_delay_seconds=1),
+    )
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(APIConnectionError):
+            async for event in provider.stream([Message(role="user", content="hello")]):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+
+    assert provider.attempts == 2
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderRetrying)
+
+
+def test_openai_provider_stops_retrying_when_cancelled_during_backoff() -> None:
+    provider = FlakyOpenAIProvider(
+        1,
+        retry_policy=RetryPolicy(max_retries=1, base_delay_seconds=5, max_delay_seconds=5),
+    )
+
+    async def run() -> None:
+        stream = provider.stream([Message(role="user", content="hello")])
+        assert isinstance(await anext(stream), ProviderRetrying)
+        with anyio.move_on_after(0.01) as scope:
+            await anext(stream)
+        assert scope.cancel_called
+        assert provider.attempts == 1
+
+    anyio.run(run)
+
+
+def test_wisp_owned_openai_client_disables_sdk_retries() -> None:
+    provider = OpenAIProvider(api_key="test-key")
+
+    assert provider._client_or_create().max_retries == 0  # noqa: SLF001
 
 
 def test_openai_provider_requires_api_key(monkeypatch: MonkeyPatch) -> None:

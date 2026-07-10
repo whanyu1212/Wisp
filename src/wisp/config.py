@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from wisp.retry import RetryPolicy
 from wisp.settings import DEFAULT_PROTECTED_PATHS, ResolvedSettings, resolve_settings
 
 DEFAULT_PROVIDER = "openai-codex"
@@ -24,6 +25,7 @@ class WispConfig(BaseModel):
     session_dir: Path = Field(default_factory=lambda: default_session_dir())
     auth_path: Path = Field(default_factory=lambda: default_auth_path())
     protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS
+    retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
 
     @model_validator(mode="after")
     def _always_protect_auth_path(self) -> WispConfig:
@@ -50,6 +52,7 @@ class WispConfig(BaseModel):
         model: str | None = None,
         session_dir: Path | None = None,
         auth_path: Path | None = None,
+        retry_policy: RetryPolicy | None = None,
         project_dir: Path | None = None,
         trusted: bool = False,
     ) -> WispConfig:
@@ -88,6 +91,7 @@ class WispConfig(BaseModel):
             session_dir=session_dir or default_session_dir(settings=settings),
             auth_path=auth_path or default_auth_path(settings=settings),
             protected_paths=_resolve_protected_paths(settings),
+            retry_policy=retry_policy or _resolve_retry_policy(settings),
         )
 
 
@@ -147,3 +151,32 @@ def _first_non_empty(*values: str | None, default: str | None = None) -> str | N
             if stripped:
                 return stripped
     return default
+
+
+def _resolve_retry_policy(settings: ResolvedSettings) -> RetryPolicy:
+    """Resolve the user-owned retry policy without consulting project settings."""
+
+    saved = settings.retry
+    return RetryPolicy.model_validate(
+        {
+            "max_retries": _first_non_empty(
+                os.environ.get("WISP_RETRY_MAX_RETRIES"),
+                str(saved.max_retries) if saved and saved.max_retries is not None else None,
+                default="2",
+            ),
+            "base_delay_seconds": _first_non_empty(
+                os.environ.get("WISP_RETRY_BASE_DELAY_SECONDS"),
+                str(saved.base_delay_seconds)
+                if saved and saved.base_delay_seconds is not None
+                else None,
+                default="0.5",
+            ),
+            "max_delay_seconds": _first_non_empty(
+                os.environ.get("WISP_RETRY_MAX_DELAY_SECONDS"),
+                str(saved.max_delay_seconds)
+                if saved and saved.max_delay_seconds is not None
+                else None,
+                default="30",
+            ),
+        }
+    )

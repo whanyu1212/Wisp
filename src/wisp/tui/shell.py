@@ -27,7 +27,9 @@ from wisp.events import (
     KnownWispEvent,
     MessageCompleted,
     MessageDelta,
+    MessageStarted,
     ProjectConfigApplied,
+    ProviderRetrying,
     RpcCommandFinished,
     SessionSaved,
     ToolApprovalRequested,
@@ -637,6 +639,19 @@ class TuiShell:
         return True
 
     async def _handle_rpc_event(self, event: KnownWispEvent) -> bool:
+        if isinstance(event, ProviderRetrying):
+            self._update_view(
+                status=(
+                    f"retrying {event.attempt}/{event.max_attempts} in {event.delay_seconds:.1f}s"
+                ),
+                input_hint=_prompt_for_mode(_InputMode.running),
+                input_mode=_InputMode.running,
+                queued_follow_ups=len(self.state.queued_prompts),
+            )
+            self.renderer.event(event)
+            return False
+        if isinstance(event, MessageStarted):
+            self._sync_view()
         if isinstance(event, MessageDelta) and event.content_kind == "text":
             self.state.token_stream_started = True
             self.state.rendered_tokens = True

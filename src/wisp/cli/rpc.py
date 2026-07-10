@@ -60,12 +60,20 @@ _session_for_print_run = _cli_tools._session_for_print_run
 
 
 async def _build_runtime_for_config(config: WispConfig) -> WispRuntime:
-    try:
-        return await build_runtime(auth_path=config.auth_path)
-    except TypeError as exc:
-        if "auth_path" not in str(exc):
-            raise
-        return await build_runtime()
+    # Preserve compatibility with embedders and tests that replace the runtime
+    # factory with an older, narrower callable. Do not conceal TypeErrors raised
+    # inside a compatible factory.
+    for kwargs in (
+        {"auth_path": config.auth_path, "retry_policy": config.retry_policy},
+        {"auth_path": config.auth_path},
+        {},
+    ):
+        try:
+            return await build_runtime(**kwargs)
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc) or not kwargs:
+                raise
+    raise AssertionError("runtime factory compatibility loop exhausted")
 
 
 @dataclass(frozen=True)
