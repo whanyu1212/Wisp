@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from json import JSONDecodeError
 from typing import cast
 
@@ -20,6 +22,7 @@ from wisp.providers.auth import ProviderAuthResolver, StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
     ProviderError,
+    ProviderProtocolError,
     ToolCallResult,
     ToolSpec,
 )
@@ -38,6 +41,7 @@ from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_de
 
 DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.5"
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
+_MAX_PENDING_CONTINUATIONS = 128
 
 
 class _CodexHTTPError(ProviderError):
@@ -73,6 +77,7 @@ class OpenAICodexProvider:
         self._base_url = base_url
         self._client = client
         self._retry_policy = retry_policy or RetryPolicy()
+        self._continuations: OrderedDict[str, tuple[dict[str, object], ...]] = OrderedDict()
 
     async def stream(
         self,
@@ -94,17 +99,23 @@ class OpenAICodexProvider:
             )
         account_id = auth.account_id or account_id_from_access_token(auth.token)
         headers = _codex_headers(token=auth.token, account_id=account_id)
+        continuation_items = self._take_continuation(previous_response_id)
+        continuation_input = (
+            *continuation_items,
+            *_tool_results_to_codex_input(tool_results),
+        )
         body = _codex_request_body(
             messages,
             model=selected_model,
             tools=tools,
-            tool_results=tool_results,
-            previous_response_id=previous_response_id,
+            continuation_input=continuation_input,
         )
         response_id: str | None = previous_response_id
         pending_tool_calls: dict[str, dict[str, object]] = {}
         completed_tool_arguments: dict[str, str] = {}
         emitted_tool_item_ids: set[str] = set()
+        output_items: OrderedDict[str, dict[str, object]] = OrderedDict()
+        anonymous_output_item = 0
         chunks: list[str] = []
         tool_calls: list[ToolCall] = []
         failure: ProviderResponseFailed | None = None
@@ -133,6 +144,8 @@ class OpenAICodexProvider:
                                 completed_tool_arguments[item_id] = arguments
                                 pending = pending_tool_calls.get(item_id)
                                 if pending is not None:
+                                    pending["arguments"] = arguments
+                                    output_items[item_id] = deepcopy(pending)
                                     tool_call = _tool_call_from_codex(
                                         pending,
                                         raw_arguments=arguments,
@@ -149,7 +162,15 @@ class OpenAICodexProvider:
                             "response.output_item.done",
                         }:
                             item = event.get("item")
-                            if isinstance(item, dict) and item.get("type") == "function_call":
+                            if not isinstance(item, dict):
+                                continue
+                            item_id = _string_value(item.get("id"))
+                            item_key = item_id or _string_value(item.get("call_id"))
+                            if item_key is None:
+                                item_key = f"anonymous-{anonymous_output_item}"
+                                anonymous_output_item += 1
+                            output_items[item_key] = deepcopy(item)
+                            if item.get("type") == "function_call":
                                 item_id = _string_value(item.get("id"))
                                 if item_id is not None:
                                     pending_tool_calls[item_id] = dict(item)
@@ -179,6 +200,21 @@ class OpenAICodexProvider:
                                     )
                                     if item_id is not None:
                                         emitted_tool_item_ids.add(item_id)
+                        elif event_type == "response.completed":
+                            event_response = event.get("response")
+                            if isinstance(event_response, dict):
+                                response_id = _string_value(event_response.get("id")) or response_id
+                                response_output = event_response.get("output")
+                                if isinstance(response_output, list):
+                                    for item in response_output:
+                                        if not isinstance(item, dict):
+                                            continue
+                                        item_id = _string_value(item.get("id"))
+                                        item_key = item_id or _string_value(item.get("call_id"))
+                                        if item_key is None:
+                                            item_key = f"anonymous-{anonymous_output_item}"
+                                            anonymous_output_item += 1
+                                        output_items[item_key] = deepcopy(item)
                         elif event_type == "error":
                             failure = ProviderResponseFailed(
                                 message=_codex_error_message(event),
@@ -233,12 +269,46 @@ class OpenAICodexProvider:
             yield failure
             return
 
+        if tool_calls:
+            if response_id is None:
+                raise ProviderProtocolError(
+                    "OpenAI Codex tool response did not include a response id"
+                )
+            replay_items = _codex_replay_items(output_items.values(), tool_calls=tool_calls)
+            self._store_continuation(
+                response_id,
+                (*continuation_input, *replay_items),
+            )
+
         yield ProviderResponseCompleted(
             content="".join(chunks),
             tool_calls=tuple(tool_calls),
             response_id=response_id,
             finish_reason="tool_calls" if tool_calls else "stop",
         )
+
+    def _take_continuation(
+        self,
+        previous_response_id: str | None,
+    ) -> tuple[dict[str, object], ...]:
+        if previous_response_id is None:
+            return ()
+        try:
+            return self._continuations.pop(previous_response_id)
+        except KeyError as exc:
+            raise ProviderProtocolError(
+                f"OpenAI Codex continuation state is unavailable for {previous_response_id}"
+            ) from exc
+
+    def _store_continuation(
+        self,
+        response_id: str,
+        items: tuple[dict[str, object], ...],
+    ) -> None:
+        self._continuations.pop(response_id, None)
+        self._continuations[response_id] = items
+        while len(self._continuations) > _MAX_PENDING_CONTINUATIONS:
+            self._continuations.popitem(last=False)
 
     @asynccontextmanager
     async def _create_stream(
@@ -289,16 +359,13 @@ def _codex_request_body(
     *,
     model: str,
     tools: Sequence[ToolSpec],
-    tool_results: Sequence[ToolCallResult],
-    previous_response_id: str | None,
+    continuation_input: Sequence[Mapping[str, object]],
 ) -> dict[str, object]:
     body: dict[str, object] = {
         "model": model,
         "store": False,
         "stream": True,
-        "input": _tool_results_to_codex_input(tool_results)
-        if tool_results
-        else _messages_to_codex_input(messages),
+        "input": [*_messages_to_codex_input(messages), *continuation_input],
         "text": {"verbosity": "low"},
         "include": ["reasoning.encrypted_content"],
         "tool_choice": "auto",
@@ -309,8 +376,6 @@ def _codex_request_body(
         body["instructions"] = instructions
     if tools:
         body["tools"] = [_tool_spec_to_codex_tool(tool) for tool in tools]
-    if previous_response_id is not None:
-        body["previous_response_id"] = previous_response_id
     return body
 
 
@@ -339,6 +404,39 @@ def _tool_results_to_codex_input(tool_results: Sequence[ToolCallResult]) -> list
         }
         for result in tool_results
     ]
+
+
+def _codex_replay_items(
+    items: Iterable[Mapping[str, object]],
+    *,
+    tool_calls: Sequence[ToolCall],
+) -> tuple[dict[str, object], ...]:
+    """Return store:false replay items with every emitted function call represented."""
+
+    replay_items: list[dict[str, object]] = []
+    replayed_call_ids: set[str] = set()
+    for item in items:
+        replay_item = deepcopy(dict(item))
+        replay_item.pop("id", None)
+        replay_items.append(replay_item)
+        if replay_item.get("type") == "function_call":
+            call_id = _string_value(replay_item.get("call_id"))
+            if call_id is not None:
+                replayed_call_ids.add(call_id)
+
+    for tool_call in tool_calls:
+        if tool_call.call_id in replayed_call_ids:
+            continue
+        replay_items.append(
+            {
+                "type": "function_call",
+                "call_id": tool_call.call_id,
+                "name": tool_call.name,
+                "arguments": tool_call.raw_arguments
+                or json.dumps(dict(tool_call.arguments), separators=(",", ":")),
+            }
+        )
+    return tuple(replay_items)
 
 
 def _tool_spec_to_codex_tool(tool: ToolSpec) -> dict[str, object]:

@@ -17,6 +17,7 @@ from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
     ProviderError,
+    ProviderProtocolError,
     ToolCall,
     ToolCallResult,
     ToolSpec,
@@ -43,6 +44,7 @@ class StubOpenAICodexProvider(OpenAICodexProvider):
         super().__init__(auth_resolver=auth_resolver, default_model="gpt-test")
         self.events = events
         self.seen_body: Mapping[str, object] | None = None
+        self.seen_bodies: list[Mapping[str, object]] = []
         self.seen_headers: Mapping[str, str] | None = None
 
     @asynccontextmanager
@@ -53,6 +55,7 @@ class StubOpenAICodexProvider(OpenAICodexProvider):
         headers: Mapping[str, str],
     ) -> AsyncIterator[AsyncIterator[dict[str, object]]]:
         self.seen_body = body
+        self.seen_bodies.append(body)
         self.seen_headers = headers
 
         async def stream() -> AsyncIterator[dict[str, object]]:
@@ -94,7 +97,27 @@ def test_openai_codex_provider_streams_text_with_subscription_headers(tmp_path: 
 def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path) -> None:
     store = _store_with_oauth(tmp_path)
     provider = StubOpenAICodexProvider(
-        [],
+        [
+            {"type": "response.created", "response": {"id": "response-id"}},
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "reasoning",
+                    "id": "reasoning-id",
+                    "encrypted_content": "encrypted",
+                },
+            },
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "item-id",
+                    "call_id": "call-id",
+                    "name": "lookup",
+                    "arguments": '{"query":"wisp"}',
+                },
+            },
+        ],
         auth_resolver=StoredProviderAuthResolver(store),
     )
     tool = ToolSpec(
@@ -105,6 +128,16 @@ def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path)
     result = ToolCallResult(call_id="call-id", output="found")
 
     async def run() -> None:
+        first_events = [
+            event
+            async for event in provider.stream(
+                [Message(role="user", content="hi")],
+                tools=[tool],
+            )
+        ]
+        assert isinstance(first_events[-1], ProviderResponseCompleted)
+        assert first_events[-1].response_id == "response-id"
+        provider.events = []
         assert [
             event
             async for event in provider.stream(
@@ -122,9 +155,20 @@ def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path)
 
     assert provider.seen_body is not None
     assert provider.seen_body["input"] == [
-        {"type": "function_call_output", "call_id": "call-id", "output": "found"}
+        {"role": "user", "content": "hi"},
+        {
+            "type": "reasoning",
+            "encrypted_content": "encrypted",
+        },
+        {
+            "type": "function_call",
+            "call_id": "call-id",
+            "name": "lookup",
+            "arguments": '{"query":"wisp"}',
+        },
+        {"type": "function_call_output", "call_id": "call-id", "output": "found"},
     ]
-    assert provider.seen_body["previous_response_id"] == "response-id"
+    assert "previous_response_id" not in provider.seen_body
     assert provider.seen_body["tools"] == [
         {
             "type": "function",
@@ -136,10 +180,33 @@ def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path)
     ]
 
 
+def test_openai_codex_provider_rejects_missing_continuation_state(tmp_path: Path) -> None:
+    provider = StubOpenAICodexProvider(
+        [],
+        auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
+    )
+
+    async def run() -> None:
+        with pytest.raises(
+            ProviderProtocolError,
+            match="continuation state is unavailable for missing-response",
+        ):
+            async for _event in provider.stream(
+                [Message(role="user", content="hi")],
+                tool_results=[ToolCallResult(call_id="call-id", output="found")],
+                previous_response_id="missing-response",
+            ):
+                pass
+
+    anyio.run(run)
+    assert provider.seen_body is None
+
+
 def test_openai_codex_provider_yields_tool_calls(tmp_path: Path) -> None:
     store = _store_with_oauth(tmp_path)
     provider = StubOpenAICodexProvider(
         [
+            {"type": "response.created", "response": {"id": "response-id"}},
             {
                 "type": "response.output_item.done",
                 "item": {
@@ -149,7 +216,7 @@ def test_openai_codex_provider_yields_tool_calls(tmp_path: Path) -> None:
                     "name": "lookup",
                     "arguments": '{"query":"wisp"}',
                 },
-            }
+            },
         ],
         auth_resolver=StoredProviderAuthResolver(store),
     )
@@ -163,6 +230,7 @@ def test_openai_codex_provider_yields_tool_calls(tmp_path: Path) -> None:
         name="lookup",
         arguments={"query": "wisp"},
         raw_arguments='{"query":"wisp"}',
+        response_id="response-id",
     )
     assert events == [
         ProviderResponseStarted(model="gpt-test"),
@@ -170,9 +238,112 @@ def test_openai_codex_provider_yields_tool_calls(tmp_path: Path) -> None:
         ProviderResponseCompleted(
             content="",
             tool_calls=(tool_call,),
+            response_id="response-id",
             finish_reason="tool_calls",
         ),
     ]
+
+
+def test_openai_codex_provider_replays_multi_round_tool_history(tmp_path: Path) -> None:
+    provider = StubOpenAICodexProvider(
+        [
+            {"type": "response.created", "response": {"id": "response-1"}},
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "reasoning",
+                    "id": "reasoning-1",
+                    "encrypted_content": "encrypted-1",
+                },
+            },
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "item-1",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "arguments": '{"query":"first"}',
+                },
+            },
+        ],
+        auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
+    )
+    messages = [Message(role="user", content="hi")]
+
+    async def run() -> None:
+        async for _event in provider.stream(messages):
+            pass
+
+        provider.events = [
+            {"type": "response.created", "response": {"id": "response-2"}},
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "reasoning",
+                    "id": "reasoning-2",
+                    "encrypted_content": "encrypted-2",
+                },
+            },
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "item-2",
+                    "call_id": "call-2",
+                    "name": "lookup",
+                    "arguments": '{"query":"second"}',
+                },
+            },
+        ]
+        async for _event in provider.stream(
+            messages,
+            tool_results=[ToolCallResult(call_id="call-1", output="first result")],
+            previous_response_id="response-1",
+        ):
+            pass
+
+        provider.events = [
+            {"type": "response.created", "response": {"id": "response-3"}},
+            {"type": "response.output_text.delta", "delta": "done"},
+        ]
+        async for _event in provider.stream(
+            messages,
+            tool_results=[ToolCallResult(call_id="call-2", output="second result")],
+            previous_response_id="response-2",
+        ):
+            pass
+
+    anyio.run(run)
+
+    assert provider.seen_bodies[-1]["input"] == [
+        {"role": "user", "content": "hi"},
+        {"type": "reasoning", "encrypted_content": "encrypted-1"},
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "lookup",
+            "arguments": '{"query":"first"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": "first result",
+        },
+        {"type": "reasoning", "encrypted_content": "encrypted-2"},
+        {
+            "type": "function_call",
+            "call_id": "call-2",
+            "name": "lookup",
+            "arguments": '{"query":"second"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call-2",
+            "output": "second result",
+        },
+    ]
+    assert all("previous_response_id" not in body for body in provider.seen_bodies)
 
 
 def test_openai_codex_provider_requires_login(tmp_path: Path) -> None:
