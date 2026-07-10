@@ -19,19 +19,25 @@ def test_json_mode_outputs_events_as_jsonl(tmp_path: Path) -> None:
     records = _jsonl_records(result.stdout)
     assert [record["type"] for record in records] == [
         "agent.started",
-        "token.delta",
-        "token.delta",
-        "token.delta",
-        "token.delta",
-        "assistant.message",
+        "turn.started",
+        "message.started",
+        "message.delta",
+        "message.delta",
+        "message.delta",
+        "message.delta",
+        "message.completed",
+        "turn.completed",
         "session.saved",
+        "agent.completed",
     ]
+    assert all(record["schema_version"] == 2 for record in records)
     assert "timestamp" in records[0]
     assert "session_id" in records[0]
     assert "fake response to: hello" == "".join(
-        str(record["delta"]) for record in records if record["type"] == "token.delta"
+        str(record["delta"]) for record in records if record["type"] == "message.delta"
     )
-    assert str(records[-1]["path"]).endswith(".jsonl")
+    assert str(records[-2]["path"]).endswith(".jsonl")
+    assert records[-1]["outcome"] == "completed"
 
 
 def test_json_mode_outputs_tool_events_as_jsonl(
@@ -70,7 +76,9 @@ def test_json_mode_outputs_tool_events_as_jsonl(
     assert records[types.index("tool.call")]["arguments"] == {"path": "file.txt"}
     assert records[types.index("tool.approval.resolved")]["approved"] is True
     assert records[types.index("tool.result")]["output"] == "changed file.txt"
-    assert records[types.index("assistant.message")]["content"] == "done"
+    assert (
+        records[types.index("message.completed", types.index("tool.result"))]["content"] == "done"
+    )
 
 
 def test_json_mode_validation_errors_are_jsonl(tmp_path: Path) -> None:
@@ -126,5 +134,15 @@ def test_json_mode_emits_error_event_without_stderr_noise(
     assert result.exit_code == 1, result.output
     assert result.stderr == ""
     records = _jsonl_records(result.stdout)
-    assert [record["type"] for record in records] == ["agent.started", "error"]
-    assert records[-1]["message"] == "Maximum tool iterations exceeded: 0"
+    assert [record["type"] for record in records] == [
+        "agent.started",
+        "turn.started",
+        "message.started",
+        "message.completed",
+        "error",
+        "turn.completed",
+        "agent.completed",
+    ]
+    assert records[-3]["message"] == "Maximum tool iterations exceeded: 0"
+    assert records[-2]["outcome"] == "failed"
+    assert records[-1]["outcome"] == "failed"

@@ -19,7 +19,14 @@ from wisp.agent.loop import Agent
 from wisp.agent.messages import Message
 from wisp.cli import _print_mode_tool_approval_policy, _print_mode_tool_registry, app
 from wisp.events import ToolApprovalRequested, ToolApprovalResolved, ToolResultReady
-from wisp.providers.base import ProviderStreamEvent, ToolCall, ToolCallResult, ToolSpec
+from wisp.providers.base import ToolCall, ToolCallResult, ToolSpec
+from wisp.providers.events import (
+    ProviderEvent,
+    ProviderResponseCompleted,
+    ProviderResponseStarted,
+    ProviderTextDelta,
+    ProviderToolCallCompleted,
+)
 from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
@@ -43,17 +50,26 @@ class MixedTextToolProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
-    ) -> AsyncIterator[ProviderStreamEvent]:
+    ) -> AsyncIterator[ProviderEvent]:
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
         if not tool_results:
-            yield "prefix"
-            yield ToolCall(
+            yield ProviderTextDelta(delta="prefix")
+            tool_call = ToolCall(
                 call_id="call-1",
                 name="danger",
                 arguments={"path": "file.txt"},
                 response_id="response-1",
             )
+            yield ProviderToolCallCompleted(tool_call=tool_call)
+            yield ProviderResponseCompleted(
+                content="prefix",
+                tool_calls=(tool_call,),
+                response_id="response-1",
+                finish_reason="tool_calls",
+            )
             return
-        yield "suffix"
+        yield ProviderTextDelta(delta="suffix")
+        yield ProviderResponseCompleted(content="suffix")
 
 
 class CancellableProvider:
@@ -68,16 +84,20 @@ class CancellableProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
-    ) -> AsyncIterator[ProviderStreamEvent]:
+    ) -> AsyncIterator[ProviderEvent]:
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
         user_prompts = _user_prompts(messages)
         prompt = user_prompts[-1] if user_prompts else ""
         if prompt == "slow":
-            yield "working"
+            yield ProviderTextDelta(delta="working")
             await anyio.sleep_forever()
         if "slow" in user_prompts[:-1]:
-            yield "leaked slow"
+            yield ProviderTextDelta(delta="leaked slow")
+            yield ProviderResponseCompleted(content="leaked slow")
             return
-        yield f"done {prompt}"
+        content = f"done {prompt}"
+        yield ProviderTextDelta(delta=content)
+        yield ProviderResponseCompleted(content=content)
 
 
 class FailingProvider:
@@ -92,15 +112,19 @@ class FailingProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
-    ) -> AsyncIterator[ProviderStreamEvent]:
+    ) -> AsyncIterator[ProviderEvent]:
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
         user_prompts = _user_prompts(messages)
         prompt = user_prompts[-1] if user_prompts else ""
         if prompt == "fail":
             raise RuntimeError("provider failed")
         if "fail" in user_prompts[:-1]:
-            yield "saw failed history"
+            yield ProviderTextDelta(delta="saw failed history")
+            yield ProviderResponseCompleted(content="saw failed history")
             return
-        yield f"done {prompt}"
+        content = f"done {prompt}"
+        yield ProviderTextDelta(delta=content)
+        yield ProviderResponseCompleted(content=content)
 
 
 class ToolCallingProvider:
@@ -115,16 +139,25 @@ class ToolCallingProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
-    ) -> AsyncIterator[ProviderStreamEvent]:
+    ) -> AsyncIterator[ProviderEvent]:
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
         if not tool_results:
-            yield ToolCall(
+            tool_call = ToolCall(
                 call_id="call-1",
                 name="danger",
                 arguments={"path": "file.txt"},
                 response_id="response-1",
             )
+            yield ProviderToolCallCompleted(tool_call=tool_call)
+            yield ProviderResponseCompleted(
+                content="",
+                tool_calls=(tool_call,),
+                response_id="response-1",
+                finish_reason="tool_calls",
+            )
             return
-        yield "done"
+        yield ProviderTextDelta(delta="done")
+        yield ProviderResponseCompleted(content="done")
 
 
 class DangerTool:
@@ -217,7 +250,7 @@ __all__ = [
     "MonkeyPatch",
     "Path",
     "ProviderRegistry",
-    "ProviderStreamEvent",
+    "ProviderEvent",
     "Queue",
     "ReadTool",
     "Sequence",

@@ -29,13 +29,19 @@ from openai.types.responses.response_input_param import ResponseInputParam
 
 from wisp.agent.messages import Message, Role
 from wisp.providers.base import (
-    JsonObject,
     ProviderConfigurationError,
-    ProviderError,
-    ProviderStreamEvent,
-    ToolCall,
     ToolCallResult,
     ToolSpec,
+)
+from wisp.providers.events import (
+    JsonObject,
+    ProviderEvent,
+    ProviderResponseCompleted,
+    ProviderResponseFailed,
+    ProviderResponseStarted,
+    ProviderTextDelta,
+    ProviderToolCallCompleted,
+    ToolCall,
 )
 
 DEFAULT_OPENAI_MODEL = "gpt-5.5"
@@ -66,8 +72,8 @@ class OpenAIProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
-    ) -> AsyncIterator[ProviderStreamEvent]:
-        """Stream text deltas and tool calls from OpenAI's Responses API."""
+    ) -> AsyncIterator[ProviderEvent]:
+        """Stream a normalized OpenAI response lifecycle."""
 
         selected_model = model or self.default_model or DEFAULT_OPENAI_MODEL
         stream = await self._create_stream(
@@ -81,21 +87,31 @@ class OpenAIProvider:
         pending_tool_calls: dict[str, ResponseFunctionToolCall] = {}
         completed_tool_arguments: dict[str, str] = {}
         emitted_tool_item_ids: set[str] = set()
+        chunks: list[str] = []
+        tool_calls: list[ToolCall] = []
+
+        yield ProviderResponseStarted(model=selected_model)
 
         async for event in stream:
             if isinstance(event, ResponseCreatedEvent):
                 response_id = event.response.id
             elif isinstance(event, ResponseTextDeltaEvent | ResponseRefusalDeltaEvent):
-                yield event.delta
+                chunks.append(event.delta)
+                yield ProviderTextDelta(delta=event.delta)
             elif isinstance(event, ResponseFunctionCallArgumentsDoneEvent):
                 completed_tool_arguments[event.item_id] = event.arguments
                 pending = pending_tool_calls.get(event.item_id)
                 if pending is not None:
-                    yield _tool_call_from_openai(
+                    tool_call = _tool_call_from_openai(
                         call_id=pending.call_id,
                         name=pending.name,
                         raw_arguments=event.arguments,
                         response_id=response_id,
+                    )
+                    tool_calls.append(tool_call)
+                    yield ProviderToolCallCompleted(
+                        tool_call=tool_call,
+                        content_index=len(tool_calls) - 1,
                     )
                     emitted_tool_item_ids.add(event.item_id)
             elif isinstance(event, ResponseOutputItemAddedEvent | ResponseOutputItemDoneEvent):
@@ -110,20 +126,47 @@ class OpenAIProvider:
                             if item_id is not None
                             else event.item.arguments
                         )
-                        yield _tool_call_from_openai(
+                        tool_call = _tool_call_from_openai(
                             call_id=event.item.call_id,
                             name=event.item.name,
                             raw_arguments=raw_arguments,
                             response_id=response_id,
                         )
+                        tool_calls.append(tool_call)
+                        yield ProviderToolCallCompleted(
+                            tool_call=tool_call,
+                            content_index=len(tool_calls) - 1,
+                        )
                         if item_id is not None:
                             emitted_tool_item_ids.add(item_id)
             elif isinstance(event, ResponseErrorEvent):
-                raise ProviderError(f"OpenAI API error: {event.message}")
+                yield ProviderResponseFailed(
+                    message=f"OpenAI API error: {event.message}",
+                    partial_content="".join(chunks),
+                    response_id=response_id,
+                )
+                return
             elif isinstance(event, ResponseFailedEvent):
-                raise ProviderError(_failed_response_message(event.response))
+                yield ProviderResponseFailed(
+                    message=_failed_response_message(event.response),
+                    partial_content="".join(chunks),
+                    response_id=response_id,
+                )
+                return
             elif isinstance(event, ResponseIncompleteEvent):
-                raise ProviderError(_incomplete_response_message(event.response))
+                yield ProviderResponseFailed(
+                    message=_incomplete_response_message(event.response),
+                    partial_content="".join(chunks),
+                    response_id=response_id,
+                )
+                return
+
+        yield ProviderResponseCompleted(
+            content="".join(chunks),
+            tool_calls=tuple(tool_calls),
+            response_id=response_id,
+            finish_reason="tool_calls" if tool_calls else "stop",
+        )
 
     async def _create_stream(
         self,

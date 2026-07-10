@@ -15,9 +15,9 @@ from rich.panel import Panel
 from rich.text import Text
 
 from wisp.events import (
-    AssistantMessage,
     ErrorEvent,
     KnownWispEvent,
+    MessageCompleted,
     RpcCommandFinished,
     SessionSaved,
     ToolApprovalRequested,
@@ -195,7 +195,7 @@ class LineTuiRenderer:
         )
 
     def event(self, event: KnownWispEvent) -> None:
-        if isinstance(event, AssistantMessage):
+        if isinstance(event, MessageCompleted) and event.content:
             self.console.print(event.content, markup=False, highlight=False)
         elif isinstance(event, ToolCallRequested):
             self.console.print(
@@ -438,7 +438,7 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def event(self, event: KnownWispEvent) -> None:
-        if isinstance(event, AssistantMessage):
+        if isinstance(event, MessageCompleted) and event.content:
             self._append("assistant", event.content, style="green")
         elif isinstance(event, ToolCallRequested):
             self._append("tool", f"→ tool {event.name} {event.arguments}", style="blue")

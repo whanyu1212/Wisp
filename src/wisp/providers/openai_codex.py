@@ -16,13 +16,20 @@ from wisp.auth.storage import JsonAuthStore
 from wisp.config import default_auth_path
 from wisp.providers.auth import ProviderAuthResolver, StoredProviderAuthResolver
 from wisp.providers.base import (
-    JsonObject,
     ProviderConfigurationError,
     ProviderError,
-    ProviderStreamEvent,
-    ToolCall,
     ToolCallResult,
     ToolSpec,
+)
+from wisp.providers.events import (
+    JsonObject,
+    ProviderEvent,
+    ProviderResponseCompleted,
+    ProviderResponseFailed,
+    ProviderResponseStarted,
+    ProviderTextDelta,
+    ProviderToolCallCompleted,
+    ToolCall,
 )
 
 DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.5"
@@ -57,7 +64,7 @@ class OpenAICodexProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
-    ) -> AsyncIterator[ProviderStreamEvent]:
+    ) -> AsyncIterator[ProviderEvent]:
         selected_model = model or self.default_model or DEFAULT_OPENAI_CODEX_MODEL
         auth = await self._auth_resolver.bearer_token(
             self.name,
@@ -80,6 +87,10 @@ class OpenAICodexProvider:
         pending_tool_calls: dict[str, dict[str, object]] = {}
         completed_tool_arguments: dict[str, str] = {}
         emitted_tool_item_ids: set[str] = set()
+        chunks: list[str] = []
+        tool_calls: list[ToolCall] = []
+
+        yield ProviderResponseStarted(model=selected_model)
 
         async for event in self._create_stream(body=body, headers=headers):
             event_type = _string_value(event.get("type"))
@@ -90,7 +101,8 @@ class OpenAICodexProvider:
             elif event_type in {"response.output_text.delta", "response.refusal.delta"}:
                 delta = _string_value(event.get("delta"))
                 if delta is not None:
-                    yield delta
+                    chunks.append(delta)
+                    yield ProviderTextDelta(delta=delta)
             elif event_type == "response.function_call_arguments.done":
                 item_id = _string_value(event.get("item_id"))
                 arguments = _string_value(event.get("arguments")) or "{}"
@@ -98,10 +110,15 @@ class OpenAICodexProvider:
                     completed_tool_arguments[item_id] = arguments
                     pending = pending_tool_calls.get(item_id)
                     if pending is not None:
-                        yield _tool_call_from_codex(
+                        tool_call = _tool_call_from_codex(
                             pending,
                             raw_arguments=arguments,
                             response_id=response_id,
+                        )
+                        tool_calls.append(tool_call)
+                        yield ProviderToolCallCompleted(
+                            tool_call=tool_call,
+                            content_index=len(tool_calls) - 1,
                         )
                         emitted_tool_item_ids.add(item_id)
             elif event_type in {"response.output_item.added", "response.output_item.done"}:
@@ -119,19 +136,46 @@ class OpenAICodexProvider:
                             if item_id is not None
                             else _string_value(item.get("arguments")) or "{}"
                         )
-                        yield _tool_call_from_codex(
+                        tool_call = _tool_call_from_codex(
                             item,
                             raw_arguments=raw_arguments,
                             response_id=response_id,
                         )
+                        tool_calls.append(tool_call)
+                        yield ProviderToolCallCompleted(
+                            tool_call=tool_call,
+                            content_index=len(tool_calls) - 1,
+                        )
                         if item_id is not None:
                             emitted_tool_item_ids.add(item_id)
             elif event_type == "error":
-                raise ProviderError(_codex_error_message(event))
+                yield ProviderResponseFailed(
+                    message=_codex_error_message(event),
+                    partial_content="".join(chunks),
+                    response_id=response_id,
+                )
+                return
             elif event_type == "response.failed":
-                raise ProviderError(_codex_failed_message(event))
+                yield ProviderResponseFailed(
+                    message=_codex_failed_message(event),
+                    partial_content="".join(chunks),
+                    response_id=response_id,
+                )
+                return
             elif event_type == "response.incomplete":
-                raise ProviderError(_codex_incomplete_message(event))
+                yield ProviderResponseFailed(
+                    message=_codex_incomplete_message(event),
+                    partial_content="".join(chunks),
+                    response_id=response_id,
+                )
+                return
+
+        yield ProviderResponseCompleted(
+            content="".join(chunks),
+            tool_calls=tuple(tool_calls),
+            response_id=response_id,
+            finish_reason="tool_calls" if tool_calls else "stop",
+        )
 
     async def _create_stream(
         self,

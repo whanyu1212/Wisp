@@ -23,13 +23,13 @@ from wisp.auth.storage import (
 )
 from wisp.config import DEFAULT_PROVIDER, default_auth_path
 from wisp.events import (
-    AssistantMessage,
     ErrorEvent,
     KnownWispEvent,
+    MessageCompleted,
+    MessageDelta,
     ProjectConfigApplied,
     RpcCommandFinished,
     SessionSaved,
-    TokenDelta,
     ToolApprovalRequested,
     TrustRequested,
 )
@@ -637,7 +637,7 @@ class TuiShell:
         return True
 
     async def _handle_rpc_event(self, event: KnownWispEvent) -> bool:
-        if isinstance(event, TokenDelta):
+        if isinstance(event, MessageDelta) and event.content_kind == "text":
             self.state.token_stream_started = True
             self.state.rendered_tokens = True
             self.renderer.token_delta(event.delta)
@@ -645,7 +645,7 @@ class TuiShell:
         if self.state.token_stream_started:
             self.renderer.end_token_stream()
             self.state.token_stream_started = False
-        if isinstance(event, AssistantMessage) and self.state.rendered_tokens:
+        if isinstance(event, MessageCompleted) and self.state.rendered_tokens:
             return False
         if isinstance(event, ToolApprovalRequested):
             self.state.pending_approval = event

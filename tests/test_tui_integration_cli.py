@@ -740,7 +740,7 @@ def test_textual_renderer_dispatches_events_by_type() -> None:
     # had a prior request) flips its card to denied with the reason.
     rendered = _render_events_to_transcript(
         [
-            AssistantMessage(content="hello there"),
+            completed_message(content="hello there"),
             ToolCallRequested(call_id="c1", name="bash", arguments={"cmd": "ls"}),
             ToolResultReady(call_id="c1", name="bash", output="file-a\nfile-b", is_error=False),
             ToolCallRequested(call_id="c3", name="write", arguments={"path": "x"}),
@@ -771,7 +771,7 @@ def test_textual_renderer_suppresses_rpc_framing_events() -> None:
             RpcCommandStarted(command_id="cmd-1", command_type="prompt"),
             AgentStarted(session_id="s1"),
             RpcCommandFinished(command_id="cmd-1", command_type="prompt", ok=True),
-            AssistantMessage(content="the answer"),
+            completed_message(content="the answer"),
         ]
     )
 
@@ -891,9 +891,9 @@ def test_textual_renderer_escapes_untrusted_event_payloads() -> None:
 
 def test_textual_renderer_ignores_unhandled_framing_events() -> None:
     # An event type with no dedicated branch is dropped, not dumped as its repr.
-    # TokenDelta is streaming plumbing (assistant text arrives via the streaming
+    # MessageDelta is streaming plumbing (assistant text arrives via the streaming
     # path, not event()); showing it in the transcript was the noise bug.
-    rendered = _render_events_to_transcript([TokenDelta(delta="raw")])
+    rendered = _render_events_to_transcript([message_delta(delta="raw")])
 
     assert rendered == ""  # nothing rendered
 
@@ -931,7 +931,7 @@ def test_textual_transcript_uses_theme_colors() -> None:
     # LineMessage/StreamMessage carry their color as a role-styled Rich span.
     styles = _rendered_segment_styles(
         [
-            AssistantMessage(content="hi"),
+            completed_message(content="hi"),
             ErrorEvent(message="boom"),
         ]
     )
@@ -952,7 +952,7 @@ def test_textual_theme_switch_rederives_transcript_styles() -> None:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             app_instance.theme = "wisp-light"
-            renderer.event(AssistantMessage(content="after switch"))
+            renderer.event(completed_message(content="after switch"))
             await pilot.pause()
             return _transcript_styles(app_instance)
 
@@ -1011,7 +1011,7 @@ def test_textual_streaming_survives_a_burst_without_dropping_text() -> None:
 
 def test_textual_end_token_stream_finalizes_the_bubble() -> None:
     # end_token_stream() is the ONLY place a streamed assistant turn is finalized
-    # (the shell suppresses the trailing AssistantMessage when tokens rendered).
+    # (the shell suppresses the trailing MessageCompleted when tokens rendered).
     # After it, the buffer/live-widget refs are cleared and the text persists.
     async def scenario() -> tuple[str, object, object]:
         app_instance, renderer = create_textual_tui()
@@ -1084,7 +1084,7 @@ def test_textual_line_messages_carry_role_classes() -> None:
     # denied), c4 is denied at approval (→ denied). One card per call_id.
     cards = _cards_for_events(
         [
-            AssistantMessage(content="hi"),
+            completed_message(content="hi"),
             ToolCallRequested(call_id="c1", name="bash", arguments={}),
             ToolResultReady(call_id="c1", name="bash", output="ok", is_error=False),
             ToolCallRequested(call_id="c2", name="bash", arguments={}),
@@ -1109,7 +1109,7 @@ def test_textual_line_message_border_title_from_role_labels() -> None:
     # never from untrusted payload — so it's safe as border chrome.
     cards = _cards_for_events(
         [
-            AssistantMessage(content="hi"),
+            completed_message(content="hi"),
             ToolCallRequested(call_id="c1", name="bash", arguments={}),
             ErrorEvent(message="bad"),
         ]

@@ -27,10 +27,16 @@ from pytest import MonkeyPatch
 from wisp.agent.messages import Message
 from wisp.providers.base import (
     ProviderConfigurationError,
-    ProviderError,
     ToolCall,
     ToolCallResult,
     ToolSpec,
+)
+from wisp.providers.events import (
+    ProviderResponseCompleted,
+    ProviderResponseFailed,
+    ProviderResponseStarted,
+    ProviderTextDelta,
+    ProviderToolCallCompleted,
 )
 from wisp.providers.openai import OpenAIProvider
 
@@ -76,10 +82,15 @@ def test_openai_provider_streams_text_deltas() -> None:
     )
     messages = [Message(role="user", content="Say hello")]
 
-    async def run() -> list[str]:
-        return [delta async for delta in provider.stream(messages, model="gpt-test")]
+    async def run() -> list[object]:
+        return [event async for event in provider.stream(messages, model="gpt-test")]
 
-    assert anyio.run(run) == ["hello", " world"]
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="gpt-test"),
+        ProviderTextDelta(delta="hello"),
+        ProviderTextDelta(delta=" world"),
+        ProviderResponseCompleted(content="hello world"),
+    ]
     assert provider.seen_model == "gpt-test"
     assert provider.seen_messages == messages
 
@@ -87,10 +98,14 @@ def test_openai_provider_streams_text_deltas() -> None:
 def test_openai_provider_uses_default_model_when_model_is_not_provided() -> None:
     provider = StubOpenAIProvider([_text_delta("hello")])
 
-    async def run() -> list[str]:
-        return [delta async for delta in provider.stream([Message(role="user", content="hello")])]
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
 
-    assert anyio.run(run) == ["hello"]
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderTextDelta(delta="hello"),
+        ProviderResponseCompleted(content="hello"),
+    ]
     assert provider.seen_model == "default-test-model"
 
 
@@ -102,16 +117,20 @@ def test_openai_provider_accepts_provider_tool_specs() -> None:
         input_schema={"type": "object", "properties": {}},
     )
 
-    async def run() -> list[str]:
+    async def run() -> list[object]:
         return [
-            delta
-            async for delta in provider.stream(
+            event
+            async for event in provider.stream(
                 [Message(role="user", content="hello")],
                 tools=[tool],
             )
         ]
 
-    assert anyio.run(run) == ["hello"]
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderTextDelta(delta="hello"),
+        ProviderResponseCompleted(content="hello"),
+    ]
     assert provider.seen_tools == [tool]
 
 
@@ -284,13 +303,20 @@ def test_openai_provider_uses_buffered_item_metadata_for_argument_done_events() 
 
     events = anyio.run(run)
 
+    tool_call = ToolCall(
+        call_id="call-id",
+        name="lookup",
+        arguments={"query": "wisp"},
+        raw_arguments='{"query": "wisp"}',
+    )
     assert events == [
-        ToolCall(
-            call_id="call-id",
-            name="lookup",
-            arguments={"query": "wisp"},
-            raw_arguments='{"query": "wisp"}',
-        )
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderToolCallCompleted(tool_call=tool_call),
+        ProviderResponseCompleted(
+            content="",
+            tool_calls=(tool_call,),
+            finish_reason="tool_calls",
+        ),
     ]
 
 
@@ -307,13 +333,20 @@ def test_openai_provider_waits_for_output_item_done_when_arguments_done_lacks_me
 
     events = anyio.run(run)
 
+    tool_call = ToolCall(
+        call_id="call-id",
+        name="lookup",
+        arguments={"query": "wisp"},
+        raw_arguments='{"query": "wisp"}',
+    )
     assert events == [
-        ToolCall(
-            call_id="call-id",
-            name="lookup",
-            arguments={"query": "wisp"},
-            raw_arguments='{"query": "wisp"}',
-        )
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderToolCallCompleted(tool_call=tool_call),
+        ProviderResponseCompleted(
+            content="",
+            tool_calls=(tool_call,),
+            finish_reason="tool_calls",
+        ),
     ]
 
 
@@ -341,14 +374,22 @@ def test_openai_provider_streams_function_tool_calls() -> None:
 
     events = anyio.run(run)
 
+    tool_call = ToolCall(
+        call_id="call-id",
+        name="lookup",
+        arguments={"query": "wisp"},
+        raw_arguments='{"query": "wisp"}',
+        response_id="response-id",
+    )
     assert events == [
-        ToolCall(
-            call_id="call-id",
-            name="lookup",
-            arguments={"query": "wisp"},
-            raw_arguments='{"query": "wisp"}',
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderToolCallCompleted(tool_call=tool_call),
+        ProviderResponseCompleted(
+            content="",
+            tool_calls=(tool_call,),
             response_id="response-id",
-        )
+            finish_reason="tool_calls",
+        ),
     ]
 
 
@@ -365,54 +406,71 @@ def test_openai_provider_streams_tool_call_parse_errors() -> None:
 
     events = anyio.run(run)
 
+    tool_call = ToolCall(
+        call_id="call-id",
+        name="lookup",
+        arguments={},
+        raw_arguments="not-json",
+        parse_error="Invalid JSON arguments for tool lookup: Expecting value",
+    )
     assert events == [
-        ToolCall(
-            call_id="call-id",
-            name="lookup",
-            arguments={},
-            raw_arguments="not-json",
-            parse_error="Invalid JSON arguments for tool lookup: Expecting value",
-        )
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderToolCallCompleted(tool_call=tool_call),
+        ProviderResponseCompleted(
+            content="",
+            tool_calls=(tool_call,),
+            finish_reason="tool_calls",
+        ),
     ]
 
 
 def test_openai_provider_streams_refusal_deltas() -> None:
     provider = StubOpenAIProvider([_refusal_delta("I can't help with that")])
 
-    async def run() -> list[str]:
-        return [delta async for delta in provider.stream([Message(role="user", content="hello")])]
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
 
-    assert anyio.run(run) == ["I can't help with that"]
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderTextDelta(delta="I can't help with that"),
+        ProviderResponseCompleted(content="I can't help with that"),
+    ]
 
 
-def test_openai_provider_raises_on_stream_error_event() -> None:
+def test_openai_provider_emits_failed_terminal_on_stream_error_event() -> None:
     provider = StubOpenAIProvider([_error_event("boom")])
 
-    async def run() -> list[str]:
-        return [delta async for delta in provider.stream([Message(role="user", content="hello")])]
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
 
-    with pytest.raises(ProviderError, match="OpenAI API error: boom"):
-        anyio.run(run)
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderResponseFailed(message="OpenAI API error: boom"),
+    ]
 
 
-def test_openai_provider_raises_on_failed_response_event() -> None:
+def test_openai_provider_emits_failed_terminal_on_failed_response_event() -> None:
     provider = StubOpenAIProvider([_failed_event("server exploded")])
 
-    async def run() -> list[str]:
-        return [delta async for delta in provider.stream([Message(role="user", content="hello")])]
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
 
-    with pytest.raises(ProviderError, match="OpenAI response failed: server exploded"):
-        anyio.run(run)
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderResponseFailed(message="OpenAI response failed: server exploded"),
+    ]
 
 
-def test_openai_provider_raises_on_incomplete_response_event() -> None:
+def test_openai_provider_emits_failed_terminal_on_incomplete_response_event() -> None:
     provider = StubOpenAIProvider([_incomplete_event("max_output_tokens")])
 
-    async def run() -> list[str]:
-        return [delta async for delta in provider.stream([Message(role="user", content="hello")])]
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
 
-    with pytest.raises(ProviderError, match="OpenAI response incomplete: max_output_tokens"):
-        anyio.run(run)
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderResponseFailed(message="OpenAI response incomplete: max_output_tokens"),
+    ]
 
 
 def test_openai_provider_requires_api_key(monkeypatch: MonkeyPatch) -> None:

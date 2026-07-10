@@ -21,18 +21,23 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
     assert [record["type"] for record in records] == [
         "rpc.command.started",
         "agent.started",
-        "token.delta",
-        "token.delta",
-        "token.delta",
-        "token.delta",
-        "assistant.message",
+        "turn.started",
+        "message.started",
+        "message.delta",
+        "message.delta",
+        "message.delta",
+        "message.delta",
+        "message.completed",
+        "turn.completed",
         "session.saved",
+        "agent.completed",
         "rpc.command.finished",
     ]
+    assert all(record["schema_version"] == 2 for record in records)
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"
-    assert records[-3]["content"] == "fake response to: hello"
+    assert records[-5]["content"] == "fake response to: hello"
     assert records[-1]["command_id"] == "cmd-1"
     assert records[-1]["command_type"] == "prompt"
     assert records[-1]["ok"] is True
@@ -122,7 +127,7 @@ def test_rpc_mode_runs_multiple_prompt_commands_in_one_session(tmp_path: Path) -
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
     assistant_messages = [
-        record["content"] for record in records if record["type"] == "assistant.message"
+        record["content"] for record in records if record["type"] == "message.completed"
     ]
     assert assistant_messages == ["fake response to: first", "fake response to: second"]
     started = [record for record in records if record["type"] == "rpc.command.started"]
@@ -178,7 +183,7 @@ def test_rpc_mode_reports_bad_commands_and_continues(tmp_path: Path) -> None:
     assert finished[2]["ok"] is False
     assert finished[2]["error"] == "RPC command id must be a non-empty string"
     assert any(
-        record["type"] == "assistant.message" and record["content"] == "fake response to: ok"
+        record["type"] == "message.completed" and record["content"] == "fake response to: ok"
         for record in records
     )
     assert finished[-1]["command_id"] == "ok"
@@ -525,7 +530,7 @@ def test_rpc_mode_rejects_commands_beyond_queue_cap_while_prompt_runs(
     finished = [record for record in records if record["type"] == "rpc.command.finished"]
     assert ("cancel-1", True) in [(record["command_id"], record["ok"]) for record in finished]
     assistant_messages = [
-        record["content"] for record in records if record["type"] == "assistant.message"
+        record["content"] for record in records if record["type"] == "message.completed"
     ]
     assert assistant_messages == ["done second", "done third"]
 
@@ -618,7 +623,7 @@ def test_rpc_mode_preserves_failed_prompt_in_next_prompt_history(
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
     assistant_messages = [
-        record["content"] for record in records if record["type"] == "assistant.message"
+        record["content"] for record in records if record["type"] == "message.completed"
     ]
     assert assistant_messages == ["saw failed history"]
     finished = [record for record in records if record["type"] == "rpc.command.finished"]
@@ -649,7 +654,7 @@ def test_rpc_mode_excludes_cancelled_prompt_from_next_prompt_history(
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
     assistant_messages = [
-        record["content"] for record in records if record["type"] == "assistant.message"
+        record["content"] for record in records if record["type"] == "message.completed"
     ]
     assert assistant_messages == ["done second"]
     session = JsonlSessionStore(tmp_path).latest()
@@ -680,7 +685,7 @@ def test_rpc_mode_queues_prompts_while_canceling_running_prompt(
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
     assistant_messages = [
-        record["content"] for record in records if record["type"] == "assistant.message"
+        record["content"] for record in records if record["type"] == "message.completed"
     ]
     assert assistant_messages == ["done second"]
     finished = [record for record in records if record["type"] == "rpc.command.finished"]

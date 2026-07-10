@@ -172,7 +172,7 @@ uv run wisp -p "continue the work" --resume <session-id-prefix>
   invocations. Point `--session-dir` or `WISP_SESSION_DIR` elsewhere to override.
 
 Session files contain provider-facing `message` entries plus selected structured `event` entries
-(tool calls, approvals, tool start/end, errors) for audit — but **not** `token.delta` events.
+(tool calls, approvals, tool start/end, errors) for audit — but **not** `message.delta` events.
 Continuation reads only message entries, so audit events never become model-visible history, and
 stale project context from earlier turns is not replayed as instructions.
 
@@ -240,13 +240,39 @@ The legacy `--mode tui` entrypoint remains for compatibility and honors
 
 ## Machine-readable output
 
+Every outbound `WispEvent` includes `"schema_version": 2`. A successful prompt follows this
+lifecycle (tool events repeat inside a turn when the model requests tools):
+
+```text
+agent.started
+  turn.started
+    message.started
+    message.delta *
+    message.completed
+    tool.call -> tool.execution.started -> approval events -> tool.execution.ended -> tool.result
+  turn.completed
+session.saved
+agent.completed
+```
+
+`message.delta` distinguishes `text` from `thinking` with `content_kind`.
+`message.completed` carries the assembled content, finish reason, response id, and completed tool
+calls. A failed provider response or tool loop emits `error`, a failed `turn.completed`, and a
+failed `agent.completed`; it does not emit `message.completed` for an incomplete response.
+
+Schema v2 replaces the former `token.delta` event with `message.delta` and the former
+`assistant.message` event with `message.completed`. It also adds explicit turn, message-start, and
+agent-completion events, and emits `tool.call` before `tool.execution.started`. JSON/RPC consumers
+should branch on `schema_version` and reject versions they do not support; Wisp's typed RPC client
+does this automatically.
+
 ### JSON mode
 
 ```bash
 uv run wisp -p "hello" --mode json
 ```
 
-Writes each `WispEvent` as one JSON object per line on stdout — including `token.delta`, tool
+Writes each `WispEvent` as one JSON object per line on stdout — including `message.delta`, tool
 lifecycle events, errors, and `session.saved`. Assistant text is not written as raw text in this
 mode.
 
@@ -310,6 +336,13 @@ finally:
 and yields parsed `WispEvent` objects.
 
 ## Development
+
+Providers yield typed events from `wisp.providers`. Each provider stream must emit exactly one
+`ProviderResponseStarted`, followed by zero or more text/thinking deltas and completed tool calls,
+then exactly one `ProviderResponseCompleted` or `ProviderResponseFailed`. The agent rejects events
+before the start, missing or duplicate terminal boundaries, post-terminal events, and mismatched
+tool-call summaries. Use `ScriptedProvider` to exercise deterministic multi-turn and failure cases
+without a live model.
 
 ```bash
 uv sync            # install

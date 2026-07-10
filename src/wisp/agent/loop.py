@@ -12,20 +12,40 @@ from wisp.agent.prompt import (
     resolve_project_context_root,
 )
 from wisp.events import (
+    AgentCompleted,
     AgentStarted,
-    AssistantMessage,
     ErrorEvent,
+    MessageCompleted,
+    MessageDelta,
+    MessageStarted,
     SessionSaved,
-    TokenDelta,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
+    ToolCallSnapshot,
     ToolExecutionEnded,
     ToolExecutionStarted,
     ToolResultReady,
+    TurnCompleted,
+    TurnStarted,
     WispEvent,
 )
-from wisp.providers.base import Provider, ToolCall, ToolCallResult, ToolSpec
+from wisp.providers.base import (
+    Provider,
+    ProviderError,
+    ProviderProtocolError,
+    ToolCallResult,
+    ToolSpec,
+)
+from wisp.providers.events import (
+    ProviderResponseCompleted,
+    ProviderResponseFailed,
+    ProviderResponseStarted,
+    ProviderTextDelta,
+    ProviderThinkingDelta,
+    ProviderToolCallCompleted,
+    ToolCall,
+)
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
@@ -43,6 +63,11 @@ PERSISTED_SESSION_EVENT_TYPES = frozenset(
         "error",
     }
 )
+
+
+def _require_provider_response_started(started: bool) -> None:
+    if not started:
+        raise ProviderProtocolError("Provider emitted response data before response_started")
 
 
 def _tool_observation_message(message: Message) -> Message:
@@ -130,14 +155,20 @@ class Agent:
             *self._conversation_history(history),
             user_message,
         ]
-        chunks: list[str] = []
+        assistant_chunks: list[str] = []
         pending_tool_results: tuple[ToolCallResult, ...] = ()
         previous_response_id: str | None = None
         tool_iterations = 0
+        turn = 0
 
         try:
             while True:
-                tool_calls: list[ToolCall] = []
+                turn += 1
+                yield await emit(TurnStarted(turn=turn))
+                response_started = False
+                terminal_response: ProviderResponseCompleted | ProviderResponseFailed | None = None
+                streamed_tool_calls: list[ToolCall] = []
+
                 async for provider_event in self.provider.stream(
                     messages,
                     model=self.model,
@@ -145,15 +176,86 @@ class Agent:
                     tool_results=pending_tool_results,
                     previous_response_id=previous_response_id,
                 ):
-                    if isinstance(provider_event, str):
-                        chunks.append(provider_event)
-                        yield await emit(TokenDelta(delta=provider_event))
-                    else:
-                        tool_calls.append(provider_event)
-                        if provider_event.response_id is not None:
-                            previous_response_id = provider_event.response_id
+                    if terminal_response is not None:
+                        raise ProviderProtocolError(
+                            "Provider emitted an event after its terminal response"
+                        )
+                    if isinstance(provider_event, ProviderResponseStarted):
+                        if response_started:
+                            raise ProviderProtocolError(
+                                "Provider emitted response_started more than once"
+                            )
+                        response_started = True
+                        yield await emit(MessageStarted(turn=turn))
+                    elif isinstance(provider_event, ProviderTextDelta):
+                        _require_provider_response_started(response_started)
+                        yield await emit(
+                            MessageDelta(
+                                turn=turn,
+                                delta=provider_event.delta,
+                                content_index=provider_event.content_index,
+                            )
+                        )
+                    elif isinstance(provider_event, ProviderThinkingDelta):
+                        _require_provider_response_started(response_started)
+                        yield await emit(
+                            MessageDelta(
+                                turn=turn,
+                                delta=provider_event.delta,
+                                content_index=provider_event.content_index,
+                                content_kind="thinking",
+                            )
+                        )
+                    elif isinstance(provider_event, ProviderToolCallCompleted):
+                        _require_provider_response_started(response_started)
+                        streamed_tool_calls.append(provider_event.tool_call)
+                    elif isinstance(
+                        provider_event, ProviderResponseCompleted | ProviderResponseFailed
+                    ):
+                        _require_provider_response_started(response_started)
+                        terminal_response = provider_event
+
+                if not response_started:
+                    raise ProviderProtocolError("Provider stream ended before response_started")
+                if terminal_response is None:
+                    raise ProviderProtocolError("Provider stream ended without a terminal response")
+                if isinstance(terminal_response, ProviderResponseFailed):
+                    raise ProviderError(terminal_response.message)
+                if tuple(streamed_tool_calls) != terminal_response.tool_calls:
+                    raise ProviderProtocolError(
+                        "Provider terminal tool calls do not match streamed tool calls"
+                    )
+
+                response = terminal_response
+                tool_calls = response.tool_calls
+                assistant_chunks.append(response.content)
+                previous_response_id = response.response_id
+                yield await emit(
+                    MessageCompleted(
+                        turn=turn,
+                        content=response.content,
+                        finish_reason=response.finish_reason,
+                        response_id=response.response_id,
+                        tool_calls=tuple(
+                            ToolCallSnapshot(
+                                call_id=tool_call.call_id,
+                                name=tool_call.name,
+                                arguments=dict(tool_call.arguments),
+                                parse_error=tool_call.parse_error,
+                            )
+                            for tool_call in tool_calls
+                        ),
+                    )
+                )
 
                 if not tool_calls:
+                    yield await emit(
+                        TurnCompleted(
+                            turn=turn,
+                            outcome="completed",
+                            finish_reason=response.finish_reason,
+                        )
+                    )
                     break
                 if (
                     self.max_tool_iterations is not None
@@ -167,14 +269,14 @@ class Agent:
                 for tool_call in tool_calls:
                     arguments = dict(tool_call.arguments)
                     yield await emit(
-                        ToolExecutionStarted(
+                        ToolCallRequested(
                             call_id=tool_call.call_id,
                             name=tool_call.name,
                             arguments=arguments,
                         )
                     )
                     yield await emit(
-                        ToolCallRequested(
+                        ToolExecutionStarted(
                             call_id=tool_call.call_id,
                             name=tool_call.name,
                             arguments=arguments,
@@ -225,16 +327,30 @@ class Agent:
                         )
                     )
                 pending_tool_results = tuple(tool_results)
+                yield await emit(
+                    TurnCompleted(
+                        turn=turn,
+                        outcome="completed",
+                        finish_reason=response.finish_reason,
+                    )
+                )
         except Exception as exc:
             yield await emit(ErrorEvent(message=str(exc)))
+            if turn > 0:
+                yield await emit(TurnCompleted(turn=turn, outcome="failed", finish_reason="error"))
+            yield await emit(
+                AgentCompleted(session_id=session.session_id, turns=turn, outcome="failed")
+            )
             raise
 
-        assistant_content = "".join(chunks)
+        assistant_content = "".join(assistant_chunks)
         assistant_message = Message(role="assistant", content=assistant_content)
         await session.append_message(assistant_message)
 
-        yield await emit(AssistantMessage(content=assistant_content))
         yield await emit(SessionSaved(session_id=session.session_id, path=session.path))
+        yield await emit(
+            AgentCompleted(session_id=session.session_id, turns=turn, outcome="completed")
+        )
 
     async def _execute_tool_call(
         self,

@@ -14,7 +14,7 @@ def test_tui_shell_records_submitted_prompt_for_fullscreen_renderer() -> None:
         controller = ScriptedController(
             [
                 [
-                    AssistantMessage(content="answer"),
+                    completed_message(content="answer"),
                     RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
                 ]
             ]
@@ -41,7 +41,7 @@ def test_tui_shell_runs_with_fullscreen_renderer() -> None:
         controller = ScriptedController(
             [
                 [
-                    AssistantMessage(content="fullscreen response"),
+                    completed_message(content="fullscreen response"),
                     RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
                 ]
             ]
@@ -67,8 +67,8 @@ def test_tui_shell_runs_prompt_then_shutdown() -> None:
         controller = ScriptedController(
             [
                 [
-                    TokenDelta(delta="hello"),
-                    AssistantMessage(content="hello"),
+                    message_delta(delta="hello"),
+                    completed_message(content="hello"),
                     RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
                 ]
             ]
@@ -97,7 +97,7 @@ def test_tui_shell_sends_slash_prefixed_prose_to_the_model() -> None:
         controller = ScriptedController(
             [
                 [
-                    AssistantMessage(content="looking into it"),
+                    completed_message(content="looking into it"),
                     RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
                 ]
             ]

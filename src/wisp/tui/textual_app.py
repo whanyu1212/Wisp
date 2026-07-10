@@ -13,9 +13,9 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Header, Input, Static
 
 from wisp.events import (
-    AssistantMessage,
     ErrorEvent,
     KnownWispEvent,
+    MessageCompleted,
     RpcCommandFinished,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -599,7 +599,7 @@ class TextualTui(App[None]):
 
     def flush_stream(self) -> None:
         # Finalize the streamed turn. This is the ONLY place a streamed assistant
-        # bubble is completed: the shell suppresses the trailing AssistantMessage
+        # bubble is completed: the shell suppresses the trailing MessageCompleted
         # when tokens were rendered (shell.py de-dup), so it never reaches event().
         # Capture the widget + final text and reconcile AFTER refresh, because the
         # widget may have been mounted this same tick — reconciling inline would
@@ -793,7 +793,7 @@ class TextualTuiRenderer:
         # Typed dispatch mirroring LineTuiRenderer.event() so tool calls, tool
         # results, and approvals render as distinct, semantically-styled lines
         # instead of an undifferentiated str(event) repr.
-        if isinstance(event, AssistantMessage):
+        if isinstance(event, MessageCompleted) and event.content:
             self.app.hide_working_indicator()
             self.app.write_assistant(event.content)
         elif isinstance(event, ToolCallRequested):

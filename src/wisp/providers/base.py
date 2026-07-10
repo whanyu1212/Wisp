@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
 from wisp.agent.messages import Message
+from wisp.providers.events import JsonObject, ProviderEvent
+from wisp.providers.events import ToolCall as ToolCall
 from wisp.tools.base import Tool
-
-JsonObject = Mapping[str, object]
 
 
 @dataclass(frozen=True)
@@ -32,18 +32,6 @@ class ToolSpec:
 
 
 @dataclass(frozen=True)
-class ToolCall:
-    """Provider-agnostic request from a model to call a tool."""
-
-    call_id: str
-    name: str
-    arguments: JsonObject
-    raw_arguments: str = ""
-    response_id: str | None = None
-    parse_error: str | None = None
-
-
-@dataclass(frozen=True)
 class ToolCallResult:
     """Provider-agnostic result returned for a model tool call."""
 
@@ -52,15 +40,16 @@ class ToolCallResult:
     is_error: bool = False
 
 
-type ProviderStreamEvent = str | ToolCall
-
-
 class ProviderError(RuntimeError):
     """Base error raised by model providers."""
 
 
 class ProviderConfigurationError(ProviderError):
     """Raised when a provider is selected but not configured correctly."""
+
+
+class ProviderProtocolError(ProviderError):
+    """Raised when a provider emits a malformed response event sequence."""
 
 
 class Provider(Protocol):
@@ -77,6 +66,6 @@ class Provider(Protocol):
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
-    ) -> AsyncIterator[ProviderStreamEvent]:
-        """Yield text deltas or tool-call requests for the assistant response."""
+    ) -> AsyncIterator[ProviderEvent]:
+        """Yield one typed, terminal provider-response event stream."""
         ...

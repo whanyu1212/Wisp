@@ -218,7 +218,7 @@ def test_tui_shell_separates_streamed_text_from_tool_events() -> None:
         controller = ScriptedController(
             [
                 [
-                    TokenDelta(delta="partial"),
+                    message_delta(delta="partial"),
                     ToolCallRequested(call_id="call-1", name="read", arguments={"path": "x"}),
                     ToolResultReady(
                         call_id="call-1",
@@ -226,7 +226,7 @@ def test_tui_shell_separates_streamed_text_from_tool_events() -> None:
                         output="ok",
                         is_error=False,
                     ),
-                    AssistantMessage(content="partial"),
+                    completed_message(content="partial"),
                     RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
                 ]
             ]

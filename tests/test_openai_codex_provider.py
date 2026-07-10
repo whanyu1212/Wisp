@@ -13,6 +13,12 @@ from wisp.agent.messages import Message
 from wisp.auth.storage import JsonAuthStore, OAuthCredential
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import ProviderConfigurationError, ToolCall, ToolCallResult, ToolSpec
+from wisp.providers.events import (
+    ProviderResponseCompleted,
+    ProviderResponseStarted,
+    ProviderTextDelta,
+    ProviderToolCallCompleted,
+)
 from wisp.providers.openai_codex import OpenAICodexProvider
 
 
@@ -51,10 +57,15 @@ def test_openai_codex_provider_streams_text_with_subscription_headers(tmp_path: 
         auth_resolver=StoredProviderAuthResolver(store),
     )
 
-    async def run() -> list[str]:
-        return [delta async for delta in provider.stream([Message(role="user", content="hi")])]
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hi")])]
 
-    assert anyio.run(run) == ["hello", " world"]
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="gpt-test"),
+        ProviderTextDelta(delta="hello"),
+        ProviderTextDelta(delta=" world"),
+        ProviderResponseCompleted(content="hello world", response_id="response-id"),
+    ]
     assert provider.seen_body is not None
     assert provider.seen_body["model"] == "gpt-test"
     assert provider.seen_body["input"] == [{"role": "user", "content": "hi"}]
@@ -86,7 +97,10 @@ def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path)
                 tool_results=[result],
                 previous_response_id="response-id",
             )
-        ] == []
+        ] == [
+            ProviderResponseStarted(model="gpt-test"),
+            ProviderResponseCompleted(content="", response_id="response-id"),
+        ]
 
     anyio.run(run)
 
@@ -128,13 +142,20 @@ def test_openai_codex_provider_yields_tool_calls(tmp_path: Path) -> None:
         return [event async for event in provider.stream([Message(role="user", content="hi")])]
 
     events = anyio.run(run)
+    tool_call = ToolCall(
+        call_id="call-id",
+        name="lookup",
+        arguments={"query": "wisp"},
+        raw_arguments='{"query":"wisp"}',
+    )
     assert events == [
-        ToolCall(
-            call_id="call-id",
-            name="lookup",
-            arguments={"query": "wisp"},
-            raw_arguments='{"query":"wisp"}',
-        )
+        ProviderResponseStarted(model="gpt-test"),
+        ProviderToolCallCompleted(tool_call=tool_call),
+        ProviderResponseCompleted(
+            content="",
+            tool_calls=(tool_call,),
+            finish_reason="tool_calls",
+        ),
     ]
 
 

@@ -14,7 +14,7 @@ from wisp.agent.loop import Agent
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.auth import auth_app
 from wisp.config import WispConfig
-from wisp.events import ErrorEvent, TokenDelta
+from wisp.events import ErrorEvent, MessageDelta
 from wisp.providers.base import ProviderError
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore, SessionError
@@ -546,7 +546,7 @@ async def _run_print(
     wrote_tokens = False
     stderr_needs_separator = False
     async for event in events:
-        if isinstance(event, TokenDelta):
+        if isinstance(event, MessageDelta) and event.content_kind == "text":
             sys.stdout.write(event.delta)
             sys.stdout.flush()
             wrote_tokens = True
