@@ -40,9 +40,7 @@ def test_bounded_decision_preview_marks_line_and_character_truncation() -> None:
     assert _bounded_decision_preview(["one", "two", "three"], max_lines=2) == (
         "one\n... preview truncated"
     )
-    assert _bounded_decision_preview(["abcdefgh"], max_chars=4) == (
-        "abcd\n... preview truncated"
-    )
+    assert _bounded_decision_preview(["abcdefgh"], max_chars=4) == ("abcd\n... preview truncated")
 
 
 def test_bash_approval_content_summarizes_command_context() -> None:
@@ -111,9 +109,7 @@ def test_trust_content_explains_scope_without_implying_persistence() -> None:
 
     assert content.title == "Trust this project?"
     assert content.meta == "/work/project"
-    assert content.detail == (
-        "Trusting allows project-local settings and instructions to load."
-    )
+    assert content.detail == ("Trusting allows project-local settings and instructions to load.")
 
 
 def test_approval_panel_defaults_to_deny_and_preserves_composer_draft() -> None:
