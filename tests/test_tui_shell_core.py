@@ -150,6 +150,30 @@ def test_tui_shell_sends_slash_prefixed_prose_to_the_model() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_sends_known_slash_command_multiline_input_to_the_model() -> None:
+    async def run() -> None:
+        prompt = "/help\nplease explain this"
+        controller = ScriptedController(
+            [
+                [
+                    completed_message(content="explanation"),
+                    RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
+                ]
+            ]
+        )
+        shell = TuiShell(
+            controller,
+            console=_console()[0],
+            prompt_reader=await _reader_from([prompt]),
+        )
+
+        await shell.run()
+
+        assert controller.prompts == [prompt]
+
+    anyio.run(run)
+
+
 def test_tui_shell_help_renders_approval_hint_literally() -> None:
     async def run() -> None:
         controller = ScriptedController()
