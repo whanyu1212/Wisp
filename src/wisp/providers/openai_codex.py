@@ -99,7 +99,7 @@ class OpenAICodexProvider:
             )
         account_id = auth.account_id or account_id_from_access_token(auth.token)
         headers = _codex_headers(token=auth.token, account_id=account_id)
-        continuation_items = self._take_continuation(previous_response_id)
+        continuation_items = self._get_continuation(previous_response_id)
         continuation_input = (
             *continuation_items,
             *_tool_results_to_codex_input(tool_results),
@@ -275,10 +275,14 @@ class OpenAICodexProvider:
                     "OpenAI Codex tool response did not include a response id"
                 )
             replay_items = _codex_replay_items(output_items.values(), tool_calls=tool_calls)
+            if previous_response_id is not None and previous_response_id != response_id:
+                self._continuations.pop(previous_response_id, None)
             self._store_continuation(
                 response_id,
                 (*continuation_input, *replay_items),
             )
+        elif previous_response_id is not None:
+            self._continuations.pop(previous_response_id, None)
 
         yield ProviderResponseCompleted(
             content="".join(chunks),
@@ -287,18 +291,20 @@ class OpenAICodexProvider:
             finish_reason="tool_calls" if tool_calls else "stop",
         )
 
-    def _take_continuation(
+    def _get_continuation(
         self,
         previous_response_id: str | None,
     ) -> tuple[dict[str, object], ...]:
         if previous_response_id is None:
             return ()
         try:
-            return self._continuations.pop(previous_response_id)
+            continuation = self._continuations[previous_response_id]
         except KeyError as exc:
             raise ProviderProtocolError(
                 f"OpenAI Codex continuation state is unavailable for {previous_response_id}"
             ) from exc
+        self._continuations.move_to_end(previous_response_id)
+        return continuation
 
     def _store_continuation(
         self,

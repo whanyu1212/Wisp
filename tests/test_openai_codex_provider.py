@@ -40,9 +40,15 @@ class StubOpenAICodexProvider(OpenAICodexProvider):
         events: Sequence[dict[str, object]],
         *,
         auth_resolver: StoredProviderAuthResolver,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
-        super().__init__(auth_resolver=auth_resolver, default_model="gpt-test")
+        super().__init__(
+            auth_resolver=auth_resolver,
+            default_model="gpt-test",
+            retry_policy=retry_policy,
+        )
         self.events = events
+        self.opening_errors: list[Exception] = []
         self.seen_body: Mapping[str, object] | None = None
         self.seen_bodies: list[Mapping[str, object]] = []
         self.seen_headers: Mapping[str, str] | None = None
@@ -57,6 +63,8 @@ class StubOpenAICodexProvider(OpenAICodexProvider):
         self.seen_body = body
         self.seen_bodies.append(body)
         self.seen_headers = headers
+        if self.opening_errors:
+            raise self.opening_errors.pop(0)
 
         async def stream() -> AsyncIterator[dict[str, object]]:
             for event in self.events:
@@ -200,6 +208,77 @@ def test_openai_codex_provider_rejects_missing_continuation_state(tmp_path: Path
 
     anyio.run(run)
     assert provider.seen_body is None
+
+
+def test_openai_codex_provider_preserves_continuation_after_opening_failure(
+    tmp_path: Path,
+) -> None:
+    provider = StubOpenAICodexProvider(
+        [
+            {"type": "response.created", "response": {"id": "response-1"}},
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "item-1",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "arguments": '{"query":"wisp"}',
+                },
+            },
+        ],
+        auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
+        retry_policy=RetryPolicy(max_retries=0),
+    )
+    messages = [Message(role="user", content="hi")]
+    tool_result = ToolCallResult(call_id="call-1", output="found")
+
+    async def run() -> None:
+        async for _event in provider.stream(messages):
+            pass
+
+        provider.opening_errors.append(httpx.ConnectError("temporary failure"))
+        with pytest.raises(httpx.ConnectError, match="temporary failure"):
+            async for _event in provider.stream(
+                messages,
+                tool_results=[tool_result],
+                previous_response_id="response-1",
+            ):
+                pass
+
+        provider.events = [
+            {"type": "response.created", "response": {"id": "response-2"}},
+            {"type": "response.output_text.delta", "delta": "recovered"},
+        ]
+        assert [
+            event
+            async for event in provider.stream(
+                messages,
+                tool_results=[tool_result],
+                previous_response_id="response-1",
+            )
+        ] == [
+            ProviderResponseStarted(model="gpt-test"),
+            ProviderTextDelta(delta="recovered"),
+            ProviderResponseCompleted(content="recovered", response_id="response-2"),
+        ]
+
+        with pytest.raises(
+            ProviderProtocolError,
+            match="continuation state is unavailable for response-1",
+        ):
+            async for _event in provider.stream(
+                messages,
+                tool_results=[tool_result],
+                previous_response_id="response-1",
+            ):
+                pass
+
+    anyio.run(run)
+
+    failed_body, retry_body = provider.seen_bodies[-2:]
+    assert failed_body == retry_body
+    assert "previous_response_id" not in retry_body
 
 
 def test_openai_codex_provider_yields_tool_calls(tmp_path: Path) -> None:
