@@ -99,7 +99,10 @@ class OpenAIProvider:
                     response_id = event.response.id
                 elif isinstance(event, ResponseTextDeltaEvent | ResponseRefusalDeltaEvent):
                     chunks.append(event.delta)
-                    yield ProviderTextDelta(delta=event.delta)
+                    yield ProviderTextDelta(
+                        delta=event.delta,
+                        content_index=event.content_index,
+                    )
                 elif isinstance(event, ResponseFunctionCallArgumentsDoneEvent):
                     completed_tool_arguments[event.item_id] = event.arguments
                     pending = pending_tool_calls.get(event.item_id)

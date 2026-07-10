@@ -208,6 +208,27 @@ def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
     ]
 
 
+def test_agent_preserves_provider_text_content_index(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderTextDelta(delta="second part", content_index=1),
+                ProviderResponseCompleted(content="second part"),
+            ]
+        ]
+    )
+
+    async def run_agent() -> list[object]:
+        agent = Agent(provider=provider, sessions=JsonlSessionStore(tmp_path))
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+
+    delta = next(event for event in events if isinstance(event, MessageDelta))
+    assert delta.content_index == 1
+
+
 @pytest.mark.parametrize(
     ("provider_events", "error_message"),
     [

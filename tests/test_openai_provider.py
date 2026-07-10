@@ -98,7 +98,7 @@ def test_openai_provider_streams_text_deltas() -> None:
     provider = StubOpenAIProvider(
         [
             _text_delta("hello"),
-            _text_delta(" world", sequence_number=1),
+            _text_delta(" world", content_index=1, sequence_number=1),
         ]
     )
     messages = [Message(role="user", content="Say hello")]
@@ -109,7 +109,7 @@ def test_openai_provider_streams_text_deltas() -> None:
     assert anyio.run(run) == [
         ProviderResponseStarted(model="gpt-test"),
         ProviderTextDelta(delta="hello"),
-        ProviderTextDelta(delta=" world"),
+        ProviderTextDelta(delta=" world", content_index=1),
         ProviderResponseCompleted(content="hello world"),
     ]
     assert provider.seen_model == "gpt-test"
@@ -446,14 +446,14 @@ def test_openai_provider_streams_tool_call_parse_errors() -> None:
 
 
 def test_openai_provider_streams_refusal_deltas() -> None:
-    provider = StubOpenAIProvider([_refusal_delta("I can't help with that")])
+    provider = StubOpenAIProvider([_refusal_delta("I can't help with that", content_index=2)])
 
     async def run() -> list[object]:
         return [event async for event in provider.stream([Message(role="user", content="hello")])]
 
     assert anyio.run(run) == [
         ProviderResponseStarted(model="default-test-model"),
-        ProviderTextDelta(delta="I can't help with that"),
+        ProviderTextDelta(delta="I can't help with that", content_index=2),
         ProviderResponseCompleted(content="I can't help with that"),
     ]
 
@@ -542,9 +542,14 @@ class StubResponsesResource:
         return stream()
 
 
-def _text_delta(text: str, *, sequence_number: int = 0) -> ResponseTextDeltaEvent:
+def _text_delta(
+    text: str,
+    *,
+    content_index: int = 0,
+    sequence_number: int = 0,
+) -> ResponseTextDeltaEvent:
     return ResponseTextDeltaEvent(
-        content_index=0,
+        content_index=content_index,
         delta=text,
         item_id="item",
         logprobs=[],
@@ -554,9 +559,14 @@ def _text_delta(text: str, *, sequence_number: int = 0) -> ResponseTextDeltaEven
     )
 
 
-def _refusal_delta(text: str, *, sequence_number: int = 0) -> ResponseRefusalDeltaEvent:
+def _refusal_delta(
+    text: str,
+    *,
+    content_index: int = 0,
+    sequence_number: int = 0,
+) -> ResponseRefusalDeltaEvent:
     return ResponseRefusalDeltaEvent(
-        content_index=0,
+        content_index=content_index,
         delta=text,
         item_id="item",
         output_index=0,
