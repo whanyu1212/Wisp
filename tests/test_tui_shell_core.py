@@ -174,6 +174,31 @@ def test_tui_shell_sends_known_slash_command_multiline_input_to_the_model() -> N
     anyio.run(run)
 
 
+def test_tui_shell_preserves_trailing_newline_before_slash_command_parsing() -> None:
+    async def run() -> None:
+        prompt = "/quit\n"
+        controller = ScriptedController(
+            [
+                [
+                    completed_message(content="not quitting"),
+                    RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
+                ]
+            ]
+        )
+        shell = TuiShell(
+            controller,
+            console=_console()[0],
+            prompt_reader=await _reader_from([prompt]),
+        )
+
+        await shell.run()
+
+        assert controller.prompts == [prompt]
+        assert controller.shutdown_count == 1
+
+    anyio.run(run)
+
+
 def test_tui_shell_help_renders_approval_hint_literally() -> None:
     async def run() -> None:
         controller = ScriptedController()
