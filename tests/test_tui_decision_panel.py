@@ -5,7 +5,7 @@ from typing import Literal
 
 import anyio
 import pytest
-from textual.widgets import Input, OptionList, Static
+from textual.widgets import OptionList, Static
 
 from wisp.events import ToolApprovalRequested, TrustRequested
 from wisp.tui import TuiViewSnapshot
@@ -15,6 +15,9 @@ from wisp.tui.widgets import (
     _approval_content,
     _bounded_decision_preview,
     _trust_content,
+)
+from wisp.tui.widgets import (
+    PromptEditor as Input,
 )
 
 
@@ -233,6 +236,30 @@ def test_approval_panel_yolo_confirmation_defaults_back(cancel_key: str) -> None
     assert second == "cancel-all"
     assert highlighted == 1
     assert title == "Enable YOLO for this TUI run?"
+
+
+def test_approval_panel_yolo_confirmation_hides_composer_and_preserves_draft() -> None:
+    async def scenario() -> tuple[bool, str, bool]:
+        app, renderer = create_textual_tui()
+        approval = _approval("bash", {"command": "echo hi"}, safety="command")
+        async with app.run_test(size=(80, 24)) as pilot:
+            input_widget = app.query_one("#input", Input)
+            input_widget.value = "draft follow-up"
+            renderer.approval_request(approval)
+            await pilot.pause()
+            renderer.approval_all_confirmation(approval)
+            await pilot.pause()
+            hidden = not input_widget.display
+            draft = input_widget.value
+            renderer.view_updated(TuiViewSnapshot(status="idle", input_hint="wisp> "))
+            await pilot.pause()
+            restored = input_widget.display and app.focused is input_widget
+            return hidden, draft, restored
+
+    hidden, draft, restored = anyio.run(scenario)
+    assert hidden
+    assert draft == "draft follow-up"
+    assert restored
 
 
 @pytest.mark.parametrize(("key", "expected"), [("enter", "n"), ("n", "n"), ("escape", "n")])

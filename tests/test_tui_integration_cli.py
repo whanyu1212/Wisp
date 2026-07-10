@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 
 from pytest import MonkeyPatch
+from textual import events
 from textual.await_complete import AwaitComplete
-from textual.widgets import Input, Static
+from textual.widgets import Static
 
 import wisp.cli as cli_module
 from tests.tui_support import *
@@ -22,6 +23,9 @@ from wisp.tui.widgets import (
     ToolCard,
     Transcript,
     WorkingMessage,
+)
+from wisp.tui.widgets import (
+    PromptEditor as Input,
 )
 
 
@@ -1748,6 +1752,80 @@ def test_textual_tui_read_prompt_returns_submitted_input() -> None:
             return results[0]
 
     assert anyio.run(scenario) == "hello"
+
+
+def test_textual_multiline_paste_is_submitted_without_truncation() -> None:
+    pasted = (
+        "Use the bash tool to run exactly: printf 'approval panel dogfood\\n'. "
+        "Do not use any\nother tools."
+    )
+
+    async def scenario() -> tuple[str, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            app_instance.post_message(events.Paste(pasted))
+            await pilot.pause()
+            editor_text = input_widget.value
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                submitted = await app_instance._prompt_receive.receive()
+            assert isinstance(submitted, str)
+            return editor_text, submitted
+
+    editor_text, submitted = anyio.run(scenario)
+    assert editor_text == pasted
+    assert submitted == pasted
+
+
+def test_textual_newline_keys_edit_without_submitting() -> None:
+    async def scenario() -> tuple[str, bool, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.press(*"first", "shift+enter", *"second", "ctrl+j", *"third")
+            await pilot.pause()
+            editor_text = input_widget.value
+            try:
+                app_instance._prompt_receive.receive_nowait()
+            except anyio.WouldBlock:
+                was_submitted = False
+            else:
+                was_submitted = True
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                submitted = await app_instance._prompt_receive.receive()
+            assert isinstance(submitted, str)
+            return editor_text, was_submitted, submitted
+
+    editor_text, submitted_early, submitted = anyio.run(scenario)
+    assert editor_text == "first\nsecond\nthird"
+    assert submitted_early is False
+    assert submitted == editor_text
+
+
+def test_textual_multiline_editor_grows_to_a_bounded_height() -> None:
+    async def scenario() -> tuple[int, int, int, int]:
+        app_instance = TextualTui()
+        async with app_instance.run_test(size=(60, 20)) as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            transcript = app_instance.query_one("#transcript", Transcript)
+            footer = app_instance.query_one("#status-bar")
+            input_widget.value = "\n".join(f"line {index}" for index in range(12))
+            await pilot.pause()
+            return (
+                input_widget.region.height,
+                transcript.region.height,
+                input_widget.region.y,
+                footer.region.y,
+            )
+
+    editor_height, transcript_height, editor_y, footer_y = anyio.run(scenario)
+    assert 1 < editor_height <= 8
+    assert transcript_height > 0
+    assert editor_y < footer_y
 
 
 def test_textual_prefill_command_sets_input_without_submitting() -> None:
