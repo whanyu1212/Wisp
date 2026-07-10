@@ -219,6 +219,7 @@ def test_tui_shell_separates_streamed_text_from_tool_events() -> None:
             [
                 [
                     message_delta(delta="partial"),
+                    completed_message(content="partial"),
                     ToolCallRequested(call_id="call-1", name="read", arguments={"path": "x"}),
                     ToolResultReady(
                         call_id="call-1",
@@ -226,7 +227,7 @@ def test_tui_shell_separates_streamed_text_from_tool_events() -> None:
                         output="ok",
                         is_error=False,
                     ),
-                    completed_message(content="partial"),
+                    completed_message(content="final answer"),
                     RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
                 ]
             ]
@@ -243,6 +244,7 @@ def test_tui_shell_separates_streamed_text_from_tool_events() -> None:
         rendered = output.getvalue()
         assert "partial\n→ tool" in rendered
         assert rendered.count("partial") == 1
+        assert "final answer" in rendered
 
     anyio.run(run)
 

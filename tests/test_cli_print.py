@@ -34,6 +34,23 @@ def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
     assert "allowed tools: none exposed to the model" in records[1]["message"]["content"]
 
 
+def test_print_mode_outputs_completion_only_response(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_completion_only_runtime)
+
+    result = CliRunner().invoke(
+        app,
+        ["-p", "hello", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "completion-only-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "completion-only response\n"
+    assert "session saved:" in result.stderr
+
+
 def test_print_mode_loads_trusted_root_settings_from_subdirectory(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

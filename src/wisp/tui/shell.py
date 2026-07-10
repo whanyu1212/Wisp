@@ -645,8 +645,11 @@ class TuiShell:
         if self.state.token_stream_started:
             self.renderer.end_token_stream()
             self.state.token_stream_started = False
-        if isinstance(event, MessageCompleted) and self.state.rendered_tokens:
-            return False
+        if isinstance(event, MessageCompleted):
+            suppress_completed_message = self.state.rendered_tokens
+            self.state.rendered_tokens = False
+            if suppress_completed_message:
+                return False
         if isinstance(event, ToolApprovalRequested):
             self.state.pending_approval = event
             self.state.status = TuiStatus.waiting_for_approval

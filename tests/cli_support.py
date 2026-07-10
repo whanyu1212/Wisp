@@ -72,6 +72,23 @@ class MixedTextToolProvider:
         yield ProviderResponseCompleted(content="suffix")
 
 
+class CompletionOnlyProvider:
+    name = "completion-only-test"
+    default_model: str | None = "completion-only-test"
+
+    async def stream(
+        self,
+        messages: Sequence[object],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        yield ProviderResponseCompleted(content="completion-only response")
+
+
 class CancellableProvider:
     name = "cancellable-test"
     default_model: str | None = "cancellable-test"
@@ -193,6 +210,15 @@ async def build_cancellable_runtime() -> WispRuntime:
     return WispRuntime(providers=providers, tools=tools, events=events, api=api)
 
 
+async def build_completion_only_runtime() -> WispRuntime:
+    providers = ProviderRegistry()
+    tools = ToolRegistry()
+    events = EventBus()
+    api = ExtensionAPI(providers=providers, tools=tools, events=events)
+    providers.register(CompletionOnlyProvider())
+    return WispRuntime(providers=providers, tools=tools, events=events, api=api)
+
+
 async def build_failing_runtime() -> WispRuntime:
     providers = ProviderRegistry()
     tools = ToolRegistry()
@@ -235,6 +261,7 @@ __all__ = [
     "BashTool",
     "CancellableProvider",
     "CliRunner",
+    "CompletionOnlyProvider",
     "DangerTool",
     "EditTool",
     "EventBus",
@@ -277,6 +304,7 @@ __all__ = [
     "anyio",
     "app",
     "build_cancellable_runtime",
+    "build_completion_only_runtime",
     "build_failing_runtime",
     "build_mixed_tool_runtime",
     "build_tool_runtime",
