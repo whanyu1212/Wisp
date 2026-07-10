@@ -747,6 +747,49 @@ def test_agent_updates_previous_response_id_for_chained_tool_calls(tmp_path: Pat
     ]
 
 
+def test_agent_falls_back_to_tool_call_response_id(tmp_path: Path) -> None:
+    tool_call = ToolCall(
+        call_id="call-1",
+        name="echo",
+        arguments={"text": "first"},
+        response_id="response-1",
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=tool_call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(tool_call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderTextDelta(delta="done"),
+                ProviderResponseCompleted(content="done"),
+            ],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+
+    assert provider.calls[1].previous_response_id == "response-1"
+    first_completion = next(event for event in events if isinstance(event, MessageCompleted))
+    assert first_completion.response_id == "response-1"
+
+
 def test_agent_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [

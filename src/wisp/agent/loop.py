@@ -233,14 +233,24 @@ class Agent:
 
                 response = terminal_response
                 tool_calls = response.tool_calls
+                response_id = response.response_id
+                if response_id is None:
+                    response_id = next(
+                        (
+                            tool_call.response_id
+                            for tool_call in reversed(tool_calls)
+                            if tool_call.response_id is not None
+                        ),
+                        None,
+                    )
                 assistant_chunks.append(response.content)
-                previous_response_id = response.response_id
+                previous_response_id = response_id
                 yield await emit(
                     MessageCompleted(
                         turn=turn,
                         content=response.content,
                         finish_reason=response.finish_reason,
-                        response_id=response.response_id,
+                        response_id=response_id,
                         tool_calls=tuple(
                             ToolCallSnapshot(
                                 call_id=tool_call.call_id,
