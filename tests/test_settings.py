@@ -158,6 +158,35 @@ def test_retry_settings_are_user_only_even_for_trusted_projects(tmp_path: Path) 
     assert settings.retry.max_delay_seconds is None
 
 
+def test_invalid_project_user_only_fields_do_not_discard_project_settings(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(
+        home,
+        protected_paths=["from-user.txt"],
+        retry={"max_retries": 3},
+    )
+    _write_settings(
+        project,
+        provider="project-provider",
+        model="project-model",
+        protected_paths=42,
+        retry={"max_retries": 20},
+    )
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.provider == "project-provider"
+    assert settings.model == "project-model"
+    assert settings.protected_paths == ("from-user.txt",)
+    assert settings.retry is not None
+    assert settings.retry.max_retries == 3
+    assert capsys.readouterr().err == ""
+
+
 # --- Precedence through WispConfig.from_env (CLI > env > file > default) ---
 #
 # The project settings layer only applies to a TRUSTED project, so tests that need

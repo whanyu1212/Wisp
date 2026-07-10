@@ -33,6 +33,7 @@ from wisp.retry import RetrySettings
 GLOBAL_SETTINGS_PATH = Path("~/.wisp/settings.json")
 PROJECT_SETTINGS_DIRNAME = ".wisp"
 PROJECT_SETTINGS_FILENAME = "settings.json"
+_USER_ONLY_SETTINGS_FIELDS = frozenset({"protected_paths", "retry"})
 
 # Default glob patterns whose contents tools refuse to read. These guard secrets
 # from being pulled into model context by an over-eager read/grep. Bare patterns
@@ -147,7 +148,10 @@ def resolve_settings(
     # cloned repo cannot inject provider/model/session_dir/auth_path. This is
     # fail-closed — an undecided project is treated as untrusted here.
     project_settings = (
-        _load_settings_file(project / PROJECT_SETTINGS_DIRNAME / PROJECT_SETTINGS_FILENAME)
+        _load_settings_file(
+            project / PROJECT_SETTINGS_DIRNAME / PROJECT_SETTINGS_FILENAME,
+            ignored_fields=_USER_ONLY_SETTINGS_FIELDS,
+        )
         if trust_project
         else WispSettings()
     )
@@ -173,7 +177,11 @@ def resolve_settings(
     )
 
 
-def _load_settings_file(path: Path) -> WispSettings:
+def _load_settings_file(
+    path: Path,
+    *,
+    ignored_fields: frozenset[str] = frozenset(),
+) -> WispSettings:
     """Load one settings file, returning empty settings on any problem.
 
     A missing file is normal (returns empty settings silently). A file that exists
@@ -198,6 +206,12 @@ def _load_settings_file(path: Path) -> WispSettings:
     if not isinstance(data, dict):
         _warn(f"ignoring settings file {path}: expected a JSON object")
         return WispSettings()
+
+    # Project-owned policy fields are ignored before schema validation. An invalid
+    # value for a field the project cannot control must not suppress otherwise-valid
+    # provider, model, session, or auth settings from a trusted project.
+    if ignored_fields:
+        data = {key: value for key, value in data.items() if key not in ignored_fields}
 
     try:
         return WispSettings.model_validate(data)
