@@ -192,7 +192,7 @@ def test_fullscreen_tui_renderer_messages_do_not_infer_footer_state() -> None:
 def test_fullscreen_tui_renderer_transcript_view_defaults_to_latest() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False, transcript_view_entries=3)
     for index in range(5):
-        renderer.event(AssistantMessage(content=f"message {index}"))
+        renderer.event(completed_message(content=f"message {index}"))
 
     assert [entry.content for entry in renderer._visible_transcript_entries()] == [
         "message 2",
@@ -207,7 +207,7 @@ def test_fullscreen_tui_renderer_transcript_view_defaults_to_latest() -> None:
 def test_fullscreen_tui_renderer_scrolls_transcript_and_clamps() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False, transcript_view_entries=3)
     for index in range(5):
-        renderer.event(AssistantMessage(content=f"message {index}"))
+        renderer.event(completed_message(content=f"message {index}"))
 
     renderer.scroll_transcript_up(1)
 
@@ -240,10 +240,10 @@ def test_fullscreen_tui_renderer_scrolls_transcript_and_clamps() -> None:
 def test_fullscreen_tui_renderer_preserves_scrolled_view_during_new_output() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False, transcript_view_entries=3)
     for index in range(5):
-        renderer.event(AssistantMessage(content=f"message {index}"))
+        renderer.event(completed_message(content=f"message {index}"))
     renderer.scroll_transcript_up(1)
 
-    renderer.event(AssistantMessage(content="message 5"))
+    renderer.event(completed_message(content="message 5"))
 
     assert renderer.state.transcript_scroll_offset == 2
     assert [entry.content for entry in renderer._visible_transcript_entries()] == [
@@ -287,10 +287,10 @@ def test_fullscreen_tui_renderer_preserves_scrolled_view_when_pruning_cap() -> N
         transcript_view_entries=3,
     )
     for index in range(5):
-        renderer.event(AssistantMessage(content=f"message {index}"))
+        renderer.event(completed_message(content=f"message {index}"))
     renderer.scroll_transcript_up(1)
 
-    renderer.event(AssistantMessage(content="message 5"))
+    renderer.event(completed_message(content="message 5"))
 
     assert [entry.content for entry in renderer.state.transcript] == [
         "message 1",
@@ -320,7 +320,7 @@ def test_fullscreen_tui_renderer_keeps_footer_visible_while_scrolled() -> None:
         )
     )
     for index in range(4):
-        renderer.event(AssistantMessage(content=f"message {index}"))
+        renderer.event(completed_message(content=f"message {index}"))
 
     renderer.scroll_transcript_up(1)
 

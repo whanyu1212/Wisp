@@ -34,6 +34,51 @@ def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
     assert "allowed tools: none exposed to the model" in records[1]["message"]["content"]
 
 
+def test_print_mode_outputs_completion_only_response(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_completion_only_runtime)
+
+    result = CliRunner().invoke(
+        app,
+        ["-p", "hello", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "completion-only-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "completion-only response\n"
+    assert "session saved:" in result.stderr
+
+
+def test_print_mode_drains_failed_agent_lifecycle_before_exit(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    emitted_event_types: list[str] = []
+
+    async def build_runtime() -> WispRuntime:
+        runtime = await build_failing_runtime()
+        runtime.events.on("*", lambda event: emitted_event_types.append(event.type))
+        return runtime
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+
+    result = CliRunner().invoke(
+        app,
+        ["-p", "fail", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "failing-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert result.stderr.count("error: provider failed") == 1
+    assert emitted_event_types[-3:] == [
+        "error",
+        "turn.completed",
+        "agent.completed",
+    ]
+
+
 def test_print_mode_loads_trusted_root_settings_from_subdirectory(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

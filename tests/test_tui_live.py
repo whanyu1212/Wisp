@@ -49,7 +49,7 @@ def test_live_fullscreen_tui_scrolls_visible_transcript_and_refreshes() -> None:
     renderer.state.transcript_view_entries = 2
     renderer._application = FakeApplication()
     for index in range(4):
-        renderer.event(AssistantMessage(content=f"message {index}"))
+        renderer.event(completed_message(content=f"message {index}"))
 
     renderer.scroll_transcript_top()
 
@@ -78,7 +78,7 @@ def test_live_fullscreen_tui_sizes_latest_view_to_terminal_rows() -> None:
     renderer = LiveFullscreenTui(run_application=False)
     renderer._application = FakeApplication()
     for index in range(6):
-        renderer.event(AssistantMessage(content=f"message {index}"))
+        renderer.event(completed_message(content=f"message {index}"))
 
     assert renderer._transcript_view_entries() == 3
     rendered = "".join(fragment for _style, fragment in renderer._transcript_fragments())
@@ -108,7 +108,7 @@ def test_live_fullscreen_tui_paginates_multiline_wrapped_entry_by_rows() -> None
     renderer = LiveFullscreenTui(run_application=False)
     renderer._application = FakeApplication()
 
-    renderer.event(AssistantMessage(content="abcdef\nghijklmnopqrstuv"))
+    renderer.event(completed_message(content="abcdef\nghijklmnopqrstuv"))
 
     assert renderer._transcript_view_entries() == 3
     assert renderer._max_transcript_scroll_offset() == 1
@@ -131,7 +131,7 @@ def test_live_fullscreen_tui_preserves_scrolled_view_during_streaming() -> None:
     renderer = LiveFullscreenTui(run_application=False)
     renderer.state.transcript_view_entries = 2
     for index in range(4):
-        renderer.event(AssistantMessage(content=f"message {index}"))
+        renderer.event(completed_message(content=f"message {index}"))
     renderer.scroll_transcript_up(1)
 
     renderer.token_delta("stream")

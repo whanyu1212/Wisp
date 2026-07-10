@@ -1,4 +1,4 @@
-"""Events emitted by the Wisp agent core."""
+"""Schema-v2 events emitted by the Wisp agent core."""
 
 from __future__ import annotations
 
@@ -8,7 +8,11 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+EVENT_SCHEMA_VERSION = 2
 JsonObject = dict[str, object]
+MessageRole = Literal["system", "user", "assistant", "tool"]
+RunOutcome = Literal["completed", "failed", "cancelled"]
+FinishReason = Literal["stop", "tool_calls", "length", "error", "cancelled"]
 
 
 def utc_now() -> datetime:
@@ -16,12 +20,24 @@ def utc_now() -> datetime:
 
 
 class WispEvent(BaseModel):
-    """Base class for events consumed by CLI, JSON, and future TUI renderers."""
+    """Base class for versioned events consumed by every Wisp frontend."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
+    schema_version: Literal[2] = 2
     timestamp: datetime = Field(default_factory=utc_now)
+
+
+class ToolCallSnapshot(BaseModel):
+    """Serializable tool-call state attached to a completed assistant message."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    call_id: str
+    name: str
+    arguments: JsonObject
+    parse_error: str | None = None
 
 
 class AgentStarted(WispEvent):
@@ -29,14 +45,34 @@ class AgentStarted(WispEvent):
     session_id: str
 
 
-class TokenDelta(WispEvent):
-    type: Literal["token.delta"] = "token.delta"
+class TurnStarted(WispEvent):
+    type: Literal["turn.started"] = "turn.started"
+    turn: int
+
+
+class MessageStarted(WispEvent):
+    type: Literal["message.started"] = "message.started"
+    turn: int
+    role: MessageRole = "assistant"
+
+
+class MessageDelta(WispEvent):
+    type: Literal["message.delta"] = "message.delta"
+    turn: int
     delta: str
+    role: MessageRole = "assistant"
+    content_index: int = 0
+    content_kind: Literal["text", "thinking"] = "text"
 
 
-class AssistantMessage(WispEvent):
-    type: Literal["assistant.message"] = "assistant.message"
+class MessageCompleted(WispEvent):
+    type: Literal["message.completed"] = "message.completed"
+    turn: int
     content: str
+    finish_reason: FinishReason
+    role: MessageRole = "assistant"
+    response_id: str | None = None
+    tool_calls: tuple[ToolCallSnapshot, ...] = ()
 
 
 class ToolCallRequested(WispEvent):
@@ -115,10 +151,24 @@ class ToolResultReady(WispEvent):
     is_error: bool
 
 
+class TurnCompleted(WispEvent):
+    type: Literal["turn.completed"] = "turn.completed"
+    turn: int
+    outcome: RunOutcome
+    finish_reason: FinishReason
+
+
 class SessionSaved(WispEvent):
     type: Literal["session.saved"] = "session.saved"
     session_id: str
     path: Path
+
+
+class AgentCompleted(WispEvent):
+    type: Literal["agent.completed"] = "agent.completed"
+    session_id: str
+    turns: int
+    outcome: RunOutcome
 
 
 class RpcCommandStarted(WispEvent):
@@ -142,8 +192,10 @@ class ErrorEvent(WispEvent):
 
 type KnownWispEvent = Annotated[
     AgentStarted
-    | TokenDelta
-    | AssistantMessage
+    | TurnStarted
+    | MessageStarted
+    | MessageDelta
+    | MessageCompleted
     | ToolCallRequested
     | ToolExecutionStarted
     | ToolApprovalRequested
@@ -153,22 +205,36 @@ type KnownWispEvent = Annotated[
     | ProjectConfigApplied
     | ToolExecutionEnded
     | ToolResultReady
+    | TurnCompleted
     | SessionSaved
+    | AgentCompleted
     | RpcCommandStarted
     | RpcCommandFinished
     | ErrorEvent,
     Field(discriminator="type"),
 ]
 KnownWispEventAdapter: TypeAdapter[KnownWispEvent] = TypeAdapter(KnownWispEvent)
+JsonObjectAdapter: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
+
+
+def _require_schema_v2(data: JsonObject) -> None:
+    version = data.get("schema_version")
+    if version != EVENT_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported Wisp event schema_version: {version!r}; expected {EVENT_SCHEMA_VERSION}"
+        )
 
 
 def wisp_event_from_json(line: str) -> KnownWispEvent:
-    """Parse one JSONL event line into a typed Wisp event."""
+    """Parse one schema-v2 JSONL event line into a typed Wisp event."""
 
-    return KnownWispEventAdapter.validate_json(line)
+    data = JsonObjectAdapter.validate_json(line)
+    _require_schema_v2(data)
+    return KnownWispEventAdapter.validate_python(data)
 
 
 def wisp_event_from_dict(data: JsonObject) -> KnownWispEvent:
-    """Parse one event dictionary into a typed Wisp event."""
+    """Parse one schema-v2 event dictionary into a typed Wisp event."""
 
+    _require_schema_v2(data)
     return KnownWispEventAdapter.validate_python(data)

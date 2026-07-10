@@ -14,7 +14,7 @@ from wisp.agent.loop import Agent
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.auth import auth_app
 from wisp.config import WispConfig
-from wisp.events import ErrorEvent, TokenDelta
+from wisp.events import ErrorEvent, MessageCompleted, MessageDelta
 from wisp.providers.base import ProviderError
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore, SessionError
@@ -544,20 +544,37 @@ async def _run_print(
 
     event_console = Console(stderr=True, soft_wrap=True)
     wrote_tokens = False
+    streamed_text_for_message = False
     stderr_needs_separator = False
-    async for event in events:
-        if isinstance(event, TokenDelta):
-            sys.stdout.write(event.delta)
-            sys.stdout.flush()
-            wrote_tokens = True
-            stderr_needs_separator = True
-        elif isinstance(event, ErrorEvent):
-            raise ProviderError(event.message)
-        else:
-            if stderr_needs_separator and _print_event_line(event) is not None:
-                event_console.print()
-                stderr_needs_separator = False
-            _render_print_event(event, event_console)
+    failure_message: str | None = None
+    try:
+        async for event in events:
+            if isinstance(event, MessageDelta) and event.content_kind == "text":
+                if event.delta:
+                    sys.stdout.write(event.delta)
+                    sys.stdout.flush()
+                    wrote_tokens = True
+                    streamed_text_for_message = True
+                    stderr_needs_separator = True
+            elif isinstance(event, MessageCompleted):
+                if not streamed_text_for_message and event.content:
+                    sys.stdout.write(event.content)
+                    sys.stdout.flush()
+                    wrote_tokens = True
+                    stderr_needs_separator = True
+                streamed_text_for_message = False
+            elif isinstance(event, ErrorEvent):
+                failure_message = event.message
+            else:
+                if stderr_needs_separator and _print_event_line(event) is not None:
+                    event_console.print()
+                    stderr_needs_separator = False
+                _render_print_event(event, event_console)
+    except Exception:
+        if failure_message is None:
+            raise
 
     if wrote_tokens:
         sys.stdout.write("\n")
+    if failure_message is not None:
+        raise ProviderError(failure_message)

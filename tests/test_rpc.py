@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import anyio
+import pytest
 
 from wisp.events import (
     ProjectConfigApplied,
@@ -136,12 +137,30 @@ def test_rpc_commands_allow_protocol_optional_id() -> None:
 
 def test_wisp_event_from_json_returns_typed_event() -> None:
     event = wisp_event_from_json(
-        '{"type":"rpc.command.finished","command_id":"cmd-1","command_type":"prompt","ok":true}'
+        '{"schema_version":2,"type":"rpc.command.finished","command_id":"cmd-1",'
+        '"command_type":"prompt","ok":true}'
     )
 
     assert isinstance(event, RpcCommandFinished)
     assert event.command_id == "cmd-1"
     assert event.ok is True
+
+
+@pytest.mark.parametrize("schema_version", [None, 1, 3])
+def test_wisp_event_from_json_rejects_unsupported_schema_version(
+    schema_version: int | None,
+) -> None:
+    payload: dict[str, object] = {
+        "type": "rpc.command.finished",
+        "command_id": "cmd-1",
+        "command_type": "prompt",
+        "ok": True,
+    }
+    if schema_version is not None:
+        payload["schema_version"] = schema_version
+
+    with pytest.raises(ValueError, match="Unsupported Wisp event schema_version"):
+        wisp_event_from_json(json.dumps(payload))
 
 
 def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
@@ -205,11 +224,13 @@ import json
 import sys
 command = json.loads(sys.stdin.readline())
 started = {
+    "schema_version": 2,
     "type": "rpc.command.started",
     "command_id": command["id"],
     "command_type": command["type"],
 }
 finished = {
+    "schema_version": 2,
     "type": "rpc.command.finished",
     "command_id": command["id"],
     "command_type": command["type"],
@@ -249,6 +270,7 @@ sys.stderr.write("x" * 200000)
 sys.stderr.flush()
 command = json.loads(sys.stdin.readline())
 print(json.dumps({
+    "schema_version": 2,
     "type": "rpc.command.finished",
     "command_id": command["id"],
     "command_type": command["type"],

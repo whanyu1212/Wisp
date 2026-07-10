@@ -6,21 +6,38 @@ from pathlib import Path
 from typing import Any, cast
 
 import anyio
+import pytest
 
 from wisp.agent.loop import Agent
 from wisp.agent.messages import Message
 from wisp.events import (
-    AssistantMessage,
+    AgentCompleted,
+    MessageCompleted,
+    MessageDelta,
     SessionSaved,
-    TokenDelta,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
     ToolExecutionStarted,
     ToolResultReady,
+    TurnCompleted,
 )
-from wisp.providers.base import ToolCall, ToolCallResult, ToolSpec
-from wisp.providers.fake import FakeProvider
+from wisp.providers.base import (
+    ProviderError,
+    ProviderProtocolError,
+    ToolCall,
+    ToolCallResult,
+    ToolSpec,
+)
+from wisp.providers.events import (
+    ProviderEvent,
+    ProviderResponseCompleted,
+    ProviderResponseFailed,
+    ProviderResponseStarted,
+    ProviderTextDelta,
+    ProviderToolCallCompleted,
+)
+from wisp.providers.fake import FakeProvider, ScriptedProvider
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry
 from wisp.sessions.jsonl import JsonlSessionStore
@@ -47,10 +64,12 @@ class CapturingProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
-    ) -> AsyncIterator[object]:
+    ) -> AsyncIterator[ProviderEvent]:
         self.seen_messages = messages
         self.seen_tools = tools
-        yield "done"
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        yield ProviderTextDelta(delta="done")
+        yield ProviderResponseCompleted(content="done")
 
 
 class ToolLoopProvider:
@@ -69,11 +88,33 @@ class ToolLoopProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
-    ) -> AsyncIterator[object]:
+    ) -> AsyncIterator[ProviderEvent]:
         self.calls.append((tool_results, previous_response_id))
         turn = self.turns.pop(0)
-        for event in turn:
-            yield event
+        chunks: list[str] = []
+        tool_calls: list[ToolCall] = []
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        for item in turn:
+            if isinstance(item, str):
+                chunks.append(item)
+                yield ProviderTextDelta(delta=item)
+            elif isinstance(item, ToolCall):
+                tool_calls.append(item)
+                yield ProviderToolCallCompleted(
+                    tool_call=item,
+                    content_index=len(tool_calls) - 1,
+                )
+            else:
+                raise TypeError(f"Unsupported test provider event: {item!r}")
+        yield ProviderResponseCompleted(
+            content="".join(chunks),
+            tool_calls=tuple(tool_calls),
+            response_id=next(
+                (call.response_id for call in reversed(tool_calls) if call.response_id),
+                None,
+            ),
+            finish_reason="tool_calls" if tool_calls else "stop",
+        )
 
 
 class EchoTool:
@@ -128,11 +169,11 @@ def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
         return [event async for event in agent.run("hello")]
 
     events = anyio.run(run_agent)
-    deltas = [event.delta for event in events if isinstance(event, TokenDelta)]
+    deltas = [event.delta for event in events if isinstance(event, MessageDelta)]
 
     assert "".join(deltas) == "fake response to: hello"
     assert any(
-        isinstance(event, AssistantMessage) and event.content == "fake response to: hello"
+        isinstance(event, MessageCompleted) and event.content == "fake response to: hello"
         for event in events
     )
 
@@ -154,12 +195,145 @@ def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
     ]
     assert emitted_event_types == [
         "agent.started",
-        "token.delta",
-        "token.delta",
-        "token.delta",
-        "token.delta",
-        "assistant.message",
+        "turn.started",
+        "message.started",
+        "message.delta",
+        "message.delta",
+        "message.delta",
+        "message.delta",
+        "message.completed",
+        "turn.completed",
         "session.saved",
+        "agent.completed",
+    ]
+
+
+def test_agent_preserves_provider_text_content_index(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderTextDelta(delta="second part", content_index=1),
+                ProviderResponseCompleted(content="second part"),
+            ]
+        ]
+    )
+
+    async def run_agent() -> list[object]:
+        agent = Agent(provider=provider, sessions=JsonlSessionStore(tmp_path))
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+
+    delta = next(event for event in events if isinstance(event, MessageDelta))
+    assert delta.content_index == 1
+
+
+@pytest.mark.parametrize(
+    ("provider_events", "error_message"),
+    [
+        (
+            [ProviderTextDelta(delta="too early")],
+            "Provider emitted response data before response_started",
+        ),
+        (
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseStarted(model="test"),
+            ],
+            "Provider emitted response_started more than once",
+        ),
+        ([], "Provider stream ended before response_started"),
+        (
+            [ProviderResponseStarted(model="test")],
+            "Provider stream ended without a terminal response",
+        ),
+        (
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="done"),
+                ProviderTextDelta(delta="too late"),
+            ],
+            "Provider emitted an event after its terminal response",
+        ),
+        (
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(
+                    tool_call=ToolCall(call_id="call-1", name="echo", arguments={})
+                ),
+                ProviderResponseCompleted(content="", tool_calls=()),
+            ],
+            "Provider terminal tool calls do not match streamed tool calls",
+        ),
+        (
+            [
+                ProviderResponseStarted(model="test"),
+                cast(ProviderEvent, object()),
+            ],
+            "Provider emitted unsupported event type: object",
+        ),
+    ],
+)
+def test_agent_rejects_malformed_provider_lifecycle(
+    tmp_path: Path,
+    provider_events: list[ProviderEvent],
+    error_message: str,
+) -> None:
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=ScriptedProvider([provider_events]),
+            sessions=JsonlSessionStore(tmp_path),
+        )
+        events: list[object] = []
+        with pytest.raises(ProviderProtocolError, match=error_message):
+            async for event in agent.run("hello"):
+                events.append(event)
+        return events
+
+    events = anyio.run(run_agent)
+
+    assert [event.type for event in events[-3:]] == [
+        "error",
+        "turn.completed",
+        "agent.completed",
+    ]
+    assert isinstance(events[-2], TurnCompleted)
+    assert events[-2].outcome == "failed"
+    assert isinstance(events[-1], AgentCompleted)
+    assert events[-1].outcome == "failed"
+
+
+def test_agent_maps_provider_failed_terminal_to_failed_lifecycle(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                ProviderTextDelta(delta="partial"),
+                ProviderResponseFailed(
+                    message="upstream failed",
+                    partial_content="partial",
+                    response_id="response-1",
+                ),
+            ]
+        ]
+    )
+
+    async def run_agent() -> list[object]:
+        agent = Agent(provider=provider, sessions=JsonlSessionStore(tmp_path))
+        events: list[object] = []
+        with pytest.raises(ProviderError, match="upstream failed"):
+            async for event in agent.run("hello"):
+                events.append(event)
+        return events
+
+    events = anyio.run(run_agent)
+
+    assert not any(isinstance(event, MessageCompleted) for event in events)
+    assert [event.type for event in events[-3:]] == [
+        "error",
+        "turn.completed",
+        "agent.completed",
     ]
 
 
@@ -245,7 +419,7 @@ def test_agent_passes_tool_specs_to_provider(tmp_path: Path) -> None:
     assert "allowed tools:\n  - lookup: Look something up." in provider.seen_messages[1].content
     assert provider.seen_messages[2].content == "hello"
     assert provider.seen_tools == (tool,)
-    assert any(isinstance(event, AssistantMessage) and event.content == "done" for event in events)
+    assert any(isinstance(event, MessageCompleted) and event.content == "done" for event in events)
 
 
 def test_agent_skips_project_context_when_untrusted(tmp_path: Path) -> None:
@@ -346,20 +520,28 @@ def test_agent_executes_tool_calls_and_continues_to_final_response(tmp_path: Pat
         "response-1",
     )
     assert any(
-        isinstance(event, AssistantMessage) and event.content == "final answer" for event in events
+        isinstance(event, MessageCompleted) and event.content == "final answer" for event in events
     )
     tool_result = next(event for event in events if isinstance(event, ToolResultReady))
     assert tool_result.output == "echo: hello"
     assert tool_result.is_error is False
     assert emitted_event_types == [
         "agent.started",
-        "tool.execution.started",
+        "turn.started",
+        "message.started",
+        "message.completed",
         "tool.call",
+        "tool.execution.started",
         "tool.execution.ended",
         "tool.result",
-        "token.delta",
-        "assistant.message",
+        "turn.completed",
+        "turn.started",
+        "message.started",
+        "message.delta",
+        "message.completed",
+        "turn.completed",
         "session.saved",
+        "agent.completed",
     ]
 
     saved = next(event for event in events if isinstance(event, SessionSaved))
@@ -374,8 +556,8 @@ def test_agent_executes_tool_calls_and_continues_to_final_response(tmp_path: Pat
         "assistant",
     ]
     assert [record["event"]["type"] for record in event_records] == [
-        "tool.execution.started",
         "tool.call",
+        "tool.execution.started",
         "tool.execution.ended",
     ]
     assert event_records[1]["event"]["call_id"] == "call-1"
@@ -433,7 +615,7 @@ def test_agent_returns_error_result_for_policy_blocked_tool(tmp_path: Path) -> N
         ToolCallResult(call_id="call-1", output="Tool mutate is blocked by policy", is_error=True),
     )
     assert any(
-        isinstance(event, AssistantMessage) and event.content == "recovered" for event in events
+        isinstance(event, MessageCompleted) and event.content == "recovered" for event in events
     )
 
 
@@ -472,21 +654,21 @@ def test_agent_blocks_approval_required_tool_without_override(tmp_path: Path) ->
     assert approval_resolved.reason is not None
     assert [event.type for event in emitted_events[:6]] == [
         "agent.started",
-        "tool.execution.started",
+        "turn.started",
+        "message.started",
+        "message.completed",
         "tool.call",
-        "tool.approval.requested",
-        "tool.approval.resolved",
-        "tool.execution.ended",
+        "tool.execution.started",
     ]
     assert any(
-        isinstance(event, AssistantMessage) and event.content == "recovered" for event in events
+        isinstance(event, MessageCompleted) and event.content == "recovered" for event in events
     )
     saved = next(event for event in events if isinstance(event, SessionSaved))
     records = [json.loads(line) for line in saved.path.read_text(encoding="utf-8").splitlines()]
     event_records = [record for record in records if record["kind"] == "event"]
     assert [record["event"]["type"] for record in event_records] == [
-        "tool.execution.started",
         "tool.call",
+        "tool.execution.started",
         "tool.approval.requested",
         "tool.approval.resolved",
         "tool.execution.ended",
@@ -565,6 +747,49 @@ def test_agent_updates_previous_response_id_for_chained_tool_calls(tmp_path: Pat
     ]
 
 
+def test_agent_falls_back_to_tool_call_response_id(tmp_path: Path) -> None:
+    tool_call = ToolCall(
+        call_id="call-1",
+        name="echo",
+        arguments={"text": "first"},
+        response_id="response-1",
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=tool_call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(tool_call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderTextDelta(delta="done"),
+                ProviderResponseCompleted(content="done"),
+            ],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+
+    assert provider.calls[1].previous_response_id == "response-1"
+    first_completion = next(event for event in events if isinstance(event, MessageCompleted))
+    assert first_completion.response_id == "response-1"
+
+
 def test_agent_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
@@ -587,17 +812,20 @@ def test_agent_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -> None:
 
         first_event = await anext(events)
         assert first_event.type == "agent.started"
-        start_event = await anext(events)
+        assert (await anext(events)).type == "turn.started"
+        assert (await anext(events)).type == "message.started"
+        assert (await anext(events)).type == "message.completed"
         call_event = await anext(events)
+        start_event = await anext(events)
 
-        assert isinstance(start_event, ToolExecutionStarted)
         assert isinstance(call_event, ToolCallRequested)
+        assert isinstance(start_event, ToolExecutionStarted)
         assert log == []
 
         release.set()
         remaining_events = [event async for event in events]
         assert log == ["run-started"]
-        assert any(isinstance(event, AssistantMessage) for event in remaining_events)
+        assert any(isinstance(event, MessageCompleted) for event in remaining_events)
 
     anyio.run(run_agent)
 
@@ -624,7 +852,7 @@ def test_agent_returns_error_result_for_unknown_tool(tmp_path: Path) -> None:
         ToolCallResult(call_id="call-1", output="Unknown tool: missing", is_error=True),
     )
     assert any(
-        isinstance(event, AssistantMessage) and event.content == "recovered" for event in events
+        isinstance(event, MessageCompleted) and event.content == "recovered" for event in events
     )
 
 
@@ -657,7 +885,7 @@ def test_agent_defaults_to_uncapped_tool_iterations(tmp_path: Path) -> None:
     events = anyio.run(run_agent)
 
     assert len(provider.calls) == 11
-    assert any(isinstance(event, AssistantMessage) and event.content == "done" for event in events)
+    assert any(isinstance(event, MessageCompleted) and event.content == "done" for event in events)
 
 
 def test_agent_enforces_configured_max_tool_iterations(tmp_path: Path) -> None:
@@ -727,5 +955,5 @@ def test_agent_returns_error_result_for_invalid_tool_arguments(tmp_path: Path) -
         ),
     )
     assert any(
-        isinstance(event, AssistantMessage) and event.content == "recovered" for event in events
+        isinstance(event, MessageCompleted) and event.content == "recovered" for event in events
     )

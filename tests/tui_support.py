@@ -19,13 +19,13 @@ from wisp import tui as tui_module
 from wisp.cli import app
 from wisp.config import WispConfig
 from wisp.events import (
-    AssistantMessage,
     ErrorEvent,
     KnownWispEvent,
+    MessageCompleted,
+    MessageDelta,
     ProjectConfigApplied,
     RpcCommandFinished,
     SessionSaved,
-    TokenDelta,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
@@ -57,6 +57,18 @@ from wisp.tui.app import (
 
 type EventBatch = list[KnownWispEvent]
 type ScriptedBatch = EventBatch | tuple[float, EventBatch]
+
+
+def completed_message(*, content: str) -> MessageCompleted:
+    """Build a completed assistant message event for renderer tests."""
+
+    return MessageCompleted(turn=1, content=content, finish_reason="stop")
+
+
+def message_delta(*, delta: str) -> MessageDelta:
+    """Build a streaming assistant text event for renderer tests."""
+
+    return MessageDelta(turn=1, delta=delta)
 
 
 class ScriptedController:
@@ -210,7 +222,6 @@ def _console() -> tuple[Console, io.StringIO]:
 
 
 __all__ = [
-    "AssistantMessage",
     "AsyncIterator",
     "CliRunner",
     "Console",
@@ -227,7 +238,6 @@ __all__ = [
     "ScriptedBatch",
     "ScriptedController",
     "SessionSaved",
-    "TokenDelta",
     "ToolApprovalRequested",
     "ToolApprovalResolved",
     "ToolCallRequested",
@@ -256,6 +266,8 @@ __all__ = [
     "format_tui_footer_lines",
     "format_tui_footer_text",
     "io",
+    "completed_message",
+    "message_delta",
     "sys",
     "tui_app_module",
     "tui_module",
