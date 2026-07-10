@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pytest import MonkeyPatch
 from textual.await_complete import AwaitComplete
 from textual.widgets import Input, Static
 
@@ -520,6 +521,42 @@ def test_cli_tui_command_defaults_to_textual_renderer(
     # `wisp tui` gives the agent the full toolset by default — otherwise it's a
     # toolless chatbot that can't read files or run commands.
     assert captured[0].all_tools is True
+
+
+def test_cli_tui_command_loads_trusted_root_settings_from_subdirectory(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    from wisp.trust import record_trust
+
+    captured: list[TuiOptions] = []
+
+    async def fake_run_tui(options: TuiOptions) -> None:
+        captured.append(options)
+
+    project = tmp_path / "project"
+    nested = project / "src"
+    nested.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'example'\n", encoding="utf-8")
+    (project / ".wisp").mkdir()
+    (project / ".wisp" / "settings.json").write_text(
+        '{"model": "project-model"}',
+        encoding="utf-8",
+    )
+    trust_file = tmp_path / "trust.json"
+    monkeypatch.setenv("WISP_TRUST_FILE", str(trust_file))
+    record_trust(project, True, trust_path=trust_file)
+    monkeypatch.chdir(nested)
+    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
+
+    result = CliRunner().invoke(
+        app,
+        ["tui"],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured[0].config.model == "project-model"
 
 
 def test_cli_tui_command_forwards_explicit_auth_file_as_user_override(

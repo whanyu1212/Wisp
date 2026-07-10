@@ -34,6 +34,37 @@ def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
     assert "allowed tools: none exposed to the model" in records[1]["message"]["content"]
 
 
+def test_print_mode_loads_trusted_root_settings_from_subdirectory(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    from wisp.trust import record_trust
+
+    project = tmp_path / "project"
+    nested = project / "src"
+    sessions = project / "project-sessions"
+    nested.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'example'\n", encoding="utf-8")
+    (project / ".wisp").mkdir()
+    (project / ".wisp" / "settings.json").write_text(
+        json.dumps({"session_dir": str(sessions)}),
+        encoding="utf-8",
+    )
+    trust_file = tmp_path / "trust.json"
+    monkeypatch.setenv("WISP_TRUST_FILE", str(trust_file))
+    record_trust(project, True, trust_path=trust_file)
+    monkeypatch.chdir(nested)
+
+    result = CliRunner().invoke(
+        app,
+        ["-p", "hello"],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(list(sessions.glob("*.jsonl"))) == 1
+
+
 def test_prompt_implies_text_mode_when_env_defaults_to_tui(tmp_path: Path) -> None:
     runner = CliRunner()
 

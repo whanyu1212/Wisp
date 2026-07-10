@@ -264,7 +264,10 @@ def cli_callback(
         session_dir=session_dir,
         auth_path=auth_file,
     )
-    config = config_overrides.build(trusted=trusted)
+    config = config_overrides.build(
+        trusted=trusted,
+        project_dir=project_context_root,
+    )
     try:
         if resolved_mode is OutputMode.rpc:
             anyio.run(
@@ -403,6 +406,7 @@ def tui_command(
     config = WispConfig.from_env(
         session_dir=session_dir,
         auth_path=auth_file,
+        project_dir=project_context_root,
         trusted=trusted,
     )
     renderer = TuiRendererKind.line if line else TuiRendererKind.textual

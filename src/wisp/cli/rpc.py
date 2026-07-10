@@ -339,12 +339,13 @@ class _ConfigOverrides:
     session_dir: Path | None = None
     auth_path: Path | None = None
 
-    def build(self, *, trusted: bool) -> WispConfig:
+    def build(self, *, trusted: bool, project_dir: Path | None = None) -> WispConfig:
         return WispConfig.from_env(
             provider=self.provider,
             model=self.model,
             session_dir=self.session_dir,
             auth_path=self.auth_path,
+            project_dir=project_dir,
             trusted=trusted,
         )
 
@@ -414,7 +415,10 @@ async def _run_rpc(
         nonlocal runtime
         if startup_trusted or config_overrides is None:
             return  # config already reflects the trusted project; nothing to rebuild.
-        trusted_config = config_overrides.build(trusted=True)
+        trusted_config = config_overrides.build(
+            trusted=True,
+            project_dir=selected_project_context_root,
+        )
         if trusted_config == config:
             return  # the project has no settings.json; the trusted build is identical.
         trusted_runtime = await _build_runtime_for_config(trusted_config)
