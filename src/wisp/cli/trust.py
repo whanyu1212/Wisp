@@ -1,8 +1,8 @@
 """Entrypoint helpers for resolving project trust.
 
 Each output mode resolves trust the same way — consult the store, prompt on a
-first run — but surfaces the prompt differently (a ``typer.confirm`` in the text
-CLI, an RPC command over stdin, a ``[y/N]`` line in the TUI). This module holds the
+first run — but surfaces the prompt differently (a ``typer.confirm`` before text/TUI
+startup or an RPC command over stdin). This module holds the
 shared, mode-agnostic pieces: the environment override and the text-mode prompter.
 The resolved decision is threaded into :meth:`wisp.config.WispConfig.from_env`, which
 gates the project-local settings file on it.
@@ -122,7 +122,7 @@ def trust_override_from_env() -> bool | None:
 def trusted_noninteractive(project_path: Path, *, trust_path: Path | None = None) -> bool:
     """Return the trust decision from non-interactive, project-safe signals only.
 
-    For entrypoints (RPC, TUI) that surface the trust prompt asynchronously or
+    For entrypoints (standalone RPC and embedded clients) that surface trust asynchronously or
     out-of-band, config must still be built at startup with *some* trust value. This
     consults only signals that a project cannot forge — a ``WISP_TRUST`` override or a
     stored decision — and returns ``True`` only when they say trusted. An undecided

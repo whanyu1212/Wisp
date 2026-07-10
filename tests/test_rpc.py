@@ -70,6 +70,26 @@ def test_rpc_commands_serialize_as_jsonl_and_parse() -> None:
     assert rpc_command_from_json(line) == command
 
 
+def test_approval_scope_serializes_only_when_selected() -> None:
+    scoped = ApprovalCommand(
+        id="approval-1",
+        call_id="call-1",
+        approved=True,
+        scope="tool_session",
+    )
+
+    assert json.loads(scoped.to_json_line()) == {
+        "id": "approval-1",
+        "type": "approval",
+        "call_id": "call-1",
+        "approved": True,
+        "scope": "tool_session",
+    }
+    assert "scope" not in json.loads(
+        ApprovalCommand(call_id="call-1", approved=True).to_json_line()
+    )
+
+
 def test_trust_command_serializes_as_jsonl_and_parses() -> None:
     command = TrustCommand(id="trust-1", request_id="req-1", trusted=True)
 
@@ -188,7 +208,11 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
 
         prompt_id = await controller.prompt("hello")
         cancel_id = await controller.cancel(prompt_id)
-        approval_id = await controller.approve("call-1", approved=False, reason="not safe")
+        approval_id = await controller.approve(
+            "call-1",
+            approved=True,
+            scope="tool_session",
+        )
         configure_id = await controller.configure(provider="openai-codex", model="gpt-5.5")
         shutdown_id = await controller.shutdown()
         await controller.close()
@@ -206,8 +230,8 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             ApprovalCommand(
                 id="approval-id",
                 call_id="call-1",
-                approved=False,
-                reason="not safe",
+                approved=True,
+                scope="tool_session",
             ),
             ConfigureCommand(id="configure-id", provider="openai-codex", model="gpt-5.5"),
             ShutdownCommand(id="shutdown-id"),

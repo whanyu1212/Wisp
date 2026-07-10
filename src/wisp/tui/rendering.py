@@ -98,6 +98,8 @@ class TuiRenderer(Protocol):
 
     def approval_request(self, event: ToolApprovalRequested) -> None: ...
 
+    def approval_all_confirmation(self, event: ToolApprovalRequested) -> None: ...
+
     def trust_request(self, event: TrustRequested) -> None: ...
 
     def event(self, event: KnownWispEvent) -> None: ...
@@ -186,6 +188,13 @@ class LineTuiRenderer:
             "[yellow]? approval required[/yellow] "
             f"{_markup_escape(event.name)} ({_markup_escape(event.safety)}) "
             f"{_markup_escape(event.arguments)}"
+        )
+
+    def approval_all_confirmation(self, event: ToolApprovalRequested) -> None:
+        self.console.print(
+            "[bold yellow]Enable YOLO for this TUI run?[/bold yellow]\n"
+            "All mutating and command tools will run without further approval "
+            "until this Wisp process exits."
         )
 
     def trust_request(self, event: TrustRequested) -> None:
@@ -415,6 +424,15 @@ class FullscreenTuiRenderer:
             "approval",
             f"? approval required {event.name} ({event.safety}) {event.arguments}",
             style="yellow",
+        )
+        self._refresh()
+
+    def approval_all_confirmation(self, event: ToolApprovalRequested) -> None:
+        self._append(
+            "approval",
+            "Enable YOLO for this TUI run? All mutating and command tools will run "
+            "without further approval until this Wisp process exits.",
+            style="bold yellow",
         )
         self._refresh()
 

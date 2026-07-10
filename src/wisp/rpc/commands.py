@@ -6,6 +6,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+type ApprovalScope = Literal["once", "tool_session", "all_session"]
+
 
 class RpcCommandModel(BaseModel):
     """Base class for RPC commands sent to `wisp --mode rpc`."""
@@ -41,6 +43,7 @@ class ApprovalCommand(RpcCommandModel):
     call_id: str
     approved: bool
     reason: str | None = None
+    scope: ApprovalScope | None = None
 
 
 class TrustCommand(RpcCommandModel):

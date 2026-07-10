@@ -271,6 +271,114 @@ def test_tui_shell_denies_tool_approval() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_allows_exact_tool_for_session() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(controller)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.waiting_for_approval
+        shell.state.pending_approval = ToolApprovalRequested(
+            call_id="call-1",
+            name="bash",
+            arguments={"command": "echo hi"},
+            safety="command",
+        )
+
+        should_exit = await shell._handle_input_line(_InputLine(text="t", mode=_InputMode.approval))
+
+        assert should_exit is False
+        assert controller.approvals == [("call-1", True, None)]
+        assert controller.approval_scopes == ["tool_session"]
+        assert shell.state.pending_approval is None
+
+    anyio.run(run)
+
+
+def test_tui_shell_requires_second_confirmation_for_all_tools() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(controller)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.waiting_for_approval
+        shell.state.pending_approval = ToolApprovalRequested(
+            call_id="call-1",
+            name="bash",
+            arguments={"command": "echo hi"},
+            safety="command",
+        )
+
+        await shell._handle_input_line(_InputLine(text="a", mode=_InputMode.approval))
+        assert shell.state.status is TuiStatus.confirming_all_tools
+        assert controller.approvals == []
+
+        await shell._handle_input_line(
+            _InputLine(text="cancel-all", mode=_InputMode.all_tools_confirmation)
+        )
+        assert shell.state.status is TuiStatus.waiting_for_approval
+        assert controller.approvals == []
+
+        await shell._handle_input_line(_InputLine(text="a", mode=_InputMode.approval))
+        should_exit = await shell._handle_input_line(
+            _InputLine(text="confirm-all", mode=_InputMode.all_tools_confirmation)
+        )
+
+        assert should_exit is False
+        assert controller.approvals == [("call-1", True, None)]
+        assert controller.approval_scopes == ["all_session"]
+        assert shell.state.pending_approval is None
+
+    anyio.run(run)
+
+
+def test_tui_shell_does_not_confirm_all_tools_from_stale_input() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(controller)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.confirming_all_tools
+        shell.state.pending_approval = ToolApprovalRequested(
+            call_id="call-1",
+            name="bash",
+            arguments={"command": "echo hi"},
+            safety="command",
+        )
+
+        should_exit = await shell._handle_input_line(
+            _InputLine(text="yes", mode=_InputMode.running)
+        )
+
+        assert should_exit is False
+        assert controller.approvals == []
+        assert list(shell.state.queued_prompts) == ["yes"]
+        assert shell.state.status is TuiStatus.confirming_all_tools
+
+    anyio.run(run)
+
+
+def test_tui_shell_interrupt_denies_during_all_tools_confirmation() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(controller)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.status = TuiStatus.confirming_all_tools
+        shell.state.pending_approval = ToolApprovalRequested(
+            call_id="call-1",
+            name="bash",
+            arguments={"command": "echo hi"},
+            safety="command",
+        )
+
+        should_exit = await shell._handle_input_interrupted(
+            _InputInterrupted(mode=_InputMode.all_tools_confirmation)
+        )
+
+        assert should_exit is False
+        assert controller.approvals == [("call-1", False, "Denied from TUI: interrupted")]
+        assert controller.approval_scopes == [None]
+
+    anyio.run(run)
+
+
 def test_tui_shell_does_not_approve_from_stale_running_input() -> None:
     async def run() -> None:
         controller = ScriptedController()

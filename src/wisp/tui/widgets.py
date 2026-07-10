@@ -222,7 +222,7 @@ class DecisionPanel(Vertical):
     DecisionPanel {
         display: none;
         height: auto;
-        max-height: 12;
+        max-height: 15;
         margin: 0 1;
         padding: 0 1;
         border-left: heavy $warning;
@@ -249,7 +249,8 @@ class DecisionPanel(Vertical):
     }
 
     DecisionPanel #decision-options {
-        height: 2;
+        height: auto;
+        max-height: 4;
         border: none;
         background: transparent;
         padding: 0;
@@ -275,6 +276,7 @@ class DecisionPanel(Vertical):
         self._detail = Static("", id="decision-detail", markup=False)
         self._options = OptionList(id="decision-options")
         self._submitted = False
+        self._mode = "approval"
 
     def compose(self) -> ComposeResult:
         yield self._title
@@ -290,36 +292,61 @@ class DecisionPanel(Vertical):
         content = _approval_content(event, cwd=cwd)
         self._show(
             content,
-            approve_label="Y  Approve once",
-            deny_label="N  Deny (default)",
+            options=[
+                Option("Y  Approve once", id="approve_once"),
+                Option(f"T  Allow {event.name} for this session", id="tool_session"),
+                Option("A  YOLO: allow all tools for this session", id="all_session"),
+                Option("N  Deny (default)", id="deny"),
+            ],
+            default_index=3,
+            mode="approval",
+        )
+
+    def show_all_confirmation(self, event: ToolApprovalRequested) -> None:
+        self._show(
+            _DecisionContent(
+                title="Enable YOLO for this TUI run?",
+                meta=f"Requested while approving {event.name}",
+                detail=(
+                    "All mutating and command tools will run without further approval "
+                    "until this Wisp process exits."
+                ),
+            ),
+            options=[
+                Option("Y  Enable YOLO for this run", id="confirm_all"),
+                Option("N  Go back (default)", id="cancel_all"),
+            ],
+            default_index=1,
+            mode="all_confirmation",
         )
 
     def show_trust(self, event: TrustRequested) -> None:
         self._show(
             _trust_content(event),
-            approve_label="Y  Trust project",
-            deny_label="N  Keep untrusted (default)",
+            options=[
+                Option("Y  Trust project", id="approve"),
+                Option("N  Keep untrusted (default)", id="deny"),
+            ],
+            default_index=1,
+            mode="trust",
         )
 
     def _show(
         self,
         content: _DecisionContent,
         *,
-        approve_label: str,
-        deny_label: str,
+        options: list[Option],
+        default_index: int,
+        mode: str,
     ) -> None:
         self._submitted = False
+        self._mode = mode
         self._title.update(content.title)
         self._meta.update(content.meta)
         self._detail.update(content.detail)
         self._options.clear_options()
-        self._options.add_options(
-            [
-                Option(approve_label, id="approve"),
-                Option(deny_label, id="deny"),
-            ]
-        )
-        self._options.highlighted = 1
+        self._options.add_options(options)
+        self._options.highlighted = default_index
         self.display = True
         self._options.focus()
 
@@ -337,18 +364,39 @@ class DecisionPanel(Vertical):
         if event.option_list is not self._options:
             return
         event.stop()
-        self.submit_answer("y" if event.option.id == "approve" else "n")
+        option_id = event.option.id
+        if option_id is None:
+            return
+        answer = {
+            "approve": "y",
+            "approve_once": "y",
+            "tool_session": "t",
+            "all_session": "a",
+            "confirm_all": "confirm-all",
+            "cancel_all": "cancel-all",
+            "deny": "n",
+        }.get(option_id)
+        if answer is not None:
+            self.submit_answer(answer)
 
     def on_key(self, event: events.Key) -> None:
         if not self.is_open:
             return
         key = event.key.lower()
-        if key == "y":
-            self.submit_answer("y")
-        elif key in {"n", "escape"}:
-            self.submit_answer("n")
-        else:
+        answer: str | None = None
+        if self._mode == "approval":
+            answer = {"y": "y", "t": "t", "a": "a", "n": "n", "escape": "n"}.get(key)
+        elif self._mode == "all_confirmation":
+            answer = {
+                "y": "confirm-all",
+                "n": "cancel-all",
+                "escape": "cancel-all",
+            }.get(key)
+        elif self._mode == "trust":
+            answer = {"y": "y", "n": "n", "escape": "n"}.get(key)
+        if answer is None:
             return
+        self.submit_answer(answer)
         event.prevent_default()
         event.stop()
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tests.cli_support import *
 
 
@@ -421,6 +423,75 @@ def test_rpc_approval_policy_rejects_duplicate_decisions() -> None:
         approved=False,
         reason="first decision",
     )
+
+
+def test_rpc_approval_policy_remembers_exact_tool_for_process() -> None:
+    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    tool = DangerTool()
+    other_tool = BashTool()
+    approval_policy.prepare_approval(tool, call_id="call-1", arguments={})
+
+    assert approval_policy.resolve_approval(
+        call_id="call-1",
+        approved=True,
+        scope="tool_session",
+    )
+    assert approval_policy.approves(tool) is True
+    assert approval_policy.requires_approval(other_tool) is True
+    assert (
+        cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval()).approves(tool)
+        is False
+    )
+
+
+def test_rpc_approval_policy_remembers_all_unsafe_tools_for_process() -> None:
+    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    tool = DangerTool()
+    approval_policy.prepare_approval(tool, call_id="call-1", arguments={})
+
+    assert approval_policy.resolve_approval(
+        call_id="call-1",
+        approved=True,
+        scope="all_session",
+    )
+    assert approval_policy.approves(tool) is True
+    assert approval_policy.approves(BashTool()) is True
+
+
+@pytest.mark.parametrize(
+    ("scope", "approved", "message"),
+    [
+        ("forever", True, "field scope must be one of"),
+        ([], True, "field scope must be one of"),
+        ("tool_session", False, "scope is only valid for approved requests"),
+    ],
+)
+def test_rpc_approval_command_rejects_invalid_scope(
+    monkeypatch: MonkeyPatch,
+    scope: object,
+    approved: bool,
+    message: str,
+) -> None:
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    approval_policy.prepare_approval(DangerTool(), call_id="call-1", arguments={})
+
+    cli_module._handle_rpc_control_command(
+        {
+            "id": "approval-1",
+            "type": "approval",
+            "call_id": "call-1",
+            "approved": approved,
+            "scope": scope,
+        },
+        running_prompt=None,
+        approval_policy=approval_policy,
+    )
+
+    records = _jsonl_records(output.getvalue())
+    assert records[-1]["ok"] is False
+    assert message in str(records[-1]["error"])
 
 
 def test_rpc_mode_denies_pending_approval_when_input_closes(

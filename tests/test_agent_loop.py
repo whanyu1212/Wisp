@@ -750,9 +750,9 @@ def test_agent_approves_required_tool_with_override(tmp_path: Path) -> None:
     events = anyio.run(run_agent)
 
     assert provider.calls[1][0] == (ToolCallResult(call_id="call-1", output="mutated"),)
-    approval_resolved = next(event for event in events if isinstance(event, ToolApprovalResolved))
-    assert approval_resolved.approved is True
-    assert approval_resolved.reason is None
+    assert not any(
+        isinstance(event, ToolApprovalRequested | ToolApprovalResolved) for event in events
+    )
 
 
 def test_agent_updates_previous_response_id_for_chained_tool_calls(tmp_path: Path) -> None:

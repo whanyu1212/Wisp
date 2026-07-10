@@ -161,9 +161,78 @@ def test_approval_panel_defaults_to_deny_and_preserves_composer_draft() -> None:
     assert visible
     assert focused
     assert restored
-    assert highlighted == 1
+    assert highlighted == 3
     assert "Run command?" in rendered
     assert "$ rm output.txt" in rendered
+
+
+def test_approval_panel_exposes_once_tool_session_and_yolo_choices() -> None:
+    async def scenario() -> tuple[list[str], int | None]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="waiting for approval",
+                    input_hint="approve> ",
+                    input_mode="approval",
+                    cwd="/work/project",
+                )
+            )
+            renderer.approval_request(_approval("bash", {"command": "echo hi"}, safety="command"))
+            await pilot.pause()
+            options = app.query_one("#decision-options", OptionList)
+            return (
+                [str(options.get_option_at_index(index).prompt) for index in range(4)],
+                options.highlighted,
+            )
+
+    options, highlighted = anyio.run(scenario)
+    assert options == [
+        "Y  Approve once",
+        "T  Allow bash for this session",
+        "A  YOLO: allow all tools for this session",
+        "N  Deny (default)",
+    ]
+    assert highlighted == 3
+
+
+@pytest.mark.parametrize("cancel_key", ["enter", "n", "escape"])
+def test_approval_panel_yolo_confirmation_defaults_back(cancel_key: str) -> None:
+    async def scenario() -> tuple[str, str, int | None, str]:
+        app, renderer = create_textual_tui()
+        approval = _approval("bash", {"command": "echo hi"}, safety="command")
+        async with app.run_test(size=(80, 24)) as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="waiting for approval",
+                    input_hint="approve> ",
+                    input_mode="approval",
+                    cwd="/work/project",
+                )
+            )
+            renderer.approval_request(approval)
+            await pilot.pause()
+            await pilot.press("a")
+            with anyio.fail_after(1):
+                first = await app._prompt_receive.receive()
+            assert isinstance(first, str)
+
+            renderer.approval_all_confirmation(approval)
+            await pilot.pause()
+            options = app.query_one("#decision-options", OptionList)
+            highlighted = options.highlighted
+            title = _static_plain(app.query_one("#decision-title", Static))
+            await pilot.press(cancel_key)
+            with anyio.fail_after(1):
+                second = await app._prompt_receive.receive()
+            assert isinstance(second, str)
+            return first, second, highlighted, title
+
+    first, second, highlighted, title = anyio.run(scenario)
+    assert first == "a"
+    assert second == "cancel-all"
+    assert highlighted == 1
+    assert title == "Enable YOLO for this TUI run?"
 
 
 @pytest.mark.parametrize(("key", "expected"), [("enter", "n"), ("n", "n"), ("escape", "n")])

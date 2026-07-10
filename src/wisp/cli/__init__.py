@@ -248,12 +248,12 @@ def cli_callback(
     # layer) on it: an untrusted repo must not be able to redirect the credential
     # file or override user defaults. Trust is read from safe sources only — the
     # global store and the real-env WISP_TRUST — never from project-controlled files.
-    # print/JSON resolve interactively here (the prompt goes to stderr, keeping JSON
-    # stdout clean); rpc/tui prompt out-of-band, so at startup they use only the
-    # non-interactive signals (an undecided project is untrusted until answered).
+    # Print/JSON and TUI resolve interactively here (the prompt goes to stderr,
+    # keeping JSON stdout clean and ensuring TUI trust is decided before the UI or
+    # RPC subprocess starts). Standalone RPC prompts out-of-band.
     cwd = Path.cwd()
     project_context_root = resolve_project_context_root(cwd)
-    if resolved_mode in (OutputMode.rpc, OutputMode.tui):
+    if resolved_mode is OutputMode.rpc:
         trusted = _cli_trust.trusted_noninteractive(project_context_root)
     else:
         trusted = _resolve_cli_trust(project_context_root).trusted
@@ -295,6 +295,7 @@ def cli_callback(
                 approve_unsafe_tools=approve_unsafe_tools,
                 max_tool_iterations=max_tool_iterations,
                 renderer=resolved_tui_renderer,
+                project_trusted=trusted,
                 # Forward the user's explicit --provider/--model/--session-dir/--auth-file
                 # (each None unless set) so the legacy `--mode tui` path keeps honoring
                 # them; the launcher no longer launders the resolved config into flags.
@@ -391,11 +392,11 @@ def tui_command(
     """Start Wisp's fullscreen TUI."""
 
     console = Console(stderr=True)
-    # The TUI resolves trust out-of-band (its RPC subprocess prompts via TrustCommand),
-    # so gate the project settings layer on the non-interactive trust signals here; an
-    # undecided project's local settings are not applied until the prompt is answered.
+    # Resolve trust before config, preflight, or terminal UI startup. The persisted
+    # decision is then observed by the RPC subprocess, so normal TUI launches never
+    # enter the fullscreen interface with project trust still undecided.
     project_context_root = resolve_project_context_root(Path.cwd())
-    trusted = _cli_trust.trusted_noninteractive(project_context_root)
+    trusted = _resolve_cli_trust(project_context_root).trusted
     _validate_session_and_iteration_options(
         resume=resume,
         continue_latest=continue_latest,
@@ -421,6 +422,7 @@ def tui_command(
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
             renderer=renderer,
+            project_trusted=trusted,
             # These default to None on the `tui` command, so they are non-None only when
             # the user explicitly set them — exactly the values that should override a
             # trusted project's settings in the RPC subprocess.
@@ -473,6 +475,7 @@ def _run_tui_from_cli_options(
     approve_unsafe_tools: bool,
     max_tool_iterations: int | None,
     renderer: TuiRendererKind,
+    project_trusted: bool,
     user_provider: str | None = None,
     user_model: str | None = None,
     user_session_dir: Path | None = None,
@@ -492,6 +495,7 @@ def _run_tui_from_cli_options(
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
             renderer=renderer,
+            project_trusted=project_trusted,
             user_provider=user_provider,
             user_model=user_model,
             user_session_dir=user_session_dir,

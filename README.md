@@ -109,7 +109,8 @@ uv run wisp trust revoke [path]   # persistently mark a project untrusted
 uv run wisp trust forget [path]   # remove the decision so Wisp can prompt again
 ```
 
-- **Non-interactive runs** (CI, scripts, RPC/TUI) default to *untrusted*. Set
+- **Non-interactive runs** (CI, scripts, standalone RPC) default to *untrusted*. The
+  interactive TUI asks before entering the interface. Set
   `WISP_TRUST=1` to opt a run in (or `WISP_TRUST=0` to force out). This is read only
   from the real process environment, never from project files, and is not persisted.
 - The `protected_paths` secret guard is a **user-only** policy: a project settings
@@ -233,9 +234,12 @@ CLI (`uv run wisp auth login openai-codex`). A Pi-style model picker/catalog is 
 
 Unlike print mode, the interactive TUI exposes the **full tool registry by
 default** — otherwise it would be a chatbot that can't read files or run
-commands. Mutating and command tools (`write`, `edit`, `bash`) still pause for a
-y/N approval prompt on each call; pass `--yes` to auto-approve, or `--no-all-tools`
-to fall back to the opt-in `--allow-read-tools` / `--allow-tool` filter.
+commands. Mutating and command tools (`write`, `edit`, `bash`) still pause for an
+approval decision. Choose **approve once**, **allow this exact tool for the TUI
+session**, **YOLO for all mutating/command tools in this TUI process**, or **deny**.
+YOLO requires a second explicit confirmation and is never persisted. Pass `--yes`
+to auto-approve from startup, or `--no-all-tools` to fall back to the opt-in
+`--allow-read-tools` / `--allow-tool` filter.
 
 Session and tool flags work with the `tui` command too:
 
@@ -303,7 +307,7 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 |---------|--------|
 | `{"id":"cmd-1","type":"prompt","prompt":"…"}` | Run one agent turn, streaming `WispEvent` JSONL |
 | `{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}` | Request cancellation of the running prompt |
-| `{"id":"approval-1","type":"approval","call_id":"call-1","approved":true}` | Approve/deny a pending tool request |
+| `{"id":"approval-1","type":"approval","call_id":"call-1","approved":true,"scope":"tool_session"}` | Approve/deny a pending tool request |
 | `{"id":"trust-1","type":"trust","request_id":"req-1","trusted":true}` | Answer a project-trust request |
 | `{"id":"cmd-2","type":"shutdown"}` | Exit cleanly |
 
@@ -311,7 +315,9 @@ Each command emits `rpc.command.started` / `rpc.command.finished` so clients can
 between them. Prompts run sequentially; `cancel` and `approval` are handled while a prompt runs.
 When an allowed mutating/command tool needs approval, Wisp emits `tool.approval.requested` with a
 `call_id`; respond with an `approval` command carrying that `call_id`, a boolean `approved`, and an
-optional denial `reason`. When an undecided project needs trust, Wisp emits `trust.requested` with a
+optional approval `scope`: `once` (the default), `tool_session` (the exact tool name for this RPC
+process), or `all_session` (all mutating/command tools for this RPC process). Scoped denials are
+rejected. An optional `reason` describes a denial. When an undecided project needs trust, Wisp emits `trust.requested` with a
 `request_id`; respond with a `trust` command carrying that `request_id`, a boolean `trusted`, and an
 optional denial `reason`. Denials are remembered unless the command includes `"transient": true`
 (for example, a UI closing before the user answered). Cancellation is best-effort. Provider, model,

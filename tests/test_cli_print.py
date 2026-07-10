@@ -244,7 +244,7 @@ def test_print_mode_renders_denied_tool_events_to_stderr(
     assert "changed file.txt" not in result.stderr
 
 
-def test_print_mode_renders_approved_tool_events_to_stderr(
+def test_print_mode_skips_approval_events_for_preapproved_tools(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -268,8 +268,8 @@ def test_print_mode_renders_approved_tool_events_to_stderr(
     assert result.exit_code == 0, result.output
     assert result.stdout == "done\n"
     assert '→ tool danger {"path": "file.txt"}' in result.stderr
-    assert "? approval required for danger (mutating)" in result.stderr
-    assert "✓ approved danger" in result.stderr
+    assert "approval required" not in result.stderr
+    assert "approved danger" not in result.stderr
     assert "✓ tool danger: changed file.txt" in result.stderr
     assert "session saved:" in result.stderr
 

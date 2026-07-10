@@ -37,12 +37,13 @@ from wisp.events import (
     TrustResolved,
 )
 from wisp.providers.base import ProviderError
+from wisp.rpc.commands import ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
-from wisp.tools.base import Tool
+from wisp.tools.base import Tool, ToolSafety
 from wisp.tools.context import ToolContext
 from wisp.trust import is_trusted, record_trust
 
@@ -110,6 +111,8 @@ class _RpcRunningPrompt:
 @dataclass
 class _RpcPendingApproval:
     call_id: str
+    tool_name: str
+    tool_safety: ToolSafety
     event: anyio.Event
     approved: bool | None = None
     reason: str | None = None
@@ -145,7 +148,12 @@ class _RpcToolApprovalPolicy(ToolApprovalPolicy):
     ) -> None:
         if self.approves(tool):
             return
-        pending = _RpcPendingApproval(call_id=call_id, event=anyio.Event())
+        pending = _RpcPendingApproval(
+            call_id=call_id,
+            tool_name=tool.name,
+            tool_safety=tool.safety,
+            event=anyio.Event(),
+        )
         self._pending[call_id] = pending
         if self._input_closed_reason is not None:
             self._resolve_pending(
@@ -180,10 +188,15 @@ class _RpcToolApprovalPolicy(ToolApprovalPolicy):
         call_id: str,
         approved: bool,
         reason: str | None = None,
+        scope: ApprovalScope = "once",
     ) -> bool:
         pending = self._pending.get(call_id)
         if pending is None or pending.resolved:
             return False
+        if approved and scope == "tool_session":
+            self.approved_tools = self.approved_tools | {pending.tool_name}
+        elif approved and scope == "all_session":
+            self.approved_safety = self.approved_safety | {"mutating", "command"}
         self._resolve_pending(pending, approved=approved, reason=reason)
         return True
 
@@ -1031,10 +1044,37 @@ def _handle_rpc_approval_command(
             message="RPC approval command field reason must be a string",
         )
         return
+    raw_scope = command.get("scope")
+    scope: ApprovalScope
+    if raw_scope is None:
+        scope = "once"
+    elif isinstance(raw_scope, str) and raw_scope in {
+        "once",
+        "tool_session",
+        "all_session",
+    }:
+        scope = cast(ApprovalScope, raw_scope)
+    else:
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=(
+                "RPC approval command field scope must be one of: once, tool_session, all_session"
+            ),
+        )
+        return
+    if not approved and scope != "once":
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC approval scope is only valid for approved requests",
+        )
+        return
     if not approval_policy.resolve_approval(
         call_id=call_id,
         approved=approved,
         reason=reason,
+        scope=scope,
     ):
         _write_rpc_command_error(
             command_id=command_id,
