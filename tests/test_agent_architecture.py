@@ -64,3 +64,37 @@ def test_provider_facing_modules_import_cleanly_in_fresh_process(module: str) ->
     )
 
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        (
+            "from wisp.agent.loop import Agent\n"
+            "from wisp.agent.compat import Agent as CompatAgent\n"
+            "assert Agent is CompatAgent"
+        ),
+        (
+            "from wisp.agent.compat import Agent\n"
+            "from wisp.agent.loop import Agent as LegacyAgent\n"
+            "assert Agent is LegacyAgent"
+        ),
+    ],
+)
+def test_legacy_agent_import_resolves_in_fresh_process(statement: str) -> None:
+    root = Path(__file__).parents[1]
+    existing_pythonpath = os.environ.get("PYTHONPATH")
+    pythonpath = str(root / "src")
+    if existing_pythonpath:
+        pythonpath = f"{pythonpath}{os.pathsep}{existing_pythonpath}"
+
+    result = subprocess.run(
+        [sys.executable, "-c", statement],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": pythonpath},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
