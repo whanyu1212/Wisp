@@ -32,6 +32,7 @@ _CODING_FORBIDDEN_IMPORTS = (
     "wisp.trust",
     "wisp.tui",
 )
+_FRONTEND_MODULES = (Path("cli/__init__.py"), Path("cli/rpc.py"))
 
 
 def _module_imports(path: Path) -> set[str]:
@@ -69,10 +70,23 @@ def test_coding_modules_do_not_import_frontends_or_trust_resolution() -> None:
     assert violations == []
 
 
-def test_legacy_agent_facade_only_imports_coding_session() -> None:
+def test_frontends_import_coding_session_directly() -> None:
+    wisp_dir = Path(__file__).parents[1] / "src" / "wisp"
+
+    for module in _FRONTEND_MODULES:
+        imports = _module_imports(wisp_dir / module)
+        assert "wisp.coding" in imports
+        assert "wisp.agent.compat" not in imports
+
+
+def test_legacy_agent_compatibility_exports_are_removed() -> None:
+    import wisp.agent.loop as agent_loop
+
     compat_path = Path(__file__).parents[1] / "src" / "wisp" / "agent" / "compat.py"
 
-    assert _module_imports(compat_path) == {"__future__", "wisp.coding.session"}
+    assert not compat_path.exists()
+    assert not hasattr(agent_loop, "Agent")
+    assert "Agent" not in agent_loop.__all__
 
 
 def test_coding_package_exports_session_coordinator() -> None:
@@ -101,44 +115,6 @@ def test_layer_modules_import_cleanly_in_fresh_process(module: str) -> None:
 
     result = subprocess.run(
         [sys.executable, "-c", f"import {module}"],
-        cwd=root,
-        env={**os.environ, "PYTHONPATH": pythonpath},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-
-
-@pytest.mark.parametrize(
-    "statement",
-    [
-        (
-            "from wisp.agent.loop import Agent\n"
-            "from wisp.agent.compat import Agent as CompatAgent\n"
-            "from wisp.coding.session import CodingSession\n"
-            "assert Agent is CompatAgent\n"
-            "assert issubclass(Agent, CodingSession)"
-        ),
-        (
-            "from wisp.agent.compat import Agent\n"
-            "from wisp.agent.loop import Agent as LegacyAgent\n"
-            "from wisp.coding.session import CodingSession\n"
-            "assert Agent is LegacyAgent\n"
-            "assert issubclass(Agent, CodingSession)"
-        ),
-    ],
-)
-def test_legacy_agent_import_resolves_in_fresh_process(statement: str) -> None:
-    root = Path(__file__).parents[1]
-    existing_pythonpath = os.environ.get("PYTHONPATH")
-    pythonpath = str(root / "src")
-    if existing_pythonpath:
-        pythonpath = f"{pythonpath}{os.pathsep}{existing_pythonpath}"
-
-    result = subprocess.run(
-        [sys.executable, "-c", statement],
         cwd=root,
         env={**os.environ, "PYTHONPATH": pythonpath},
         capture_output=True,

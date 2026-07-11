@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import dataclass
-from importlib import import_module
-from typing import Any, Protocol
+from typing import Protocol
 
 import wisp.providers.events as provider_events
 from wisp.agent.execution import (
@@ -62,9 +61,6 @@ type AgentLoopEvent = (
     | TurnCompleted
     | ErrorEvent
 )
-
-# The value remains unbound until __getattr__ loads the compatibility adapter.
-Agent: Any
 
 
 class CancellationToken(Protocol):
@@ -355,18 +351,7 @@ async def run_agent_loop(
         raise
 
 
-def __getattr__(name: str) -> Any:
-    """Resolve the temporary legacy Agent export without an eager import cycle."""
-    if name != "Agent":
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-    agent = import_module("wisp.agent.compat").Agent
-    globals()[name] = agent
-    return agent
-
-
 __all__ = [
-    "Agent",
     "AgentLoopConfig",
     "AgentLoopEvent",
     "CancellationToken",
