@@ -24,7 +24,7 @@ import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
-from wisp.agent.loop import Agent
+from wisp.agent.compat import Agent
 from wisp.agent.messages import Message
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.config import WispConfig

@@ -8,7 +8,7 @@ from typing import Any, cast
 import anyio
 import pytest
 
-from wisp.agent.loop import Agent
+from wisp.agent.compat import Agent
 from wisp.agent.messages import Message
 from wisp.events import (
     AgentCompleted,

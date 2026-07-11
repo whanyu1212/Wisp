@@ -10,7 +10,7 @@ import anyio
 import typer
 from rich.console import Console
 
-from wisp.agent.loop import Agent
+from wisp.agent.compat import Agent
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.auth import auth_app
 from wisp.config import WispConfig
