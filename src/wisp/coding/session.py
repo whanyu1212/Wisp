@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
+import anyio
+
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
-from wisp.agent.messages import Message, historical_tool_observation
+from wisp.agent.messages import (
+    Message,
+    SessionEntry,
+    historical_tool_observation,
+    message_from_completion_event,
+)
 from wisp.agent.prompt import (
     DEFAULT_CONTEXT_MAX_CHARS,
     build_prompt_messages,
@@ -42,6 +51,12 @@ PERSISTED_SESSION_EVENT_TYPES = frozenset(
         "error",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingSessionEntry:
+    session: JsonlSession
+    entry: SessionEntry
 
 
 class CodingSession:
@@ -85,6 +100,9 @@ class CodingSession:
         self.project_context_max_chars = project_context_max_chars
         self.project_context_root = project_context_root
         self.max_tool_iterations = max_tool_iterations
+        self._pending_entries: deque[_PendingSessionEntry] = deque()
+        self._pending_flush_lock = anyio.Lock()
+        self._history_refresh_session_ids: set[str] = set()
 
     async def run(
         self,
@@ -94,6 +112,13 @@ class CodingSession:
         history: Sequence[Message] = (),
     ) -> AsyncIterator[WispEvent]:
         session = session or self.sessions.create()
+        recover_history = session.session_id in self._history_refresh_session_ids or any(
+            pending.entry.session_id == session.session_id for pending in self._pending_entries
+        )
+        await self._flush_pending_entries()
+        if recover_history:
+            history = await anyio.to_thread.run_sync(session.read_messages)
+            self._history_refresh_session_ids.discard(session.session_id)
 
         async def emit(event: WispEvent) -> WispEvent:
             return await self._emit(event, session=session)
@@ -122,30 +147,20 @@ class CodingSession:
             ),
             messages=(*prompt_messages, *self._conversation_history(history)),
         )
-        assistant_chunks: list[str] = []
         turns = 0
         saw_loop_error = False
+        harness_events = harness.prompt_message(user_message)
 
         try:
-            async for event in harness.prompt_message(user_message):
+            async for event in harness_events:
                 if isinstance(event, TurnStarted):
                     turns = event.turn
-                elif isinstance(event, MessageCompleted):
-                    assistant_chunks.append(event.content)
                 elif isinstance(event, ErrorEvent):
                     saw_loop_error = True
+                if isinstance(event, MessageCompleted | ToolResultReady):
+                    self._queue_completion(session, event)
 
                 yield await emit(event)
-
-                if isinstance(event, ToolResultReady):
-                    await session.append_message(
-                        Message(
-                            role="tool",
-                            content=event.output,
-                            tool_call_id=event.call_id,
-                            tool_name=event.name,
-                        )
-                    )
         except Exception as exc:
             if not saw_loop_error:
                 yield await emit(ErrorEvent(message=str(exc)))
@@ -157,9 +172,13 @@ class CodingSession:
                 AgentCompleted(session_id=session.session_id, turns=turns, outcome="failed")
             )
             raise
+        finally:
+            with anyio.CancelScope(shield=True):
+                try:
+                    await harness_events.aclose()
+                finally:
+                    await self._flush_pending_entries()
 
-        assistant_message = Message(role="assistant", content="".join(assistant_chunks))
-        await session.append_message(assistant_message)
         yield await emit(SessionSaved(session_id=session.session_id, path=session.path))
         yield await emit(
             AgentCompleted(session_id=session.session_id, turns=turns, outcome="completed")
@@ -202,11 +221,36 @@ class CodingSession:
         *,
         session: JsonlSession | None = None,
     ) -> WispEvent:
+        await self._flush_pending_entries()
         if session is not None and event.type in PERSISTED_SESSION_EVENT_TYPES:
             await session.append_event(event)
         if self.events is not None:
             await self.events.emit(event)
         return event
+
+    def _queue_completion(
+        self,
+        session: JsonlSession,
+        event: MessageCompleted | ToolResultReady,
+    ) -> None:
+        message = message_from_completion_event(event)
+        entry = SessionEntry(
+            session_id=session.session_id,
+            message=message,
+            created_at=message.created_at,
+        )
+        self._pending_entries.append(_PendingSessionEntry(session=session, entry=entry))
+
+    async def _flush_pending_entries(self) -> None:
+        async with self._pending_flush_lock:
+            while self._pending_entries:
+                pending = self._pending_entries[0]
+                try:
+                    await pending.session.append_entry(pending.entry)
+                except BaseException:
+                    self._history_refresh_session_ids.add(pending.entry.session_id)
+                    raise
+                self._pending_entries.popleft()
 
 
 __all__ = ["CodingSession", "PERSISTED_SESSION_EVENT_TYPES"]

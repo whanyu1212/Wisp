@@ -8,7 +8,7 @@ from typing import Any, cast
 import anyio
 import pytest
 
-from wisp.agent.messages import Message
+from wisp.agent.messages import Message, SessionEntry
 from wisp.coding.session import CodingSession
 from wisp.events import (
     AgentCompleted,
@@ -154,12 +154,21 @@ class BlockingTool:
     description = "Blocks until released."
     input_schema: ToolInputSchema = {"type": "object", "properties": {}}
 
-    def __init__(self, *, release: anyio.Event, log: list[str]) -> None:
+    def __init__(
+        self,
+        *,
+        release: anyio.Event,
+        log: list[str],
+        started: anyio.Event | None = None,
+    ) -> None:
         self.release = release
         self.log = log
+        self.started = started
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         self.log.append("run-started")
+        if self.started is not None:
+            self.started.set()
         await self.release.wait()
         return ToolResult(text="released")
 
@@ -223,6 +232,86 @@ def test_coding_session_streams_fake_response_and_saves_session(tmp_path: Path) 
         "session.saved",
         "agent.completed",
     ]
+
+
+def test_coding_session_persists_completion_before_exposing_it(
+    tmp_path: Path,
+) -> None:
+    tool_call = ToolCall(
+        call_id="call-1",
+        name="echo",
+        arguments={"text": "hello"},
+        response_id="response-1",
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                ProviderToolCallCompleted(tool_call=tool_call),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=(tool_call,),
+                    response_id="response-1",
+                    finish_reason="tool_calls",
+                ),
+            ]
+        ]
+    )
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def run_agent() -> MessageCompleted:
+        agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
+        events = agent.run("hello", session=session)
+        while True:
+            event = await anext(events)
+            if isinstance(event, MessageCompleted):
+                persisted = session.read_messages()[-1]
+                assert persisted.content == "checking"
+                assert persisted.response_id == "response-1"
+                assert persisted.finish_reason == "tool_calls"
+                assert persisted.tool_calls is not None
+                assert [call.call_id for call in persisted.tool_calls] == ["call-1"]
+                assert persisted.created_at == event.timestamp
+                await events.aclose()
+                return event
+
+    completion = anyio.run(run_agent)
+
+    assert completion.content == "checking"
+    assert [message.role for message in session.read_messages()] == [
+        "system",
+        "system",
+        "user",
+        "assistant",
+    ]
+
+
+def test_coding_session_does_not_persist_partial_assistant_on_generator_close(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderTextDelta(delta="partial"),
+                ProviderResponseCompleted(content="partial"),
+            ]
+        ]
+    )
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def run_agent() -> None:
+        agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
+        events = agent.run("hello", session=session)
+        while True:
+            event = await anext(events)
+            if isinstance(event, MessageDelta):
+                await events.aclose()
+                return
+
+    anyio.run(run_agent)
+
+    assert not any(message.role == "assistant" for message in session.read_messages())
 
 
 def test_coding_session_preserves_provider_text_content_index(tmp_path: Path) -> None:
@@ -403,6 +492,126 @@ def test_coding_session_maps_provider_failed_terminal_to_failed_lifecycle(tmp_pa
     ]
 
 
+def test_coding_session_retries_uncertain_completion_write_without_duplicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="done"),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="next"),
+            ],
+        ]
+    )
+    session = JsonlSessionStore(tmp_path).create()
+    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
+    append_entry = session.append_entry
+    failed = False
+
+    async def append_then_fail(entry: SessionEntry) -> SessionEntry:
+        nonlocal failed
+        persisted = await append_entry(entry)
+        if not failed and entry.message is not None and entry.message.role == "assistant":
+            failed = True
+            raise OSError("uncertain completion write")
+        return persisted
+
+    monkeypatch.setattr(session, "append_entry", append_then_fail)
+
+    async def run_agent() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(OSError, match="uncertain completion write"):
+            async for event in agent.run("hello", session=session):
+                events.append(event)
+        _next_events = [event async for event in agent.run("again", session=session, history=())]
+        return events
+
+    events = anyio.run(run_agent)
+
+    assert not any(isinstance(event, MessageCompleted) for event in events)
+    assistant_entries = [
+        entry
+        for entry in session.read_entries()
+        if entry.message is not None and entry.message.role == "assistant"
+    ]
+    assert len(assistant_entries) == 2
+    assert assistant_entries[0].message is not None
+    assert assistant_entries[0].message.content == "done"
+    assert assistant_entries[1].message is not None
+    assert assistant_entries[1].message.content == "next"
+    assert [(message.role, message.content) for message in provider.calls[1].messages[-3:]] == [
+        ("user", "hello"),
+        ("assistant", "done"),
+        ("user", "again"),
+    ]
+
+
+def test_coding_session_flushes_prior_completion_before_next_provider_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="first answer"),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="second answer"),
+            ],
+        ]
+    )
+    session = JsonlSessionStore(tmp_path).create()
+    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
+    append_entry = session.append_entry
+    fail_completion_writes = True
+
+    async def fail_first_completion(entry: SessionEntry) -> SessionEntry:
+        if (
+            fail_completion_writes
+            and entry.message is not None
+            and entry.message.role == "assistant"
+            and entry.message.content == "first answer"
+        ):
+            raise OSError("completion storage unavailable")
+        return await append_entry(entry)
+
+    monkeypatch.setattr(session, "append_entry", fail_first_completion)
+
+    async def run_agent() -> None:
+        nonlocal fail_completion_writes
+        with pytest.raises(OSError, match="completion storage unavailable"):
+            _events = [event async for event in agent.run("first", session=session)]
+
+        fail_completion_writes = False
+        _events = [event async for event in agent.run("second", session=session, history=())]
+
+    anyio.run(run_agent)
+
+    assert [message.role for message in provider.calls[1].messages] == [
+        "system",
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert [(message.role, message.content) for message in provider.calls[1].messages[-3:]] == [
+        ("user", "first"),
+        ("assistant", "first answer"),
+        ("user", "second"),
+    ]
+    assistant_messages = [
+        message.content for message in session.read_messages() if message.role == "assistant"
+    ]
+    assert assistant_messages == ["first answer", "second answer"]
+
+
 def test_coding_session_continues_with_history_and_labeled_tool_observations(
     tmp_path: Path,
 ) -> None:
@@ -554,12 +763,13 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
     provider = ToolLoopProvider(
         [
             [
+                "checking ",
                 ToolCall(
                     call_id="call-1",
                     name="echo",
                     arguments={"text": "hello"},
                     response_id="response-1",
-                )
+                ),
             ],
             ["final answer"],
         ]
@@ -595,6 +805,7 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
         "agent.started",
         "turn.started",
         "message.started",
+        "message.delta",
         "message.completed",
         "tool.call",
         "tool.execution.started",
@@ -618,6 +829,7 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
         "system",
         "system",
         "user",
+        "assistant",
         "tool",
         "assistant",
     ]
@@ -630,9 +842,26 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
     assert event_records[1]["event"]["arguments"] == {"text": "hello"}
     assert event_records[2]["event"]["output"] == "echo: hello"
     assert event_records[2]["event"]["is_error"] is False
-    assert message_records[3]["message"]["tool_call_id"] == "call-1"
-    assert message_records[3]["message"]["tool_name"] == "echo"
-    assert message_records[3]["message"]["content"] == "echo: hello"
+    tool_call_message = message_records[3]["message"]
+    assert tool_call_message["content"] == "checking "
+    assert tool_call_message["response_id"] == "response-1"
+    assert tool_call_message["finish_reason"] == "tool_calls"
+    assert tool_call_message["tool_calls"] == [
+        {
+            "call_id": "call-1",
+            "name": "echo",
+            "arguments": {"text": "hello"},
+        }
+    ]
+    tool_message = message_records[4]["message"]
+    assert tool_message["tool_call_id"] == "call-1"
+    assert tool_message["tool_name"] == "echo"
+    assert tool_message["content"] == "echo: hello"
+    assert tool_message["is_error"] is False
+    final_message = message_records[5]["message"]
+    assert final_message["content"] == "final answer"
+    assert final_message["finish_reason"] == "stop"
+    assert final_message["tool_calls"] == []
 
 
 def test_coding_session_returns_error_result_when_tool_result_text_raises(tmp_path: Path) -> None:
@@ -661,6 +890,12 @@ def test_coding_session_returns_error_result_when_tool_result_text_raises(tmp_pa
     assert any(
         isinstance(event, MessageCompleted) and event.content == "recovered" for event in events
     )
+    tool_message = next(
+        message
+        for message in JsonlSessionStore(tmp_path).latest().read_messages()
+        if message.role == "tool"
+    )
+    assert tool_message.is_error is True
 
 
 def test_coding_session_filters_provider_tool_specs_by_policy(tmp_path: Path) -> None:
@@ -922,6 +1157,63 @@ def test_coding_session_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -
         assert any(isinstance(event, MessageCompleted) for event in remaining_events)
 
     anyio.run(run_agent)
+
+
+def test_coding_session_cancellation_during_tool_keeps_completed_assistant(
+    tmp_path: Path,
+) -> None:
+    provider = ToolLoopProvider(
+        [
+            [
+                ToolCall(
+                    call_id="call-1",
+                    name="blocking",
+                    arguments={},
+                    response_id="response-1",
+                )
+            ],
+            ["unused"],
+        ]
+    )
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def run_agent() -> None:
+        release = anyio.Event()
+        started = anyio.Event()
+        tools = ToolRegistry()
+        tools.register(BlockingTool(release=release, log=[], started=started))
+        agent = CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        events = agent.run("hello", session=session)
+        while True:
+            event = await anext(events)
+            if isinstance(event, ToolExecutionStarted):
+                break
+
+        scope = anyio.CancelScope()
+
+        async def wait_for_tool_result() -> None:
+            with scope:
+                await anext(events)
+
+        with anyio.fail_after(1):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(wait_for_tool_result)
+                await started.wait()
+                scope.cancel()
+        await events.aclose()
+
+    anyio.run(run_agent)
+
+    completed_messages = [
+        message for message in session.read_messages() if message.role in {"assistant", "tool"}
+    ]
+    assert [message.role for message in completed_messages] == ["assistant"]
+    assert completed_messages[0].tool_calls is not None
+    assert [call.call_id for call in completed_messages[0].tool_calls] == ["call-1"]
 
 
 def test_coding_session_returns_error_result_for_unknown_tool(tmp_path: Path) -> None:

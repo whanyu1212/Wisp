@@ -8,7 +8,14 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from wisp.events import FinishReason, JsonObject, ToolCallSnapshot, utc_now
+from wisp.events import (
+    FinishReason,
+    JsonObject,
+    MessageCompleted,
+    ToolCallSnapshot,
+    ToolResultReady,
+    utc_now,
+)
 
 Role = Literal["system", "user", "assistant", "tool"]
 
@@ -27,6 +34,28 @@ class Message(BaseModel):
     finish_reason: FinishReason | None = None
     is_error: bool | None = None
     created_at: datetime = Field(default_factory=utc_now)
+
+
+def message_from_completion_event(event: MessageCompleted | ToolResultReady) -> Message:
+    """Build the provider-visible message completed by a lifecycle event."""
+
+    if isinstance(event, MessageCompleted):
+        return Message(
+            role=event.role,
+            content=event.content,
+            tool_calls=event.tool_calls,
+            response_id=event.response_id,
+            finish_reason=event.finish_reason,
+            created_at=event.timestamp,
+        )
+    return Message(
+        role="tool",
+        content=event.output,
+        tool_call_id=event.call_id,
+        tool_name=event.name,
+        is_error=event.is_error,
+        created_at=event.timestamp,
+    )
 
 
 def historical_tool_observation(message: Message) -> Message:

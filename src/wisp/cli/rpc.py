@@ -817,17 +817,11 @@ async def _run_rpc_prompt_command(
                 error = f"RPC command cancelled: {command_id}"
     finally:
         cancelled = error is not None and error.startswith("RPC command cancelled:")
-        if cancelled:
-            await session.truncate_entries(entry_start)
-        entry_count = (
-            entry_start
-            if cancelled
-            else len(session.read_entries())
-            if session.path.is_file()
-            else entry_start
-        )
-        updated_history = (
-            None if cancelled else _updated_rpc_history(session, committed_history, entry_start)
+        entry_count, updated_history = await anyio.to_thread.run_sync(
+            _updated_rpc_session_state,
+            session,
+            committed_history,
+            entry_start,
         )
         async with send:
             if cancelled:
@@ -856,15 +850,23 @@ def _updated_rpc_history(
     committed_history: tuple[Message, ...],
     entry_start: int,
 ) -> tuple[Message, ...]:
+    return _updated_rpc_session_state(session, committed_history, entry_start)[1]
+
+
+def _updated_rpc_session_state(
+    session: JsonlSession,
+    committed_history: tuple[Message, ...],
+    entry_start: int,
+) -> tuple[int, tuple[Message, ...]]:
     if not session.path.is_file():
-        return committed_history
+        return entry_start, committed_history
     entries = session.read_entries()
     new_messages = tuple(
         entry.message
         for entry in entries[entry_start:]
         if entry.kind == "message" and entry.message is not None
     )
-    return (*committed_history, *new_messages)
+    return len(entries), (*committed_history, *new_messages)
 
 
 def _reject_rpc_command(command: dict[str, object], *, message: str) -> None:

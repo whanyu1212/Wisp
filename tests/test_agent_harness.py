@@ -213,9 +213,19 @@ def test_harness_preserves_assistant_tool_result_order_across_runs() -> None:
         ("user", "what next?"),
         ("assistant", "follow-up"),
     ]
+    tool_call_message = harness.messages[1]
+    assert tool_call_message.response_id == "response-1"
+    assert tool_call_message.finish_reason == "tool_calls"
+    assert tool_call_message.tool_calls is not None
+    assert [snapshot.call_id for snapshot in tool_call_message.tool_calls] == ["call-1"]
     tool_message = harness.messages[2]
     assert tool_message.tool_call_id == "call-1"
     assert tool_message.tool_name == "lookup"
+    assert tool_message.is_error is False
+    final_message = harness.messages[3]
+    assert final_message.response_id == "response-2"
+    assert final_message.finish_reason == "stop"
+    assert final_message.tool_calls == ()
     assert provider.calls[1].tool_results[0].output == "found it"
     assert [(message.role, message.content) for message in provider.calls[2].messages] == [
         ("user", "search"),
