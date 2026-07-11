@@ -13,6 +13,7 @@ from wisp.events import (
     JsonObject,
     MessageCompleted,
     ToolCallSnapshot,
+    ToolExecutionEnded,
     ToolResultReady,
     utc_now,
 )
@@ -36,7 +37,9 @@ class Message(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
-def message_from_completion_event(event: MessageCompleted | ToolResultReady) -> Message:
+def message_from_completion_event(
+    event: MessageCompleted | ToolExecutionEnded | ToolResultReady,
+) -> Message:
     """Build the provider-visible message completed by a lifecycle event."""
 
     if isinstance(event, MessageCompleted):

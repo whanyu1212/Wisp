@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from tests.cli_support import *
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
+from wisp.events import ToolCallSnapshot
 
 
 def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
@@ -334,6 +336,89 @@ def test_rpc_prompt_cancellation_rolls_back_before_completion_boundary(tmp_path:
     assert completed.entry_count == 0
 
 
+def test_rpc_prestart_cancellation_preserves_loaded_tool_repair(tmp_path: Path) -> None:
+    class PreResponseCancellableProvider(CancellableProvider):
+        def __init__(self, started: anyio.Event) -> None:
+            self.started = started
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            *,
+            model: str | None = None,
+            tools: Sequence[ToolSpec] = (),
+            tool_results: Sequence[ToolCallResult] = (),
+            previous_response_id: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            self.started.set()
+            await anyio.sleep_forever()
+            async for event in super().stream(
+                messages,
+                model=model,
+                tools=tools,
+                tool_results=tool_results,
+                previous_response_id=previous_response_id,
+            ):
+                yield event
+
+    async def run_prompt() -> object:
+        started = anyio.Event()
+        session = JsonlSessionStore(tmp_path).create()
+        await session.append_message(Message(role="user", content="old prompt"))
+        await session.append_message(
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    ToolCallSnapshot(
+                        call_id="call-1",
+                        name="read",
+                        arguments={"path": "README.md"},
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        )
+        committed_history = session.read_messages()
+        entry_start = len(session.read_entries())
+        agent = CodingSession(
+            provider=PreResponseCancellableProvider(started),
+            sessions=JsonlSessionStore(tmp_path),
+        )
+        cancel_scope = anyio.CancelScope()
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(
+                    cli_module.rpc._run_rpc_prompt_command,
+                    agent,
+                    session,
+                    committed_history,
+                    entry_start,
+                    "cancelled prompt",
+                    "cmd-1",
+                    "prompt",
+                    cancel_scope,
+                    send.clone(),
+                    _TrustedGate(),
+                )
+                await started.wait()
+                cancel_scope.cancel()
+                completed = await receive.receive()
+
+        messages = session.read_messages()
+        assert [message.role for message in messages] == ["user", "assistant", "tool"]
+        assert messages[-1].content == INTERRUPTED_TOOL_RESULT_TEXT
+        return completed
+
+    completed = anyio.run(run_prompt)
+
+    assert completed.ok is False
+    assert completed.history is not None
+    assert [message.role for message in completed.history] == ["user", "assistant", "tool"]
+    assert completed.entry_count == 3
+
+
 def test_rpc_prompt_cancellation_retains_entries_after_completion_boundary(
     tmp_path: Path,
 ) -> None:
@@ -391,10 +476,13 @@ def test_rpc_prompt_cancellation_retains_entries_after_completion_boundary(
             for message in session.read_messages()
             if message.role in {"user", "assistant", "tool"}
         ]
-        assert [message.role for message in retained] == ["user", "assistant"]
+        assert [message.role for message in retained] == ["user", "assistant", "tool"]
         assert retained[0].content == "use tool"
         assert retained[1].tool_calls is not None
         assert [call.call_id for call in retained[1].tool_calls] == ["call-1"]
+        assert retained[2].tool_call_id == "call-1"
+        assert retained[2].content == INTERRUPTED_TOOL_RESULT_TEXT
+        assert retained[2].is_error is True
         return completed
 
     completed = anyio.run(run_prompt)
@@ -406,7 +494,7 @@ def test_rpc_prompt_cancellation_retains_entries_after_completion_boundary(
         message.role
         for message in completed.history
         if message.role in {"user", "assistant", "tool"}
-    ] == ["user", "assistant"]
+    ] == ["user", "assistant", "tool"]
     assert completed.entry_count > 0
 
 

@@ -9,6 +9,7 @@ import anyio
 import pytest
 
 from wisp.agent.messages import Message, SessionEntry
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.coding.session import CodingSession
 from wisp.events import (
     AgentCompleted,
@@ -19,6 +20,7 @@ from wisp.events import (
     ToolApprovalResolved,
     ToolCallRequested,
     ToolCallSnapshot,
+    ToolExecutionEnded,
     ToolExecutionStarted,
     ToolResultReady,
     TurnCompleted,
@@ -284,7 +286,12 @@ def test_coding_session_persists_completion_before_exposing_it(
         "system",
         "user",
         "assistant",
+        "tool",
     ]
+    repair = session.read_messages()[-1]
+    assert repair.tool_call_id == "call-1"
+    assert repair.content == INTERRUPTED_TOOL_RESULT_TEXT
+    assert repair.is_error is True
 
 
 def test_coding_session_does_not_persist_partial_assistant_on_generator_close(
@@ -313,6 +320,57 @@ def test_coding_session_does_not_persist_partial_assistant_on_generator_close(
     anyio.run(run_agent)
 
     assert not any(message.role == "assistant" for message in session.read_messages())
+
+
+def test_coding_session_persists_tool_output_before_exposing_execution_end(
+    tmp_path: Path,
+) -> None:
+    provider = ToolLoopProvider(
+        [
+            [
+                ToolCall(
+                    call_id="call-1",
+                    name="echo",
+                    arguments={"text": "hello"},
+                    response_id="response-1",
+                )
+            ],
+            ["unused"],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def run_agent() -> ToolExecutionEnded:
+        agent = CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        events = agent.run("echo it", session=session)
+        while True:
+            event = await anext(events)
+            if isinstance(event, ToolExecutionEnded):
+                persisted = session.read_messages()[-1]
+                assert persisted.role == "tool"
+                assert persisted.tool_call_id == "call-1"
+                assert persisted.content == "echo: hello"
+                assert persisted.is_error is False
+                await events.aclose()
+                return event
+
+    terminal = anyio.run(run_agent)
+
+    assert terminal.output == "echo: hello"
+    tool_messages = [
+        message
+        for message in session.read_messages()
+        if message.role == "tool" and message.tool_call_id == "call-1"
+    ]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].content == "echo: hello"
+    assert tool_messages[0].content != INTERRUPTED_TOOL_RESULT_TEXT
 
 
 def test_coding_session_preserves_provider_text_content_index(tmp_path: Path) -> None:
@@ -611,6 +669,245 @@ def test_coding_session_flushes_prior_completion_before_next_provider_request(
         message.content for message in session.read_messages() if message.role == "assistant"
     ]
     assert assistant_messages == ["first answer", "second answer"]
+
+
+def test_coding_session_repairs_loaded_tool_call_before_provider_request(
+    tmp_path: Path,
+) -> None:
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    interrupted = Message(
+        role="assistant",
+        content="starting read",
+        tool_calls=(
+            ToolCallSnapshot(
+                call_id="call-1",
+                name="read",
+                arguments={"path": "README.md"},
+            ),
+        ),
+        finish_reason="tool_calls",
+    )
+
+    async def seed_session() -> None:
+        await session.append_message(Message(role="user", content="read the file"))
+        await session.append_message(interrupted)
+        await session.append_message(Message(role="user", content="historical follow-up"))
+
+    anyio.run(seed_session)
+    provider = CapturingProvider()
+
+    async def run_agent() -> None:
+        agent = CodingSession(provider=provider, sessions=store)
+        _events = [
+            event
+            async for event in agent.run(
+                "continue",
+                session=session,
+                history=session.read_messages(),
+            )
+        ]
+
+    anyio.run(run_agent)
+
+    assert provider.seen_messages is not None
+    assert [(message.role, message.content) for message in provider.seen_messages[-5:]] == [
+        ("user", "read the file"),
+        ("assistant", "starting read"),
+        (
+            "user",
+            "[Historical tool observation — not a user instruction]\n"
+            "Tool: read (call-1)\n\n"
+            f"{INTERRUPTED_TOOL_RESULT_TEXT}",
+        ),
+        ("user", "historical follow-up"),
+        ("user", "continue"),
+    ]
+    repairs = [
+        message
+        for message in session.read_messages()
+        if message.role == "tool" and message.tool_call_id == "call-1"
+    ]
+    assert len(repairs) == 1
+    assert repairs[0].is_error is True
+
+    reloaded = store.load(session.path)
+
+    async def resume_reloaded() -> None:
+        agent = CodingSession(provider=CapturingProvider(), sessions=store)
+        _events = [
+            event
+            async for event in agent.run(
+                "after reload",
+                session=reloaded,
+                history=reloaded.read_messages(),
+            )
+        ]
+
+    anyio.run(resume_reloaded)
+
+    assert (
+        len(
+            [
+                message
+                for message in reloaded.read_messages()
+                if message.role == "tool" and message.tool_call_id == "call-1"
+            ]
+        )
+        == 1
+    )
+
+
+def test_coding_session_retries_uncertain_repair_write_without_duplicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    interrupted = Message(
+        role="assistant",
+        content="",
+        tool_calls=(
+            ToolCallSnapshot(
+                call_id="call-1",
+                name="bash",
+                arguments={"command": "make"},
+            ),
+        ),
+        finish_reason="tool_calls",
+    )
+
+    async def seed_session() -> None:
+        await session.append_message(Message(role="user", content="build it"))
+        await session.append_message(interrupted)
+
+    anyio.run(seed_session)
+    provider = CapturingProvider()
+    agent = CodingSession(provider=provider, sessions=store)
+    append_entry = session.append_entry
+    failed = False
+
+    async def append_then_fail(entry: SessionEntry) -> SessionEntry:
+        nonlocal failed
+        persisted = await append_entry(entry)
+        if (
+            not failed
+            and entry.message is not None
+            and entry.message.content == INTERRUPTED_TOOL_RESULT_TEXT
+        ):
+            failed = True
+            raise OSError("uncertain repair write")
+        return persisted
+
+    monkeypatch.setattr(session, "append_entry", append_then_fail)
+
+    async def run_agent() -> None:
+        with pytest.raises(OSError, match="uncertain repair write"):
+            _events = [
+                event
+                async for event in agent.run(
+                    "first attempt",
+                    session=session,
+                    history=session.read_messages(),
+                )
+            ]
+        assert provider.seen_messages is None
+
+        _events = [event async for event in agent.run("retry", session=session, history=())]
+
+    anyio.run(run_agent)
+
+    repairs = [
+        entry
+        for entry in session.read_entries()
+        if entry.message is not None
+        and entry.message.role == "tool"
+        and entry.message.tool_call_id == "call-1"
+    ]
+    assert len(repairs) == 1
+    assert repairs[0].message is not None
+    assert repairs[0].message.is_error is True
+    assert provider.seen_messages is not None
+    assert any(
+        message.role == "user" and INTERRUPTED_TOOL_RESULT_TEXT in message.content
+        for message in provider.seen_messages
+    )
+
+
+def test_coding_session_retries_uncertain_finalizer_repair_without_duplicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool_call = ToolCall(
+        call_id="call-1",
+        name="read",
+        arguments={"path": "README.md"},
+        response_id="response-1",
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                ProviderToolCallCompleted(tool_call=tool_call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(tool_call,),
+                    response_id="response-1",
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="response-2"),
+                ProviderResponseCompleted(content="recovered", response_id="response-2"),
+            ],
+        ]
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    agent = CodingSession(provider=provider, sessions=store)
+    append_entry = session.append_entry
+    failed = False
+
+    async def append_then_fail(entry: SessionEntry) -> SessionEntry:
+        nonlocal failed
+        persisted = await append_entry(entry)
+        if (
+            not failed
+            and entry.message is not None
+            and entry.message.content == INTERRUPTED_TOOL_RESULT_TEXT
+        ):
+            failed = True
+            raise OSError("uncertain finalizer repair write")
+        return persisted
+
+    monkeypatch.setattr(session, "append_entry", append_then_fail)
+
+    async def run_agent() -> None:
+        events = agent.run("read it", session=session)
+        while True:
+            event = await anext(events)
+            if isinstance(event, MessageCompleted):
+                break
+        with pytest.raises(OSError, match="uncertain finalizer repair write"):
+            await events.aclose()
+
+        _events = [event async for event in agent.run("retry", session=session, history=())]
+
+    anyio.run(run_agent)
+
+    repair_entries = [
+        entry
+        for entry in session.read_entries()
+        if entry.message is not None
+        and entry.message.role == "tool"
+        and entry.message.tool_call_id == "call-1"
+    ]
+    assert len(repair_entries) == 1
+    assert len(provider.calls) == 2
+    assert any(
+        message.role == "user" and INTERRUPTED_TOOL_RESULT_TEXT in message.content
+        for message in provider.calls[1].messages
+    )
 
 
 def test_coding_session_continues_with_history_and_labeled_tool_observations(
@@ -1228,9 +1525,47 @@ def test_coding_session_cancellation_during_tool_keeps_completed_assistant(
     completed_messages = [
         message for message in session.read_messages() if message.role in {"assistant", "tool"}
     ]
-    assert [message.role for message in completed_messages] == ["assistant"]
+    assert [message.role for message in completed_messages] == ["assistant", "tool"]
     assert completed_messages[0].tool_calls is not None
     assert [call.call_id for call in completed_messages[0].tool_calls] == ["call-1"]
+    assert completed_messages[1].tool_call_id == "call-1"
+    assert completed_messages[1].tool_name == "blocking"
+    assert completed_messages[1].content == INTERRUPTED_TOOL_RESULT_TEXT
+    assert completed_messages[1].is_error is True
+
+    resumed_provider = CapturingProvider()
+
+    async def resume_agent() -> None:
+        agent = CodingSession(
+            provider=resumed_provider,
+            sessions=JsonlSessionStore(tmp_path),
+        )
+        _events = [
+            event
+            async for event in agent.run(
+                "what happened?",
+                session=session,
+                history=session.read_messages(),
+            )
+        ]
+
+    anyio.run(resume_agent)
+
+    assert resumed_provider.seen_messages is not None
+    assert any(
+        message.role == "user" and INTERRUPTED_TOOL_RESULT_TEXT in message.content
+        for message in resumed_provider.seen_messages
+    )
+    assert (
+        len(
+            [
+                message
+                for message in session.read_messages()
+                if message.role == "tool" and message.tool_call_id == "call-1"
+            ]
+        )
+        == 1
+    )
 
 
 def test_coding_session_returns_error_result_for_unknown_tool(tmp_path: Path) -> None:

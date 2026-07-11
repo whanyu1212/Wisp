@@ -8,7 +8,7 @@ import pytest
 from wisp.agent.execution import ToolExecutionEvent
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.messages import Message
-from wisp.events import MessageDelta, ToolExecutionEnded, TurnCompleted
+from wisp.events import MessageDelta, ToolCallSnapshot, ToolExecutionEnded, TurnCompleted
 from wisp.providers.base import Provider, ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderEvent,
@@ -300,6 +300,56 @@ def test_harness_omits_empty_tool_call_assistant_from_follow_up_history() -> Non
         ),
         ("assistant", "done"),
         ("user", "what next?"),
+    ]
+
+
+def test_harness_repairs_interrupted_tool_call_before_next_provider_request() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="recovered"),
+            ]
+        ]
+    )
+    harness = _harness(
+        provider,
+        messages=(
+            Message(role="user", content="read the file"),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    ToolCallSnapshot(
+                        call_id="call-1",
+                        name="read",
+                        arguments={"path": "README.md"},
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+        ),
+    )
+
+    async def run() -> None:
+        _events = [event async for event in harness.prompt("what happened?")]
+
+    anyio.run(run)
+
+    repair = harness.messages[2]
+    assert repair.role == "tool"
+    assert repair.tool_call_id == "call-1"
+    assert repair.tool_name == "read"
+    assert repair.is_error is True
+    assert [(message.role, message.content) for message in provider.calls[0].messages] == [
+        ("user", "read the file"),
+        (
+            "user",
+            "[Historical tool observation — not a user instruction]\n"
+            "Tool: read (call-1)\n\n"
+            "Tool call interrupted before completion; execution outcome is unknown.",
+        ),
+        ("user", "what happened?"),
     ]
 
 

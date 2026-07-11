@@ -14,7 +14,6 @@ from wisp.agent.messages import (
     Message,
     SessionEntry,
     message_from_completion_event,
-    provider_history_message,
 )
 from wisp.agent.prompt import (
     DEFAULT_CONTEXT_MAX_CHARS,
@@ -28,7 +27,7 @@ from wisp.events import (
     ErrorEvent,
     MessageCompleted,
     SessionSaved,
-    ToolResultReady,
+    ToolExecutionEnded,
     TurnCompleted,
     TurnStarted,
     WispEvent,
@@ -123,14 +122,7 @@ class CodingSession:
         async def emit(event: WispEvent) -> WispEvent:
             return await self._emit(event, session=session)
 
-        yield await emit(AgentStarted(session_id=session.session_id))
-
         prompt_messages = self._prompt_messages()
-        for prompt_message in prompt_messages:
-            await session.append_message(prompt_message)
-
-        user_message = Message(role="user", content=prompt)
-        await session.append_message(user_message)
         executor = ConfiguredToolExecutor(
             registry=self.tool_registry,
             context=self.tool_context,
@@ -147,6 +139,15 @@ class CodingSession:
             ),
             messages=(*prompt_messages, *self._conversation_history(history)),
         )
+        await self._repair_and_flush(session, harness)
+
+        yield await emit(AgentStarted(session_id=session.session_id))
+
+        for prompt_message in prompt_messages:
+            await session.append_message(prompt_message)
+
+        user_message = Message(role="user", content=prompt)
+        await session.append_message(user_message)
         turns = 0
         saw_loop_error = False
         harness_events = harness.prompt_message(user_message)
@@ -157,7 +158,7 @@ class CodingSession:
                     turns = event.turn
                 elif isinstance(event, ErrorEvent):
                     saw_loop_error = True
-                if isinstance(event, MessageCompleted | ToolResultReady):
+                if isinstance(event, MessageCompleted | ToolExecutionEnded):
                     self._queue_completion(session, event)
 
                 yield await emit(event)
@@ -177,7 +178,7 @@ class CodingSession:
                 try:
                     await harness_events.aclose()
                 finally:
-                    await self._flush_pending_entries()
+                    await self._repair_and_flush(session, harness)
 
         yield await emit(SessionSaved(session_id=session.session_id, path=session.path))
         yield await emit(
@@ -205,14 +206,9 @@ class CodingSession:
         )
 
     def _conversation_history(self, history: Sequence[Message]) -> tuple[Message, ...]:
-        normalized: list[Message] = []
-        for message in history:
-            if message.role == "system":
-                continue
-            provider_message = provider_history_message(message)
-            if provider_message is not None:
-                normalized.append(provider_message)
-        return tuple(normalized)
+        """Retain raw tool metadata while replacing stale system prompts."""
+
+        return tuple(message for message in history if message.role != "system")
 
     async def _emit(
         self,
@@ -230,15 +226,28 @@ class CodingSession:
     def _queue_completion(
         self,
         session: JsonlSession,
-        event: MessageCompleted | ToolResultReady,
+        event: MessageCompleted | ToolExecutionEnded,
     ) -> None:
-        message = message_from_completion_event(event)
+        self._queue_message(session, message_from_completion_event(event))
+
+    def _queue_message(self, session: JsonlSession, message: Message) -> None:
         entry = SessionEntry(
             session_id=session.session_id,
             message=message,
             created_at=message.created_at,
         )
         self._pending_entries.append(_PendingSessionEntry(session=session, entry=entry))
+
+    async def _repair_and_flush(
+        self,
+        session: JsonlSession,
+        harness: AgentHarness,
+    ) -> None:
+        """Persist synthetic repairs before the transcript crosses a new boundary."""
+
+        for message in harness.repair_interrupted_tool_calls():
+            self._queue_message(session, message)
+        await self._flush_pending_entries()
 
     async def _flush_pending_entries(self) -> None:
         async with self._pending_flush_lock:
