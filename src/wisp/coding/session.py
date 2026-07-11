@@ -27,7 +27,7 @@ from wisp.events import (
     ErrorEvent,
     MessageCompleted,
     SessionSaved,
-    ToolResultReady,
+    ToolExecutionEnded,
     TurnCompleted,
     TurnStarted,
     WispEvent,
@@ -158,7 +158,7 @@ class CodingSession:
                     turns = event.turn
                 elif isinstance(event, ErrorEvent):
                     saw_loop_error = True
-                if isinstance(event, MessageCompleted | ToolResultReady):
+                if isinstance(event, MessageCompleted | ToolExecutionEnded):
                     self._queue_completion(session, event)
 
                 yield await emit(event)
@@ -226,7 +226,7 @@ class CodingSession:
     def _queue_completion(
         self,
         session: JsonlSession,
-        event: MessageCompleted | ToolResultReady,
+        event: MessageCompleted | ToolExecutionEnded,
     ) -> None:
         self._queue_message(session, message_from_completion_event(event))
 

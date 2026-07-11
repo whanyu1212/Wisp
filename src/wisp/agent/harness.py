@@ -18,7 +18,7 @@ from wisp.agent.transcript import plan_interrupted_tool_repairs
 from wisp.events import (
     ErrorEvent,
     MessageCompleted,
-    ToolResultReady,
+    ToolExecutionEnded,
     TurnCompleted,
     TurnStarted,
 )
@@ -215,7 +215,9 @@ class AgentHarness:
                 if isinstance(event, MessageCompleted):
                     self._messages.append(message_from_completion_event(event))
                     run_finished = not event.tool_calls
-                elif isinstance(event, ToolResultReady):
+                elif isinstance(event, ToolExecutionEnded):
+                    # ToolResultReady copies this terminal payload; retain it now so
+                    # closing the stream at this visible boundary cannot lose output.
                     self._messages.append(message_from_completion_event(event))
                 elif isinstance(event, TurnCompleted):
                     active_turn_completed = True

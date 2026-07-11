@@ -20,6 +20,7 @@ from wisp.events import (
     ToolApprovalResolved,
     ToolCallRequested,
     ToolCallSnapshot,
+    ToolExecutionEnded,
     ToolExecutionStarted,
     ToolResultReady,
     TurnCompleted,
@@ -319,6 +320,57 @@ def test_coding_session_does_not_persist_partial_assistant_on_generator_close(
     anyio.run(run_agent)
 
     assert not any(message.role == "assistant" for message in session.read_messages())
+
+
+def test_coding_session_persists_tool_output_before_exposing_execution_end(
+    tmp_path: Path,
+) -> None:
+    provider = ToolLoopProvider(
+        [
+            [
+                ToolCall(
+                    call_id="call-1",
+                    name="echo",
+                    arguments={"text": "hello"},
+                    response_id="response-1",
+                )
+            ],
+            ["unused"],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def run_agent() -> ToolExecutionEnded:
+        agent = CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        events = agent.run("echo it", session=session)
+        while True:
+            event = await anext(events)
+            if isinstance(event, ToolExecutionEnded):
+                persisted = session.read_messages()[-1]
+                assert persisted.role == "tool"
+                assert persisted.tool_call_id == "call-1"
+                assert persisted.content == "echo: hello"
+                assert persisted.is_error is False
+                await events.aclose()
+                return event
+
+    terminal = anyio.run(run_agent)
+
+    assert terminal.output == "echo: hello"
+    tool_messages = [
+        message
+        for message in session.read_messages()
+        if message.role == "tool" and message.tool_call_id == "call-1"
+    ]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].content == "echo: hello"
+    assert tool_messages[0].content != INTERRUPTED_TOOL_RESULT_TEXT
 
 
 def test_coding_session_preserves_provider_text_content_index(tmp_path: Path) -> None:
