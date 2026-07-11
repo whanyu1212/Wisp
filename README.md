@@ -368,8 +368,8 @@ CLI / RPC / TUI -> CodingSession -> AgentHarness -> run_agent_loop
 
 `wisp.coding.session.CodingSession` owns project prompts, persistence, trust state, tool policy,
 and application event publication. `AgentHarness` owns the in-memory transcript and cancellation,
-while `run_agent_loop` remains independent of sessions and frontends. The legacy
-`wisp.agent.compat.Agent` name remains as a thin frontend compatibility facade during migration.
+while `run_agent_loop` remains independent of sessions and frontends. CLI and RPC frontends import
+the coding-session coordinator directly; the TUI consumes that same runtime through RPC events.
 
 Providers yield typed events from `wisp.providers`. A stream may emit zero or more
 `ProviderRetrying` events before exactly one `ProviderResponseStarted`, followed by zero or more

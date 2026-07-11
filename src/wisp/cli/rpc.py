@@ -24,9 +24,9 @@ import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
-from wisp.agent.compat import Agent
 from wisp.agent.messages import Message
 from wisp.agent.prompt import resolve_project_context_root
+from wisp.coding import CodingSession
 from wisp.config import WispConfig
 from wisp.events import (
     ErrorEvent,
@@ -464,7 +464,7 @@ async def _run_rpc(
         selected_project_context_root,
         on_first_trusted=_rebuild_agent_for_trusted_project,
     )
-    agent = Agent(
+    agent = CodingSession(
         provider=provider,
         sessions=sessions,
         events=runtime.events,
@@ -570,7 +570,7 @@ async def _run_rpc(
 def _dispatch_rpc_command(
     command: dict[str, object],
     *,
-    agent: Agent,
+    agent: CodingSession,
     runtime: WispRuntime,
     sessions: JsonlSessionStore,
     session_state: _RpcSessionState,
@@ -735,7 +735,7 @@ def _decode_rpc_stdin_line(raw_line: bytes | bytearray) -> str:
 def _start_rpc_prompt_command(
     command: dict[str, object],
     *,
-    agent: Agent,
+    agent: CodingSession,
     sessions: JsonlSessionStore,
     session_state: _RpcSessionState,
     task_group: TaskGroup,
@@ -780,7 +780,7 @@ def _start_rpc_prompt_command(
 
 
 async def _run_rpc_prompt_command(
-    agent: Agent,
+    agent: CodingSession,
     session: JsonlSession,
     committed_history: tuple[Message, ...],
     entry_start: int,
@@ -882,7 +882,7 @@ def _handle_rpc_control_command(
     *,
     running_prompt: _RpcRunningPrompt | None,
     approval_policy: _RpcToolApprovalPolicy,
-    agent: Agent | None = None,
+    agent: CodingSession | None = None,
     runtime: WispRuntime | None = None,
     trust_gate: _RpcTrustGate | None = None,
     configure_overrides: _RpcConfigureOverrides | None = None,
@@ -959,7 +959,7 @@ def _handle_rpc_configure_command(
     *,
     command_id: str,
     command_type: str,
-    agent: Agent,
+    agent: CodingSession,
     runtime: WispRuntime,
     configure_overrides: _RpcConfigureOverrides | None = None,
 ) -> None:

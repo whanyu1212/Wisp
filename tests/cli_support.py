@@ -15,9 +15,9 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from wisp import cli as cli_module
-from wisp.agent.compat import Agent
 from wisp.agent.messages import Message
 from wisp.cli import _print_mode_tool_approval_policy, _print_mode_tool_registry, app
+from wisp.coding import CodingSession
 from wisp.events import ToolApprovalRequested, ToolApprovalResolved, ToolResultReady
 from wisp.providers.base import ToolCall, ToolCallResult, ToolSpec
 from wisp.providers.events import (
@@ -256,12 +256,12 @@ def _user_prompts(messages: Sequence[object]) -> list[str]:
 
 
 __all__ = [
-    "Agent",
     "AsyncIterator",
     "BashTool",
     "CancellableProvider",
     "CliRunner",
     "CompletionOnlyProvider",
+    "CodingSession",
     "DangerTool",
     "EditTool",
     "EventBus",

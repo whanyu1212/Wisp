@@ -10,9 +10,9 @@ import anyio
 import typer
 from rich.console import Console
 
-from wisp.agent.compat import Agent
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.auth import auth_app
+from wisp.coding import CodingSession
 from wisp.config import WispConfig
 from wisp.events import ErrorEvent, MessageCompleted, MessageDelta
 from wisp.providers.base import ProviderError
@@ -523,7 +523,7 @@ async def _run_print(
     sessions = JsonlSessionStore(config.session_dir)
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     history = session.read_messages() if session is not None else ()
-    agent = Agent(
+    agent = CodingSession(
         provider=provider,
         sessions=sessions,
         events=runtime.events,

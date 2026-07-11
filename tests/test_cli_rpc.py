@@ -311,7 +311,7 @@ def test_rpc_approval_policy_approves_waiting_tool_call(tmp_path: Path) -> None:
     approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=tools,
@@ -341,7 +341,7 @@ def test_rpc_approval_policy_denies_waiting_tool_call(tmp_path: Path) -> None:
     approval_policy = cli_module._RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=tools,
