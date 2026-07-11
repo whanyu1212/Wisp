@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -9,7 +10,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message, SessionEntry
-from wisp.events import ErrorEvent, ToolCallRequested
+from wisp.events import ErrorEvent, ToolCallRequested, ToolCallSnapshot
 from wisp.sessions import jsonl as jsonl_module
 from wisp.sessions.jsonl import (
     AmbiguousSessionError,
@@ -58,6 +59,224 @@ def test_session_persists_event_entries_without_polluting_messages(tmp_path: Pat
     assert events[1]["message"] == "boom"
 
 
+def test_session_round_trips_completed_message_metadata(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    assistant = Message(
+        role="assistant",
+        content="running",
+        tool_calls=(
+            ToolCallSnapshot(
+                call_id="call-1",
+                name="bash",
+                arguments={"command": "pwd"},
+            ),
+        ),
+        response_id="response-1",
+        finish_reason="tool_calls",
+    )
+    tool = Message(
+        role="tool",
+        content="cancelled",
+        tool_call_id="call-1",
+        tool_name="bash",
+        is_error=True,
+    )
+    completed = Message(
+        role="assistant",
+        content="done",
+        tool_calls=(),
+        response_id="response-2",
+        finish_reason="stop",
+    )
+
+    async def write() -> None:
+        await session.append_message(assistant)
+        await session.append_message(tool)
+        await session.append_message(completed)
+
+    anyio.run(write)
+
+    assert session.read_messages() == (assistant, tool, completed)
+    assert session.read_messages()[2].tool_calls == ()
+
+
+def test_session_loads_legacy_messages_without_rewriting_them(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.jsonl"
+    legacy_entry = {
+        "id": "legacy-entry",
+        "session_id": "legacy-session",
+        "kind": "message",
+        "message": {
+            "role": "assistant",
+            "content": "done",
+            "created_at": "2026-07-11T00:00:00Z",
+        },
+        "created_at": "2026-07-11T00:00:00Z",
+    }
+    path.write_text(f"{json.dumps(legacy_entry)}\n", encoding="utf-8")
+    original = path.read_bytes()
+
+    message = JsonlSessionStore(tmp_path).load(path).read_messages()[0]
+
+    assert message.tool_calls is None
+    assert message.response_id is None
+    assert message.finish_reason is None
+    assert message.is_error is None
+    assert path.read_bytes() == original
+
+
+def test_append_entry_is_idempotent(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    entry = SessionEntry(
+        id="entry-1",
+        session_id=session.session_id,
+        message=Message(role="assistant", content="done"),
+    )
+
+    async def write() -> None:
+        assert await session.append_entry(entry) == entry
+        assert await session.append_entry(entry) == entry
+
+    anyio.run(write)
+
+    assert session.read_entries() == (entry,)
+    assert len(session.path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_append_entry_is_idempotent_after_reopen(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    entry = SessionEntry(
+        id="entry-1",
+        session_id=session.session_id,
+        message=Message(role="assistant", content="done"),
+    )
+
+    async def write() -> None:
+        await session.append_entry(entry)
+        await store.load(session.path).append_entry(entry)
+
+    anyio.run(write)
+
+    assert session.read_entries() == (entry,)
+
+
+def test_concurrent_append_entry_writes_one_record(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    entry = SessionEntry(
+        id="entry-1",
+        session_id=session.session_id,
+        message=Message(role="assistant", content="done"),
+    )
+
+    async def write() -> None:
+        async with anyio.create_task_group() as task_group:
+            for _ in range(8):
+                task_group.start_soon(session.append_entry, entry)
+
+    anyio.run(write)
+
+    assert session.read_entries() == (entry,)
+
+
+def test_append_entry_reloads_identity_after_uncertain_write_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    entry = SessionEntry(
+        id="entry-1",
+        session_id=session.session_id,
+        message=Message(role="assistant", content="done"),
+    )
+    append_line = session._append_line  # noqa: SLF001
+    should_fail = True
+
+    def append_then_fail(line: str) -> None:
+        nonlocal should_fail
+        append_line(line)
+        if should_fail:
+            should_fail = False
+            raise OSError("uncertain write outcome")
+
+    monkeypatch.setattr(session, "_append_line", append_then_fail)
+
+    async def write() -> None:
+        with pytest.raises(OSError, match="uncertain write outcome"):
+            await session.append_entry(entry)
+        await session.append_entry(entry)
+
+    anyio.run(write)
+
+    assert session.read_entries() == (entry,)
+
+
+def test_append_entry_rejects_conflicting_identity(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    first_message = Message(role="assistant", content="first")
+    first = SessionEntry(
+        id="entry-1",
+        session_id=session.session_id,
+        message=first_message,
+    )
+    conflicting = SessionEntry(
+        id=first.id,
+        session_id=session.session_id,
+        message=first_message.model_copy(update={"content": "different"}),
+        created_at=first.created_at,
+    )
+
+    async def write() -> None:
+        await session.append_entry(first)
+        reopened = JsonlSessionStore(tmp_path).load(session.path)
+        with pytest.raises(SessionError, match="conflicts with persisted data"):
+            await reopened.append_entry(conflicting)
+
+    anyio.run(write)
+
+    assert session.read_entries() == (first,)
+
+
+def test_append_entry_rejects_another_session(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    entry = SessionEntry(
+        id="entry-1",
+        session_id="another-session",
+        message=Message(role="assistant", content="done"),
+    )
+
+    async def write() -> None:
+        await session.append_entry(entry)
+
+    with pytest.raises(SessionError, match="belongs to another-session"):
+        anyio.run(write)
+    assert not session.path.exists()
+
+
+def test_truncate_invalidates_append_identity_index(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    first = SessionEntry(
+        id="entry-1",
+        session_id=session.session_id,
+        message=Message(role="user", content="first"),
+    )
+    second = SessionEntry(
+        id="entry-2",
+        session_id=session.session_id,
+        message=Message(role="assistant", content="second"),
+    )
+
+    async def write() -> None:
+        await session.append_entry(first)
+        await session.append_entry(second)
+        await session.truncate_entries(1)
+        await session.append_entry(second)
+
+    anyio.run(write)
+
+    assert session.read_entries() == (first, second)
+
+
 def test_session_store_creates_private_directories_and_files(tmp_path: Path) -> None:
     root = tmp_path / "missing" / "sessions"
     session = JsonlSessionStore(root).create()
@@ -103,6 +322,30 @@ def test_session_store_rejects_symlink_session_directory(tmp_path: Path) -> None
 
     with pytest.raises(SessionError, match="not a directory"):
         anyio.run(write)
+
+
+def test_append_entry_rejects_symlink_session_file(tmp_path: Path) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are not supported")
+    root = tmp_path / "sessions"
+    root.mkdir()
+    session = JsonlSessionStore(root).create()
+    entry = SessionEntry(
+        id="entry-1",
+        session_id=session.session_id,
+        message=Message(role="assistant", content="done"),
+    )
+    target = tmp_path / "target.jsonl"
+    target.write_text(f"{entry.model_dump_json(exclude_none=True)}\n", encoding="utf-8")
+    original = target.read_bytes()
+    session.path.symlink_to(target)
+
+    async def write() -> None:
+        await session.append_entry(entry)
+
+    with pytest.raises(SessionError, match="not a regular file"):
+        anyio.run(write)
+    assert target.read_bytes() == original
 
 
 def test_session_store_opens_latest_session(tmp_path: Path) -> None:

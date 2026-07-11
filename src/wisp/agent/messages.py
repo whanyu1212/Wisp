@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from wisp.events import JsonObject, utc_now
+from wisp.events import FinishReason, JsonObject, ToolCallSnapshot, utc_now
 
 Role = Literal["system", "user", "assistant", "tool"]
 
@@ -22,6 +22,10 @@ class Message(BaseModel):
     content: str
     tool_call_id: str | None = None
     tool_name: str | None = None
+    tool_calls: tuple[ToolCallSnapshot, ...] | None = None
+    response_id: str | None = None
+    finish_reason: FinishReason | None = None
+    is_error: bool | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 

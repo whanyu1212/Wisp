@@ -90,11 +90,12 @@ class JsonlSession:
     def __init__(self, *, session_id: str, path: Path) -> None:
         self.session_id = session_id
         self.path = path
+        self._append_lock = anyio.Lock()
+        self._entry_index: dict[str, SessionEntry] | None = None
 
     async def append_message(self, message: Message) -> SessionEntry:
         entry = SessionEntry(session_id=self.session_id, message=message)
-        await self._append_entry(entry)
-        return entry
+        return await self.append_entry(entry)
 
     async def append_event(self, event: WispEvent) -> SessionEntry:
         """Persist a structured runtime event for audit/debugging."""
@@ -104,19 +105,29 @@ class JsonlSession:
             kind="event",
             event=event.model_dump(mode="json"),
         )
-        await self._append_entry(entry)
-        return entry
+        return await self.append_entry(entry)
 
-    async def _append_entry(self, entry: SessionEntry) -> None:
-        line = entry.model_dump_json(exclude_none=True)
-        await anyio.to_thread.run_sync(self._append_line, line)
+    async def append_entry(self, entry: SessionEntry) -> SessionEntry:
+        """Persist a prebuilt entry once, keyed by its stable entry id."""
+
+        if entry.session_id != self.session_id:
+            raise SessionError(
+                f"Session entry belongs to {entry.session_id}, not {self.session_id}"
+            )
+        async with self._append_lock:
+            await anyio.to_thread.run_sync(self._append_entry_once, entry)
+        return entry
 
     async def truncate_entries(self, count: int) -> None:
         """Remove entries after count, preserving the first count entries."""
 
         if count < 0:
             raise ValueError("Session entry count cannot be negative")
-        await anyio.to_thread.run_sync(self._truncate_entries, count)
+        async with self._append_lock:
+            try:
+                await anyio.to_thread.run_sync(self._truncate_entries, count)
+            finally:
+                self._entry_index = None
 
     def read_entries(self) -> tuple[SessionEntry, ...]:
         """Read all persisted entries from the session file."""
@@ -157,6 +168,45 @@ class JsonlSession:
         finally:
             if fd != -1:
                 os.close(fd)
+
+    def _append_entry_once(self, entry: SessionEntry) -> None:
+        _ensure_private_directory(self.path.parent)
+        if not self._validate_session_file():
+            self._entry_index = {}
+        elif self._entry_index is None:
+            self._entry_index = self._load_entry_index()
+
+        existing = self._entry_index.get(entry.id)
+        if existing is not None:
+            if existing == entry:
+                return
+            raise SessionError(f"Session entry id conflicts with persisted data: {entry.id}")
+
+        try:
+            self._append_line(entry.model_dump_json(exclude_none=True))
+        except Exception:
+            self._entry_index = None
+            raise
+        self._entry_index[entry.id] = entry
+
+    def _load_entry_index(self) -> dict[str, SessionEntry]:
+        entries: dict[str, SessionEntry] = {}
+        for entry in _read_entries(self.path):
+            if entry.id in entries:
+                raise SessionError(f"Duplicate session entry id: {entry.id}")
+            entries[entry.id] = entry
+        return entries
+
+    def _validate_session_file(self) -> bool:
+        try:
+            info = self.path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise SessionError(f"Could not inspect session file: {self.path}") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise SessionError(f"Session file is not a regular file: {self.path}")
+        return True
 
     def _truncate_entries(self, count: int) -> None:
         if not self.path.is_file():
