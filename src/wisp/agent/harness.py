@@ -14,6 +14,7 @@ from wisp.agent.messages import (
     message_from_completion_event,
     provider_history_message,
 )
+from wisp.agent.transcript import plan_interrupted_tool_repairs
 from wisp.events import (
     ErrorEvent,
     MessageCompleted,
@@ -112,6 +113,14 @@ class AgentHarness:
         self._ensure_idle()
         self._messages = list(messages)
 
+    def repair_interrupted_tool_calls(self) -> tuple[Message, ...]:
+        """Repair logical ordering and return synthetic results needing persistence."""
+
+        self._ensure_idle()
+        plan = plan_interrupted_tool_repairs(self._messages)
+        self._messages = list(plan.messages)
+        return plan.repairs
+
     def cancel(self) -> bool:
         """Request cooperative cancellation for the active run."""
         if self._current_token is None:
@@ -140,7 +149,7 @@ class AgentHarness:
         *,
         prompt_message: Message | None = None,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
-        self._ensure_idle()
+        self.repair_interrupted_tool_calls()
         self._running = True
         token = SimpleCancellationToken()
         self._current_token = token
