@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 from wisp.agent.execution import ToolExecutionEvent
-from wisp.agent.loop import AgentLoopConfig, run_agent_loop
+from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.messages import Message
 from wisp.agent.prompt import (
     DEFAULT_CONTEXT_MAX_CHARS,
@@ -210,27 +210,28 @@ class Agent:
 
         user_message = Message(role="user", content=prompt)
         await session.append_message(user_message)
-        messages = [*prompt_messages, *self._conversation_history(history), user_message]
-
         executor = _ConfiguredToolExecutor(
             registry=self.tool_registry,
             context=self.tool_context,
             policy=self.tool_policy,
             approval_policy=self.tool_approval_policy,
         )
-        config = AgentLoopConfig(
-            provider=self.provider,
-            tool_executor=executor,
-            model=self.model,
-            tools=self.tools,
-            max_tool_iterations=self.max_tool_iterations,
+        harness = AgentHarness(
+            AgentHarnessConfig(
+                provider=self.provider,
+                tool_executor=executor,
+                model=self.model,
+                tools=self.tools,
+                max_tool_iterations=self.max_tool_iterations,
+            ),
+            messages=(*prompt_messages, *self._conversation_history(history)),
         )
         assistant_chunks: list[str] = []
         turns = 0
         saw_loop_error = False
 
         try:
-            async for event in run_agent_loop(config, messages=messages):
+            async for event in harness.prompt_message(user_message):
                 if isinstance(event, TurnStarted):
                     turns = event.turn
                 elif isinstance(event, MessageCompleted):

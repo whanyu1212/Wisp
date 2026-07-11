@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Any
+from typing import Any, Protocol
 
 import wisp.providers.events as provider_events
 from wisp.agent.execution import (
@@ -67,6 +67,14 @@ type AgentLoopEvent = (
 Agent: Any
 
 
+class CancellationToken(Protocol):
+    """Cooperative cancellation state observed by the pure loop."""
+
+    def is_cancelled(self) -> bool:
+        """Return whether the current run should stop."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class AgentLoopConfig:
     """Dependencies and limits for one provider-neutral loop run."""
@@ -76,6 +84,19 @@ class AgentLoopConfig:
     model: str | None = None
     tools: tuple[ToolSpec, ...] = ()
     max_tool_iterations: int | None = None
+    cancellation_token: CancellationToken | None = None
+
+
+def _is_cancelled(config: AgentLoopConfig) -> bool:
+    token = config.cancellation_token
+    return token is not None and token.is_cancelled()
+
+
+def _cancelled_turn_events(turn: int) -> tuple[ErrorEvent, TurnCompleted]:
+    return (
+        ErrorEvent(message="Agent run cancelled"),
+        TurnCompleted(turn=turn, outcome="cancelled", finish_reason="cancelled"),
+    )
 
 
 def _require_provider_response_started(started: bool) -> None:
@@ -125,7 +146,7 @@ async def run_agent_loop(
     config: AgentLoopConfig,
     *,
     messages: Sequence[Message],
-) -> AsyncIterator[AgentLoopEvent]:
+) -> AsyncGenerator[AgentLoopEvent, None]:
     """Run provider turns and tool cycles without session or frontend dependencies."""
 
     pending_tool_results: tuple[ToolCallResult, ...] = ()
@@ -135,8 +156,15 @@ async def run_agent_loop(
 
     try:
         while True:
+            if _is_cancelled(config):
+                yield ErrorEvent(message="Agent run cancelled")
+                break
             turn += 1
             yield TurnStarted(turn=turn)
+            if _is_cancelled(config):
+                for event in _cancelled_turn_events(turn):
+                    yield event
+                break
             response_started = False
             terminal_response: ProviderResponseCompleted | ProviderResponseFailed | None = None
             streamed_tool_calls: list[ToolCall] = []
@@ -148,6 +176,10 @@ async def run_agent_loop(
                 tool_results=pending_tool_results,
                 previous_response_id=previous_response_id,
             ):
+                if _is_cancelled(config):
+                    for event in _cancelled_turn_events(turn):
+                        yield event
+                    return
                 if terminal_response is not None:
                     raise ProviderProtocolError(
                         "Provider emitted an event after its terminal response"
@@ -199,6 +231,10 @@ async def run_agent_loop(
                         f"Provider emitted unsupported event type: {type(provider_event).__name__}"
                     )
 
+            if _is_cancelled(config):
+                for event in _cancelled_turn_events(turn):
+                    yield event
+                break
             if not response_started:
                 raise ProviderProtocolError("Provider stream ended before response_started")
             if terminal_response is None:
@@ -246,6 +282,10 @@ async def run_agent_loop(
                     finish_reason=response.finish_reason,
                 )
                 break
+            if _is_cancelled(config):
+                for event in _cancelled_turn_events(turn):
+                    yield event
+                break
             if (
                 config.max_tool_iterations is not None
                 and tool_iterations >= config.max_tool_iterations
@@ -257,22 +297,40 @@ async def run_agent_loop(
             tool_iterations += 1
             tool_results: list[ToolCallResult] = []
             for tool_call in tool_calls:
+                if _is_cancelled(config):
+                    for event in _cancelled_turn_events(turn):
+                        yield event
+                    return
                 arguments = dict(tool_call.arguments)
                 yield ToolCallRequested(
                     call_id=tool_call.call_id,
                     name=tool_call.name,
                     arguments=arguments,
                 )
+                if _is_cancelled(config):
+                    for event in _cancelled_turn_events(turn):
+                        yield event
+                    return
                 yield ToolExecutionStarted(
                     call_id=tool_call.call_id,
                     name=tool_call.name,
                     arguments=arguments,
                 )
+                if _is_cancelled(config):
+                    for event in _cancelled_turn_events(turn):
+                        yield event
+                    return
                 result_event: ToolResultReady | None = None
                 async for execution_event in _execute_tool_call(config, tool_call):
                     yield execution_event
                     if isinstance(execution_event, ToolResultReady):
                         result_event = execution_event
+                    if _is_cancelled(config) and not isinstance(
+                        execution_event, ToolExecutionEnded
+                    ):
+                        for event in _cancelled_turn_events(turn):
+                            yield event
+                        return
                 if result_event is None:
                     raise ToolExecutionProtocolError(
                         f"Tool executor produced no provider result for {tool_call.call_id}"
@@ -307,4 +365,10 @@ def __getattr__(name: str) -> Any:
     return agent
 
 
-__all__ = ["Agent", "AgentLoopConfig", "AgentLoopEvent", "run_agent_loop"]
+__all__ = [
+    "Agent",
+    "AgentLoopConfig",
+    "AgentLoopEvent",
+    "CancellationToken",
+    "run_agent_loop",
+]

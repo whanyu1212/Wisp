@@ -1,0 +1,321 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Sequence
+
+import anyio
+import pytest
+
+from wisp.agent.execution import ToolExecutionEvent
+from wisp.agent.harness import AgentHarness, AgentHarnessConfig
+from wisp.agent.messages import Message
+from wisp.events import MessageDelta, ToolExecutionEnded, TurnCompleted
+from wisp.providers.base import Provider, ToolCallResult, ToolSpec
+from wisp.providers.events import (
+    ProviderEvent,
+    ProviderResponseCompleted,
+    ProviderResponseStarted,
+    ProviderTextDelta,
+    ProviderToolCallCompleted,
+    ToolCall,
+)
+from wisp.providers.fake import ScriptedProvider
+
+
+class RecordingToolExecutor:
+    def __init__(self, output: str = "tool output") -> None:
+        self.output = output
+        self.calls: list[ToolCall] = []
+
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        self.calls.append(tool_call)
+        yield ToolExecutionEnded(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            output=self.output,
+            is_error=False,
+        )
+
+
+class BlockingProvider:
+    name = "blocking"
+    default_model: str | None = "blocking"
+
+    def __init__(self, *, waiting: anyio.Event, release: anyio.Event) -> None:
+        self.waiting = waiting
+        self.release = release
+        self.closed = False
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        del messages, tools, tool_results, previous_response_id
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        self.waiting.set()
+        try:
+            await self.release.wait()
+        finally:
+            self.closed = True
+        yield ProviderResponseCompleted(content="too late")
+
+
+def _harness(
+    provider: Provider,
+    *,
+    executor: RecordingToolExecutor | None = None,
+    messages: Sequence[Message] = (),
+    tools: tuple[ToolSpec, ...] = (),
+) -> AgentHarness:
+    return AgentHarness(
+        AgentHarnessConfig(
+            provider=provider,
+            tool_executor=executor or RecordingToolExecutor(),
+            tools=tools,
+        ),
+        messages=messages,
+    )
+
+
+def test_harness_prompt_owns_transcript_and_returns_immutable_snapshots() -> None:
+    initial = Message(role="system", content="system prompt")
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderTextDelta(delta="hello"),
+                ProviderResponseCompleted(content="hello"),
+            ]
+        ]
+    )
+    harness = _harness(provider, messages=(initial,))
+    before = harness.messages
+
+    async def run() -> list[object]:
+        return [event async for event in harness.prompt("hi")]
+
+    events = anyio.run(run)
+
+    assert before == (initial,)
+    assert [(message.role, message.content) for message in harness.messages] == [
+        ("system", "system prompt"),
+        ("user", "hi"),
+        ("assistant", "hello"),
+    ]
+    assert [(message.role, message.content) for message in provider.calls[0].messages] == [
+        ("system", "system prompt"),
+        ("user", "hi"),
+    ]
+    assert [event.type for event in events] == [
+        "turn.started",
+        "message.started",
+        "message.delta",
+        "message.completed",
+        "turn.completed",
+    ]
+    assert harness.is_running is False
+
+
+def test_harness_continue_uses_existing_transcript_without_new_user_message() -> None:
+    existing = Message(role="user", content="previous")
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="continued"),
+            ]
+        ]
+    )
+    harness = _harness(provider, messages=(existing,))
+
+    async def run() -> None:
+        _events = [event async for event in harness.continue_()]
+
+    anyio.run(run)
+
+    assert [(message.role, message.content) for message in harness.messages] == [
+        ("user", "previous"),
+        ("assistant", "continued"),
+    ]
+    assert provider.calls[0].messages == (existing,)
+
+
+def test_harness_records_tool_results_and_combines_assistant_turns() -> None:
+    call = ToolCall(
+        call_id="call-1",
+        name="lookup",
+        arguments={"query": "wisp"},
+        response_id="response-1",
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                ProviderTextDelta(delta="checking "),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="checking ",
+                    tool_calls=(call,),
+                    response_id="response-1",
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="response-2"),
+                ProviderTextDelta(delta="done"),
+                ProviderResponseCompleted(content="done", response_id="response-2"),
+            ],
+        ]
+    )
+    executor = RecordingToolExecutor("found it")
+    harness = _harness(
+        provider,
+        executor=executor,
+        tools=(
+            ToolSpec(
+                name="lookup",
+                description="Look something up.",
+                input_schema={"type": "object"},
+            ),
+        ),
+    )
+
+    async def run() -> None:
+        _events = [event async for event in harness.prompt("search")]
+
+    anyio.run(run)
+
+    assert executor.calls == [call]
+    assert [(message.role, message.content) for message in harness.messages] == [
+        ("user", "search"),
+        ("tool", "found it"),
+        ("assistant", "checking done"),
+    ]
+    tool_message = harness.messages[1]
+    assert tool_message.tool_call_id == "call-1"
+    assert tool_message.tool_name == "lookup"
+    assert provider.calls[1].tool_results[0].output == "found it"
+
+
+def test_harness_cancel_stops_at_event_boundary_and_marks_turn_cancelled() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderTextDelta(delta="first"),
+                ProviderTextDelta(delta="second"),
+                ProviderResponseCompleted(content="firstsecond"),
+            ]
+        ]
+    )
+    harness = _harness(provider)
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        async for event in harness.prompt("stop"):
+            events.append(event)
+            if isinstance(event, MessageDelta):
+                assert harness.cancel()
+        return events
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events] == [
+        "turn.started",
+        "message.started",
+        "message.delta",
+        "error",
+        "turn.completed",
+    ]
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert completed.outcome == "cancelled"
+    assert [(message.role, message.content) for message in harness.messages] == [("user", "stop")]
+    assert harness.is_running is False
+    assert harness.cancel() is False
+
+
+def test_harness_cancel_interrupts_a_blocked_provider_stream() -> None:
+    async def run() -> tuple[AgentHarness, BlockingProvider, list[object]]:
+        provider = BlockingProvider(waiting=anyio.Event(), release=anyio.Event())
+        harness = _harness(provider)
+        events: list[object] = []
+
+        async def collect() -> None:
+            events.extend([event async for event in harness.prompt("stop now")])
+
+        with anyio.fail_after(1):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(collect)
+                await provider.waiting.wait()
+                assert harness.cancel()
+        return harness, provider, events
+
+    harness, provider, events = anyio.run(run)
+
+    assert [event.type for event in events] == [
+        "turn.started",
+        "message.started",
+        "error",
+        "turn.completed",
+    ]
+    assert provider.closed
+    assert [(message.role, message.content) for message in harness.messages] == [
+        ("user", "stop now")
+    ]
+    assert harness.is_running is False
+
+
+def test_harness_rejects_overlapping_runs_and_resets_when_stream_closes() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="done"),
+            ]
+        ]
+    )
+    harness = _harness(provider)
+
+    async def run() -> None:
+        first = harness.prompt("first")
+        first_event = await anext(first)
+        assert first_event.type == "turn.started"
+        assert harness.is_running
+
+        overlapping = harness.prompt("second")
+        with pytest.raises(RuntimeError, match="already running"):
+            await anext(overlapping)
+        with pytest.raises(RuntimeError, match="already running"):
+            harness.append_message(Message(role="user", content="injected"))
+        with pytest.raises(RuntimeError, match="already running"):
+            harness.replace_messages(())
+        with pytest.raises(RuntimeError, match="already running"):
+            harness.replace_config(harness.config)
+
+        assert [(message.role, message.content) for message in harness.messages] == [
+            ("user", "first")
+        ]
+        await first.aclose()
+
+    anyio.run(run)
+
+    assert harness.is_running is False
+    harness.replace_messages((Message(role="user", content="restored"),))
+    harness.append_message(Message(role="assistant", content="ready"))
+    harness.replace_config(harness.config)
+    assert [(message.role, message.content) for message in harness.messages] == [
+        ("user", "restored"),
+        ("assistant", "ready"),
+    ]
+
+
+def test_harness_rejects_non_user_prompt_messages() -> None:
+    harness = _harness(ScriptedProvider([]))
+
+    with pytest.raises(ValueError, match="require a user message"):
+        harness.prompt_message(Message(role="assistant", content="not a prompt"))

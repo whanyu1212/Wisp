@@ -1,0 +1,209 @@
+"""Stateful provider-neutral harness built on the pure agent loop."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
+
+import anyio
+
+from wisp.agent.execution import ToolExecutor
+from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, run_agent_loop
+from wisp.agent.messages import Message
+from wisp.events import (
+    ErrorEvent,
+    MessageCompleted,
+    ToolResultReady,
+    TurnCompleted,
+    TurnStarted,
+)
+from wisp.providers.base import Provider, ToolSpec
+
+
+@dataclass(frozen=True, slots=True)
+class AgentHarnessConfig:
+    """Portable dependencies and limits for an `AgentHarness`."""
+
+    provider: Provider
+    tool_executor: ToolExecutor
+    model: str | None = None
+    tools: tuple[ToolSpec, ...] = ()
+    max_tool_iterations: int | None = None
+
+
+class SimpleCancellationToken:
+    """Small cooperative cancellation token owned by one harness run."""
+
+    def __init__(self) -> None:
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Request cancellation."""
+        self._cancelled = True
+
+    def is_cancelled(self) -> bool:
+        """Return whether cancellation has been requested."""
+        return self._cancelled
+
+
+class AgentHarness:
+    """Own an in-memory transcript and delegate execution to the pure loop."""
+
+    def __init__(
+        self,
+        config: AgentHarnessConfig,
+        *,
+        messages: Sequence[Message] = (),
+    ) -> None:
+        self._config = config
+        self._messages = list(messages)
+        self._current_token: SimpleCancellationToken | None = None
+        self._current_scope: anyio.CancelScope | None = None
+        self._running = False
+
+    @property
+    def config(self) -> AgentHarnessConfig:
+        """Return the current harness configuration."""
+        return self._config
+
+    @property
+    def messages(self) -> tuple[Message, ...]:
+        """Return an immutable transcript snapshot."""
+        return tuple(self._messages)
+
+    @property
+    def is_running(self) -> bool:
+        """Return whether a prompt or continuation is active."""
+        return self._running
+
+    def replace_config(self, config: AgentHarnessConfig) -> None:
+        """Replace provider/tool configuration between runs."""
+        self._ensure_idle()
+        self._config = config
+
+    def append_message(self, message: Message) -> None:
+        """Append restored or application-provided transcript state."""
+        self._ensure_idle()
+        self._messages.append(message)
+
+    def replace_messages(self, messages: Sequence[Message]) -> None:
+        """Replace the transcript between runs."""
+        self._ensure_idle()
+        self._messages = list(messages)
+
+    def cancel(self) -> bool:
+        """Request cooperative cancellation for the active run."""
+        if self._current_token is None:
+            return False
+        self._current_token.cancel()
+        if self._current_scope is not None:
+            self._current_scope.cancel()
+        return True
+
+    def prompt(self, content: str) -> AsyncIterator[AgentLoopEvent]:
+        """Append a user message and start a run."""
+        return self.prompt_message(Message(role="user", content=content))
+
+    def prompt_message(self, message: Message) -> AsyncIterator[AgentLoopEvent]:
+        """Append an existing user message and start a run."""
+        if message.role != "user":
+            raise ValueError("AgentHarness prompts require a user message")
+        return self._run(prompt_message=message)
+
+    def continue_(self) -> AsyncIterator[AgentLoopEvent]:
+        """Continue from the current transcript without adding a user message."""
+        return self._run()
+
+    async def _run(
+        self,
+        *,
+        prompt_message: Message | None = None,
+    ) -> AsyncIterator[AgentLoopEvent]:
+        self._ensure_idle()
+        self._running = True
+        token = SimpleCancellationToken()
+        self._current_token = token
+        if prompt_message is not None:
+            self._messages.append(prompt_message)
+
+        assistant_chunks: list[str] = []
+        final_outcome: str | None = None
+        cancellation_observed = False
+        active_turn: int | None = None
+        active_turn_completed = False
+        config = AgentLoopConfig(
+            provider=self._config.provider,
+            tool_executor=self._config.tool_executor,
+            model=self._config.model,
+            tools=self._config.tools,
+            max_tool_iterations=self._config.max_tool_iterations,
+            cancellation_token=token,
+        )
+        loop_events = run_agent_loop(config, messages=tuple(self._messages))
+        try:
+            while True:
+                scope = anyio.CancelScope()
+                self._current_scope = scope
+                event: AgentLoopEvent | None = None
+                stream_ended = False
+                with scope:
+                    try:
+                        event = await anext(loop_events)
+                    except StopAsyncIteration:
+                        stream_ended = True
+                if self._current_scope is scope:
+                    self._current_scope = None
+
+                if scope.cancel_called:
+                    cancellation_observed = True
+                    yield ErrorEvent(message="Agent run cancelled")
+                    if active_turn is not None and not active_turn_completed:
+                        final_outcome = "cancelled"
+                        yield TurnCompleted(
+                            turn=active_turn,
+                            outcome="cancelled",
+                            finish_reason="cancelled",
+                        )
+                    break
+                if stream_ended:
+                    break
+                assert event is not None
+
+                if isinstance(event, TurnStarted):
+                    active_turn = event.turn
+                    active_turn_completed = False
+                if isinstance(event, MessageCompleted):
+                    assistant_chunks.append(event.content)
+                elif isinstance(event, ToolResultReady):
+                    self._messages.append(
+                        Message(
+                            role="tool",
+                            content=event.output,
+                            tool_call_id=event.call_id,
+                            tool_name=event.name,
+                        )
+                    )
+                elif isinstance(event, TurnCompleted):
+                    final_outcome = event.outcome
+                    active_turn_completed = True
+                    cancellation_observed = cancellation_observed or event.outcome == "cancelled"
+                elif isinstance(event, ErrorEvent) and token.is_cancelled():
+                    cancellation_observed = True
+                yield event
+
+            if final_outcome == "completed" and not cancellation_observed:
+                self._messages.append(Message(role="assistant", content="".join(assistant_chunks)))
+        finally:
+            self._current_scope = None
+            with anyio.CancelScope(shield=True):
+                await loop_events.aclose()
+            if self._current_token is token:
+                self._current_token = None
+            self._running = False
+
+    def _ensure_idle(self) -> None:
+        if self._running:
+            raise RuntimeError("AgentHarness is already running")
+
+
+__all__ = ["AgentHarness", "AgentHarnessConfig", "SimpleCancellationToken"]
