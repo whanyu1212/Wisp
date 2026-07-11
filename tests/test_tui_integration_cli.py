@@ -1982,6 +1982,55 @@ def test_textual_scrollback_keys_reach_transcript_and_compose_with_follow() -> N
     assert r["stream_repinned"], "a stream after End should re-pin to the tail"
 
 
+def test_textual_mouse_wheel_scrolls_transcript_and_updates_follow() -> None:
+    # run_test bypasses terminal mouse-mode negotiation, so post the same wheel
+    # events Textual's driver emits. This proves the Transcript consumes them,
+    # preserves editor focus, and composes with its sticky follow-tail state.
+    async def scenario() -> dict[str, object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            input_widget = app_instance.query_one("#input", Input)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            start_y = transcript.scroll_y
+
+            scrolled_up = await pilot._post_mouse_events(
+                [events.MouseScrollUp],
+                widget=transcript,
+                times=3,
+            )
+            await pilot.pause()
+            after_up_y = transcript.scroll_y
+            after_up_follow = transcript._follow
+            focus_after_up = app_instance.focused is input_widget
+
+            scrolled_down = await pilot._post_mouse_events(
+                [events.MouseScrollDown],
+                widget=transcript,
+                times=30,
+            )
+            await pilot.pause()
+            return {
+                "events_delivered": scrolled_up and scrolled_down,
+                "scrolled_up": after_up_y < start_y,
+                "follow_cleared": after_up_follow is False,
+                "focus_kept": focus_after_up,
+                "returned_to_bottom": transcript.scroll_y >= transcript.max_scroll_y - 3,
+                "follow_restored": transcript._follow is True,
+            }
+
+    result = anyio.run(scenario)
+    assert result["events_delivered"]
+    assert result["scrolled_up"]
+    assert result["follow_cleared"]
+    assert result["focus_kept"]
+    assert result["returned_to_bottom"]
+    assert result["follow_restored"]
+
+
 def test_textual_home_key_scrolls_transcript_over_input_cursor() -> None:
     # home is priority-bound to the transcript, so it jumps the transcript to the
     # top even while the Input has typed text — it does not move the input cursor.
@@ -2483,11 +2532,9 @@ def test_textual_input_has_no_box_border() -> None:
     assert border.bottom[0] == "heavy"
 
 
-def test_textual_run_shell_disables_mouse_for_native_copy() -> None:
-    # Copy is delegated to the terminal: the shell must start with mouse reporting
-    # off so the emulator keeps click-drag selection and the OS copy shortcut
-    # (Cmd+C / right-click-copy) works natively. Assert run_async is invoked with
-    # mouse=False rather than driving a real terminal.
+def test_textual_run_shell_enables_mouse_for_wheel_scrolling() -> None:
+    # The real terminal must enter mouse-reporting mode; widget-level wheel tests
+    # pass headlessly even when run_shell accidentally disables terminal events.
     captured: dict[str, object] = {}
 
     async def scenario() -> None:
@@ -2504,7 +2551,7 @@ def test_textual_run_shell_disables_mouse_for_native_copy() -> None:
         await app_instance.run_shell(runner)
 
     anyio.run(scenario)
-    assert captured["mouse"] is False
+    assert captured["mouse"] is True
 
 
 def test_textual_header_shows_the_wisp_wordmark() -> None:

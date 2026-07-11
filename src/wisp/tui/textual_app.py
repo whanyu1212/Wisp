@@ -249,9 +249,9 @@ class TextualTui(App[None]):
     # These are priority bindings because TextArea consumes all four keys. Ctrl+A /
     # Ctrl+E remain available for moving within the prompt.
     #
-    # Copy is handled by the terminal, not the app: the shell runs with mouse
-    # reporting off (see run_shell), so drag-select + the OS copy shortcut work
-    # natively. That leaves ctrl+c with its traditional interrupt meaning.
+    # Mouse reporting is enabled in run_shell so wheel and trackpad events reach
+    # the transcript. Ctrl+C remains the traditional interrupt; terminal-native
+    # selection is still available through the emulator's mouse-bypass modifier.
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt", priority=True),
         Binding("ctrl+d", "eof", "EOF", priority=True),
@@ -459,16 +459,11 @@ class TextualTui(App[None]):
 
     async def run_shell(self, runner: Callable[[], Awaitable[None]]) -> None:
         self._runner = runner
-        # mouse=False stops Textual from putting the terminal into mouse-reporting
-        # mode (the `?1000h`/`?1003h` sequences). With reporting off, the terminal
-        # emulator keeps ownership of click-drag, so selecting text and the OS copy
-        # shortcut (Cmd+C on macOS, right-click-copy elsewhere) work natively —
-        # exactly as in any other terminal program. The trade-off is that no mouse
-        # events reach the app: no wheel-scroll of the transcript (PageUp/PageDown/
-        # Home/End cover that) and no click-to-focus (the editor is the resting focus
-        # and the palette opens via `/` or ctrl+p). We accept that to make copy
-        # behave the way users expect from a terminal.
-        await self.run_async(mouse=False)
+        # Textual must enable terminal mouse reporting for wheel/trackpad events and
+        # scrollbar interaction to reach the Transcript. Keep this explicit: the
+        # default is also True, but silently reverting to mouse=False makes the
+        # visible scrollbar inert in a real terminal while headless widget tests pass.
+        await self.run_async(mouse=True)
         # Textual restores the terminal before returning; re-raise any error
         # from the shell worker here so it surfaces as a normal traceback
         # instead of being swallowed by the app teardown.
