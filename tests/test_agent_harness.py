@@ -144,7 +144,7 @@ def test_harness_continue_uses_existing_transcript_without_new_user_message() ->
     assert provider.calls[0].messages == (existing,)
 
 
-def test_harness_records_tool_results_and_combines_assistant_turns() -> None:
+def test_harness_preserves_assistant_tool_result_order_across_runs() -> None:
     call = ToolCall(
         call_id="call-1",
         name="lookup",
@@ -169,6 +169,11 @@ def test_harness_records_tool_results_and_combines_assistant_turns() -> None:
                 ProviderTextDelta(delta="done"),
                 ProviderResponseCompleted(content="done", response_id="response-2"),
             ],
+            [
+                ProviderResponseStarted(model="test", response_id="response-3"),
+                ProviderTextDelta(delta="follow-up"),
+                ProviderResponseCompleted(content="follow-up", response_id="response-3"),
+            ],
         ]
     )
     executor = RecordingToolExecutor("found it")
@@ -185,20 +190,31 @@ def test_harness_records_tool_results_and_combines_assistant_turns() -> None:
     )
 
     async def run() -> None:
-        _events = [event async for event in harness.prompt("search")]
+        _first_events = [event async for event in harness.prompt("search")]
+        _second_events = [event async for event in harness.prompt("what next?")]
 
     anyio.run(run)
 
     assert executor.calls == [call]
     assert [(message.role, message.content) for message in harness.messages] == [
         ("user", "search"),
+        ("assistant", "checking "),
         ("tool", "found it"),
-        ("assistant", "checking done"),
+        ("assistant", "done"),
+        ("user", "what next?"),
+        ("assistant", "follow-up"),
     ]
-    tool_message = harness.messages[1]
+    tool_message = harness.messages[2]
     assert tool_message.tool_call_id == "call-1"
     assert tool_message.tool_name == "lookup"
     assert provider.calls[1].tool_results[0].output == "found it"
+    assert [(message.role, message.content) for message in provider.calls[2].messages] == [
+        ("user", "search"),
+        ("assistant", "checking "),
+        ("tool", "found it"),
+        ("assistant", "done"),
+        ("user", "what next?"),
+    ]
 
 
 def test_harness_cancel_stops_at_event_boundary_and_marks_turn_cancelled() -> None:

@@ -126,9 +126,6 @@ class AgentHarness:
         if prompt_message is not None:
             self._messages.append(prompt_message)
 
-        assistant_chunks: list[str] = []
-        final_outcome: str | None = None
-        cancellation_observed = False
         active_turn: int | None = None
         active_turn_completed = False
         config = AgentLoopConfig(
@@ -155,10 +152,8 @@ class AgentHarness:
                     self._current_scope = None
 
                 if scope.cancel_called:
-                    cancellation_observed = True
                     yield ErrorEvent(message="Agent run cancelled")
                     if active_turn is not None and not active_turn_completed:
-                        final_outcome = "cancelled"
                         yield TurnCompleted(
                             turn=active_turn,
                             outcome="cancelled",
@@ -173,7 +168,7 @@ class AgentHarness:
                     active_turn = event.turn
                     active_turn_completed = False
                 if isinstance(event, MessageCompleted):
-                    assistant_chunks.append(event.content)
+                    self._messages.append(Message(role="assistant", content=event.content))
                 elif isinstance(event, ToolResultReady):
                     self._messages.append(
                         Message(
@@ -184,15 +179,8 @@ class AgentHarness:
                         )
                     )
                 elif isinstance(event, TurnCompleted):
-                    final_outcome = event.outcome
                     active_turn_completed = True
-                    cancellation_observed = cancellation_observed or event.outcome == "cancelled"
-                elif isinstance(event, ErrorEvent) and token.is_cancelled():
-                    cancellation_observed = True
                 yield event
-
-            if final_outcome == "completed" and not cancellation_observed:
-                self._messages.append(Message(role="assistant", content="".join(assistant_chunks)))
         finally:
             self._current_scope = None
             with anyio.CancelScope(shield=True):
