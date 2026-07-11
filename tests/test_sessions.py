@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import time
 from pathlib import Path
 
 import anyio
@@ -14,6 +15,7 @@ from wisp.events import ErrorEvent, ToolCallRequested, ToolCallSnapshot
 from wisp.sessions import jsonl as jsonl_module
 from wisp.sessions.jsonl import (
     AmbiguousSessionError,
+    JsonlSession,
     JsonlSessionStore,
     SessionError,
     SessionNotFoundError,
@@ -143,9 +145,14 @@ def test_append_entry_is_idempotent(tmp_path: Path) -> None:
     assert len(session.path.read_text(encoding="utf-8").splitlines()) == 1
 
 
-def test_append_entry_is_idempotent_after_reopen(tmp_path: Path) -> None:
+def test_append_entry_rechecks_identity_after_another_handle_appends(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     session = store.create()
+    seed = SessionEntry(
+        id="seed-entry",
+        session_id=session.session_id,
+        message=Message(role="user", content="start"),
+    )
     entry = SessionEntry(
         id="entry-1",
         session_id=session.session_id,
@@ -153,12 +160,15 @@ def test_append_entry_is_idempotent_after_reopen(tmp_path: Path) -> None:
     )
 
     async def write() -> None:
+        await session.append_entry(seed)
+        reopened = store.load(session.path)
+        await reopened.append_entry(seed)
         await session.append_entry(entry)
-        await store.load(session.path).append_entry(entry)
+        await reopened.append_entry(entry)
 
     anyio.run(write)
 
-    assert session.read_entries() == (entry,)
+    assert session.read_entries() == (seed, entry)
 
 
 def test_concurrent_append_entry_writes_one_record(tmp_path: Path) -> None:
@@ -177,6 +187,43 @@ def test_concurrent_append_entry_writes_one_record(tmp_path: Path) -> None:
     anyio.run(write)
 
     assert session.read_entries() == (entry,)
+
+
+def test_concurrent_session_handles_append_one_record(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    seed = SessionEntry(
+        id="seed-entry",
+        session_id=session.session_id,
+        message=Message(role="user", content="start"),
+    )
+    entry = SessionEntry(
+        id="entry-1",
+        session_id=session.session_id,
+        message=Message(role="assistant", content="done"),
+    )
+    load_entry_index = JsonlSession._load_entry_index  # noqa: SLF001
+
+    def delayed_load_entry_index(handle: JsonlSession) -> dict[str, SessionEntry]:
+        index = load_entry_index(handle)
+        time.sleep(0.02)
+        return index
+
+    monkeypatch.setattr(JsonlSession, "_load_entry_index", delayed_load_entry_index)
+
+    async def write() -> None:
+        await session.append_entry(seed)
+        handles = [store.load(session.path) for _ in range(8)]
+        async with anyio.create_task_group() as task_group:
+            for handle in handles:
+                task_group.start_soon(handle.append_entry, entry)
+
+    anyio.run(write)
+
+    assert session.read_entries() == (seed, entry)
 
 
 def test_append_entry_reloads_identity_after_uncertain_write_failure(

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 import stat
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 import anyio
 from pydantic import ValidationError
@@ -16,6 +18,27 @@ from wisp.events import JsonObject, WispEvent
 
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
+_FileSignature = tuple[int, int, int, int]
+
+
+class _SessionFileState:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.generation = 0
+
+
+_SESSION_FILE_STATES_GUARD = threading.Lock()
+_SESSION_FILE_STATES: WeakValueDictionary[Path, _SessionFileState] = WeakValueDictionary()
+
+
+def _session_file_state(path: Path) -> _SessionFileState:
+    key = Path(os.path.abspath(path))
+    with _SESSION_FILE_STATES_GUARD:
+        state = _SESSION_FILE_STATES.get(key)
+        if state is None:
+            state = _SessionFileState()
+            _SESSION_FILE_STATES[key] = state
+        return state
 
 
 class SessionError(RuntimeError):
@@ -91,7 +114,10 @@ class JsonlSession:
         self.session_id = session_id
         self.path = path
         self._append_lock = anyio.Lock()
+        self._file_state = _session_file_state(path)
         self._entry_index: dict[str, SessionEntry] | None = None
+        self._entry_index_generation: int | None = None
+        self._entry_index_signature: _FileSignature | None = None
 
     async def append_message(self, message: Message) -> SessionEntry:
         entry = SessionEntry(session_id=self.session_id, message=message)
@@ -124,10 +150,7 @@ class JsonlSession:
         if count < 0:
             raise ValueError("Session entry count cannot be negative")
         async with self._append_lock:
-            try:
-                await anyio.to_thread.run_sync(self._truncate_entries, count)
-            finally:
-                self._entry_index = None
+            await anyio.to_thread.run_sync(self._truncate_entries_once, count)
 
     def read_entries(self) -> tuple[SessionEntry, ...]:
         """Read all persisted entries from the session file."""
@@ -170,11 +193,13 @@ class JsonlSession:
                 os.close(fd)
 
     def _append_entry_once(self, entry: SessionEntry) -> None:
+        with self._file_state.lock:
+            self._append_entry_locked(entry)
+
+    def _append_entry_locked(self, entry: SessionEntry) -> None:
         _ensure_private_directory(self.path.parent)
-        if not self._validate_session_file():
-            self._entry_index = {}
-        elif self._entry_index is None:
-            self._entry_index = self._load_entry_index()
+        self._refresh_entry_index()
+        assert self._entry_index is not None
 
         existing = self._entry_index.get(entry.id)
         if existing is not None:
@@ -184,10 +209,40 @@ class JsonlSession:
 
         try:
             self._append_line(entry.model_dump_json(exclude_none=True))
+            info = self._validate_session_file()
+            if info is None:
+                raise SessionError(f"Session file disappeared after append: {self.path}")
         except Exception:
-            self._entry_index = None
+            self._file_state.generation += 1
+            self._invalidate_entry_index()
             raise
+        self._file_state.generation += 1
         self._entry_index[entry.id] = entry
+        self._entry_index_generation = self._file_state.generation
+        self._entry_index_signature = _session_file_signature(info)
+
+    def _refresh_entry_index(self) -> None:
+        info = self._validate_session_file()
+        if info is None:
+            self._entry_index = {}
+            self._entry_index_generation = self._file_state.generation
+            self._entry_index_signature = None
+            return
+
+        signature = _session_file_signature(info)
+        if (
+            self._entry_index is None
+            or self._entry_index_generation != self._file_state.generation
+            or self._entry_index_signature != signature
+        ):
+            self._entry_index = self._load_entry_index()
+            self._entry_index_generation = self._file_state.generation
+            self._entry_index_signature = signature
+
+    def _invalidate_entry_index(self) -> None:
+        self._entry_index = None
+        self._entry_index_generation = None
+        self._entry_index_signature = None
 
     def _load_entry_index(self) -> dict[str, SessionEntry]:
         entries: dict[str, SessionEntry] = {}
@@ -197,16 +252,24 @@ class JsonlSession:
             entries[entry.id] = entry
         return entries
 
-    def _validate_session_file(self) -> bool:
+    def _validate_session_file(self) -> os.stat_result | None:
         try:
             info = self.path.lstat()
         except FileNotFoundError:
-            return False
+            return None
         except OSError as exc:
             raise SessionError(f"Could not inspect session file: {self.path}") from exc
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
             raise SessionError(f"Session file is not a regular file: {self.path}")
-        return True
+        return info
+
+    def _truncate_entries_once(self, count: int) -> None:
+        with self._file_state.lock:
+            try:
+                self._truncate_entries(count)
+            finally:
+                self._file_state.generation += 1
+                self._invalidate_entry_index()
 
     def _truncate_entries(self, count: int) -> None:
         if not self.path.is_file():
@@ -268,6 +331,10 @@ def _validate_private_directory(path: Path) -> None:
         info = path.lstat()
         if stat.S_IMODE(info.st_mode) & 0o077:
             raise SessionError(f"Session directory is not private: {path}")
+
+
+def _session_file_signature(info: os.stat_result) -> _FileSignature:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 
 def _matches_reference(path: Path, reference: str) -> bool:
