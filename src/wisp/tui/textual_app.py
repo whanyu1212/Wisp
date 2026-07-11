@@ -59,11 +59,10 @@ _ROLE_FALLBACK: dict[str, str] = {
     "tool": "blue",
     "approved": "green",
     "denied": "red",
-    "banner": "cyan",
 }
 
-# The Wisp wordmark, shown once at startup. Block-drawing glyphs only (width-1,
-# universally supported); 40 cols wide, fits a standard terminal.
+# The Wisp wordmark, shown while the transcript is empty. Block-drawing glyphs
+# only (width-1, universally supported); 40 cols wide, fits a standard terminal.
 _WORDMARK = (
     "▄▄▄▄  ▄▄▄  ▄▄▄▄ ▄▄▄▄▄  ▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄\n"
     "▀███  ███  ███▀  ███  █████▀▀▀ ███▀▀███▄\n"
@@ -72,6 +71,7 @@ _WORDMARK = (
     "  ▀████▀████▀   ▄███▄ ███████▀ ███"
 )
 _TAGLINE = "a quiet coding agent"
+_EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 
 # The input's prompt glyph. The shell hands the Textual renderer a semantic hint
 # (`wisp> `, `wisp(running)> `, `approve? [y/N] `) shared with the line/fullscreen
@@ -138,6 +138,33 @@ class TextualTui(App[None]):
         border: none;
         padding: 0 1;
         scrollbar-size-vertical: 1;
+        scrollbar-color: $secondary;
+        scrollbar-color-hover: $primary;
+        scrollbar-color-active: $accent;
+    }
+
+    #transcript-empty {
+        width: 1fr;
+        height: 1fr;
+        min-height: 7;
+        align: center middle;
+    }
+
+    #transcript-empty-wordmark {
+        width: 40;
+        max-width: 100%;
+        height: 5;
+        color: $accent;
+        text-align: center;
+    }
+
+    #transcript-empty-hint {
+        width: 40;
+        max-width: 100%;
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+        text-align: center;
     }
 
     /* Minimalist messages: a single thin left rule in the role's color carries
@@ -180,12 +207,6 @@ class TextualTui(App[None]):
         color: $text-muted;
     }
 
-    .message--banner {
-        border-left: none;
-        margin: 1 0 0 0;
-        padding-left: 1;
-    }
-
     #status-bar {
         height: auto;
         padding: 0 1;
@@ -209,11 +230,14 @@ class TextualTui(App[None]):
         border: none;
         border-bottom: heavy $surface-lighten-2;
         padding: 0 1;
+        background: $background;
+        transition: border 200ms;
     }
 
     #input:focus {
         border: none;
         border-bottom: heavy $accent;
+        background: $surface;
     }
     """
 
@@ -275,7 +299,11 @@ class TextualTui(App[None]):
             # footer hug the bottom, matching Pi's editor-above-footer visual shape.
             # The input is yielded directly — a wrapping Container would default to
             # height: 1fr and float the input into the middle of the screen.
-            yield Transcript(id="transcript")
+            yield Transcript(
+                empty_wordmark=_WORDMARK,
+                empty_hint=_EMPTY_TRANSCRIPT_HINT,
+                id="transcript",
+            )
             # The slash-command menu floats on the overlay layer anchored near the
             # input; yielded here so it shares the Vertical's coordinate space.
             yield SlashSuggest(id="suggest")
@@ -576,7 +604,7 @@ class TextualTui(App[None]):
         if self._working_widget is not None:
             return self._working_widget
         self._working_widget = WorkingMessage()
-        self._transcript.mount(self._working_widget)
+        self._transcript.mount_message(self._working_widget)
         self._follow_tail_after_refresh()
         return self._working_widget
 
@@ -603,7 +631,7 @@ class TextualTui(App[None]):
         self.hide_working_indicator()
         card = ToolCard(name, arguments)
         self._tool_cards[call_id] = card
-        self._transcript.mount(card)
+        self._transcript.mount_message(card)
         self._follow_tail_after_refresh()
 
     def resolve_tool_call(
@@ -649,14 +677,6 @@ class TextualTui(App[None]):
         escaped = _markup_escape(message)
         self._mount_line(role, f"[{style}]{escaped}[/{style}]" if style else escaped)
 
-    def write_banner(self, art: str) -> None:
-        # The startup wordmark: accent-colored, borderless (the "banner" role has
-        # no card chrome), rendered verbatim. Block glyphs aren't markup-special,
-        # but escape anyway to keep the escape-at-boundary invariant uniform.
-        style = self._style("banner")
-        escaped = _markup_escape(art)
-        self._mount_line("banner", f"[{style}]{escaped}[/{style}]" if style else escaped)
-
     def write_notice(self, message: str) -> None:
         self._write_styled("notice", message)
 
@@ -687,7 +707,7 @@ class TextualTui(App[None]):
         # mount lays out.
         if self._transcript is None:
             return
-        self._transcript.mount(LineMessage(markup, role=role))
+        self._transcript.mount_message(LineMessage(markup, role=role))
         self._follow_tail_after_refresh()
 
     def append_stream(self, delta: str) -> None:
@@ -698,7 +718,7 @@ class TextualTui(App[None]):
         self._streaming_text += delta
         if self._stream_widget is None and self._transcript is not None:
             self._stream_widget = StreamMessage()
-            self._transcript.mount(self._stream_widget)
+            self._transcript.mount_message(self._stream_widget)
         self._schedule_stream_refresh()
 
     def flush_stream(self) -> None:
@@ -875,11 +895,10 @@ class TextualTuiRenderer:
         return mode
 
     def startup(self) -> None:
-        # One tight greeting under the wordmark: identity + the two things worth
-        # knowing on first launch (the `/` command door, how to leave). Keeping it
-        # to a single dim line lets the wordmark breathe without a wall of hints.
-        self.app.write_banner(_WORDMARK)
-        self.app.write_dim(f"{_TAGLINE} · press / for commands · /quit to exit")
+        # Textual renders identity as a disposable empty state. Keeping startup()
+        # as a no-op preserves the shared renderer protocol without putting the
+        # wordmark into scrollback; line/fullscreen keep their own startup output.
+        pass
 
     def help(self) -> None:
         self.app.write_notice(_tui_help_text())

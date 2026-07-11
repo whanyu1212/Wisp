@@ -26,7 +26,7 @@ from textual.await_complete import AwaitComplete
 from textual.containers import Vertical, VerticalScroll
 from textual.message import Message
 from textual.timer import Timer
-from textual.widget import Widget
+from textual.widget import AwaitMount, Widget
 from textual.widgets import Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
@@ -500,6 +500,27 @@ class DecisionPanel(Vertical):
         event.stop()
 
 
+class TranscriptEmptyState(Vertical):
+    """Centered identity shown only while the transcript has no output."""
+
+    def __init__(self, wordmark: str, hint: str) -> None:
+        super().__init__(id="transcript-empty")
+        self._wordmark = wordmark
+        self._hint = hint
+
+    def compose(self) -> ComposeResult:
+        yield Static(
+            self._wordmark,
+            id="transcript-empty-wordmark",
+            markup=False,
+        )
+        yield Static(
+            self._hint,
+            id="transcript-empty-hint",
+            markup=False,
+        )
+
+
 class Transcript(VerticalScroll):
     """Scrollable message container that follows the newest output like `tail -f`.
 
@@ -523,9 +544,36 @@ class Transcript(VerticalScroll):
     is set.
     """
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
+    def __init__(
+        self,
+        *args: object,
+        empty_wordmark: str | None = None,
+        empty_hint: str = "",
+        **kwargs: object,
+    ) -> None:
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
         self._follow = True
+        self._empty_wordmark = empty_wordmark
+        self._empty_hint = empty_hint
+        self._empty_state: TranscriptEmptyState | None = None
+
+    def compose(self) -> ComposeResult:
+        if self._empty_wordmark is not None:
+            self._empty_state = TranscriptEmptyState(
+                self._empty_wordmark,
+                self._empty_hint,
+            )
+            yield self._empty_state
+
+    def mount_message(self, widget: Widget) -> AwaitMount:
+        """Mount output after permanently dismissing the initial empty state."""
+
+        empty_state = self._empty_state
+        if empty_state is not None:
+            self._empty_state = None
+            empty_state.display = False
+            empty_state.remove()
+        return self.mount(widget)
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         # Textual updates scroll_y as the position settles (including at the end
