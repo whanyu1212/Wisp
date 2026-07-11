@@ -11,7 +11,14 @@ from textual.widgets import Static
 
 import wisp.cli as cli_module
 from tests.tui_support import *
-from wisp.events import AgentStarted, RpcCommandStarted
+from wisp.events import (
+    AgentCompleted,
+    AgentStarted,
+    MessageStarted,
+    ProviderRetrying,
+    RpcCommandStarted,
+    TurnStarted,
+)
 from wisp.trust_flow import TrustDecision
 from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
@@ -40,6 +47,27 @@ def _transcript_texts(app: TextualTui) -> list[str]:
         elif isinstance(child, StreamMessage):
             texts.append(child._markdown.source)
     return texts
+
+
+def _provider_retry(
+    *,
+    turn: int = 1,
+    attempt: int = 1,
+    max_attempts: int = 3,
+    provider: str = "openai",
+    delay_seconds: float = 0.5,
+    reason: str = "rate_limit",
+    status_code: int | None = None,
+) -> ProviderRetrying:
+    return ProviderRetrying(
+        turn=turn,
+        provider=provider,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        delay_seconds=delay_seconds,
+        reason=reason,
+        status_code=status_code,
+    )
 
 
 def _transcript_styles(app: TextualTui) -> str:
@@ -1272,6 +1300,217 @@ def test_textual_working_row_animates_spinner_and_counts_elapsed() -> None:
     assert start.endswith("0s")
     assert later.endswith("1s")  # counter advanced with elapsed time
     assert start[0] in WorkingMessage._FRAMES  # a braille frame, not the old dot
+
+
+def test_textual_retry_progress_mutates_one_row_and_rejects_older_attempts() -> None:
+    async def scenario() -> tuple[int, bool, str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.event(TurnStarted(turn=1))
+            renderer.event(_provider_retry(attempt=2, delay_seconds=1.25))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            row = next(child for child in transcript.children if isinstance(child, WorkingMessage))
+            first = row.render().plain
+
+            renderer.event(_provider_retry(attempt=1, delay_seconds=9.0))
+            renderer.event(_provider_retry(attempt=2, delay_seconds=9.0))
+            renderer.event(_provider_retry(attempt=3, status_code=429))
+            await pilot.pause()
+            rows = [child for child in transcript.children if isinstance(child, WorkingMessage)]
+            return len(rows), rows[0] is row, first, row.render().plain
+
+    count, same_row, first, latest = anyio.run(scenario)
+    assert count == 1
+    assert same_row
+    assert "Retrying openai · 2/3 in 1.2s · rate limited" in first
+    assert "Retrying openai · 3/3 in 0.5s · rate limited (429)" in latest
+    assert "9.0s" not in latest
+
+
+def test_textual_retry_progress_recovers_and_ignores_post_start_retry() -> None:
+    async def scenario() -> tuple[str, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.event(TurnStarted(turn=1))
+            renderer.event(_provider_retry(attempt=2))
+            renderer.event(MessageStarted(turn=1))
+            renderer.event(_provider_retry(attempt=3))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            row = next(child for child in transcript.children if isinstance(child, WorkingMessage))
+            recovered = row.render().plain
+
+            renderer.token_delta("response")
+            await pilot.pause()
+            texts = _transcript_texts(app_instance)
+            return recovered, "\n".join(texts), row._timer is None
+
+    recovered, transcript, timer_stopped = anyio.run(scenario)
+    assert "Working" in recovered
+    assert "Retrying" not in recovered
+    assert "response" in transcript
+    assert "Retrying" not in transcript
+    assert timer_stopped
+
+
+def test_textual_retry_progress_resumes_for_a_later_tool_turn() -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.event(TurnStarted(turn=1))
+            renderer.event(MessageStarted(turn=1))
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={}))
+            renderer.event(ToolResultReady(call_id="c1", name="read", output="ok", is_error=False))
+            renderer.event(TurnStarted(turn=2))
+            renderer.event(_provider_retry(turn=2, attempt=1, reason="server_error"))
+            await pilot.pause()
+            rows = [
+                child
+                for child in app_instance.query_one("#transcript", Transcript).children
+                if isinstance(child, WorkingMessage)
+            ]
+            return rows[0].render().plain
+
+    rendered = anyio.run(scenario)
+    assert "Retrying openai · 1/3 in 0.5s · server error" in rendered
+
+
+def test_textual_retry_progress_does_not_replay_or_survive_terminal_states() -> None:
+    async def scenario() -> tuple[int, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(_provider_retry())
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            replayed = sum(isinstance(child, WorkingMessage) for child in transcript.children)
+
+            renderer.running()
+            renderer.event(TurnStarted(turn=1))
+            renderer.event(_provider_retry())
+            await pilot.pause()
+            row = next(child for child in transcript.children if isinstance(child, WorkingMessage))
+            renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
+            renderer.event(_provider_retry(attempt=2))
+            await pilot.pause()
+            remaining = any(isinstance(child, WorkingMessage) for child in transcript.children)
+            return replayed, remaining, row._timer is None
+
+    replayed, remaining, timer_stopped = anyio.run(scenario)
+    assert replayed == 0
+    assert not remaining
+    assert timer_stopped
+
+
+def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure() -> None:
+    async def approval_scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.event(_provider_retry())
+            renderer.approval_request(
+                ToolApprovalRequested(
+                    call_id="c1",
+                    name="bash",
+                    arguments={"command": "echo ok"},
+                    safety="command",
+                )
+            )
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            return (
+                any(isinstance(child, WorkingMessage) for child in transcript.children),
+                app_instance.query_one("#decision-panel").display,
+            )
+
+    async def cancellation_scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.event(_provider_retry())
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            row = next(child for child in transcript.children if isinstance(child, WorkingMessage))
+            renderer.cancelling("Cancelling current prompt...")
+            renderer.event(_provider_retry(attempt=2))
+            await pilot.pause()
+            return (
+                any(isinstance(child, WorkingMessage) for child in transcript.children),
+                row._timer is None,
+            )
+
+    async def failure_scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.event(_provider_retry())
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            row = next(child for child in transcript.children if isinstance(child, WorkingMessage))
+            renderer.rpc_event_reader_failed("closed")
+            await pilot.pause()
+            return (
+                any(isinstance(child, WorkingMessage) for child in transcript.children),
+                row._timer is None,
+            )
+
+    approval_row, approval_visible = anyio.run(approval_scenario)
+    cancellation_row, cancellation_timer_stopped = anyio.run(cancellation_scenario)
+    failure_row, failure_timer_stopped = anyio.run(failure_scenario)
+    assert not approval_row
+    assert approval_visible
+    assert not cancellation_row
+    assert cancellation_timer_stopped
+    assert not failure_row
+    assert failure_timer_stopped
+
+
+def test_textual_retry_progress_preserves_compact_prompt_and_footer() -> None:
+    async def scenario() -> tuple[str, bool, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(72, 20)) as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="retrying 2/3 in 0.5s",
+                    input_hint="wisp(running)> ",
+                    input_mode="running",
+                    cwd="/tmp/project",
+                    provider="openai-codex",
+                    model="gpt-5-codex",
+                )
+            )
+            renderer.running()
+            renderer.event(TurnStarted(turn=1))
+            renderer.event(
+                _provider_retry(
+                    attempt=2,
+                    provider="custom-provider-name-that-is-too-long",
+                    reason="transient_http",
+                    status_code=503,
+                )
+            )
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            row = next(child for child in transcript.children if isinstance(child, WorkingMessage))
+            input_widget = app_instance.query_one("#input", Input)
+            footer = app_instance.query_one("#status", Static)
+            return (
+                row.render().plain,
+                row.region.y < input_widget.region.y,
+                input_widget.region.y < footer.region.y,
+                input_widget.display,
+            )
+
+    rendered, retry_above_prompt, footer_below_prompt, prompt_visible = anyio.run(scenario)
+    assert "custom-provider-nam…" in rendered
+    assert "2/3 in 0.5s" in rendered
+    assert "temporary HTTP error (503)" in rendered
+    assert retry_above_prompt
+    assert footer_below_prompt
+    assert prompt_visible
 
 
 def test_format_duration_scales_units() -> None:
