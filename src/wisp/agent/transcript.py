@@ -29,23 +29,30 @@ def plan_interrupted_tool_repairs(messages: Sequence[Message]) -> TranscriptRepa
     """
 
     source = tuple(messages)
-    result_index_by_call_id: dict[str, int] = {}
-    referenced_call_ids: set[str] = set()
+    result_index_by_call_occurrence: dict[tuple[int, int], int] = {}
+    pending_call_occurrences: dict[str, list[tuple[int, int]]] = {}
+    matched_result_indices: set[int] = set()
 
-    for index, message in enumerate(source):
-        if message.role == "tool" and message.tool_call_id is not None:
-            result_index_by_call_id.setdefault(message.tool_call_id, index)
+    for message_index, message in enumerate(source):
         if message.role == "assistant" and message.tool_calls:
-            referenced_call_ids.update(call.call_id for call in message.tool_calls)
+            for call_index, tool_call in enumerate(message.tool_calls):
+                pending_call_occurrences.setdefault(tool_call.call_id, []).append(
+                    (message_index, call_index)
+                )
+            continue
+        if message.role != "tool" or message.tool_call_id is None:
+            continue
+        pending = pending_call_occurrences.get(message.tool_call_id)
+        if not pending:
+            continue
+        # Providers may reuse an id in a later turn, so bind each result to the
+        # nearest preceding unmatched occurrence instead of treating ids globally.
+        call_occurrence = pending.pop()
+        result_index_by_call_occurrence[call_occurrence] = message_index
+        matched_result_indices.add(message_index)
 
-    matched_result_indices = {
-        result_index_by_call_id[call_id]
-        for call_id in referenced_call_ids
-        if call_id in result_index_by_call_id
-    }
     repaired: list[Message] = []
     repairs: list[Message] = []
-    handled_call_ids: set[str] = set()
 
     for index, message in enumerate(source):
         if index in matched_result_indices:
@@ -54,11 +61,8 @@ def plan_interrupted_tool_repairs(messages: Sequence[Message]) -> TranscriptRepa
         if message.role != "assistant" or not message.tool_calls:
             continue
 
-        for tool_call in message.tool_calls:
-            if tool_call.call_id in handled_call_ids:
-                continue
-            handled_call_ids.add(tool_call.call_id)
-            result_index = result_index_by_call_id.get(tool_call.call_id)
+        for call_index, tool_call in enumerate(message.tool_calls):
+            result_index = result_index_by_call_occurrence.get((index, call_index))
             if result_index is not None:
                 repaired.append(source[result_index])
                 continue

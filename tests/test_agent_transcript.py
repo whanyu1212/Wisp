@@ -102,3 +102,65 @@ def test_plan_interrupted_tool_repairs_handles_empty_call_id_idempotently() -> N
 
     assert repeated.messages == first.messages
     assert repeated.repairs == ()
+
+
+def test_plan_interrupted_tool_repairs_consumes_reused_call_ids_per_occurrence() -> None:
+    first_result = Message(
+        role="tool",
+        content="first completed",
+        tool_call_id="call-1",
+        tool_name="read",
+    )
+    messages = (
+        _assistant_with_calls("call-1"),
+        first_result,
+        Message(role="user", content="try again"),
+        _assistant_with_calls("call-1"),
+    )
+
+    plan = plan_interrupted_tool_repairs(messages)
+
+    assert [(message.role, message.tool_call_id) for message in plan.messages] == [
+        ("assistant", None),
+        ("tool", "call-1"),
+        ("user", None),
+        ("assistant", None),
+        ("tool", "call-1"),
+    ]
+    assert plan.messages[1] is first_result
+    assert len(plan.repairs) == 1
+    assert plan.messages[-1] is plan.repairs[0]
+    assert plan.repairs[0].content == INTERRUPTED_TOOL_RESULT_TEXT
+
+    repeated = plan_interrupted_tool_repairs(plan.messages)
+
+    assert repeated.messages == plan.messages
+    assert repeated.repairs == ()
+
+
+def test_plan_interrupted_tool_repairs_matches_reused_id_to_nearest_call() -> None:
+    later_result = Message(
+        role="tool",
+        content="later completed",
+        tool_call_id="call-1",
+        tool_name="read",
+    )
+    messages = (
+        _assistant_with_calls("call-1"),
+        Message(role="user", content="try again"),
+        _assistant_with_calls("call-1"),
+        later_result,
+    )
+
+    plan = plan_interrupted_tool_repairs(messages)
+
+    assert len(plan.repairs) == 1
+    assert plan.messages[1] is plan.repairs[0]
+    assert plan.messages[-1] is later_result
+    assert [(message.role, message.tool_call_id) for message in plan.messages] == [
+        ("assistant", None),
+        ("tool", "call-1"),
+        ("user", None),
+        ("assistant", None),
+        ("tool", "call-1"),
+    ]
