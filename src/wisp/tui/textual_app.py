@@ -383,8 +383,10 @@ class TextualTui(App[None]):
     def on_jump_to_latest_selected(self, event: JumpToLatest.Selected) -> None:
         event.stop()
         self.action_scroll_transcript_end()
-        if self._input is not None:
+        if self._input is not None and self._input.display:
             self._input.focus()
+        elif self._decision_panel is not None:
+            self._decision_panel.focus_options()
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         self._forward_jump_overlay_scroll(event, direction=-1)

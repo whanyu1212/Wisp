@@ -392,6 +392,12 @@ class DecisionPanel(Vertical):
     def is_open(self) -> bool:
         return self.display
 
+    def focus_options(self) -> None:
+        """Restore keyboard focus to the active deny-first choice list."""
+
+        if self.is_open:
+            self._options.focus()
+
     def show_approval(self, event: ToolApprovalRequested, *, cwd: str) -> None:
         content = _approval_content(event, cwd=cwd)
         self._show(
@@ -452,7 +458,7 @@ class DecisionPanel(Vertical):
         self._options.add_options(options)
         self._options.highlighted = default_index
         self.display = True
-        self._options.focus()
+        self.focus_options()
 
     def hide(self) -> None:
         self.display = False

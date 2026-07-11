@@ -8,7 +8,7 @@ from pytest import MonkeyPatch
 from textual import events
 from textual.await_complete import AwaitComplete
 from textual.content import Content
-from textual.widgets import Static
+from textual.widgets import OptionList, Static
 
 import wisp.cli as cli_module
 from tests.tui_support import *
@@ -2008,6 +2008,52 @@ def test_textual_jump_to_latest_click_restores_follow_and_input_focus() -> None:
     assert result["following"]
     assert result["at_bottom"]
     assert result["focus_kept"]
+
+
+def test_textual_jump_to_latest_preserves_approval_and_trust_focus() -> None:
+    async def scenario(mode: str) -> tuple[bool, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            await pilot.press("pageup")
+            await pilot.pause()
+            renderer.notice("new output")
+            await pilot.pause()
+
+            if mode == "approval":
+                renderer.approval_request(
+                    ToolApprovalRequested(
+                        call_id="latest",
+                        name="bash",
+                        arguments={"command": "echo ok"},
+                        safety="command",
+                    )
+                )
+            else:
+                renderer.trust_request(
+                    TrustRequested(request_id="trust-latest", project_path=Path("/tmp/project"))
+                )
+            await pilot.pause()
+
+            input_widget = app_instance.query_one("#input", Input)
+            options = app_instance.query_one("#decision-options", OptionList)
+            focused_before = app_instance.focused is options
+            clicked = await pilot.click("#jump-latest")
+            await pilot.pause()
+            return (
+                clicked,
+                focused_before,
+                app_instance.focused is options and not input_widget.display,
+            )
+
+    approval = anyio.run(scenario, "approval")
+    trust = anyio.run(scenario, "trust")
+    assert approval == (True, True, True)
+    assert trust == (True, True, True)
 
 
 def test_textual_returning_to_the_bottom_resumes_following() -> None:
