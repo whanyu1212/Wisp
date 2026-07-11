@@ -36,6 +36,8 @@ from wisp.tui.rendering import _format_cwd_for_footer, _markup_escape
 
 _DECISION_PREVIEW_LINES = 5
 _DECISION_PREVIEW_CHARS = 320
+_TOOL_OUTPUT_PREVIEW_LINES = 8
+_TOOL_OUTPUT_PREVIEW_BYTES = 2_000
 
 
 class PromptEditor(TextArea):
@@ -255,6 +257,41 @@ def _format_duration(seconds: float) -> str:
         return f"{seconds:.0f}s"
     minutes, secs = divmod(int(seconds), 60)
     return f"{minutes}m{secs:02d}s"
+
+
+def _preview_tool_output(
+    output: str,
+    *,
+    max_lines: int = _TOOL_OUTPUT_PREVIEW_LINES,
+    max_bytes: int = _TOOL_OUTPUT_PREVIEW_BYTES,
+) -> str:
+    """Return bounded final tool output with explicit hidden-content metadata."""
+
+    normalized = output.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+    if not normalized.strip():
+        return "(no output)"
+
+    lines = normalized.split("\n")
+    preview = "\n".join(lines[: max(1, max_lines)])
+    encoded = preview.encode("utf-8")
+    if len(encoded) > max_bytes:
+        preview = encoded[: max(1, max_bytes)].decode("utf-8", errors="ignore")
+    preview = preview.rstrip("\n")
+
+    total_bytes = len(normalized.encode("utf-8"))
+    visible_bytes = len(preview.encode("utf-8"))
+    hidden_bytes = max(0, total_bytes - visible_bytes)
+    if hidden_bytes == 0:
+        return preview
+
+    visible_lines = preview.count("\n") + 1
+    hidden_lines = max(0, len(lines) - visible_lines)
+    hidden: list[str] = []
+    if hidden_lines:
+        unit = "line" if hidden_lines == 1 else "lines"
+        hidden.append(f"{hidden_lines} more {unit}")
+    hidden.append(f"{hidden_bytes} bytes hidden")
+    return f"{preview}\n... {', '.join(hidden)}"
 
 
 def _summarize_arguments(arguments: object, *, limit: int = 48) -> str:
@@ -647,8 +684,9 @@ class ToolCard(Static):
     mint a separate line per event, one ``ToolCard`` is mounted on the request and
     then *mutated in place* as the later events arrive. The card carries its status
     in a leading glyph plus the role CSS class (which colors the left rule), so the
-    whole lifecycle reads as one line transitioning pending → running → done/error
-    instead of three stacked cards the reader has to reconcile.
+    whole lifecycle reads as one card transitioning pending → running → done/error
+    instead of three stacked cards the reader has to reconcile. Resolved cards add
+    a bounded multiline output preview below their compact status row.
 
     Parallel calls each own a stable card regardless of finish order, because the
     registry (in ``TextualTui``) routes every event to the card for its call_id.
@@ -704,7 +742,7 @@ class ToolCard(Static):
         """Transition the card to a new status, swapping glyph, color, and detail.
 
         ``detail`` overrides the argument summary (used to show a denial reason or
-        a one-line result). ``elapsed`` is the true wall-clock duration (from the
+        bounded result preview). ``elapsed`` is the true wall-clock duration (from the
         request/result event timestamps); passing it freezes the live counter at
         the honest value and stops the per-card timer. The role CSS class is
         swapped rather than added so the left-rule color reflects only the current
@@ -733,14 +771,16 @@ class ToolCard(Static):
 
     def _repaint(self) -> None:
         # name is a fixed tool identifier; summary/detail are escaped as untrusted
-        # payload (a path or output line the model or a file supplied), preserving
+        # payload (a path or output the model or a file supplied), preserving
         # the escape-at-boundary invariant the transcript relies on.
-        body = self._detail or self._summary
         text = f"{self._glyph} [b]{_markup_escape(self._name)}[/b]"
-        if body:
-            text += f"  [dim]{_markup_escape(body)}[/dim]"
+        if not self._detail and self._summary:
+            text += f"  [dim]{_markup_escape(self._summary)}[/dim]"
         if self._elapsed is not None:
             text += f" [dim]· {_format_duration(self._elapsed)}[/dim]"
+        if self._detail:
+            indented = "\n".join(f"  {line}" for line in self._detail.split("\n"))
+            text += f"\n[dim]{_markup_escape(indented)}[/dim]"
         self.update(text)
 
 

@@ -26,7 +26,6 @@ from wisp.events import (
 from wisp.tui.rendering import (
     TuiRenderer,
     TuiViewSnapshot,
-    _first_line,
     _markup_escape,
     _tui_help_text,
     format_tui_footer_text,
@@ -41,6 +40,7 @@ from wisp.tui.widgets import (
     ToolCard,
     Transcript,
     WorkingMessage,
+    _preview_tool_output,
 )
 
 # Plain Rich color names used only before on_mount resolves the themed palette
@@ -882,7 +882,7 @@ class TextualTuiRenderer:
             self.app.resolve_tool_call(
                 event.call_id,
                 status,
-                detail=_first_line(event.output),
+                detail=_preview_tool_output(event.output),
                 elapsed=self._tool_elapsed(event.call_id, event.timestamp),
             )
         elif isinstance(event, ErrorEvent):
