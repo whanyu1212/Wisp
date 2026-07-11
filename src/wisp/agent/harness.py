@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
 
 import anyio
 
 from wisp.agent.execution import ToolExecutor
 from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, run_agent_loop
-from wisp.agent.messages import Message, historical_tool_observation
+from wisp.agent.messages import (
+    Message,
+    message_from_completion_event,
+    provider_history_message,
+)
 from wisp.events import (
     ErrorEvent,
     MessageCompleted,
@@ -117,17 +121,17 @@ class AgentHarness:
             self._current_scope.cancel()
         return True
 
-    def prompt(self, content: str) -> AsyncIterator[AgentLoopEvent]:
+    def prompt(self, content: str) -> AsyncGenerator[AgentLoopEvent, None]:
         """Append a user message and start a run."""
         return self.prompt_message(Message(role="user", content=content))
 
-    def prompt_message(self, message: Message) -> AsyncIterator[AgentLoopEvent]:
+    def prompt_message(self, message: Message) -> AsyncGenerator[AgentLoopEvent, None]:
         """Append an existing user message and start a run."""
         if message.role != "user":
             raise ValueError("AgentHarness prompts require a user message")
         return self._run(prompt_message=message)
 
-    def continue_(self) -> AsyncIterator[AgentLoopEvent]:
+    def continue_(self) -> AsyncGenerator[AgentLoopEvent, None]:
         """Continue from the current transcript without adding a user message."""
         return self._run()
 
@@ -135,7 +139,7 @@ class AgentHarness:
         self,
         *,
         prompt_message: Message | None = None,
-    ) -> AsyncIterator[AgentLoopEvent]:
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
         self._ensure_idle()
         self._running = True
         token = SimpleCancellationToken()
@@ -154,10 +158,12 @@ class AgentHarness:
             max_tool_iterations=self._config.max_tool_iterations,
             cancellation_token=token,
         )
-        provider_messages = tuple(
-            historical_tool_observation(message) if message.role == "tool" else message
-            for message in self._messages
-        )
+        provider_messages_list: list[Message] = []
+        for message in self._messages:
+            provider_message = provider_history_message(message)
+            if provider_message is not None:
+                provider_messages_list.append(provider_message)
+        provider_messages = tuple(provider_messages_list)
         loop_events = run_agent_loop(config, messages=provider_messages)
         try:
             while True:
@@ -198,17 +204,10 @@ class AgentHarness:
                     active_turn_completed = False
                     run_finished = False
                 if isinstance(event, MessageCompleted):
-                    self._messages.append(Message(role="assistant", content=event.content))
+                    self._messages.append(message_from_completion_event(event))
                     run_finished = not event.tool_calls
                 elif isinstance(event, ToolResultReady):
-                    self._messages.append(
-                        Message(
-                            role="tool",
-                            content=event.output,
-                            tool_call_id=event.call_id,
-                            tool_name=event.name,
-                        )
-                    )
+                    self._messages.append(message_from_completion_event(event))
                 elif isinstance(event, TurnCompleted):
                     active_turn_completed = True
                     run_finished = run_finished or event.outcome != "completed"

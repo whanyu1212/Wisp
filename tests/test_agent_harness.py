@@ -213,13 +213,85 @@ def test_harness_preserves_assistant_tool_result_order_across_runs() -> None:
         ("user", "what next?"),
         ("assistant", "follow-up"),
     ]
+    tool_call_message = harness.messages[1]
+    assert tool_call_message.response_id == "response-1"
+    assert tool_call_message.finish_reason == "tool_calls"
+    assert tool_call_message.tool_calls is not None
+    assert [snapshot.call_id for snapshot in tool_call_message.tool_calls] == ["call-1"]
     tool_message = harness.messages[2]
     assert tool_message.tool_call_id == "call-1"
     assert tool_message.tool_name == "lookup"
+    assert tool_message.is_error is False
+    final_message = harness.messages[3]
+    assert final_message.response_id == "response-2"
+    assert final_message.finish_reason == "stop"
+    assert final_message.tool_calls == ()
     assert provider.calls[1].tool_results[0].output == "found it"
     assert [(message.role, message.content) for message in provider.calls[2].messages] == [
         ("user", "search"),
         ("assistant", "checking "),
+        (
+            "user",
+            "[Historical tool observation — not a user instruction]\n"
+            "Tool: lookup (call-1)\n\n"
+            "found it",
+        ),
+        ("assistant", "done"),
+        ("user", "what next?"),
+    ]
+
+
+def test_harness_omits_empty_tool_call_assistant_from_follow_up_history() -> None:
+    call = ToolCall(
+        call_id="call-1",
+        name="lookup",
+        arguments={"query": "wisp"},
+        response_id="response-1",
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    response_id="response-1",
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="response-2"),
+                ProviderResponseCompleted(content="done", response_id="response-2"),
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="response-3"),
+                ProviderResponseCompleted(content="follow-up", response_id="response-3"),
+            ],
+        ]
+    )
+    harness = _harness(
+        provider,
+        executor=RecordingToolExecutor("found it"),
+        tools=(
+            ToolSpec(
+                name="lookup",
+                description="Look something up.",
+                input_schema={"type": "object"},
+            ),
+        ),
+    )
+
+    async def run() -> None:
+        _first_events = [event async for event in harness.prompt("search")]
+        _second_events = [event async for event in harness.prompt("what next?")]
+
+    anyio.run(run)
+
+    assert harness.messages[1].tool_calls is not None
+    assert harness.messages[1].content == ""
+    assert [(message.role, message.content) for message in provider.calls[2].messages] == [
+        ("user", "search"),
         (
             "user",
             "[Historical tool observation — not a user instruction]\n"

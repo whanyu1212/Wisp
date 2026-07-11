@@ -264,6 +264,152 @@ def test_rpc_mode_cancels_running_prompt(
     assert prompt_finished["error"] == "RPC command cancelled: cmd-1"
 
 
+class _TrustedGate:
+    async def resolve(self) -> bool:
+        return True
+
+
+def test_rpc_prompt_cancellation_rolls_back_before_completion_boundary(tmp_path: Path) -> None:
+    class PreResponseCancellableProvider(CancellableProvider):
+        def __init__(self, started: anyio.Event) -> None:
+            self.started = started
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            *,
+            model: str | None = None,
+            tools: Sequence[ToolSpec] = (),
+            tool_results: Sequence[ToolCallResult] = (),
+            previous_response_id: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            self.started.set()
+            await anyio.sleep_forever()
+            async for event in super().stream(
+                messages,
+                model=model,
+                tools=tools,
+                tool_results=tool_results,
+                previous_response_id=previous_response_id,
+            ):
+                yield event
+
+    async def run_prompt() -> object:
+        started = anyio.Event()
+        session = JsonlSessionStore(tmp_path).create()
+        agent = CodingSession(
+            provider=PreResponseCancellableProvider(started),
+            sessions=JsonlSessionStore(tmp_path),
+        )
+        cancel_scope = anyio.CancelScope()
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(
+                    cli_module.rpc._run_rpc_prompt_command,
+                    agent,
+                    session,
+                    (),
+                    0,
+                    "slow",
+                    "cmd-1",
+                    "prompt",
+                    cancel_scope,
+                    send.clone(),
+                    _TrustedGate(),
+                )
+                await started.wait()
+                cancel_scope.cancel()
+                completed = await receive.receive()
+
+        assert not session.path.exists()
+        return completed
+
+    completed = anyio.run(run_prompt)
+
+    assert completed.ok is False
+    assert completed.command_id == "cmd-1"
+    assert completed.history is not None
+    assert completed.history == ()
+    assert completed.entry_count == 0
+
+
+def test_rpc_prompt_cancellation_retains_entries_after_completion_boundary(
+    tmp_path: Path,
+) -> None:
+    class BlockingDangerTool:
+        name = "danger"
+        safety = "read"
+        description = "Block after the provider completes its tool-call turn."
+        input_schema: ToolInputSchema = {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        }
+
+        def __init__(self, started: anyio.Event) -> None:
+            self.started = started
+
+        async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+            self.started.set()
+            await anyio.sleep_forever()
+            return ToolResult(text="unused")
+
+    async def run_prompt() -> object:
+        started = anyio.Event()
+        session = JsonlSessionStore(tmp_path).create()
+        tools = ToolRegistry()
+        tools.register(BlockingDangerTool(started))
+        agent = CodingSession(
+            provider=ToolCallingProvider(),
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        cancel_scope = anyio.CancelScope()
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(
+                    cli_module.rpc._run_rpc_prompt_command,
+                    agent,
+                    session,
+                    (),
+                    0,
+                    "use tool",
+                    "cmd-1",
+                    "prompt",
+                    cancel_scope,
+                    send.clone(),
+                    _TrustedGate(),
+                )
+                await started.wait()
+                cancel_scope.cancel()
+                completed = await receive.receive()
+
+        retained = [
+            message
+            for message in session.read_messages()
+            if message.role in {"user", "assistant", "tool"}
+        ]
+        assert [message.role for message in retained] == ["user", "assistant"]
+        assert retained[0].content == "use tool"
+        assert retained[1].tool_calls is not None
+        assert [call.call_id for call in retained[1].tool_calls] == ["call-1"]
+        return completed
+
+    completed = anyio.run(run_prompt)
+
+    assert completed.ok is False
+    assert completed.command_id == "cmd-1"
+    assert completed.history is not None
+    assert [
+        message.role
+        for message in completed.history
+        if message.role in {"user", "assistant", "tool"}
+    ] == ["user", "assistant"]
+    assert completed.entry_count > 0
+
+
 def test_rpc_mode_cancel_reports_unknown_target(tmp_path: Path) -> None:
     runner = CliRunner()
 
