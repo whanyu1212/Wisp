@@ -833,10 +833,10 @@ def test_textual_renderer_dispatches_events_by_type() -> None:
     )
 
     assert "assistant: hello there" in rendered
-    # One card for c1: done glyph + name + first output line (not two lines).
+    # One card for c1: done glyph + name + the bounded multiline output preview.
     assert "✓ bash" in rendered
     assert "file-a" in rendered
-    assert "file-b" not in rendered  # only the first non-empty output line shows
+    assert "file-b" in rendered
     # The denied card carries the reason.
     assert "✗ write" in rendered
     assert "too risky" in rendered
@@ -864,8 +864,9 @@ def test_textual_renderer_suppresses_rpc_framing_events() -> None:
 
 
 def test_textual_renderer_collapses_call_and_result_into_one_card() -> None:
-    # Request then result for one call_id mutate a single card in place (one line,
-    # not two). An errored result flips the glyph to ✗ and shows the output line.
+    # Request then result for one call_id mutate a single card in place rather than
+    # mounting a second card. An errored result flips the glyph to ✗ and shows its
+    # bounded output preview.
     async def scenario() -> tuple[list[str], int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
@@ -920,7 +921,38 @@ def test_textual_tool_card_shows_true_elapsed_from_event_timestamps() -> None:
             return card.render().plain
 
     text = anyio.run(scenario)
-    assert text.endswith("· 2.5s"), text  # true delta, not the virtual-clock tick count
+    assert text.splitlines()[0].endswith("· 2.5s"), text
+
+
+def test_textual_tool_output_preview_reports_hidden_lines_and_bytes() -> None:
+    from wisp.tui.widgets import _preview_tool_output
+
+    preview = _preview_tool_output("one\ntwo\nthree", max_lines=2, max_bytes=100)
+
+    assert preview == "one\ntwo\n... 1 more line, 6 bytes hidden"
+
+
+def test_textual_tool_output_preview_bounds_long_unicode_line() -> None:
+    from wisp.tui.widgets import _preview_tool_output
+
+    preview = _preview_tool_output("é" * 10, max_lines=8, max_bytes=5)
+
+    assert preview == "éé\n... 16 bytes hidden"
+
+
+def test_textual_tool_card_bounds_large_multiline_output() -> None:
+    output = "\n".join(f"line-{index}" for index in range(12))
+    rendered = _render_events_to_transcript(
+        [
+            ToolCallRequested(call_id="c1", name="bash", arguments={}),
+            ToolResultReady(call_id="c1", name="bash", output=output, is_error=False),
+        ]
+    )
+
+    assert "line-0" in rendered
+    assert "line-7" in rendered
+    assert "line-8" not in rendered
+    assert "... 4 more lines" in rendered
 
 
 def test_textual_tool_card_without_a_request_shows_no_duration() -> None:
