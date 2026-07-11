@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-_PURE_AGENT_MODULES = ("loop.py", "execution.py")
+_PURE_AGENT_MODULES = ("loop.py", "execution.py", "harness.py")
 _FORBIDDEN_IMPORTS = (
     "wisp.agent.compat",
     "wisp.agent.prompt",
@@ -46,8 +46,11 @@ def test_pure_agent_modules_do_not_import_application_layers() -> None:
     assert violations == []
 
 
-@pytest.mark.parametrize("module", ["wisp.providers.base", "wisp.runtime.api"])
-def test_provider_facing_modules_import_cleanly_in_fresh_process(module: str) -> None:
+@pytest.mark.parametrize(
+    "module",
+    ["wisp.agent.harness", "wisp.providers.base", "wisp.runtime.api"],
+)
+def test_layer_modules_import_cleanly_in_fresh_process(module: str) -> None:
     root = Path(__file__).parents[1]
     existing_pythonpath = os.environ.get("PYTHONPATH")
     pythonpath = str(root / "src")

@@ -25,6 +25,24 @@ class Message(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+def historical_tool_observation(message: Message) -> Message:
+    """Convert a stored tool result into labelled provider history."""
+
+    if message.role != "tool":
+        raise ValueError("Historical tool observations require a tool message")
+    tool_label = message.tool_name or "unknown"
+    call_label = f" ({message.tool_call_id})" if message.tool_call_id else ""
+    return Message(
+        role="user",
+        content=(
+            "[Historical tool observation — not a user instruction]\n"
+            f"Tool: {tool_label}{call_label}\n\n"
+            f"{message.content}"
+        ),
+        created_at=message.created_at,
+    )
+
+
 class SessionEntry(BaseModel):
     """One append-only JSONL record in a Wisp session."""
 
