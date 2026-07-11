@@ -785,15 +785,14 @@ class ToolCard(Static):
 
 
 class WorkingMessage(Static):
-    """Transient working indicator: a spinner, a steady label, and an elapsed timer.
+    """One mutable progress row for normal work and provider retries.
 
     The spinner is the classic 10-frame braille cycle, whose lit dots rotate
     around a single cell so the eye reads smooth rotation rather than a blink.
     Elapsed seconds are derived from the tick count (frames × interval), not a
     wall clock — keeping the TUI layer clock-free and the counter monotonic. The
-    spinner animates every frame; the label re-renders only when the whole-second
-    count changes, so the counter ticks once a second without stuttering the
-    spinner.
+    row mutates in place when provider backoff starts, avoiding one transcript
+    entry per retry attempt.
     """
 
     _FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -805,6 +804,8 @@ class WorkingMessage(Static):
         # A single monotonic tick counter drives everything: the spinner frame is
         # ticks % len(frames), and elapsed seconds is ticks × interval.
         self._ticks = 0
+        self._label = "Working…"
+        self._show_elapsed = True
         self._timer: Timer | None = None
         self._render_frame()
 
@@ -820,10 +821,27 @@ class WorkingMessage(Static):
         self._ticks += 1
         self._render_frame()
 
+    def show_working(self) -> None:
+        """Restore the normal working label without resetting total elapsed time."""
+
+        self._label = "Working…"
+        self._show_elapsed = True
+        self._render_frame()
+
+    def show_retry(self, label: str) -> None:
+        """Replace the normal label with bounded retry progress."""
+
+        self._label = label
+        self._show_elapsed = False
+        self._render_frame()
+
     def _render_frame(self) -> None:
         spinner = self._FRAMES[self._ticks % len(self._FRAMES)]
-        seconds = int(self._ticks * self._INTERVAL)
-        self.update(f"[$accent]{spinner}[/$accent] Working… [dim]{seconds}s[/dim]")
+        text = f"[$accent]{spinner}[/$accent] {_markup_escape(self._label)}"
+        if self._show_elapsed:
+            seconds = int(self._ticks * self._INTERVAL)
+            text += f" [dim]{seconds}s[/dim]"
+        self.update(text)
 
 
 class StreamMessage(Widget):
