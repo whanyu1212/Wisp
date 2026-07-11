@@ -13,8 +13,8 @@ from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.messages import (
     Message,
     SessionEntry,
-    historical_tool_observation,
     message_from_completion_event,
+    provider_history_message,
 )
 from wisp.agent.prompt import (
     DEFAULT_CONTEXT_MAX_CHARS,
@@ -209,10 +209,9 @@ class CodingSession:
         for message in history:
             if message.role == "system":
                 continue
-            if message.role == "tool":
-                normalized.append(historical_tool_observation(message))
-            else:
-                normalized.append(message)
+            provider_message = provider_history_message(message)
+            if provider_message is not None:
+                normalized.append(provider_message)
         return tuple(normalized)
 
     async def _emit(

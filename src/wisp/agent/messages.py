@@ -76,6 +76,16 @@ def historical_tool_observation(message: Message) -> Message:
     )
 
 
+def provider_history_message(message: Message) -> Message | None:
+    """Normalize one durable transcript message for provider replay."""
+
+    if message.role == "tool":
+        return historical_tool_observation(message)
+    if message.role == "assistant" and message.tool_calls and not message.content.strip():
+        return None
+    return message
+
+
 class SessionEntry(BaseModel):
     """One append-only JSONL record in a Wisp session."""
 

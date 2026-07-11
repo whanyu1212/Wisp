@@ -18,6 +18,7 @@ from wisp.events import (
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
+    ToolCallSnapshot,
     ToolExecutionStarted,
     ToolResultReady,
     TurnCompleted,
@@ -621,6 +622,19 @@ def test_coding_session_continues_with_history_and_labeled_tool_observations(
         Message(role="system", content="old instructions"),
         Message(role="user", content="previous question"),
         Message(
+            role="assistant",
+            content="",
+            tool_calls=(
+                ToolCallSnapshot(
+                    call_id="call-1",
+                    name="read",
+                    arguments={"path": "README.md"},
+                ),
+            ),
+            response_id="response-1",
+            finish_reason="tool_calls",
+        ),
+        Message(
             role="tool",
             content="raw tool output must not be replayed as user text",
             tool_call_id="call-1",
@@ -658,6 +672,9 @@ def test_coding_session_continues_with_history_and_labeled_tool_observations(
         "previous answer",
         "next question",
     ]
+    assert not any(
+        message.role == "assistant" and not message.content for message in provider.seen_messages
+    )
 
     records = [json.loads(line) for line in session.path.read_text(encoding="utf-8").splitlines()]
     assert [record["message"]["role"] for record in records] == [

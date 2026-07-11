@@ -11,8 +11,8 @@ from wisp.agent.execution import ToolExecutor
 from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, run_agent_loop
 from wisp.agent.messages import (
     Message,
-    historical_tool_observation,
     message_from_completion_event,
+    provider_history_message,
 )
 from wisp.events import (
     ErrorEvent,
@@ -158,10 +158,12 @@ class AgentHarness:
             max_tool_iterations=self._config.max_tool_iterations,
             cancellation_token=token,
         )
-        provider_messages = tuple(
-            historical_tool_observation(message) if message.role == "tool" else message
-            for message in self._messages
-        )
+        provider_messages_list: list[Message] = []
+        for message in self._messages:
+            provider_message = provider_history_message(message)
+            if provider_message is not None:
+                provider_messages_list.append(provider_message)
+        provider_messages = tuple(provider_messages_list)
         loop_events = run_agent_loop(config, messages=provider_messages)
         try:
             while True:
