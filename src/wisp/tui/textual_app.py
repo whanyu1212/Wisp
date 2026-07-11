@@ -10,7 +10,8 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Header, Static, TextArea
+from textual.widget import Widget
+from textual.widgets import Header, TextArea
 
 from wisp.events import (
     AgentCompleted,
@@ -33,18 +34,18 @@ from wisp.tui.rendering import (
     _markup_escape,
     _truncate_to_cell_width,
     _tui_help_text,
-    format_tui_footer_text,
 )
 from wisp.tui.theme import WISP_THEMES, role_styles
 from wisp.tui.widgets import (
     DecisionPanel,
+    JumpToLatest,
     LineMessage,
     PromptEditor,
     SlashSuggest,
+    StatusBar,
     StreamMessage,
     ToolCard,
     Transcript,
-    WorkingMessage,
     _preview_tool_output,
 )
 
@@ -108,7 +109,7 @@ def _input_placeholder(hint: str) -> str:
 
 
 def _retry_progress_label(event: ProviderRetrying) -> str:
-    """Return compact, human-readable retry progress for the transient row."""
+    """Return compact, human-readable retry progress for the status footer."""
 
     provider = _truncate_to_cell_width(event.provider, 20)
     reason = _RETRY_REASON_LABELS[event.reason]
@@ -165,6 +166,17 @@ class TextualTui(App[None]):
         margin-top: 1;
         color: $text-muted;
         text-align: center;
+    }
+
+    #jump-latest-row {
+        overlay: screen;
+        constrain: inside;
+        display: none;
+        width: 1fr;
+        height: 1;
+        offset: 0 -1;
+        padding: 0 2 0 0;
+        align: right middle;
     }
 
     /* Minimalist messages: a single thin left rule in the role's color carries
@@ -268,8 +280,9 @@ class TextualTui(App[None]):
         self._prompt_send, self._prompt_receive = anyio.create_memory_object_stream[
             str | BaseException
         ](100)
-        self._status: Static | None = None
+        self._status: StatusBar | None = None
         self._transcript: Transcript | None = None
+        self._jump_to_latest: JumpToLatest | None = None
         self._input: PromptEditor | None = None
         self._suggest: SlashSuggest | None = None
         self._decision_panel: DecisionPanel | None = None
@@ -287,7 +300,10 @@ class TextualTui(App[None]):
         self._streaming_text = ""
         self._stream_widget: StreamMessage | None = None
         self._stream_refresh_pending = False
-        self._working_widget: WorkingMessage | None = None
+        # Distinct transcript widgets changed while the user is reading history.
+        # A set keeps token deltas and in-place tool-card updates from inflating
+        # the jump-to-latest count.
+        self._unseen_output: set[Widget] = set()
         # call_id → ToolCard, so the request, approval, and result events for one
         # tool call all mutate the same card instead of stacking three lines.
         self._tool_cards: dict[str, ToolCard] = {}
@@ -304,20 +320,19 @@ class TextualTui(App[None]):
                 empty_hint=_EMPTY_TRANSCRIPT_HINT,
                 id="transcript",
             )
+            # A full-width transparent overlay row provides right alignment while
+            # preserving this natural anchor at the transcript's lower edge.
+            with Horizontal(id="jump-latest-row"):
+                yield JumpToLatest(id="jump-latest")
             # The slash-command menu floats on the overlay layer anchored near the
             # input; yielded here so it shares the Vertical's coordinate space.
             yield SlashSuggest(id="suggest")
             yield DecisionPanel(id="decision-panel")
             yield PromptEditor(placeholder=_input_placeholder("wisp> "), id="input")
             with Horizontal(id="status-bar"):
-                # markup=False: the footer is always plain data (cwd, session,
-                # provider/model, status) — never intentional markup. Static
-                # renders markup by default, so a cwd or model name containing
-                # bracket syntax (e.g. a dir named `[x]`, or `/model [bold]`)
-                # would be interpreted as style tags and could restyle/hide/raise.
-                # Disabling markup on the widget makes the footer literal for every
-                # set_status() call without escaping at each site.
-                yield Static("idle", id="status", markup=False)
+                # StatusBar owns the shell snapshot and transient spinner so the
+                # same two-line footer surface can reflow safely at compact widths.
+                yield StatusBar(id="status")
 
     async def on_mount(self) -> None:
         # The Header renders these as the wordmark in the top bar: a quiet,
@@ -329,7 +344,8 @@ class TextualTui(App[None]):
         self.theme = WISP_THEMES[0].name
         self._role_styles = role_styles(self.current_theme)
         self._transcript = self.query_one("#transcript", Transcript)
-        self._status = self.query_one("#status", Static)
+        self._jump_to_latest = self.query_one("#jump-latest", JumpToLatest)
+        self._status = self.query_one("#status", StatusBar)
         self._input = self.query_one("#input", PromptEditor)
         self._suggest = self.query_one("#suggest", SlashSuggest)
         self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
@@ -359,6 +375,41 @@ class TextualTui(App[None]):
         # show_for() hides it otherwise (no `/`, a space, or no match).
         if event.text_area is self._input and self._suggest is not None:
             self._suggest.show_for(event.text_area.text)
+
+    def on_transcript_follow_changed(self, event: Transcript.FollowChanged) -> None:
+        if event.following:
+            self._clear_unseen_output()
+
+    def on_jump_to_latest_selected(self, event: JumpToLatest.Selected) -> None:
+        event.stop()
+        self.action_scroll_transcript_end()
+        if self._input is not None:
+            self._input.focus()
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self._forward_jump_overlay_scroll(event, direction=-1)
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self._forward_jump_overlay_scroll(event, direction=1)
+
+    def _forward_jump_overlay_scroll(
+        self,
+        event: events.MouseScrollUp | events.MouseScrollDown,
+        *,
+        direction: int,
+    ) -> None:
+        """Route wheel input through the transparent badge-alignment row."""
+
+        jump = self._jump_to_latest
+        transcript = self._transcript
+        target = event.widget
+        if jump is None or transcript is None or target not in {jump, jump.parent}:
+            return
+        transcript.scroll_to(
+            y=transcript.scroll_target_y + direction * self.scroll_sensitivity_y,
+            animate=False,
+        )
+        event.stop()
 
     def submit_command_line(self, text: str) -> None:
         """Submit a line as if the user typed it and pressed Enter.
@@ -489,10 +540,10 @@ class TextualTui(App[None]):
     def action_eof(self) -> None:
         self._signal_input(EOFError(), action="EOF")
 
-    # Scrollback: delegate to the Transcript's own scroll actions. The Transcript
-    # keeps its follow-the-tail flag correct via watch_scroll_y — scrolling up
-    # clears it, scrolling to the end restores it — so we never touch _follow here.
-    # None-guarded like _mount_line for calls before on_mount wires the widget.
+    # Scrollback: delegate to the Transcript's own scroll actions. Its scroll
+    # watcher derives follow intent for normal movement; End uses return_to_latest
+    # to restore that intent atomically before jumping. None-guarded like
+    # _mount_line for calls before on_mount wires the widget.
     def action_scroll_transcript_page_up(self) -> None:
         if self._transcript is not None:
             self._transcript.action_page_up()
@@ -507,7 +558,8 @@ class TextualTui(App[None]):
 
     def action_scroll_transcript_end(self) -> None:
         if self._transcript is not None:
-            self._transcript.action_scroll_end()
+            self._transcript.return_to_latest()
+        self._clear_unseen_output()
 
     def _signal_input(self, signal: BaseException, *, action: str) -> None:
         # send_nowait raises WouldBlock if the buffer is full; degrade to a
@@ -524,9 +576,9 @@ class TextualTui(App[None]):
         if self._input is not None:
             self._input.value = ""
 
-    def set_status(self, message: str) -> None:
+    def set_status(self, snapshot: TuiViewSnapshot) -> None:
         if self._status is not None:
-            self._status.update(message)
+            self._status.set_snapshot(snapshot)
 
     def status_width(self) -> int | None:
         # The width the footer text actually renders into: the #status widget's
@@ -584,42 +636,26 @@ class TextualTui(App[None]):
             self._input.focus()
 
     def show_working_indicator(self) -> None:
-        widget = self._ensure_working_indicator()
-        if widget is not None:
-            widget.show_working()
+        if self._status is not None:
+            self._status.show_working()
 
     def show_retry_indicator(self, label: str) -> None:
-        widget = self._ensure_working_indicator()
-        if widget is not None:
-            widget.show_retry(label)
-
-    def _ensure_working_indicator(self) -> WorkingMessage | None:
-        if self._transcript is None:
-            return None
-        if self._working_widget is not None:
-            return self._working_widget
-        self._working_widget = WorkingMessage()
-        self._transcript.mount_message(self._working_widget)
-        self._follow_tail_after_refresh()
-        return self._working_widget
+        if self._status is not None:
+            self._status.show_retry(label)
 
     def restart_working_indicator(self) -> None:
-        """Start a fresh progress row for a newly submitted prompt."""
+        """Start fresh footer activity for a newly submitted prompt."""
 
-        if self._transcript is None:
-            return
-        self.hide_working_indicator()
-        self.show_working_indicator()
+        if self._status is not None:
+            self._status.restart_working()
 
     def hide_working_indicator(self) -> None:
-        widget = self._working_widget
-        self._working_widget = None
-        if widget is not None:
-            widget.remove()
+        if self._status is not None:
+            self._status.hide_activity()
 
     def mount_tool_call(self, call_id: str, name: str, arguments: object) -> None:
         # Mount a fresh card for a tool call and register it by call_id. The
-        # working indicator is retired: this card now carries the "in progress"
+        # status activity is retired: this card now carries the "in progress"
         # signal (pending glyph + dim rule) for the rest of the call's lifecycle.
         if self._transcript is None:
             return
@@ -627,6 +663,7 @@ class TextualTui(App[None]):
         card = ToolCard(name, arguments)
         self._tool_cards[call_id] = card
         self._transcript.mount_message(card)
+        self._note_transcript_update(card)
         self._follow_tail_after_refresh()
 
     def resolve_tool_call(
@@ -641,6 +678,7 @@ class TextualTui(App[None]):
         if card is None:
             return
         card.set_state(status, detail=detail, elapsed=elapsed)
+        self._note_transcript_update(card)
         # A terminal state (done/denied/error) ends the call's lifecycle; forget
         # the card so the registry doesn't grow across a long session. The widget
         # stays mounted in the transcript — we just stop tracking it.
@@ -660,6 +698,7 @@ class TextualTui(App[None]):
             return
         for card in self._tool_cards.values():
             card.set_state("cancelled", detail=detail)
+            self._note_transcript_update(card)
         self._tool_cards.clear()
 
     def _style(self, role: str) -> str:
@@ -702,7 +741,9 @@ class TextualTui(App[None]):
         # mount lays out.
         if self._transcript is None:
             return
-        self._transcript.mount_message(LineMessage(markup, role=role))
+        widget = LineMessage(markup, role=role)
+        self._transcript.mount_message(widget)
+        self._note_transcript_update(widget)
         self._follow_tail_after_refresh()
 
     def append_stream(self, delta: str) -> None:
@@ -733,7 +774,7 @@ class TextualTui(App[None]):
             self.call_after_refresh(self._finalize_stream, widget, final_text)
 
     async def _finalize_stream(self, widget: StreamMessage, text: str) -> None:
-        await self._follow_tail_after_content(widget.set_content(text))
+        await self._follow_tail_after_content(widget, widget.set_content(text))
 
     def _schedule_stream_refresh(self) -> None:
         if self._stream_refresh_pending:
@@ -749,16 +790,21 @@ class TextualTui(App[None]):
         self._stream_refresh_pending = False
         if self._stream_widget is not None:
             await self._follow_tail_after_content(
-                self._stream_widget.set_content(self._streaming_text)
+                self._stream_widget, self._stream_widget.set_content(self._streaming_text)
             )
 
-    async def _follow_tail_after_content(self, await_content: Awaitable[None]) -> None:
+    async def _follow_tail_after_content(
+        self,
+        widget: StreamMessage,
+        await_content: Awaitable[None],
+    ) -> None:
         # Await the Markdown update's AwaitComplete so this update's block children
         # have mounted, THEN follow the tail — the scroll lands on the grown extent
         # instead of a partially-mounted one. This replaces guessing a fixed number
         # of refresh cycles with the update's own completion signal. The Transcript
         # still decides whether to scroll (it stays put if the user scrolled away).
         await await_content
+        self._note_transcript_update(widget)
         if self._transcript is not None:
             self._transcript.follow_tail()
 
@@ -767,6 +813,19 @@ class TextualTui(App[None]):
         # post-refresh pass reaches the settled scroll range; used by _mount_line.
         if self._transcript is not None:
             self.call_after_refresh(self._transcript.follow_tail)
+
+    def _note_transcript_update(self, widget: Widget) -> None:
+        transcript = self._transcript
+        jump = self._jump_to_latest
+        if transcript is None or jump is None or transcript.is_following:
+            return
+        self._unseen_output.add(widget)
+        jump.show_count(len(self._unseen_output))
+
+    def _clear_unseen_output(self) -> None:
+        self._unseen_output.clear()
+        if self._jump_to_latest is not None:
+            self._jump_to_latest.hide()
 
 
 class TextualTuiRenderer:
@@ -797,10 +856,7 @@ class TextualTuiRenderer:
         self._visible_input_mode = snapshot.input_mode
         self._visible_cwd = snapshot.cwd
         self.app.set_input_hint(snapshot.input_hint)
-        # Size the footer to the #status content region, not the app width — the
-        # status bar's horizontal padding makes the render area narrower, so app
-        # width would over-pad and wrap/clip the two-line footer.
-        self.app.set_status(format_tui_footer_text(snapshot, width=self.app.status_width()))
+        self.app.set_status(snapshot)
         if snapshot.input_mode != "running":
             self.app.hide_working_indicator()
         if snapshot.input_mode not in {"running", "approval", "trust"}:

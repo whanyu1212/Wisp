@@ -25,13 +25,14 @@ from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 from wisp.tui.widgets import (
     _ROLE_LABELS,
+    JumpToLatest,
     LineMessage,
     SlashSuggest,
+    StatusBar,
     StreamMessage,
     ToolCard,
     Transcript,
     TranscriptEmptyState,
-    WorkingMessage,
 )
 from wisp.tui.widgets import (
     PromptEditor as Input,
@@ -44,11 +45,17 @@ def _transcript_texts(app: TextualTui) -> list[str]:
     transcript = app.query_one("#transcript", Transcript)
     texts: list[str] = []
     for child in transcript.children:
-        if isinstance(child, LineMessage | WorkingMessage | ToolCard):
+        if isinstance(child, LineMessage | ToolCard):
             texts.append(child.render().plain)  # Textual Content
         elif isinstance(child, StreamMessage):
             texts.append(child._markdown.source)
     return texts
+
+
+def _status_activity(app: TextualTui) -> str:
+    """Plain second footer line, where transient activity replaces status."""
+
+    return app.query_one("#status", StatusBar).render().plain.splitlines()[1]
 
 
 def _provider_retry(
@@ -1266,21 +1273,21 @@ def test_textual_line_message_border_title_from_role_labels() -> None:
     assert titles == [_ROLE_LABELS["assistant"], _ROLE_LABELS["tool"], _ROLE_LABELS["error"]]
 
 
-def test_textual_running_mounts_transient_working_row() -> None:
-    # Running state should surface inline in the transcript as a dim, untitled
-    # working row while we're waiting for the first visible output.
-    async def scenario() -> list[tuple[str | None, object]]:
+def test_textual_running_uses_status_bar_without_polluting_transcript() -> None:
+    async def scenario() -> tuple[str, list[tuple[str | None, object]]]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()
             await pilot.pause()
-            return _transcript_cards(app_instance)
+            status = app_instance.query_one("#status", StatusBar)
+            return status.render().plain, _transcript_cards(app_instance)
 
-    cards = anyio.run(scenario)
-    assert cards == [("message--dim", None)]
+    status, cards = anyio.run(scenario)
+    assert "Working" in status
+    assert cards == []
 
 
-def test_textual_working_row_animates_spinner_and_counts_elapsed() -> None:
+def test_textual_status_activity_animates_spinner_and_counts_elapsed() -> None:
     # The heartbeat is a smooth braille spinner + a live elapsed-seconds counter,
     # both driven off one monotonic tick counter (frame = ticks % len, seconds =
     # ticks × interval). Advance ticks directly and assert the spinner rotates
@@ -1290,53 +1297,55 @@ def test_textual_working_row_animates_spinner_and_counts_elapsed() -> None:
         async with app_instance.run_test() as pilot:
             renderer.running()
             await pilot.pause()
-            transcript = app_instance.query_one("#transcript", Transcript)
-            row = next(c for c in transcript.children if isinstance(c, WorkingMessage))
+            status = app_instance.query_one("#status", StatusBar)
 
-            start = row.render().plain
+            start = status.render().plain.splitlines()[1]
             glyphs: set[str] = {start[0]}
             # One full spinner cycle plus enough ticks to cross 1s (interval 0.08s).
-            for _ in range(len(WorkingMessage._FRAMES) + 3):
-                row._tick()
-                glyphs.add(row.render().plain[0])
-            return len(glyphs), start, row.render().plain
+            for _ in range(len(StatusBar._FRAMES) + 3):
+                status._tick()
+                glyphs.add(status.render().plain.splitlines()[1][0])
+            return len(glyphs), start, status.render().plain.splitlines()[1]
 
     distinct_glyphs, start, later = anyio.run(scenario)
-    assert distinct_glyphs == len(WorkingMessage._FRAMES)  # every frame shown → smooth
+    assert distinct_glyphs == len(StatusBar._FRAMES)  # every frame shown → smooth
     assert start.endswith("0s")
     assert later.endswith("1s")  # counter advanced with elapsed time
-    assert start[0] in WorkingMessage._FRAMES  # a braille frame, not the old dot
+    assert start[0] in StatusBar._FRAMES  # a braille frame, not the old dot
 
 
-def test_textual_retry_progress_mutates_one_row_and_rejects_older_attempts() -> None:
-    async def scenario() -> tuple[int, bool, str, str]:
+def test_textual_retry_progress_mutates_status_and_rejects_older_attempts() -> None:
+    async def scenario() -> tuple[bool, str, str, list[str]]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()
             renderer.event(TurnStarted(turn=1))
             renderer.event(_provider_retry(attempt=2, delay_seconds=1.25))
             await pilot.pause()
-            transcript = app_instance.query_one("#transcript", Transcript)
-            row = next(child for child in transcript.children if isinstance(child, WorkingMessage))
-            first = row.render().plain
+            status = app_instance.query_one("#status", StatusBar)
+            first = _status_activity(app_instance)
 
             renderer.event(_provider_retry(attempt=1, delay_seconds=9.0))
             renderer.event(_provider_retry(attempt=2, delay_seconds=9.0))
             renderer.event(_provider_retry(attempt=3, status_code=429))
             await pilot.pause()
-            rows = [child for child in transcript.children if isinstance(child, WorkingMessage)]
-            return len(rows), rows[0] is row, first, row.render().plain
+            return (
+                status._active,
+                first,
+                _status_activity(app_instance),
+                _transcript_texts(app_instance),
+            )
 
-    count, same_row, first, latest = anyio.run(scenario)
-    assert count == 1
-    assert same_row
+    active, first, latest, transcript = anyio.run(scenario)
+    assert active
     assert "Retrying openai · 2/3 in 1.2s · rate limited" in first
     assert "Retrying openai · 3/3 in 0.5s · rate limited (429)" in latest
     assert "9.0s" not in latest
+    assert transcript == []
 
 
 def test_textual_retry_progress_recovers_and_ignores_post_start_retry() -> None:
-    async def scenario() -> tuple[str, str, bool]:
+    async def scenario() -> tuple[str, str, bool, bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()
@@ -1345,21 +1354,21 @@ def test_textual_retry_progress_recovers_and_ignores_post_start_retry() -> None:
             renderer.event(MessageStarted(turn=1))
             renderer.event(_provider_retry(attempt=3))
             await pilot.pause()
-            transcript = app_instance.query_one("#transcript", Transcript)
-            row = next(child for child in transcript.children if isinstance(child, WorkingMessage))
-            recovered = row.render().plain
+            status = app_instance.query_one("#status", StatusBar)
+            recovered = _status_activity(app_instance)
 
             renderer.token_delta("response")
             await pilot.pause()
             texts = _transcript_texts(app_instance)
-            return recovered, "\n".join(texts), row._timer is None
+            return recovered, "\n".join(texts), status._timer is None, status._active
 
-    recovered, transcript, timer_stopped = anyio.run(scenario)
+    recovered, transcript, timer_stopped, active = anyio.run(scenario)
     assert "Working" in recovered
     assert "Retrying" not in recovered
     assert "response" in transcript
     assert "Retrying" not in transcript
     assert timer_stopped
+    assert not active
 
 
 def test_textual_retry_progress_resumes_for_a_later_tool_turn() -> None:
@@ -1374,41 +1383,35 @@ def test_textual_retry_progress_resumes_for_a_later_tool_turn() -> None:
             renderer.event(TurnStarted(turn=2))
             renderer.event(_provider_retry(turn=2, attempt=1, reason="server_error"))
             await pilot.pause()
-            rows = [
-                child
-                for child in app_instance.query_one("#transcript", Transcript).children
-                if isinstance(child, WorkingMessage)
-            ]
-            return rows[0].render().plain
+            return _status_activity(app_instance)
 
     rendered = anyio.run(scenario)
     assert "Retrying openai · 1/3 in 0.5s · server error" in rendered
 
 
 def test_textual_retry_progress_does_not_replay_or_survive_terminal_states() -> None:
-    async def scenario() -> tuple[int, bool, bool]:
+    async def scenario() -> tuple[bool, bool, bool, str]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.event(_provider_retry())
             await pilot.pause()
-            transcript = app_instance.query_one("#transcript", Transcript)
-            replayed = sum(isinstance(child, WorkingMessage) for child in transcript.children)
+            status = app_instance.query_one("#status", StatusBar)
+            replayed = status._active
 
             renderer.running()
             renderer.event(TurnStarted(turn=1))
             renderer.event(_provider_retry())
             await pilot.pause()
-            row = next(child for child in transcript.children if isinstance(child, WorkingMessage))
             renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
             renderer.event(_provider_retry(attempt=2))
             await pilot.pause()
-            remaining = any(isinstance(child, WorkingMessage) for child in transcript.children)
-            return replayed, remaining, row._timer is None
+            return replayed, status._active, status._timer is None, _status_activity(app_instance)
 
-    replayed, remaining, timer_stopped = anyio.run(scenario)
-    assert replayed == 0
+    replayed, remaining, timer_stopped, rendered = anyio.run(scenario)
+    assert not replayed
     assert not remaining
     assert timer_stopped
+    assert "Retrying" not in rendered
 
 
 def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure() -> None:
@@ -1426,9 +1429,9 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
                 )
             )
             await pilot.pause()
-            transcript = app_instance.query_one("#transcript", Transcript)
+            status = app_instance.query_one("#status", StatusBar)
             return (
-                any(isinstance(child, WorkingMessage) for child in transcript.children),
+                status._active,
                 app_instance.query_one("#decision-panel").display,
             )
 
@@ -1438,15 +1441,11 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
             renderer.running()
             renderer.event(_provider_retry())
             await pilot.pause()
-            transcript = app_instance.query_one("#transcript", Transcript)
-            row = next(child for child in transcript.children if isinstance(child, WorkingMessage))
+            status = app_instance.query_one("#status", StatusBar)
             renderer.cancelling("Cancelling current prompt...")
             renderer.event(_provider_retry(attempt=2))
             await pilot.pause()
-            return (
-                any(isinstance(child, WorkingMessage) for child in transcript.children),
-                row._timer is None,
-            )
+            return status._active, status._timer is None
 
     async def failure_scenario() -> tuple[bool, bool]:
         app_instance, renderer = create_textual_tui()
@@ -1454,14 +1453,10 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
             renderer.running()
             renderer.event(_provider_retry())
             await pilot.pause()
-            transcript = app_instance.query_one("#transcript", Transcript)
-            row = next(child for child in transcript.children if isinstance(child, WorkingMessage))
+            status = app_instance.query_one("#status", StatusBar)
             renderer.rpc_event_reader_failed("closed")
             await pilot.pause()
-            return (
-                any(isinstance(child, WorkingMessage) for child in transcript.children),
-                row._timer is None,
-            )
+            return status._active, status._timer is None
 
     approval_row, approval_visible = anyio.run(approval_scenario)
     cancellation_row, cancellation_timer_stopped = anyio.run(cancellation_scenario)
@@ -1499,22 +1494,20 @@ def test_textual_retry_progress_preserves_compact_prompt_and_footer() -> None:
                 )
             )
             await pilot.pause()
-            transcript = app_instance.query_one("#transcript", Transcript)
-            row = next(child for child in transcript.children if isinstance(child, WorkingMessage))
             input_widget = app_instance.query_one("#input", Input)
-            footer = app_instance.query_one("#status", Static)
+            footer = app_instance.query_one("#status", StatusBar)
             return (
-                row.render().plain,
-                row.region.y < input_widget.region.y,
+                footer.render().plain,
+                footer.region.y > input_widget.region.y,
                 input_widget.region.y < footer.region.y,
                 input_widget.display,
             )
 
-    rendered, retry_above_prompt, footer_below_prompt, prompt_visible = anyio.run(scenario)
+    rendered, activity_in_footer, footer_below_prompt, prompt_visible = anyio.run(scenario)
     assert "custom-provider-nam…" in rendered
-    assert "2/3 in 0.5s" in rendered
-    assert "temporary HTTP error (503)" in rendered
-    assert retry_above_prompt
+    assert "2/3" in rendered
+    assert "openai-codex/gpt-5-codex" in rendered
+    assert activity_in_footer
     assert footer_below_prompt
     assert prompt_visible
 
@@ -1779,22 +1772,22 @@ def test_textual_footer_stays_below_input_without_stealing_focus() -> None:
     assert focus_ok
 
 
-def test_textual_working_row_disappears_on_first_stream_output() -> None:
-    async def scenario() -> tuple[list[str], list[str]]:
+def test_textual_working_status_disappears_on_first_stream_output() -> None:
+    async def scenario() -> tuple[str, str, list[str]]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()
             await pilot.pause()
-            before = _transcript_texts(app_instance)
+            before = _status_activity(app_instance)
             renderer.token_delta("hello")
             await pilot.pause()
-            after = _transcript_texts(app_instance)
-            return before, after
+            after = _status_activity(app_instance)
+            return before, after, _transcript_texts(app_instance)
 
-    before, after = anyio.run(scenario)
-    assert any("Working" in text for text in before)
-    assert all("Working" not in text for text in after)
-    assert any("hello" in text for text in after)
+    before, after, transcript = anyio.run(scenario)
+    assert "Working" in before
+    assert "Working" not in after
+    assert any("hello" in text for text in transcript)
 
 
 def _fill_transcript(renderer: TextualTuiRenderer, count: int) -> None:
@@ -1905,6 +1898,116 @@ def test_textual_streaming_does_not_yank_a_reader_who_scrolled_up() -> None:
     scroll_y, follow = anyio.run(scenario)
     assert not follow  # scrolling away cleared the follow intent
     assert scroll_y <= 7  # stayed roughly where the user left it, not the bottom
+
+
+def test_textual_scrollback_counts_distinct_unseen_output_and_end_clears_it() -> None:
+    async def scenario() -> dict[str, object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            jump = app_instance.query_one("#jump-latest", JumpToLatest)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            await pilot.press("pageup")
+            await pilot.pause()
+
+            # Multiple deltas reconcile the same StreamMessage, so this is one
+            # unseen logical output rather than a token-counting notification.
+            renderer.token_delta("first ")
+            await pilot.pause()
+            renderer.token_delta("second")
+            await pilot.pause()
+            stream_count = len(app_instance._unseen_output)
+            stream_label = jump.render().plain
+
+            # A new ToolCard is a second logical output; resolving that same card
+            # in place must not increase the count again.
+            renderer.event(ToolCallRequested(call_id="latest", name="read", arguments={}))
+            await pilot.pause()
+            tool_count = len(app_instance._unseen_output)
+            renderer.event(
+                ToolResultReady(call_id="latest", name="read", output="ok", is_error=False)
+            )
+            await pilot.pause()
+            resolved_count = len(app_instance._unseen_output)
+            resolved_label = jump.render().plain
+
+            await pilot.press("end")
+            await pilot.pause()
+            return {
+                "stream_count": stream_count,
+                "stream_label": stream_label,
+                "tool_count": tool_count,
+                "resolved_count": resolved_count,
+                "resolved_label": resolved_label,
+                "cleared": len(app_instance._unseen_output) == 0,
+                "hidden": jump.display is False,
+                "following": transcript.is_following,
+            }
+
+    result = anyio.run(scenario)
+    assert result["stream_count"] == 1
+    assert result["stream_label"] == "↓ 1 new"
+    assert result["tool_count"] == 2
+    assert result["resolved_count"] == 2
+    assert result["resolved_label"] == "↓ 2 new"
+    assert result["cleared"]
+    assert result["hidden"]
+    assert result["following"]
+
+
+def test_textual_jump_to_latest_click_restores_follow_and_input_focus() -> None:
+    async def scenario() -> dict[str, object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            jump = app_instance.query_one("#jump-latest", JumpToLatest)
+            input_widget = app_instance.query_one("#input", Input)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            await pilot._post_mouse_events(
+                [events.MouseScrollUp],
+                widget=transcript,
+                times=3,
+            )
+            await pilot.pause()
+
+            renderer.notice("new output")
+            await pilot.pause()
+            visible_before_click = jump.display
+            overlay_row = app_instance.query_one("#jump-latest-row")
+            before_overlay_wheel = transcript.scroll_y
+            await pilot._post_mouse_events(
+                [events.MouseScrollUp],
+                widget=overlay_row,
+                times=1,
+            )
+            await pilot.pause()
+            overlay_wheel_forwarded = transcript.scroll_y < before_overlay_wheel
+            clicked = await pilot.click("#jump-latest")
+            await pilot.pause()
+            return {
+                "visible_before_click": visible_before_click,
+                "overlay_wheel_forwarded": overlay_wheel_forwarded,
+                "clicked": clicked,
+                "hidden": jump.display is False,
+                "following": transcript.is_following,
+                "at_bottom": transcript.scroll_y >= transcript.max_scroll_y - 3,
+                "focus_kept": app_instance.focused is input_widget,
+            }
+
+    result = anyio.run(scenario)
+    assert result["visible_before_click"]
+    assert result["overlay_wheel_forwarded"]
+    assert result["clicked"]
+    assert result["hidden"]
+    assert result["following"]
+    assert result["at_bottom"]
+    assert result["focus_kept"]
 
 
 def test_textual_returning_to_the_bottom_resumes_following() -> None:

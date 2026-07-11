@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from textual import events
 from textual.app import ComposeResult
@@ -32,7 +32,12 @@ from textual.widgets.option_list import Option
 
 from wisp.events import ToolApprovalRequested, TrustRequested
 from wisp.tui.commands import SLASH_COMMAND_SPECS, SlashCommandSpec
-from wisp.tui.rendering import _format_cwd_for_footer, _markup_escape
+from wisp.tui.rendering import (
+    TuiViewSnapshot,
+    _format_cwd_for_footer,
+    _markup_escape,
+    format_tui_footer_text,
+)
 
 _DECISION_PREVIEW_LINES = 5
 _DECISION_PREVIEW_CHARS = 320
@@ -521,6 +526,51 @@ class TranscriptEmptyState(Vertical):
         )
 
 
+class JumpToLatest(Static):
+    """Clickable overlay that reports logical output unseen below the viewport."""
+
+    DEFAULT_CSS = """
+    JumpToLatest {
+        display: none;
+        width: auto;
+        max-width: 16;
+        height: 1;
+        padding: 0 1;
+        background: $panel;
+        color: $primary;
+    }
+
+    JumpToLatest:hover {
+        background: $surface-lighten-1;
+        color: $text;
+    }
+    """
+
+    class Selected(Message):
+        """The user requested a return to the newest transcript output."""
+
+    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
+        super().__init__("", id=id, markup=False)
+
+    def show_count(self, count: int) -> None:
+        bounded = "99+" if count > 99 else str(max(1, count))
+        self.update(f"↓ {bounded} new")
+        if self.parent is not None:
+            self.parent.display = True
+        self.display = True
+
+    def hide(self) -> None:
+        self.display = False
+        if self.parent is not None:
+            self.parent.display = False
+
+    def on_click(self, event: events.Click) -> None:
+        if event.button != 1:
+            return
+        event.stop()
+        self.post_message(self.Selected())
+
+
 class Transcript(VerticalScroll):
     """Scrollable message container that follows the newest output like `tail -f`.
 
@@ -543,6 +593,13 @@ class Transcript(VerticalScroll):
     append the app calls ``follow_tail()``, which scrolls to the end iff the flag
     is set.
     """
+
+    class FollowChanged(Message):
+        """The viewport entered or left sticky tail-follow mode."""
+
+        def __init__(self, following: bool) -> None:
+            super().__init__()
+            self.following = following
 
     def __init__(
         self,
@@ -580,13 +637,31 @@ class Transcript(VerticalScroll):
         # of an animated user scroll). Re-derive follow intent from the resting
         # position: at the bottom means "keep following", anywhere above means
         # "the user is reading back, leave them there".
+        previous = self._follow
         super().watch_scroll_y(old_value, new_value)
         self._follow = self.is_vertical_scroll_end
+        if self._follow != previous:
+            self.post_message(self.FollowChanged(self._follow))
+
+    @property
+    def is_following(self) -> bool:
+        """Whether new output should remain pinned to the transcript tail."""
+
+        return self._follow
 
     def follow_tail(self) -> None:
         """Scroll to the newest content iff the user hasn't scrolled away."""
         if self._follow:
             self.scroll_end(animate=False)
+
+    def return_to_latest(self) -> None:
+        """Restore tail-follow intent and jump to the newest output immediately."""
+
+        was_following = self._follow
+        self._follow = True
+        self.scroll_end(animate=False)
+        if not was_following:
+            self.post_message(self.FollowChanged(True))
 
 
 class SlashSuggest(OptionList):
@@ -832,64 +907,114 @@ class ToolCard(Static):
         self.update(text)
 
 
-class WorkingMessage(Static):
-    """One mutable progress row for normal work and provider retries.
+class StatusBar(Static):
+    """Compact footer with an in-place activity and retry indicator.
 
     The spinner is the classic 10-frame braille cycle, whose lit dots rotate
     around a single cell so the eye reads smooth rotation rather than a blink.
     Elapsed seconds are derived from the tick count (frames × interval), not a
     wall clock — keeping the TUI layer clock-free and the counter monotonic. The
-    row mutates in place when provider backoff starts, avoiding one transcript
-    entry per retry attempt.
+    footer mutates in place when provider backoff starts, keeping transient
+    activity out of the conversation transcript.
     """
 
     _FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
     _INTERVAL = 0.08  # ~12.5 fps: fluid braille rotation without churning the CPU
 
-    def __init__(self) -> None:
-        super().__init__("")
-        self.add_class("message", "message--dim")
+    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
+        super().__init__("idle", id=id, markup=False)
+        self._snapshot = TuiViewSnapshot(status="idle", input_hint="wisp> ")
+        self._active = False
         # A single monotonic tick counter drives everything: the spinner frame is
         # ticks % len(frames), and elapsed seconds is ticks × interval.
         self._ticks = 0
         self._label = "Working…"
         self._show_elapsed = True
         self._timer: Timer | None = None
-        self._render_frame()
 
     def on_mount(self) -> None:
-        self._timer = self.set_interval(self._INTERVAL, self._tick)
+        self._render_status()
 
     def on_unmount(self) -> None:
-        if self._timer is not None:
-            self._timer.stop()
-            self._timer = None
+        self._stop_timer()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._render_status()
+
+    def set_snapshot(self, snapshot: TuiViewSnapshot) -> None:
+        """Replace the shell-owned footer state without disturbing activity."""
+
+        self._snapshot = snapshot
+        self._render_status()
 
     def _tick(self) -> None:
         self._ticks += 1
-        self._render_frame()
+        self._render_status()
+
+    def restart_working(self) -> None:
+        """Start a fresh activity lifetime for a newly submitted prompt."""
+
+        self._stop_timer()
+        self._ticks = 0
+        self._active = True
+        self._label = "Working…"
+        self._show_elapsed = True
+        self._start_timer()
+        self._render_status()
 
     def show_working(self) -> None:
         """Restore the normal working label without resetting total elapsed time."""
 
+        self._ensure_active()
         self._label = "Working…"
         self._show_elapsed = True
-        self._render_frame()
+        self._render_status()
 
     def show_retry(self, label: str) -> None:
         """Replace the normal label with bounded retry progress."""
 
+        self._ensure_active()
         self._label = label
         self._show_elapsed = False
-        self._render_frame()
+        self._render_status()
 
-    def _render_frame(self) -> None:
+    def hide_activity(self) -> None:
+        """Stop and clear transient activity while retaining footer state."""
+
+        self._active = False
+        self._stop_timer()
+        self._render_status()
+
+    def _ensure_active(self) -> None:
+        if self._active:
+            return
+        self._ticks = 0
+        self._active = True
+        self._start_timer()
+
+    def _start_timer(self) -> None:
+        if self._timer is None:
+            self._timer = self.set_interval(self._INTERVAL, self._tick)
+
+    def _stop_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _activity_text(self) -> str:
         spinner = self._FRAMES[self._ticks % len(self._FRAMES)]
-        text = f"[$accent]{spinner}[/$accent] {_markup_escape(self._label)}"
+        text = f"{spinner} {self._label}"
         if self._show_elapsed:
             seconds = int(self._ticks * self._INTERVAL)
-            text += f" [dim]{seconds}s[/dim]"
-        self.update(text)
+            text += f" {seconds}s"
+        return text
+
+    def _render_status(self) -> None:
+        snapshot = self._snapshot
+        if self._active:
+            snapshot = replace(snapshot, status=self._activity_text())
+        width = self.content_size.width
+        self.update(format_tui_footer_text(snapshot, width=width if width > 0 else None))
 
 
 class StreamMessage(Widget):
