@@ -7,6 +7,7 @@ import os
 from pytest import MonkeyPatch
 from textual import events
 from textual.await_complete import AwaitComplete
+from textual.content import Content
 from textual.widgets import Static
 
 import wisp.cli as cli_module
@@ -29,6 +30,7 @@ from wisp.tui.widgets import (
     StreamMessage,
     ToolCard,
     Transcript,
+    TranscriptEmptyState,
     WorkingMessage,
 )
 from wisp.tui.widgets import (
@@ -93,7 +95,11 @@ def _transcript_cards(app: TextualTui) -> list[tuple[str | None, object]]:
     """(role class, border_title) for every mounted transcript card."""
 
     transcript = app.query_one("#transcript", Transcript)
-    return [(_transcript_role_class(c), c.border_title) for c in transcript.children]
+    return [
+        (role, child.border_title)
+        for child in transcript.children
+        if (role := _transcript_role_class(child)) is not None
+    ]
 
 
 def _cards_for_events(events: list[object]) -> list[tuple[str | None, object]]:
@@ -1599,15 +1605,17 @@ def test_textual_session_saved_is_not_rendered() -> None:
     # SessionSaved is session/RPC audit, not conversation — the active session id
     # already lives in the status bar, so a per-turn "session saved:" line is pure
     # redundancy. The Textual renderer drops it, matching the line renderer.
-    async def scenario() -> list[object]:
+    async def scenario() -> tuple[list[tuple[str | None, object]], bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.event(SessionSaved(session_id="sess-1", path=Path("/tmp/sess.json")))
             await pilot.pause()
-            return _transcript_cards(app_instance)
+            has_empty_state = bool(list(app_instance.query(TranscriptEmptyState)))
+            return _transcript_cards(app_instance), has_empty_state
 
-    cards = anyio.run(scenario)
+    cards, has_empty_state = anyio.run(scenario)
     assert cards == []
+    assert has_empty_state is True
 
 
 def test_textual_stream_message_carries_the_assistant_card() -> None:
@@ -2304,28 +2312,114 @@ def test_textual_enter_runs_completed_command_through_typed_path() -> None:
     assert menu_open is False
 
 
-def test_textual_startup_shows_the_wordmark_banner() -> None:
-    # startup() renders the wordmark as an accent-colored, borderless banner plus
-    # the tagline — the greeting, distinct from a normal message card.
-    async def scenario() -> tuple[list[str | None], list[str]]:
+def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
+    # The wordmark identifies an empty session without consuming permanent
+    # scrollback. Its 40-column block and prompt hint must fit the compact audit
+    # viewport, then disappear before the first real transcript item is mounted.
+    async def scenario() -> tuple[
+        tuple[str, str],
+        tuple[int, int, int],
+        list[str],
+        list[str],
+    ]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(72, 20)) as pilot:
             renderer.startup()
             await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
-            roles = [_transcript_role_class(c) for c in transcript.children]
-            texts = _transcript_texts(app_instance)
-            return roles, texts
+            empty = app_instance.query_one("#transcript-empty", TranscriptEmptyState)
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
+            hint = app_instance.query_one("#transcript-empty-hint", Static)
+            centers = (
+                transcript.region.x + transcript.region.width // 2,
+                wordmark.region.x + wordmark.region.width // 2,
+                hint.region.x + hint.region.width // 2,
+            )
+            initial_children = [type(child).__name__ for child in transcript.children]
+            wordmark_content = wordmark.render()
+            hint_content = hint.render()
+            assert isinstance(wordmark_content, Content)
+            assert isinstance(hint_content, Content)
+            content = (wordmark_content.plain, hint_content.plain)
 
-    roles, texts = anyio.run(scenario)
-    assert "message--banner" in roles  # the wordmark is a banner, not a card
-    # The banner carries the block-drawing wordmark; a single tightened greeting
-    # line follows — tagline + the `/` command door + how to quit, all in one row.
-    assert any("▄" in t for t in texts)
-    greeting = [t for t in texts if "a quiet coding agent" in t]
-    assert len(greeting) == 1
-    assert "press / for commands" in greeting[0]
-    assert "/quit to exit" in greeting[0]
+            renderer.prompt_submitted("hello")
+            await pilot.pause()
+            final_children = [type(child).__name__ for child in transcript.children]
+            assert empty not in transcript.children
+            return content, centers, initial_children, final_children
+
+    content, centers, initial_children, final_children = anyio.run(scenario)
+    wordmark, hint = content
+    assert "▄" in wordmark
+    assert hint == "Type a prompt or / for commands."
+    assert centers[0] == centers[1] == centers[2]
+    assert initial_children == ["TranscriptEmptyState"]
+    assert final_children == ["LineMessage"]
+
+
+def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
+    async def scenario() -> dict[str, tuple[str, str, str, str, float]]:
+        styles: dict[str, tuple[str, str, str, str, float]] = {}
+        for theme in ("wisp", "wisp-light"):
+            app_instance = TextualTui()
+            async with app_instance.run_test() as pilot:
+                app_instance.theme = theme
+                input_widget = app_instance.query_one("#input", Input)
+                app_instance.screen.set_focus(None)
+                await pilot.pause(0.25)
+                idle_background = input_widget.styles.background.hex
+                idle_border = input_widget.styles.border_bottom[1].hex
+
+                input_widget.focus()
+                await pilot.pause(0.25)
+                transition = input_widget.styles.transitions["border"]
+                styles[theme] = (
+                    idle_background,
+                    input_widget.styles.background.hex,
+                    idle_border,
+                    input_widget.styles.border_bottom[1].hex,
+                    transition.duration,
+                )
+        return styles
+
+    styles = anyio.run(scenario)
+    expected = {
+        "wisp": ("#0E1216", "#151B21", "#3FB8B8"),
+        "wisp-light": ("#FBFCFD", "#FFFFFF", "#2F8F8F"),
+    }
+    for theme, (idle_background, focused_background, idle_border, focused_border, delay) in (
+        styles.items()
+    ):
+        expected_idle, expected_focused, expected_accent = expected[theme]
+        assert idle_background == expected_idle
+        assert focused_background == expected_focused
+        assert idle_border != focused_border
+        assert focused_border == expected_accent
+        assert delay == 0.2
+
+
+def test_textual_scrollbar_colors_resolve_for_both_themes() -> None:
+    async def scenario() -> dict[str, tuple[str, str, str, int]]:
+        colors: dict[str, tuple[str, str, str, int]] = {}
+        for theme in ("wisp", "wisp-light"):
+            app_instance = TextualTui()
+            async with app_instance.run_test() as pilot:
+                app_instance.theme = theme
+                await pilot.pause()
+                transcript = app_instance.query_one("#transcript", Transcript)
+                colors[theme] = (
+                    transcript.styles.scrollbar_color.hex,
+                    transcript.styles.scrollbar_color_hover.hex,
+                    transcript.styles.scrollbar_color_active.hex,
+                    transcript.styles.scrollbar_size_vertical,
+                )
+        return colors
+
+    colors = anyio.run(scenario)
+    assert colors == {
+        "wisp": ("#7C8B99", "#4AA3C7", "#3FB8B8", 1),
+        "wisp-light": ("#55636D", "#2F8FB3", "#2F8F8F", 1),
+    }
 
 
 def test_textual_input_is_pinned_to_the_bottom() -> None:
