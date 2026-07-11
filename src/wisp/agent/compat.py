@@ -143,9 +143,9 @@ class _ConfiguredToolExecutor:
     async def _run_tool(self, tool: Tool, arguments: dict[str, object]) -> tuple[str, bool]:
         try:
             result = await tool.run(arguments, self._context)
+            return result.text, False
         except Exception as exc:  # noqa: BLE001 - tool failures are model-visible results
             return str(exc), True
-        return result.text, False
 
 
 class Agent:
