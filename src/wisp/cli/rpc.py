@@ -12,7 +12,7 @@ import os
 import stat
 import sys
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Empty, Queue
@@ -29,12 +29,14 @@ from wisp.agent.prompt import resolve_project_context_root
 from wisp.coding import CodingSession
 from wisp.config import WispConfig
 from wisp.events import (
+    AgentStarted,
     ErrorEvent,
     ProjectConfigApplied,
     RpcCommandFinished,
     RpcCommandStarted,
     TrustRequested,
     TrustResolved,
+    WispEvent,
 )
 from wisp.providers.base import ProviderError
 from wisp.rpc.commands import ApprovalScope
@@ -792,6 +794,21 @@ async def _run_rpc_prompt_command(
     trust_gate: _RpcTrustGate,
 ) -> None:
     error: str | None = None
+    run_entry_start = entry_start
+
+    async def track_run_start(events: AsyncIterator[WispEvent]) -> AsyncIterator[WispEvent]:
+        nonlocal run_entry_start
+        async for event in events:
+            if isinstance(event, AgentStarted):
+                # AgentStarted follows recovery of prior pending entries and precedes
+                # persistence of this run's prompt messages.
+                run_entry_start = await anyio.to_thread.run_sync(
+                    _rpc_session_entry_count,
+                    session,
+                    entry_start,
+                )
+            yield event
+
     try:
         with cancel_scope:
             try:
@@ -801,7 +818,7 @@ async def _run_rpc_prompt_command(
                 # deadlock the reader.
                 agent.trusted = await trust_gate.resolve()
                 await _render_json_events(
-                    agent.run(prompt, session=session, history=committed_history)
+                    track_run_start(agent.run(prompt, session=session, history=committed_history))
                 )
             except _JsonOutputModeError as exc:
                 error = str(exc)
@@ -817,6 +834,16 @@ async def _run_rpc_prompt_command(
                 error = f"RPC command cancelled: {command_id}"
     finally:
         cancelled = error is not None and error.startswith("RPC command cancelled:")
+        if cancelled:
+            # Keep recovered prior entries, but discard this prompt unless the run
+            # produced provider output that CodingSession durably persisted.
+            crossed_completion_boundary = await anyio.to_thread.run_sync(
+                _rpc_has_durable_completion,
+                session,
+                run_entry_start,
+            )
+            if not crossed_completion_boundary:
+                await session.truncate_entries(run_entry_start)
         entry_count, updated_history = await anyio.to_thread.run_sync(
             _updated_rpc_session_state,
             session,
@@ -851,6 +878,29 @@ def _updated_rpc_history(
     entry_start: int,
 ) -> tuple[Message, ...]:
     return _updated_rpc_session_state(session, committed_history, entry_start)[1]
+
+
+def _rpc_session_entry_count(
+    session: JsonlSession,
+    fallback: int,
+) -> int:
+    if not session.path.is_file():
+        return fallback
+    return len(session.read_entries())
+
+
+def _rpc_has_durable_completion(session: JsonlSession, entry_start: int) -> bool:
+    if not session.path.is_file():
+        return False
+    for entry in session.read_entries()[entry_start:]:
+        message = entry.message
+        if message is None:
+            continue
+        if message.role == "assistant" and message.finish_reason is not None:
+            return True
+        if message.role == "tool" and message.tool_call_id is not None:
+            return True
+    return False
 
 
 def _updated_rpc_session_state(
