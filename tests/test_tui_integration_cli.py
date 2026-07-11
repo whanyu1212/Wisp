@@ -2387,9 +2387,13 @@ def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
         "wisp": ("#0E1216", "#151B21", "#3FB8B8"),
         "wisp-light": ("#FBFCFD", "#FFFFFF", "#2F8F8F"),
     }
-    for theme, (idle_background, focused_background, idle_border, focused_border, delay) in (
-        styles.items()
-    ):
+    for theme, (
+        idle_background,
+        focused_background,
+        idle_border,
+        focused_border,
+        delay,
+    ) in styles.items():
         expected_idle, expected_focused, expected_accent = expected[theme]
         assert idle_background == expected_idle
         assert focused_background == expected_focused
