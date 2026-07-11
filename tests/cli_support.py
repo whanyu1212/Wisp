@@ -15,7 +15,7 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from wisp import cli as cli_module
-from wisp.agent.loop import Agent
+from wisp.agent.compat import Agent
 from wisp.agent.messages import Message
 from wisp.cli import _print_mode_tool_approval_policy, _print_mode_tool_registry, app
 from wisp.events import ToolApprovalRequested, ToolApprovalResolved, ToolResultReady

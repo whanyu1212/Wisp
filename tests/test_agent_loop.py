@@ -8,7 +8,7 @@ from typing import Any, cast
 import anyio
 import pytest
 
-from wisp.agent.loop import Agent
+from wisp.agent.compat import Agent
 from wisp.agent.messages import Message
 from wisp.events import (
     AgentCompleted,
@@ -130,6 +130,22 @@ class EchoTool:
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         return ToolResult(text=f"echo: {arguments['text']}")
+
+
+class _RaisingTextResult:
+    @property
+    def text(self) -> str:
+        raise ValueError("could not read tool result text")
+
+
+class MalformedResultTool:
+    name = "malformed"
+    safety = "read"
+    description = "Returns an invalid result object."
+    input_schema: ToolInputSchema = {"type": "object", "properties": {}}
+
+    async def run(self, arguments: ToolArguments, context: ToolContext) -> Any:
+        return _RaisingTextResult()
 
 
 class BlockingTool:
@@ -617,6 +633,34 @@ def test_agent_executes_tool_calls_and_continues_to_final_response(tmp_path: Pat
     assert message_records[3]["message"]["tool_call_id"] == "call-1"
     assert message_records[3]["message"]["tool_name"] == "echo"
     assert message_records[3]["message"]["content"] == "echo: hello"
+
+
+def test_agent_returns_error_result_when_tool_result_text_raises(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [ToolCall(call_id="call-1", name="malformed", arguments={})],
+            ["recovered"],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(MalformedResultTool())
+
+    async def run_agent() -> list[object]:
+        agent = Agent(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+
+    result = next(event for event in events if isinstance(event, ToolResultReady))
+    assert result.output == "could not read tool result text"
+    assert result.is_error is True
+    assert any(
+        isinstance(event, MessageCompleted) and event.content == "recovered" for event in events
+    )
 
 
 def test_agent_filters_provider_tool_specs_by_policy(tmp_path: Path) -> None:
