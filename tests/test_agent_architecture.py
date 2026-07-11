@@ -13,10 +13,21 @@ _FORBIDDEN_IMPORTS = (
     "wisp.agent.compat",
     "wisp.agent.prompt",
     "wisp.cli",
+    "wisp.coding",
     "wisp.config",
     "wisp.rpc",
     "wisp.runtime",
     "wisp.sessions",
+    "wisp.settings",
+    "wisp.trust",
+    "wisp.tui",
+)
+_CODING_MODULES = ("session.py", "tool_execution.py")
+_CODING_FORBIDDEN_IMPORTS = (
+    "wisp.agent.compat",
+    "wisp.cli",
+    "wisp.config",
+    "wisp.rpc",
     "wisp.settings",
     "wisp.trust",
     "wisp.tui",
@@ -46,9 +57,40 @@ def test_pure_agent_modules_do_not_import_application_layers() -> None:
     assert violations == []
 
 
+def test_coding_modules_do_not_import_frontends_or_trust_resolution() -> None:
+    coding_dir = Path(__file__).parents[1] / "src" / "wisp" / "coding"
+
+    violations: list[str] = []
+    for filename in _CODING_MODULES:
+        for imported in sorted(_module_imports(coding_dir / filename)):
+            if imported.startswith(_CODING_FORBIDDEN_IMPORTS):
+                violations.append(f"{filename}: {imported}")
+
+    assert violations == []
+
+
+def test_legacy_agent_facade_only_imports_coding_session() -> None:
+    compat_path = Path(__file__).parents[1] / "src" / "wisp" / "agent" / "compat.py"
+
+    assert _module_imports(compat_path) == {"__future__", "wisp.coding.session"}
+
+
+def test_coding_package_exports_session_coordinator() -> None:
+    from wisp.coding import CodingSession as ExportedCodingSession
+    from wisp.coding.session import CodingSession
+
+    assert ExportedCodingSession is CodingSession
+
+
 @pytest.mark.parametrize(
     "module",
-    ["wisp.agent.harness", "wisp.providers.base", "wisp.runtime.api"],
+    [
+        "wisp.agent.harness",
+        "wisp.coding.session",
+        "wisp.coding.tool_execution",
+        "wisp.providers.base",
+        "wisp.runtime.api",
+    ],
 )
 def test_layer_modules_import_cleanly_in_fresh_process(module: str) -> None:
     root = Path(__file__).parents[1]
@@ -75,12 +117,16 @@ def test_layer_modules_import_cleanly_in_fresh_process(module: str) -> None:
         (
             "from wisp.agent.loop import Agent\n"
             "from wisp.agent.compat import Agent as CompatAgent\n"
-            "assert Agent is CompatAgent"
+            "from wisp.coding.session import CodingSession\n"
+            "assert Agent is CompatAgent\n"
+            "assert issubclass(Agent, CodingSession)"
         ),
         (
             "from wisp.agent.compat import Agent\n"
             "from wisp.agent.loop import Agent as LegacyAgent\n"
-            "assert Agent is LegacyAgent"
+            "from wisp.coding.session import CodingSession\n"
+            "assert Agent is LegacyAgent\n"
+            "assert issubclass(Agent, CodingSession)"
         ),
     ],
 )

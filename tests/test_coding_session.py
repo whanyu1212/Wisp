@@ -8,8 +8,8 @@ from typing import Any, cast
 import anyio
 import pytest
 
-from wisp.agent.compat import Agent
 from wisp.agent.messages import Message
+from wisp.coding.session import CodingSession
 from wisp.events import (
     AgentCompleted,
     MessageCompleted,
@@ -174,13 +174,13 @@ class MutatingTool:
         return ToolResult(text="mutated")
 
 
-def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
+def test_coding_session_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
     emitted_event_types: list[str] = []
 
     async def run_agent() -> list[object]:
         event_bus = EventBus()
         event_bus.on("*", lambda event: emitted_event_types.append(event.type))
-        agent = Agent(
+        agent = CodingSession(
             provider=FakeProvider(), sessions=JsonlSessionStore(tmp_path), events=event_bus
         )
         return [event async for event in agent.run("hello")]
@@ -225,7 +225,7 @@ def test_agent_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
     ]
 
 
-def test_agent_preserves_provider_text_content_index(tmp_path: Path) -> None:
+def test_coding_session_preserves_provider_text_content_index(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -237,7 +237,7 @@ def test_agent_preserves_provider_text_content_index(tmp_path: Path) -> None:
     )
 
     async def run_agent() -> list[object]:
-        agent = Agent(provider=provider, sessions=JsonlSessionStore(tmp_path))
+        agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
         return [event async for event in agent.run("hello")]
 
     events = anyio.run(run_agent)
@@ -246,7 +246,7 @@ def test_agent_preserves_provider_text_content_index(tmp_path: Path) -> None:
     assert delta.content_index == 1
 
 
-def test_agent_maps_pre_start_provider_retry_progress(tmp_path: Path) -> None:
+def test_coding_session_maps_pre_start_provider_retry_progress(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -264,7 +264,7 @@ def test_agent_maps_pre_start_provider_retry_progress(tmp_path: Path) -> None:
     )
 
     async def run_agent() -> list[object]:
-        agent = Agent(provider=provider, sessions=JsonlSessionStore(tmp_path))
+        agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
         return [event async for event in agent.run("hello")]
 
     events = anyio.run(run_agent)
@@ -341,13 +341,13 @@ def test_agent_maps_pre_start_provider_retry_progress(tmp_path: Path) -> None:
         ),
     ],
 )
-def test_agent_rejects_malformed_provider_lifecycle(
+def test_coding_session_rejects_malformed_provider_lifecycle(
     tmp_path: Path,
     provider_events: list[ProviderEvent],
     error_message: str,
 ) -> None:
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=ScriptedProvider([provider_events]),
             sessions=JsonlSessionStore(tmp_path),
         )
@@ -370,7 +370,7 @@ def test_agent_rejects_malformed_provider_lifecycle(
     assert events[-1].outcome == "failed"
 
 
-def test_agent_maps_provider_failed_terminal_to_failed_lifecycle(tmp_path: Path) -> None:
+def test_coding_session_maps_provider_failed_terminal_to_failed_lifecycle(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -386,7 +386,7 @@ def test_agent_maps_provider_failed_terminal_to_failed_lifecycle(tmp_path: Path)
     )
 
     async def run_agent() -> list[object]:
-        agent = Agent(provider=provider, sessions=JsonlSessionStore(tmp_path))
+        agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
         events: list[object] = []
         with pytest.raises(ProviderError, match="upstream failed"):
             async for event in agent.run("hello"):
@@ -403,7 +403,7 @@ def test_agent_maps_provider_failed_terminal_to_failed_lifecycle(tmp_path: Path)
     ]
 
 
-def test_agent_continues_with_history_and_labeled_tool_observations(
+def test_coding_session_continues_with_history_and_labeled_tool_observations(
     tmp_path: Path,
 ) -> None:
     provider = CapturingProvider()
@@ -421,7 +421,7 @@ def test_agent_continues_with_history_and_labeled_tool_observations(
     ]
 
     async def run_agent() -> list[object]:
-        agent = Agent(provider=provider, sessions=JsonlSessionStore(tmp_path))
+        agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
         return [
             event async for event in agent.run("next question", session=session, history=history)
         ]
@@ -461,7 +461,7 @@ def test_agent_continues_with_history_and_labeled_tool_observations(
     assert records[3]["message"]["content"] == "done"
 
 
-def test_agent_passes_tool_specs_to_provider(tmp_path: Path) -> None:
+def test_coding_session_passes_tool_specs_to_provider(tmp_path: Path) -> None:
     provider = CapturingProvider()
     tool = ToolSpec(
         name="lookup",
@@ -470,7 +470,7 @@ def test_agent_passes_tool_specs_to_provider(tmp_path: Path) -> None:
     )
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tools=[tool],
@@ -488,7 +488,7 @@ def test_agent_passes_tool_specs_to_provider(tmp_path: Path) -> None:
     assert any(isinstance(event, MessageCompleted) and event.content == "done" for event in events)
 
 
-def test_agent_skips_project_context_when_untrusted(tmp_path: Path) -> None:
+def test_coding_session_skips_project_context_when_untrusted(tmp_path: Path) -> None:
     provider = CapturingProvider()
     project = tmp_path / "project"
     project.mkdir()
@@ -502,7 +502,7 @@ def test_agent_skips_project_context_when_untrusted(tmp_path: Path) -> None:
     )
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=cast(Any, provider),
             sessions=JsonlSessionStore(tmp_path),
             tools=[tool],
@@ -525,7 +525,7 @@ def test_agent_skips_project_context_when_untrusted(tmp_path: Path) -> None:
     assert "allowed tools:\n  - lookup: Look something up." in context
 
 
-def test_agent_includes_project_context_when_trusted(tmp_path: Path) -> None:
+def test_coding_session_includes_project_context_when_trusted(tmp_path: Path) -> None:
     provider = CapturingProvider()
     project = tmp_path / "project"
     project.mkdir()
@@ -533,7 +533,7 @@ def test_agent_includes_project_context_when_trusted(tmp_path: Path) -> None:
     (project / "AGENTS.md").write_text("Trusted agent rules.\n", encoding="utf-8")
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=cast(Any, provider),
             sessions=JsonlSessionStore(tmp_path),
             tool_context=ToolContext(cwd=project),
@@ -550,7 +550,7 @@ def test_agent_includes_project_context_when_trusted(tmp_path: Path) -> None:
     assert "--- AGENTS.md ---\nTrusted agent rules." in context
 
 
-def test_agent_executes_tool_calls_and_continues_to_final_response(tmp_path: Path) -> None:
+def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [
@@ -571,7 +571,7 @@ def test_agent_executes_tool_calls_and_continues_to_final_response(tmp_path: Pat
     async def run_agent() -> list[object]:
         event_bus = EventBus()
         event_bus.on("*", lambda event: emitted_event_types.append(event.type))
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             events=event_bus,
@@ -635,7 +635,7 @@ def test_agent_executes_tool_calls_and_continues_to_final_response(tmp_path: Pat
     assert message_records[3]["message"]["content"] == "echo: hello"
 
 
-def test_agent_returns_error_result_when_tool_result_text_raises(tmp_path: Path) -> None:
+def test_coding_session_returns_error_result_when_tool_result_text_raises(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="malformed", arguments={})],
@@ -646,7 +646,7 @@ def test_agent_returns_error_result_when_tool_result_text_raises(tmp_path: Path)
     tools.register(MalformedResultTool())
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=tools,
@@ -663,14 +663,14 @@ def test_agent_returns_error_result_when_tool_result_text_raises(tmp_path: Path)
     )
 
 
-def test_agent_filters_provider_tool_specs_by_policy(tmp_path: Path) -> None:
+def test_coding_session_filters_provider_tool_specs_by_policy(tmp_path: Path) -> None:
     provider = CapturingProvider()
     tools = ToolRegistry()
     tools.register(EchoTool())
     tools.register(MutatingTool())
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=tools,
@@ -684,7 +684,7 @@ def test_agent_filters_provider_tool_specs_by_policy(tmp_path: Path) -> None:
     assert [tool.name for tool in provider.seen_tools] == ["echo"]
 
 
-def test_agent_returns_error_result_for_policy_blocked_tool(tmp_path: Path) -> None:
+def test_coding_session_returns_error_result_for_policy_blocked_tool(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="mutate", arguments={}, response_id="response-1")],
@@ -695,7 +695,7 @@ def test_agent_returns_error_result_for_policy_blocked_tool(tmp_path: Path) -> N
     tools.register(MutatingTool())
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=tools,
@@ -713,7 +713,7 @@ def test_agent_returns_error_result_for_policy_blocked_tool(tmp_path: Path) -> N
     )
 
 
-def test_agent_blocks_approval_required_tool_without_override(tmp_path: Path) -> None:
+def test_coding_session_blocks_approval_required_tool_without_override(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="mutate", arguments={}, response_id="response-1")],
@@ -727,7 +727,7 @@ def test_agent_blocks_approval_required_tool_without_override(tmp_path: Path) ->
     async def run_agent() -> list[object]:
         event_bus = EventBus()
         event_bus.on("*", emitted_events.append)
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             events=event_bus,
@@ -771,7 +771,7 @@ def test_agent_blocks_approval_required_tool_without_override(tmp_path: Path) ->
     assert "requires approval" in event_records[3]["event"]["reason"]
 
 
-def test_agent_approves_required_tool_with_override(tmp_path: Path) -> None:
+def test_coding_session_approves_required_tool_with_override(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="mutate", arguments={}, response_id="response-1")],
@@ -782,7 +782,7 @@ def test_agent_approves_required_tool_with_override(tmp_path: Path) -> None:
     tools.register(MutatingTool())
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=tools,
@@ -799,7 +799,7 @@ def test_agent_approves_required_tool_with_override(tmp_path: Path) -> None:
     )
 
 
-def test_agent_updates_previous_response_id_for_chained_tool_calls(tmp_path: Path) -> None:
+def test_coding_session_updates_previous_response_id_for_chained_tool_calls(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [
@@ -825,7 +825,7 @@ def test_agent_updates_previous_response_id_for_chained_tool_calls(tmp_path: Pat
     tools.register(EchoTool())
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=tools,
@@ -841,7 +841,7 @@ def test_agent_updates_previous_response_id_for_chained_tool_calls(tmp_path: Pat
     ]
 
 
-def test_agent_falls_back_to_tool_call_response_id(tmp_path: Path) -> None:
+def test_coding_session_falls_back_to_tool_call_response_id(tmp_path: Path) -> None:
     tool_call = ToolCall(
         call_id="call-1",
         name="echo",
@@ -870,7 +870,7 @@ def test_agent_falls_back_to_tool_call_response_id(tmp_path: Path) -> None:
     tools.register(EchoTool())
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=tools,
@@ -884,7 +884,7 @@ def test_agent_falls_back_to_tool_call_response_id(tmp_path: Path) -> None:
     assert first_completion.response_id == "response-1"
 
 
-def test_agent_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -> None:
+def test_coding_session_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="blocking", arguments={}, response_id="response-1")],
@@ -897,7 +897,7 @@ def test_agent_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -> None:
         log: list[str] = []
         tools = ToolRegistry()
         tools.register(BlockingTool(release=release, log=log))
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=tools,
@@ -924,7 +924,7 @@ def test_agent_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -> None:
     anyio.run(run_agent)
 
 
-def test_agent_returns_error_result_for_unknown_tool(tmp_path: Path) -> None:
+def test_coding_session_returns_error_result_for_unknown_tool(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="missing", arguments={}, response_id="response-1")],
@@ -933,7 +933,7 @@ def test_agent_returns_error_result_for_unknown_tool(tmp_path: Path) -> None:
     )
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=ToolRegistry(),
@@ -950,7 +950,7 @@ def test_agent_returns_error_result_for_unknown_tool(tmp_path: Path) -> None:
     )
 
 
-def test_agent_defaults_to_uncapped_tool_iterations(tmp_path: Path) -> None:
+def test_coding_session_defaults_to_uncapped_tool_iterations(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [
@@ -969,7 +969,7 @@ def test_agent_defaults_to_uncapped_tool_iterations(tmp_path: Path) -> None:
     tools.register(EchoTool())
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=tools,
@@ -982,7 +982,7 @@ def test_agent_defaults_to_uncapped_tool_iterations(tmp_path: Path) -> None:
     assert any(isinstance(event, MessageCompleted) and event.content == "done" for event in events)
 
 
-def test_agent_enforces_configured_max_tool_iterations(tmp_path: Path) -> None:
+def test_coding_session_enforces_configured_max_tool_iterations(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="echo", arguments={"text": "hello"})],
@@ -993,7 +993,7 @@ def test_agent_enforces_configured_max_tool_iterations(tmp_path: Path) -> None:
     tools.register(EchoTool())
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=tools,
@@ -1013,7 +1013,7 @@ def test_agent_enforces_configured_max_tool_iterations(tmp_path: Path) -> None:
     assert error_events[-1]["message"] == "Maximum tool iterations exceeded: 1"
 
 
-def test_agent_returns_error_result_for_invalid_tool_arguments(tmp_path: Path) -> None:
+def test_coding_session_returns_error_result_for_invalid_tool_arguments(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [
@@ -1032,7 +1032,7 @@ def test_agent_returns_error_result_for_invalid_tool_arguments(tmp_path: Path) -
     tools.register(EchoTool())
 
     async def run_agent() -> list[object]:
-        agent = Agent(
+        agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
             tool_registry=tools,
