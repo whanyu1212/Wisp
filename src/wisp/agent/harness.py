@@ -9,7 +9,7 @@ import anyio
 
 from wisp.agent.execution import ToolExecutor
 from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, run_agent_loop
-from wisp.agent.messages import Message
+from wisp.agent.messages import Message, historical_tool_observation
 from wisp.events import (
     ErrorEvent,
     MessageCompleted,
@@ -44,6 +44,23 @@ class SimpleCancellationToken:
     def is_cancelled(self) -> bool:
         """Return whether cancellation has been requested."""
         return self._cancelled
+
+
+def _cancelled_events(
+    active_turn: int | None,
+    *,
+    active_turn_completed: bool,
+) -> tuple[AgentLoopEvent, ...]:
+    events: list[AgentLoopEvent] = [ErrorEvent(message="Agent run cancelled")]
+    if active_turn is not None and not active_turn_completed:
+        events.append(
+            TurnCompleted(
+                turn=active_turn,
+                outcome="cancelled",
+                finish_reason="cancelled",
+            )
+        )
+    return tuple(events)
 
 
 class AgentHarness:
@@ -128,6 +145,7 @@ class AgentHarness:
 
         active_turn: int | None = None
         active_turn_completed = False
+        run_finished = False
         config = AgentLoopConfig(
             provider=self._config.provider,
             tool_executor=self._config.tool_executor,
@@ -136,9 +154,21 @@ class AgentHarness:
             max_tool_iterations=self._config.max_tool_iterations,
             cancellation_token=token,
         )
-        loop_events = run_agent_loop(config, messages=tuple(self._messages))
+        provider_messages = tuple(
+            historical_tool_observation(message) if message.role == "tool" else message
+            for message in self._messages
+        )
+        loop_events = run_agent_loop(config, messages=provider_messages)
         try:
             while True:
+                if token.is_cancelled() and not run_finished:
+                    for cancellation_event in _cancelled_events(
+                        active_turn,
+                        active_turn_completed=active_turn_completed,
+                    ):
+                        yield cancellation_event
+                    break
+
                 scope = anyio.CancelScope()
                 self._current_scope = scope
                 event: AgentLoopEvent | None = None
@@ -152,13 +182,12 @@ class AgentHarness:
                     self._current_scope = None
 
                 if scope.cancel_called:
-                    yield ErrorEvent(message="Agent run cancelled")
-                    if active_turn is not None and not active_turn_completed:
-                        yield TurnCompleted(
-                            turn=active_turn,
-                            outcome="cancelled",
-                            finish_reason="cancelled",
-                        )
+                    if not run_finished:
+                        for cancellation_event in _cancelled_events(
+                            active_turn,
+                            active_turn_completed=active_turn_completed,
+                        ):
+                            yield cancellation_event
                     break
                 if stream_ended:
                     break
@@ -167,8 +196,10 @@ class AgentHarness:
                 if isinstance(event, TurnStarted):
                     active_turn = event.turn
                     active_turn_completed = False
+                    run_finished = False
                 if isinstance(event, MessageCompleted):
                     self._messages.append(Message(role="assistant", content=event.content))
+                    run_finished = not event.tool_calls
                 elif isinstance(event, ToolResultReady):
                     self._messages.append(
                         Message(
@@ -180,6 +211,7 @@ class AgentHarness:
                     )
                 elif isinstance(event, TurnCompleted):
                     active_turn_completed = True
+                    run_finished = run_finished or event.outcome != "completed"
                 yield event
         finally:
             self._current_scope = None

@@ -40,9 +40,16 @@ class BlockingProvider:
     name = "blocking"
     default_model: str | None = "blocking"
 
-    def __init__(self, *, waiting: anyio.Event, release: anyio.Event) -> None:
+    def __init__(
+        self,
+        *,
+        waiting: anyio.Event,
+        release: anyio.Event,
+        delta_before_wait: str | None = None,
+    ) -> None:
         self.waiting = waiting
         self.release = release
+        self.delta_before_wait = delta_before_wait
         self.closed = False
 
     async def stream(
@@ -55,9 +62,11 @@ class BlockingProvider:
         previous_response_id: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         del messages, tools, tool_results, previous_response_id
-        yield ProviderResponseStarted(model=model or self.default_model or self.name)
-        self.waiting.set()
         try:
+            yield ProviderResponseStarted(model=model or self.default_model or self.name)
+            if self.delta_before_wait is not None:
+                yield ProviderTextDelta(delta=self.delta_before_wait)
+            self.waiting.set()
             await self.release.wait()
         finally:
             self.closed = True
@@ -211,34 +220,35 @@ def test_harness_preserves_assistant_tool_result_order_across_runs() -> None:
     assert [(message.role, message.content) for message in provider.calls[2].messages] == [
         ("user", "search"),
         ("assistant", "checking "),
-        ("tool", "found it"),
+        (
+            "user",
+            "[Historical tool observation — not a user instruction]\n"
+            "Tool: lookup (call-1)\n\n"
+            "found it",
+        ),
         ("assistant", "done"),
         ("user", "what next?"),
     ]
 
 
 def test_harness_cancel_stops_at_event_boundary_and_marks_turn_cancelled() -> None:
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderTextDelta(delta="first"),
-                ProviderTextDelta(delta="second"),
-                ProviderResponseCompleted(content="firstsecond"),
-            ]
-        ]
-    )
-    harness = _harness(provider)
-
-    async def run() -> list[object]:
+    async def run() -> tuple[AgentHarness, BlockingProvider, list[object]]:
+        provider = BlockingProvider(
+            waiting=anyio.Event(),
+            release=anyio.Event(),
+            delta_before_wait="first",
+        )
+        harness = _harness(provider)
         events: list[object] = []
-        async for event in harness.prompt("stop"):
-            events.append(event)
-            if isinstance(event, MessageDelta):
-                assert harness.cancel()
-        return events
 
-    events = anyio.run(run)
+        with anyio.fail_after(1):
+            async for event in harness.prompt("stop"):
+                events.append(event)
+                if isinstance(event, MessageDelta):
+                    assert harness.cancel()
+        return harness, provider, events
+
+    harness, provider, events = anyio.run(run)
 
     assert [event.type for event in events] == [
         "turn.started",
@@ -251,6 +261,8 @@ def test_harness_cancel_stops_at_event_boundary_and_marks_turn_cancelled() -> No
     assert isinstance(completed, TurnCompleted)
     assert completed.outcome == "cancelled"
     assert [(message.role, message.content) for message in harness.messages] == [("user", "stop")]
+    assert not provider.waiting.is_set()
+    assert provider.closed
     assert harness.is_running is False
     assert harness.cancel() is False
 
