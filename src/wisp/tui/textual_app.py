@@ -383,8 +383,13 @@ class TextualTui(App[None]):
             self._role_styles = role_styles(self.current_theme)
 
     async def on_prompt_editor_submitted(self, event: PromptEditor.Submitted) -> None:
-        # Enter runs the line as-is through the typed path; the menu (if open) is
-        # just a hint, so close it. `/command` parsing lives in the shell.
+        # Enter on a highlighted menu item accepts THAT command (Claude-Code/Codex/
+        # Pi model), not the raw buffer — so `/`↓↓ Enter runs the highlighted
+        # command even though only `/` was typed. See _accept_menu_highlight_on_enter
+        # for the fill-vs-run rules.
+        if self._accept_menu_highlight_on_enter(event.value):
+            return
+        # No live menu: run the line as-is through the typed path.
         if self._suggest is not None:
             self._suggest.hide()
         # Register a compact echo when the submitted (expanded) text differs from
@@ -393,6 +398,42 @@ class TextualTui(App[None]):
         if event.display != event.value:
             self._register_compact_echo(event.value, event.display)
         self.submit_command_line(event.value)
+
+    def _accept_menu_highlight_on_enter(self, typed: str) -> bool:
+        """Accept the highlighted slash command on Enter; return whether it handled.
+
+        Returns False (Enter falls through to submitting the raw line) unless the
+        menu is open on a highlighted command.
+
+        The highlight is only *filled and left for editing* when it's still a
+        suggestion the user hasn't finished typing — i.e. what they typed is a
+        strict prefix of the command (`/` or `/mo` → `/model`) AND the command
+        takes an argument, so the trailing space primes the value. Otherwise the
+        command is run as typed: an arg-taking command whose name is already fully
+        typed (`/model`, `/provider`, `/login`) is a valid bare invocation (show
+        current / use defaults), so a single Enter must still run it — filling it
+        would silently demand a second Enter. Arg-less commands always run.
+        """
+
+        suggest = self._suggest
+        if suggest is None or not suggest.is_open:
+            return False
+        spec = suggest.highlighted_spec()
+        if spec is None:
+            return False
+        suggest.hide()
+        # Case-insensitive, matching how the menu matches (query_from_value
+        # lowercases): `/MODEL` is a fully-typed `/model`, not a prefix still being
+        # typed — otherwise it would fill instead of running. Accepting the highlight
+        # always submits the canonical spelling (spec.command), so `/MODEL` runs
+        # `/model`, which is what the parser accepts.
+        still_typing = typed.lower() != spec.command.lower()  # a prefix like `/`/`/mo`
+        if spec.takes_args and still_typing:
+            # Prime the value: fill `/cmd ` and let the user type it, then Enter.
+            self.prefill_command(f"{spec.command} ")
+        else:
+            self.submit_command_line(spec.command)
+        return True
 
     def _register_compact_echo(self, prompt: str, display: str) -> None:
         # Append to a per-prompt FIFO so duplicate submissions each keep an echo,

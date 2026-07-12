@@ -2819,6 +2819,185 @@ def test_textual_full_command_typed_letter_by_letter_submits_whole_line() -> Non
     assert focused_id == "input"  # focus never left the editor
 
 
+async def _navigate_menu_to(pilot, suggest, command: str) -> None:
+    """Press ``down`` until the menu highlights ``command`` (wraps a full cycle)."""
+    for _ in range(suggest.option_count):
+        spec = suggest.highlighted_spec()
+        if spec is not None and spec.command == command:
+            return
+        await pilot.press("down")
+        await pilot.pause()
+    raise AssertionError(f"never highlighted {command!r}")
+
+
+def test_textual_enter_runs_highlighted_argless_command_without_typing_it() -> None:
+    # Type only "/", arrow-navigate to an arg-less command, press Enter -> that
+    # command runs, even though the buffer only ever held "/". This is the
+    # Claude-Code/Codex/Pi model: Enter accepts the highlight, it isn't a raw-line
+    # submit. Before the fix, Enter submitted the literal "/".
+    async def scenario() -> tuple[str, bool]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+            await pilot.press("/")  # open menu, nothing else typed
+            await pilot.pause()
+            await _navigate_menu_to(pilot, suggest, "/quit")
+            await pilot.press("enter")
+            await pilot.pause()
+            queued = await app_instance._prompt_receive.receive()
+            return queued, suggest.is_open
+
+    queued, menu_open = anyio.run(scenario)
+    assert queued == "/quit"  # the HIGHLIGHTED command ran, not the "/" in the buffer
+    assert menu_open is False  # accepting the highlight closes the menu
+
+
+def test_textual_enter_on_arg_taking_highlight_fills_then_waits_for_value() -> None:
+    # Enter on a highlighted arg-taking command (/model) must NOT submit a bare
+    # "/model" — it fills "/model " and waits for the value, then a second Enter
+    # runs the completed line. This mirrors how Tab-completion primes arg-taking
+    # commands, so Enter and Tab agree.
+    async def scenario() -> tuple[str, bool, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+            await pilot.press("/")
+            await pilot.pause()
+            await _navigate_menu_to(pilot, suggest, "/model")
+            await pilot.press("enter")  # accept -> fill, don't submit
+            await pilot.pause()
+            filled = input_widget.value
+            open_after_fill = suggest.is_open
+            await pilot.press(*"gpt-5")  # type the value
+            await pilot.pause()
+            await pilot.press("enter")  # now run it
+            await pilot.pause()
+            queued = await app_instance._prompt_receive.receive()
+            return filled, open_after_fill, queued
+
+    filled, open_after_fill, queued = anyio.run(scenario)
+    assert filled == "/model "  # arg-taking -> filled with a trailing space
+    assert open_after_fill is False  # menu closed while the user types the value
+    assert queued == "/model gpt-5"  # second Enter runs the completed line
+
+
+def test_textual_enter_runs_fully_typed_optional_arg_command_bare() -> None:
+    # REGRESSION: "takes_args" means the command *optionally* takes an argument —
+    # bare `/model`, `/provider`, `/login` are valid (show current / use defaults).
+    # When the command name is already fully typed, Enter must run it as-is on the
+    # first press, NOT prefill "/model " and demand a second Enter. Only a strict
+    # prefix (still-typing suggestion) gets the fill-and-wait treatment.
+    async def scenario() -> tuple[str, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            await pilot.press(*"/model")  # fully typed; menu still open, highlighted
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            queued = await app_instance._prompt_receive.receive()
+            return queued, input_widget.value
+
+    queued, buffer_after = anyio.run(scenario)
+    assert queued == "/model"  # ran bare on the FIRST Enter
+    assert buffer_after == ""  # submitted and cleared, not left as "/model "
+
+
+def test_textual_enter_accepts_fully_typed_command_case_insensitively() -> None:
+    # The menu matches case-insensitively (query_from_value lowercases), so a
+    # fully-typed "/MODEL" keeps "/model" highlighted. The accept check must match
+    # that: "/MODEL" is a completed command, not a prefix still being typed, so the
+    # first Enter runs it as the canonical "/model" instead of filling "/model ".
+    async def scenario() -> tuple[str, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            await pilot.press(*"/MODEL")  # uppercase, arg-taking
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            queued = await app_instance._prompt_receive.receive()
+            return queued, input_widget.value
+
+    queued, buffer_after = anyio.run(scenario)
+    assert queued == "/model"  # ran the canonical spelling on the FIRST Enter
+    assert buffer_after == ""  # not left as "/model " awaiting a second Enter
+
+
+def test_textual_selecting_optional_arg_command_from_prefix_waits_for_value() -> None:
+    # SAFETY: /auth and /logout take an optional [provider] (see the shell's
+    # `/auth [provider]` / `/logout [provider]` handlers), so their specs are
+    # takes_args=True. Selecting one from a bare "/" prefix must fill "/logout "
+    # and wait for the provider — NOT submit "/logout" immediately, which would act
+    # on the default provider (e.g. delete its credentials) instead of the intended
+    # one. Checks both an idempotent (/auth) and a destructive (/logout) command.
+    async def scenario() -> dict[str, tuple[str, str]]:
+        results: dict[str, tuple[str, str]] = {}
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+            for command in ("/auth", "/logout"):
+                input_widget.value = ""
+                suggest.hide()
+                await pilot.pause()
+                input_widget.focus()
+                await pilot.pause()
+                await pilot.press("/")  # bare prefix; nothing else typed
+                await pilot.pause()
+                await _navigate_menu_to(pilot, suggest, command)
+                await pilot.press("enter")
+                await pilot.pause()
+                try:
+                    with anyio.fail_after(0.2):
+                        queued = await app_instance._prompt_receive.receive()
+                except TimeoutError:
+                    queued = "<none>"
+                results[command] = (input_widget.value, queued)
+        return results
+
+    results = anyio.run(scenario)
+    assert results["/auth"] == ("/auth ", "<none>")  # filled, awaiting provider
+    assert results["/logout"] == ("/logout ", "<none>")  # no destructive auto-run
+
+
+def test_textual_enter_on_fully_typed_command_runs_it_once() -> None:
+    # A fully typed command with the menu still open (its own name highlighted)
+    # runs exactly once on Enter — accepting the highlight yields the same command
+    # as the buffer, so there's no double-submit.
+    async def scenario() -> tuple[str, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            await pilot.press(*"/quit")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            first = await app_instance._prompt_receive.receive()
+            try:
+                with anyio.fail_after(0.2):
+                    second = await app_instance._prompt_receive.receive()
+            except TimeoutError:
+                second = "<none>"
+            return first, second
+
+    first, second = anyio.run(scenario)
+    assert first == "/quit"
+    assert second == "<none>"  # exactly one submission, not two
+
+
 def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
     # The wordmark identifies an empty session without consuming permanent
     # scrollback. Its ultra-minimal form and prompt hint must fit the compact
