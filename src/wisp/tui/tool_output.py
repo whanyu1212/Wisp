@@ -107,12 +107,14 @@ def render_error(output: str, *, exit_code: int | None) -> str:
         lines.append(status)
 
     # When a shell command produces no stdout/stderr, its output is a synthetic
-    # "Command exited with code N" restatement of the exit code (see
+    # "Command exited with code N" restatement of *this* exit code (see
     # _format_process_output). With a structured status line already shown, that
     # tail is pure duplication — and for a signal it would even restate the raw
     # negative code (`... code -15`), reintroducing the wording the status line
-    # replaces. Drop it in that case.
-    body = "" if status is not None and _is_bare_exit_restatement(output) else output
+    # replaces. Drop it in that case, but only when the restated code matches the
+    # promoted exit code, so a command whose genuine output merely resembles the
+    # fallback (with a different number) is preserved.
+    body = "" if status is not None and _is_exit_restatement(output, exit_code) else output
     tail = _tail_preview(body, max_lines=_ERROR_TAIL_LINES, max_bytes=_ERROR_TAIL_BYTES)
     if tail:
         lines.append(tail)
@@ -123,23 +125,19 @@ def render_error(output: str, *, exit_code: int | None) -> str:
 _EXIT_RESTATEMENT_PREFIX = "Command exited with code "
 
 
-def _is_bare_exit_restatement(output: str) -> bool:
-    """Whether output is solely the shell's synthetic exit-code restatement.
+def _is_exit_restatement(output: str, exit_code: int | None) -> bool:
+    """Whether output is solely the shell's synthetic restatement of exit_code.
 
-    Mirrors the fallback in ``wisp.tools.process._format_process_output``. Kept a
-    narrow prefix + integer check rather than a full-format match so it recognizes
-    only that specific synthesized line and never suppresses real command output.
+    Mirrors the fallback in ``wisp.tools.process._format_process_output``, which
+    emits exactly ``f"Command exited with code {exit_code}"`` when a command has
+    no stdout/stderr. Requiring the restated number to equal the promoted code
+    means genuine output that merely resembles the fallback (a different number,
+    or extra content) is never suppressed.
     """
 
-    stripped = output.strip()
-    if not stripped.startswith(_EXIT_RESTATEMENT_PREFIX):
+    if exit_code is None:
         return False
-    remainder = stripped[len(_EXIT_RESTATEMENT_PREFIX) :]
-    return _is_int_literal(remainder)
-
-
-def _is_int_literal(text: str) -> bool:
-    return bool(text) and (text.lstrip("-")).isdigit()
+    return output.strip() == f"{_EXIT_RESTATEMENT_PREFIX}{exit_code}"
 
 
 def _exit_status_line(exit_code: int | None) -> str | None:

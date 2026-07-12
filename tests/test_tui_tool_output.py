@@ -94,6 +94,15 @@ def test_render_error_keeps_real_output_alongside_exit_line() -> None:
     assert "stderr detail" in multi
 
 
+def test_render_error_keeps_genuine_output_resembling_the_fallback() -> None:
+    # A command whose real output is literally "Command exited with code 7" while
+    # it exits 2 must be preserved — suppression requires the restated number to
+    # match the promoted exit code, so a mismatched number is genuine output.
+    rendered = render_error("Command exited with code 7", exit_code=2)
+    assert "Command exited with code 7" in rendered
+    assert rendered == "exit 2\nCommand exited with code 7"
+
+
 def test_render_error_keeps_restatement_when_no_status_line() -> None:
     # With no promoted exit code there is no status line, so the synthetic
     # restatement is the only signal and must be kept.
