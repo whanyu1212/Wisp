@@ -67,6 +67,41 @@ def test_render_error_unknown_signal_number_falls_back() -> None:
     assert rendered.splitlines()[0] == "killed by signal 999"
 
 
+def test_render_error_suppresses_synthetic_exit_restatement() -> None:
+    # A shell command with no stdout/stderr has output "Command exited with code
+    # N" (a restatement of the exit code). With a status line already shown, that
+    # tail is pure duplication and must be dropped.
+    rendered = render_error("Command exited with code 2", exit_code=2)
+    assert rendered == "exit 2"
+
+
+def test_render_error_synthetic_restatement_does_not_reintroduce_negative_code() -> None:
+    # The signal case is why this matters: the synthetic tail would restate the
+    # raw negative code (`... code -15`), undoing the signal wording.
+    rendered = render_error("Command exited with code -15", exit_code=-15)
+    assert "Command exited with code" not in rendered
+    assert "-15" not in rendered
+    assert rendered.startswith("killed by signal 15")
+
+
+def test_render_error_keeps_real_output_alongside_exit_line() -> None:
+    # Suppression is narrow: real command output is never dropped, even when a
+    # status line is present.
+    rendered = render_error("error: file not found", exit_code=2)
+    assert rendered == "exit 2\nerror: file not found"
+    # Output that merely starts with the synthetic phrase but carries more is real.
+    multi = render_error("Command exited with code 2\nstderr detail", exit_code=2)
+    assert "stderr detail" in multi
+
+
+def test_render_error_keeps_restatement_when_no_status_line() -> None:
+    # With no promoted exit code there is no status line, so the synthetic
+    # restatement is the only signal and must be kept.
+    assert render_error("Command exited with code 2", exit_code=None) == (
+        "Command exited with code 2"
+    )
+
+
 def test_render_error_shows_the_tail_not_the_head() -> None:
     # The core fix: failures surface at the END of output. A long output must
     # show its last lines, not its first — the pre-#74 behavior showed the head

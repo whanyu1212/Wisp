@@ -106,11 +106,40 @@ def render_error(output: str, *, exit_code: int | None) -> str:
     if status is not None:
         lines.append(status)
 
-    tail = _tail_preview(output, max_lines=_ERROR_TAIL_LINES, max_bytes=_ERROR_TAIL_BYTES)
+    # When a shell command produces no stdout/stderr, its output is a synthetic
+    # "Command exited with code N" restatement of the exit code (see
+    # _format_process_output). With a structured status line already shown, that
+    # tail is pure duplication — and for a signal it would even restate the raw
+    # negative code (`... code -15`), reintroducing the wording the status line
+    # replaces. Drop it in that case.
+    body = "" if status is not None and _is_bare_exit_restatement(output) else output
+    tail = _tail_preview(body, max_lines=_ERROR_TAIL_LINES, max_bytes=_ERROR_TAIL_BYTES)
     if tail:
         lines.append(tail)
 
     return "\n".join(lines) if lines else "(no output)"
+
+
+_EXIT_RESTATEMENT_PREFIX = "Command exited with code "
+
+
+def _is_bare_exit_restatement(output: str) -> bool:
+    """Whether output is solely the shell's synthetic exit-code restatement.
+
+    Mirrors the fallback in ``wisp.tools.process._format_process_output``. Kept a
+    narrow prefix + integer check rather than a full-format match so it recognizes
+    only that specific synthesized line and never suppresses real command output.
+    """
+
+    stripped = output.strip()
+    if not stripped.startswith(_EXIT_RESTATEMENT_PREFIX):
+        return False
+    remainder = stripped[len(_EXIT_RESTATEMENT_PREFIX) :]
+    return _is_int_literal(remainder)
+
+
+def _is_int_literal(text: str) -> bool:
+    return bool(text) and (text.lstrip("-")).isdigit()
 
 
 def _exit_status_line(exit_code: int | None) -> str | None:
