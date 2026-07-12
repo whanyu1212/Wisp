@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import datetime
 
 import anyio
-from textual import events
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -46,6 +47,7 @@ from wisp.tui.widgets import (
     StreamMessage,
     ToolCard,
     Transcript,
+    WorkingIndicator,
     _preview_tool_output,
 )
 
@@ -62,16 +64,10 @@ _ROLE_FALLBACK: dict[str, str] = {
     "denied": "red",
 }
 
-# The Wisp wordmark, shown while the transcript is empty. Block-drawing glyphs
-# only (width-1, universally supported); 40 cols wide, fits a standard terminal.
-_WORDMARK = (
-    "▄▄▄▄  ▄▄▄  ▄▄▄▄ ▄▄▄▄▄  ▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄\n"
-    "▀███  ███  ███▀  ███  █████▀▀▀ ███▀▀███▄\n"
-    " ███  ███  ███   ███   ▀████▄  ███▄▄███▀\n"
-    " ███▄▄███▄▄███   ███     ▀████ ███▀▀▀▀\n"
-    "  ▀████▀████▀   ▄███▄ ███████▀ ███"
-)
-_TAGLINE = "a quiet coding agent"
+# The Wisp wordmark, shown while the transcript is empty. Ultra-minimal -
+# lowercase, accent color + centering does the work. Quiet over loud.
+_WORDMARK = "wisp"
+_TAGLINE = "tethered to you"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 
 # The input's prompt glyph. The shell hands the Textual renderer a semantic hint
@@ -154,7 +150,7 @@ class TextualTui(App[None]):
     #transcript-empty-wordmark {
         width: 40;
         max-width: 100%;
-        height: 5;
+        height: 1;
         color: $accent;
         text-align: center;
     }
@@ -307,6 +303,9 @@ class TextualTui(App[None]):
         # call_id → ToolCard, so the request, approval, and result events for one
         # tool call all mutate the same card instead of stacking three lines.
         self._tool_cards: dict[str, ToolCard] = {}
+        # Main-screen heartbeat (opencode-style): a dim WorkingIndicator row in the
+        # transcript right after the user prompt, not in the stable footer chrome.
+        self._working_indicator: Widget | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -375,6 +374,12 @@ class TextualTui(App[None]):
         # show_for() hides it otherwise (no `/`, a space, or no match).
         if event.text_area is self._input and self._suggest is not None:
             self._suggest.show_for(event.text_area.text)
+        # Keep large-paste placeholder tracking accurate: if the user edits away
+        # a "[Pasted content #N: ...]" marker, its backing full text is dropped so
+        # it isn't submitted stale.
+        if event.text_area.id == "input" and self._input is not None:
+            with suppress(Exception):
+                self._input.sync_pending_paste()
 
     def on_transcript_follow_changed(self, event: Transcript.FollowChanged) -> None:
         if event.following:
@@ -536,7 +541,51 @@ class TextualTui(App[None]):
     async def close(self) -> None:
         self.exit()
 
+    def copy_to_clipboard(self, text: str) -> None:
+        """Copy via pyperclip when available, otherwise Textual's OSC52 fallback."""
+
+        try:
+            import pyperclip  # type: ignore[import-untyped]
+        except ImportError:
+            pass
+        else:
+            with suppress(Exception):
+                pyperclip.copy(text)
+        super().copy_to_clipboard(text)
+
+    @on(events.TextSelected)
+    def on_text_selected(self) -> None:
+        """Auto-copy transcript selections so mouse drag + copy works."""
+
+        # Don't auto-copy while the agent is streaming — the transcript
+        # mutates and Textual's SELECTED bounds become stale, which would
+        # copy unrelated output that scrolled into the selection region.
+        # Explicit ctrl+c copy from the prompt editor still works regardless.
+        with suppress(Exception):
+            if self._transcript is None:
+                return
+            # If the prompt editor has selection, it owns the copy — its own
+            # ctrl+c / ctrl+insert handling already covers it.
+            if self._input is not None and self._input.selected_text:
+                return
+            selection = self.screen.get_selected_text()
+            if not selection:
+                return
+            self.copy_to_clipboard(selection)
+            self.notify("Copied selection to clipboard.")
+
     def action_interrupt(self) -> None:
+        # If the prompt editor has selected text, ctrl+c means "copy", not
+        # "interrupt". Because this binding is priority=True (so it fires
+        # before TextArea's own handler and would otherwise swallow copy),
+        # we explicitly copy here.
+        if self._input is not None:
+            with suppress(Exception):
+                selected = self._input.selected_text
+                if selected:
+                    self.copy_to_clipboard(selected)
+                    self.notify(f"Copied {len(selected)} chars to clipboard.")
+                    return
         self._signal_input(KeyboardInterrupt(), action="interrupt")
 
     def action_eof(self) -> None:
@@ -637,23 +686,53 @@ class TextualTui(App[None]):
             self._input.display = True
             self._input.focus()
 
+    # --- Main-screen heartbeat (opencode-style) ---
+
+    def _mount_working_indicator(self, indicator: WorkingIndicator) -> None:
+        if self._transcript is None:
+            return
+        self._working_indicator = indicator
+        self._transcript.mount_message(indicator)
+        self._follow_tail_after_refresh()
+
+    def _remove_working_indicator(self) -> None:
+        indicator = self._working_indicator
+        if indicator is None:
+            return
+        self._working_indicator = None
+        with suppress(Exception):
+            indicator.remove()
+
     def show_working_indicator(self) -> None:
-        if self._status is not None:
-            self._status.show_working()
+        existing = self._working_indicator
+        if isinstance(existing, WorkingIndicator):
+            existing.show_working()
+            return
+        # No active indicator — create a fresh one in the transcript timeline.
+        self._remove_working_indicator()
+        indicator = WorkingIndicator()
+        indicator.restart_working()
+        self._mount_working_indicator(indicator)
 
     def show_retry_indicator(self, label: str) -> None:
-        if self._status is not None:
-            self._status.show_retry(label)
+        existing = self._working_indicator
+        if isinstance(existing, WorkingIndicator):
+            existing.show_retry(label)
+            return
+        indicator = WorkingIndicator()
+        indicator.show_retry(label)
+        self._mount_working_indicator(indicator)
 
     def restart_working_indicator(self) -> None:
-        """Start fresh footer activity for a newly submitted prompt."""
+        """Start fresh transcript activity for a newly submitted prompt."""
 
-        if self._status is not None:
-            self._status.restart_working()
+        self._remove_working_indicator()
+        indicator = WorkingIndicator()
+        indicator.restart_working()
+        self._mount_working_indicator(indicator)
 
     def hide_working_indicator(self) -> None:
-        if self._status is not None:
-            self._status.hide_activity()
+        self._remove_working_indicator()
 
     def mount_tool_call(self, call_id: str, name: str, arguments: object) -> None:
         # Mount a fresh card for a tool call and register it by call_id. The

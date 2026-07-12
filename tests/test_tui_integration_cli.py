@@ -2512,8 +2512,9 @@ def test_textual_enter_runs_completed_command_through_typed_path() -> None:
 
 def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
     # The wordmark identifies an empty session without consuming permanent
-    # scrollback. Its 40-column block and prompt hint must fit the compact audit
-    # viewport, then disappear before the first real transcript item is mounted.
+    # scrollback. Its ultra-minimal form and prompt hint must fit the compact
+    # audit viewport, then disappear before the first real transcript item is
+    # mounted.
     async def scenario() -> tuple[
         tuple[str, str],
         tuple[int, int, int],
@@ -2548,7 +2549,7 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
 
     content, centers, initial_children, final_children = anyio.run(scenario)
     wordmark, hint = content
-    assert "▄" in wordmark
+    assert wordmark.strip() == "wisp"
     assert hint == "Type a prompt or / for commands."
     assert centers[0] == centers[1] == centers[2]
     assert initial_children == ["TranscriptEmptyState"]
@@ -2713,7 +2714,7 @@ def test_textual_header_shows_the_wisp_wordmark() -> None:
 
     title, sub_title = anyio.run(scenario)
     assert title == "wisp"
-    assert sub_title == "a quiet coding agent"
+    assert sub_title == "tethered to you"
 
 
 def _read_prompt_signal_for_key(key: str) -> type[BaseException] | None:
