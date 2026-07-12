@@ -33,6 +33,7 @@ from wisp.tui.widgets import (
     ToolCard,
     Transcript,
     TranscriptEmptyState,
+    WorkingIndicator,
 )
 from wisp.tui.widgets import (
     PromptEditor as Input,
@@ -52,10 +53,11 @@ def _transcript_texts(app: TextualTui) -> list[str]:
     return texts
 
 
-def _status_activity(app: TextualTui) -> str:
-    """Plain second footer line, where transient activity replaces status."""
+def _working_activity(app: TextualTui) -> str:
+    """Plain transcript heartbeat text, or empty when activity is hidden."""
 
-    return app.query_one("#status", StatusBar).render().plain.splitlines()[1]
+    indicator = app._working_indicator
+    return indicator.render().plain if isinstance(indicator, WorkingIndicator) else ""
 
 
 def _provider_retry(
@@ -1273,18 +1275,23 @@ def test_textual_line_message_border_title_from_role_labels() -> None:
     assert titles == [_ROLE_LABELS["assistant"], _ROLE_LABELS["tool"], _ROLE_LABELS["error"]]
 
 
-def test_textual_running_uses_status_bar_without_polluting_transcript() -> None:
-    async def scenario() -> tuple[str, list[tuple[str | None, object]]]:
+def test_textual_running_uses_transcript_heartbeat_and_stable_status_bar() -> None:
+    async def scenario() -> tuple[str, str, list[tuple[str | None, object]]]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()
             await pilot.pause()
             status = app_instance.query_one("#status", StatusBar)
-            return status.render().plain, _transcript_cards(app_instance)
+            return (
+                status.render().plain,
+                _working_activity(app_instance),
+                _transcript_cards(app_instance),
+            )
 
-    status, cards = anyio.run(scenario)
-    assert "Working" in status
-    assert cards == []
+    status, activity, cards = anyio.run(scenario)
+    assert "Working" not in status
+    assert "Working" in activity
+    assert cards == [("message--dim", None)]
 
 
 def test_textual_status_activity_animates_spinner_and_counts_elapsed() -> None:
@@ -1297,21 +1304,21 @@ def test_textual_status_activity_animates_spinner_and_counts_elapsed() -> None:
         async with app_instance.run_test() as pilot:
             renderer.running()
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
+            indicator = app_instance.query_one(WorkingIndicator)
 
-            start = status.render().plain.splitlines()[1]
+            start = indicator.render().plain
             glyphs: set[str] = {start[0]}
             # One full spinner cycle plus enough ticks to cross 1s (interval 0.08s).
-            for _ in range(len(StatusBar._FRAMES) + 3):
-                status._tick()
-                glyphs.add(status.render().plain.splitlines()[1][0])
-            return len(glyphs), start, status.render().plain.splitlines()[1]
+            for _ in range(len(WorkingIndicator._FRAMES) + 3):
+                indicator._tick()
+                glyphs.add(indicator.render().plain[0])
+            return len(glyphs), start, indicator.render().plain
 
     distinct_glyphs, start, later = anyio.run(scenario)
-    assert distinct_glyphs == len(StatusBar._FRAMES)  # every frame shown → smooth
+    assert distinct_glyphs == len(WorkingIndicator._FRAMES)  # every frame shown → smooth
     assert start.endswith("0s")
     assert later.endswith("1s")  # counter advanced with elapsed time
-    assert start[0] in StatusBar._FRAMES  # a braille frame, not the old dot
+    assert start[0] in WorkingIndicator._FRAMES  # a braille frame, not the old dot
 
 
 def test_textual_retry_progress_mutates_status_and_rejects_older_attempts() -> None:
@@ -1322,17 +1329,16 @@ def test_textual_retry_progress_mutates_status_and_rejects_older_attempts() -> N
             renderer.event(TurnStarted(turn=1))
             renderer.event(_provider_retry(attempt=2, delay_seconds=1.25))
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
-            first = _status_activity(app_instance)
+            first = _working_activity(app_instance)
 
             renderer.event(_provider_retry(attempt=1, delay_seconds=9.0))
             renderer.event(_provider_retry(attempt=2, delay_seconds=9.0))
             renderer.event(_provider_retry(attempt=3, status_code=429))
             await pilot.pause()
             return (
-                status._active,
+                app_instance._working_indicator is not None,
                 first,
-                _status_activity(app_instance),
+                _working_activity(app_instance),
                 _transcript_texts(app_instance),
             )
 
@@ -1354,13 +1360,17 @@ def test_textual_retry_progress_recovers_and_ignores_post_start_retry() -> None:
             renderer.event(MessageStarted(turn=1))
             renderer.event(_provider_retry(attempt=3))
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
-            recovered = _status_activity(app_instance)
+            recovered = _working_activity(app_instance)
 
             renderer.token_delta("response")
             await pilot.pause()
             texts = _transcript_texts(app_instance)
-            return recovered, "\n".join(texts), status._timer is None, status._active
+            return (
+                recovered,
+                "\n".join(texts),
+                app_instance._working_indicator is None,
+                app_instance._working_indicator is not None,
+            )
 
     recovered, transcript, timer_stopped, active = anyio.run(scenario)
     assert "Working" in recovered
@@ -1383,7 +1393,7 @@ def test_textual_retry_progress_resumes_for_a_later_tool_turn() -> None:
             renderer.event(TurnStarted(turn=2))
             renderer.event(_provider_retry(turn=2, attempt=1, reason="server_error"))
             await pilot.pause()
-            return _status_activity(app_instance)
+            return _working_activity(app_instance)
 
     rendered = anyio.run(scenario)
     assert "Retrying openai · 1/3 in 0.5s · server error" in rendered
@@ -1395,8 +1405,7 @@ def test_textual_retry_progress_does_not_replay_or_survive_terminal_states() -> 
         async with app_instance.run_test() as pilot:
             renderer.event(_provider_retry())
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
-            replayed = status._active
+            replayed = app_instance._working_indicator is not None
 
             renderer.running()
             renderer.event(TurnStarted(turn=1))
@@ -1405,7 +1414,8 @@ def test_textual_retry_progress_does_not_replay_or_survive_terminal_states() -> 
             renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
             renderer.event(_provider_retry(attempt=2))
             await pilot.pause()
-            return replayed, status._active, status._timer is None, _status_activity(app_instance)
+            remaining = app_instance._working_indicator is not None
+            return replayed, remaining, not remaining, _working_activity(app_instance)
 
     replayed, remaining, timer_stopped, rendered = anyio.run(scenario)
     assert not replayed
@@ -1429,9 +1439,8 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
                 )
             )
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
             return (
-                status._active,
+                app_instance._working_indicator is not None,
                 app_instance.query_one("#decision-panel").display,
             )
 
@@ -1441,11 +1450,11 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
             renderer.running()
             renderer.event(_provider_retry())
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
             renderer.cancelling("Cancelling current prompt...")
             renderer.event(_provider_retry(attempt=2))
             await pilot.pause()
-            return status._active, status._timer is None
+            remaining = app_instance._working_indicator is not None
+            return remaining, not remaining
 
     async def failure_scenario() -> tuple[bool, bool]:
         app_instance, renderer = create_textual_tui()
@@ -1453,10 +1462,10 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
             renderer.running()
             renderer.event(_provider_retry())
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
             renderer.rpc_event_reader_failed("closed")
             await pilot.pause()
-            return status._active, status._timer is None
+            remaining = app_instance._working_indicator is not None
+            return remaining, not remaining
 
     approval_row, approval_visible = anyio.run(approval_scenario)
     cancellation_row, cancellation_timer_stopped = anyio.run(cancellation_scenario)
@@ -1470,7 +1479,7 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
 
 
 def test_textual_retry_progress_preserves_compact_prompt_and_footer() -> None:
-    async def scenario() -> tuple[str, bool, bool, bool]:
+    async def scenario() -> tuple[str, str, bool, bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(72, 20)) as pilot:
             renderer.view_updated(
@@ -1498,16 +1507,15 @@ def test_textual_retry_progress_preserves_compact_prompt_and_footer() -> None:
             footer = app_instance.query_one("#status", StatusBar)
             return (
                 footer.render().plain,
-                footer.region.y > input_widget.region.y,
+                _working_activity(app_instance),
                 input_widget.region.y < footer.region.y,
                 input_widget.display,
             )
 
-    rendered, activity_in_footer, footer_below_prompt, prompt_visible = anyio.run(scenario)
-    assert "custom-provider-nam…" in rendered
-    assert "2/3" in rendered
-    assert "openai-codex/gpt-5-codex" in rendered
-    assert activity_in_footer
+    footer, activity, footer_below_prompt, prompt_visible = anyio.run(scenario)
+    assert "custom-provider-nam…" in activity
+    assert "2/3" in activity
+    assert "openai-codex/gpt-5-codex" in footer
     assert footer_below_prompt
     assert prompt_visible
 
@@ -1778,10 +1786,10 @@ def test_textual_working_status_disappears_on_first_stream_output() -> None:
         async with app_instance.run_test() as pilot:
             renderer.running()
             await pilot.pause()
-            before = _status_activity(app_instance)
+            before = _working_activity(app_instance)
             renderer.token_delta("hello")
             await pilot.pause()
-            after = _status_activity(app_instance)
+            after = _working_activity(app_instance)
             return before, after, _transcript_texts(app_instance)
 
     before, after, transcript = anyio.run(scenario)
