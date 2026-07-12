@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal
@@ -155,6 +156,11 @@ class ToolExecutionEnded(WispEvent):
     name: str
     output: str
     is_error: bool
+    # Structured result payload from ToolResult.data, carried verbatim for
+    # tool-aware rendering (exit codes, match counts, edit old/new text). Empty
+    # for error paths that never produced a ToolResult (approval-denied, raised
+    # exceptions); the renderer must not assume it is populated.
+    data: Mapping[str, object] = Field(default_factory=dict)
 
 
 class ToolResultReady(WispEvent):
@@ -163,6 +169,7 @@ class ToolResultReady(WispEvent):
     name: str
     output: str
     is_error: bool
+    data: Mapping[str, object] = Field(default_factory=dict)
 
 
 class TurnCompleted(WispEvent):

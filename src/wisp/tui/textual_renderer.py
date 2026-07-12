@@ -32,7 +32,7 @@ from wisp.tui.rendering import (
     _truncate_to_cell_width,
     _tui_help_text,
 )
-from wisp.tui.widgets import _preview_tool_output
+from wisp.tui.tool_output import render_tool_result
 
 if TYPE_CHECKING:
     from wisp.tui.textual_app import TextualTui
@@ -304,7 +304,16 @@ class TextualTuiRenderer:
             self.app.resolve_tool_call(
                 event.call_id,
                 status,
-                detail=_preview_tool_output(event.output),
+                # arguments are unused by the error/generic renderers PR A ships;
+                # the parameter stays in the seam so the diff/summary renderers
+                # (which need them) don't reshape this call site later.
+                detail=render_tool_result(
+                    event.name,
+                    {},
+                    event.output,
+                    is_error=event.is_error,
+                    data=event.data,
+                ),
                 elapsed=self._tool_elapsed(event.call_id, event.timestamp),
             )
         elif isinstance(event, AgentCompleted):

@@ -1003,6 +1003,30 @@ def test_textual_tool_card_bounds_large_multiline_output() -> None:
     assert "... 4 more lines" in rendered
 
 
+def test_textual_tool_card_error_shows_tail_and_exit_code() -> None:
+    # Issue #74 PR A: a failed tool now renders the exit status and the TAIL of
+    # its output (where the error is), not the head. Before this, the card showed
+    # the first lines and dropped the actual failure at the end.
+    output = "\n".join(f"line-{index}" for index in range(40))
+    rendered = _render_events_to_transcript(
+        [
+            ToolCallRequested(call_id="c1", name="bash", arguments={}),
+            ToolResultReady(
+                call_id="c1",
+                name="bash",
+                output=output,
+                is_error=True,
+                data={"exit_code": 2},
+            ),
+        ]
+    )
+
+    assert "✗ bash" in rendered
+    assert "exit 2" in rendered
+    assert "line-39" in rendered  # the tail (the error) is shown
+    assert "line-0" not in rendered  # the head is dropped
+
+
 def test_textual_tool_card_without_a_request_shows_no_duration() -> None:
     # A result arriving with no prior request (e.g. a resumed session) can't
     # compute a duration; the card is simply never mounted, so nothing is shown

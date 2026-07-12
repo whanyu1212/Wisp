@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 
 from wisp.agent.execution import ToolExecutionEvent
 from wisp.events import ToolApprovalRequested, ToolApprovalResolved, ToolExecutionEnded
@@ -34,6 +34,10 @@ class ConfiguredToolExecutor:
         arguments = dict(tool_call.arguments)
         output: str
         is_error = False
+        # Only a real ToolResult carries structured data; the synthetic error
+        # paths below (parse error, unconfigured, unknown tool, blocked, denied)
+        # leave this empty, which the renderer treats as "nothing structured".
+        data: Mapping[str, object] = {}
 
         if tool_call.parse_error is not None:
             output = tool_call.parse_error
@@ -77,26 +81,29 @@ class ConfiguredToolExecutor:
                         reason=decision.reason,
                     )
                     if decision.approved:
-                        output, is_error = await self._run_tool(tool, arguments)
+                        output, is_error, data = await self._run_tool(tool, arguments)
                     else:
                         output = decision.reason or "Tool execution was not approved"
                         is_error = True
                 else:
-                    output, is_error = await self._run_tool(tool, arguments)
+                    output, is_error, data = await self._run_tool(tool, arguments)
 
         yield ToolExecutionEnded(
             call_id=tool_call.call_id,
             name=tool_call.name,
             output=output,
             is_error=is_error,
+            data=data,
         )
 
-    async def _run_tool(self, tool: Tool, arguments: dict[str, object]) -> tuple[str, bool]:
+    async def _run_tool(
+        self, tool: Tool, arguments: dict[str, object]
+    ) -> tuple[str, bool, Mapping[str, object]]:
         try:
             result = await tool.run(arguments, self._context)
-            return result.text, False
+            return result.text, False, result.data
         except Exception as exc:  # noqa: BLE001 - tool failures are model-visible results
-            return str(exc), True
+            return str(exc), True, {}
 
 
 __all__ = ["ConfiguredToolExecutor"]
