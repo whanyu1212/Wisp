@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from datetime import datetime
 
 import anyio
 from textual import events, on
@@ -15,29 +14,17 @@ from textual.widget import Widget
 from textual.widgets import Header, TextArea
 
 from wisp.events import (
-    AgentCompleted,
-    ErrorEvent,
-    KnownWispEvent,
-    MessageCompleted,
-    MessageStarted,
-    ProviderRetrying,
-    RpcCommandFinished,
     ToolApprovalRequested,
-    ToolApprovalResolved,
-    ToolCallRequested,
-    ToolResultReady,
     TrustRequested,
-    TurnStarted,
 )
 from wisp.tui.compact_echo import CompactEchoLog
 from wisp.tui.rendering import (
     TuiRenderer,
     TuiViewSnapshot,
     _markup_escape,
-    _truncate_to_cell_width,
-    _tui_help_text,
 )
 from wisp.tui.stream_buffer import StreamCoalescer
+from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.theme import WISP_THEMES, role_styles
 from wisp.tui.widgets import (
     DecisionPanel,
@@ -49,7 +36,6 @@ from wisp.tui.widgets import (
     ToolCard,
     Transcript,
     WorkingIndicator,
-    _preview_tool_output,
 )
 
 # Plain Rich color names used only before on_mount resolves the themed palette
@@ -86,14 +72,6 @@ _INPUT_PLACEHOLDERS: dict[str, str] = {
     "approve? [y/N] ": f"{_PROMPT_GLYPH} approve? [y/N]",
 }
 
-_RETRY_REASON_LABELS = {
-    "network": "network error",
-    "timeout": "request timed out",
-    "rate_limit": "rate limited",
-    "server_error": "server error",
-    "transient_http": "temporary HTTP error",
-}
-
 
 def _input_placeholder(hint: str) -> str:
     """Map a shared semantic prompt hint to the Textual input's glyph placeholder.
@@ -103,18 +81,6 @@ def _input_placeholder(hint: str) -> str:
     """
 
     return _INPUT_PLACEHOLDERS.get(hint, f"{_PROMPT_GLYPH} {hint}")
-
-
-def _retry_progress_label(event: ProviderRetrying) -> str:
-    """Return compact, human-readable retry progress for the status footer."""
-
-    provider = _truncate_to_cell_width(event.provider, 20)
-    reason = _RETRY_REASON_LABELS[event.reason]
-    status = f" ({event.status_code})" if event.status_code is not None else ""
-    return (
-        f"Retrying {provider} · {event.attempt}/{event.max_attempts} "
-        f"in {event.delay_seconds:.1f}s · {reason}{status}"
-    )
 
 
 class TextualTui(App[None]):
@@ -995,294 +961,6 @@ class TextualTui(App[None]):
         self._unseen_output.clear()
         if self._jump_to_latest is not None:
             self._jump_to_latest.hide()
-
-
-class TextualTuiRenderer:
-    """Renderer adapter consumed by `TuiShell` and backed by `TextualTui`."""
-
-    def __init__(self, app: TextualTui) -> None:
-        self.app = app
-        # Mode the shell last reported via view_updated(); this is the mode in
-        # effect while the user types the next line.
-        self._visible_input_mode = "idle"
-        self._visible_cwd = ""
-        # Mode captured at the instant a line was submitted. It can differ from
-        # the mode the shell polled when read_prompt() began waiting (e.g. a
-        # tool approval that arrived mid-line), so the shell reconciles against
-        # it via consume_submitted_input_mode().
-        self._submitted_input_mode: str | None = None
-        app.set_submit_hook(self._capture_submitted_input_mode)
-        # call_id → request event timestamp, so a tool card can show the true
-        # wall-clock duration (result.timestamp − request.timestamp) when it
-        # resolves. Every WispEvent carries a UTC timestamp, so this needs no clock.
-        self._tool_started: dict[str, datetime] = {}
-        self._progress_active = False
-        self._progress_turn: int | None = None
-        self._response_started = False
-        self._retry_attempt = 0
-
-    def view_updated(self, snapshot: TuiViewSnapshot) -> None:
-        self._visible_input_mode = snapshot.input_mode
-        self._visible_cwd = snapshot.cwd
-        self.app.set_input_hint(snapshot.input_hint)
-        self.app.set_status(snapshot)
-        if snapshot.input_mode != "running":
-            self.app.hide_working_indicator()
-        if snapshot.input_mode not in {"running", "approval", "trust"}:
-            self._finish_progress()
-        if snapshot.input_mode not in {"approval", "trust"}:
-            self.app.hide_decision()
-
-    def _begin_progress(self) -> None:
-        self._progress_active = True
-        self._progress_turn = None
-        self._response_started = False
-        self._retry_attempt = 0
-        self.app.restart_working_indicator()
-
-    def _finish_progress(self) -> None:
-        self._progress_active = False
-        self._progress_turn = None
-        self._response_started = False
-        self._retry_attempt = 0
-        self.app.hide_working_indicator()
-
-    def _suspend_progress(self) -> None:
-        self.app.hide_working_indicator()
-
-    def _turn_started(self, turn: int) -> None:
-        if not self._progress_active:
-            return
-        if self._progress_turn is not None and turn <= self._progress_turn:
-            return
-        self._progress_turn = turn
-        self._response_started = False
-        self._retry_attempt = 0
-        self.app.show_working_indicator()
-
-    def _provider_retrying(self, event: ProviderRetrying) -> None:
-        if not self._progress_active:
-            return
-        if self._progress_turn is None or event.turn > self._progress_turn:
-            self._progress_turn = event.turn
-            self._response_started = False
-            self._retry_attempt = 0
-        elif event.turn < self._progress_turn:
-            return
-        if self._response_started or event.attempt <= self._retry_attempt:
-            return
-        self._retry_attempt = event.attempt
-        self.app.show_retry_indicator(_retry_progress_label(event))
-
-    def _message_started(self, turn: int) -> None:
-        if not self._progress_active:
-            return
-        if self._progress_turn is not None and turn < self._progress_turn:
-            return
-        if self._progress_turn == turn and self._response_started:
-            return
-        self._progress_turn = turn
-        self._response_started = True
-        self._retry_attempt = 0
-        self.app.show_working_indicator()
-
-    def _tool_elapsed(self, call_id: str, finished: datetime) -> float | None:
-        # True wall-clock duration for a resolving tool call: result timestamp −
-        # request timestamp. Pops the start time so the map doesn't grow and a
-        # duplicate result (denial then error result for the same call) doesn't
-        # double-count. Returns None when the request was never seen (e.g. resume),
-        # leaving the card timer-less rather than showing a bogus duration.
-        started = self._tool_started.pop(call_id, None)
-        if started is None:
-            return None
-        return (finished - started).total_seconds()
-
-    def _abort_pending_tools(self, detail: str = "cancelled") -> None:
-        # A turn ended without results (cancel / failure / stream death): drain any
-        # still-pending tool cards and forget their request timestamps so neither
-        # a spinning card nor a stale start time leaks into the next turn.
-        self._tool_started.clear()
-        self.app.fail_pending_tool_calls(detail)
-
-    def _capture_submitted_input_mode(self) -> None:
-        self._submitted_input_mode = self._visible_input_mode
-
-    def consume_submitted_input_mode(self, fallback: str) -> str:
-        """Return and clear the mode captured when the last line was accepted."""
-
-        mode = self._submitted_input_mode or fallback
-        self._submitted_input_mode = None
-        return mode
-
-    def startup(self) -> None:
-        # Textual renders identity as a disposable empty state. Keeping startup()
-        # as a no-op preserves the shared renderer protocol without putting the
-        # wordmark into scrollback; line/fullscreen keep their own startup output.
-        pass
-
-    def help(self) -> None:
-        self.app.write_notice(_tui_help_text())
-
-    def notice(self, message: str) -> None:
-        self.app.write_notice(message)
-
-    def command_error(self, message: str) -> None:
-        self.app.write_error(message)
-
-    def prompt_submitted(self, prompt: str) -> None:
-        # Echo a compact line for large pastes (marker kept) while the model still
-        # received the full expanded text via controller.prompt(prompt).
-        self.app.write_user(self.app.compact_echo_for(prompt))
-
-    def queued_prompts_cleared(self) -> None:
-        # The shell dropped its queued follow-ups (cancel/quit/input-closed/error),
-        # so their pending compact echoes will never be consumed — reclaim them.
-        self.app.clear_compact_echoes()
-
-    def running(self) -> None:
-        self._begin_progress()
-
-    def queued_follow_up(self, count: int) -> None:
-        self.app.write_dim(f"queued follow-up #{count}")
-
-    def running_queued_follow_up(self, count: int) -> None:
-        self.app.write_dim(f"running queued follow-up; {count} queued")
-
-    def input_closed_finishing_prompt(self) -> None:
-        self.app.write_dim("input closed; finishing current prompt")
-
-    def input_cleared(self) -> None:
-        self.app.write_dim("input cleared")
-
-    def cancelling(self, message: str) -> None:
-        self._finish_progress()
-        self.app.write_notice(message)
-
-    def cancel_already_requested(self) -> None:
-        self.app.write_dim("cancel already requested")
-
-    def approval_input_closed(self) -> None:
-        self.app.write_notice("Approval input closed; denying tool request.")
-
-    def approval_interrupted(self) -> None:
-        self.app.write_notice("Approval interrupted; denying tool request.")
-
-    def quit_requested_denying_approval(self) -> None:
-        self.app.write_notice("Quit requested; denying pending tool request.")
-
-    def send_failed(self, action: str, error: object) -> None:
-        self._finish_progress()
-        self.app.hide_decision()
-        self._abort_pending_tools(f"send failed: {action}")
-        self.app.write_error(f"failed to send {action}: {error}")
-
-    def shutdown_failed(self, error: object) -> None:
-        self._finish_progress()
-        self._abort_pending_tools("shutdown failed")
-        self.app.write_error(f"shutdown failed: {error}")
-
-    def cancelled(self) -> None:
-        self._finish_progress()
-        self._abort_pending_tools("cancelled")
-        self.app.write_notice("cancelled")
-
-    def token_delta(self, delta: str) -> None:
-        # Stream live into the assistant Markdown widget; append_stream buffers
-        # and coalesces the reconcile. end_token_stream() finalizes the bubble.
-        self._suspend_progress()
-        self.app.append_stream(delta)
-
-    def end_token_stream(self) -> None:
-        self.app.flush_stream()
-
-    def approval_request(self, event: ToolApprovalRequested) -> None:
-        self._suspend_progress()
-        self.app.show_approval(event, cwd=self._visible_cwd)
-
-    def approval_all_confirmation(self, event: ToolApprovalRequested) -> None:
-        self.app.show_approval_all_confirmation(event)
-
-    def trust_request(self, event: TrustRequested) -> None:
-        self._suspend_progress()
-        self.app.show_trust(event)
-
-    def event(self, event: KnownWispEvent) -> None:
-        # Typed dispatch mirroring LineTuiRenderer.event() so tool calls, tool
-        # results, and approvals render as distinct, semantically-styled lines
-        # instead of an undifferentiated str(event) repr.
-        if isinstance(event, TurnStarted):
-            self._turn_started(event.turn)
-        elif isinstance(event, ProviderRetrying):
-            self._provider_retrying(event)
-        elif isinstance(event, MessageStarted):
-            self._message_started(event.turn)
-        elif isinstance(event, MessageCompleted):
-            self._suspend_progress()
-            if event.content:
-                self.app.write_assistant(event.content)
-        elif isinstance(event, ToolCallRequested):
-            # Mount the evolving card; approval/result mutate it in place. Record
-            # the request time so the card can show its true duration on resolve.
-            self._suspend_progress()
-            self._tool_started[event.call_id] = event.timestamp
-            self.app.mount_tool_call(event.call_id, event.name, event.arguments)
-        elif isinstance(event, ToolApprovalResolved):
-            # Only a denial changes the card here: an approval leaves it pending
-            # until the result lands (the tool still has to run). A denial short-
-            # circuits to an error result, but flip the card to "denied" now so the
-            # reason shows immediately rather than as a generic error line.
-            if not event.approved:
-                self.app.resolve_tool_call(
-                    event.call_id,
-                    "denied",
-                    detail=event.reason or "denied",
-                    elapsed=self._tool_elapsed(event.call_id, event.timestamp),
-                )
-        elif isinstance(event, ToolResultReady):
-            status = "error" if event.is_error else "done"
-            self.app.resolve_tool_call(
-                event.call_id,
-                status,
-                detail=_preview_tool_output(event.output),
-                elapsed=self._tool_elapsed(event.call_id, event.timestamp),
-            )
-        elif isinstance(event, AgentCompleted):
-            self._finish_progress()
-        elif isinstance(event, ErrorEvent):
-            self._finish_progress()
-            self.app.write_error(f"error: {event.message}")
-        elif isinstance(event, RpcCommandFinished):
-            if event.command_type == "prompt":
-                self._finish_progress()
-            if not event.ok:
-                self._suspend_progress()
-                self._abort_pending_tools("command failed")
-                self.app.write_error(f"command failed: {event.error or event.command_id}")
-        # Framing/plumbing events (RpcCommandStarted, a successful RpcCommandFinished,
-        # AgentStarted, ToolExecutionStarted/Ended, SessionSaved) are intentionally
-        # not rendered. They are session/RPC audit, not conversation — and the active
-        # session id already lives in the footer, so a per-turn "session saved:"
-        # line is pure redundancy. Dropping them keeps the transcript conversational.
-
-    def rpc_event_reader_failed(self, error: str) -> None:
-        self._finish_progress()
-        self._abort_pending_tools("event reader failed")
-        self.app.write_error(f"RPC event reader failed: {error}")
-
-    def rpc_stream_ended_before_command(self, command_id: str) -> None:
-        self._finish_progress()
-        self._abort_pending_tools("stream ended")
-        self.app.write_error(f"RPC stream ended before command finished: {command_id}")
-
-    def rpc_stream_ended_before_shutdown(self, command_id: str) -> None:
-        self._finish_progress()
-        self._abort_pending_tools("stream ended")
-        self.app.write_error(f"RPC stream ended before shutdown finished: {command_id}")
-
-    def rpc_stream_ended_unexpectedly(self) -> None:
-        self._finish_progress()
-        self._abort_pending_tools("stream ended")
-        self.app.write_error("RPC stream ended unexpectedly")
 
 
 def create_textual_tui() -> tuple[TextualTui, TuiRenderer]:
