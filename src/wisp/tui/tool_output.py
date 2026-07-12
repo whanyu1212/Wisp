@@ -26,6 +26,7 @@ Markdown parser.
 
 from __future__ import annotations
 
+import signal
 from collections.abc import Mapping
 
 from wisp.tui.widgets import (
@@ -101,14 +102,40 @@ def render_error(output: str, *, exit_code: int | None) -> str:
 
     lines: list[str] = []
 
-    if exit_code is not None and exit_code != 0:
-        lines.append(f"exit {exit_code}")
+    status = _exit_status_line(exit_code)
+    if status is not None:
+        lines.append(status)
 
     tail = _tail_preview(output, max_lines=_ERROR_TAIL_LINES, max_bytes=_ERROR_TAIL_BYTES)
     if tail:
         lines.append(tail)
 
     return "\n".join(lines) if lines else "(no output)"
+
+
+def _exit_status_line(exit_code: int | None) -> str | None:
+    """Human-readable status for a process exit code, or None to omit.
+
+    A zero code is success (suppressed as noise). A negative code is POSIX
+    signal termination — asyncio reports ``-N`` when the process was killed by
+    signal ``N`` (including Wisp's own SIGKILL when a command exhausts the output
+    budget) — so render it as the signal rather than a nonsensical ``exit -9``.
+    """
+
+    if exit_code is None or exit_code == 0:
+        return None
+    if exit_code < 0:
+        return f"killed by {_signal_name(-exit_code)}"
+    return f"exit {exit_code}"
+
+
+def _signal_name(number: int) -> str:
+    """`signal 9 (SIGKILL)` when the number is known, else `signal N`."""
+
+    try:
+        return f"signal {number} ({signal.Signals(number).name})"
+    except ValueError:
+        return f"signal {number}"
 
 
 def _tail_preview(output: str, *, max_lines: int, max_bytes: int) -> str:

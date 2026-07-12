@@ -41,6 +41,22 @@ def test_render_error_omits_exit_line_when_none() -> None:
     assert render_error("denied", exit_code=None) == "denied"
 
 
+def test_render_error_renders_signal_termination_not_negative_exit() -> None:
+    # asyncio reports a negative code when the process was killed by a signal
+    # (including Wisp's own SIGKILL on output-budget exhaustion). "exit -9" is
+    # nonsensical; render it as the signal.
+    rendered = render_error("boom", exit_code=-9)
+    first = rendered.splitlines()[0]
+    assert "exit -9" not in rendered
+    assert first == "killed by signal 9 (SIGKILL)"
+
+
+def test_render_error_unknown_signal_number_falls_back() -> None:
+    # A signal number with no Signals enum member still renders cleanly.
+    rendered = render_error("boom", exit_code=-999)
+    assert rendered.splitlines()[0] == "killed by signal 999"
+
+
 def test_render_error_shows_the_tail_not_the_head() -> None:
     # The core fix: failures surface at the END of output. A long output must
     # show its last lines, not its first — the pre-#74 behavior showed the head
