@@ -7,18 +7,21 @@ raw output itself.
 
 Design — strict core, tolerant edge:
 
-* Built-in tools are a small, known set whose ``data`` shape we own. They get
-  explicit renderers that read structured fields (exit codes, match counts, edit
-  old/new text) and produce high-fidelity detail (error tails, diffs, summaries).
+* Built-in tools are a small, known set whose result shape we own. They get
+  explicit rendering from promoted, typed facts (today, a shell ``exit_code``;
+  later PRs add diffs and structured summaries) for high-fidelity detail.
 * Custom / third-party tools are an open set we do not control. They fall through
   to a permissive generic renderer that never assumes a shape and degrades
   gracefully to bounded output.
 
+The structured facts reach these functions as narrow, typed parameters (e.g.
+``exit_code: int | None``) promoted agent-side for recognized tools, not as a raw
+result mapping — so an unrelated tool can never drive failure styling, and the
+signal stays bounded and serialization-safe across the RPC transport.
+
 Every renderer returns an already-bounded, ``_markup_escape``-safe string. Output
 is treated as untrusted: it is escaped at this boundary and never handed to the
-Markdown parser. ``data`` from a custom tool is likewise untrusted input — the
-dispatcher only routes to a typed renderer when both the tool name and the
-payload shape are recognized, and otherwise falls back.
+Markdown parser.
 """
 
 from __future__ import annotations
@@ -128,8 +131,13 @@ def _tail_preview(output: str, *, max_lines: int, max_bytes: int) -> str:
 
     encoded = preview.encode("utf-8")
     if len(encoded) > max_bytes:
-        # Trim from the front of the byte window so the very tail survives.
-        preview = encoded[-max(1, max_bytes) :].decode("utf-8", errors="ignore")
+        # Trim from the front of the byte window so the very tail survives, then
+        # drop any leading partial-line remnant up to the first newline so the
+        # preview starts at a clean line boundary. Without this, a trim landing on
+        # a separator leaves a spurious blank first line and skews the line count.
+        clipped = encoded[-max(1, max_bytes) :].decode("utf-8", errors="ignore")
+        newline = clipped.find("\n")
+        preview = clipped[newline + 1 :] if newline != -1 else clipped
 
     visible_bytes = len(preview.encode("utf-8"))
     hidden_bytes = max(0, total_bytes - visible_bytes)

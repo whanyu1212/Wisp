@@ -72,6 +72,18 @@ def test_render_error_marks_byte_only_truncation_of_single_line() -> None:
     assert rendered.rstrip().endswith("x")  # the tail is what survives
 
 
+def test_render_error_byte_trim_on_newline_boundary_has_no_blank_line() -> None:
+    # When the byte trim lands exactly on a newline, the separator must not
+    # survive as a spurious blank first line, and the counts stay honest: the
+    # first (dropped) line is reported as a hidden line, not swallowed as bytes.
+    output = "head\n" + "x" * (_ERROR_TAIL_BYTES - 1)
+    rendered = render_error(output, exit_code=None)
+    body = rendered.split("\n", 1)[1] if rendered.startswith("...") else rendered
+    assert not body.startswith("\n")  # no leading blank line
+    assert "head" not in rendered  # the dropped head line is gone
+    assert "1 earlier line" in rendered  # and counted as a hidden line
+
+
 def test_render_error_short_output_has_no_hidden_marker() -> None:
     rendered = render_error("only one line", exit_code=None)
     assert "earlier" not in rendered

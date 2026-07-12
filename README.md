@@ -261,7 +261,7 @@ The legacy `--mode tui` entrypoint remains for compatibility and honors
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 3`. A successful prompt follows this
+Every outbound `WispEvent` includes `"schema_version": 4`. A successful prompt follows this
 lifecycle (tool events repeat inside a turn when the model requests tools):
 
 ```text
@@ -282,10 +282,13 @@ agent.completed
 calls. A failed provider response or tool loop emits `error`, a failed `turn.completed`, and a
 failed `agent.completed`; it does not emit `message.completed` for an incomplete response.
 
-Schema v3 adds `provider.retrying` before `message.started`, with the next attempt number, bounded
-delay, retry reason, and optional HTTP status. It also retains schema v2's explicit turn/message
-lifecycle and tool ordering. JSON/RPC consumers should branch on `schema_version` and reject
-versions they do not support; Wisp's typed RPC client does this automatically.
+Schema v4 adds an optional `exit_code` (`int | null`) to `tool.execution.ended` and `tool.result`,
+carrying a shell-like tool's process exit status for presentation; it is `null` for tools without
+exit-code semantics. Schema v3 added `provider.retrying` before `message.started`, with the next
+attempt number, bounded delay, retry reason, and optional HTTP status. Both retain schema v2's
+explicit turn/message lifecycle and tool ordering. JSON/RPC consumers should branch on
+`schema_version` and reject versions they do not support; Wisp's typed RPC client does this
+automatically.
 
 ### JSON mode
 
