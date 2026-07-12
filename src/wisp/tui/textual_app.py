@@ -410,10 +410,14 @@ class TextualTui(App[None]):
                 if not queued:
                     del self._compact_echoes[oldest]
 
-    def _clear_compact_echoes(self) -> None:
-        # Interrupt/EOF abandons any queued follow-ups, so their pending echoes
-        # will never be consumed — drop them all rather than leave orphans that a
-        # later identical paste could pop by mistake.
+    def clear_compact_echoes(self) -> None:
+        """Drop all pending compact echoes (the shell dropped its queued prompts).
+
+        Called by the renderer only on paths that actually abandon queued
+        follow-ups, so their never-to-be-consumed echoes can't orphan (unbounded
+        growth) or be popped by mistake by a later identical paste.
+        """
+
         self._compact_echoes.clear()
         self._echo_order.clear()
 
@@ -721,9 +725,11 @@ class TextualTui(App[None]):
         # silently discard the user's text without cancelling anything.
         if self._input is not None:
             self._input.value = ""
-        # The interrupt/EOF also abandons any queued follow-ups, so their pending
-        # compact echoes will never be consumed — clear them to avoid orphans.
-        self._clear_compact_echoes()
+        # NOTE: pending compact echoes are NOT cleared here. Ctrl+C/EOF is
+        # context-dependent shell-side — during an approval/trust prompt it only
+        # denies that decision and the queued follow-ups (and their echoes) still
+        # run. The shell calls queued_prompts_cleared() on the paths that actually
+        # drop the queue, which is where the echoes are reclaimed.
 
     def set_status(self, snapshot: TuiViewSnapshot) -> None:
         if self._status is not None:
@@ -1165,6 +1171,11 @@ class TextualTuiRenderer:
         # Echo a compact line for large pastes (marker kept) while the model still
         # received the full expanded text via controller.prompt(prompt).
         self.app.write_user(self.app.compact_echo_for(prompt))
+
+    def queued_prompts_cleared(self) -> None:
+        # The shell dropped its queued follow-ups (cancel/quit/input-closed/error),
+        # so their pending compact echoes will never be consumed — reclaim them.
+        self.app.clear_compact_echoes()
 
     def running(self) -> None:
         self._begin_progress()

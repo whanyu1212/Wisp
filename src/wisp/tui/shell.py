@@ -233,6 +233,14 @@ class TuiShell:
             return await self._handle_rpc_event(signal.event)
         return self._handle_rpc_closed(signal)
 
+    def _clear_queued_prompts(self) -> None:
+        # Single seam for dropping queued follow-ups: also tell the renderer so it
+        # can reclaim any pending large-paste compact echoes tied to those dropped
+        # prompts (only these paths abandon the queue — denying an approval leaves
+        # queued follow-ups, and their echoes, intact).
+        self.state.queued_prompts.clear()
+        self.renderer.queued_prompts_cleared()
+
     async def _handle_input_line(self, signal: _InputLine) -> bool:
         text = signal.text
         has_content = bool(text.strip())
@@ -448,7 +456,7 @@ class TuiShell:
                 exit_after_denial=True,
             )
         if self.state.current_command_id is not None:
-            self.state.queued_prompts.clear()
+            self._clear_queued_prompts()
             self._update_view(queued_follow_ups=0)
             self.renderer.input_closed_finishing_prompt()
             return False
@@ -478,7 +486,7 @@ class TuiShell:
 
     async def _handle_quit(self) -> bool:
         self.state.exit_requested = True
-        self.state.queued_prompts.clear()
+        self._clear_queued_prompts()
         self._update_view(queued_follow_ups=0)
         if self.state.pending_trust is not None:
             return await self._answer_pending_trust(
@@ -523,7 +531,7 @@ class TuiShell:
         if self.state.cancel_requested:
             self.renderer.cancel_already_requested()
             return False
-        self.state.queued_prompts.clear()
+        self._clear_queued_prompts()
         self.state.cancel_requested = True
         self._update_view(status="cancelling", queued_follow_ups=0)
         self.renderer.cancelling(message)
@@ -817,7 +825,7 @@ class TuiShell:
         self.state.token_stream_started = False
         self.state.rendered_tokens = False
         if self.state.exit_requested or not event.ok:
-            self.state.queued_prompts.clear()
+            self._clear_queued_prompts()
         if self.state.exit_requested:
             self.state.cancel_requested = False
             return await self._request_shutdown()
@@ -893,7 +901,7 @@ class TuiShell:
             ):
                 self.state.status = TuiStatus.idle
                 self.state.cancel_requested = False
-                self.state.queued_prompts.clear()
+                self._clear_queued_prompts()
                 self._sync_view()
                 self.renderer.cancelled()
                 return

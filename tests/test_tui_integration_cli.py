@@ -2468,33 +2468,42 @@ def test_textual_duplicate_large_paste_submissions_each_echo_compactly() -> None
     assert third == "duplicate blob " * 400  # exhausted → falls back to full text
 
 
-def test_textual_interrupt_clears_pending_paste_echoes() -> None:
-    # Regression (verification P2): an echo is registered on Enter but consumed
-    # only when the prompt is echoed. A prompt abandoned by interrupt/EOF (e.g. a
-    # queued follow-up dropped on Ctrl-C) must not leave an orphan that a later
-    # identical paste would pop by mistake (stale #N marker).
-    async def scenario() -> tuple[int, str]:
+def test_textual_queue_drop_clears_pending_paste_echoes_but_bare_interrupt_does_not() -> None:
+    # Regression (Codex P2 on the round-4 fix): an echo is registered on Enter but
+    # consumed only when the prompt is echoed. Echoes must be reclaimed when the
+    # shell actually DROPS its queued follow-ups (cancel/quit/input-closed/error)
+    # — via clear_compact_echoes() / the queued_prompts_cleared renderer hook — so
+    # an orphan can't mis-echo a later identical paste. But a bare Ctrl+C during an
+    # approval only DENIES that decision; the queued follow-ups (and their echoes)
+    # survive, so action_interrupt alone must NOT clear the echoes.
+    async def scenario() -> tuple[int, int, str]:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
             input_widget = app_instance.query_one("#input", Input)
             full = "orphan blob " * 400
-            stale_marker = "[Pasted content #1: 4,800 characters, 4.7 KB]"
-            # Register an echo, then abandon the submission via interrupt.
-            app_instance.post_message(input_widget.Submitted(full, stale_marker))
+            marker = "[Pasted content #1: 4,800 characters, 4.7 KB]"
+            app_instance.post_message(input_widget.Submitted(full, marker))
             await pilot.pause()
+
+            # A bare interrupt (approval-deny shape) must PRESERVE queued echoes.
             app_instance.action_interrupt()
             await pilot.pause()
-            pending_after_interrupt = len(app_instance._compact_echoes)
-            # A later identical paste registers its OWN echo and must echo that,
-            # not the stale orphaned one.
+            after_bare_interrupt = len(app_instance._compact_echoes)
+
+            # The shell's real queue-drop hook reclaims them.
+            app_instance.clear_compact_echoes()
+            after_queue_drop = len(app_instance._compact_echoes)
+
+            # A later identical paste registers and echoes its OWN marker.
             fresh_marker = "[Pasted content #2: 4,800 characters, 4.7 KB]"
             app_instance.post_message(input_widget.Submitted(full, fresh_marker))
             await pilot.pause()
             echoed = app_instance.compact_echo_for(full)
-            return pending_after_interrupt, echoed
+            return after_bare_interrupt, after_queue_drop, echoed
 
-    pending_after_interrupt, echoed = anyio.run(scenario)
-    assert pending_after_interrupt == 0  # interrupt cleared the orphan
+    after_bare_interrupt, after_queue_drop, echoed = anyio.run(scenario)
+    assert after_bare_interrupt == 1  # bare interrupt preserves queued echoes
+    assert after_queue_drop == 0  # a real queue-drop reclaims them
     assert echoed == "[Pasted content #2: 4,800 characters, 4.7 KB]"  # not stale #1
 
 
