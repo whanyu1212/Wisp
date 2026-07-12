@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal
@@ -156,19 +155,12 @@ class ToolExecutionEnded(WispEvent):
     name: str
     output: str
     is_error: bool
-    # Structured result payload from ToolResult.data, carried in-process for
-    # tool-aware rendering (exit codes, match counts, edit old/new text). Empty
-    # for error paths that never produced a ToolResult (approval-denied, raised
-    # exceptions); the renderer must not assume it is populated.
-    #
-    # exclude=True keeps this off every serialization boundary: it never crosses
-    # the RPC wire or lands in a persisted session line. That is deliberate — the
-    # payload is a rendering hint, not part of the event contract. Excluding it
-    # keeps the wire format compatible with schema-v3 consumers that forbid
-    # unknown fields, avoids re-emitting unbounded tool data (e.g. a full `ls`
-    # entry list) a second time past ToolContext's output bounds, and sidesteps
-    # serializing arbitrary non-JSON objects an extension tool might place here.
-    data: Mapping[str, object] = Field(default_factory=dict, exclude=True)
+    # Process exit status for shell-like tools, promoted from ToolResult.data by
+    # the executor (which knows the tool and holds the structured result). None
+    # for tools without exit-code semantics and for error paths that produced no
+    # ToolResult. See ToolResultReady.exit_code for why this is a narrow scalar
+    # rather than the whole data mapping.
+    exit_code: int | None = None
 
 
 class ToolResultReady(WispEvent):
@@ -177,9 +169,17 @@ class ToolResultReady(WispEvent):
     name: str
     output: str
     is_error: bool
-    # See ToolExecutionEnded.data: an in-process rendering hint, excluded from
-    # every serialization boundary.
-    data: Mapping[str, object] = Field(default_factory=dict, exclude=True)
+    # The one structured fact tool-aware rendering needs today: a shell command's
+    # exit status. Deliberately a bounded, JSON-safe scalar rather than the raw
+    # ToolResult.data mapping — the renderer runs in the TUI process and only sees
+    # events *after* they cross the RPC wire (agent subprocess → JSON → client),
+    # so the signal must serialize; but shipping the whole mapping would re-emit
+    # unbounded tool data (e.g. an `ls` entry list) past ToolContext's bounds and
+    # risk non-JSON payloads. This field crosses the only serialized consumer of
+    # these events — the same-version RPC transport (sessions store Messages, not
+    # raw events) — so no schema bump is needed. Set only for tools with genuine
+    # exit-code semantics, so a card is never spuriously reddened.
+    exit_code: int | None = None
 
 
 class TurnCompleted(WispEvent):

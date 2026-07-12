@@ -303,7 +303,7 @@ class TextualTuiRenderer:
             # A nonzero-exit command is is_error=False on the wire (a normal
             # model-visible result) but should still present as a failure; drive
             # the glyph and the detail from the same judgment so they agree.
-            failed = tool_result_failed(event.is_error, event.data)
+            failed = tool_result_failed(event.is_error, event.exit_code)
             status = "error" if failed else "done"
             self.app.resolve_tool_call(
                 event.call_id,
@@ -316,7 +316,7 @@ class TextualTuiRenderer:
                     {},
                     event.output,
                     is_error=event.is_error,
-                    data=event.data,
+                    exit_code=event.exit_code,
                 ),
                 elapsed=self._tool_elapsed(event.call_id, event.timestamp),
             )

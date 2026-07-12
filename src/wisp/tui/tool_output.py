@@ -45,24 +45,25 @@ def render_tool_result(
     output: str,
     *,
     is_error: bool,
-    data: Mapping[str, object],
+    exit_code: int | None,
 ) -> str:
     """Render terminal tool output into bounded, escaped card detail.
 
-    ``name`` selects the renderer; ``arguments`` and ``data`` supply structured
-    context when the tool is a recognized built-in. Unknown tools and
-    unrecognized payloads fall back to :func:`render_generic`.
+    ``name`` selects the renderer; ``arguments`` supplies structured context for
+    recognized built-ins (used by later PRs). ``exit_code`` is the promoted shell
+    exit status, or None for tools without exit-code semantics. Unknown tools and
+    successful results fall back to :func:`render_generic`.
     """
 
     # PR A ships only the generic path + error rendering; built-in success
     # renderers (diffs, summaries) are added by later PRs, each routing here
-    # first when it doesn't recognize the payload.
-    if tool_result_failed(is_error, data):
-        return render_error(output, data=data)
+    # first when it doesn't recognize the result.
+    if tool_result_failed(is_error, exit_code):
+        return render_error(output, exit_code=exit_code)
     return render_generic(output)
 
 
-def tool_result_failed(is_error: bool, data: Mapping[str, object]) -> bool:
+def tool_result_failed(is_error: bool, exit_code: int | None) -> bool:
     """Whether a tool result should be presented as a failure.
 
     This is a presentation judgment, distinct from the event's ``is_error`` flag,
@@ -71,37 +72,33 @@ def tool_result_failed(is_error: bool, data: Mapping[str, object]) -> bool:
     (denied, raised, unknown tool); a command that ran fine but exited nonzero (a
     failing ``bash``) is *not* an ``is_error`` — that stays a normal,
     model-visible result on the wire. But its card should still read as a failure
-    and surface the exit status, so a nonzero ``exit_code`` in ``data`` counts as
-    failed here without touching ``is_error``.
+    and surface the exit status, so a nonzero ``exit_code`` counts as failed here
+    without touching ``is_error``. ``exit_code`` is already gated to shell-like
+    tools by the executor, so this never spuriously reddens an unrelated tool.
     """
 
     if is_error:
         return True
-    exit_code = data.get("exit_code")
-    return isinstance(exit_code, int) and exit_code != 0
+    return exit_code is not None and exit_code != 0
 
 
-def render_error(output: str, *, data: Mapping[str, object]) -> str:
+def render_error(output: str, *, exit_code: int | None) -> str:
     """Render a failed tool call, surfacing exit status and the output tail.
 
     Errors are the biggest evidence gap today: the transcript shows only the
     first line, so a failure's actual cause (a stderr tail, a non-zero exit code)
-    is lost. This renderer leads with the structured exit status when the tool
-    supplied one, then shows the *tail* of the output (where errors live) rather
-    than the head.
+    is lost. This renderer leads with the exit status when the tool supplied one,
+    then shows the *tail* of the output (where errors live) rather than the head.
 
-    The exit status comes from structured ``data`` (it isn't recoverable from the
-    flat output without format-parsing); a zero code is suppressed as noise. The
-    body is the *merged* output tail rather than the split-out ``stderr`` field,
-    because a failing command's useful context often lives in stdout (a test
-    runner printing failures, exit 1) and the merged output already contains
-    stderr anyway.
+    The exit status is the promoted scalar (it isn't recoverable from the flat
+    output without format-parsing); a zero code is suppressed as noise. The body
+    is the merged output tail, because a failing command's useful context often
+    lives in stdout (a test runner printing failures, exit 1).
     """
 
     lines: list[str] = []
 
-    exit_code = data.get("exit_code")
-    if isinstance(exit_code, int) and exit_code != 0:
+    if exit_code is not None and exit_code != 0:
         lines.append(f"exit {exit_code}")
 
     tail = _tail_preview(output, max_lines=_ERROR_TAIL_LINES, max_bytes=_ERROR_TAIL_BYTES)

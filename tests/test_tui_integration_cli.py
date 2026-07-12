@@ -1016,7 +1016,7 @@ def test_textual_tool_card_error_shows_tail_and_exit_code() -> None:
                 name="bash",
                 output=output,
                 is_error=True,
-                data={"exit_code": 2},
+                exit_code=2,
             ),
         ]
     )
@@ -1030,8 +1030,8 @@ def test_textual_tool_card_error_shows_tail_and_exit_code() -> None:
 def test_textual_tool_card_nonzero_exit_renders_as_failure() -> None:
     # The realistic bash failure: the tool RAN (is_error=False, a normal
     # model-visible result) but the command exited nonzero. The card must still
-    # show as a failure with the exit status and tail — driven by exit_code in
-    # data, not by is_error (which stays honest on the wire).
+    # show as a failure with the exit status and tail — driven by exit_code,
+    # not by is_error (which stays honest on the wire).
     output = "\n".join(f"line-{index}" for index in range(40))
     rendered = _render_events_to_transcript(
         [
@@ -1041,7 +1041,7 @@ def test_textual_tool_card_nonzero_exit_renders_as_failure() -> None:
                 name="bash",
                 output=output,
                 is_error=False,
-                data={"exit_code": 1},
+                exit_code=1,
             ),
         ]
     )
