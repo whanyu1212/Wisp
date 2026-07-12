@@ -2292,6 +2292,72 @@ def test_textual_large_paste_replaces_selection_and_expands_on_submit() -> None:
     assert cursor_position == len(editor_text) - len(" tail")
 
 
+def test_textual_large_paste_survives_placeholder_delete_then_restore() -> None:
+    # Regression (Codex P2): a placeholder can vanish from an intermediate editor
+    # state (delete) and return (undo / paste-back). The backing content must be
+    # retained across that round-trip so Enter submits the real paste, not the
+    # literal "[Pasted content #N: ...]" marker.
+    pasted = "restore me\n" * 250
+
+    async def scenario() -> tuple[str, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            app_instance.post_message(events.Paste(pasted))
+            await pilot.pause()
+            marker = input_widget.value
+            assert marker.startswith("[Pasted content #1:")
+            # Delete the marker (drops it from the current text), then restore the
+            # same visible text — each assignment fires TextArea.Changed, the event
+            # that used to prune the record mid-edit.
+            input_widget.value = "typing something else"
+            await pilot.pause()
+            input_widget.value = marker
+            await pilot.pause()
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                submitted = await app_instance._prompt_receive.receive()
+            assert isinstance(submitted, str)
+            return marker, submitted
+
+    marker, submitted = anyio.run(scenario)
+    assert submitted == pasted
+    assert marker not in submitted
+
+
+def test_textual_large_paste_survives_cut_and_move() -> None:
+    # Regression (Codex P2): cutting the marker to move it elsewhere removes it
+    # from the text for a beat before it's pasted back. The record must persist so
+    # the relocated marker still expands to the full paste on submit.
+    pasted = "move me\n" * 300
+
+    async def scenario() -> tuple[str, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            app_instance.post_message(events.Paste(pasted))
+            await pilot.pause()
+            marker = input_widget.value
+            assert marker.startswith("[Pasted content #1:")
+            # Simulate cut (marker gone) then paste-back at a new position (marker
+            # now trails after appended text) via successive Changed events.
+            input_widget.value = "head "
+            await pilot.pause()
+            input_widget.value = f"head tail {marker}"
+            await pilot.pause()
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                submitted = await app_instance._prompt_receive.receive()
+            assert isinstance(submitted, str)
+            return marker, submitted
+
+    marker, submitted = anyio.run(scenario)
+    assert submitted == f"head tail {pasted}"
+    assert marker not in submitted
+
+
 def test_textual_newline_keys_edit_without_submitting() -> None:
     async def scenario() -> tuple[str, bool, str]:
         app_instance = TextualTui()

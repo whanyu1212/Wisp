@@ -136,19 +136,18 @@ class PromptEditor(TextArea):
 
         self._pending_pastes.clear()
 
-    def sync_pending_paste(self) -> None:
-        """Invalidate stored paste content when its placeholder is edited away."""
-
-        self._pending_pastes = [
-            (placeholder, content)
-            for placeholder, content in self._pending_pastes
-            if placeholder in self.text
-        ]
-
     def text_for_submission(self) -> str:
-        """Return the prompt text, expanding intact large-paste placeholders."""
+        """Return the prompt text, expanding any intact large-paste placeholders.
 
-        self.sync_pending_paste()
+        Paste records are retained for the whole edit session rather than pruned
+        on intermediate editor states, so cut/paste-moving or delete/undo of a
+        placeholder can't silently drop the backing content: expansion is decided
+        purely by which placeholders are present in the final text. Only present
+        placeholders expand (first occurrence each); absent ones are skipped. The
+        record set is bounded per turn — it's cleared when the input is emptied
+        after submit or an interrupt (see the ``value`` setter).
+        """
+
         text = self.text
         for placeholder, content in self._pending_pastes:
             text = text.replace(placeholder, content, 1)

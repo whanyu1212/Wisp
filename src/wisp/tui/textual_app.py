@@ -374,12 +374,6 @@ class TextualTui(App[None]):
         # show_for() hides it otherwise (no `/`, a space, or no match).
         if event.text_area is self._input and self._suggest is not None:
             self._suggest.show_for(event.text_area.text)
-        # Keep large-paste placeholder tracking accurate: if the user edits away
-        # a "[Pasted content #N: ...]" marker, its backing full text is dropped so
-        # it isn't submitted stale.
-        if event.text_area.id == "input" and self._input is not None:
-            with suppress(Exception):
-                self._input.sync_pending_paste()
 
     def on_transcript_follow_changed(self, event: Transcript.FollowChanged) -> None:
         if event.following:
