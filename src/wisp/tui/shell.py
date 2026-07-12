@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -13,13 +12,8 @@ import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 from rich.console import Console
 
-from wisp.auth.openai_codex import OpenAICodexLoginMethod, login_openai_codex
 from wisp.auth.storage import (
-    ApiKeyCredential,
-    AuthCredential,
-    AuthStorageError,
     JsonAuthStore,
-    OAuthCredential,
 )
 from wisp.config import DEFAULT_PROVIDER, default_auth_path
 from wisp.events import (
@@ -36,6 +30,7 @@ from wisp.events import (
     TrustRequested,
 )
 from wisp.rpc.commands import ApprovalScope
+from wisp.tui.auth_commands import AuthCommands
 from wisp.tui.commands import (
     TuiSlashCommand,
     TuiSlashCommandError,
@@ -143,6 +138,13 @@ class TuiShell:
         self.current_model = model
         self.pending_configures: dict[str, _PendingConfigure] = {}
         self.auth_store = JsonAuthStore(auth_path or default_auth_path())
+        # Credential commands read auth_store lazily (it is rebound on a trusted-
+        # project rebuild) and the default provider from live shell state.
+        self._auth = AuthCommands(
+            self.renderer,
+            lambda: self.auth_store,
+            self._default_auth_provider,
+        )
 
     async def run(self) -> None:
         """Run the interactive prompt/event loop."""
@@ -302,13 +304,13 @@ class TuiShell:
             self.renderer.command_error("Cannot run slash commands while a prompt is running.")
             return False
         if command.name is TuiSlashCommandName.auth:
-            self._handle_auth_status_command(command.args)
+            self._auth.status(command.args)
             return False
         if command.name is TuiSlashCommandName.login:
-            await self._handle_login_command(command.args)
+            await self._auth.login(command.args)
             return False
         if command.name is TuiSlashCommandName.logout:
-            self._handle_logout_command(command.args)
+            self._auth.logout(command.args)
             return False
         if command.name is TuiSlashCommandName.provider:
             await self._handle_provider_command(command.args)
@@ -318,71 +320,6 @@ class TuiShell:
             return False
         self.renderer.command_error(f"Unknown command: /{command.name.value}")
         return False
-
-    def _handle_auth_status_command(self, args: tuple[str, ...]) -> None:
-        if len(args) > 1:
-            self.renderer.command_error("Usage: /auth [provider]")
-            return
-        provider = args[0] if args else self._default_auth_provider()
-        try:
-            credential = self.auth_store.get(provider)
-        except AuthStorageError as exc:
-            self.renderer.command_error(f"Auth storage error: {exc}")
-            return
-        self.renderer.notice(_auth_status_line(provider, credential))
-
-    async def _handle_login_command(self, args: tuple[str, ...]) -> None:
-        if len(args) > 2:
-            self.renderer.command_error("Usage: /login [provider] [device-code]")
-            return
-        provider = args[0] if args else self._default_auth_provider()
-        if provider != "openai-codex":
-            self.renderer.command_error("TUI login currently supports only openai-codex.")
-            return
-        method_text = args[1] if len(args) == 2 else OpenAICodexLoginMethod.device_code.value
-        try:
-            method = OpenAICodexLoginMethod(method_text)
-        except ValueError:
-            self.renderer.command_error("Usage: /login [openai-codex] [device-code]")
-            return
-        if method is OpenAICodexLoginMethod.browser:
-            self.renderer.command_error(
-                "Browser login is not available inside the TUI; use `wisp auth login openai-codex`."
-            )
-            return
-        self.renderer.notice("Starting openai-codex device-code login...")
-        try:
-            credential = await login_openai_codex(
-                method=method,
-                on_device_code=lambda info: self.renderer.notice(
-                    f"Open {info.verification_uri} and enter code {info.user_code}"
-                ),
-                open_browser=False,
-            )
-        except Exception as exc:  # noqa: BLE001 - show login failure in the TUI
-            self.renderer.command_error(f"Login failed: {exc}")
-            return
-        try:
-            self.auth_store.set(provider, credential)
-        except AuthStorageError as exc:
-            self.renderer.command_error(f"Auth storage error: {exc}")
-            return
-        self.renderer.notice(f"Logged in: {provider}")
-
-    def _handle_logout_command(self, args: tuple[str, ...]) -> None:
-        if len(args) > 1:
-            self.renderer.command_error("Usage: /logout [provider]")
-            return
-        provider = args[0] if args else self._default_auth_provider()
-        try:
-            deleted = self.auth_store.delete(provider)
-        except AuthStorageError as exc:
-            self.renderer.command_error(f"Auth storage error: {exc}")
-            return
-        if deleted:
-            self.renderer.notice(f"Logged out: {provider}")
-        else:
-            self.renderer.notice(f"Not logged in: {provider}")
 
     async def _handle_provider_command(self, args: tuple[str, ...]) -> None:
         if len(args) > 1:
@@ -917,19 +854,6 @@ class TuiShell:
 async def _default_prompt_reader(prompt: str) -> str:
     selected_prompt = prompt if _stdin_is_interactive() else ""
     return await anyio.to_thread.run_sync(input, selected_prompt, abandon_on_cancel=True)
-
-
-def _auth_status_line(provider: str, credential: AuthCredential | None) -> str:
-    if credential is None:
-        return f"{provider}: not logged in"
-    if isinstance(credential, ApiKeyCredential):
-        return f"{provider}: api key configured"
-    return f"{provider}: oauth configured ({_oauth_expiry_text(credential)})"
-
-
-def _oauth_expiry_text(credential: OAuthCredential) -> str:
-    expires = datetime.fromtimestamp(credential.expires / 1000, tz=UTC)
-    return f"expires {expires.isoformat()}"
 
 
 def _compact_session_path(path: object) -> str:

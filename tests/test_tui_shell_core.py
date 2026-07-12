@@ -7,7 +7,7 @@ from pytest import MonkeyPatch
 from tests.tui_support import *
 from wisp.auth.storage import OAuthCredential
 from wisp.events import MessageStarted, ProviderRetrying
-from wisp.tui import shell as tui_shell_module
+from wisp.tui import auth_commands as tui_auth_commands_module
 
 
 def test_tui_shell_records_submitted_prompt_for_fullscreen_renderer() -> None:
@@ -330,7 +330,7 @@ def test_tui_shell_login_reports_storage_errors(
             account_id="account-id",
         )
 
-    monkeypatch.setattr(tui_shell_module, "login_openai_codex", fake_login)
+    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex", fake_login)
     auth_path = tmp_path / "auth.json"
     auth_path.write_text("{not json", encoding="utf-8")
 
@@ -368,7 +368,7 @@ def test_tui_shell_login_and_logout_openai_codex(
             account_id="account-id",
         )
 
-    monkeypatch.setattr(tui_shell_module, "login_openai_codex", fake_login)
+    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex", fake_login)
 
     async def run() -> None:
         controller = ScriptedController()
@@ -406,7 +406,7 @@ def test_tui_shell_login_defaults_to_pending_provider(
             account_id="account-id",
         )
 
-    monkeypatch.setattr(tui_shell_module, "login_openai_codex", fake_login)
+    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex", fake_login)
 
     async def run() -> None:
         controller = ScriptedController(
