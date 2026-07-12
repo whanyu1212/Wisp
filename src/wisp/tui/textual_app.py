@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import datetime
 
 import anyio
-from textual import events
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -46,6 +48,7 @@ from wisp.tui.widgets import (
     StreamMessage,
     ToolCard,
     Transcript,
+    WorkingIndicator,
     _preview_tool_output,
 )
 
@@ -62,16 +65,10 @@ _ROLE_FALLBACK: dict[str, str] = {
     "denied": "red",
 }
 
-# The Wisp wordmark, shown while the transcript is empty. Block-drawing glyphs
-# only (width-1, universally supported); 40 cols wide, fits a standard terminal.
-_WORDMARK = (
-    "▄▄▄▄  ▄▄▄  ▄▄▄▄ ▄▄▄▄▄  ▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄\n"
-    "▀███  ███  ███▀  ███  █████▀▀▀ ███▀▀███▄\n"
-    " ███  ███  ███   ███   ▀████▄  ███▄▄███▀\n"
-    " ███▄▄███▄▄███   ███     ▀████ ███▀▀▀▀\n"
-    "  ▀████▀████▀   ▄███▄ ███████▀ ███"
-)
-_TAGLINE = "a quiet coding agent"
+# The Wisp wordmark, shown while the transcript is empty. Ultra-minimal -
+# lowercase, accent color + centering does the work. Quiet over loud.
+_WORDMARK = "wisp"
+_TAGLINE = "tethered to you"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 
 # The input's prompt glyph. The shell hands the Textual renderer a semantic hint
@@ -96,6 +93,14 @@ _RETRY_REASON_LABELS = {
     "server_error": "server error",
     "transient_http": "temporary HTTP error",
 }
+
+# Hard cap on pending large-paste compact echoes (see TextualTui._compact_echoes).
+# An echo is registered on Enter but consumed only when the prompt is actually
+# echoed; a prompt abandoned before echo (cancelled/quit/errored/empty-dropped
+# queued follow-up) would otherwise orphan its entry forever. The cap bounds the
+# map so orphans can never accumulate — the oldest is evicted on overflow — and
+# each key holds a whole pasted blob, so the bound must stay small.
+_MAX_PENDING_ECHOES = 32
 
 
 def _input_placeholder(hint: str) -> str:
@@ -154,7 +159,7 @@ class TextualTui(App[None]):
     #transcript-empty-wordmark {
         width: 40;
         max-width: 100%;
-        height: 5;
+        height: 1;
         color: $accent;
         text-align: center;
     }
@@ -307,6 +312,23 @@ class TextualTui(App[None]):
         # call_id → ToolCard, so the request, approval, and result events for one
         # tool call all mutate the same card instead of stacking three lines.
         self._tool_cards: dict[str, ToolCard] = {}
+        # Main-screen heartbeat (opencode-style): a dim WorkingIndicator row in the
+        # transcript right after the user prompt, not in the stable footer chrome.
+        self._working_indicator: Widget | None = None
+        # full submitted text → FIFO of compact echoes (raw editor text with
+        # large-paste markers intact). The channel/shell carry only the full str;
+        # this side map lets prompt_submitted() echo a compact line without
+        # re-plumbing the queue. A per-key FIFO — not a single value — so that
+        # submitting the same large paste more than once (e.g. duplicate queued
+        # follow-ups) keeps a compact echo for each, consumed in submission order.
+        # Entries are registered only when display differs from the full text
+        # (i.e. a large paste was expanded) and popped when the echo consumes them.
+        # Insertion order is tracked so the map can stay bounded: a prompt
+        # abandoned before it echoes (cancel/quit/error/empty-drop) never consumes
+        # its entry, so registration evicts the oldest past _MAX_PENDING_ECHOES,
+        # and an interrupt/EOF clears the map wholesale.
+        self._compact_echoes: dict[str, deque[str]] = {}
+        self._echo_order: deque[str] = deque()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -365,7 +387,60 @@ class TextualTui(App[None]):
         # just a hint, so close it. `/command` parsing lives in the shell.
         if self._suggest is not None:
             self._suggest.hide()
+        # Register a compact echo when the submitted (expanded) text differs from
+        # what the editor showed — a large paste. The transcript then echoes the
+        # marker line, not the whole blob, while the model still gets event.value.
+        if event.display != event.value:
+            self._register_compact_echo(event.value, event.display)
         self.submit_command_line(event.value)
+
+    def _register_compact_echo(self, prompt: str, display: str) -> None:
+        # Append to a per-prompt FIFO so duplicate submissions each keep an echo,
+        # tracking global insertion order so the map stays bounded: evict the
+        # oldest echo once the total exceeds the cap. An entry orphaned by an
+        # abandoned submission (never consumed) is thus reclaimed after enough
+        # newer pastes, and can never accumulate without bound.
+        self._compact_echoes.setdefault(prompt, deque()).append(display)
+        self._echo_order.append(prompt)
+        while len(self._echo_order) > _MAX_PENDING_ECHOES:
+            oldest = self._echo_order.popleft()
+            queued = self._compact_echoes.get(oldest)
+            if queued:
+                queued.popleft()
+                if not queued:
+                    del self._compact_echoes[oldest]
+
+    def clear_compact_echoes(self) -> None:
+        """Drop all pending compact echoes (the shell dropped its queued prompts).
+
+        Called by the renderer only on paths that actually abandon queued
+        follow-ups, so their never-to-be-consumed echoes can't orphan (unbounded
+        growth) or be popped by mistake by a later identical paste.
+        """
+
+        self._compact_echoes.clear()
+        self._echo_order.clear()
+
+    def compact_echo_for(self, prompt: str) -> str:
+        """Return the compact transcript echo for a submitted prompt.
+
+        Falls back to the prompt itself when no large-paste echo was registered
+        (the common case). Each registered echo is single-use — consumed in
+        submission order from the per-prompt FIFO — so N identical large pastes
+        each echo compactly, and a later repeat with no fresh paste echoes verbatim.
+        """
+
+        echoes = self._compact_echoes.get(prompt)
+        if not echoes:
+            return prompt
+        display = echoes.popleft()
+        if not echoes:
+            del self._compact_echoes[prompt]
+        # Drop the matching insertion-order marker (the oldest for this key) so the
+        # cap accounting stays exact and consumed echoes aren't evicted twice.
+        with suppress(ValueError):
+            self._echo_order.remove(prompt)
+        return display
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         # Keep the inline slash menu in sync with the input WITHOUT ever touching
@@ -536,7 +611,80 @@ class TextualTui(App[None]):
     async def close(self) -> None:
         self.exit()
 
+    def copy_to_clipboard(self, text: str) -> None:
+        """Copy via pyperclip when available, otherwise Textual's OSC52 fallback."""
+
+        try:
+            import pyperclip  # type: ignore[import-untyped]
+        except ImportError:
+            pass
+        else:
+            with suppress(Exception):
+                pyperclip.copy(text)
+        super().copy_to_clipboard(text)
+
+    def _editor_owns_selection(self) -> bool:
+        """Whether a selection in the prompt editor owns the current copy gesture.
+
+        The editor only owns copy (ctrl+c or mouse-drag) while it's actually
+        visible and focused: when a decision panel is open the composer is hidden
+        (display=False) and any stale draft selection must NOT claim ownership, or
+        it swallows an interrupt/deny or blocks transcript auto-copy until cleared.
+        """
+
+        editor = self._input
+        return bool(
+            editor is not None and editor.display and editor.has_focus and editor.selected_text
+        )
+
+    def _is_streaming(self) -> bool:
+        """Whether a streamed assistant turn is mid-flight and mutating the transcript.
+
+        The stream widget is mounted on the first token delta and cleared on
+        flush, so its presence (or a non-empty buffer, which the widget lags by a
+        frame) marks the window where Textual's selection bounds can go stale.
+        """
+
+        return self._stream_widget is not None or bool(self._streaming_text)
+
+    @on(events.TextSelected)
+    def on_text_selected(self) -> None:
+        """Auto-copy transcript selections so mouse drag + copy works."""
+
+        # Don't auto-copy while the agent is streaming — the transcript
+        # mutates and Textual's SELECTED bounds become stale, which would
+        # copy unrelated output that scrolled into the selection region.
+        # Explicit ctrl+c copy from the prompt editor still works regardless.
+        with suppress(Exception):
+            if self._transcript is None or self._is_streaming():
+                return
+            # If the (visible, focused) prompt editor has a selection, it owns the
+            # copy — its own ctrl+c / ctrl+insert handling already covers it.
+            if self._editor_owns_selection():
+                return
+            selection = self.screen.get_selected_text()
+            if not selection:
+                return
+            self.copy_to_clipboard(selection)
+            self.notify("Copied selection to clipboard.")
+
     def action_interrupt(self) -> None:
+        # If the prompt editor owns the keystroke AND has selected text, ctrl+c
+        # means "copy", not "interrupt". Because this binding is priority=True (so
+        # it fires before TextArea's own handler and would otherwise swallow copy),
+        # we explicitly copy here. Ownership requires the editor to be visible and
+        # focused, so a stale selection behind a decision panel can't swallow the
+        # interrupt/deny meant for the active approval.
+        if self._editor_owns_selection():
+            # Copy is best-effort: a broken terminal can make the OSC52 clipboard
+            # write (or notify) raise, but the gesture was still a copy, not an
+            # interrupt. Return unconditionally so a failed copy never falls
+            # through to KeyboardInterrupt (which would also wipe the draft line).
+            with suppress(Exception):
+                selected = self._input.selected_text  # type: ignore[union-attr]
+                self.copy_to_clipboard(selected)
+                self.notify(f"Copied {len(selected)} chars to clipboard.")
+            return
         self._signal_input(KeyboardInterrupt(), action="interrupt")
 
     def action_eof(self) -> None:
@@ -577,6 +725,11 @@ class TextualTui(App[None]):
         # silently discard the user's text without cancelling anything.
         if self._input is not None:
             self._input.value = ""
+        # NOTE: pending compact echoes are NOT cleared here. Ctrl+C/EOF is
+        # context-dependent shell-side — during an approval/trust prompt it only
+        # denies that decision and the queued follow-ups (and their echoes) still
+        # run. The shell calls queued_prompts_cleared() on the paths that actually
+        # drop the queue, which is where the echoes are reclaimed.
 
     def set_status(self, snapshot: TuiViewSnapshot) -> None:
         if self._status is not None:
@@ -637,23 +790,61 @@ class TextualTui(App[None]):
             self._input.display = True
             self._input.focus()
 
+    # --- Main-screen heartbeat (opencode-style) ---
+
+    def _mount_working_indicator(self, indicator: WorkingIndicator) -> None:
+        if self._transcript is None:
+            return
+        self._working_indicator = indicator
+        self._transcript.mount_message(indicator)
+        # Surface the heartbeat to a scrolled-back reader too: activity no longer
+        # lives in the footer, so the jump-to-latest badge is the only cue that
+        # working/retry state has begun. No-op while following the tail.
+        self._note_transcript_update(indicator)
+        self._follow_tail_after_refresh()
+
+    def _remove_working_indicator(self) -> None:
+        indicator = self._working_indicator
+        if indicator is None:
+            return
+        self._working_indicator = None
+        # The heartbeat is transient — drop it from the unseen set on removal so a
+        # retired indicator never inflates the badge or leaves it pointing at a
+        # widget no longer in the transcript.
+        self._discard_unseen_output(indicator)
+        with suppress(Exception):
+            indicator.remove()
+
     def show_working_indicator(self) -> None:
-        if self._status is not None:
-            self._status.show_working()
+        existing = self._working_indicator
+        if isinstance(existing, WorkingIndicator):
+            existing.show_working()
+            return
+        # No active indicator — create a fresh one in the transcript timeline.
+        self._remove_working_indicator()
+        indicator = WorkingIndicator()
+        indicator.restart_working()
+        self._mount_working_indicator(indicator)
 
     def show_retry_indicator(self, label: str) -> None:
-        if self._status is not None:
-            self._status.show_retry(label)
+        existing = self._working_indicator
+        if isinstance(existing, WorkingIndicator):
+            existing.show_retry(label)
+            return
+        indicator = WorkingIndicator()
+        indicator.show_retry(label)
+        self._mount_working_indicator(indicator)
 
     def restart_working_indicator(self) -> None:
-        """Start fresh footer activity for a newly submitted prompt."""
+        """Start fresh transcript activity for a newly submitted prompt."""
 
-        if self._status is not None:
-            self._status.restart_working()
+        self._remove_working_indicator()
+        indicator = WorkingIndicator()
+        indicator.restart_working()
+        self._mount_working_indicator(indicator)
 
     def hide_working_indicator(self) -> None:
-        if self._status is not None:
-            self._status.hide_activity()
+        self._remove_working_indicator()
 
     def mount_tool_call(self, call_id: str, name: str, arguments: object) -> None:
         # Mount a fresh card for a tool call and register it by call_id. The
@@ -824,6 +1015,20 @@ class TextualTui(App[None]):
         self._unseen_output.add(widget)
         jump.show_count(len(self._unseen_output))
 
+    def _discard_unseen_output(self, widget: Widget) -> None:
+        # Forget one widget (e.g. a retired heartbeat) and reconcile the badge:
+        # hide it once nothing unseen remains, otherwise shrink the count.
+        if widget not in self._unseen_output:
+            return
+        self._unseen_output.discard(widget)
+        jump = self._jump_to_latest
+        if jump is None:
+            return
+        if self._unseen_output:
+            jump.show_count(len(self._unseen_output))
+        else:
+            jump.hide()
+
     def _clear_unseen_output(self) -> None:
         self._unseen_output.clear()
         if self._jump_to_latest is not None:
@@ -963,7 +1168,14 @@ class TextualTuiRenderer:
         self.app.write_error(message)
 
     def prompt_submitted(self, prompt: str) -> None:
-        self.app.write_user(prompt)
+        # Echo a compact line for large pastes (marker kept) while the model still
+        # received the full expanded text via controller.prompt(prompt).
+        self.app.write_user(self.app.compact_echo_for(prompt))
+
+    def queued_prompts_cleared(self) -> None:
+        # The shell dropped its queued follow-ups (cancel/quit/input-closed/error),
+        # so their pending compact echoes will never be consumed — reclaim them.
+        self.app.clear_compact_echoes()
 
     def running(self) -> None:
         self._begin_progress()

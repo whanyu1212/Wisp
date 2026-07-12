@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from textual import events
 from textual.app import ComposeResult
@@ -43,17 +43,27 @@ _DECISION_PREVIEW_LINES = 5
 _DECISION_PREVIEW_CHARS = 320
 _TOOL_OUTPUT_PREVIEW_LINES = 8
 _TOOL_OUTPUT_PREVIEW_BYTES = 2_000
+PASTE_DISPLAY_THRESHOLD = 2_000
 
 
 class PromptEditor(TextArea):
     """Multiline prompt editor with Pi-compatible submission keys."""
 
     class Submitted(Message):
-        """The complete prompt accepted by the editor."""
+        """The prompt accepted by the editor.
 
-        def __init__(self, value: str) -> None:
+        ``value`` is the full text sent to the model, with large-paste
+        placeholders expanded to their backing content. ``display`` is the
+        compact form for the transcript echo — the raw editor text with the
+        ``[Pasted content #N: ...]`` markers left intact — so submitting a large
+        paste doesn't mount the whole blob into the transcript. The two are equal
+        when there are no large pastes.
+        """
+
+        def __init__(self, value: str, display: str) -> None:
             super().__init__()
             self.value = value
+            self.display = display
 
     def __init__(
         self,
@@ -69,6 +79,8 @@ class PromptEditor(TextArea):
             highlight_cursor_line=False,
             tab_behavior="focus",
         )
+        self._pending_pastes: list[tuple[str, str]] = []
+        self._paste_placeholder_counter = 0
 
     @property
     def value(self) -> str:
@@ -79,6 +91,8 @@ class PromptEditor(TextArea):
     @value.setter
     def value(self, text: str) -> None:
         self.text = text
+        if not text:
+            self._clear_pending_paste()
 
     @property
     def cursor_position(self) -> int:
@@ -94,13 +108,69 @@ class PromptEditor(TextArea):
         before = self.text[:bounded]
         self.move_cursor((before.count("\n"), len(before.rsplit("\n", 1)[-1])))
 
+    def on_paste(self, event: events.Paste) -> None:
+        """Show a compact placeholder instead of rendering very large pasted text."""
+
+        if len(event.text) <= PASTE_DISPLAY_THRESHOLD:
+            return
+        event.stop()
+        event.prevent_default()
+        self._show_large_paste_placeholder(event.text)
+
+    def _show_large_paste_placeholder(self, content: str) -> None:
+        """Store large pasted text and render a compact placeholder."""
+
+        self._paste_placeholder_counter += 1
+        placeholder = self._large_paste_placeholder(content, self._paste_placeholder_counter)
+        self._pending_pastes.append((placeholder, content))
+        if result := self._replace_via_keyboard(placeholder, *self.selection):
+            self.move_cursor(result.end_location)
+            self.focus()
+
+    def _large_paste_placeholder(self, content: str, paste_number: int) -> str:
+        """Build the display text for a large paste."""
+
+        char_count = len(content)
+        line_count = content.count("\n") + 1
+        kb = char_count / 1024
+        parts: list[str] = [f"{char_count:,} characters"]
+        if line_count > 1:
+            parts.append(f"{line_count} lines")
+        if kb >= 1:
+            parts.append(f"{kb:.1f} KB")
+        return f"[Pasted content #{paste_number}: {', '.join(parts)}]"
+
+    def _clear_pending_paste(self) -> None:
+        """Forget any stored large paste content."""
+
+        self._pending_pastes.clear()
+
+    def text_for_submission(self) -> str:
+        """Return the prompt text, expanding any intact large-paste placeholders.
+
+        Paste records are retained for the whole edit session rather than pruned
+        on intermediate editor states, so cut/paste-moving or delete/undo of a
+        placeholder can't silently drop the backing content: expansion is decided
+        purely by which placeholders are present in the final text. Only present
+        placeholders expand (first occurrence each); absent ones are skipped. The
+        record set is bounded per turn — it's cleared when the input is emptied
+        after submit or an interrupt (see the ``value`` setter).
+        """
+
+        text = self.text
+        for placeholder, content in self._pending_pastes:
+            text = text.replace(placeholder, content, 1)
+        return text
+
     async def on_key(self, event: events.Key) -> None:
         """Submit on Enter and reserve Pi's newline keys for multiline input."""
 
         if event.key == "enter":
             event.stop()
             event.prevent_default()
-            self.post_message(self.Submitted(self.text))
+            # Full expansion for the model; the raw editor text (placeholders
+            # intact) for the compact transcript echo.
+            self.post_message(self.Submitted(self.text_for_submission(), self.text))
         elif event.key in {"shift+enter", "ctrl+j"}:
             event.stop()
             event.prevent_default()
@@ -913,90 +983,58 @@ class ToolCard(Static):
         self.update(text)
 
 
-class StatusBar(Static):
-    """Compact footer with an in-place activity and retry indicator.
+class WorkingIndicator(Static):
+    """Transient heartbeat shown in the *transcript*, not the footer.
 
-    The spinner is the classic 10-frame braille cycle, whose lit dots rotate
-    around a single cell so the eye reads smooth rotation rather than a blink.
-    Elapsed seconds are derived from the tick count (frames × interval), not a
-    wall clock — keeping the TUI layer clock-free and the counter monotonic. The
-    footer mutates in place when provider backoff starts, keeping transient
-    activity out of the conversation transcript.
+    Opencode-style: right after the user's prompt, a dim row
+    ``⠋ Working… · 3s`` (or ``Retrying openai · 1/3 …``) that ticks alive
+    and auto-removes when token streaming or a ToolCard mounts. Keeps the
+    footer stable (cwd / session / model) — quiet over noisy.
     """
 
     _FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-    _INTERVAL = 0.08  # ~12.5 fps: fluid braille rotation without churning the CPU
+    _INTERVAL = 0.08  # ~12.5 fps braille rotation
 
-    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
-        super().__init__("idle", id=id, markup=False)
-        self._snapshot = TuiViewSnapshot(status="idle", input_hint="wisp> ")
-        self._active = False
-        # A single monotonic tick counter drives everything: the spinner frame is
-        # ticks % len(frames), and elapsed seconds is ticks × interval.
+    def __init__(self) -> None:
+        super().__init__("", markup=False)
+        self.add_class("message", "message--dim")
         self._ticks = 0
         self._label = "Working…"
         self._show_elapsed = True
         self._timer: Timer | None = None
 
     def on_mount(self) -> None:
-        self._render_status()
+        self._start_timer()
+        self._repaint()
 
     def on_unmount(self) -> None:
         self._stop_timer()
 
-    def on_resize(self, event: events.Resize) -> None:
-        self._render_status()
-
-    def set_snapshot(self, snapshot: TuiViewSnapshot) -> None:
-        """Replace the shell-owned footer state without disturbing activity."""
-
-        self._snapshot = snapshot
-        self._render_status()
-
     def _tick(self) -> None:
         self._ticks += 1
-        self._render_status()
+        self._repaint()
 
     def restart_working(self) -> None:
-        """Start a fresh activity lifetime for a newly submitted prompt."""
-
         self._stop_timer()
         self._ticks = 0
-        self._active = True
         self._label = "Working…"
         self._show_elapsed = True
         self._start_timer()
-        self._render_status()
+        self._repaint()
 
     def show_working(self) -> None:
-        """Restore the normal working label without resetting total elapsed time."""
-
-        self._ensure_active()
+        if self._timer is None:
+            self._start_timer()
         self._label = "Working…"
         self._show_elapsed = True
-        self._render_status()
+        self._repaint()
 
     def show_retry(self, label: str) -> None:
-        """Replace the normal label with bounded retry progress."""
-
-        self._ensure_active()
+        if self._timer is None:
+            self._start_timer()
         self._label = label
         self._show_elapsed = False
-        self._render_status()
-
-    def hide_activity(self) -> None:
-        """Stop and clear transient activity while retaining footer state."""
-
-        self._active = False
-        self._stop_timer()
-        self._render_status()
-
-    def _ensure_active(self) -> None:
-        if self._active:
-            return
-        self._ticks = 0
-        self._active = True
-        self._start_timer()
+        self._repaint()
 
     def _start_timer(self) -> None:
         if self._timer is None:
@@ -1007,20 +1045,41 @@ class StatusBar(Static):
             self._timer.stop()
             self._timer = None
 
-    def _activity_text(self) -> str:
+    def _repaint(self) -> None:
         spinner = self._FRAMES[self._ticks % len(self._FRAMES)]
         text = f"{spinner} {self._label}"
         if self._show_elapsed:
             seconds = int(self._ticks * self._INTERVAL)
-            text += f" {seconds}s"
-        return text
+            text += f" · {seconds}s"
+        # No Rich markup — this Static is markup=False and styled dim via
+        # CSS class `message--dim` (muted, no border). Just plain text.
+        self.update(text)
+
+
+class StatusBar(Static):
+    """Stable footer — cwd / session / model. No spinner, no transient state.
+
+    The working heartbeat now lives in the transcript as ``WorkingIndicator``
+    (opencode-style), so the footer stays calm and persistent.
+    """
+
+    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
+        super().__init__("idle", id=id, markup=False)
+        self._snapshot = TuiViewSnapshot(status="idle", input_hint="wisp> ")
+
+    def on_mount(self) -> None:
+        self._render_status()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._render_status()
+
+    def set_snapshot(self, snapshot: TuiViewSnapshot) -> None:
+        self._snapshot = snapshot
+        self._render_status()
 
     def _render_status(self) -> None:
-        snapshot = self._snapshot
-        if self._active:
-            snapshot = replace(snapshot, status=self._activity_text())
         width = self.content_size.width
-        self.update(format_tui_footer_text(snapshot, width=width if width > 0 else None))
+        self.update(format_tui_footer_text(self._snapshot, width=width if width > 0 else None))
 
 
 class StreamMessage(Widget):

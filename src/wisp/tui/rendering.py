@@ -66,6 +66,8 @@ class TuiRenderer(Protocol):
 
     def prompt_submitted(self, prompt: str) -> None: ...
 
+    def queued_prompts_cleared(self) -> None: ...
+
     def running(self) -> None: ...
 
     def queued_follow_up(self, count: int) -> None: ...
@@ -136,6 +138,10 @@ class LineTuiRenderer:
         self.console.print(f"[red]{_markup_escape(message)}[/red]")
 
     def prompt_submitted(self, prompt: str) -> None:
+        pass
+
+    def queued_prompts_cleared(self) -> None:
+        # No large-paste compact-echo cache in the text renderer; nothing to drop.
         pass
 
     def running(self) -> None:
@@ -345,6 +351,10 @@ class FullscreenTuiRenderer:
 
     def prompt_submitted(self, prompt: str) -> None:
         self._append("user", prompt, style="bold")
+
+    def queued_prompts_cleared(self) -> None:
+        # No large-paste compact-echo cache in the text renderer; nothing to drop.
+        pass
 
     def running(self) -> None:
         self._refresh()

@@ -22,7 +22,12 @@ from wisp.events import (
 )
 from wisp.trust_flow import TrustDecision
 from wisp.tui.commands import parse_tui_slash_command
-from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
+from wisp.tui.textual_app import (
+    _MAX_PENDING_ECHOES,
+    TextualTui,
+    TextualTuiRenderer,
+    create_textual_tui,
+)
 from wisp.tui.widgets import (
     _ROLE_LABELS,
     JumpToLatest,
@@ -33,6 +38,7 @@ from wisp.tui.widgets import (
     ToolCard,
     Transcript,
     TranscriptEmptyState,
+    WorkingIndicator,
 )
 from wisp.tui.widgets import (
     PromptEditor as Input,
@@ -52,10 +58,11 @@ def _transcript_texts(app: TextualTui) -> list[str]:
     return texts
 
 
-def _status_activity(app: TextualTui) -> str:
-    """Plain second footer line, where transient activity replaces status."""
+def _working_activity(app: TextualTui) -> str:
+    """Plain transcript heartbeat text, or empty when activity is hidden."""
 
-    return app.query_one("#status", StatusBar).render().plain.splitlines()[1]
+    indicator = app._working_indicator
+    return indicator.render().plain if isinstance(indicator, WorkingIndicator) else ""
 
 
 def _provider_retry(
@@ -1273,18 +1280,23 @@ def test_textual_line_message_border_title_from_role_labels() -> None:
     assert titles == [_ROLE_LABELS["assistant"], _ROLE_LABELS["tool"], _ROLE_LABELS["error"]]
 
 
-def test_textual_running_uses_status_bar_without_polluting_transcript() -> None:
-    async def scenario() -> tuple[str, list[tuple[str | None, object]]]:
+def test_textual_running_uses_transcript_heartbeat_and_stable_status_bar() -> None:
+    async def scenario() -> tuple[str, str, list[tuple[str | None, object]]]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()
             await pilot.pause()
             status = app_instance.query_one("#status", StatusBar)
-            return status.render().plain, _transcript_cards(app_instance)
+            return (
+                status.render().plain,
+                _working_activity(app_instance),
+                _transcript_cards(app_instance),
+            )
 
-    status, cards = anyio.run(scenario)
-    assert "Working" in status
-    assert cards == []
+    status, activity, cards = anyio.run(scenario)
+    assert "Working" not in status
+    assert "Working" in activity
+    assert cards == [("message--dim", None)]
 
 
 def test_textual_status_activity_animates_spinner_and_counts_elapsed() -> None:
@@ -1297,21 +1309,21 @@ def test_textual_status_activity_animates_spinner_and_counts_elapsed() -> None:
         async with app_instance.run_test() as pilot:
             renderer.running()
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
+            indicator = app_instance.query_one(WorkingIndicator)
 
-            start = status.render().plain.splitlines()[1]
+            start = indicator.render().plain
             glyphs: set[str] = {start[0]}
             # One full spinner cycle plus enough ticks to cross 1s (interval 0.08s).
-            for _ in range(len(StatusBar._FRAMES) + 3):
-                status._tick()
-                glyphs.add(status.render().plain.splitlines()[1][0])
-            return len(glyphs), start, status.render().plain.splitlines()[1]
+            for _ in range(len(WorkingIndicator._FRAMES) + 3):
+                indicator._tick()
+                glyphs.add(indicator.render().plain[0])
+            return len(glyphs), start, indicator.render().plain
 
     distinct_glyphs, start, later = anyio.run(scenario)
-    assert distinct_glyphs == len(StatusBar._FRAMES)  # every frame shown → smooth
+    assert distinct_glyphs == len(WorkingIndicator._FRAMES)  # every frame shown → smooth
     assert start.endswith("0s")
     assert later.endswith("1s")  # counter advanced with elapsed time
-    assert start[0] in StatusBar._FRAMES  # a braille frame, not the old dot
+    assert start[0] in WorkingIndicator._FRAMES  # a braille frame, not the old dot
 
 
 def test_textual_retry_progress_mutates_status_and_rejects_older_attempts() -> None:
@@ -1322,17 +1334,16 @@ def test_textual_retry_progress_mutates_status_and_rejects_older_attempts() -> N
             renderer.event(TurnStarted(turn=1))
             renderer.event(_provider_retry(attempt=2, delay_seconds=1.25))
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
-            first = _status_activity(app_instance)
+            first = _working_activity(app_instance)
 
             renderer.event(_provider_retry(attempt=1, delay_seconds=9.0))
             renderer.event(_provider_retry(attempt=2, delay_seconds=9.0))
             renderer.event(_provider_retry(attempt=3, status_code=429))
             await pilot.pause()
             return (
-                status._active,
+                app_instance._working_indicator is not None,
                 first,
-                _status_activity(app_instance),
+                _working_activity(app_instance),
                 _transcript_texts(app_instance),
             )
 
@@ -1354,13 +1365,17 @@ def test_textual_retry_progress_recovers_and_ignores_post_start_retry() -> None:
             renderer.event(MessageStarted(turn=1))
             renderer.event(_provider_retry(attempt=3))
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
-            recovered = _status_activity(app_instance)
+            recovered = _working_activity(app_instance)
 
             renderer.token_delta("response")
             await pilot.pause()
             texts = _transcript_texts(app_instance)
-            return recovered, "\n".join(texts), status._timer is None, status._active
+            return (
+                recovered,
+                "\n".join(texts),
+                app_instance._working_indicator is None,
+                app_instance._working_indicator is not None,
+            )
 
     recovered, transcript, timer_stopped, active = anyio.run(scenario)
     assert "Working" in recovered
@@ -1383,7 +1398,7 @@ def test_textual_retry_progress_resumes_for_a_later_tool_turn() -> None:
             renderer.event(TurnStarted(turn=2))
             renderer.event(_provider_retry(turn=2, attempt=1, reason="server_error"))
             await pilot.pause()
-            return _status_activity(app_instance)
+            return _working_activity(app_instance)
 
     rendered = anyio.run(scenario)
     assert "Retrying openai · 1/3 in 0.5s · server error" in rendered
@@ -1395,8 +1410,7 @@ def test_textual_retry_progress_does_not_replay_or_survive_terminal_states() -> 
         async with app_instance.run_test() as pilot:
             renderer.event(_provider_retry())
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
-            replayed = status._active
+            replayed = app_instance._working_indicator is not None
 
             renderer.running()
             renderer.event(TurnStarted(turn=1))
@@ -1405,7 +1419,8 @@ def test_textual_retry_progress_does_not_replay_or_survive_terminal_states() -> 
             renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
             renderer.event(_provider_retry(attempt=2))
             await pilot.pause()
-            return replayed, status._active, status._timer is None, _status_activity(app_instance)
+            remaining = app_instance._working_indicator is not None
+            return replayed, remaining, not remaining, _working_activity(app_instance)
 
     replayed, remaining, timer_stopped, rendered = anyio.run(scenario)
     assert not replayed
@@ -1429,9 +1444,8 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
                 )
             )
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
             return (
-                status._active,
+                app_instance._working_indicator is not None,
                 app_instance.query_one("#decision-panel").display,
             )
 
@@ -1441,11 +1455,11 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
             renderer.running()
             renderer.event(_provider_retry())
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
             renderer.cancelling("Cancelling current prompt...")
             renderer.event(_provider_retry(attempt=2))
             await pilot.pause()
-            return status._active, status._timer is None
+            remaining = app_instance._working_indicator is not None
+            return remaining, not remaining
 
     async def failure_scenario() -> tuple[bool, bool]:
         app_instance, renderer = create_textual_tui()
@@ -1453,10 +1467,10 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
             renderer.running()
             renderer.event(_provider_retry())
             await pilot.pause()
-            status = app_instance.query_one("#status", StatusBar)
             renderer.rpc_event_reader_failed("closed")
             await pilot.pause()
-            return status._active, status._timer is None
+            remaining = app_instance._working_indicator is not None
+            return remaining, not remaining
 
     approval_row, approval_visible = anyio.run(approval_scenario)
     cancellation_row, cancellation_timer_stopped = anyio.run(cancellation_scenario)
@@ -1470,7 +1484,7 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
 
 
 def test_textual_retry_progress_preserves_compact_prompt_and_footer() -> None:
-    async def scenario() -> tuple[str, bool, bool, bool]:
+    async def scenario() -> tuple[str, str, bool, bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(72, 20)) as pilot:
             renderer.view_updated(
@@ -1498,16 +1512,15 @@ def test_textual_retry_progress_preserves_compact_prompt_and_footer() -> None:
             footer = app_instance.query_one("#status", StatusBar)
             return (
                 footer.render().plain,
-                footer.region.y > input_widget.region.y,
+                _working_activity(app_instance),
                 input_widget.region.y < footer.region.y,
                 input_widget.display,
             )
 
-    rendered, activity_in_footer, footer_below_prompt, prompt_visible = anyio.run(scenario)
-    assert "custom-provider-nam…" in rendered
-    assert "2/3" in rendered
-    assert "openai-codex/gpt-5-codex" in rendered
-    assert activity_in_footer
+    footer, activity, footer_below_prompt, prompt_visible = anyio.run(scenario)
+    assert "custom-provider-nam…" in activity
+    assert "2/3" in activity
+    assert "openai-codex/gpt-5-codex" in footer
     assert footer_below_prompt
     assert prompt_visible
 
@@ -1778,10 +1791,10 @@ def test_textual_working_status_disappears_on_first_stream_output() -> None:
         async with app_instance.run_test() as pilot:
             renderer.running()
             await pilot.pause()
-            before = _status_activity(app_instance)
+            before = _working_activity(app_instance)
             renderer.token_delta("hello")
             await pilot.pause()
-            after = _status_activity(app_instance)
+            after = _working_activity(app_instance)
             return before, after, _transcript_texts(app_instance)
 
     before, after, transcript = anyio.run(scenario)
@@ -1956,6 +1969,47 @@ def test_textual_scrollback_counts_distinct_unseen_output_and_end_clears_it() ->
     assert result["cleared"]
     assert result["hidden"]
     assert result["following"]
+
+
+def test_textual_heartbeat_notifies_scrolled_back_reader_and_clears_on_removal() -> None:
+    # Regression (Codex P2): activity no longer lives in the footer, so the
+    # jump-to-latest badge is the only cue that working/retry state began. A
+    # scrolled-back reader must see the heartbeat register as unseen output, and
+    # its transient removal must reconcile the badge (no phantom "1 new").
+    async def scenario() -> dict[str, object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            jump = app_instance.query_one("#jump-latest", JumpToLatest)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            await pilot.press("pageup")
+            await pilot.pause()
+            assert transcript.is_following is False
+
+            app_instance.show_working_indicator()
+            await pilot.pause()
+            working_count = len(app_instance._unseen_output)
+            working_shown = jump.display is True
+
+            # Retiring the heartbeat must drop it from the unseen set and hide the
+            # badge, since it was the only unseen output.
+            app_instance.hide_working_indicator()
+            await pilot.pause()
+            return {
+                "working_count": working_count,
+                "working_shown": working_shown,
+                "cleared": len(app_instance._unseen_output) == 0,
+                "hidden": jump.display is False,
+            }
+
+    result = anyio.run(scenario)
+    assert result["working_count"] == 1
+    assert result["working_shown"]
+    assert result["cleared"]
+    assert result["hidden"]
 
 
 def test_textual_jump_to_latest_click_restores_follow_and_input_focus() -> None:
@@ -2256,6 +2310,230 @@ def test_textual_multiline_paste_is_submitted_without_truncation() -> None:
     assert submitted == pasted
 
 
+def test_textual_large_paste_replaces_selection_and_expands_on_submit() -> None:
+    pasted = "replacement\n" * 250
+
+    async def scenario() -> tuple[str, str, int]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "keep replace me tail"
+            input_widget.selection = type(input_widget.selection)((0, 5), (0, 15))
+            input_widget.focus()
+            app_instance.post_message(events.Paste(pasted))
+            await pilot.pause()
+            editor_text = input_widget.value
+            cursor_position = input_widget.cursor_position
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                submitted = await app_instance._prompt_receive.receive()
+            assert isinstance(submitted, str)
+            return editor_text, submitted, cursor_position
+
+    editor_text, submitted, cursor_position = anyio.run(scenario)
+    assert editor_text.startswith("keep [Pasted content #1:")
+    assert editor_text.endswith(" tail")
+    assert "replace me" not in editor_text
+    assert submitted == f"keep {pasted} tail"
+    assert cursor_position == len(editor_text) - len(" tail")
+
+
+def test_textual_large_paste_survives_placeholder_delete_then_restore() -> None:
+    # Regression (Codex P2): a placeholder can vanish from an intermediate editor
+    # state (delete) and return (undo / paste-back). The backing content must be
+    # retained across that round-trip so Enter submits the real paste, not the
+    # literal "[Pasted content #N: ...]" marker.
+    pasted = "restore me\n" * 250
+
+    async def scenario() -> tuple[str, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            app_instance.post_message(events.Paste(pasted))
+            await pilot.pause()
+            marker = input_widget.value
+            assert marker.startswith("[Pasted content #1:")
+            # Delete the marker (drops it from the current text), then restore the
+            # same visible text — each assignment fires TextArea.Changed, the event
+            # that used to prune the record mid-edit.
+            input_widget.value = "typing something else"
+            await pilot.pause()
+            input_widget.value = marker
+            await pilot.pause()
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                submitted = await app_instance._prompt_receive.receive()
+            assert isinstance(submitted, str)
+            return marker, submitted
+
+    marker, submitted = anyio.run(scenario)
+    assert submitted == pasted
+    assert marker not in submitted
+
+
+def test_textual_large_paste_survives_cut_and_move() -> None:
+    # Regression (Codex P2): cutting the marker to move it elsewhere removes it
+    # from the text for a beat before it's pasted back. The record must persist so
+    # the relocated marker still expands to the full paste on submit.
+    pasted = "move me\n" * 300
+
+    async def scenario() -> tuple[str, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            app_instance.post_message(events.Paste(pasted))
+            await pilot.pause()
+            marker = input_widget.value
+            assert marker.startswith("[Pasted content #1:")
+            # Simulate cut (marker gone) then paste-back at a new position (marker
+            # now trails after appended text) via successive Changed events.
+            input_widget.value = "head "
+            await pilot.pause()
+            input_widget.value = f"head tail {marker}"
+            await pilot.pause()
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                submitted = await app_instance._prompt_receive.receive()
+            assert isinstance(submitted, str)
+            return marker, submitted
+
+    marker, submitted = anyio.run(scenario)
+    assert submitted == f"head tail {pasted}"
+    assert marker not in submitted
+
+
+def test_textual_large_paste_echoes_compact_line_while_model_gets_full_text() -> None:
+    # Regression (Codex P2): submitting a >2 KB paste must not mount the whole
+    # blob into the transcript. The model still receives the full expanded text
+    # via controller.prompt(prompt); the transcript echo (renderer.prompt_submitted)
+    # keeps the compact "[Pasted content #N: ...]" marker.
+    pasted = "echo me\n" * 400
+
+    async def scenario() -> tuple[str, list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            app_instance.post_message(events.Paste(pasted))
+            await pilot.pause()
+            marker = input_widget.value
+            assert marker.startswith("[Pasted content #1:")
+
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                submitted = await app_instance._prompt_receive.receive()
+            assert isinstance(submitted, str)
+            # Drive the echo seam the shell uses: prompt_submitted(full_text).
+            renderer.prompt_submitted(submitted)
+            await pilot.pause()
+            return submitted, _transcript_texts(app_instance)
+
+    submitted, transcript = anyio.run(scenario)
+    # Model side: the full expanded blob.
+    assert submitted == pasted
+    # Transcript side: exactly the compact marker (role label prefixes the line),
+    # never the blob.
+    user_lines = [line for line in transcript if "[Pasted content #1:" in line]
+    assert len(user_lines) == 1
+    assert not any("echo me\necho me" in line for line in transcript)
+
+
+def test_textual_duplicate_large_paste_submissions_each_echo_compactly() -> None:
+    # Regression (Codex P3): the compact-echo map is keyed by the expanded prompt
+    # text. Two identical large pastes submitted before either is echoed (e.g.
+    # duplicate queued follow-ups) must NOT collide — each keeps a compact echo,
+    # consumed in submission order, or the second echoes the whole blob.
+    async def scenario() -> tuple[str, str, str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            marker = "[Pasted content #1: 5,000 characters, 5.0 KB]"
+            full = "duplicate blob " * 400
+            # Two identical submissions register two echoes under the same key.
+            app_instance.post_message(input_widget.Submitted(full, marker))
+            app_instance.post_message(input_widget.Submitted(full, marker))
+            await pilot.pause()
+            # The shell echoes each in submission order via prompt_submitted(full).
+            first = app_instance.compact_echo_for(full)
+            second = app_instance.compact_echo_for(full)
+            # A third identical prompt with no fresh paste echoes verbatim.
+            third = app_instance.compact_echo_for(full)
+            return marker, first, second, third
+
+    marker, first, second, third = anyio.run(scenario)
+    assert first == marker  # first echo is compact
+    assert second == marker  # second (duplicate) is ALSO compact, not the blob
+    assert third == "duplicate blob " * 400  # exhausted → falls back to full text
+
+
+def test_textual_queue_drop_clears_pending_paste_echoes_but_bare_interrupt_does_not() -> None:
+    # Regression (Codex P2 on the round-4 fix): an echo is registered on Enter but
+    # consumed only when the prompt is echoed. Echoes must be reclaimed when the
+    # shell actually DROPS its queued follow-ups (cancel/quit/input-closed/error)
+    # — via clear_compact_echoes() / the queued_prompts_cleared renderer hook — so
+    # an orphan can't mis-echo a later identical paste. But a bare Ctrl+C during an
+    # approval only DENIES that decision; the queued follow-ups (and their echoes)
+    # survive, so action_interrupt alone must NOT clear the echoes.
+    async def scenario() -> tuple[int, int, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            full = "orphan blob " * 400
+            marker = "[Pasted content #1: 4,800 characters, 4.7 KB]"
+            app_instance.post_message(input_widget.Submitted(full, marker))
+            await pilot.pause()
+
+            # A bare interrupt (approval-deny shape) must PRESERVE queued echoes.
+            app_instance.action_interrupt()
+            await pilot.pause()
+            after_bare_interrupt = len(app_instance._compact_echoes)
+
+            # The shell's real queue-drop hook reclaims them.
+            app_instance.clear_compact_echoes()
+            after_queue_drop = len(app_instance._compact_echoes)
+
+            # A later identical paste registers and echoes its OWN marker.
+            fresh_marker = "[Pasted content #2: 4,800 characters, 4.7 KB]"
+            app_instance.post_message(input_widget.Submitted(full, fresh_marker))
+            await pilot.pause()
+            echoed = app_instance.compact_echo_for(full)
+            return after_bare_interrupt, after_queue_drop, echoed
+
+    after_bare_interrupt, after_queue_drop, echoed = anyio.run(scenario)
+    assert after_bare_interrupt == 1  # bare interrupt preserves queued echoes
+    assert after_queue_drop == 0  # a real queue-drop reclaims them
+    assert echoed == "[Pasted content #2: 4,800 characters, 4.7 KB]"  # not stale #1
+
+
+def test_textual_pending_paste_echoes_are_bounded() -> None:
+    # Regression (verification P2): echoes for prompts that are never echoed
+    # (abandoned before consumption) must not accumulate without bound. Registering
+    # far more than the cap evicts the oldest so the map stays bounded, and the
+    # most-recent echoes are the ones that survive.
+    async def scenario() -> tuple[int, int, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            overflow = _MAX_PENDING_ECHOES + 10
+            for i in range(overflow):
+                full = f"blob-{i} " * 400  # distinct >2 KB prompt each
+                marker = f"[Pasted content #{i}: ...]"
+                app_instance.post_message(input_widget.Submitted(full, marker))
+            await pilot.pause()
+            total = sum(len(q) for q in app_instance._compact_echoes.values())
+            order_len = len(app_instance._echo_order)
+            # The oldest were evicted; the newest survives and still echoes compact.
+            newest = app_instance.compact_echo_for(f"blob-{overflow - 1} " * 400)
+            return total, order_len, newest
+
+    total, order_len, newest = anyio.run(scenario)
+    assert total <= _MAX_PENDING_ECHOES  # bounded, never grows past the cap
+    assert order_len <= _MAX_PENDING_ECHOES
+    assert newest == f"[Pasted content #{_MAX_PENDING_ECHOES + 9}: ...]"  # newest kept
+
+
 def test_textual_newline_keys_edit_without_submitting() -> None:
     async def scenario() -> tuple[str, bool, str]:
         app_instance = TextualTui()
@@ -2512,8 +2790,9 @@ def test_textual_enter_runs_completed_command_through_typed_path() -> None:
 
 def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
     # The wordmark identifies an empty session without consuming permanent
-    # scrollback. Its 40-column block and prompt hint must fit the compact audit
-    # viewport, then disappear before the first real transcript item is mounted.
+    # scrollback. Its ultra-minimal form and prompt hint must fit the compact
+    # audit viewport, then disappear before the first real transcript item is
+    # mounted.
     async def scenario() -> tuple[
         tuple[str, str],
         tuple[int, int, int],
@@ -2548,7 +2827,7 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
 
     content, centers, initial_children, final_children = anyio.run(scenario)
     wordmark, hint = content
-    assert "▄" in wordmark
+    assert wordmark.strip() == "wisp"
     assert hint == "Type a prompt or / for commands."
     assert centers[0] == centers[1] == centers[2]
     assert initial_children == ["TranscriptEmptyState"]
@@ -2713,7 +2992,7 @@ def test_textual_header_shows_the_wisp_wordmark() -> None:
 
     title, sub_title = anyio.run(scenario)
     assert title == "wisp"
-    assert sub_title == "a quiet coding agent"
+    assert sub_title == "tethered to you"
 
 
 def _read_prompt_signal_for_key(key: str) -> type[BaseException] | None:
@@ -2826,6 +3105,205 @@ def test_textual_tui_ctrl_c_clears_partial_input() -> None:
             return input_widget.value
 
     assert anyio.run(scenario) == ""
+
+
+def test_textual_ctrl_c_interrupts_approval_despite_stale_editor_selection() -> None:
+    # Regression (Codex P2): a decision panel hides the composer, but a draft
+    # selection can linger in the hidden editor. Ctrl+C must still interrupt/deny
+    # the active approval — the editor only owns the copy while it's visible and
+    # focused, so a stale selection behind the panel can't swallow the interrupt.
+    async def scenario() -> type[BaseException] | None:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "stale draft selection"
+            input_widget.selection = type(input_widget.selection)((0, 0), (0, 21))
+            await pilot.pause()
+            assert input_widget.selected_text  # a selection really is present
+
+            captured: list[BaseException] = []
+            async with anyio.create_task_group() as tg:
+
+                async def read() -> None:
+                    try:
+                        await app_instance.read_prompt("approve? [y/N] ")
+                    except BaseException as exc:  # noqa: BLE001 - assert on type below
+                        captured.append(exc)
+
+                tg.start_soon(read)
+                await pilot.pause()
+                # Open the approval panel: this hides the composer (display=False)
+                # while the stale selection remains on the editor.
+                renderer.approval_request(
+                    ToolApprovalRequested(
+                        call_id="latest",
+                        name="bash",
+                        arguments={"command": "echo ok"},
+                        safety="command",
+                    )
+                )
+                await pilot.pause()
+                assert input_widget.display is False
+                app_instance.action_interrupt()
+                await pilot.pause()
+            return type(captured[0]) if captured else None
+
+    assert anyio.run(scenario) is KeyboardInterrupt
+
+
+def test_textual_ctrl_c_copies_when_editor_is_focused_with_selection() -> None:
+    # Complement to the approval regression: when the editor IS visible and
+    # focused with a selection, Ctrl+C keeps its "copy, don't interrupt" behavior.
+    async def scenario() -> bool:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "copy me"
+            input_widget.selection = type(input_widget.selection)((0, 0), (0, 7))
+            input_widget.focus()
+            await pilot.pause()
+
+            interrupted = False
+            async with anyio.create_task_group() as tg:
+
+                async def read() -> None:
+                    nonlocal interrupted
+                    try:
+                        await app_instance.read_prompt("wisp> ")
+                    except KeyboardInterrupt:
+                        interrupted = True
+
+                tg.start_soon(read)
+                await pilot.pause()
+                app_instance.action_interrupt()
+                await pilot.pause()
+                # No interrupt was queued, so the read is still pending — cancel it
+                # so the task group can exit.
+                tg.cancel_scope.cancel()
+            return interrupted
+
+    assert anyio.run(scenario) is False
+
+
+def test_textual_ctrl_c_copy_failure_does_not_fire_interrupt() -> None:
+    # Regression (verification P1): the copy-branch return must sit OUTSIDE the
+    # suppress block. If copy_to_clipboard raises (e.g. broken terminal OSC52
+    # write), an editor-owned ctrl+c copy gesture must NOT fall through to
+    # KeyboardInterrupt — that would interrupt the agent and wipe the draft line.
+    async def scenario() -> tuple[bool, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "keep this draft"
+            input_widget.selection = type(input_widget.selection)((0, 0), (0, 4))
+            input_widget.focus()
+            await pilot.pause()
+
+            def boom(_text: str) -> None:
+                raise RuntimeError("clipboard write failed")
+
+            app_instance.copy_to_clipboard = boom  # type: ignore[method-assign]
+
+            interrupted = False
+            async with anyio.create_task_group() as tg:
+
+                async def read() -> None:
+                    nonlocal interrupted
+                    try:
+                        await app_instance.read_prompt("wisp> ")
+                    except KeyboardInterrupt:
+                        interrupted = True
+
+                tg.start_soon(read)
+                await pilot.pause()
+                app_instance.action_interrupt()
+                await pilot.pause()
+                draft = input_widget.value
+                tg.cancel_scope.cancel()
+            return interrupted, draft
+
+    interrupted, draft = anyio.run(scenario)
+    assert interrupted is False  # a failed copy never becomes an interrupt
+    assert draft == "keep this draft"  # and never wipes the draft line
+
+
+def test_textual_transcript_autocopy_ignores_hidden_editor_selection() -> None:
+    # Regression (Codex P3): dragging visible transcript/decision text must
+    # auto-copy even when a stale draft selection lingers in a HIDDEN editor
+    # (e.g. behind an approval panel). Ownership is gated on the editor being
+    # visible and focused, so a hidden selection no longer blocks the copy.
+    async def scenario() -> tuple[list[str], list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "stale hidden selection"
+            input_widget.selection = type(input_widget.selection)((0, 0), (0, 22))
+            await pilot.pause()
+
+            copied: list[str] = []
+            app_instance.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+            app_instance.screen.get_selected_text = lambda: "transcript text"  # type: ignore[method-assign]
+
+            # Editor visible + focused: it owns the selection, so transcript
+            # auto-copy defers to the editor and copies nothing.
+            input_widget.focus()
+            await pilot.pause()
+            app_instance.on_text_selected()
+            focused_copies = list(copied)
+
+            # Open an approval panel: the composer is hidden (display=False) while
+            # the stale selection remains. Auto-copy must now fire for the drag.
+            copied.clear()
+            renderer.approval_request(
+                ToolApprovalRequested(
+                    call_id="latest",
+                    name="bash",
+                    arguments={"command": "echo ok"},
+                    safety="command",
+                )
+            )
+            await pilot.pause()
+            assert input_widget.display is False
+            app_instance.on_text_selected()
+            hidden_copies = list(copied)
+            return focused_copies, hidden_copies
+
+    focused_copies, hidden_copies = anyio.run(scenario)
+    assert focused_copies == []  # focused editor owns the selection
+    assert hidden_copies == ["transcript text"]  # hidden editor doesn't block
+
+
+def test_textual_transcript_autocopy_skips_while_streaming() -> None:
+    # Regression (Codex P3): on_text_selected promised (in its own comment) not to
+    # auto-copy while the agent streams — the transcript mutates and Textual's
+    # selection bounds go stale — but never enforced it. A selection during a live
+    # response must NOT overwrite the clipboard; it may only copy once the stream
+    # has flushed.
+    async def scenario() -> tuple[list[str], list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            copied: list[str] = []
+            app_instance.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+            app_instance.screen.get_selected_text = lambda: "streamed line"  # type: ignore[method-assign]
+
+            # Start a stream: append_stream mounts the stream widget (is_streaming).
+            app_instance.append_stream("partial response ")
+            await pilot.pause()
+            assert app_instance._is_streaming()
+            app_instance.on_text_selected()
+            during_stream = list(copied)
+
+            # Flush the stream: the guard lifts and a later selection copies again.
+            app_instance.flush_stream()
+            await pilot.pause()
+            assert not app_instance._is_streaming()
+            app_instance.on_text_selected()
+            after_flush = list(copied)
+            return during_stream, after_flush
+
+    during_stream, after_flush = anyio.run(scenario)
+    assert during_stream == []  # streaming suppresses the stale-bounds auto-copy
+    assert after_flush == ["streamed line"]  # after flush, auto-copy resumes
 
 
 def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) -> None:
