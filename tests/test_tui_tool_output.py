@@ -11,6 +11,8 @@ tools only, so a card is never spuriously reddened by an unrelated tool's data.
 
 from __future__ import annotations
 
+import signal
+
 from wisp.tui.tool_output import (
     _ERROR_TAIL_BYTES,
     _ERROR_TAIL_LINES,
@@ -44,11 +46,19 @@ def test_render_error_omits_exit_line_when_none() -> None:
 def test_render_error_renders_signal_termination_not_negative_exit() -> None:
     # asyncio reports a negative code when the process was killed by a signal
     # (including Wisp's own SIGKILL on output-budget exhaustion). "exit -9" is
-    # nonsensical; render it as the signal.
+    # nonsensical; render it as the signal. The signal *number* is
+    # platform-invariant; its symbolic name (SIGKILL) is only present where the
+    # platform defines it, so assert the number always and the name when known.
     rendered = render_error("boom", exit_code=-9)
     first = rendered.splitlines()[0]
     assert "exit -9" not in rendered
-    assert first == "killed by signal 9 (SIGKILL)"
+    assert first.startswith("killed by signal 9")
+    try:
+        name = signal.Signals(9).name
+    except ValueError:
+        assert first == "killed by signal 9"
+    else:
+        assert first == f"killed by signal 9 ({name})"
 
 
 def test_render_error_unknown_signal_number_falls_back() -> None:
