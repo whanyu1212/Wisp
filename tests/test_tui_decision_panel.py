@@ -9,12 +9,14 @@ from textual.widgets import OptionList, Static
 
 from wisp.events import ToolApprovalRequested, TrustRequested
 from wisp.tui import TuiViewSnapshot
-from wisp.tui.textual_app import create_textual_tui
-from wisp.tui.widgets import (
-    DecisionPanel,
+from wisp.tui.decision_content import (
     _approval_content,
     _bounded_decision_preview,
     _trust_content,
+)
+from wisp.tui.textual_app import create_textual_tui
+from wisp.tui.widgets import (
+    DecisionPanel,
 )
 from wisp.tui.widgets import (
     PromptEditor as Input,
