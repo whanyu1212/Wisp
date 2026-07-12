@@ -134,6 +134,15 @@ def _is_exit_restatement(output: str, exit_code: int | None) -> bool:
     whitespace ``_tail_preview`` itself normalizes): genuine output that merely
     resembles the fallback — a different number, surrounding whitespace, or extra
     content — is never suppressed.
+
+    Known residual ambiguity: a command whose *sole genuine* output is exactly
+    this string while it exits with the matching code is indistinguishable from
+    the synthetic fallback by text alone, so its output is suppressed. Fully
+    resolving this needs an explicit synthetic-output flag propagated from the
+    tool, which is deferred (see the truncation follow-up — same shape of
+    cross-cutting field propagation). The collision is vanishingly rare and the
+    cost is only a duplicated status line, so text matching is the right tradeoff
+    for now.
     """
 
     if exit_code is None:
