@@ -50,10 +50,18 @@ class SlashCommandSpec:
     """A user-facing slash command for the inline completion menu.
 
     One row per command the menu offers: the canonical ``/``-prefixed spelling,
-    a one-line description, and whether it takes an argument (so Tab-completion
-    knows to leave a trailing space for the value). This is the single source of
-    truth the menu and completion read, kept alongside the parser so all three
-    stay in sync.
+    a one-line description, and whether it accepts an argument. This is the single
+    source of truth the menu and completion read, kept alongside the parser so all
+    three stay in sync.
+
+    ``takes_args`` means the command *accepts* an argument (required or optional),
+    not that one is mandatory: ``/model``/``/auth`` run bare (show current /
+    default) yet still take a value. It drives two behaviors, so it must match the
+    shell handlers: Tab-completion leaves a trailing space for the value, and
+    accepting the highlight from a still-being-typed prefix (e.g. ``/`` → ``/auth``)
+    fills ``/cmd `` for the value instead of running immediately — important for
+    destructive commands like ``/logout`` where the bare default differs from the
+    intended target.
     """
 
     command: str  # canonical spelling, e.g. "/model"
@@ -68,9 +76,9 @@ SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("/help", "Show the TUI commands"),
     SlashCommandSpec("/model", "Show or switch the active model", takes_args=True),
     SlashCommandSpec("/provider", "Show or switch the active provider", takes_args=True),
-    SlashCommandSpec("/auth", "Show credential status"),
+    SlashCommandSpec("/auth", "Show credential status", takes_args=True),
     SlashCommandSpec("/login", "Log in to a provider", takes_args=True),
-    SlashCommandSpec("/logout", "Remove stored credentials"),
+    SlashCommandSpec("/logout", "Remove stored credentials", takes_args=True),
     SlashCommandSpec("/quit", "Quit the TUI"),
 )
 
