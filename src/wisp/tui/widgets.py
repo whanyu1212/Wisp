@@ -50,11 +50,20 @@ class PromptEditor(TextArea):
     """Multiline prompt editor with Pi-compatible submission keys."""
 
     class Submitted(Message):
-        """The complete prompt accepted by the editor."""
+        """The prompt accepted by the editor.
 
-        def __init__(self, value: str) -> None:
+        ``value`` is the full text sent to the model, with large-paste
+        placeholders expanded to their backing content. ``display`` is the
+        compact form for the transcript echo — the raw editor text with the
+        ``[Pasted content #N: ...]`` markers left intact — so submitting a large
+        paste doesn't mount the whole blob into the transcript. The two are equal
+        when there are no large pastes.
+        """
+
+        def __init__(self, value: str, display: str) -> None:
             super().__init__()
             self.value = value
+            self.display = display
 
     def __init__(
         self,
@@ -159,7 +168,9 @@ class PromptEditor(TextArea):
         if event.key == "enter":
             event.stop()
             event.prevent_default()
-            self.post_message(self.Submitted(self.text_for_submission()))
+            # Full expansion for the model; the raw editor text (placeholders
+            # intact) for the compact transcript echo.
+            self.post_message(self.Submitted(self.text_for_submission(), self.text))
         elif event.key in {"shift+enter", "ctrl+j"}:
             event.stop()
             event.prevent_default()

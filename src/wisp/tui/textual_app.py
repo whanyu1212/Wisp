@@ -306,6 +306,12 @@ class TextualTui(App[None]):
         # Main-screen heartbeat (opencode-style): a dim WorkingIndicator row in the
         # transcript right after the user prompt, not in the stable footer chrome.
         self._working_indicator: Widget | None = None
+        # full submitted text → compact echo (raw editor text with large-paste
+        # markers intact). The channel/shell carry only the full str; this side map
+        # lets prompt_submitted() echo a compact line without re-plumbing the queue.
+        # Entries are registered only when display differs from the full text
+        # (i.e. a large paste was expanded) and popped when the echo consumes them.
+        self._compact_echoes: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -364,7 +370,22 @@ class TextualTui(App[None]):
         # just a hint, so close it. `/command` parsing lives in the shell.
         if self._suggest is not None:
             self._suggest.hide()
+        # Register a compact echo when the submitted (expanded) text differs from
+        # what the editor showed — a large paste. The transcript then echoes the
+        # marker line, not the whole blob, while the model still gets event.value.
+        if event.display != event.value:
+            self._compact_echoes[event.value] = event.display
         self.submit_command_line(event.value)
+
+    def compact_echo_for(self, prompt: str) -> str:
+        """Return the compact transcript echo for a submitted prompt.
+
+        Falls back to the prompt itself when no large-paste echo was registered
+        (the common case). The mapping is single-use — popped here — so a repeated
+        identical prompt without a fresh large paste echoes verbatim.
+        """
+
+        return self._compact_echoes.pop(prompt, prompt)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         # Keep the inline slash menu in sync with the input WITHOUT ever touching
@@ -547,6 +568,20 @@ class TextualTui(App[None]):
                 pyperclip.copy(text)
         super().copy_to_clipboard(text)
 
+    def _editor_owns_selection(self) -> bool:
+        """Whether a selection in the prompt editor owns the current copy gesture.
+
+        The editor only owns copy (ctrl+c or mouse-drag) while it's actually
+        visible and focused: when a decision panel is open the composer is hidden
+        (display=False) and any stale draft selection must NOT claim ownership, or
+        it swallows an interrupt/deny or blocks transcript auto-copy until cleared.
+        """
+
+        editor = self._input
+        return bool(
+            editor is not None and editor.display and editor.has_focus and editor.selected_text
+        )
+
     @on(events.TextSelected)
     def on_text_selected(self) -> None:
         """Auto-copy transcript selections so mouse drag + copy works."""
@@ -558,9 +593,9 @@ class TextualTui(App[None]):
         with suppress(Exception):
             if self._transcript is None:
                 return
-            # If the prompt editor has selection, it owns the copy — its own
-            # ctrl+c / ctrl+insert handling already covers it.
-            if self._input is not None and self._input.selected_text:
+            # If the (visible, focused) prompt editor has a selection, it owns the
+            # copy — its own ctrl+c / ctrl+insert handling already covers it.
+            if self._editor_owns_selection():
                 return
             selection = self.screen.get_selected_text()
             if not selection:
@@ -572,17 +607,15 @@ class TextualTui(App[None]):
         # If the prompt editor owns the keystroke AND has selected text, ctrl+c
         # means "copy", not "interrupt". Because this binding is priority=True (so
         # it fires before TextArea's own handler and would otherwise swallow copy),
-        # we explicitly copy here. The editor only owns ctrl+c while it's actually
-        # visible and focused: when a decision panel is open the composer is hidden
-        # (display=False) and any stale draft selection must NOT swallow ctrl+c, or
-        # the interrupt/deny never reaches the active approval.
-        if self._input is not None and self._input.display and self._input.has_focus:
+        # we explicitly copy here. Ownership requires the editor to be visible and
+        # focused, so a stale selection behind a decision panel can't swallow the
+        # interrupt/deny meant for the active approval.
+        if self._editor_owns_selection():
             with suppress(Exception):
-                selected = self._input.selected_text
-                if selected:
-                    self.copy_to_clipboard(selected)
-                    self.notify(f"Copied {len(selected)} chars to clipboard.")
-                    return
+                selected = self._input.selected_text  # type: ignore[union-attr]
+                self.copy_to_clipboard(selected)
+                self.notify(f"Copied {len(selected)} chars to clipboard.")
+                return
         self._signal_input(KeyboardInterrupt(), action="interrupt")
 
     def action_eof(self) -> None:
@@ -1061,7 +1094,9 @@ class TextualTuiRenderer:
         self.app.write_error(message)
 
     def prompt_submitted(self, prompt: str) -> None:
-        self.app.write_user(prompt)
+        # Echo a compact line for large pastes (marker kept) while the model still
+        # received the full expanded text via controller.prompt(prompt).
+        self.app.write_user(self.app.compact_echo_for(prompt))
 
     def running(self) -> None:
         self._begin_progress()

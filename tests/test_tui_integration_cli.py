@@ -2399,6 +2399,42 @@ def test_textual_large_paste_survives_cut_and_move() -> None:
     assert marker not in submitted
 
 
+def test_textual_large_paste_echoes_compact_line_while_model_gets_full_text() -> None:
+    # Regression (Codex P2): submitting a >2 KB paste must not mount the whole
+    # blob into the transcript. The model still receives the full expanded text
+    # via controller.prompt(prompt); the transcript echo (renderer.prompt_submitted)
+    # keeps the compact "[Pasted content #N: ...]" marker.
+    pasted = "echo me\n" * 400
+
+    async def scenario() -> tuple[str, list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            app_instance.post_message(events.Paste(pasted))
+            await pilot.pause()
+            marker = input_widget.value
+            assert marker.startswith("[Pasted content #1:")
+
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                submitted = await app_instance._prompt_receive.receive()
+            assert isinstance(submitted, str)
+            # Drive the echo seam the shell uses: prompt_submitted(full_text).
+            renderer.prompt_submitted(submitted)
+            await pilot.pause()
+            return submitted, _transcript_texts(app_instance)
+
+    submitted, transcript = anyio.run(scenario)
+    # Model side: the full expanded blob.
+    assert submitted == pasted
+    # Transcript side: exactly the compact marker (role label prefixes the line),
+    # never the blob.
+    user_lines = [line for line in transcript if "[Pasted content #1:" in line]
+    assert len(user_lines) == 1
+    assert not any("echo me\necho me" in line for line in transcript)
+
+
 def test_textual_newline_keys_edit_without_submitting() -> None:
     async def scenario() -> tuple[str, bool, str]:
         app_instance = TextualTui()
@@ -3048,6 +3084,52 @@ def test_textual_ctrl_c_copies_when_editor_is_focused_with_selection() -> None:
             return interrupted
 
     assert anyio.run(scenario) is False
+
+
+def test_textual_transcript_autocopy_ignores_hidden_editor_selection() -> None:
+    # Regression (Codex P3): dragging visible transcript/decision text must
+    # auto-copy even when a stale draft selection lingers in a HIDDEN editor
+    # (e.g. behind an approval panel). Ownership is gated on the editor being
+    # visible and focused, so a hidden selection no longer blocks the copy.
+    async def scenario() -> tuple[list[str], list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "stale hidden selection"
+            input_widget.selection = type(input_widget.selection)((0, 0), (0, 22))
+            await pilot.pause()
+
+            copied: list[str] = []
+            app_instance.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+            app_instance.screen.get_selected_text = lambda: "transcript text"  # type: ignore[method-assign]
+
+            # Editor visible + focused: it owns the selection, so transcript
+            # auto-copy defers to the editor and copies nothing.
+            input_widget.focus()
+            await pilot.pause()
+            app_instance.on_text_selected()
+            focused_copies = list(copied)
+
+            # Open an approval panel: the composer is hidden (display=False) while
+            # the stale selection remains. Auto-copy must now fire for the drag.
+            copied.clear()
+            renderer.approval_request(
+                ToolApprovalRequested(
+                    call_id="latest",
+                    name="bash",
+                    arguments={"command": "echo ok"},
+                    safety="command",
+                )
+            )
+            await pilot.pause()
+            assert input_widget.display is False
+            app_instance.on_text_selected()
+            hidden_copies = list(copied)
+            return focused_copies, hidden_copies
+
+    focused_copies, hidden_copies = anyio.run(scenario)
+    assert focused_copies == []  # focused editor owns the selection
+    assert hidden_copies == ["transcript text"]  # hidden editor doesn't block
 
 
 def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) -> None:
