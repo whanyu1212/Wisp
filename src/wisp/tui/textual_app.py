@@ -569,11 +569,14 @@ class TextualTui(App[None]):
             self.notify("Copied selection to clipboard.")
 
     def action_interrupt(self) -> None:
-        # If the prompt editor has selected text, ctrl+c means "copy", not
-        # "interrupt". Because this binding is priority=True (so it fires
-        # before TextArea's own handler and would otherwise swallow copy),
-        # we explicitly copy here.
-        if self._input is not None:
+        # If the prompt editor owns the keystroke AND has selected text, ctrl+c
+        # means "copy", not "interrupt". Because this binding is priority=True (so
+        # it fires before TextArea's own handler and would otherwise swallow copy),
+        # we explicitly copy here. The editor only owns ctrl+c while it's actually
+        # visible and focused: when a decision panel is open the composer is hidden
+        # (display=False) and any stale draft selection must NOT swallow ctrl+c, or
+        # the interrupt/deny never reaches the active approval.
+        if self._input is not None and self._input.display and self._input.has_focus:
             with suppress(Exception):
                 selected = self._input.selected_text
                 if selected:
@@ -687,6 +690,10 @@ class TextualTui(App[None]):
             return
         self._working_indicator = indicator
         self._transcript.mount_message(indicator)
+        # Surface the heartbeat to a scrolled-back reader too: activity no longer
+        # lives in the footer, so the jump-to-latest badge is the only cue that
+        # working/retry state has begun. No-op while following the tail.
+        self._note_transcript_update(indicator)
         self._follow_tail_after_refresh()
 
     def _remove_working_indicator(self) -> None:
@@ -694,6 +701,10 @@ class TextualTui(App[None]):
         if indicator is None:
             return
         self._working_indicator = None
+        # The heartbeat is transient — drop it from the unseen set on removal so a
+        # retired indicator never inflates the badge or leaves it pointing at a
+        # widget no longer in the transcript.
+        self._discard_unseen_output(indicator)
         with suppress(Exception):
             indicator.remove()
 
@@ -896,6 +907,20 @@ class TextualTui(App[None]):
             return
         self._unseen_output.add(widget)
         jump.show_count(len(self._unseen_output))
+
+    def _discard_unseen_output(self, widget: Widget) -> None:
+        # Forget one widget (e.g. a retired heartbeat) and reconcile the badge:
+        # hide it once nothing unseen remains, otherwise shrink the count.
+        if widget not in self._unseen_output:
+            return
+        self._unseen_output.discard(widget)
+        jump = self._jump_to_latest
+        if jump is None:
+            return
+        if self._unseen_output:
+            jump.show_count(len(self._unseen_output))
+        else:
+            jump.hide()
 
     def _clear_unseen_output(self) -> None:
         self._unseen_output.clear()

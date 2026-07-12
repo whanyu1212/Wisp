@@ -1966,6 +1966,47 @@ def test_textual_scrollback_counts_distinct_unseen_output_and_end_clears_it() ->
     assert result["following"]
 
 
+def test_textual_heartbeat_notifies_scrolled_back_reader_and_clears_on_removal() -> None:
+    # Regression (Codex P2): activity no longer lives in the footer, so the
+    # jump-to-latest badge is the only cue that working/retry state began. A
+    # scrolled-back reader must see the heartbeat register as unseen output, and
+    # its transient removal must reconcile the badge (no phantom "1 new").
+    async def scenario() -> dict[str, object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            jump = app_instance.query_one("#jump-latest", JumpToLatest)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            await pilot.press("pageup")
+            await pilot.pause()
+            assert transcript.is_following is False
+
+            app_instance.show_working_indicator()
+            await pilot.pause()
+            working_count = len(app_instance._unseen_output)
+            working_shown = jump.display is True
+
+            # Retiring the heartbeat must drop it from the unseen set and hide the
+            # badge, since it was the only unseen output.
+            app_instance.hide_working_indicator()
+            await pilot.pause()
+            return {
+                "working_count": working_count,
+                "working_shown": working_shown,
+                "cleared": len(app_instance._unseen_output) == 0,
+                "hidden": jump.display is False,
+            }
+
+    result = anyio.run(scenario)
+    assert result["working_count"] == 1
+    assert result["working_shown"]
+    assert result["cleared"]
+    assert result["hidden"]
+
+
 def test_textual_jump_to_latest_click_restores_follow_and_input_focus() -> None:
     async def scenario() -> dict[str, object]:
         app_instance, renderer = create_textual_tui()
@@ -2929,6 +2970,84 @@ def test_textual_tui_ctrl_c_clears_partial_input() -> None:
             return input_widget.value
 
     assert anyio.run(scenario) == ""
+
+
+def test_textual_ctrl_c_interrupts_approval_despite_stale_editor_selection() -> None:
+    # Regression (Codex P2): a decision panel hides the composer, but a draft
+    # selection can linger in the hidden editor. Ctrl+C must still interrupt/deny
+    # the active approval — the editor only owns the copy while it's visible and
+    # focused, so a stale selection behind the panel can't swallow the interrupt.
+    async def scenario() -> type[BaseException] | None:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "stale draft selection"
+            input_widget.selection = type(input_widget.selection)((0, 0), (0, 21))
+            await pilot.pause()
+            assert input_widget.selected_text  # a selection really is present
+
+            captured: list[BaseException] = []
+            async with anyio.create_task_group() as tg:
+
+                async def read() -> None:
+                    try:
+                        await app_instance.read_prompt("approve? [y/N] ")
+                    except BaseException as exc:  # noqa: BLE001 - assert on type below
+                        captured.append(exc)
+
+                tg.start_soon(read)
+                await pilot.pause()
+                # Open the approval panel: this hides the composer (display=False)
+                # while the stale selection remains on the editor.
+                renderer.approval_request(
+                    ToolApprovalRequested(
+                        call_id="latest",
+                        name="bash",
+                        arguments={"command": "echo ok"},
+                        safety="command",
+                    )
+                )
+                await pilot.pause()
+                assert input_widget.display is False
+                app_instance.action_interrupt()
+                await pilot.pause()
+            return type(captured[0]) if captured else None
+
+    assert anyio.run(scenario) is KeyboardInterrupt
+
+
+def test_textual_ctrl_c_copies_when_editor_is_focused_with_selection() -> None:
+    # Complement to the approval regression: when the editor IS visible and
+    # focused with a selection, Ctrl+C keeps its "copy, don't interrupt" behavior.
+    async def scenario() -> bool:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "copy me"
+            input_widget.selection = type(input_widget.selection)((0, 0), (0, 7))
+            input_widget.focus()
+            await pilot.pause()
+
+            interrupted = False
+            async with anyio.create_task_group() as tg:
+
+                async def read() -> None:
+                    nonlocal interrupted
+                    try:
+                        await app_instance.read_prompt("wisp> ")
+                    except KeyboardInterrupt:
+                        interrupted = True
+
+                tg.start_soon(read)
+                await pilot.pause()
+                app_instance.action_interrupt()
+                await pilot.pause()
+                # No interrupt was queued, so the read is still pending — cancel it
+                # so the task group can exit.
+                tg.cancel_scope.cancel()
+            return interrupted
+
+    assert anyio.run(scenario) is False
 
 
 def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) -> None:
