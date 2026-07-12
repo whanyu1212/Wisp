@@ -103,6 +103,15 @@ def test_render_error_keeps_genuine_output_resembling_the_fallback() -> None:
     assert rendered == "exit 2\nCommand exited with code 7"
 
 
+def test_render_error_restatement_match_allows_only_trailing_newline() -> None:
+    # The synthetic fallback is emitted verbatim (no padding), so the match is
+    # exact except for a trailing newline. Output with surrounding whitespace is
+    # genuine and preserved; a bare trailing newline is still the fallback.
+    assert render_error("Command exited with code 2\n", exit_code=2) == "exit 2"
+    with_spaces = render_error(" Command exited with code 2 ", exit_code=2)
+    assert with_spaces == "exit 2\n Command exited with code 2 "
+
+
 def test_render_error_keeps_restatement_when_no_status_line() -> None:
     # With no promoted exit code there is no status line, so the synthetic
     # restatement is the only signal and must be kept.

@@ -130,14 +130,15 @@ def _is_exit_restatement(output: str, exit_code: int | None) -> bool:
 
     Mirrors the fallback in ``wisp.tools.process._format_process_output``, which
     emits exactly ``f"Command exited with code {exit_code}"`` when a command has
-    no stdout/stderr. Requiring the restated number to equal the promoted code
-    means genuine output that merely resembles the fallback (a different number,
-    or extra content) is never suppressed.
+    no stdout/stderr. The match is exact except for a trailing newline (the only
+    whitespace ``_tail_preview`` itself normalizes): genuine output that merely
+    resembles the fallback — a different number, surrounding whitespace, or extra
+    content — is never suppressed.
     """
 
     if exit_code is None:
         return False
-    return output.strip() == f"{_EXIT_RESTATEMENT_PREFIX}{exit_code}"
+    return output.rstrip("\n") == f"{_EXIT_RESTATEMENT_PREFIX}{exit_code}"
 
 
 def _exit_status_line(exit_code: int | None) -> str | None:
