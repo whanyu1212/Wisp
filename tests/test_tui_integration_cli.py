@@ -22,8 +22,8 @@ from wisp.events import (
 )
 from wisp.trust_flow import TrustDecision
 from wisp.tui.commands import parse_tui_slash_command
+from wisp.tui.compact_echo import MAX_PENDING_ECHOES as _MAX_PENDING_ECHOES
 from wisp.tui.textual_app import (
-    _MAX_PENDING_ECHOES,
     TextualTui,
     TextualTuiRenderer,
     create_textual_tui,
@@ -1185,8 +1185,8 @@ def test_textual_end_token_stream_finalizes_the_bubble() -> None:
             texts = _transcript_texts(app_instance)
             return (
                 texts[0] if texts else "",
-                app_instance._stream_widget,
-                app_instance._streaming_text,
+                app_instance._stream.live_widget,
+                app_instance._stream.buffered_text,
             )
 
     text, live_widget, buffer = anyio.run(scenario)
@@ -2488,11 +2488,11 @@ def test_textual_queue_drop_clears_pending_paste_echoes_but_bare_interrupt_does_
             # A bare interrupt (approval-deny shape) must PRESERVE queued echoes.
             app_instance.action_interrupt()
             await pilot.pause()
-            after_bare_interrupt = len(app_instance._compact_echoes)
+            after_bare_interrupt = app_instance._echo_log.key_count
 
             # The shell's real queue-drop hook reclaims them.
             app_instance.clear_compact_echoes()
-            after_queue_drop = len(app_instance._compact_echoes)
+            after_queue_drop = app_instance._echo_log.key_count
 
             # A later identical paste registers and echoes its OWN marker.
             fresh_marker = "[Pasted content #2: 4,800 characters, 4.7 KB]"
@@ -2522,8 +2522,8 @@ def test_textual_pending_paste_echoes_are_bounded() -> None:
                 marker = f"[Pasted content #{i}: ...]"
                 app_instance.post_message(input_widget.Submitted(full, marker))
             await pilot.pause()
-            total = sum(len(q) for q in app_instance._compact_echoes.values())
-            order_len = len(app_instance._echo_order)
+            total = app_instance._echo_log.pending_count
+            order_len = app_instance._echo_log.order_length
             # The oldest were evicted; the newest survives and still echoes compact.
             newest = app_instance.compact_echo_for(f"blob-{overflow - 1} " * 400)
             return total, order_len, newest

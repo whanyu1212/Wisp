@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime
@@ -30,6 +29,7 @@ from wisp.events import (
     TrustRequested,
     TurnStarted,
 )
+from wisp.tui.compact_echo import CompactEchoLog
 from wisp.tui.rendering import (
     TuiRenderer,
     TuiViewSnapshot,
@@ -37,6 +37,7 @@ from wisp.tui.rendering import (
     _truncate_to_cell_width,
     _tui_help_text,
 )
+from wisp.tui.stream_buffer import StreamCoalescer
 from wisp.tui.theme import WISP_THEMES, role_styles
 from wisp.tui.widgets import (
     DecisionPanel,
@@ -45,7 +46,6 @@ from wisp.tui.widgets import (
     PromptEditor,
     SlashSuggest,
     StatusBar,
-    StreamMessage,
     ToolCard,
     Transcript,
     WorkingIndicator,
@@ -93,14 +93,6 @@ _RETRY_REASON_LABELS = {
     "server_error": "server error",
     "transient_http": "temporary HTTP error",
 }
-
-# Hard cap on pending large-paste compact echoes (see TextualTui._compact_echoes).
-# An echo is registered on Enter but consumed only when the prompt is actually
-# echoed; a prompt abandoned before echo (cancelled/quit/errored/empty-dropped
-# queued follow-up) would otherwise orphan its entry forever. The cap bounds the
-# map so orphans can never accumulate — the oldest is evicted on overflow — and
-# each key holds a whole pasted blob, so the bound must stay small.
-_MAX_PENDING_ECHOES = 32
 
 
 def _input_placeholder(hint: str) -> str:
@@ -299,12 +291,10 @@ class TextualTui(App[None]):
         # theme and re-derived on theme change (watch_theme). Populated in
         # on_mount. LineMessage widgets carry it as pre-composed markup.
         self._role_styles: dict[str, str] = {}
-        # Streaming state: authoritative buffer + the live assistant widget +
-        # a coalescing flag so the widget reconciles once per refresh, not once
-        # per token (avoids O(n^2) Markdown reparse and the mount race).
-        self._streaming_text = ""
-        self._stream_widget: StreamMessage | None = None
-        self._stream_refresh_pending = False
+        # Streaming coalescer: owns the authoritative buffer + the live assistant
+        # widget, reconciling once per refresh (avoids O(n^2) Markdown reparse and
+        # the mount race). Holds a back-ref to this app for its Textual services.
+        self._stream = StreamCoalescer(self)
         # Distinct transcript widgets changed while the user is reading history.
         # A set keeps token deltas and in-place tool-card updates from inflating
         # the jump-to-latest count.
@@ -318,17 +308,9 @@ class TextualTui(App[None]):
         # full submitted text → FIFO of compact echoes (raw editor text with
         # large-paste markers intact). The channel/shell carry only the full str;
         # this side map lets prompt_submitted() echo a compact line without
-        # re-plumbing the queue. A per-key FIFO — not a single value — so that
-        # submitting the same large paste more than once (e.g. duplicate queued
-        # follow-ups) keeps a compact echo for each, consumed in submission order.
-        # Entries are registered only when display differs from the full text
-        # (i.e. a large paste was expanded) and popped when the echo consumes them.
-        # Insertion order is tracked so the map can stay bounded: a prompt
-        # abandoned before it echoes (cancel/quit/error/empty-drop) never consumes
-        # its entry, so registration evicts the oldest past _MAX_PENDING_ECHOES,
-        # and an interrupt/EOF clears the map wholesale.
-        self._compact_echoes: dict[str, deque[str]] = {}
-        self._echo_order: deque[str] = deque()
+        # re-plumbing the queue. Registered only when display differs from the full
+        # text (a large paste was expanded); consumed by compact_echo_for().
+        self._echo_log = CompactEchoLog()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -436,20 +418,7 @@ class TextualTui(App[None]):
         return True
 
     def _register_compact_echo(self, prompt: str, display: str) -> None:
-        # Append to a per-prompt FIFO so duplicate submissions each keep an echo,
-        # tracking global insertion order so the map stays bounded: evict the
-        # oldest echo once the total exceeds the cap. An entry orphaned by an
-        # abandoned submission (never consumed) is thus reclaimed after enough
-        # newer pastes, and can never accumulate without bound.
-        self._compact_echoes.setdefault(prompt, deque()).append(display)
-        self._echo_order.append(prompt)
-        while len(self._echo_order) > _MAX_PENDING_ECHOES:
-            oldest = self._echo_order.popleft()
-            queued = self._compact_echoes.get(oldest)
-            if queued:
-                queued.popleft()
-                if not queued:
-                    del self._compact_echoes[oldest]
+        self._echo_log.register(prompt, display)
 
     def clear_compact_echoes(self) -> None:
         """Drop all pending compact echoes (the shell dropped its queued prompts).
@@ -459,8 +428,7 @@ class TextualTui(App[None]):
         growth) or be popped by mistake by a later identical paste.
         """
 
-        self._compact_echoes.clear()
-        self._echo_order.clear()
+        self._echo_log.clear()
 
     def compact_echo_for(self, prompt: str) -> str:
         """Return the compact transcript echo for a submitted prompt.
@@ -471,17 +439,7 @@ class TextualTui(App[None]):
         each echo compactly, and a later repeat with no fresh paste echoes verbatim.
         """
 
-        echoes = self._compact_echoes.get(prompt)
-        if not echoes:
-            return prompt
-        display = echoes.popleft()
-        if not echoes:
-            del self._compact_echoes[prompt]
-        # Drop the matching insertion-order marker (the oldest for this key) so the
-        # cap accounting stays exact and consumed echoes aren't evicted twice.
-        with suppress(ValueError):
-            self._echo_order.remove(prompt)
-        return display
+        return self._echo_log.take(prompt)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         # Keep the inline slash menu in sync with the input WITHOUT ever touching
@@ -686,7 +644,7 @@ class TextualTui(App[None]):
         frame) marks the window where Textual's selection bounds can go stale.
         """
 
-        return self._stream_widget is not None or bool(self._streaming_text)
+        return self._stream.is_streaming
 
     @on(events.TextSelected)
     def on_text_selected(self) -> None:
@@ -981,72 +939,35 @@ class TextualTui(App[None]):
         self._follow_tail_after_refresh()
 
     def append_stream(self, delta: str) -> None:
-        # Accumulate into the authoritative buffer; lazily mount the streaming
-        # assistant widget on the first delta; reconcile via one coalesced
-        # refresh so the Markdown reparses at most once per frame, not per token.
-        self.hide_working_indicator()
-        self._streaming_text += delta
-        if self._stream_widget is None and self._transcript is not None:
-            self._stream_widget = StreamMessage()
-            self._transcript.mount_message(self._stream_widget)
-        self._schedule_stream_refresh()
+        self._stream.append(delta)
 
     def flush_stream(self) -> None:
-        # Finalize the streamed turn. This is the ONLY place a streamed assistant
-        # bubble is completed: the shell suppresses the trailing MessageCompleted
-        # when tokens were rendered (shell.py de-dup), so it never reaches event().
-        # Capture the widget + final text and reconcile AFTER refresh, because the
-        # widget may have been mounted this same tick — reconciling inline would
-        # hit the mount race and drop the content.
-        self.hide_working_indicator()
-        widget = self._stream_widget
-        final_text = self._streaming_text
-        self._streaming_text = ""
-        self._stream_widget = None
-        self._stream_refresh_pending = False
-        if widget is not None:
-            self.call_after_refresh(self._finalize_stream, widget, final_text)
-
-    async def _finalize_stream(self, widget: StreamMessage, text: str) -> None:
-        await self._follow_tail_after_content(widget, widget.set_content(text))
-
-    def _schedule_stream_refresh(self) -> None:
-        if self._stream_refresh_pending:
-            return
-        self._stream_refresh_pending = True
-        # call_after_refresh runs the reconcile once the pending mount/refresh
-        # settles, sidestepping the mount race (update() on a not-yet-mounted
-        # widget silently drops content). Textual awaits coroutine callbacks, so
-        # the reconcile can await the Markdown mount before following the tail.
-        self.call_after_refresh(self._reconcile_stream)
-
-    async def _reconcile_stream(self) -> None:
-        self._stream_refresh_pending = False
-        if self._stream_widget is not None:
-            await self._follow_tail_after_content(
-                self._stream_widget, self._stream_widget.set_content(self._streaming_text)
-            )
-
-    async def _follow_tail_after_content(
-        self,
-        widget: StreamMessage,
-        await_content: Awaitable[None],
-    ) -> None:
-        # Await the Markdown update's AwaitComplete so this update's block children
-        # have mounted, THEN follow the tail — the scroll lands on the grown extent
-        # instead of a partially-mounted one. This replaces guessing a fixed number
-        # of refresh cycles with the update's own completion signal. The Transcript
-        # still decides whether to scroll (it stays put if the user scrolled away).
-        await await_content
-        self._note_transcript_update(widget)
-        if self._transcript is not None:
-            self._transcript.follow_tail()
+        self._stream.flush()
 
     def _follow_tail_after_refresh(self) -> None:
         # Non-streamed lines (LineMessage) mount synchronously enough that one
         # post-refresh pass reaches the settled scroll range; used by _mount_line.
         if self._transcript is not None:
             self.call_after_refresh(self._transcript.follow_tail)
+
+    @property
+    def transcript(self) -> Transcript | None:
+        """The transcript scroll view, or None before on_mount wires it.
+
+        Public so collaborators (e.g. the StreamCoalescer) reach it through the
+        app's surface rather than a private field, matching TextualTuiRenderer.
+        """
+
+        return self._transcript
+
+    def note_transcript_update(self, widget: Widget) -> None:
+        """Record that ``widget`` changed while the user is reading history.
+
+        Public entry point for collaborators; internal callers use the private
+        alias below.
+        """
+
+        self._note_transcript_update(widget)
 
     def _note_transcript_update(self, widget: Widget) -> None:
         transcript = self._transcript
