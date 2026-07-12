@@ -32,7 +32,7 @@ from wisp.tui.rendering import (
     _truncate_to_cell_width,
     _tui_help_text,
 )
-from wisp.tui.tool_output import render_tool_result
+from wisp.tui.tool_output import render_tool_result, tool_result_failed
 
 if TYPE_CHECKING:
     from wisp.tui.textual_app import TextualTui
@@ -300,7 +300,11 @@ class TextualTuiRenderer:
                     elapsed=self._tool_elapsed(event.call_id, event.timestamp),
                 )
         elif isinstance(event, ToolResultReady):
-            status = "error" if event.is_error else "done"
+            # A nonzero-exit command is is_error=False on the wire (a normal
+            # model-visible result) but should still present as a failure; drive
+            # the glyph and the detail from the same judgment so they agree.
+            failed = tool_result_failed(event.is_error, event.data)
+            status = "error" if failed else "done"
             self.app.resolve_tool_call(
                 event.call_id,
                 status,

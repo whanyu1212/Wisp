@@ -53,6 +53,7 @@ class RecordingToolExecutor:
             name=tool_call.name,
             output="tool output",
             is_error=False,
+            data={"exit_code": 0},
         )
 
 
@@ -185,6 +186,17 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
     assert result.output == "tool output"
     assert provider.calls[1].tool_results[0].output == "tool output"
     assert provider.calls[1].previous_response_id == "response-1"
+    # The structured payload reaches the in-memory event for the renderer...
+    assert result.data == {"exit_code": 0}
+    # ...but is excluded from every serialization boundary: it must not appear on
+    # the RPC wire or in a persisted session line, so schema-v3 consumers that
+    # forbid unknown fields keep accepting these events unchanged.
+    assert "data" not in result.model_dump()
+    assert "data" not in result.model_dump(mode="json")
+    assert "data" not in result.model_dump_json()
+    ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
+    assert ended.data == {"exit_code": 0}
+    assert "data" not in ended.model_dump_json()
 
 
 def test_pure_loop_rejects_executor_without_terminal_result() -> None:

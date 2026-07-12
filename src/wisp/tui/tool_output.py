@@ -57,9 +57,28 @@ def render_tool_result(
     # PR A ships only the generic path + error rendering; built-in success
     # renderers (diffs, summaries) are added by later PRs, each routing here
     # first when it doesn't recognize the payload.
-    if is_error:
+    if tool_result_failed(is_error, data):
         return render_error(output, data=data)
     return render_generic(output)
+
+
+def tool_result_failed(is_error: bool, data: Mapping[str, object]) -> bool:
+    """Whether a tool result should be presented as a failure.
+
+    This is a presentation judgment, distinct from the event's ``is_error`` flag,
+    and the renderer uses it for *both* the card status glyph and the detail body
+    so the two never disagree. ``is_error`` means the tool mechanism failed
+    (denied, raised, unknown tool); a command that ran fine but exited nonzero (a
+    failing ``bash``) is *not* an ``is_error`` — that stays a normal,
+    model-visible result on the wire. But its card should still read as a failure
+    and surface the exit status, so a nonzero ``exit_code`` in ``data`` counts as
+    failed here without touching ``is_error``.
+    """
+
+    if is_error:
+        return True
+    exit_code = data.get("exit_code")
+    return isinstance(exit_code, int) and exit_code != 0
 
 
 def render_error(output: str, *, data: Mapping[str, object]) -> str:
@@ -97,13 +116,15 @@ def _tail_preview(output: str, *, max_lines: int, max_bytes: int) -> str:
 
     Mirrors ``_preview_tool_output`` but keeps the last lines rather than the
     first, because tool failures surface at the end. Truncation stays honest: a
-    ``... N earlier lines`` marker is prepended when content is dropped.
+    leading marker reports both dropped lines and dropped bytes, so a single
+    over-long line clipped by the byte budget is never shown as if complete.
     """
 
     normalized = output.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
     if not normalized.strip():
         return ""
 
+    total_bytes = len(normalized.encode("utf-8"))
     lines = normalized.split("\n")
     kept = lines[-max(1, max_lines) :]
     preview = "\n".join(kept)
@@ -113,11 +134,18 @@ def _tail_preview(output: str, *, max_lines: int, max_bytes: int) -> str:
         # Trim from the front of the byte window so the very tail survives.
         preview = encoded[-max(1, max_bytes) :].decode("utf-8", errors="ignore")
 
+    visible_bytes = len(preview.encode("utf-8"))
+    hidden_bytes = max(0, total_bytes - visible_bytes)
+    if hidden_bytes == 0:
+        return preview
+
     hidden_lines = len(lines) - preview.count("\n") - 1
+    parts: list[str] = []
     if hidden_lines > 0:
         unit = "line" if hidden_lines == 1 else "lines"
-        return f"... {hidden_lines} earlier {unit}\n{preview}"
-    return preview
+        parts.append(f"{hidden_lines} earlier {unit}")
+    parts.append(f"{hidden_bytes} bytes hidden")
+    return f"... {', '.join(parts)}\n{preview}"
 
 
 def render_generic(output: str) -> str:
