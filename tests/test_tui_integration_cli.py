@@ -2788,6 +2788,37 @@ def test_textual_enter_runs_completed_command_through_typed_path() -> None:
     assert menu_open is False
 
 
+def test_textual_full_command_typed_letter_by_letter_submits_whole_line() -> None:
+    # REGRESSION: the slash menu is a passive hint layer and must never take
+    # keyboard focus from the editor. SlashSuggest inherits OptionList.can_focus,
+    # which defaults to True; before it was forced off, opening the menu on "/"
+    # could move focus onto the OptionList, so the rest of the command was dropped
+    # and only "/" ever submitted. Type a full command letter-by-letter (no Tab
+    # completion) with the menu open and assert the whole line submits and focus
+    # never leaves #input.
+    async def scenario() -> tuple[str, bool, bool, str | None]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+            await pilot.press(*"/quit")  # menu is open the whole time
+            await pilot.pause()
+            menu_open = suggest.is_open
+            focused_id = app_instance.focused.id if app_instance.focused else None
+            await pilot.press("enter")
+            await pilot.pause()
+            queued = await app_instance._prompt_receive.receive()
+            return queued, suggest.can_focus, menu_open, focused_id
+
+    queued, suggest_focusable, menu_open, focused_id = anyio.run(scenario)
+    assert queued == "/quit"  # the WHOLE command, not a lone "/"
+    assert suggest_focusable is False  # the menu can never be a keyboard target
+    assert menu_open is True  # menu stayed open while typing (it's a live hint)
+    assert focused_id == "input"  # focus never left the editor
+
+
 def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
     # The wordmark identifies an empty session without consuming permanent
     # scrollback. Its ultra-minimal form and prompt hint must fit the compact

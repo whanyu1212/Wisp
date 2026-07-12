@@ -754,6 +754,14 @@ class SlashSuggest(OptionList):
     recovered by id — no parallel index to keep in sync.
     """
 
+    # OptionList defaults to can_focus=True; force it off. This menu is a passive
+    # projection of the input buffer (Claude-Code/Codex/Pi model) driven entirely
+    # by the app's on_key (cursor moves, Tab-complete, hide) — it must NEVER become
+    # a keyboard target. If it could take focus, opening it on `/` would steal the
+    # caret from the PromptEditor, so the rest of the command ("quit") would land in
+    # the OptionList (which drops printable keys) and only `/` would ever submit.
+    can_focus = False
+
     # overlay: screen floats the menu over the transcript WITHOUT reflowing it,
     # while keeping its natural compose position (just above #input, where it's
     # yielded). It is deliberately NOT put on a separate `layer:` — a lone child on
