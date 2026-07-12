@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime
@@ -92,6 +93,14 @@ _RETRY_REASON_LABELS = {
     "server_error": "server error",
     "transient_http": "temporary HTTP error",
 }
+
+# Hard cap on pending large-paste compact echoes (see TextualTui._compact_echoes).
+# An echo is registered on Enter but consumed only when the prompt is actually
+# echoed; a prompt abandoned before echo (cancelled/quit/errored/empty-dropped
+# queued follow-up) would otherwise orphan its entry forever. The cap bounds the
+# map so orphans can never accumulate — the oldest is evicted on overflow — and
+# each key holds a whole pasted blob, so the bound must stay small.
+_MAX_PENDING_ECHOES = 32
 
 
 def _input_placeholder(hint: str) -> str:
@@ -306,12 +315,20 @@ class TextualTui(App[None]):
         # Main-screen heartbeat (opencode-style): a dim WorkingIndicator row in the
         # transcript right after the user prompt, not in the stable footer chrome.
         self._working_indicator: Widget | None = None
-        # full submitted text → compact echo (raw editor text with large-paste
-        # markers intact). The channel/shell carry only the full str; this side map
-        # lets prompt_submitted() echo a compact line without re-plumbing the queue.
+        # full submitted text → FIFO of compact echoes (raw editor text with
+        # large-paste markers intact). The channel/shell carry only the full str;
+        # this side map lets prompt_submitted() echo a compact line without
+        # re-plumbing the queue. A per-key FIFO — not a single value — so that
+        # submitting the same large paste more than once (e.g. duplicate queued
+        # follow-ups) keeps a compact echo for each, consumed in submission order.
         # Entries are registered only when display differs from the full text
         # (i.e. a large paste was expanded) and popped when the echo consumes them.
-        self._compact_echoes: dict[str, str] = {}
+        # Insertion order is tracked so the map can stay bounded: a prompt
+        # abandoned before it echoes (cancel/quit/error/empty-drop) never consumes
+        # its entry, so registration evicts the oldest past _MAX_PENDING_ECHOES,
+        # and an interrupt/EOF clears the map wholesale.
+        self._compact_echoes: dict[str, deque[str]] = {}
+        self._echo_order: deque[str] = deque()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -374,18 +391,52 @@ class TextualTui(App[None]):
         # what the editor showed — a large paste. The transcript then echoes the
         # marker line, not the whole blob, while the model still gets event.value.
         if event.display != event.value:
-            self._compact_echoes[event.value] = event.display
+            self._register_compact_echo(event.value, event.display)
         self.submit_command_line(event.value)
+
+    def _register_compact_echo(self, prompt: str, display: str) -> None:
+        # Append to a per-prompt FIFO so duplicate submissions each keep an echo,
+        # tracking global insertion order so the map stays bounded: evict the
+        # oldest echo once the total exceeds the cap. An entry orphaned by an
+        # abandoned submission (never consumed) is thus reclaimed after enough
+        # newer pastes, and can never accumulate without bound.
+        self._compact_echoes.setdefault(prompt, deque()).append(display)
+        self._echo_order.append(prompt)
+        while len(self._echo_order) > _MAX_PENDING_ECHOES:
+            oldest = self._echo_order.popleft()
+            queued = self._compact_echoes.get(oldest)
+            if queued:
+                queued.popleft()
+                if not queued:
+                    del self._compact_echoes[oldest]
+
+    def _clear_compact_echoes(self) -> None:
+        # Interrupt/EOF abandons any queued follow-ups, so their pending echoes
+        # will never be consumed — drop them all rather than leave orphans that a
+        # later identical paste could pop by mistake.
+        self._compact_echoes.clear()
+        self._echo_order.clear()
 
     def compact_echo_for(self, prompt: str) -> str:
         """Return the compact transcript echo for a submitted prompt.
 
         Falls back to the prompt itself when no large-paste echo was registered
-        (the common case). The mapping is single-use — popped here — so a repeated
-        identical prompt without a fresh large paste echoes verbatim.
+        (the common case). Each registered echo is single-use — consumed in
+        submission order from the per-prompt FIFO — so N identical large pastes
+        each echo compactly, and a later repeat with no fresh paste echoes verbatim.
         """
 
-        return self._compact_echoes.pop(prompt, prompt)
+        echoes = self._compact_echoes.get(prompt)
+        if not echoes:
+            return prompt
+        display = echoes.popleft()
+        if not echoes:
+            del self._compact_echoes[prompt]
+        # Drop the matching insertion-order marker (the oldest for this key) so the
+        # cap accounting stays exact and consumed echoes aren't evicted twice.
+        with suppress(ValueError):
+            self._echo_order.remove(prompt)
+        return display
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         # Keep the inline slash menu in sync with the input WITHOUT ever touching
@@ -582,6 +633,16 @@ class TextualTui(App[None]):
             editor is not None and editor.display and editor.has_focus and editor.selected_text
         )
 
+    def _is_streaming(self) -> bool:
+        """Whether a streamed assistant turn is mid-flight and mutating the transcript.
+
+        The stream widget is mounted on the first token delta and cleared on
+        flush, so its presence (or a non-empty buffer, which the widget lags by a
+        frame) marks the window where Textual's selection bounds can go stale.
+        """
+
+        return self._stream_widget is not None or bool(self._streaming_text)
+
     @on(events.TextSelected)
     def on_text_selected(self) -> None:
         """Auto-copy transcript selections so mouse drag + copy works."""
@@ -591,7 +652,7 @@ class TextualTui(App[None]):
         # copy unrelated output that scrolled into the selection region.
         # Explicit ctrl+c copy from the prompt editor still works regardless.
         with suppress(Exception):
-            if self._transcript is None:
+            if self._transcript is None or self._is_streaming():
                 return
             # If the (visible, focused) prompt editor has a selection, it owns the
             # copy — its own ctrl+c / ctrl+insert handling already covers it.
@@ -611,11 +672,15 @@ class TextualTui(App[None]):
         # focused, so a stale selection behind a decision panel can't swallow the
         # interrupt/deny meant for the active approval.
         if self._editor_owns_selection():
+            # Copy is best-effort: a broken terminal can make the OSC52 clipboard
+            # write (or notify) raise, but the gesture was still a copy, not an
+            # interrupt. Return unconditionally so a failed copy never falls
+            # through to KeyboardInterrupt (which would also wipe the draft line).
             with suppress(Exception):
                 selected = self._input.selected_text  # type: ignore[union-attr]
                 self.copy_to_clipboard(selected)
                 self.notify(f"Copied {len(selected)} chars to clipboard.")
-                return
+            return
         self._signal_input(KeyboardInterrupt(), action="interrupt")
 
     def action_eof(self) -> None:
@@ -656,6 +721,9 @@ class TextualTui(App[None]):
         # silently discard the user's text without cancelling anything.
         if self._input is not None:
             self._input.value = ""
+        # The interrupt/EOF also abandons any queued follow-ups, so their pending
+        # compact echoes will never be consumed — clear them to avoid orphans.
+        self._clear_compact_echoes()
 
     def set_status(self, snapshot: TuiViewSnapshot) -> None:
         if self._status is not None:

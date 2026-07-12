@@ -22,7 +22,12 @@ from wisp.events import (
 )
 from wisp.trust_flow import TrustDecision
 from wisp.tui.commands import parse_tui_slash_command
-from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
+from wisp.tui.textual_app import (
+    _MAX_PENDING_ECHOES,
+    TextualTui,
+    TextualTuiRenderer,
+    create_textual_tui,
+)
 from wisp.tui.widgets import (
     _ROLE_LABELS,
     JumpToLatest,
@@ -2435,6 +2440,91 @@ def test_textual_large_paste_echoes_compact_line_while_model_gets_full_text() ->
     assert not any("echo me\necho me" in line for line in transcript)
 
 
+def test_textual_duplicate_large_paste_submissions_each_echo_compactly() -> None:
+    # Regression (Codex P3): the compact-echo map is keyed by the expanded prompt
+    # text. Two identical large pastes submitted before either is echoed (e.g.
+    # duplicate queued follow-ups) must NOT collide — each keeps a compact echo,
+    # consumed in submission order, or the second echoes the whole blob.
+    async def scenario() -> tuple[str, str, str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            marker = "[Pasted content #1: 5,000 characters, 5.0 KB]"
+            full = "duplicate blob " * 400
+            # Two identical submissions register two echoes under the same key.
+            app_instance.post_message(input_widget.Submitted(full, marker))
+            app_instance.post_message(input_widget.Submitted(full, marker))
+            await pilot.pause()
+            # The shell echoes each in submission order via prompt_submitted(full).
+            first = app_instance.compact_echo_for(full)
+            second = app_instance.compact_echo_for(full)
+            # A third identical prompt with no fresh paste echoes verbatim.
+            third = app_instance.compact_echo_for(full)
+            return marker, first, second, third
+
+    marker, first, second, third = anyio.run(scenario)
+    assert first == marker  # first echo is compact
+    assert second == marker  # second (duplicate) is ALSO compact, not the blob
+    assert third == "duplicate blob " * 400  # exhausted → falls back to full text
+
+
+def test_textual_interrupt_clears_pending_paste_echoes() -> None:
+    # Regression (verification P2): an echo is registered on Enter but consumed
+    # only when the prompt is echoed. A prompt abandoned by interrupt/EOF (e.g. a
+    # queued follow-up dropped on Ctrl-C) must not leave an orphan that a later
+    # identical paste would pop by mistake (stale #N marker).
+    async def scenario() -> tuple[int, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            full = "orphan blob " * 400
+            stale_marker = "[Pasted content #1: 4,800 characters, 4.7 KB]"
+            # Register an echo, then abandon the submission via interrupt.
+            app_instance.post_message(input_widget.Submitted(full, stale_marker))
+            await pilot.pause()
+            app_instance.action_interrupt()
+            await pilot.pause()
+            pending_after_interrupt = len(app_instance._compact_echoes)
+            # A later identical paste registers its OWN echo and must echo that,
+            # not the stale orphaned one.
+            fresh_marker = "[Pasted content #2: 4,800 characters, 4.7 KB]"
+            app_instance.post_message(input_widget.Submitted(full, fresh_marker))
+            await pilot.pause()
+            echoed = app_instance.compact_echo_for(full)
+            return pending_after_interrupt, echoed
+
+    pending_after_interrupt, echoed = anyio.run(scenario)
+    assert pending_after_interrupt == 0  # interrupt cleared the orphan
+    assert echoed == "[Pasted content #2: 4,800 characters, 4.7 KB]"  # not stale #1
+
+
+def test_textual_pending_paste_echoes_are_bounded() -> None:
+    # Regression (verification P2): echoes for prompts that are never echoed
+    # (abandoned before consumption) must not accumulate without bound. Registering
+    # far more than the cap evicts the oldest so the map stays bounded, and the
+    # most-recent echoes are the ones that survive.
+    async def scenario() -> tuple[int, int, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            overflow = _MAX_PENDING_ECHOES + 10
+            for i in range(overflow):
+                full = f"blob-{i} " * 400  # distinct >2 KB prompt each
+                marker = f"[Pasted content #{i}: ...]"
+                app_instance.post_message(input_widget.Submitted(full, marker))
+            await pilot.pause()
+            total = sum(len(q) for q in app_instance._compact_echoes.values())
+            order_len = len(app_instance._echo_order)
+            # The oldest were evicted; the newest survives and still echoes compact.
+            newest = app_instance.compact_echo_for(f"blob-{overflow - 1} " * 400)
+            return total, order_len, newest
+
+    total, order_len, newest = anyio.run(scenario)
+    assert total <= _MAX_PENDING_ECHOES  # bounded, never grows past the cap
+    assert order_len <= _MAX_PENDING_ECHOES
+    assert newest == f"[Pasted content #{_MAX_PENDING_ECHOES + 9}: ...]"  # newest kept
+
+
 def test_textual_newline_keys_edit_without_submitting() -> None:
     async def scenario() -> tuple[str, bool, str]:
         app_instance = TextualTui()
@@ -3086,6 +3176,48 @@ def test_textual_ctrl_c_copies_when_editor_is_focused_with_selection() -> None:
     assert anyio.run(scenario) is False
 
 
+def test_textual_ctrl_c_copy_failure_does_not_fire_interrupt() -> None:
+    # Regression (verification P1): the copy-branch return must sit OUTSIDE the
+    # suppress block. If copy_to_clipboard raises (e.g. broken terminal OSC52
+    # write), an editor-owned ctrl+c copy gesture must NOT fall through to
+    # KeyboardInterrupt — that would interrupt the agent and wipe the draft line.
+    async def scenario() -> tuple[bool, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "keep this draft"
+            input_widget.selection = type(input_widget.selection)((0, 0), (0, 4))
+            input_widget.focus()
+            await pilot.pause()
+
+            def boom(_text: str) -> None:
+                raise RuntimeError("clipboard write failed")
+
+            app_instance.copy_to_clipboard = boom  # type: ignore[method-assign]
+
+            interrupted = False
+            async with anyio.create_task_group() as tg:
+
+                async def read() -> None:
+                    nonlocal interrupted
+                    try:
+                        await app_instance.read_prompt("wisp> ")
+                    except KeyboardInterrupt:
+                        interrupted = True
+
+                tg.start_soon(read)
+                await pilot.pause()
+                app_instance.action_interrupt()
+                await pilot.pause()
+                draft = input_widget.value
+                tg.cancel_scope.cancel()
+            return interrupted, draft
+
+    interrupted, draft = anyio.run(scenario)
+    assert interrupted is False  # a failed copy never becomes an interrupt
+    assert draft == "keep this draft"  # and never wipes the draft line
+
+
 def test_textual_transcript_autocopy_ignores_hidden_editor_selection() -> None:
     # Regression (Codex P3): dragging visible transcript/decision text must
     # auto-copy even when a stale draft selection lingers in a HIDDEN editor
@@ -3130,6 +3262,39 @@ def test_textual_transcript_autocopy_ignores_hidden_editor_selection() -> None:
     focused_copies, hidden_copies = anyio.run(scenario)
     assert focused_copies == []  # focused editor owns the selection
     assert hidden_copies == ["transcript text"]  # hidden editor doesn't block
+
+
+def test_textual_transcript_autocopy_skips_while_streaming() -> None:
+    # Regression (Codex P3): on_text_selected promised (in its own comment) not to
+    # auto-copy while the agent streams — the transcript mutates and Textual's
+    # selection bounds go stale — but never enforced it. A selection during a live
+    # response must NOT overwrite the clipboard; it may only copy once the stream
+    # has flushed.
+    async def scenario() -> tuple[list[str], list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            copied: list[str] = []
+            app_instance.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+            app_instance.screen.get_selected_text = lambda: "streamed line"  # type: ignore[method-assign]
+
+            # Start a stream: append_stream mounts the stream widget (is_streaming).
+            app_instance.append_stream("partial response ")
+            await pilot.pause()
+            assert app_instance._is_streaming()
+            app_instance.on_text_selected()
+            during_stream = list(copied)
+
+            # Flush the stream: the guard lifts and a later selection copies again.
+            app_instance.flush_stream()
+            await pilot.pause()
+            assert not app_instance._is_streaming()
+            app_instance.on_text_selected()
+            after_flush = list(copied)
+            return during_stream, after_flush
+
+    during_stream, after_flush = anyio.run(scenario)
+    assert during_stream == []  # streaming suppresses the stale-bounds auto-copy
+    assert after_flush == ["streamed line"]  # after flush, auto-copy resumes
 
 
 def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) -> None:
