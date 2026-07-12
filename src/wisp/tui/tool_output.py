@@ -131,13 +131,20 @@ def _tail_preview(output: str, *, max_lines: int, max_bytes: int) -> str:
 
     encoded = preview.encode("utf-8")
     if len(encoded) > max_bytes:
-        # Trim from the front of the byte window so the very tail survives, then
-        # drop any leading partial-line remnant up to the first newline so the
-        # preview starts at a clean line boundary. Without this, a trim landing on
-        # a separator leaves a spurious blank first line and skews the line count.
-        clipped = encoded[-max(1, max_bytes) :].decode("utf-8", errors="ignore")
+        # Trim from the front of the byte window so the very tail survives. If the
+        # window begins mid-line (the byte just before it is not a newline), drop
+        # the leading partial-line remnant up to the first newline so the preview
+        # starts at a clean boundary — otherwise a trim landing on a separator
+        # would leave a spurious blank first line and skew the line count. But when
+        # the window happens to begin right after a newline, that first line is
+        # complete and must be kept.
+        window = max(1, max_bytes)
+        starts_mid_line = encoded[-window - 1 : -window] != b"\n"
+        clipped = encoded[-window:].decode("utf-8", errors="ignore")
         newline = clipped.find("\n")
-        preview = clipped[newline + 1 :] if newline != -1 else clipped
+        if starts_mid_line and newline != -1:
+            clipped = clipped[newline + 1 :]
+        preview = clipped
 
     visible_bytes = len(preview.encode("utf-8"))
     hidden_bytes = max(0, total_bytes - visible_bytes)

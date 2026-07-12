@@ -84,6 +84,19 @@ def test_render_error_byte_trim_on_newline_boundary_has_no_blank_line() -> None:
     assert "1 earlier line" in rendered  # and counted as a hidden line
 
 
+def test_render_error_keeps_complete_line_when_window_starts_at_boundary() -> None:
+    # When the byte window happens to begin right after a newline, the first line
+    # in it is COMPLETE and must be kept — only a mid-line window's partial
+    # remnant should be dropped. Here only the short head line falls outside the
+    # window; the full middle line must survive.
+    middle = "a" * 1000
+    output = "head\n" + middle + "\n" + "b" * 999
+    rendered = render_error(output, exit_code=None)
+    assert middle in rendered  # the complete middle line is preserved
+    assert "head" not in rendered  # only the out-of-window head line is dropped
+    assert "1 earlier line" in rendered  # exactly one line hidden, not two
+
+
 def test_render_error_short_output_has_no_hidden_marker() -> None:
     rendered = render_error("only one line", exit_code=None)
     assert "earlier" not in rendered
