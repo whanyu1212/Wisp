@@ -2264,6 +2264,34 @@ def test_textual_multiline_paste_is_submitted_without_truncation() -> None:
     assert submitted == pasted
 
 
+def test_textual_large_paste_replaces_selection_and_expands_on_submit() -> None:
+    pasted = "replacement\n" * 250
+
+    async def scenario() -> tuple[str, str, int]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "keep replace me tail"
+            input_widget.selection = type(input_widget.selection)((0, 5), (0, 15))
+            input_widget.focus()
+            app_instance.post_message(events.Paste(pasted))
+            await pilot.pause()
+            editor_text = input_widget.value
+            cursor_position = input_widget.cursor_position
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                submitted = await app_instance._prompt_receive.receive()
+            assert isinstance(submitted, str)
+            return editor_text, submitted, cursor_position
+
+    editor_text, submitted, cursor_position = anyio.run(scenario)
+    assert editor_text.startswith("keep [Pasted content #1:")
+    assert editor_text.endswith(" tail")
+    assert "replace me" not in editor_text
+    assert submitted == f"keep {pasted} tail"
+    assert cursor_position == len(editor_text) - len(" tail")
+
+
 def test_textual_newline_keys_edit_without_submitting() -> None:
     async def scenario() -> tuple[str, bool, str]:
         app_instance = TextualTui()

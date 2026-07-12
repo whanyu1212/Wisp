@@ -114,7 +114,9 @@ class PromptEditor(TextArea):
         self._paste_placeholder_counter += 1
         placeholder = self._large_paste_placeholder(content, self._paste_placeholder_counter)
         self._pending_pastes.append((placeholder, content))
-        self.insert(placeholder)
+        if result := self._replace_via_keyboard(placeholder, *self.selection):
+            self.move_cursor(result.end_location)
+            self.focus()
 
     def _large_paste_placeholder(self, content: str, paste_number: int) -> str:
         """Build the display text for a large paste."""
