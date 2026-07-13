@@ -351,22 +351,44 @@ def _parse_edit_hunks(arguments: Mapping[str, object]) -> list[tuple[str, str]]:
     return hunks
 
 
+def _line_boundary_count(text: str) -> int:
+    """Line-boundary count consistent with the ``splitlines`` used to diff.
+
+    The guard must count boundaries the *same way* ``_single_hunk_lines`` later
+    splits, or an input it splits into many lines but this undercounts would slip
+    past the guard and still start the matcher. ``_single_hunk_lines`` uses
+    ``str.splitlines``, which breaks on lone ``\\r`` (classic-Mac) and ``\\r\\n``
+    as well as ``\\n`` — so counting only ``\\n`` misses CR-delimited input, a
+    terminator this renderer explicitly supports. Count LF and lone CR, treating
+    ``\\r\\n`` as one boundary, all with allocation-free ``str.count`` (cheaper
+    than ``splitlines``, which materializes the line list we are trying to avoid).
+
+    This covers every terminator the renderer distinguishes (LF/CRLF/CR). The
+    exotic separators ``splitlines`` also honors (``\\v``, ``\\f``, U+2028, …) are
+    not counted; catching them would need ``splitlines`` itself, and they are not
+    terminators this renderer annotates. Their only effect is a slightly looser
+    bound in a vanishingly rare case, never a tighter one on real input.
+    """
+
+    return text.count("\n") + text.count("\r") - text.count("\r\n")
+
+
 def _edit_input_too_large(hunks: Sequence[tuple[str, str]]) -> bool:
     """Whether these hunks are too large to diff on the event loop.
 
     difflib's matcher is O(n*m) in *line count* and pays its full cost the moment
     its generator is first advanced, so the decision to diff has to be made before
-    calling it. We gate on newline count — a cheap ``str.count`` scan (O(len), no
-    allocation, unlike ``splitlines``) and a tight proxy for difflib's sequence
-    length. A single hunk over :data:`_DIFF_MAX_HUNK_LINES` per side, or a total
-    across hunks over :data:`_DIFF_MAX_TOTAL_LINES`, is refused. Both checks
-    short-circuit, so one giant hunk is rejected after its first scan.
+    calling it. We gate on a line-boundary count (:func:`_line_boundary_count`, a
+    cheap allocation-free proxy for difflib's sequence length). A single hunk over
+    :data:`_DIFF_MAX_HUNK_LINES` per side, or a total across hunks over
+    :data:`_DIFF_MAX_TOTAL_LINES`, is refused. Both checks short-circuit, so one
+    giant hunk is rejected after its first scan.
     """
 
     total = 0
     for old, new in hunks:
-        old_lines = old.count("\n")
-        new_lines = new.count("\n")
+        old_lines = _line_boundary_count(old)
+        new_lines = _line_boundary_count(new)
         if old_lines > _DIFF_MAX_HUNK_LINES or new_lines > _DIFF_MAX_HUNK_LINES:
             return True
         total += old_lines + new_lines

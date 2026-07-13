@@ -344,14 +344,16 @@ def test_clip_line_to_bytes_returns_line_unchanged_when_it_fits() -> None:
 # show 8.
 
 
-def _text_with_newlines(count: int, token: str) -> str:
-    """A string containing exactly ``count`` newline characters.
+def _text_with_newlines(count: int, token: str, *, sep: str = "\n") -> str:
+    """A string containing exactly ``count`` line boundaries of ``sep``.
 
-    The guard counts ``\\n`` (not lines), so tests express thresholds in newlines
-    directly: N joined lines carry N-1 newlines, an off-by-one trap this avoids.
+    The guard counts line boundaries (not lines), so tests express thresholds in
+    boundaries directly: N joined lines carry N-1 boundaries, an off-by-one trap
+    this avoids. ``sep`` defaults to LF; pass ``"\\r"`` or ``"\\r\\n"`` to exercise
+    the other terminators the renderer supports.
     """
 
-    return "\n".join(f"{token}{i}" for i in range(count + 1))
+    return sep.join(f"{token}{i}" for i in range(count + 1))
 
 
 def _oversize_edit(newlines: int = 60_000) -> dict[str, object]:
@@ -463,6 +465,55 @@ def test_oversize_noop_edit_returns_none_without_diffing(monkeypatch) -> None:
 
     same = _text_with_newlines(_DIFF_MAX_HUNK_LINES + 100, "line-")
     assert render_edit_diff(_edit((same, same))) is None
+
+
+def test_guard_bounds_oversize_non_lf_terminators(monkeypatch) -> None:
+    # The guard must count boundaries the way the diff splits them. A large
+    # lone-CR (classic-Mac) or CRLF edit splits into thousands of lines via
+    # splitlines, so counting only "\n" would let it start the matcher. Both
+    # supported non-LF terminators must be bounded, not just LF.
+    import wisp.tui.tool_output as mod
+
+    def forbidden(*_a, **_k):
+        raise AssertionError("difflib must not run for oversize non-LF input")
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", forbidden)
+
+    for sep in ("\r", "\r\n"):
+        old = _text_with_newlines(_DIFF_MAX_HUNK_LINES + 1, "o", sep=sep)
+        new = _text_with_newlines(_DIFF_MAX_HUNK_LINES + 1, "n", sep=sep)
+        assert render_edit_diff(_edit((old, new))) is None, f"sep={sep!r} not bounded"
+
+
+def test_guard_aggregate_boundary_is_strict(monkeypatch) -> None:
+    # The aggregate ceiling uses a strict ">": a total of exactly
+    # _DIFF_MAX_TOTAL_LINES still diffs, one boundary more falls back. This pins
+    # the boundary directly rather than jumping from 8000 to 16000.
+    import wisp.tui.tool_output as mod
+
+    calls: list[tuple] = []
+    real = mod.difflib.unified_diff
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", spy)
+
+    # Two hunks, each side well under the per-hunk ceiling, summing to exactly the
+    # total ceiling: old+new boundaries across both hunks == _DIFF_MAX_TOTAL_LINES.
+    quarter = _DIFF_MAX_TOTAL_LINES // 4
+    old = _text_with_newlines(quarter, "a")
+    new = _text_with_newlines(quarter, "b")
+    at_ceiling = _edit((old, new), (old, new))
+    assert render_edit_diff(at_ceiling) is not None  # exactly at ceiling → diffs
+    assert len(calls) == 2  # difflib ran per hunk
+
+    # One boundary over the ceiling → fall back, no diffing.
+    calls.clear()
+    over = _edit((_text_with_newlines(quarter + 1, "a"), new), (old, new))
+    assert render_edit_diff(over) is None
+    assert calls == []
 
 
 def test_render_tool_result_oversize_edit_falls_back_to_generic() -> None:
