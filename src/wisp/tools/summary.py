@@ -25,8 +25,16 @@ _SUMMARY_MAX_CHARS = 200
 _PATH_MAX_CHARS = 80
 
 
-def summarize_tool_result(name: str, data: Mapping[str, object]) -> str | None:
+def summarize_tool_result(
+    name: str, data: Mapping[str, object], *, truncated: bool = False
+) -> str | None:
     """Return a one-line summary for a successful read-type tool, or ``None``.
+
+    ``truncated`` is the tool's own ``ToolResult.truncated`` flag — the authoritative
+    signal that the result was capped (by ``max_results`` or the output budget). It
+    is threaded here rather than read from ``data`` so the summary carries the same
+    "there's more" cue the raw output's ``[truncated]`` marker did; without it, a
+    capped ``grep: 100 matches`` would silently drop that the shown results were cut.
 
     ``None`` for any tool without a summary (diff/shell tools, unknown tools) or
     when the tool's ``data`` lacks the facts a summary needs — the caller then falls
@@ -37,13 +45,13 @@ def summarize_tool_result(name: str, data: Mapping[str, object]) -> str | None:
     builder = _BUILDERS.get(name)
     if builder is None:
         return None
-    summary = builder(data)
+    summary = builder(data, truncated)
     if summary is None:
         return None
     return _clip(summary, _SUMMARY_MAX_CHARS)
 
 
-def _summarize_read(data: Mapping[str, object]) -> str | None:
+def _summarize_read(data: Mapping[str, object], truncated: bool) -> str | None:
     line_count = data.get("line_count")
     if not isinstance(line_count, int):
         return None
@@ -59,7 +67,6 @@ def _summarize_read(data: Mapping[str, object]) -> str | None:
     # read even for a two-line page of a huge file — the summary replaces the raw
     # output, so that would actively mislead.
     selected = data.get("selected_count")
-    truncated = data.get("truncated") is True
 
     if truncated:
         # The budget clipped the output, so no line count is exactly honest; say the
@@ -74,25 +81,25 @@ def _summarize_read(data: Mapping[str, object]) -> str | None:
     return f"read {_count(returned, 'line', 'lines')}{suffix}"
 
 
-def _summarize_grep(data: Mapping[str, object]) -> str | None:
+def _summarize_grep(data: Mapping[str, object], truncated: bool) -> str | None:
     count = data.get("count")
     if not isinstance(count, int):
         return None
     if count == 0:
         return "grep: no matches"
-    return f"grep: {_count(count, 'match', 'matches')}"
+    return f"grep: {_count(count, 'match', 'matches')}{_more(truncated)}"
 
 
-def _summarize_find(data: Mapping[str, object]) -> str | None:
+def _summarize_find(data: Mapping[str, object], truncated: bool) -> str | None:
     count = data.get("count")
     if not isinstance(count, int):
         return None
     if count == 0:
         return "find: no files"
-    return f"find: {_count(count, 'file', 'files')}"
+    return f"find: {_count(count, 'file', 'files')}{_more(truncated)}"
 
 
-def _summarize_ls(data: Mapping[str, object]) -> str | None:
+def _summarize_ls(data: Mapping[str, object], truncated: bool) -> str | None:
     entries = data.get("entries")
     if not isinstance(entries, list):
         return None
@@ -100,8 +107,11 @@ def _summarize_ls(data: Mapping[str, object]) -> str | None:
     path = _path(data)
     if count == 0:
         return f"ls: empty ({path})" if path else "ls: empty"
+    # ``entries`` is the kept (possibly capped) list, so a truncated ls means "at
+    # least this many" — the "+ more" marker says the count is a floor, not the total.
     entry_count = _count(count, "entry", "entries")
-    return f"ls: {entry_count} in {path}" if path else f"ls: {entry_count}"
+    body = f"{entry_count} in {path}" if path else entry_count
+    return f"ls: {body}{_more(truncated)}"
 
 
 _BUILDERS = {
@@ -116,6 +126,13 @@ def _count(n: int, singular: str, plural: str) -> str:
     """``"1 line"`` / ``"3 lines"`` — count with a correctly pluralized noun."""
 
     return f"{n} {singular if n == 1 else plural}"
+
+
+def _more(truncated: bool) -> str:
+    """`` (+ more)`` when the result was capped, else empty — the truncation cue the
+    raw output's ``[truncated]`` marker carried, which the summary replaces."""
+
+    return " (+ more)" if truncated else ""
 
 
 def _path(data: Mapping[str, object]) -> str | None:

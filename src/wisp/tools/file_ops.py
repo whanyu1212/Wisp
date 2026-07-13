@@ -66,11 +66,11 @@ class ReadTool:
                 # ``line_count`` is the whole file; ``selected_count`` is the lines the
                 # offset/limit slice returned. The summary needs the latter so it
                 # doesn't claim the whole file was read when only a slice was.
+                # (Truncation reaches the summary via ToolResult.truncated below.)
                 "line_count": line_count,
                 "selected_count": selected_count,
                 "offset": offset,
                 "limit": limit,
-                "truncated": truncated.truncated,
             },
             truncated=truncated.truncated,
         )

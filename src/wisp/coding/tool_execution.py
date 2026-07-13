@@ -141,7 +141,7 @@ class ConfiguredToolExecutor:
                 exit_code=_promote_exit_code(tool.name, result.data),
                 before_text=_promote_before_text(tool.name, result.data),
                 created=_promote_created(tool.name, result.data),
-                summary=summarize_tool_result(tool.name, result.data),
+                summary=summarize_tool_result(tool.name, result.data, truncated=result.truncated),
             )
         except Exception as exc:  # noqa: BLE001 - tool failures are model-visible results
             return _ToolRunOutcome(str(exc), is_error=True)

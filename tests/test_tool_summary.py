@@ -18,12 +18,13 @@ from wisp.tools.summary import (
 
 
 def _read_data(
-    *, line_count: int, selected_count: int, truncated: bool = False, path: str | None = "foo.py"
+    *, line_count: int, selected_count: int, path: str | None = "foo.py"
 ) -> dict[str, object]:
+    # Truncation is NOT part of data — read gets it via the summarize() parameter
+    # (sourced from ToolResult.truncated), so tests pass truncated= separately.
     data: dict[str, object] = {
         "line_count": line_count,
         "selected_count": selected_count,
-        "truncated": truncated,
     }
     if path is not None:
         data["path"] = path
@@ -68,7 +69,9 @@ def test_read_summary_truncated_does_not_overstate_count() -> None:
     # slice size, so no exact count is honest: report truncation + file total.
     assert (
         summarize_tool_result(
-            "read", _read_data(line_count=500, selected_count=500, truncated=True, path="big.txt")
+            "read",
+            _read_data(line_count=500, selected_count=500, path="big.txt"),
+            truncated=True,
         )
         == "read (truncated) from big.txt — 500 lines total"
     )
@@ -104,6 +107,16 @@ def test_grep_summary_zero_matches() -> None:
     assert summarize_tool_result("grep", {"count": 0, "matches": []}) == "grep: no matches"
 
 
+def test_grep_summary_marks_truncated_results() -> None:
+    # A capped grep (count itself limited by max_results, or output-budget clipped)
+    # must carry a "there's more" cue — the summary replaces the raw [truncated]
+    # marker, so dropping it would hide that results were omitted.
+    assert (
+        summarize_tool_result("grep", {"count": 100, "matches": []}, truncated=True)
+        == "grep: 100 matches (+ more)"
+    )
+
+
 def test_grep_summary_none_when_count_missing() -> None:
     assert summarize_tool_result("grep", {"matches": []}) is None
 
@@ -118,6 +131,13 @@ def test_find_summary_counts_files() -> None:
 def test_find_summary_singular_and_zero() -> None:
     assert summarize_tool_result("find", {"count": 1, "files": ["x"]}) == "find: 1 file"
     assert summarize_tool_result("find", {"count": 0, "files": []}) == "find: no files"
+
+
+def test_find_summary_marks_truncated_results() -> None:
+    assert (
+        summarize_tool_result("find", {"count": 50, "files": []}, truncated=True)
+        == "find: 50 files (+ more)"
+    )
 
 
 # --- ls ----------------------------------------------------------------------
@@ -136,6 +156,14 @@ def test_ls_summary_singular_entry() -> None:
 
 def test_ls_summary_empty_directory() -> None:
     assert summarize_tool_result("ls", {"path": "src/", "entries": []}) == "ls: empty (src/)"
+
+
+def test_ls_summary_marks_truncated_as_a_floor() -> None:
+    # A truncated ls reports the kept entries as a floor, not the true total.
+    assert (
+        summarize_tool_result("ls", {"path": "big/", "entries": ["a", "b"]}, truncated=True)
+        == "ls: 2 entries in big/ (+ more)"
+    )
 
 
 def test_ls_summary_none_when_entries_not_a_list() -> None:
