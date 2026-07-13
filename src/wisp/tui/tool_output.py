@@ -77,6 +77,27 @@ _DIFF_MAX_HUNK_LINES = 4000
 # cap the total lines diffed across all hunks of one edit call as a backstop.
 _DIFF_MAX_TOTAL_LINES = 8000
 
+# The single-character boundaries ``str.splitlines`` breaks on. The work guard
+# below must count boundaries the SAME way the diff later splits them, or an input
+# that splits into many lines slips past an undercounting guard and still starts
+# the matcher. This is every separator CPython's ``splitlines`` recognizes except
+# ``\r\n`` (handled separately as a two-char sequence): LF, CR, vertical tab, form
+# feed, the file/group/record/unit separators, NEL, and the Unicode line/para
+# separators. Counting each with ``str.count`` stays allocation-free — we never
+# build the line list ``splitlines`` would.
+_SPLITLINES_SEPARATORS = (
+    "\n",  # line feed
+    "\r",  # carriage return (lone; \r\n corrected below)
+    "\v",  # vertical tab
+    "\f",  # form feed
+    "\x1c",  # file separator
+    "\x1d",  # group separator
+    "\x1e",  # record separator
+    "\x85",  # next line (NEL)
+    "\u2028",  # line separator
+    "\u2029",  # paragraph separator
+)
+
 # Errors surface at the tail, so the error preview keeps the last few lines
 # (a traceback's final frames, a stderr tail) rather than the first. Bounds
 # track the generic preview so a failure card is never larger than a success
@@ -355,22 +376,23 @@ def _line_boundary_count(text: str) -> int:
     """Line-boundary count consistent with the ``splitlines`` used to diff.
 
     The guard must count boundaries the *same way* ``_single_hunk_lines`` later
-    splits, or an input it splits into many lines but this undercounts would slip
-    past the guard and still start the matcher. ``_single_hunk_lines`` uses
-    ``str.splitlines``, which breaks on lone ``\\r`` (classic-Mac) and ``\\r\\n``
-    as well as ``\\n`` — so counting only ``\\n`` misses CR-delimited input, a
-    terminator this renderer explicitly supports. Count LF and lone CR, treating
-    ``\\r\\n`` as one boundary, all with allocation-free ``str.count`` (cheaper
-    than ``splitlines``, which materializes the line list we are trying to avoid).
+    splits, or an input that splits into many lines slips past an undercounting
+    guard and still starts the matcher. ``_single_hunk_lines`` splits with
+    ``str.splitlines``, which breaks on eight single characters (LF, CR, VT, FF,
+    the file/group/record/unit separators, NEL, and the Unicode line/paragraph
+    separators) plus the two-char ``\\r\\n``. A guard that counted only ``\\n``
+    would let a large VT- or U+2028-delimited edit through — the same event-loop
+    stall the guard exists to prevent — so we count *every* separator.
 
-    This covers every terminator the renderer distinguishes (LF/CRLF/CR). The
-    exotic separators ``splitlines`` also honors (``\\v``, ``\\f``, U+2028, …) are
-    not counted; catching them would need ``splitlines`` itself, and they are not
-    terminators this renderer annotates. Their only effect is a slightly looser
-    bound in a vanishingly rare case, never a tighter one on real input.
+    Each separator is counted with allocation-free ``str.count`` (a C scan; ten
+    of them still beat a Python per-character loop, and we never build the line
+    list ``splitlines`` would). ``\\r\\n`` is subtracted once because the standalone
+    ``\\r`` and ``\\n`` counts each already counted it, and ``splitlines`` treats it
+    as a single boundary.
     """
 
-    return text.count("\n") + text.count("\r") - text.count("\r\n")
+    total = sum(text.count(sep) for sep in _SPLITLINES_SEPARATORS)
+    return total - text.count("\r\n")
 
 
 def _edit_input_too_large(hunks: Sequence[tuple[str, str]]) -> bool:

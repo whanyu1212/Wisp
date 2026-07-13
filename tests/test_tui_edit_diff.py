@@ -468,21 +468,54 @@ def test_oversize_noop_edit_returns_none_without_diffing(monkeypatch) -> None:
 
 
 def test_guard_bounds_oversize_non_lf_terminators(monkeypatch) -> None:
-    # The guard must count boundaries the way the diff splits them. A large
-    # lone-CR (classic-Mac) or CRLF edit splits into thousands of lines via
-    # splitlines, so counting only "\n" would let it start the matcher. Both
-    # supported non-LF terminators must be bounded, not just LF.
+    # The guard must count boundaries the way the diff splits them. splitlines
+    # breaks on every separator below — not just "\n" — so a large edit delimited
+    # by any of them splits into thousands of lines. Counting only "\n" would let
+    # a VT-, U+2028- or lone-CR-delimited whole-file rewrite start the matcher on
+    # the event loop. Every splitlines separator must be bounded.
     import wisp.tui.tool_output as mod
 
     def forbidden(*_a, **_k):
-        raise AssertionError("difflib must not run for oversize non-LF input")
+        raise AssertionError("difflib must not run for oversize input")
 
     monkeypatch.setattr(mod.difflib, "unified_diff", forbidden)
 
-    for sep in ("\r", "\r\n"):
+    # Lone CR, CRLF, VT, FF, the C0 separators, NEL, and the Unicode line/para
+    # separators — the full set str.splitlines honors.
+    separators = ("\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+    for sep in separators:
         old = _text_with_newlines(_DIFF_MAX_HUNK_LINES + 1, "o", sep=sep)
         new = _text_with_newlines(_DIFF_MAX_HUNK_LINES + 1, "n", sep=sep)
         assert render_edit_diff(_edit((old, new))) is None, f"sep={sep!r} not bounded"
+
+
+def test_line_boundary_count_matches_splitlines() -> None:
+    # The guard's boundary count must equal what splitlines produces, or the two
+    # disagree about how large an input is. Assert exact agreement across every
+    # separator and a mixed string, so a future separator drift is caught.
+    from wisp.tui.tool_output import _line_boundary_count
+
+    separators = (
+        "\n",
+        "\r",
+        "\r\n",
+        "\v",
+        "\f",
+        "\x1c",
+        "\x1d",
+        "\x1e",
+        "\x85",
+        "\u2028",
+        "\u2029",
+    )
+    for sep in separators:
+        text = f"a{sep}b{sep}c"
+        assert _line_boundary_count(text) == len(text.splitlines()) - 1, f"sep={sep!r}"
+
+    mixed = (
+        "\v".join(f"a{i}" for i in range(50)) + "\u2028" + "\x85".join(f"b{i}" for i in range(50))
+    )
+    assert _line_boundary_count(mixed) == len(mixed.splitlines()) - 1
 
 
 def test_guard_aggregate_boundary_is_strict(monkeypatch) -> None:
