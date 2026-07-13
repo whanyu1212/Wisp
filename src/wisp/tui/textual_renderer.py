@@ -330,6 +330,8 @@ class TextualTuiRenderer:
                     event.output,
                     is_error=event.is_error,
                     exit_code=event.exit_code,
+                    before_text=event.before_text,
+                    created=event.created,
                 ),
                 elapsed=self._tool_elapsed(event.call_id, event.timestamp),
             )

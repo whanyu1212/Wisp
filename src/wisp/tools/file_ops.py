@@ -11,6 +11,13 @@ from wisp.tools.context import ToolContext
 from wisp.tools.paths import display_tool_path, resolve_tool_path
 from wisp.tools.result import ToolError, ToolResult
 
+# A write can overwrite an arbitrarily large file. The before-snapshot rides the RPC
+# wire to the TUI as an event field, so cap it at the tool layer: past this size a
+# diff isn't worth rendering (it exceeds the renderer's own work guard anyway), so we
+# drop the snapshot and let the write fall back to its plain summary. Matched to the
+# renderer's per-hunk character ceiling so the two bounds agree.
+_WRITE_SNAPSHOT_MAX_CHARS = 1_000_000
+
 
 class ReadTool:
     """Read text files with optional line slicing."""
@@ -83,13 +90,34 @@ class WriteTool:
         path = resolve_tool_path(_required_string(arguments, "path"), context)
         content = _required_string(arguments, "content", allow_empty=True)
 
+        # Distinguish a create from an overwrite *before* the write, so the renderer
+        # can tell "brand-new file" (show its content as a pure-addition diff) from
+        # "overwrote an existing file whose prior text we couldn't capture" (fall back
+        # to the plain summary — never imply a create by rendering pure additions).
+        created = not path.exists()
+        # Snapshot the prior contents *before* the write clobbers them, so the TUI can
+        # render a before/after diff. This is the only moment the "before" exists: the
+        # open("w") below destroys it and the tool args carry only the new content. The
+        # snapshot is None for a create AND for an unreadable/non-UTF-8/oversize prior
+        # file; ``created`` is what separates those, since only a real create should
+        # still render (as additions). Bounding here (not renderer-side) keeps the
+        # snapshot off the RPC wire when it would be too large to diff anyway.
+        before_text = _snapshot_before_write(path)
+
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8", newline="") as file:
             file.write(content)
         byte_count = len(content.encode("utf-8"))
+        data: dict[str, object] = {
+            "path": display_tool_path(path, context),
+            "bytes": byte_count,
+            "created": created,
+        }
+        if before_text is not None:
+            data["before_text"] = before_text
         return ToolResult(
             text=f"Wrote {byte_count} bytes to {display_tool_path(path, context)}",
-            data={"path": display_tool_path(path, context), "bytes": byte_count},
+            data=data,
         )
 
 
@@ -161,6 +189,29 @@ class EditTool:
             text=f"Applied {len(edits)} edit(s) to {display_tool_path(path, context)}",
             data={"path": display_tool_path(path, context), "edits": len(edits)},
         )
+
+
+def _snapshot_before_write(path: Path) -> str | None:
+    """Return the file's current text for a before/after write diff, or None.
+
+    None means "no usable snapshot" — the file doesn't exist (a create, which the
+    renderer shows as a pure addition), isn't valid UTF-8 (binary — a diff would be
+    garbage), is too large to diff (``_WRITE_SNAPSHOT_MAX_CHARS``), or can't be read.
+    Reads with ``newline=""`` so line terminators are preserved exactly, matching the
+    write path — the diff must reflect real CRLF/LF changes, not translated ones.
+    Never raises: a snapshot failure must not fail the write itself.
+    """
+
+    try:
+        if not path.is_file():
+            return None
+        with path.open("r", encoding="utf-8", newline="") as file:
+            before = file.read(_WRITE_SNAPSHOT_MAX_CHARS + 1)
+    except (OSError, UnicodeDecodeError):
+        return None
+    if len(before) > _WRITE_SNAPSHOT_MAX_CHARS:
+        return None
+    return before
 
 
 def _read_line_slice(

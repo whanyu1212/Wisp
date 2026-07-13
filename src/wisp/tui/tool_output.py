@@ -24,10 +24,10 @@ Return types and the untrusted-content rule:
 * The error/generic renderers return a bounded plain ``str``. The widget renders
   it as literal, un-styled text (``Content.styled(..., "dim")``), so it is never
   parsed as markup — bracket characters in tool output stay literal.
-* The edit-diff renderer returns a Textual ``Content`` it built itself, adding
-  every line of file content with ``Content.styled`` (literal text, out-of-band
-  theme style). File content is likewise never parsed as markup, so a diff line
-  containing ``[red]`` or ``[/]`` cannot inject or break a color span.
+* The diff renderers (edit and write) return a Textual ``Content`` they built
+  themselves, adding every line of file content with ``Content.styled`` (literal
+  text, out-of-band theme style). File content is likewise never parsed as markup,
+  so a diff line containing ``[red]`` or ``[/]`` cannot inject or break a color span.
 
 Either way, untrusted content is bounded and reaches the screen as literal text
 with styles applied out-of-band — not through a markup parser.
@@ -146,26 +146,36 @@ def render_tool_result(
     *,
     is_error: bool,
     exit_code: int | None,
+    before_text: str | None = None,
+    created: bool = False,
 ) -> str | Content:
     """Render terminal tool output into bounded card detail.
 
     ``name`` selects the renderer; ``arguments`` supplies structured context for
     recognized built-ins. ``exit_code`` is the promoted shell exit status, or None
-    for tools without exit-code semantics.
+    for tools without exit-code semantics. ``before_text`` is the promoted pre-write
+    file snapshot for the write tool, or None; ``created`` says whether that write
+    made a new file, which disambiguates a None snapshot (create vs. uncapturable
+    overwrite).
 
     Returns a plain ``str`` for the error/generic paths (the widget escapes it as
-    untrusted markup) or a Textual ``Content`` for the colored edit diff (already
-    styled with literal, unparsed text — the widget renders it directly). Unknown
-    tools and successful results fall back to :func:`render_generic`.
+    untrusted markup) or a Textual ``Content`` for a colored diff (already styled
+    with literal, unparsed text — the widget renders it directly). Unknown tools and
+    successful results fall back to :func:`render_generic`.
     """
 
     if tool_result_failed(is_error, exit_code):
         return render_error(output, exit_code=exit_code)
     # A successful edit carries its before/after text in the tool-call arguments
-    # (oldText/newText per hunk); render it as a colored unified diff. Anything
-    # unrecognized or malformed falls through to the generic preview.
+    # (oldText/newText per hunk); a write carries the "after" in its arguments and
+    # the "before" in the promoted snapshot. Render either as a colored unified
+    # diff. Anything unrecognized or malformed falls through to the generic preview.
     if name == "edit":
         diff = render_edit_diff(arguments)
+        if diff is not None:
+            return diff
+    elif name == "write":
+        diff = render_write_diff(before_text, arguments, created=created)
         if diff is not None:
             return diff
     return render_generic(output)
@@ -367,10 +377,69 @@ def render_edit_diff(arguments: Mapping[str, object]) -> Content | None:
         # the generic "Applied N edit(s)" summary.
         return None
 
+    path = arguments.get("path")
+    return _render_diff_content(changed, multi=multi, path=path)
+
+
+def render_write_diff(
+    before: str | None,
+    arguments: Mapping[str, object],
+    *,
+    created: bool = False,
+) -> Content | None:
+    """Render a ``write`` tool call's before/after text as a colored unified diff.
+
+    ``before`` is the file's prior contents, captured by the tool before it
+    overwrote them and carried on the result event. It is ``None`` in two very
+    different cases that ``created`` disambiguates: a brand-new file (``created``
+    True), rendered as a pure addition of the new content; or an overwrite whose
+    prior text couldn't be captured — binary, oversize, or unreadable (``created``
+    False), which must NOT masquerade as a create, so it returns ``None`` and the
+    caller shows the plain "Wrote N bytes" summary. ``arguments`` supplies the new
+    ``content`` (and ``path``). Also returns ``None`` on malformed arguments or a
+    no-op write.
+
+    Same safety property as :func:`render_edit_diff`: content is styled out-of-band
+    via :meth:`Content.styled`, never parsed as markup.
+    """
+
+    after = arguments.get("content")
+    if not isinstance(after, str):
+        return None
+    if before is None and not created:
+        # Overwrote an existing file but couldn't snapshot its prior text (binary,
+        # oversize, or unreadable). Rendering additions here would falsely imply the
+        # file was created; fall back to the generic summary instead.
+        return None
+    old = str.__str__(before) if isinstance(before, str) else ""
+    new = str.__str__(after)
+    if old == new:
+        # Content unchanged (e.g. rewriting a file with identical bytes): nothing to
+        # diff. Fall back to the generic summary.
+        return None
+
+    path = arguments.get("path")
+    return _render_diff_content([(1, old, new)], multi=False, path=path)
+
+
+def _render_diff_content(
+    changed: Sequence[tuple[int, str, str]],
+    *,
+    multi: bool,
+    path: object,
+) -> Content | None:
+    """Bound, build, and header a colored unified diff from changed hunks.
+
+    Shared tail of :func:`render_edit_diff` and :func:`render_write_diff`: the two
+    differ only in how they derive the ``(label, old, new)`` hunks, so the work
+    guard, the diff build, and the path header live here as a single source of
+    truth. Returns ``None`` when the input is too large to diff or diffs to nothing.
+    """
+
     # Bound the *work* before starting it: difflib's matcher cost is paid on first
     # consumption and cannot be recovered by trimming its output, so a whole-file
-    # replacement must never reach it. Above the line ceiling, return None and let
-    # the caller show the generic "Applied N edit(s)" summary instead of a diff.
+    # replacement must never reach it. Above the ceilings, return None and let the
+    # caller show the generic summary instead of a diff.
     if _edit_input_too_large([(old, new) for _, old, new in changed]):
         return None
 
@@ -382,11 +451,10 @@ def render_edit_diff(arguments: Mapping[str, object]) -> Content | None:
 
     diff = _content_from_diff_lines(diff_lines)
 
-    # Lead with the edited path so a resolved card names its file — the diff
-    # replaces the argument summary, which otherwise carried the path. It's
-    # metadata, not a diff line, so style it explicitly rather than routing it
-    # through the marker-prefix styler (a bare path has no diff prefix).
-    path = arguments.get("path")
+    # Lead with the file path so a resolved card names its file — the diff replaces
+    # the argument summary, which otherwise carried the path. It's metadata, not a
+    # diff line, so style it explicitly rather than routing it through the
+    # marker-prefix styler (a bare path has no diff prefix).
     if isinstance(path, str) and path:
         return Content.styled(path, _DIFF_META_STYLE) + Content("\n") + diff
     return diff

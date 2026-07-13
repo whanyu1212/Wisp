@@ -161,6 +161,14 @@ class ToolExecutionEnded(WispEvent):
     # ToolResult. See ToolResultReady.exit_code for why this is a narrow scalar
     # rather than the whole data mapping.
     exit_code: int | None = None
+    # Pre-write file snapshot for the diff renderer, promoted from ToolResult.data
+    # for write-like tools only. None for every other tool and for error paths.
+    # See ToolResultReady.before_text for the wire/bounding rationale.
+    before_text: str | None = None
+    # Whether a write created a new file. Disambiguates before_text=None: a create
+    # renders as pure additions, an overwrite with no usable snapshot falls back to
+    # the summary. False for every non-write tool. See ToolResultReady.created.
+    created: bool = False
 
 
 class ToolResultReady(WispEvent):
@@ -180,6 +188,21 @@ class ToolResultReady(WispEvent):
     # raw events) — so no schema bump is needed. Set only for tools with genuine
     # exit-code semantics, so a card is never spuriously reddened.
     exit_code: int | None = None
+    # The file's contents *before* a write overwrote them, so the renderer can show
+    # a before/after diff instead of the flat "Wrote N bytes" summary. Like
+    # exit_code, this is a bounded, JSON-safe scalar that must survive the RPC wire:
+    # the write tool captures the prior text before clobbering the file, caps it
+    # (dropping the snapshot entirely rather than shipping an unbounded or partial
+    # file), and the executor promotes it here for the write tool only. None means
+    # no snapshot — a newly created file, a binary/oversize/unreadable prior file,
+    # or any non-write tool. The renderer uses ``created`` to tell those apart.
+    before_text: str | None = None
+    # Whether a write created a new file (vs. overwrote one). With before_text=None
+    # this is the only thing separating a create — rendered as a pure-addition diff
+    # of the new content — from an overwrite whose prior text couldn't be captured,
+    # which must fall back to the plain summary rather than masquerade as a create.
+    # A bounded JSON-safe scalar like before_text; False for every non-write tool.
+    created: bool = False
 
 
 class TurnCompleted(WispEvent):
