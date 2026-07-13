@@ -979,18 +979,22 @@ class ToolCard(Static):
             # Expanded: show the full (tool-bounded) output in place of the collapsed
             # detail, so the reader sees what the preview/summary/diff stood in for.
             content += Content("\n") + self._indent_str(self._full_output)
-            if self._truncated:
-                # The tool capped its own output before it ever reached here, so even
-                # this expanded view isn't the whole story — say so honestly.
-                content += Content("\n") + Content.styled(
-                    "  ⋯ output truncated at the tool's limit", "dim"
-                )
         elif isinstance(self._detail, Content):
             # A pre-styled renderable (e.g. a colored diff): compose its already
             # theme-styled, literal text directly, indented under the status row.
             content += Content("\n") + _indent_content(self._detail)
         elif self._detail:
             content += Content("\n") + self._indent_str(self._detail)
+
+        if self._truncated:
+            # The tool capped its own output before it ever reached here, so what the
+            # card shows — collapsed preview or expanded full output — isn't the whole
+            # story. Say so honestly regardless of expand state: a capped output that
+            # fits the preview budget (so there's nothing extra to expand) would
+            # otherwise present as complete, which is exactly the case this marks.
+            content += Content("\n") + Content.styled(
+                "  ⋯ output truncated at the tool's limit", "dim"
+            )
 
         self.update(content)
 

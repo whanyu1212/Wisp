@@ -74,23 +74,40 @@ def test_error_card_without_full_output_cannot_expand() -> None:
     assert "▸" not in _rendered(card)
 
 
-def test_truncation_marker_only_when_expanded_and_truncated() -> None:
+def test_truncation_marker_shows_when_truncated_collapsed_and_expanded() -> None:
+    # Truncation is a property of the output, not of the expanded view: the honest
+    # "tool capped this" marker must show whether the card is collapsed or expanded,
+    # so a reader who never expands still knows the output is incomplete.
     full = "".join(f"row {i}\n" for i in range(20))
     card = _resolved(detail="preview", full_output=full, truncated=True)
     marker = "truncated at the tool's limit"
 
-    assert marker not in _rendered(card)  # collapsed: no marker
+    assert marker in _rendered(card)  # collapsed: marker present
     card.action_toggle_expand()
-    assert marker in _rendered(card)  # expanded + truncated: honest marker
+    assert marker in _rendered(card)  # expanded: still present, not duplicated
+    assert _rendered(card).count(marker) == 1
     card.action_toggle_expand()
-    assert marker not in _rendered(card)  # collapsed again
+    assert marker in _rendered(card)  # collapsed again: still present
+
+
+def test_truncation_marker_shows_when_capped_output_fits_and_cannot_expand() -> None:
+    # A tool that capped its output but returned a buffer already equal to the
+    # collapsed detail has nothing extra to expand (_can_expand is False). The
+    # truncation marker must still show — otherwise the capped output would present
+    # as complete. This is the case Codex flagged (small max_output budgets).
+    card = _resolved(detail="line 1\nline 2", full_output="line 1\nline 2", truncated=True)
+    assert card._can_expand() is False  # nothing more to reveal
+    rendered = _rendered(card)
+    assert "▸" not in rendered  # no expand affordance offered
+    assert "truncated at the tool's limit" in rendered  # but the marker is still honest
 
 
 def test_no_truncation_marker_when_tool_returned_everything() -> None:
     full = "".join(f"row {i}\n" for i in range(20))
     card = _resolved(detail="preview", full_output=full, truncated=False)
+    assert "truncated at the tool's limit" not in _rendered(card)  # collapsed
     card.action_toggle_expand()
-    assert "truncated at the tool's limit" not in _rendered(card)
+    assert "truncated at the tool's limit" not in _rendered(card)  # expanded
 
 
 def test_expanded_output_stays_literal_no_markup_injection() -> None:

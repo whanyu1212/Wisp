@@ -1337,6 +1337,37 @@ def test_textual_tool_card_expanded_shows_tool_truncation_marker() -> None:
     assert "truncated at the tool's limit" in text
 
 
+def test_textual_tool_card_small_capped_output_shows_truncation_marker_collapsed() -> None:
+    # A tool that capped its output but returned a buffer that fits the preview budget
+    # has nothing extra to expand, so the card stays collapsed with no affordance. The
+    # truncation marker must still show — otherwise the capped output reads as complete.
+    # (Codex-flagged: small max_output_bytes/lines on bash/custom tools.)
+    short = "line 1\nline 2\nline 3\n"
+
+    async def scenario() -> tuple[str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={"command": "x"}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="bash",
+                    output=short,
+                    is_error=False,
+                    truncated=True,
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            return card.render().plain, card._can_expand()
+
+    rendered, can_expand = anyio.run(scenario)
+    assert can_expand is False  # nothing more to expand than the collapsed preview
+    assert "▸" not in rendered  # so no affordance is offered
+    assert "truncated at the tool's limit" in rendered  # but truncation is still surfaced
+
+
 def test_textual_tool_card_escape_returns_focus_to_input() -> None:
     # Escape on a focused card hands focus back to the prompt input, so the reader
     # isn't stranded on a card.
