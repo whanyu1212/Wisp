@@ -355,10 +355,12 @@ def _single_hunk_lines(old: str, new: str) -> list[str]:
     """Unified-diff body lines for one hunk, or an empty list when unchanged.
 
     Splits with ``keepends=True`` so a change confined to line terminators — a
-    dropped trailing newline, a CRLF→LF conversion — makes the affected lines
+    dropped trailing newline, a CRLF↔LF conversion — makes the affected lines
     differ and therefore show in the diff, instead of collapsing to identical
-    line sequences and looking like a no-op. The kept terminators are stripped
-    from each rendered line so the display stays one entry per line.
+    line sequences and looking like a no-op. The kept terminator is stripped from
+    each rendered line (so the display stays one entry per line) but its *kind*
+    is annotated when notable, so ``a`` → ``a\\n`` reads differently from its
+    reverse instead of both rendering as an unexplained ``-a`` / ``+a``.
     """
 
     diff = difflib.unified_diff(
@@ -380,33 +382,108 @@ def _single_hunk_lines(old: str, new: str) -> list[str]:
             continue
         if not seen_hunk:
             continue  # difflib's blank file headers, positionally before any hunk
-        # A +/-/space body line: strip the kept terminator from the content so
-        # the rendered line doesn't carry an embedded newline (the terminator has
-        # already done its job of making the line compare as changed).
-        body.append(line[:1] + line[1:].rstrip("\r\n"))
+        # A +/-/space body line: strip the kept terminator from the content (its
+        # job of making the line compare as changed is done), but annotate the
+        # terminator's kind on changed lines so a newline-only edit stays
+        # self-describing.
+        marker = line[:1]
+        content = line[1:]
+        body.append(marker + content.rstrip("\r\n") + _terminator_note(marker, content))
     return body
+
+
+def _terminator_note(marker: str, content: str) -> str:
+    """A compact, literal annotation of a changed line's stripped terminator.
+
+    Returns ``""`` for the ordinary LF ending (the common case, no noise), a
+    git-style ``⏎ no newline`` when the line had no terminator, or ``⏎ CRLF``
+    for a carriage-return ending. Only ``+``/``-`` lines are annotated: an
+    unchanged context line's terminator is the same before and after, so marking
+    it would be noise. Annotating the changed sides is what lets a newline-only
+    edit show its direction — ``a`` → ``a\\n`` annotates the deleted side
+    ``no newline`` while the reverse annotates the added side, so the two differ.
+    """
+
+    if marker not in ("+", "-"):
+        return ""
+    if content.endswith("\r\n"):
+        return "  ⏎ CRLF"
+    if content.endswith("\n"):
+        return ""
+    return "  ⏎ no newline"
 
 
 def _content_from_diff_lines(diff_lines: Sequence[str]) -> Content:
     """Bounded ``Content`` from prefixed diff lines, colored by add/delete/meta.
 
-    Bounds the number of lines the same way the previews do, appending an honest
-    ``... N more lines`` marker when the diff is longer. Each line's text is added
-    with :meth:`Content.styled` so it stays literal.
+    Bounds the diff on *both* axes — line count and byte size — so neither a
+    diff with very many lines nor one with a single enormous line (a minified
+    file, generated content) can flood the transcript. Each kept line's text is
+    added with :meth:`Content.styled` so it stays literal, and an honest trailer
+    reports whatever was dropped.
     """
 
-    kept = list(diff_lines[:_DIFF_PREVIEW_LINES])
-    hidden = len(diff_lines) - len(kept)
+    kept: list[str] = []
+    used_bytes = 0
+    for line in diff_lines[:_DIFF_PREVIEW_LINES]:
+        remaining = _DIFF_PREVIEW_BYTES - used_bytes
+        if remaining <= 0:
+            break
+        clipped = _clip_line_to_bytes(line, remaining)
+        kept.append(clipped)
+        used_bytes += len(clipped.encode("utf-8"))
+        if clipped != line:
+            break  # this line hit the byte budget; the rest is hidden
+
+    hidden_lines = len(diff_lines) - len(kept)
+    kept_bytes = sum(len(line.encode("utf-8")) for line in kept)
+    total_bytes = sum(len(line.encode("utf-8")) for line in diff_lines)
+    hidden_bytes = max(0, total_bytes - kept_bytes)
 
     content = Content("")
     for offset, line in enumerate(kept):
         if offset:
             content += Content("\n")
         content += Content.styled(line, _diff_line_style(line))
-    if hidden > 0:
-        unit = "line" if hidden == 1 else "lines"
-        content += Content("\n") + Content.styled(f"... {hidden} more {unit}", _DIFF_META_STYLE)
+
+    trailer = _hidden_trailer(hidden_lines, hidden_bytes)
+    if trailer is not None:
+        content += Content("\n") + Content.styled(trailer, _DIFF_META_STYLE)
     return content
+
+
+def _clip_line_to_bytes(line: str, max_bytes: int) -> str:
+    """``line`` truncated to at most ``max_bytes`` UTF-8 bytes, on a char boundary.
+
+    Returns the line unchanged when it already fits. Truncation decodes with
+    ``errors="ignore"`` so a cut landing mid-multibyte-character drops that
+    partial character rather than emitting invalid UTF-8, keeping the diff line
+    literal and well-formed.
+    """
+
+    encoded = line.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return line
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _hidden_trailer(hidden_lines: int, hidden_bytes: int) -> str | None:
+    """A ``... N more lines, M bytes hidden`` trailer, or None when nothing hid.
+
+    Mirrors the honest-truncation trailer of :func:`_tail_preview`: it reports
+    dropped lines and dropped bytes together so a diff clipped by the byte budget
+    (a single giant line) is never shown as if it were complete.
+    """
+
+    if hidden_lines <= 0 and hidden_bytes <= 0:
+        return None
+    parts: list[str] = []
+    if hidden_lines > 0:
+        unit = "line" if hidden_lines == 1 else "lines"
+        parts.append(f"{hidden_lines} more {unit}")
+    if hidden_bytes > 0:
+        parts.append(f"{hidden_bytes} bytes hidden")
+    return f"... {', '.join(parts)}"
 
 
 def _diff_line_style(line: str) -> str:

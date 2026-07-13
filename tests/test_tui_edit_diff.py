@@ -14,6 +14,7 @@ from wisp.tui.tool_output import (
     _DIFF_ADD_STYLE,
     _DIFF_DEL_STYLE,
     _DIFF_META_STYLE,
+    _DIFF_PREVIEW_BYTES,
     _DIFF_PREVIEW_LINES,
     render_edit_diff,
     render_tool_result,
@@ -145,10 +146,48 @@ def test_render_edit_diff_surfaces_newline_only_change() -> None:
     crlf_to_lf = render_edit_diff(_edit(("x\r\ny", "x\ny")))
     assert crlf_to_lf is not None
     # The rendered lines carry no embedded terminator — the kept newline is
-    # stripped for display after difflib used it for comparison.
+    # stripped for display after difflib used it for comparison. The terminator's
+    # *kind* is annotated separately (see below), so no raw CR reaches the output.
     assert "\r" not in dropped_newline.plain
     for line in dropped_newline.plain.split("\n"):
         assert not line.endswith(("\r",))
+
+
+def test_render_edit_diff_newline_only_change_shows_direction() -> None:
+    # Stripping the terminator for display must not erase *which* terminator
+    # changed: adding a trailing newline and removing one are opposite edits and
+    # must render distinctly, not both as an unexplained "-a" / "+a".
+    added = render_edit_diff(_edit(("a", "a\n")))
+    removed = render_edit_diff(_edit(("a\n", "a")))
+    assert added is not None and removed is not None
+    assert added.plain != removed.plain
+    # The side lacking a newline is the one annotated: the addition's deleted
+    # side (old "a" had none), the removal's added side (new "a" has none).
+    assert "-a  ⏎ no newline" in added.plain
+    assert "+a  ⏎ no newline" in removed.plain
+
+
+def test_render_edit_diff_crlf_conversion_shows_direction() -> None:
+    # CRLF→LF and LF→CRLF are opposite conversions and must render distinctly.
+    crlf_to_lf = render_edit_diff(_edit(("x\r\ny", "x\ny")))
+    lf_to_crlf = render_edit_diff(_edit(("x\ny", "x\r\ny")))
+    assert crlf_to_lf is not None and lf_to_crlf is not None
+    assert crlf_to_lf.plain != lf_to_crlf.plain
+    # The CRLF side carries the CRLF marker in each direction.
+    assert "-x  ⏎ CRLF" in crlf_to_lf.plain
+    assert "+x  ⏎ CRLF" in lf_to_crlf.plain
+
+
+def test_render_edit_diff_does_not_annotate_unchanged_context() -> None:
+    # A terminator note belongs only on changed (+/-) lines. An unchanged context
+    # line's terminator is identical before and after, so annotating it — even
+    # when the file legitimately lacks a trailing newline — is pure noise.
+    content = render_edit_diff(_edit(("a\nb\nc", "a\nB\nc")))
+    assert content is not None
+    # "c" is unchanged context and the file has no trailing newline, yet "c" must
+    # not carry a "no newline" note; the changed lines b/B are what matter.
+    assert " c  ⏎" not in content.plain
+    assert " c" in content.plain
 
 
 # --- Content fidelity: header-lookalike lines and the path header -------------
@@ -210,6 +249,29 @@ def test_render_edit_diff_bounds_large_diff() -> None:
     # (a short, trusted filename that a long diff must not push out of view).
     assert line_count <= _DIFF_PREVIEW_LINES + 2
     assert "more lines" in content.plain
+
+
+def test_render_edit_diff_bounds_single_enormous_line() -> None:
+    # A diff with just one gigantic line stays under the line cap, so a line-only
+    # bound would let it through. The byte budget must still cap it and report the
+    # hidden bytes honestly, or one minified/generated line floods the transcript.
+    big = "x" * 250_000
+    content = render_edit_diff(_edit((big, big + "y")))
+    rendered_bytes = len(content.plain.encode("utf-8"))
+    # Bounded to roughly the byte budget (plus the short path header and trailer),
+    # nowhere near the 250 KB input.
+    assert rendered_bytes <= _DIFF_PREVIEW_BYTES + 200
+    assert "bytes hidden" in content.plain
+
+
+def test_render_edit_diff_byte_clip_stays_valid_utf8() -> None:
+    # Clipping a huge line to the byte budget must land on a character boundary,
+    # never emit invalid UTF-8 by cutting a multibyte character in half.
+    multibyte = "☃" * 100_000  # 3 bytes each
+    content = render_edit_diff(_edit((multibyte, multibyte + "z")))
+    # Re-encoding round-trips only if the clipped text is well-formed.
+    content.plain.encode("utf-8")
+    assert len(content.plain.encode("utf-8")) <= _DIFF_PREVIEW_BYTES + 200
 
 
 # --- Dispatch: render_tool_result routes edit successes here ------------------
