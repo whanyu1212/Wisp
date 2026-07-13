@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from wisp.events import (
     AgentCompleted,
     ErrorEvent,
+    JsonObject,
     KnownWispEvent,
     MessageCompleted,
     MessageStarted,
@@ -77,6 +78,12 @@ class TextualTuiRenderer:
         # wall-clock duration (result.timestamp − request.timestamp) when it
         # resolves. Every WispEvent carries a UTC timestamp, so this needs no clock.
         self._tool_started: dict[str, datetime] = {}
+        # call_id → the request's arguments, retained so the result renderer can
+        # build tool-aware detail (e.g. an edit diff needs the oldText/newText
+        # hunks, which travel only on ToolCallRequested, not the result event).
+        # Popped when the call resolves, mirroring _tool_started's lifecycle so
+        # neither map grows across a session.
+        self._tool_arguments: dict[str, JsonObject] = {}
         self._progress_active = False
         self._progress_turn: int | None = None
         self._response_started = False
@@ -160,9 +167,11 @@ class TextualTuiRenderer:
 
     def _abort_pending_tools(self, detail: str = "cancelled") -> None:
         # A turn ended without results (cancel / failure / stream death): drain any
-        # still-pending tool cards and forget their request timestamps so neither
-        # a spinning card nor a stale start time leaks into the next turn.
+        # still-pending tool cards and forget their request timestamps and retained
+        # arguments so neither a spinning card nor stale per-call state leaks into
+        # the next turn.
         self._tool_started.clear()
+        self._tool_arguments.clear()
         self.app.fail_pending_tool_calls(detail)
 
     def _capture_submitted_input_mode(self) -> None:
@@ -283,9 +292,12 @@ class TextualTuiRenderer:
                 self.app.write_assistant(event.content)
         elif isinstance(event, ToolCallRequested):
             # Mount the evolving card; approval/result mutate it in place. Record
-            # the request time so the card can show its true duration on resolve.
+            # the request time so the card can show its true duration on resolve,
+            # and retain the arguments so the result renderer can build tool-aware
+            # detail (they don't travel on the result event).
             self._suspend_progress()
             self._tool_started[event.call_id] = event.timestamp
+            self._tool_arguments[event.call_id] = event.arguments
             self.app.mount_tool_call(event.call_id, event.name, event.arguments)
         elif isinstance(event, ToolApprovalResolved):
             # Only a denial changes the card here: an approval leaves it pending
@@ -305,15 +317,16 @@ class TextualTuiRenderer:
             # the glyph and the detail from the same judgment so they agree.
             failed = tool_result_failed(event.is_error, event.exit_code)
             status = "error" if failed else "done"
+            # Consume the retained arguments for this call (empty if the request
+            # was never seen, e.g. a resumed session) so tool-aware renderers can
+            # use them; pop so the map doesn't grow across the session.
+            arguments = self._tool_arguments.pop(event.call_id, {})
             self.app.resolve_tool_call(
                 event.call_id,
                 status,
-                # arguments are unused by the error/generic renderers PR A ships;
-                # the parameter stays in the seam so the diff/summary renderers
-                # (which need them) don't reshape this call site later.
                 detail=render_tool_result(
                     event.name,
-                    {},
+                    arguments,
                     event.output,
                     is_error=event.is_error,
                     exit_code=event.exit_code,

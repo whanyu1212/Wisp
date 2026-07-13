@@ -1,125 +1,57 @@
 # Wisp
 
-**A Python, Pi-inspired coding agent.**
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
+[![Package manager](https://img.shields.io/badge/package%20manager-uv-purple.svg)](https://docs.astral.sh/uv/)
+[![Code style](https://img.shields.io/badge/code%20style-ruff-black.svg)](https://docs.astral.sh/ruff/)
 
-Wisp is a small, auditable coding agent built around one agent core exposed through four
-interchangeable interfaces — a print CLI, machine-readable JSON, a long-lived JSONL-RPC
-protocol, and a fullscreen Textual TUI.
+**A Python-native coding agent with CLI, JSON, RPC, and TUI interfaces.**
 
-- **Auditable** — every provider-visible message and key event is persisted as JSONL.
-- **Safe by default** — print mode exposes no tools to the model unless you opt in, and
-  mutating tools require explicit approval.
-- **Embeddable** — a typed RPC client/controller is the stable integration layer.
+Wisp is an event-driven coding-agent runtime designed for local tool use, persistent
+sessions, explicit approval flows, and embeddable integrations. The same core powers
+interactive CLI use, machine-readable JSON output, long-lived RPC sessions, and the TUI.
 
+Wisp uses Pi as a behavioral reference while implementing its runtime, safety model,
+and extension surface in Python.
+
+- **Event-driven** — agent activity is exposed as structured `WispEvent` streams.
+- **Auditable** — provider-visible messages and key runtime events are persisted as JSONL.
+- **Safe by default** — tools are opt-in, and mutating or command execution requires approval.
+- **Embeddable** — a typed RPC client/controller provides a stable integration boundary.
+
+> **Status:** Wisp is early-stage software. APIs and CLI behavior may change while the
+> agent loop, session model, RPC layer, and TUI stabilize.
+>
 > Requires **Python 3.12+** and [`uv`](https://docs.astral.sh/uv/).
 
 ## Quickstart
 
 ```bash
-uv sync                                    # install dependencies
-uv run wisp auth login openai-codex        # authenticate a provider
-uv run wisp -p "hello"                      # run one turn
+uv sync
+uv run wisp auth login openai-codex
+uv run wisp -p "hello"
 ```
 
-Wisp defaults to the `openai-codex` provider. See [Providers & auth](#providers--auth) for
-other options. To try Wisp without any credentials, use the offline `fake` provider:
+Wisp defaults to the `openai-codex` provider. For an offline smoke test that does not
+require credentials, use the deterministic `fake` provider:
 
 ```bash
 uv run wisp -p "hello" --provider fake
 ```
 
-## Interfaces
+## Usage modes
 
 Wisp runs the same agent core in four modes:
 
-| Mode | Command | Output | Use for |
-|------|---------|--------|---------|
-| **Print** (default) | `wisp -p "…"` | Assistant text on stdout, events on stderr | Interactive/CLI use, piping |
-| **JSON** | `wisp -p "…" --mode json` | One `WispEvent` JSON object per line | Machine-readable integrations |
+| Mode | Command | Output | Best for |
+|------|---------|--------|----------|
+| **Print** (default) | `wisp -p "…"` | Assistant text on stdout, events on stderr | One-shot prompts and shell workflows |
+| **JSON** | `wisp -p "…" --mode json` | One `WispEvent` JSON object per line | Scripts and event consumers |
 | **RPC** | `wisp --mode rpc` | JSONL commands in, `WispEvent` JSONL out | Long-lived integrations |
-| **TUI** | `wisp tui` | Fullscreen Textual UI | Day-to-day interactive sessions |
-
-## Configuration
-
-Wisp reads configuration from the environment and from a settings file. Set the
-variables you need in your shell (or your shell profile / a process manager):
-
-```bash
-export WISP_PROVIDER=          # openai-codex (default) | openai | fake
-export WISP_MODEL=             # provider default when blank
-export WISP_MODE=              # blank = help/text; set to tui to open the TUI directly
-export WISP_TUI_RENDERER=      # line | fullscreen | textual
-export WISP_SESSION_DIR=       # where transcripts are stored (default: ~/.wisp/sessions)
-export WISP_AUTH_FILE=~/.wisp/auth.json
-export WISP_RETRY_MAX_RETRIES= # default: 2 (set 0 to disable retries)
-export WISP_RETRY_BASE_DELAY_SECONDS= # default: 0.5
-export WISP_RETRY_MAX_DELAY_SECONDS=  # default: 30
-export OPENAI_API_KEY=         # required only for the openai provider
-```
-
-For durable defaults, use a settings file instead of exporting every session. The
-user (global) file lives at `~/.wisp/settings.json`; a project may add
-`./.wisp/settings.json`, applied **only after you trust the project** (see
-[Project trust](#project-trust)):
-
-```json
-{
-  "provider": "openai",
-  "model": "gpt-5.5",
-  "session_dir": "~/.wisp/sessions",
-  "retry": { "max_retries": 2, "base_delay_seconds": 0.5, "max_delay_seconds": 30 }
-}
-```
-
-Precedence, highest to lowest: **CLI flag > environment variable > project
-`./.wisp/settings.json` > user `~/.wisp/settings.json` > built-in default.** Never
-commit auth files or real API keys.
-
-Retry settings are user-only, even in a trusted project: a repository cannot increase API spending
-or prolong waits. Wisp retries only a request that failed before the provider started streaming.
-It uses bounded exponential backoff with small jitter, honors reasonable `Retry-After` requests,
-and emits retry progress in JSON/RPC and the TUI. It never replays an already-started response.
-
-> **Migration note:** Wisp no longer reads a project `.env` file. Move any values you
-> kept there into your shell environment (`export …`) or, for durable defaults, into
-> `~/.wisp/settings.json`. A project `.env` on disk is still treated as a secret and
-> is never surfaced to the model.
-
-## Project trust
-
-Project-local configuration — the `./.wisp/settings.json` file, context files
-(`AGENTS.md` / `CLAUDE.md`), and project extensions — is applied **only for projects you
-trust**. The first time you run Wisp in an untrusted directory it asks:
-
-```
-Do you trust the files in /path/to/project?
-```
-
-Answer **yes** and the decision is remembered (globally, in `~/.wisp/trust.json`, keyed
-by resolved path) so you are not asked again. Until then Wisp still runs — it just
-ignores the project's local configuration, so a freshly cloned repository can't
-redirect Wisp's credential file or override your defaults before you have looked at it.
-
-Manage persisted project decisions with:
-
-```bash
-uv run wisp trust status [path]   # trusted, untrusted, or undecided
-uv run wisp trust allow [path]    # persistently trust a project
-uv run wisp trust revoke [path]   # persistently mark a project untrusted
-uv run wisp trust forget [path]   # remove the decision so Wisp can prompt again
-```
-
-- **Non-interactive runs** (CI, scripts, standalone RPC) default to *untrusted*. The
-  interactive TUI asks before entering the interface. Set
-  `WISP_TRUST=1` to opt a run in (or `WISP_TRUST=0` to force out). This is read only
-  from the real process environment, never from project files, and is not persisted.
-- The `protected_paths` secret guard is a **user-only** policy: a project settings
-  file can never weaken it, even once trusted.
-- `WISP_TRUST_FILE` may relocate the global trust store, but only to an **absolute
-  path**; keep it outside any repository, since a store inside a project you clone
-  would let that project decide its own trust. A relative value is rejected.
+| **TUI** | `wisp tui` | Fullscreen Textual UI | Interactive development sessions |
 
 ## Providers & auth
+
+Wisp supports three provider modes:
 
 ```bash
 uv run wisp -p "hello" --provider openai-codex --model gpt-5.5
@@ -137,20 +69,20 @@ uv run wisp -p "hello" --provider fake
   permissions.
 
 - **`openai`** — set `OPENAI_API_KEY`.
-- **`fake`** — a deterministic offline provider for tests and no-credential smoke runs; it
-  echoes a canned response and needs no key.
+- **`fake`** — a deterministic offline provider for tests and no-credential smoke runs.
 
 Sessions persist to `~/.wisp/sessions` by default so transcripts survive across runs and can be
-resumed; set `WISP_SESSION_DIR` (or pass `--session-dir`) to store them elsewhere (including a
-temp path for ephemeral sessions).
+resumed. Set `WISP_SESSION_DIR` or pass `--session-dir` to store them elsewhere, including a
+temporary path for ephemeral sessions.
 
-## Tools
+## Tools and safety
 
-Wisp registers built-in local tools through its extension API. File tools are sandboxed to the
-tool context's working directory by default.
+Wisp includes built-in local tools for reading files, editing files, searching projects, and
+running shell commands. File tools are sandboxed to the tool context's working directory by
+default, and tools are exposed to the model only when enabled.
 
-| | Tools |
-|---|---|
+| Category | Tools |
+|----------|-------|
 | **Read** | `read` · `grep` · `find` · `ls` |
 | **Mutating** | `write` · `edit` |
 | **Command** | `bash` |
@@ -163,11 +95,11 @@ uv run wisp -p "list files" --provider openai --allow-read-tools
 uv run wisp -p "run tests"  --provider openai --allow-tool bash --yes
 ```
 
-Because print mode is non-interactive, mutating and command tools are **also** blocked at
-execution time unless you pass `--yes` (alias `--allow-unsafe-tool-execution`). Without it, the
-model receives a clear tool error instead of Wisp executing the operation.
+Because print mode is non-interactive, mutating and command tools are also blocked at execution
+time unless you pass `--yes` (alias `--allow-unsafe-tool-execution`). Without it, the model
+receives a clear tool error instead of Wisp executing the operation.
 
-Wisp does not cap model/tool rounds by default (matching Pi's permissive agent loop). Pass
+Wisp does not cap model/tool rounds by default, matching Pi's permissive agent loop. Pass
 `--max-tool-iterations <n>` for a non-interactive fuse.
 
 ## Sessions
@@ -182,31 +114,118 @@ uv run wisp -p "continue the work" --resume <session-id-prefix>
 
 - `--continue` resumes the newest session in the active session directory.
 - `--resume` accepts a JSONL path, filename, full session id, or unique id prefix.
-- By default sessions live under `~/.wisp/sessions`, so `--continue`/`--resume` work across
-  invocations. Point `--session-dir` or `WISP_SESSION_DIR` elsewhere to override.
+- By default sessions live under `~/.wisp/sessions`. Use `--session-dir` or
+  `WISP_SESSION_DIR` to override this location.
 
 Session files contain provider-facing `message` entries plus selected structured `event` entries
-(tool calls, approvals, tool start/end, errors) for audit — but **not** `message.delta` events.
-Continuation reads only message entries, so audit events never become model-visible history, and
-stale project context from earlier turns is not replayed as instructions.
+(tool calls, approvals, tool start/end, errors) for audit. They do **not** persist
+`message.delta` events. Continuation reads only message entries, so audit events never become
+model-visible history, and stale project context from earlier turns is not replayed as
+instructions.
 
-### Prompt & project context
+## Configuration
+
+Wisp reads configuration from CLI flags, environment variables, and JSON settings files.
+
+### Environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, or `fake` |
+| `WISP_MODEL` | Model override; blank uses the provider default |
+| `WISP_MODE` | Default mode; set to `tui` to open the TUI directly |
+| `WISP_TUI_RENDERER` | TUI renderer: `line`, `fullscreen`, or `textual` |
+| `WISP_SESSION_DIR` | Session storage directory; defaults to `~/.wisp/sessions` |
+| `WISP_AUTH_FILE` | Auth file path; defaults to `~/.wisp/auth.json` |
+| `WISP_RETRY_MAX_RETRIES` | Provider retry count; defaults to `2`, set `0` to disable |
+| `WISP_RETRY_BASE_DELAY_SECONDS` | Initial retry delay; defaults to `0.5` |
+| `WISP_RETRY_MAX_DELAY_SECONDS` | Maximum retry delay; defaults to `30` |
+| `OPENAI_API_KEY` | Required only for the `openai` provider |
+
+### Settings files
+
+For durable defaults, use a settings file instead of exporting every session. The user-level file
+lives at `~/.wisp/settings.json`; a project may add `./.wisp/settings.json`, applied only after
+you trust the project.
+
+```json
+{
+  "provider": "openai",
+  "model": "gpt-5.5",
+  "session_dir": "~/.wisp/sessions",
+  "retry": { "max_retries": 2, "base_delay_seconds": 0.5, "max_delay_seconds": 30 }
+}
+```
+
+Configuration precedence, highest to lowest:
+
+```text
+CLI flag > environment variable > project ./.wisp/settings.json > user ~/.wisp/settings.json > built-in default
+```
+
+Never commit auth files or real API keys.
+
+### Retry behavior
+
+Retry settings are user-only, even in a trusted project: a repository cannot increase API spending
+or prolong waits. Wisp retries only requests that fail before the provider starts streaming. It
+uses bounded exponential backoff with small jitter, honors reasonable `Retry-After` requests, and
+emits retry progress in JSON/RPC and the TUI. It never replays an already-started response.
+
+> **Migration note:** Wisp no longer reads a project `.env` file. Move any values you kept there
+> into your shell environment or `~/.wisp/settings.json`. A project `.env` on disk is still
+> treated as a secret and is never surfaced to the model.
+
+## Project trust
+
+Project-local settings, context files (`AGENTS.md` / `CLAUDE.md`), and project extensions are
+loaded only after the project is trusted. Untrusted projects can still be used, but Wisp ignores
+their local configuration and instructions.
+
+The first time you run Wisp in an untrusted directory it asks:
+
+```text
+Do you trust the files in /path/to/project?
+```
+
+Answer **yes** and the decision is remembered globally in `~/.wisp/trust.json`, keyed by resolved
+path. Manage persisted decisions with:
+
+```bash
+uv run wisp trust status [path]   # trusted, untrusted, or undecided
+uv run wisp trust allow [path]    # persistently trust a project
+uv run wisp trust revoke [path]   # persistently mark a project untrusted
+uv run wisp trust forget [path]   # remove the decision so Wisp can prompt again
+```
+
+Security notes:
+
+- **Non-interactive runs** (CI, scripts, standalone RPC) default to untrusted. The interactive
+  TUI asks before entering the interface. Set `WISP_TRUST=1` to opt in for one process, or
+  `WISP_TRUST=0` to force untrusted mode.
+- `WISP_TRUST` is read only from the real process environment, never from project files, and is
+  not persisted.
+- The `protected_paths` secret guard is user-only: a project settings file can never weaken it,
+  even once trusted.
+- `WISP_TRUST_FILE` may relocate the global trust store, but only to an absolute path outside the
+  repository. A relative value is rejected.
+
+## How Wisp builds context
 
 Each turn sends a default coding-agent system prompt plus a bounded project-context message before
-the user prompt. The context includes the working directory, git branch and a capped status
-summary, detected root files (`pyproject.toml`, `package.json`, `README.md`, …), the tools
-currently exposed to the model, and trusted project instructions from context files.
+the user prompt. The context includes the working directory, git branch and capped status summary,
+detected root files (`pyproject.toml`, `package.json`, `README.md`, …), tools exposed to the
+model, and trusted project instructions from context files.
 
-Context files are loaded from the trusted context root down to the current working directory,
-with parent instructions before nested ones. In each directory Wisp uses the first Pi-compatible
-match in this order: `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`. Symlinked, protected,
-or out-of-scope context files are skipped. Project instructions are bounded separately from the
-tool list so large instruction files cannot hide the tools available to the model.
+Context files are loaded from the trusted context root down to the current working directory, with
+parent instructions before nested ones. In each directory Wisp uses the first Pi-compatible match
+in this order: `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`. Symlinked, protected, or
+out-of-scope context files are skipped. Project instructions are bounded separately from the tool
+list so large instruction files cannot hide the tools available to the model.
 
-Wisp intentionally trust-gates project-local context files. If the project is untrusted, Wisp
-does not read or mention those files and sends only the safe untrusted-context notice plus the
-exposed tool list. This is stricter than Pi's broader context loading, but keeps project guidance
-inside the same trust boundary as project settings and future project extensions.
+Project context is trust-gated. In untrusted projects, Wisp does not read local instruction files
+or project settings. This is stricter than Pi's broader context loading, but keeps project
+guidance inside the same trust boundary as project settings and future project extensions.
 
 ## TUI
 
