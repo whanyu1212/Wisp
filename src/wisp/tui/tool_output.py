@@ -434,12 +434,16 @@ def _content_from_diff_lines(diff_lines: Sequence[str]) -> Content:
     kept: list[str] = []
     used_bytes = 0
     for line in diff_lines[:_DIFF_PREVIEW_LINES]:
-        remaining = _DIFF_PREVIEW_BYTES - used_bytes
+        # Count the newline that will join this line to the previous one, so the
+        # budget bounds the whole rendered body — separators included — not just
+        # the line text.
+        separator = 1 if kept else 0
+        remaining = _DIFF_PREVIEW_BYTES - used_bytes - separator
         if remaining <= 0:
             break
         clipped = _clip_line_to_bytes(line, remaining)
         kept.append(clipped)
-        used_bytes += len(clipped.encode("utf-8"))
+        used_bytes += separator + len(clipped.encode("utf-8"))
         if clipped != line:
             break  # this line hit the byte budget; the rest is hidden
 

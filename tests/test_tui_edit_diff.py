@@ -271,6 +271,25 @@ def test_render_edit_diff_bounds_large_diff() -> None:
     assert "more lines" in content.plain
 
 
+def test_render_edit_diff_byte_budget_counts_separators() -> None:
+    # The byte budget bounds the whole rendered diff body — the newlines that join
+    # kept lines included — not just the line text. This case keeps the line count
+    # under the line cap so the *byte* budget is what binds, across several kept
+    # lines whose text sums to just under the budget; the inter-line separators
+    # are then the overflow the budget must still absorb (a body over the cap if
+    # separators go uncounted).
+    old = "anchor"
+    new = "anchor\n" + "\n".join("z" * 490 for _ in range(4))
+    content = render_edit_diff(_edit((old, new)))
+
+    # The diff body is every line except the path header and the trailer.
+    body = "\n".join(
+        line for line in content.plain.split("\n") if line.startswith(("@@", "-", "+", " "))
+    )
+    assert len(body.encode("utf-8")) <= _DIFF_PREVIEW_BYTES
+    assert "bytes hidden" in content.plain  # the pushed-out separator bytes are reported
+
+
 def test_render_edit_diff_bounds_single_enormous_line() -> None:
     # A diff with just one gigantic line stays under the line cap, so a line-only
     # bound would let it through. The byte budget must still cap it and report the
