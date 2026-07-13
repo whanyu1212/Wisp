@@ -276,14 +276,16 @@ class WriteSnapshotExecutor:
             output="Wrote 4 bytes to f.txt",
             is_error=False,
             before_text="old\n",
+            created=False,
         )
 
 
 def test_pure_loop_forwards_before_text_across_the_wire() -> None:
-    # The write tool's pre-write snapshot must reach ToolResultReady AND survive
-    # serialization: the TUI renderer only sees events after the agent subprocess
-    # serializes them to JSON, so a before_text that doesn't round-trip renders no
-    # diff — the exact failure that retired the opaque `data` field.
+    # The write tool's pre-write snapshot AND its create flag must reach
+    # ToolResultReady AND survive serialization: the TUI renderer only sees events
+    # after the agent subprocess serializes them to JSON, so a field that doesn't
+    # round-trip renders no diff — the exact failure that retired the opaque `data`
+    # field. created rides alongside before_text to disambiguate a None snapshot.
     call = ToolCall(
         call_id="call-1",
         name="write",
@@ -323,7 +325,11 @@ def test_pure_loop_forwards_before_text_across_the_wire() -> None:
 
     result = next(event for event in events if isinstance(event, ToolResultReady))
     assert result.before_text == "old\n"
-    assert wisp_event_from_json(result.model_dump_json()).before_text == "old\n"
+    assert result.created is False
+    round_tripped = wisp_event_from_json(result.model_dump_json())
+    assert round_tripped.before_text == "old\n"
+    assert round_tripped.created is False
     ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
     assert ended.before_text == "old\n"
+    assert ended.created is False
     assert wisp_event_from_json(ended.model_dump_json()).before_text == "old\n"

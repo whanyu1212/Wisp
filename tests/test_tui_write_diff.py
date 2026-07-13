@@ -65,9 +65,10 @@ def test_render_write_diff_leads_with_path_header() -> None:
 
 
 def test_render_write_diff_create_is_pure_addition() -> None:
-    # A newly created file has no "before" (before_text is None); render its whole
-    # content as additions so the transcript still previews what was written.
-    content = render_write_diff(None, _write("line1\nline2\n"))
+    # A newly created file has no "before" (before_text is None) but created=True;
+    # render its whole content as additions so the transcript previews what was
+    # written.
+    content = render_write_diff(None, _write("line1\nline2\n"), created=True)
     assert isinstance(content, Content)
     assert "+line1" in content.plain
     assert "+line2" in content.plain
@@ -78,9 +79,19 @@ def test_render_write_diff_create_is_pure_addition() -> None:
 
 
 def test_render_write_diff_create_colors_additions() -> None:
-    content = render_write_diff(None, _write("hello\n"))
+    content = render_write_diff(None, _write("hello\n"), created=True)
     assert isinstance(content, Content)
     assert _DIFF_ADD_STYLE in _styles_at(content, "+hello")
+
+
+def test_render_write_diff_overwrite_without_snapshot_falls_back() -> None:
+    # An overwrite whose prior text couldn't be captured (binary/oversize/unreadable)
+    # arrives as before_text=None with created=False. It must NOT render as a
+    # pure-addition create — that would hide that an existing file was replaced. Fall
+    # back to the generic summary instead.
+    assert render_write_diff(None, _write("new content\n"), created=False) is None
+    # Default (no created kwarg) is the conservative overwrite reading.
+    assert render_write_diff(None, _write("new content\n")) is None
 
 
 # --- render_write_diff: fallback cases --------------------------------------
@@ -93,8 +104,8 @@ def test_render_write_diff_noop_returns_none() -> None:
 
 
 def test_render_write_diff_create_empty_content_returns_none() -> None:
-    # Creating an empty file (no before, empty after) has nothing to diff.
-    assert render_write_diff(None, _write("")) is None
+    # Creating an empty file (created, no before, empty after) has nothing to diff.
+    assert render_write_diff(None, _write(""), created=True) is None
 
 
 def test_render_write_diff_missing_content_returns_none() -> None:
@@ -163,7 +174,8 @@ def test_render_tool_result_routes_successful_write_to_diff() -> None:
 
 
 def test_render_tool_result_routes_write_create_to_diff() -> None:
-    # before_text=None (a create) still routes to a pure-add diff from the content.
+    # A create (before_text=None, created=True) routes to a pure-add diff from the
+    # content.
     content = render_tool_result(
         "write",
         _write("fresh\n"),
@@ -171,9 +183,26 @@ def test_render_tool_result_routes_write_create_to_diff() -> None:
         is_error=False,
         exit_code=None,
         before_text=None,
+        created=True,
     )
     assert isinstance(content, Content)
     assert "+fresh" in content.plain
+
+
+def test_render_tool_result_write_overwrite_without_snapshot_falls_back() -> None:
+    # An overwrite with no usable snapshot (before_text=None, created=False) must
+    # fall back to the plain summary, not a create-style pure-addition diff.
+    result = render_tool_result(
+        "write",
+        _write("fresh\n"),
+        "Wrote 6 bytes to src/foo.py",
+        is_error=False,
+        exit_code=None,
+        before_text=None,
+        created=False,
+    )
+    assert isinstance(result, str)
+    assert "Wrote 6 bytes" in result
 
 
 def test_render_tool_result_write_failure_uses_error_not_diff() -> None:

@@ -165,6 +165,10 @@ class ToolExecutionEnded(WispEvent):
     # for write-like tools only. None for every other tool and for error paths.
     # See ToolResultReady.before_text for the wire/bounding rationale.
     before_text: str | None = None
+    # Whether a write created a new file. Disambiguates before_text=None: a create
+    # renders as pure additions, an overwrite with no usable snapshot falls back to
+    # the summary. False for every non-write tool. See ToolResultReady.created.
+    created: bool = False
 
 
 class ToolResultReady(WispEvent):
@@ -190,9 +194,15 @@ class ToolResultReady(WispEvent):
     # the write tool captures the prior text before clobbering the file, caps it
     # (dropping the snapshot entirely rather than shipping an unbounded or partial
     # file), and the executor promotes it here for the write tool only. None means
-    # no diff — a newly created file (rendered as a pure addition from the tool
-    # args), a binary/oversize/unreadable prior file, or any non-write tool.
+    # no snapshot — a newly created file, a binary/oversize/unreadable prior file,
+    # or any non-write tool. The renderer uses ``created`` to tell those apart.
     before_text: str | None = None
+    # Whether a write created a new file (vs. overwrote one). With before_text=None
+    # this is the only thing separating a create — rendered as a pure-addition diff
+    # of the new content — from an overwrite whose prior text couldn't be captured,
+    # which must fall back to the plain summary rather than masquerade as a create.
+    # A bounded JSON-safe scalar like before_text; False for every non-write tool.
+    created: bool = False
 
 
 class TurnCompleted(WispEvent):

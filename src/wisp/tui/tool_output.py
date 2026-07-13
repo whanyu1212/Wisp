@@ -147,14 +147,16 @@ def render_tool_result(
     is_error: bool,
     exit_code: int | None,
     before_text: str | None = None,
+    created: bool = False,
 ) -> str | Content:
     """Render terminal tool output into bounded card detail.
 
     ``name`` selects the renderer; ``arguments`` supplies structured context for
     recognized built-ins. ``exit_code`` is the promoted shell exit status, or None
     for tools without exit-code semantics. ``before_text`` is the promoted pre-write
-    file snapshot for the write tool, or None (a create, a fallback, or any other
-    tool).
+    file snapshot for the write tool, or None; ``created`` says whether that write
+    made a new file, which disambiguates a None snapshot (create vs. uncapturable
+    overwrite).
 
     Returns a plain ``str`` for the error/generic paths (the widget escapes it as
     untrusted markup) or a Textual ``Content`` for a colored diff (already styled
@@ -173,7 +175,7 @@ def render_tool_result(
         if diff is not None:
             return diff
     elif name == "write":
-        diff = render_write_diff(before_text, arguments)
+        diff = render_write_diff(before_text, arguments, created=created)
         if diff is not None:
             return diff
     return render_generic(output)
@@ -379,16 +381,23 @@ def render_edit_diff(arguments: Mapping[str, object]) -> Content | None:
     return _render_diff_content(changed, multi=multi, path=path)
 
 
-def render_write_diff(before: str | None, arguments: Mapping[str, object]) -> Content | None:
+def render_write_diff(
+    before: str | None,
+    arguments: Mapping[str, object],
+    *,
+    created: bool = False,
+) -> Content | None:
     """Render a ``write`` tool call's before/after text as a colored unified diff.
 
     ``before`` is the file's prior contents, captured by the tool before it
-    overwrote them and carried on the result event (``None`` for a newly created
-    file, or when the prior file was binary/oversize/unreadable). ``arguments``
-    supplies the new ``content`` (and ``path``) from the tool call. A create is
-    rendered as a pure addition (``before`` treated as empty). Returns a Textual
-    ``Content``, or ``None`` when the arguments are malformed or the write was a
-    no-op, so the caller falls back to the generic "Wrote N bytes" summary.
+    overwrote them and carried on the result event. It is ``None`` in two very
+    different cases that ``created`` disambiguates: a brand-new file (``created``
+    True), rendered as a pure addition of the new content; or an overwrite whose
+    prior text couldn't be captured — binary, oversize, or unreadable (``created``
+    False), which must NOT masquerade as a create, so it returns ``None`` and the
+    caller shows the plain "Wrote N bytes" summary. ``arguments`` supplies the new
+    ``content`` (and ``path``). Also returns ``None`` on malformed arguments or a
+    no-op write.
 
     Same safety property as :func:`render_edit_diff`: content is styled out-of-band
     via :meth:`Content.styled`, never parsed as markup.
@@ -396,6 +405,11 @@ def render_write_diff(before: str | None, arguments: Mapping[str, object]) -> Co
 
     after = arguments.get("content")
     if not isinstance(after, str):
+        return None
+    if before is None and not created:
+        # Overwrote an existing file but couldn't snapshot its prior text (binary,
+        # oversize, or unreadable). Rendering additions here would falsely imply the
+        # file was created; fall back to the generic summary instead.
         return None
     old = str.__str__(before) if isinstance(before, str) else ""
     new = str.__str__(after)

@@ -100,17 +100,32 @@ def test_write_tool_snapshots_prior_content_on_overwrite(tmp_path: Path) -> None
     result = run_tool(WriteTool(), {"path": "f.txt", "content": "new\n"}, context)
 
     assert result.data["before_text"] == "old\n"
+    assert result.data["created"] is False
     assert (tmp_path / "f.txt").read_text(encoding="utf-8") == "new\n"
 
 
 def test_write_tool_omits_snapshot_when_creating_new_file(tmp_path: Path) -> None:
-    # A create has no prior content: before_text must be absent so the renderer
-    # treats it as a pure addition rather than an overwrite of empty text.
+    # A create has no prior content: before_text must be absent, but created=True so
+    # the renderer knows to preview it as a pure addition rather than fall back.
     context = ToolContext(cwd=tmp_path)
 
     result = run_tool(WriteTool(), {"path": "new.txt", "content": "hello\n"}, context)
 
     assert "before_text" not in result.data
+    assert result.data["created"] is True
+
+
+def test_write_tool_reports_overwrite_of_unsnapshotable_file(tmp_path: Path) -> None:
+    # The exact Codex P2: overwriting a binary file yields no snapshot AND created is
+    # False, so the renderer falls back to the summary instead of a pure-add diff
+    # that would falsely read as a create.
+    context = ToolContext(cwd=tmp_path)
+    (tmp_path / "f.bin").write_bytes(b"\xff\xfe\x00data")
+
+    result = run_tool(WriteTool(), {"path": "f.bin", "content": "text\n"}, context)
+
+    assert "before_text" not in result.data
+    assert result.data["created"] is False
 
 
 def test_write_tool_snapshot_preserves_prior_newline_bytes(tmp_path: Path) -> None:

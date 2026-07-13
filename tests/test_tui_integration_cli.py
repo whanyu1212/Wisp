@@ -1136,8 +1136,8 @@ def test_textual_tool_card_write_renders_colored_diff() -> None:
 
 
 def test_textual_tool_card_write_create_renders_pure_addition() -> None:
-    # A newly created file has no before_text; the write still renders a diff, as an
-    # all-additions preview of the content, so the transcript shows what was written.
+    # A newly created file has no before_text but created=True; the write renders a
+    # diff as an all-additions preview so the transcript shows what was written.
     async def scenario() -> str:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
@@ -1156,6 +1156,7 @@ def test_textual_tool_card_write_create_renders_pure_addition() -> None:
                     output="Wrote 11 bytes to new.py",
                     is_error=False,
                     before_text=None,
+                    created=True,
                 )
             )
             await pilot.pause()
@@ -1164,6 +1165,40 @@ def test_textual_tool_card_write_create_renders_pure_addition() -> None:
     text = anyio.run(scenario)
     assert "✓ write" in text
     assert "+fresh line" in text
+
+
+def test_textual_tool_card_write_overwrite_without_snapshot_shows_summary() -> None:
+    # Overwriting a file whose prior text couldn't be captured (before_text=None,
+    # created=False) must show the plain summary — never a pure-addition diff that
+    # would falsely read as a create.
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="write",
+                    arguments={"path": "data.bin", "content": "replacement\n"},
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="write",
+                    output="Wrote 12 bytes to data.bin",
+                    is_error=False,
+                    before_text=None,
+                    created=False,
+                )
+            )
+            await pilot.pause()
+            return "\n".join(_transcript_texts(app_instance))
+
+    text = anyio.run(scenario)
+    assert "✓ write" in text
+    assert "Wrote 12 bytes to data.bin" in text
+    assert "+replacement" not in text  # not rendered as a create-style diff
 
 
 def test_textual_tool_card_edit_content_is_not_markup_injectable() -> None:

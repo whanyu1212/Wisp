@@ -90,12 +90,17 @@ class WriteTool:
         path = resolve_tool_path(_required_string(arguments, "path"), context)
         content = _required_string(arguments, "content", allow_empty=True)
 
+        # Distinguish a create from an overwrite *before* the write, so the renderer
+        # can tell "brand-new file" (show its content as a pure-addition diff) from
+        # "overwrote an existing file whose prior text we couldn't capture" (fall back
+        # to the plain summary — never imply a create by rendering pure additions).
+        created = not path.exists()
         # Snapshot the prior contents *before* the write clobbers them, so the TUI can
         # render a before/after diff. This is the only moment the "before" exists: the
-        # open("w") below destroys it and the tool args carry only the new content. A
-        # missing file (create), an unreadable/non-UTF-8 file, or an oversize file all
-        # yield before_text=None → the renderer shows the plain summary rather than a
-        # misleading or unbounded diff. Bounding here (not renderer-side) keeps the
+        # open("w") below destroys it and the tool args carry only the new content. The
+        # snapshot is None for a create AND for an unreadable/non-UTF-8/oversize prior
+        # file; ``created`` is what separates those, since only a real create should
+        # still render (as additions). Bounding here (not renderer-side) keeps the
         # snapshot off the RPC wire when it would be too large to diff anyway.
         before_text = _snapshot_before_write(path)
 
@@ -106,6 +111,7 @@ class WriteTool:
         data: dict[str, object] = {
             "path": display_tool_path(path, context),
             "bytes": byte_count,
+            "created": created,
         }
         if before_text is not None:
             data["before_text"] = before_text
