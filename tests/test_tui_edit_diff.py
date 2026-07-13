@@ -151,6 +151,52 @@ def test_render_edit_diff_surfaces_newline_only_change() -> None:
         assert not line.endswith(("\r",))
 
 
+# --- Content fidelity: header-lookalike lines and the path header -------------
+
+
+def test_render_edit_diff_keeps_deleted_line_that_looks_like_a_header() -> None:
+    # A source line beginning with "-- " becomes "--- ..." once difflib prepends
+    # its "-" delete marker — the same prefix as difflib's own file header. The
+    # renderer must keep it as a body line (headers only precede the first hunk),
+    # not silently drop the deletion.
+    content = render_edit_diff(_edit(("-- old comment\nkeep", "-- new comment\nkeep")))
+    assert content is not None
+    assert "-- old comment" in content.plain  # the deleted line survives
+    assert "-- new comment" in content.plain  # the added line survives
+    # And the deletion is colored as a deletion, not treated as metadata.
+    assert _DIFF_DEL_STYLE in _styles_at(content, "--- old comment")
+
+
+def test_render_edit_diff_keeps_added_line_that_looks_like_a_header() -> None:
+    # Symmetric to the delete case: a source line beginning with "++ " becomes
+    # "+++ ..." after the "+" add marker and must not be mistaken for a header.
+    content = render_edit_diff(_edit(("++ a", "++ b")))
+    assert content is not None
+    assert "++ a" in content.plain
+    assert "++ b" in content.plain
+    assert _DIFF_ADD_STYLE in _styles_at(content, "+++ b")
+
+
+def test_render_edit_diff_leads_with_the_edited_path() -> None:
+    # The diff replaces the argument summary that used to name the file, so the
+    # path must reappear as a meta-styled header line.
+    content = render_edit_diff(_edit(("a", "b"), path="src/pkg/module.py"))
+    assert content is not None
+    assert content.plain.startswith("src/pkg/module.py")
+    assert _DIFF_META_STYLE in _styles_at(content, "src/pkg/module.py")
+
+
+def test_render_edit_diff_omits_path_header_when_absent_or_blank() -> None:
+    # A missing or non-string path just yields no header line — never a crash or
+    # a stray "None" label.
+    no_path = render_edit_diff({"edits": [{"oldText": "a", "newText": "b"}]})
+    assert no_path is not None
+    assert no_path.plain.startswith("@@")
+    blank_path = render_edit_diff(_edit(("a", "b"), path=""))
+    assert blank_path is not None
+    assert blank_path.plain.startswith("@@")
+
+
 # --- Bounding: a huge edit is capped with honest metadata ---------------------
 
 
@@ -159,8 +205,10 @@ def test_render_edit_diff_bounds_large_diff() -> None:
     new = "\n".join(f"changed-{i}" for i in range(200))
     content = render_edit_diff(_edit((old, new)))
     line_count = content.plain.count("\n") + 1
-    # Bounded to the preview budget plus the trailing "... N more lines" marker.
-    assert line_count <= _DIFF_PREVIEW_LINES + 1
+    # The untrusted diff body is bounded to the preview budget plus the trailing
+    # "... N more lines" marker; the path header is one extra, unbudgeted line
+    # (a short, trusted filename that a long diff must not push out of view).
+    assert line_count <= _DIFF_PREVIEW_LINES + 2
     assert "more lines" in content.plain
 
 

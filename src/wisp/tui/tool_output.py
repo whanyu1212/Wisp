@@ -292,7 +292,16 @@ def render_edit_diff(arguments: Mapping[str, object]) -> Content | None:
         # to diff; let the caller show the generic "Applied N edit(s)" summary.
         return None
 
-    return _content_from_diff_lines(diff_lines)
+    diff = _content_from_diff_lines(diff_lines)
+
+    # Lead with the edited path so a resolved card names its file — the diff
+    # replaces the argument summary, which otherwise carried the path. It's
+    # metadata, not a diff line, so style it explicitly rather than routing it
+    # through the marker-prefix styler (a bare path has no diff prefix).
+    path = arguments.get("path")
+    if isinstance(path, str) and path:
+        return Content.styled(path, _DIFF_META_STYLE) + Content("\n") + diff
+    return diff
 
 
 def _parse_edit_hunks(arguments: Mapping[str, object]) -> list[tuple[str, str]]:
@@ -359,12 +368,18 @@ def _single_hunk_lines(old: str, new: str) -> list[str]:
         n=2,
     )
     body: list[str] = []
+    seen_hunk = False
     for line in diff:
-        if line.startswith("--- ") or line.startswith("+++ "):
-            continue  # difflib's blank file headers are noise here
         if line.startswith("@@"):
+            # The first ``@@`` opens the hunk body; everything before it is the
+            # ``---``/``+++`` file-header pair, which we drop. We must not skip by
+            # prefix — a deleted content line such as ``--- comment`` (a source
+            # line ``-- comment`` with difflib's ``-`` marker) shares that prefix.
+            seen_hunk = True
             body.append(line)
             continue
+        if not seen_hunk:
+            continue  # difflib's blank file headers, positionally before any hunk
         # A +/-/space body line: strip the kept terminator from the content so
         # the rendered line doesn't carry an embedded newline (the terminator has
         # already done its job of making the line compare as changed).
