@@ -345,13 +345,15 @@ class SummaryExecutor:
             output="line 1\nline 2\nline 3\n",
             is_error=False,
             summary="read 3 lines from f.txt",
+            truncated=True,
         )
 
 
 def test_pure_loop_forwards_summary_across_the_wire() -> None:
-    # A read-type tool's one-line summary must reach ToolResultReady AND survive
-    # serialization — the renderer shows it in place of the raw output, so a summary
-    # that doesn't round-trip would silently fall back to the dump.
+    # A read-type tool's one-line summary AND its truncation flag must reach
+    # ToolResultReady AND survive serialization — the renderer shows the summary in
+    # place of the raw output, and the card shows a "truncated" marker on expand, so a
+    # field that doesn't round-trip would silently drop either signal.
     call = ToolCall(
         call_id="call-1",
         name="read",
@@ -391,7 +393,13 @@ def test_pure_loop_forwards_summary_across_the_wire() -> None:
 
     result = next(event for event in events if isinstance(event, ToolResultReady))
     assert result.summary == "read 3 lines from f.txt"
-    assert wisp_event_from_json(result.model_dump_json()).summary == "read 3 lines from f.txt"
+    assert result.truncated is True
+    round_tripped = wisp_event_from_json(result.model_dump_json())
+    assert round_tripped.summary == "read 3 lines from f.txt"
+    assert round_tripped.truncated is True
+    ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
+    assert ended.truncated is True
+    assert wisp_event_from_json(ended.model_dump_json()).truncated is True
     ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
     assert ended.summary == "read 3 lines from f.txt"
     assert wisp_event_from_json(ended.model_dump_json()).summary == "read 3 lines from f.txt"

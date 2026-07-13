@@ -183,6 +183,12 @@ class TextualTui(App[None]):
         color: $text-muted;
     }
 
+    /* A focused tool card (reached by Tab) is the expand/collapse target; a subtle
+       fill marks it without competing with the role-colored left rule. */
+    ToolCard:focus {
+        background: $boost;
+    }
+
     #status-bar {
         height: auto;
         padding: 0 1;
@@ -428,6 +434,20 @@ class TextualTui(App[None]):
             self._input.focus()
         elif self._decision_panel is not None:
             self._decision_panel.focus_options()
+
+    def on_tool_card_toggled(self, event: ToolCard.Toggled) -> None:
+        # A card grew or shrank. Re-pin the tail iff the user was following it, so
+        # expanding the newest card keeps it in view without yanking a reader who has
+        # scrolled up (the sticky follow flag decides).
+        event.stop()
+        self._follow_tail_after_refresh()
+
+    def on_tool_card_leave_requested(self, event: ToolCard.LeaveRequested) -> None:
+        # Escape on a focused card hands focus back to the resting target (the input),
+        # so the reader isn't stranded on a card with no obvious way back.
+        event.stop()
+        if self._input is not None and self._input.display:
+            self._input.focus()
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         self._forward_jump_overlay_scroll(event, direction=-1)
@@ -832,16 +852,25 @@ class TextualTui(App[None]):
         *,
         detail: str | Content = "",
         elapsed: float | None = None,
+        full_output: str = "",
+        truncated: bool = False,
     ) -> None:
         # Transition the card for this call_id in place. If the request card was
         # never seen (a result arriving with no prior request, e.g. after a
         # resume), there is nothing to mutate — drop it rather than mint a
         # half-formed card, keeping the registry the single source of truth.
         # `elapsed` is the true wall-clock duration; it freezes the live counter.
+        # `full_output`/`truncated` let the card expand past the collapsed detail.
         card = self._tool_cards.get(call_id)
         if card is None:
             return
-        card.set_state(status, detail=detail, elapsed=elapsed)
+        card.set_state(
+            status,
+            detail=detail,
+            elapsed=elapsed,
+            full_output=full_output,
+            truncated=truncated,
+        )
         self._note_transcript_update(card)
         # A terminal state (done/denied/error) ends the call's lifecycle; forget
         # the card so the registry doesn't grow across a long session. The widget

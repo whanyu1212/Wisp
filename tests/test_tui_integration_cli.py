@@ -1254,6 +1254,149 @@ def test_textual_tool_card_grep_shows_match_summary() -> None:
     assert "a.py:1:x" not in text  # raw matches replaced by the summary
 
 
+def _first_tool_card(app: TextualTui) -> ToolCard:
+    transcript = app.query_one("#transcript", Transcript)
+    return next(child for child in transcript.children if isinstance(child, ToolCard))
+
+
+def test_textual_tool_card_expands_to_full_output_on_enter() -> None:
+    # Issue #74 PR D: a resolved read card shows its one-line summary collapsed, and
+    # expands to the full (tool-bounded) output when focused and Enter is pressed —
+    # restoring what the summary replaced. Enter again collapses it back.
+    full = "".join(f"line {i}\n" for i in range(30))
+
+    async def scenario() -> tuple[str, str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={"path": "f.py"}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="read",
+                    output=full,
+                    is_error=False,
+                    summary="read 30 lines from f.py",
+                )
+            )
+            await pilot.pause()
+            collapsed = "\n".join(_transcript_texts(app_instance))
+
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            expanded = "\n".join(_transcript_texts(app_instance))
+
+            await pilot.press("enter")
+            await pilot.pause()
+            recollapsed = "\n".join(_transcript_texts(app_instance))
+            return collapsed, expanded, recollapsed
+
+    collapsed, expanded, recollapsed = anyio.run(scenario)
+    # Collapsed: summary shown, full output hidden.
+    assert "read 30 lines from f.py" in collapsed
+    assert "line 29" not in collapsed
+    # Expanded: full output revealed.
+    assert "line 29" in expanded
+    # Re-collapsed: back to the summary.
+    assert "line 29" not in recollapsed
+    assert "read 30 lines from f.py" in recollapsed
+
+
+def test_textual_tool_card_expanded_shows_tool_truncation_marker() -> None:
+    # When the tool itself capped its output (truncated=True), the expanded card says
+    # so — even the full view isn't the whole story.
+    full = "".join(f"row {i}\n" for i in range(30))
+
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={"path": "big"}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="read",
+                    output=full,
+                    is_error=False,
+                    summary="read 30 lines from big",
+                    truncated=True,
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            return "\n".join(_transcript_texts(app_instance))
+
+    text = anyio.run(scenario)
+    assert "truncated at the tool's limit" in text
+
+
+def test_textual_tool_card_escape_returns_focus_to_input() -> None:
+    # Escape on a focused card hands focus back to the prompt input, so the reader
+    # isn't stranded on a card.
+    async def scenario() -> bool:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={"path": "f"}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="read",
+                    output="a\nb\nc\n",
+                    is_error=False,
+                    summary="read 3 lines from f",
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            return app_instance._input is app_instance.focused
+
+    assert anyio.run(scenario) is True
+
+
+def test_textual_tool_card_expand_keeps_tail_follow() -> None:
+    # Expanding the newest card while following must keep the transcript pinned to the
+    # tail — content growth alone should not break follow-tail (acceptance criterion).
+    full = "".join(f"line {i}\n" for i in range(40))
+
+    async def scenario() -> bool:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={"path": "f"}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="read",
+                    output=full,
+                    is_error=False,
+                    summary="read 40 lines from f",
+                )
+            )
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            assert transcript.is_following  # resting at the tail
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            return transcript.is_following
+
+    assert anyio.run(scenario) is True
+
+
 def test_textual_tool_card_edit_content_is_not_markup_injectable() -> None:
     # End-to-end injection guard: edit content containing markup metacharacters
     # must render literally in the transcript, never parsed as color markup.

@@ -8,11 +8,23 @@ unrelated ``exit_code`` from being styled as a failure.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import anyio
+
 from wisp.coding.tool_execution import (
+    ConfiguredToolExecutor,
     _promote_before_text,
     _promote_created,
     _promote_exit_code,
 )
+from wisp.events import ToolExecutionEnded
+from wisp.providers.events import ToolCall
+from wisp.runtime.registry import ToolRegistry
+from wisp.tools.approval import ToolApprovalPolicy
+from wisp.tools.context import ToolContext
+from wisp.tools.policy import ToolPolicy
+from wisp.tools.result import ToolResult
 
 
 def test_promote_exit_code_extracts_for_recognized_shell_tool() -> None:
@@ -69,3 +81,42 @@ def test_promote_created_false_when_absent_or_non_bool() -> None:
     assert _promote_created("write", {}) is False
     assert _promote_created("write", {"created": "yes"}) is False
     assert _promote_created("write", {"created": None}) is False
+
+
+class _TruncatingTool:
+    name = "capped"
+    safety = "read"
+    description = "Returns truncated output."
+    input_schema: dict[str, object] = {"type": "object", "properties": {}}
+
+    def __init__(self, *, truncated: bool) -> None:
+        self._truncated = truncated
+
+    async def run(self, arguments: object, context: object) -> ToolResult:
+        return ToolResult(text="partial output", data={}, truncated=self._truncated)
+
+
+def _run_executor(tool: object) -> ToolExecutionEnded:
+    registry = ToolRegistry()
+    registry.register(tool)  # type: ignore[arg-type]
+    executor = ConfiguredToolExecutor(
+        registry=registry,
+        context=ToolContext(cwd=Path.cwd(), protected_paths=()),
+        policy=ToolPolicy.allow_all_tools(),
+        approval_policy=ToolApprovalPolicy.approve_all(),
+    )
+
+    call = ToolCall(call_id="c1", name=tool.name, arguments={})  # type: ignore[attr-defined]
+
+    async def run() -> ToolExecutionEnded:
+        events = [event async for event in executor.execute(call)]
+        return next(e for e in events if isinstance(e, ToolExecutionEnded))
+
+    return anyio.run(run)
+
+
+def test_executor_promotes_truncated_from_tool_result() -> None:
+    # The tool's own truncated flag rides onto the event so the card can honestly
+    # mark output the tool itself capped.
+    assert _run_executor(_TruncatingTool(truncated=True)).truncated is True
+    assert _run_executor(_TruncatingTool(truncated=False)).truncated is False

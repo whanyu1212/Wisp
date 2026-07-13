@@ -46,6 +46,7 @@ class _ToolRunOutcome:
     before_text: str | None = None
     created: bool = False
     summary: str | None = None
+    truncated: bool = False
 
 
 class ConfiguredToolExecutor:
@@ -127,6 +128,7 @@ class ConfiguredToolExecutor:
             before_text=outcome.before_text,
             created=outcome.created,
             summary=outcome.summary,
+            truncated=outcome.truncated,
         )
 
     async def _run_tool(self, tool: Tool, arguments: dict[str, object]) -> _ToolRunOutcome:
@@ -142,6 +144,11 @@ class ConfiguredToolExecutor:
                 before_text=_promote_before_text(tool.name, result.data),
                 created=_promote_created(tool.name, result.data),
                 summary=summarize_tool_result(tool.name, result.data, truncated=result.truncated),
+                # The tool's own authoritative "I capped my output" flag, so the card
+                # can be honest that an expanded view may still not be the whole story.
+                # Only a real ToolResult sets this; every synthetic/error path defaults
+                # it False.
+                truncated=result.truncated,
             )
         except Exception as exc:  # noqa: BLE001 - tool failures are model-visible results
             return _ToolRunOutcome(str(exc), is_error=True)
