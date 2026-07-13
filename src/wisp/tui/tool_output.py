@@ -72,16 +72,39 @@ _DIFF_PREVIEW_BYTES = _TOOL_OUTPUT_PREVIEW_BYTES
 # 50k-line rewrite is not review signal anyway.
 #
 # This bounds the matcher's *dimensions* and the transient diff-line count, which
-# is what the reported flooding needed. It is not a hard wall-clock bound: at the
-# ceiling a pathological repeated-line pattern can still take a few hundred ms in
-# SequenceMatcher. A hard event-loop latency bound would need off-thread diffing —
-# out of scope here; the ceiling is chosen so a *typical* at-limit edit stays in
-# the low-ms range while pathological ones remain sub-second rather than unbounded.
+# is what the reported flooding needed. SequenceMatcher is O(n*m) in *comparisons*,
+# but each comparison is cheap string equality on one line, so at n=m=4000 the
+# constant is tiny: measured worst cases at the ceiling — scrambled inputs over a
+# small alphabet (the arrangement that maximizes matching-block recursion) — run in
+# single-digit milliseconds, well under one frame, not the hundreds of ms an O(n*m)
+# reading might suggest. The 4000-line ceiling that bounds memory therefore also
+# bounds time; a hard off-thread latency bound would only matter at a much larger
+# ceiling and is deliberately out of scope.
 _DIFF_MAX_HUNK_LINES = 4000
 
 # Many hunks each just under the per-hunk ceiling still sum to unbounded work, so
 # cap the total lines diffed across all hunks of one edit call as a backstop.
 _DIFF_MAX_TOTAL_LINES = 8000
+
+# The line ceilings bound the matcher's *time* (SequenceMatcher is line-count
+# driven), but not the *memory* to split and materialize diff lines. That memory is
+# the input strings plus the ``splitlines`` list and the ``-``/``+`` line strings —
+# all Python ``str``, whose size scales with character count (at most 4 bytes/char
+# via PEP 393), never the UTF-8-encoded length. A minified or generated file is a
+# few enormous lines — it sails past the line ceiling yet makes those allocations
+# balloon before the display cap trims them. So we cap per-side *characters*: 1 M
+# chars comfortably accepts a 4000-line file up to ~250 chars/line (well past any
+# human edit) while rejecting the multi-MB single-line case. We deliberately count
+# characters (``len``) rather than encoded bytes — the diff path never encodes the
+# input, so char count is the faithful proxy for its allocation, and measuring
+# ``len(text.encode())`` would itself allocate the very buffer we are guarding
+# against.
+_DIFF_MAX_HUNK_CHARS = 1_000_000
+
+# Many hunks each just under the per-hunk char ceiling still sum to unbounded
+# allocation (thousands of near-1M-char single-line changes), so cap the aggregate
+# too — the character mirror of _DIFF_MAX_TOTAL_LINES.
+_DIFF_MAX_TOTAL_CHARS = 2_000_000
 
 # The single-character boundaries ``str.splitlines`` breaks on. The work guard
 # below must count boundaries the SAME way the diff later splits them, or an input
@@ -454,22 +477,36 @@ def _edit_input_too_large(hunks: Sequence[tuple[str, str]]) -> bool:
 
     difflib's matcher is O(n*m) in *line count* and pays its full cost the moment
     its generator is first advanced, so the decision to diff has to be made before
-    calling it. There are two independent cost axes and this guards both:
+    calling it. Cost has two independent axes — how many lines, and how many
+    characters — and this guards both:
 
-    * A single huge hunk — bounded per side against :data:`_DIFF_MAX_HUNK_LINES`.
-    * Many hunks — ``_unified_diff_lines`` runs difflib once per changed hunk, so a
-      call with thousands of tiny one-line changes (a generated batch of
-      replacements) is as expensive as one giant hunk. The aggregate line count is
-      bounded against :data:`_DIFF_MAX_TOTAL_LINES`, and each hunk is charged at
-      least one unit so even single-character edits accumulate toward the total.
+    * Line count — a single huge hunk is bounded per side against
+      :data:`_DIFF_MAX_HUNK_LINES`, and the aggregate line count across many hunks
+      (``_unified_diff_lines`` runs difflib once per changed hunk, so a batch of
+      tiny replacements is as expensive as one giant hunk) against
+      :data:`_DIFF_MAX_TOTAL_LINES`. Each hunk is charged at least one unit so even
+      single-character edits accumulate toward the total.
+    * Character count — the line ceilings bound the matcher's *time* but not the
+      *memory* to split and materialize diff lines. That memory is Python ``str``
+      (the input, the ``splitlines`` list, the ``-``/``+`` lines), so it scales with
+      character count, not encoded bytes. A minified file is a few enormous lines
+      (few lines, many characters), so each side is also bounded against
+      :data:`_DIFF_MAX_HUNK_CHARS`.
 
-    Both checks short-circuit, so an oversize input is rejected on its first scan,
-    and line counts come from :func:`_line_count` (allocation-free) so the decision
-    never materializes the line lists ``splitlines`` would.
+    Both checks short-circuit, so an oversize input is rejected on its first scan.
+    Line counts come from :func:`_line_count` and the character check from ``len`` —
+    both allocation-free, so the decision never materializes what ``splitlines``
+    would, nor encodes the input just to size it.
     """
 
-    total = 0
+    total_lines = 0
+    total_chars = 0
     for old, new in hunks:
+        if len(old) > _DIFF_MAX_HUNK_CHARS or len(new) > _DIFF_MAX_HUNK_CHARS:
+            return True
+        total_chars += len(old) + len(new)
+        if total_chars > _DIFF_MAX_TOTAL_CHARS:
+            return True
         old_lines = _line_count(old)
         new_lines = _line_count(new)
         if old_lines > _DIFF_MAX_HUNK_LINES or new_lines > _DIFF_MAX_HUNK_LINES:
@@ -477,8 +514,8 @@ def _edit_input_too_large(hunks: Sequence[tuple[str, str]]) -> bool:
         # A changed hunk always has a non-empty side, so old_lines + new_lines is
         # already >= 1; max keeps that floor explicit — difflib runs once per hunk
         # regardless of size, so every hunk must cost at least one aggregate unit.
-        total += max(1, old_lines + new_lines)
-        if total > _DIFF_MAX_TOTAL_LINES:
+        total_lines += max(1, old_lines + new_lines)
+        if total_lines > _DIFF_MAX_TOTAL_LINES:
             return True
     return False
 

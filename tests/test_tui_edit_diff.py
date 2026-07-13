@@ -13,7 +13,9 @@ from textual.content import Content
 from wisp.tui.tool_output import (
     _DIFF_ADD_STYLE,
     _DIFF_DEL_STYLE,
+    _DIFF_MAX_HUNK_CHARS,
     _DIFF_MAX_HUNK_LINES,
+    _DIFF_MAX_TOTAL_CHARS,
     _DIFF_MAX_TOTAL_LINES,
     _DIFF_META_STYLE,
     _DIFF_PREVIEW_BYTES,
@@ -639,6 +641,90 @@ def test_guard_bounds_many_single_line_hunks(monkeypatch) -> None:
     count = _DIFF_MAX_TOTAL_LINES  # 2 lines/hunk \u00d7 this \u226b the ceiling
     hunks = tuple((f"old {i}", f"new {i}") for i in range(count))
     assert render_edit_diff(_edit(*hunks)) is None
+
+
+def test_guard_bounds_single_huge_line_by_chars(monkeypatch) -> None:
+    # A minified/generated file is a few enormous lines: it passes the LINE ceiling
+    # (one line) but splitting it and materializing the diff-line strings allocates
+    # megabytes before the display cap trims them. The per-side char ceiling must
+    # reject it before difflib runs.
+    import wisp.tui.tool_output as mod
+
+    def forbidden(*_a, **_k):
+        raise AssertionError("difflib must not run for a huge single-line hunk")
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", forbidden)
+
+    big = "x" * (_DIFF_MAX_HUNK_CHARS + 1)  # one line, over the char ceiling
+    assert render_edit_diff(_edit((big, big + "y"))) is None
+
+
+def test_guard_bounds_aggregate_chars_across_hunks(monkeypatch) -> None:
+    # Many hunks each under the per-hunk char ceiling but summing over the aggregate
+    # char ceiling must also fall back \u2014 the character mirror of the aggregate-line
+    # guard. Each is a single line, so the line guards never trip.
+    import wisp.tui.tool_output as mod
+
+    def forbidden(*_a, **_k):
+        raise AssertionError("difflib must not run when the total char ceiling is exceeded")
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", forbidden)
+
+    # Each side is well under _DIFF_MAX_HUNK_CHARS; a handful sum well over the
+    # total char ceiling. A single line each, so the aggregate *line* guard (which
+    # would only reach ~a few units here) never catches it \u2014 only the char total.
+    side = "x" * (_DIFF_MAX_HUNK_CHARS // 2)
+    hunk_count = (_DIFF_MAX_TOTAL_CHARS // len(side)) + 4
+    hunks = tuple((side, side + "y") for _ in range(hunk_count))
+    assert render_edit_diff(_edit(*hunks)) is None
+
+
+def test_guard_allows_edit_just_under_char_ceilings(monkeypatch) -> None:
+    # A single-line edit just under the per-hunk char ceiling (and under the
+    # aggregate) still produces a real diff \u2014 the char guard must not over-reject.
+    import wisp.tui.tool_output as mod
+
+    calls: list[tuple] = []
+    real = mod.difflib.unified_diff
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", spy)
+
+    # Under both the per-hunk (1 side) and aggregate (old+new) char ceilings.
+    side = "x" * (_DIFF_MAX_HUNK_CHARS - 100)
+    content = render_edit_diff(_edit((side, side[:-1])))
+    assert content is not None
+    assert len(calls) == 1
+
+
+def test_guard_measures_characters_not_encoded_bytes(monkeypatch) -> None:
+    # The guard deliberately bounds *characters* (len), not UTF-8-encoded bytes: the
+    # diff path keeps everything as Python ``str`` and never encodes the input, so
+    # char count — not encoded size — is the faithful proxy for its allocation. Pin
+    # that: a non-ASCII hunk whose encoded size is over the per-hunk ceiling but
+    # whose character count is under it must still diff, and difflib must run.
+    import wisp.tui.tool_output as mod
+
+    calls: list[tuple] = []
+    real = mod.difflib.unified_diff
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", spy)
+
+    # "€" is 1 character but 3 UTF-8 bytes. Sized just under the char ceiling, its
+    # encoded length is ~3x the ceiling — an encoded-byte guard would wrongly reject.
+    side = "€" * (_DIFF_MAX_HUNK_CHARS - 100)
+    assert len(side) < _DIFF_MAX_HUNK_CHARS
+    assert len(side.encode("utf-8")) > _DIFF_MAX_HUNK_CHARS
+    content = render_edit_diff(_edit((side, side[:-1])))
+    assert content is not None
+    assert len(calls) == 1
 
 
 def test_guard_aggregate_boundary_is_strict(monkeypatch) -> None:
