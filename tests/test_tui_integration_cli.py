@@ -1201,6 +1201,59 @@ def test_textual_tool_card_write_overwrite_without_snapshot_shows_summary() -> N
     assert "+replacement" not in text  # not rendered as a create-style diff
 
 
+def test_textual_tool_card_read_shows_summary_not_raw_output() -> None:
+    # Issue #74 PR C: a successful read renders its one-line summary in place of the
+    # raw file dump. The summary rides the result event (promoted from the tool's
+    # structured data); the card shows it instead of the output lines.
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(call_id="c1", name="read", arguments={"path": "foo.py"})
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="read",
+                    output="import os\nimport sys\nprint('hi')\n",
+                    is_error=False,
+                    summary="read 3 lines from foo.py",
+                )
+            )
+            await pilot.pause()
+            return "\n".join(_transcript_texts(app_instance))
+
+    text = anyio.run(scenario)
+    assert "✓ read" in text
+    assert "read 3 lines from foo.py" in text
+    assert "import os" not in text  # the raw output is replaced by the summary
+
+
+def test_textual_tool_card_grep_shows_match_summary() -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="grep", arguments={"pattern": "x"}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="grep",
+                    output="a.py:1:x\nb.py:2:x\nc.py:3:x\n",
+                    is_error=False,
+                    summary="grep: 3 matches",
+                )
+            )
+            await pilot.pause()
+            return "\n".join(_transcript_texts(app_instance))
+
+    text = anyio.run(scenario)
+    assert "✓ grep" in text
+    assert "grep: 3 matches" in text
+    assert "a.py:1:x" not in text  # raw matches replaced by the summary
+
+
 def test_textual_tool_card_edit_content_is_not_markup_injectable() -> None:
     # End-to-end injection guard: edit content containing markup metacharacters
     # must render literally in the transcript, never parsed as color markup.

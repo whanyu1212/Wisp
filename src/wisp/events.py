@@ -169,6 +169,10 @@ class ToolExecutionEnded(WispEvent):
     # renders as pure additions, an overwrite with no usable snapshot falls back to
     # the summary. False for every non-write tool. See ToolResultReady.created.
     created: bool = False
+    # One-line success summary for read-type tools (read/grep/find/ls), built from
+    # the tool's structured data. None for tools without one. See
+    # ToolResultReady.summary.
+    summary: str | None = None
 
 
 class ToolResultReady(WispEvent):
@@ -203,6 +207,14 @@ class ToolResultReady(WispEvent):
     # which must fall back to the plain summary rather than masquerade as a create.
     # A bounded JSON-safe scalar like before_text; False for every non-write tool.
     created: bool = False
+    # A concise one-line summary of a successful read-type tool (read/grep/find/ls),
+    # e.g. "read 42 lines from foo.py" or "grep: 3 matches", shown on the card in
+    # place of a raw output dump. Like the other promoted fields it is a bounded,
+    # JSON-safe scalar that must survive the RPC wire: the tool computes it from its
+    # own structured data (never by re-parsing output), the summary module bounds it
+    # at the source, and the executor promotes it only for tools that have one. None
+    # for diff/shell tools, unknown tools, and error paths.
+    summary: str | None = None
 
 
 class TurnCompleted(WispEvent):

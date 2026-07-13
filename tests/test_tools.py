@@ -40,6 +40,39 @@ def test_read_tool_supports_offset_limit_and_truncation(tmp_path: Path) -> None:
     assert result.data["line_count"] == 4
 
 
+def test_summary_module_reads_the_real_tool_data_keys(tmp_path: Path) -> None:
+    # Guard against the formatter and the tools drifting on data-key names (grep uses
+    # "matches", find uses "files", etc.): run each read-type tool for real and
+    # confirm summarize_tool_result produces a sensible summary from its actual data.
+    from wisp.tools.summary import summarize_tool_result
+
+    (tmp_path / "notes.txt").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("alpha again\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    read = run_tool(ReadTool(), {"path": "notes.txt"}, context)
+    assert summarize_tool_result("read", read.data) == "read 3 lines from notes.txt"
+
+    # Paging a slice of a file must report the returned lines and the file total, not
+    # the whole-file count — the P1 the review caught (summary replaces the dump).
+    paged = run_tool(ReadTool(), {"path": "notes.txt", "offset": 2, "limit": 1}, context)
+    assert paged.text == "beta\n"
+    assert summarize_tool_result("read", paged.data) == "read 1 line of 3 from notes.txt"
+
+    grep = run_tool(GrepTool(), {"pattern": "alpha"}, context)
+    assert summarize_tool_result("grep", grep.data) == "grep: 2 matches"
+
+    find = run_tool(FindTool(), {"pattern": "*.txt"}, context)
+    assert summarize_tool_result("find", find.data) == "find: 2 files"
+
+    ls = run_tool(LsTool(), {"path": "."}, context)
+    ls_summary = summarize_tool_result("ls", ls.data)
+    assert ls_summary is not None and ls_summary.startswith("ls: 2 entries in ")
+
+    grep_empty = run_tool(GrepTool(), {"pattern": "no-such-token-xyz"}, context)
+    assert summarize_tool_result("grep", grep_empty.data) == "grep: no matches"
+
+
 def test_read_tool_streams_requested_slice_with_line_count(tmp_path: Path) -> None:
     path = tmp_path / "large.log"
     path.write_text("".join(f"line {index}\n" for index in range(10_000)), encoding="utf-8")

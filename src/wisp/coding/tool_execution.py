@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 
 from wisp.agent.execution import ToolExecutionEvent
 from wisp.events import ToolApprovalRequested, ToolApprovalResolved, ToolExecutionEnded
@@ -12,6 +13,7 @@ from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import Tool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
+from wisp.tools.summary import summarize_tool_result
 
 # Tools whose ``ToolResult.data["exit_code"]`` carries genuine process
 # exit-status semantics. Gating promotion by name keeps a custom tool that
@@ -24,6 +26,26 @@ _EXIT_CODE_TOOLS = frozenset({"bash"})
 # extension tool that stashes an unrelated ``before_text`` can't inject content into
 # the diff renderer — only these tools' snapshots reach the event.
 _BEFORE_TEXT_TOOLS = frozenset({"write"})
+
+
+@dataclass(frozen=True)
+class _ToolRunOutcome:
+    """What running one tool produced, before it becomes a ToolExecutionEnded.
+
+    Bundles the output text with the narrow, JSON-safe scalars the executor promotes
+    from the structured ``ToolResult.data`` for the TUI — each gated to the tools it
+    applies to. The synthetic/error paths (parse error, unconfigured, blocked,
+    denied, raised) build one with just ``output``/``is_error`` and every promoted
+    field defaulted, so the presentation signals are absent exactly when there was no
+    real ToolResult to promote them from.
+    """
+
+    output: str
+    is_error: bool = False
+    exit_code: int | None = None
+    before_text: str | None = None
+    created: bool = False
+    summary: str | None = None
 
 
 class ConfiguredToolExecutor:
@@ -44,37 +66,23 @@ class ConfiguredToolExecutor:
 
     async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
         arguments = dict(tool_call.arguments)
-        output: str
-        is_error = False
-        # Promoted from a real ToolResult for shell-like tools; None for the
-        # synthetic error paths below (parse error, unconfigured, unknown tool,
-        # blocked, denied) and for tools without exit-code semantics.
-        exit_code: int | None = None
-        # Pre-write snapshot for the diff renderer; None for every non-write tool and
-        # for the synthetic/error paths, which never produce a ToolResult.
-        before_text: str | None = None
-        # Whether a write created a new file (vs. overwrote an existing one). Lets the
-        # renderer show a create as pure additions but fall back to the plain summary
-        # for an overwrite whose prior text couldn't be snapshotted. False for every
-        # non-write tool and every error path.
-        created = False
+        # The synthetic paths below (parse error, unconfigured, unknown tool, blocked,
+        # denied) never produce a ToolResult, so they build an outcome from just the
+        # message + is_error and leave every promoted signal at its default.
+        outcome: _ToolRunOutcome
 
         if tool_call.parse_error is not None:
-            output = tool_call.parse_error
-            is_error = True
+            outcome = _ToolRunOutcome(tool_call.parse_error, is_error=True)
         elif self._registry is None:
-            output = "Tool execution is not configured"
-            is_error = True
+            outcome = _ToolRunOutcome("Tool execution is not configured", is_error=True)
         else:
             try:
                 tool = self._registry.get(tool_call.name)
             except UnknownToolError as exc:
-                output = str(exc)
-                is_error = True
+                outcome = _ToolRunOutcome(str(exc), is_error=True)
             else:
                 if not self._policy.allows(tool):
-                    output = self._policy.block_reason(tool)
-                    is_error = True
+                    outcome = _ToolRunOutcome(self._policy.block_reason(tool), is_error=True)
                 elif self._approval_policy.requires_approval(
                     tool
                 ) and not self._approval_policy.approves(tool):
@@ -101,41 +109,42 @@ class ConfiguredToolExecutor:
                         reason=decision.reason,
                     )
                     if decision.approved:
-                        output, is_error, exit_code, before_text, created = await self._run_tool(
-                            tool, arguments
-                        )
+                        outcome = await self._run_tool(tool, arguments)
                     else:
-                        output = decision.reason or "Tool execution was not approved"
-                        is_error = True
+                        outcome = _ToolRunOutcome(
+                            decision.reason or "Tool execution was not approved",
+                            is_error=True,
+                        )
                 else:
-                    output, is_error, exit_code, before_text, created = await self._run_tool(
-                        tool, arguments
-                    )
+                    outcome = await self._run_tool(tool, arguments)
 
         yield ToolExecutionEnded(
             call_id=tool_call.call_id,
             name=tool_call.name,
-            output=output,
-            is_error=is_error,
-            exit_code=exit_code,
-            before_text=before_text,
-            created=created,
+            output=outcome.output,
+            is_error=outcome.is_error,
+            exit_code=outcome.exit_code,
+            before_text=outcome.before_text,
+            created=outcome.created,
+            summary=outcome.summary,
         )
 
-    async def _run_tool(
-        self, tool: Tool, arguments: dict[str, object]
-    ) -> tuple[str, bool, int | None, str | None, bool]:
+    async def _run_tool(self, tool: Tool, arguments: dict[str, object]) -> _ToolRunOutcome:
+        # Reading result.text/result.data stays inside the try: a tool may return a
+        # result object whose fields raise on access (a malformed extension tool), and
+        # that must degrade to a model-visible error like any other tool failure, not
+        # crash the loop.
         try:
             result = await tool.run(arguments, self._context)
-            return (
-                result.text,
-                False,
-                _promote_exit_code(tool.name, result.data),
-                _promote_before_text(tool.name, result.data),
-                _promote_created(tool.name, result.data),
+            return _ToolRunOutcome(
+                output=result.text,
+                exit_code=_promote_exit_code(tool.name, result.data),
+                before_text=_promote_before_text(tool.name, result.data),
+                created=_promote_created(tool.name, result.data),
+                summary=summarize_tool_result(tool.name, result.data),
             )
         except Exception as exc:  # noqa: BLE001 - tool failures are model-visible results
-            return str(exc), True, None, None, False
+            return _ToolRunOutcome(str(exc), is_error=True)
 
 
 def _promote_exit_code(name: str, data: Mapping[str, object]) -> int | None:
