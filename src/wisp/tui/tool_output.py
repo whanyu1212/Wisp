@@ -63,14 +63,20 @@ _DIFF_PREVIEW_BYTES = _TOOL_OUTPUT_PREVIEW_BYTES
 # Upfront guard on the *work* of diffing, distinct from the display bounds above.
 # difflib.unified_diff runs an O(n*m) SequenceMatcher whose full cost is paid the
 # moment its generator is first advanced — so early-stopping its output cannot
-# bound it; only refusing to start can. Its cost driver is *line count* (n and m),
-# not bytes: one 2 MB line diffs in O(1), while tens of thousands of short lines
-# is the expensive case. So we gate on per-side line count and, above the ceiling,
-# skip difflib entirely and fall back to the generic summary. A whole-file
-# replacement (the case this guards: e.g. 50k lines) is one giant hunk far over
-# the ceiling and never reaches the matcher; an 8-line preview of a 50k-line
-# rewrite is not review signal anyway. At the ceiling the worst case is a few ms
-# on the event loop and a few thousand transient diff lines — measured, bounded.
+# bound it; only refusing to start can. The dominant cost scales with *line count*
+# (n and m), not bytes: one 2 MB line diffs in O(1), while tens of thousands of
+# short lines is the expensive case. So we gate on per-side line count and, above
+# the ceiling, skip difflib entirely and fall back to the generic summary. A
+# whole-file replacement (the case this guards: e.g. 50k lines) is one giant hunk
+# far over the ceiling and never reaches the matcher; an 8-line preview of a
+# 50k-line rewrite is not review signal anyway.
+#
+# This bounds the matcher's *dimensions* and the transient diff-line count, which
+# is what the reported flooding needed. It is not a hard wall-clock bound: at the
+# ceiling a pathological repeated-line pattern can still take a few hundred ms in
+# SequenceMatcher. A hard event-loop latency bound would need off-thread diffing —
+# out of scope here; the ceiling is chosen so a *typical* at-limit edit stays in
+# the low-ms range while pathological ones remain sub-second rather than unbounded.
 _DIFF_MAX_HUNK_LINES = 4000
 
 # Many hunks each just under the per-hunk ceiling still sum to unbounded work, so
@@ -80,11 +86,12 @@ _DIFF_MAX_TOTAL_LINES = 8000
 # The single-character boundaries ``str.splitlines`` breaks on. The work guard
 # below must count boundaries the SAME way the diff later splits them, or an input
 # that splits into many lines slips past an undercounting guard and still starts
-# the matcher. This is every separator CPython's ``splitlines`` recognizes except
-# ``\r\n`` (handled separately as a two-char sequence): LF, CR, vertical tab, form
-# feed, the file/group/record/unit separators, NEL, and the Unicode line/para
-# separators. Counting each with ``str.count`` stays allocation-free — we never
-# build the line list ``splitlines`` would.
+# the matcher. These are the ten single-code-point separators CPython's
+# ``splitlines`` recognizes (``\r\n`` is handled separately as a two-char
+# sequence): LF, CR, vertical tab, form feed, the file/group/record separators
+# (but NOT the unit separator U+001F, which splitlines does not break on), NEL,
+# and the Unicode line/paragraph separators. Counting each with ``str.count`` stays
+# allocation-free — we never build the line list ``splitlines`` would.
 _SPLITLINES_SEPARATORS = (
     "\n",  # line feed
     "\r",  # carriage return (lone; \r\n corrected below)
@@ -378,11 +385,12 @@ def _line_boundary_count(text: str) -> int:
     The guard must count boundaries the *same way* ``_single_hunk_lines`` later
     splits, or an input that splits into many lines slips past an undercounting
     guard and still starts the matcher. ``_single_hunk_lines`` splits with
-    ``str.splitlines``, which breaks on eight single characters (LF, CR, VT, FF,
-    the file/group/record/unit separators, NEL, and the Unicode line/paragraph
-    separators) plus the two-char ``\\r\\n``. A guard that counted only ``\\n``
-    would let a large VT- or U+2028-delimited edit through — the same event-loop
-    stall the guard exists to prevent — so we count *every* separator.
+    ``str.splitlines``, which breaks on ten single-code-point separators (the set
+    in :data:`_SPLITLINES_SEPARATORS`: LF, CR, VT, FF, the file/group/record
+    separators, NEL, and the Unicode line/paragraph separators) plus the two-char
+    ``\\r\\n``. A guard that counted only ``\\n`` would let a large VT- or
+    U+2028-delimited edit through — the same event-loop stall the guard exists to
+    prevent — so we count *every* separator.
 
     Each separator is counted with allocation-free ``str.count`` (a C scan; ten
     of them still beat a Python per-character loop, and we never build the line
