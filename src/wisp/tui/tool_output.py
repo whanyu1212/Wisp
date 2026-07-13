@@ -395,13 +395,19 @@ def _single_hunk_lines(old: str, new: str) -> list[str]:
 def _terminator_note(marker: str, content: str) -> str:
     """A compact, literal annotation of a changed line's stripped terminator.
 
-    Returns ``""`` for the ordinary LF ending (the common case, no noise), a
-    git-style ``⏎ no newline`` when the line had no terminator, or ``⏎ CRLF``
-    for a carriage-return ending. Only ``+``/``-`` lines are annotated: an
-    unchanged context line's terminator is the same before and after, so marking
-    it would be noise. Annotating the changed sides is what lets a newline-only
-    edit show its direction — ``a`` → ``a\\n`` annotates the deleted side
-    ``no newline`` while the reverse annotates the added side, so the two differ.
+    Returns ``""`` for the ordinary LF ending (the common case, no noise) or a
+    git-style marker for a notable one: ``⏎ CRLF`` (Windows), ``⏎ CR`` (a lone
+    carriage return — classic Mac, which ``splitlines`` also treats as a line
+    end), or ``⏎ no newline`` when the line had no terminator at all. Only
+    ``+``/``-`` lines are annotated: an unchanged context line's terminator is
+    the same before and after, so marking it would be noise. Annotating the
+    changed sides is what lets a newline-only edit show its direction — ``a`` →
+    ``a\\n`` annotates the deleted side ``no newline`` while the reverse annotates
+    the added side, so the two differ.
+
+    The endings are checked longest-first so ``\\r\\n`` is never misread as a
+    lone ``\\r`` (it ends in ``\\n``, so only the explicit ``\\r\\n`` test matches
+    it).
     """
 
     if marker not in ("+", "-"):
@@ -410,6 +416,8 @@ def _terminator_note(marker: str, content: str) -> str:
         return "  ⏎ CRLF"
     if content.endswith("\n"):
         return ""
+    if content.endswith("\r"):
+        return "  ⏎ CR"
     return "  ⏎ no newline"
 
 

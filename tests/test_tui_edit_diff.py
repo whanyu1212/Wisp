@@ -16,6 +16,8 @@ from wisp.tui.tool_output import (
     _DIFF_META_STYLE,
     _DIFF_PREVIEW_BYTES,
     _DIFF_PREVIEW_LINES,
+    _clip_line_to_bytes,
+    _unified_diff_lines,
     render_edit_diff,
     render_tool_result,
 )
@@ -178,6 +180,24 @@ def test_render_edit_diff_crlf_conversion_shows_direction() -> None:
     assert "+x  ⏎ CRLF" in lf_to_crlf.plain
 
 
+def test_render_edit_diff_lone_cr_shows_direction_and_is_not_no_newline() -> None:
+    # splitlines(keepends=True) treats a lone "\r" (classic-Mac line ending) as a
+    # terminator, so a CR change must render distinctly and be labeled as a CR —
+    # not collapse to an identical, mislabeled "no newline" on both sides.
+    added_cr = render_edit_diff(_edit(("a", "a\r")))
+    removed_cr = render_edit_diff(_edit(("a\r", "a")))
+    assert added_cr is not None and removed_cr is not None
+    assert added_cr.plain != removed_cr.plain
+    # The CR side is labeled CR (the terminator it has), never "no newline".
+    assert "+a  ⏎ CR" in added_cr.plain
+    assert "-a  ⏎ CR" in removed_cr.plain
+    # And a genuine CRLF is not misread as a lone CR.
+    crlf_to_lf = render_edit_diff(_edit(("x\r\ny", "x\ny")))
+    assert crlf_to_lf is not None
+    assert "⏎ CRLF" in crlf_to_lf.plain
+    assert "⏎ CR\n" not in crlf_to_lf.plain
+
+
 def test_render_edit_diff_does_not_annotate_unchanged_context() -> None:
     # A terminator note belongs only on changed (+/-) lines. An unchanged context
     # line's terminator is identical before and after, so annotating it — even
@@ -255,23 +275,43 @@ def test_render_edit_diff_bounds_single_enormous_line() -> None:
     # A diff with just one gigantic line stays under the line cap, so a line-only
     # bound would let it through. The byte budget must still cap it and report the
     # hidden bytes honestly, or one minified/generated line floods the transcript.
-    big = "x" * 250_000
-    content = render_edit_diff(_edit((big, big + "y")))
-    rendered_bytes = len(content.plain.encode("utf-8"))
-    # Bounded to roughly the byte budget (plus the short path header and trailer),
-    # nowhere near the 250 KB input.
-    assert rendered_bytes <= _DIFF_PREVIEW_BYTES + 200
-    assert "bytes hidden" in content.plain
+    #
+    # The trailer count is asserted exactly (hidden = total − kept), derived from
+    # the same diff-line primitive the renderer uses, so a drift in the accounting
+    # is caught — not merely that "bytes hidden" appears somewhere.
+    old = "x" * 5_000
+    content = render_edit_diff(_edit((old, old + "y")))
+
+    # Total diff-line content bytes (what the renderer measures against the budget)
+    # and what actually survived in the rendered body.
+    total_bytes = sum(len(line.encode("utf-8")) for line in _unified_diff_lines([(old, old + "y")]))
+    kept_bytes = sum(
+        len(line.encode("utf-8"))
+        for line in content.plain.split("\n")
+        if line.startswith(("@@", "-", "+"))
+    )
+    assert kept_bytes <= _DIFF_PREVIEW_BYTES
+    hidden_bytes = total_bytes - kept_bytes
+    # The single addition line was entirely dropped (1 more line), and the clipped
+    # deleted line's remaining bytes are reported exactly.
+    assert f"... 1 more line, {hidden_bytes} bytes hidden" in content.plain
 
 
-def test_render_edit_diff_byte_clip_stays_valid_utf8() -> None:
-    # Clipping a huge line to the byte budget must land on a character boundary,
-    # never emit invalid UTF-8 by cutting a multibyte character in half.
-    multibyte = "☃" * 100_000  # 3 bytes each
-    content = render_edit_diff(_edit((multibyte, multibyte + "z")))
-    # Re-encoding round-trips only if the clipped text is well-formed.
-    content.plain.encode("utf-8")
-    assert len(content.plain.encode("utf-8")) <= _DIFF_PREVIEW_BYTES + 200
+def test_clip_line_to_bytes_drops_partial_multibyte_char() -> None:
+    # A budget landing *inside* a multibyte character must drop that partial
+    # character entirely — never emit a U+FFFD replacement or invalid UTF-8.
+    # "☃" is 3 bytes; a budget of 7 covers two whole snowmen (6 bytes) and one
+    # byte of the third, which must be discarded.
+    clipped = _clip_line_to_bytes("☃☃☃", 7)
+    assert clipped == "☃☃"
+    assert "�" not in clipped  # no replacement char from a mid-char cut
+    assert len(clipped.encode("utf-8")) <= 7
+
+
+def test_clip_line_to_bytes_returns_line_unchanged_when_it_fits() -> None:
+    assert _clip_line_to_bytes("short", 100) == "short"
+    # Exact-fit boundary: a line whose byte length equals the budget is kept whole.
+    assert _clip_line_to_bytes("☃☃", 6) == "☃☃"
 
 
 # --- Dispatch: render_tool_result routes edit successes here ------------------
