@@ -332,6 +332,7 @@ class TextualTuiRenderer:
                     exit_code=event.exit_code,
                     before_text=event.before_text,
                     created=event.created,
+                    summary=event.summary,
                 ),
                 elapsed=self._tool_elapsed(event.call_id, event.timestamp),
             )

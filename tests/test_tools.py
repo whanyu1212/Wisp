@@ -40,6 +40,52 @@ def test_read_tool_supports_offset_limit_and_truncation(tmp_path: Path) -> None:
     assert result.data["line_count"] == 4
 
 
+def test_summary_module_reads_the_real_tool_data_keys(tmp_path: Path) -> None:
+    # Guard against the formatter and the tools drifting on data-key names (grep uses
+    # "matches", find uses "files", etc.): run each read-type tool for real and
+    # confirm summarize_tool_result produces a sensible summary from its actual data.
+    from wisp.tools.summary import summarize_tool_result
+
+    (tmp_path / "notes.txt").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("alpha again\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    def summary_of(name: str, result: ToolResult) -> str | None:
+        # Call it exactly as the executor does — with the tool's own truncated flag.
+        return summarize_tool_result(name, result.data, truncated=result.truncated)
+
+    read = run_tool(ReadTool(), {"path": "notes.txt"}, context)
+    assert summary_of("read", read) == "read 3 lines from notes.txt"
+
+    # Paging a slice of a file must report the returned lines and the file total, not
+    # the whole-file count — the P1 the review caught (summary replaces the dump).
+    paged = run_tool(ReadTool(), {"path": "notes.txt", "offset": 2, "limit": 1}, context)
+    assert paged.text == "beta\n"
+    assert summary_of("read", paged) == "read 1 line of 3 from notes.txt"
+
+    grep = run_tool(GrepTool(), {"pattern": "alpha"}, context)
+    assert summary_of("grep", grep) == "grep: 2 matches"
+
+    find = run_tool(FindTool(), {"pattern": "*.txt"}, context)
+    assert summary_of("find", find) == "find: 2 files"
+
+    ls = run_tool(LsTool(), {"path": "."}, context)
+    ls_summary = summary_of("ls", ls)
+    assert ls_summary is not None and ls_summary.startswith("ls: 2 entries in ")
+
+    grep_empty = run_tool(GrepTool(), {"pattern": "no-such-token-xyz"}, context)
+    assert summary_of("grep", grep_empty) == "grep: no matches"
+
+    # A capped grep sets ToolResult.truncated; the summary must carry the "+ more"
+    # cue — the P2 the review caught (summary replaces the raw [truncated] marker).
+    for index in range(20):
+        (tmp_path / f"hit-{index}.txt").write_text("needle here\n", encoding="utf-8")
+    capped = run_tool(GrepTool(), {"pattern": "needle", "max_results": 5}, context)
+    assert capped.truncated is True
+    capped_summary = summary_of("grep", capped)
+    assert capped_summary is not None and capped_summary.endswith("(+ more)")
+
+
 def test_read_tool_streams_requested_slice_with_line_count(tmp_path: Path) -> None:
     path = tmp_path / "large.log"
     path.write_text("".join(f"line {index}\n" for index in range(10_000)), encoding="utf-8")

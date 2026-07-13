@@ -48,7 +48,7 @@ class ReadTool:
             raise ToolError(f"File does not exist: {display_tool_path(path, context)}")
 
         try:
-            selected, line_count, stream_truncated = _read_line_slice(
+            selected, line_count, selected_count, stream_truncated = _read_line_slice(
                 path,
                 offset=offset,
                 limit=limit,
@@ -63,7 +63,12 @@ class ReadTool:
             text=truncated.text,
             data={
                 "path": display_tool_path(path, context),
+                # ``line_count`` is the whole file; ``selected_count`` is the lines the
+                # offset/limit slice returned. The summary needs the latter so it
+                # doesn't claim the whole file was read when only a slice was.
+                # (Truncation reaches the summary via ToolResult.truncated below.)
                 "line_count": line_count,
+                "selected_count": selected_count,
                 "offset": offset,
                 "limit": limit,
             },
@@ -221,7 +226,7 @@ def _read_line_slice(
     limit: int | None,
     max_bytes: int,
     max_lines: int,
-) -> tuple[str, int, bool]:
+) -> tuple[str, int, int, bool]:
     selected_parts: list[str] = []
     line_count = 0
     selected_count = 0
@@ -264,7 +269,7 @@ def _read_line_slice(
             buffered_bytes += len(encoded_line)
             buffered_lines += 1
 
-    return "".join(selected_parts), line_count, truncated
+    return "".join(selected_parts), line_count, selected_count, truncated
 
 
 def _parse_edits(arguments: Mapping[str, object]) -> list[tuple[str, str]]:

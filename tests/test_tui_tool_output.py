@@ -235,3 +235,42 @@ def test_render_tool_result_zero_exit_stays_generic() -> None:
     # exit 0 is success — it must not trigger the failure path.
     via_dispatch = render_tool_result("bash", {}, "ok\ndone", is_error=False, exit_code=0)
     assert via_dispatch == render_generic("ok\ndone")
+
+
+def test_render_tool_result_shows_summary_in_place_of_output() -> None:
+    # A read-type tool carries a promoted one-line summary; the dispatcher returns it
+    # instead of a raw dump of the (much longer) output.
+    output = "\n".join(f"line-{i}" for i in range(40))
+    via_dispatch = render_tool_result(
+        "read",
+        {"path": "foo.py"},
+        output,
+        is_error=False,
+        exit_code=None,
+        summary="read 40 lines from foo.py",
+    )
+    assert via_dispatch == "read 40 lines from foo.py"
+
+
+def test_render_tool_result_no_summary_falls_back_to_generic() -> None:
+    # Without a summary (e.g. an unknown tool, or a covered tool that produced no
+    # structured facts) the success path is unchanged: the generic preview.
+    via_dispatch = render_tool_result(
+        "read", {}, "raw\noutput", is_error=False, exit_code=None, summary=None
+    )
+    assert via_dispatch == render_generic("raw\noutput")
+
+
+def test_render_tool_result_failed_read_uses_error_not_summary() -> None:
+    # A failed read still renders the error, never the summary — a summary is only a
+    # success affordance.
+    result = render_tool_result(
+        "read",
+        {"path": "foo.py"},
+        "read failed: file not found",
+        is_error=True,
+        exit_code=None,
+        summary="read 40 lines from foo.py",
+    )
+    assert result == render_error("read failed: file not found", exit_code=None)
+    assert "read 40 lines" not in result

@@ -333,3 +333,65 @@ def test_pure_loop_forwards_before_text_across_the_wire() -> None:
     assert ended.before_text == "old\n"
     assert ended.created is False
     assert wisp_event_from_json(ended.model_dump_json()).before_text == "old\n"
+
+
+class SummaryExecutor:
+    """Emits a terminal result carrying a one-line summary, like a read-type tool."""
+
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        yield ToolExecutionEnded(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            output="line 1\nline 2\nline 3\n",
+            is_error=False,
+            summary="read 3 lines from f.txt",
+        )
+
+
+def test_pure_loop_forwards_summary_across_the_wire() -> None:
+    # A read-type tool's one-line summary must reach ToolResultReady AND survive
+    # serialization — the renderer shows it in place of the raw output, so a summary
+    # that doesn't round-trip would silently fall back to the dump.
+    call = ToolCall(
+        call_id="call-1",
+        name="read",
+        arguments={"path": "f.txt"},
+        response_id="response-1",
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    response_id="response-1",
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="response-2"),
+                ProviderTextDelta(delta="done"),
+                ProviderResponseCompleted(content="done", response_id="response-2"),
+            ],
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=SummaryExecutor()),
+                messages=(Message(role="user", content="read f.txt"),),
+            )
+        ]
+
+    events = anyio.run(run)
+
+    result = next(event for event in events if isinstance(event, ToolResultReady))
+    assert result.summary == "read 3 lines from f.txt"
+    assert wisp_event_from_json(result.model_dump_json()).summary == "read 3 lines from f.txt"
+    ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
+    assert ended.summary == "read 3 lines from f.txt"
+    assert wisp_event_from_json(ended.model_dump_json()).summary == "read 3 lines from f.txt"

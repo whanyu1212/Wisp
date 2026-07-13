@@ -8,8 +8,9 @@ raw output itself.
 Design — strict core, tolerant edge:
 
 * Built-in tools are a small, known set whose result shape we own. They get
-  explicit rendering from promoted, typed facts (today, a shell ``exit_code``;
-  later PRs add diffs and structured summaries) for high-fidelity detail.
+  explicit rendering from promoted, typed facts — a shell ``exit_code``, an edit or
+  write before/after diff, and a read-type tool's one-line summary — for
+  high-fidelity detail.
 * Custom / third-party tools are an open set we do not control. They fall through
   to a permissive generic renderer that never assumes a shape and degrades
   gracefully to bounded output.
@@ -148,6 +149,7 @@ def render_tool_result(
     exit_code: int | None,
     before_text: str | None = None,
     created: bool = False,
+    summary: str | None = None,
 ) -> str | Content:
     """Render terminal tool output into bounded card detail.
 
@@ -156,12 +158,14 @@ def render_tool_result(
     for tools without exit-code semantics. ``before_text`` is the promoted pre-write
     file snapshot for the write tool, or None; ``created`` says whether that write
     made a new file, which disambiguates a None snapshot (create vs. uncapturable
-    overwrite).
+    overwrite). ``summary`` is the promoted one-line success summary for read-type
+    tools (read/grep/find/ls), or None.
 
-    Returns a plain ``str`` for the error/generic paths (the widget escapes it as
-    untrusted markup) or a Textual ``Content`` for a colored diff (already styled
-    with literal, unparsed text — the widget renders it directly). Unknown tools and
-    successful results fall back to :func:`render_generic`.
+    Returns a plain ``str`` for the error/generic/summary paths (the widget escapes
+    it as untrusted markup) or a Textual ``Content`` for a colored diff (already
+    styled with literal, unparsed text — the widget renders it directly). Unknown
+    tools and successful results without a summary fall back to
+    :func:`render_generic`.
     """
 
     if tool_result_failed(is_error, exit_code):
@@ -178,6 +182,12 @@ def render_tool_result(
         diff = render_write_diff(before_text, arguments, created=created)
         if diff is not None:
             return diff
+    # A read-type tool (read/grep/find/ls) carries a one-line success summary the
+    # executor built from its structured data. The summary is only ever set for
+    # those tools, so its presence is the signal — no per-tool check needed here.
+    # It replaces the raw output dump; the full output returns via expand/collapse.
+    if summary is not None:
+        return summary
     return render_generic(output)
 
 
