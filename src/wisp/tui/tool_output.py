@@ -378,6 +378,8 @@ def _parse_edit_hunks(arguments: Mapping[str, object]) -> list[tuple[str, str]]:
     and the diff both operate on plain strings, so a ``str`` subclass with a
     stateful ``__eq__`` (which could answer the no-op check differently across the
     two passes and let unbounded work slip past the guard) cannot reach either.
+    ``str.__str__`` is called unbound rather than ``str(old)`` so the result is an
+    exact built-in even for a subclass whose ``__str__`` returns ``self``.
     """
 
     raw_edits = arguments.get("edits")
@@ -391,7 +393,7 @@ def _parse_edit_hunks(arguments: Mapping[str, object]) -> list[tuple[str, str]]:
         new = item.get("newText")
         if not isinstance(old, str) or not isinstance(new, str):
             return []
-        hunks.append((str(old), str(new)))
+        hunks.append((str.__str__(old), str.__str__(new)))
     return hunks
 
 

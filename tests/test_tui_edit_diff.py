@@ -580,8 +580,10 @@ def test_guard_survives_stateful_str_subclass(monkeypatch) -> None:
     # The no-op filter and the work guard must agree on which hunks change. A str
     # subclass with a stateful __eq__ (equal on the first compare, not after) could
     # otherwise be judged a no-op by one pass and a change by the other, charging
-    # the guard zero while difflib still runs per hunk. Arguments are coerced to
+    # the guard zero while difflib still runs per hunk. Arguments are coerced to a
     # built-in str at the parse boundary, so the subclass never reaches the guard.
+    # This subclass also overrides __str__ to return itself, so the coercion must
+    # use str.__str__ (not str(), which such a subclass would pass through).
     import wisp.tui.tool_output as mod
 
     class FlipStr(str):
@@ -593,6 +595,9 @@ def test_guard_survives_stateful_str_subclass(monkeypatch) -> None:
         def __eq__(self, other: object) -> bool:
             self._compares += 1  # type: ignore[attr-defined]
             return self._compares == 1  # equal once (guard), then not (diff)
+
+        def __str__(self) -> str:
+            return self  # str() would not normalize this; str.__str__ must
 
         def __hash__(self) -> int:
             return super().__hash__()
