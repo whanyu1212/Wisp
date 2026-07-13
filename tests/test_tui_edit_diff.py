@@ -411,8 +411,10 @@ def test_guard_below_threshold_still_diffs(monkeypatch) -> None:
     # Exactly at the ceiling (not over) — the guard uses a strict `>`, so this
     # still diffs. A full replacement renders deletions first, so the 8-line
     # preview shows the leading "-" lines (the "+" additions fall past the cap).
-    old = _text_with_lines(_DIFF_MAX_HUNK_LINES, "a")
-    new = _text_with_lines(_DIFF_MAX_HUNK_LINES, "b")
+    # The side ends in a trailing newline (an ordinary file), so the line count
+    # must be exact: 4000 lines score 4000, not 4001, and stay at the ceiling.
+    old = _text_with_lines(_DIFF_MAX_HUNK_LINES, "a") + "\n"
+    new = _text_with_lines(_DIFF_MAX_HUNK_LINES, "b") + "\n"
     content = render_edit_diff(_edit((old, new)))
     assert content is not None
     assert "-a0" in content.plain  # a real diff was produced, not the fallback
@@ -518,19 +520,56 @@ def test_line_boundary_count_matches_splitlines() -> None:
     assert _line_boundary_count(mixed) == len(mixed.splitlines()) - 1
 
 
-def test_line_count_charges_a_non_empty_side_at_least_one() -> None:
-    # _line_count must never score a non-empty side as zero, or many single-line
-    # hunks (which have no separators) accumulate no aggregate cost. It is an
-    # upper bound on splitlines' line count: exact without a trailing separator,
-    # one over with one \u2014 over-counting is the safe direction for a work guard.
+def test_line_count_matches_splitlines_exactly() -> None:
+    # _line_count must equal len(splitlines()) exactly \u2014 a single-line hunk still
+    # costs one (so many tiny hunks accumulate), and a file ending in a separator
+    # is not over-counted (so an ordinary 4000-line file keeps its diff at the
+    # ceiling instead of losing it a line early).
     from wisp.tui.tool_output import _line_count
 
     assert _line_count("") == 0  # empty side contributes nothing
     assert _line_count("one line") == 1  # a single-line hunk still costs one
-    assert _line_count("a\nb\nc") == 3
-    # Upper-bound invariant across mixed separators, with and without a trailer.
-    for text in ("x", "a\nb", "a\rb", "trailing\n", "\n", "a\nb\n", "caf\u00e9\u2028th\u00e9"):
-        assert _line_count(text) >= len(text.splitlines())
+    cases = (
+        "x",
+        "a\nb",
+        "a\nb\nc",
+        "a\rb",
+        "trailing\n",  # a trailing separator does not add a phantom line
+        "\n",
+        "a\nb\n",
+        "a\r\nb\r\n",
+        "x\vy",
+        "caf\u00e9\u2028th\u00e9",
+    )
+    for text in cases:
+        assert _line_count(text) == len(text.splitlines()), repr(text)
+
+
+def test_guard_bounds_many_no_op_hunks(monkeypatch) -> None:
+    # A no-op hunk (old == new, including both-empty) produces no diff, so it must
+    # be skipped BEFORE difflib \u2014 not diffed and then discarded. Otherwise a batch
+    # of many no-op hunks re-opens the many-hunks work bypass: difflib once per
+    # hunk. It must run zero times, and a real change after them still diffs.
+    import wisp.tui.tool_output as mod
+
+    calls: list[tuple] = []
+    real = mod.difflib.unified_diff
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", spy)
+
+    # Thousands of both-empty no-op hunks: difflib must never run.
+    empties = tuple(("", "") for _ in range(_DIFF_MAX_TOTAL_LINES + 1))
+    assert render_edit_diff(_edit(*empties)) is None
+    assert calls == []
+
+    # The same batch followed by one real change: only the real hunk is diffed.
+    calls.clear()
+    assert render_edit_diff(_edit(*empties, ("a", "b"))) is not None
+    assert len(calls) == 1
 
 
 def test_guard_bounds_many_single_line_hunks(monkeypatch) -> None:
@@ -554,8 +593,8 @@ def test_guard_bounds_many_single_line_hunks(monkeypatch) -> None:
 
 def test_guard_aggregate_boundary_is_strict(monkeypatch) -> None:
     # The aggregate ceiling uses a strict ">": a total of exactly
-    # _DIFF_MAX_TOTAL_LINES still diffs, one boundary more falls back. This pins
-    # the boundary directly rather than jumping from 8000 to 16000.
+    # _DIFF_MAX_TOTAL_LINES still diffs, one line more falls back. This pins the
+    # boundary directly rather than jumping from 8000 to 16000.
     import wisp.tui.tool_output as mod
 
     calls: list[tuple] = []

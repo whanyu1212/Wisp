@@ -404,25 +404,27 @@ def _line_boundary_count(text: str) -> int:
 
 
 def _line_count(text: str) -> int:
-    """An allocation-free upper bound on the lines ``str.splitlines`` yields.
+    """The number of lines ``str.splitlines`` yields for ``text``, allocation-free.
 
-    A non-empty side is charged its separator count plus one, so it is never
-    scored as free: a single-line hunk (zero separators) still counts as one line.
-    An empty side is zero. This is an *upper* bound, not exact — a trailing
-    separator does not start a new line for ``splitlines`` (``"a\\n"`` is one
-    line), so this over-counts by one there. For a work guard, over-counting is
-    the safe direction: it can only make the guard trip earlier, never let
-    oversize input through.
+    Equal to the separator count plus one for the trailing run of text — unless
+    the text ends in a separator, since ``splitlines`` treats a terminator as
+    *ending* a line, not starting a new one (``"a\\n"`` is one line, not two). An
+    empty string is zero lines. Exact agreement with ``splitlines`` matters at the
+    ceiling: an ordinary file ending in a newline would otherwise be miscounted
+    by one and lose its diff a line early.
 
     Distinct from :func:`_line_boundary_count` — that returns separators; this
-    returns (bounded) lines — because the aggregate guard must count each hunk's
-    real per-hunk cost. ``_unified_diff_lines`` runs difflib once per hunk, so a
-    single-line hunk costs one run; counting *boundaries* there would score it
+    returns lines — because the aggregate guard must count each hunk's real
+    per-hunk cost. ``_unified_diff_lines`` runs difflib once per changed hunk, so
+    a single-line hunk costs one run; counting *boundaries* there would score it
     free and let thousands of tiny hunks accumulate unbounded work. Counting
-    *lines* charges each hunk at least one.
+    *lines* charges each non-empty side at least one.
     """
 
-    return _line_boundary_count(text) + 1 if text else 0
+    if not text:
+        return 0
+    boundaries = _line_boundary_count(text)
+    return boundaries if text.endswith(_SPLITLINES_SEPARATORS) else boundaries + 1
 
 
 def _edit_input_too_large(hunks: Sequence[tuple[str, str]]) -> bool:
@@ -433,26 +435,33 @@ def _edit_input_too_large(hunks: Sequence[tuple[str, str]]) -> bool:
     calling it. There are two independent cost axes and this guards both:
 
     * A single huge hunk — bounded per side against :data:`_DIFF_MAX_HUNK_LINES`.
-    * Many hunks — ``_unified_diff_lines`` runs difflib once *per hunk*, so a call
-      with thousands of tiny one-line hunks (a generated batch of replacements)
-      is as expensive as one giant hunk even though each hunk is small. The
-      aggregate line count across all hunks is bounded against
-      :data:`_DIFF_MAX_TOTAL_LINES`, and because a non-empty side counts as at
-      least one line, each hunk contributes to the total whether or not it spans
-      multiple lines.
+    * Many hunks — ``_unified_diff_lines`` runs difflib once per *changed* hunk,
+      so a call with thousands of tiny one-line changes (a generated batch of
+      replacements) is as expensive as one giant hunk. The aggregate line count
+      across the changed hunks is bounded against :data:`_DIFF_MAX_TOTAL_LINES`,
+      and each changed hunk is charged at least one unit so even single-character
+      edits accumulate toward the total.
 
-    Both checks short-circuit, so an oversize input is rejected on its first scan.
-    Line counts come from :func:`_line_count` (allocation-free), so the decision
-    never materializes the line lists ``splitlines`` would.
+    No-op hunks (``old == new``) are skipped here exactly as ``_unified_diff_lines``
+    skips them before difflib, so the guard's accounting matches the work actually
+    done — a batch of no-op hunks costs nothing and cannot re-open the many-hunks
+    bypass. Both checks short-circuit, so an oversize input is rejected on its
+    first scan, and line counts come from :func:`_line_count` (allocation-free) so
+    the decision never materializes the line lists ``splitlines`` would.
     """
 
     total = 0
     for old, new in hunks:
+        if old == new:
+            continue  # skipped before difflib in _unified_diff_lines too — no cost
         old_lines = _line_count(old)
         new_lines = _line_count(new)
         if old_lines > _DIFF_MAX_HUNK_LINES or new_lines > _DIFF_MAX_HUNK_LINES:
             return True
-        total += old_lines + new_lines
+        # A changed hunk always has a non-empty side (both empty would be a no-op,
+        # skipped above), so old_lines + new_lines is already >= 1; max keeps that
+        # floor explicit — difflib runs once per changed hunk regardless of size.
+        total += max(1, old_lines + new_lines)
         if total > _DIFF_MAX_TOTAL_LINES:
             return True
     return False
@@ -473,6 +482,8 @@ def _unified_diff_lines(hunks: Sequence[tuple[str, str]]) -> list[str]:
     lines: list[str] = []
     multi = len(hunks) > 1
     for index, (old, new) in enumerate(hunks):
+        if old == new:
+            continue  # identical text cannot diff — skip before invoking difflib
         body = _single_hunk_lines(old, new)
         if not body:
             continue  # a no-op hunk adds neither a label nor body
