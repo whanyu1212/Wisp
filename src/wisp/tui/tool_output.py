@@ -72,14 +72,17 @@ _DIFF_PREVIEW_BYTES = _TOOL_OUTPUT_PREVIEW_BYTES
 # 50k-line rewrite is not review signal anyway.
 #
 # This bounds the matcher's *dimensions* and the transient diff-line count, which
-# is what the reported flooding needed. SequenceMatcher is O(n*m) in *comparisons*,
-# but each comparison is cheap string equality on one line, so at n=m=4000 the
-# constant is tiny: measured worst cases at the ceiling — scrambled inputs over a
-# small alphabet (the arrangement that maximizes matching-block recursion) — run in
-# single-digit milliseconds, well under one frame, not the hundreds of ms an O(n*m)
-# reading might suggest. The 4000-line ceiling that bounds memory therefore also
-# bounds time; a hard off-thread latency bound would only matter at a much larger
-# ceiling and is deliberately out of scope.
+# is what the reported flooding needed. It bounds the matcher's *time* too, but only
+# to a sub-second ceiling, not a per-frame one. SequenceMatcher is O(n*m) in
+# comparisons and each comparison is cheap line-equality, so typical at-ceiling
+# inputs diff in tens of milliseconds; an adversarial arrangement can still reach a
+# few hundred ms of synchronous work before difflib first yields (measurements of
+# the pathological shapes vary by input and machine — assume up to ~1 s at the
+# ceiling, not the low-ms of the common case). That is bounded and non-recurring, so
+# it is acceptable inline for now; a hard per-frame latency bound would require
+# off-thread diffing and is deliberately out of scope. The 4000-line ceiling is
+# chosen to keep even that worst case sub-second while comfortably admitting any
+# real human edit.
 _DIFF_MAX_HUNK_LINES = 4000
 
 # Many hunks each just under the per-hunk ceiling still sum to unbounded work, so
