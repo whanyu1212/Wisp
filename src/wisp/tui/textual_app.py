@@ -450,15 +450,18 @@ class TextualTui(App[None]):
             self._card_focus_was_following = self._transcript.is_following
 
     def on_tool_card_toggled(self, event: ToolCard.Toggled) -> None:
-        # A card grew or shrank. If the transcript was following the tail when this
-        # card took focus, re-pin it — expanding the newest card should keep it in
-        # view even though focusing a tall card scrolled the tail off first. If the
-        # reader had scrolled up before focusing, leave their position alone.
+        # A card grew or shrank. Re-pin the tail only when the *newest* card (the
+        # transcript's last child) is expanded while the reader was following: that
+        # keeps its output in view even though focusing a tall card scrolled the tail
+        # off first. Expanding an older card, or one the reader scrolled up to reach,
+        # leaves the viewport alone so the freshly revealed content isn't yanked away.
         event.stop()
-        if self._card_focus_was_following and self._transcript is not None:
-            self._transcript.return_to_latest()
-        else:
-            self._follow_tail_after_refresh()
+        transcript = self._transcript
+        if transcript is None:
+            return
+        is_newest = bool(transcript.children) and transcript.children[-1] is event.card
+        if self._card_focus_was_following and is_newest:
+            transcript.return_to_latest()
 
     def on_tool_card_leave_requested(self, event: ToolCard.LeaveRequested) -> None:
         # Escape on a focused card hands focus back to the resting target: the input,

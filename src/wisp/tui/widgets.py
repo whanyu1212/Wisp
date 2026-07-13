@@ -934,10 +934,10 @@ class ToolCard(Static):
             return
         self._expanded = not self._expanded
         self._repaint()
-        # A followed transcript should stay pinned to the tail when the newest card
-        # grows; if the user has scrolled up, leave their position alone. The app's
-        # post-refresh follow honors the sticky follow flag, so just request it.
-        self.post_message(self.Toggled())
+        # A followed transcript should stay pinned to the tail when the *newest* card
+        # grows; the app decides using the follow intent captured at focus and this
+        # card's position (expanding a historical card must not yank the viewport).
+        self.post_message(self.Toggled(self))
 
     def action_leave(self) -> None:
         """Return focus to the prompt input (Escape on a focused card)."""
@@ -945,7 +945,15 @@ class ToolCard(Static):
         self.post_message(self.LeaveRequested())
 
     class Toggled(Message):
-        """A card expanded or collapsed; the transcript may need to re-pin its tail."""
+        """A card expanded or collapsed; the transcript may need to re-pin its tail.
+
+        Carries the card so the app can re-pin only when the *newest* card grew —
+        expanding an older card leaves the viewport alone so its content stays in view.
+        """
+
+        def __init__(self, card: ToolCard) -> None:
+            super().__init__()
+            self.card = card
 
     class LeaveRequested(Message):
         """A focused card asked to hand focus back to the prompt input."""

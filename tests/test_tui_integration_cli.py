@@ -1433,6 +1433,51 @@ def test_textual_tool_card_expand_repins_tail_when_focus_scrolled_a_tall_card() 
     assert following_after_expand is True  # the explicit expand re-pinned it
 
 
+def test_textual_tool_card_expand_of_older_card_does_not_yank_viewport() -> None:
+    # Expanding an *older* card while the transcript is following must NOT scroll to
+    # the tail: the reader asked to see that card's output, so the freshly revealed
+    # content (its top) must stay in view rather than being yanked toward later output.
+    # Only the newest card's expansion re-pins the tail.
+    def _output(tag: str) -> str:
+        return "".join(f"{tag} line {i}\n" for i in range(30))
+
+    async def scenario() -> tuple[float, float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            for idx in (1, 2):
+                renderer.event(
+                    ToolCallRequested(call_id=f"c{idx}", name="read", arguments={"path": f"f{idx}"})
+                )
+                await pilot.pause()
+                renderer.event(
+                    ToolResultReady(
+                        call_id=f"c{idx}",
+                        name="read",
+                        output=_output(f"c{idx}"),
+                        is_error=False,
+                        summary=f"read 30 lines from f{idx}",
+                    )
+                )
+                await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            assert transcript.is_following  # resting at the tail, both cards fit
+            cards = [c for c in transcript.children if isinstance(c, ToolCard)]
+            older = cards[0]
+            older.focus()  # short card fits, so no center-scroll; follow stays on
+            await pilot.pause()
+            top_before = older.region.y
+            await pilot.press("enter")
+            await pilot.pause()
+            return top_before, older.region.y, transcript.scroll_y
+
+    top_before, top_after, scroll_y = anyio.run(scenario)
+    # The older card's top was visible before expanding and must remain in view — a
+    # re-pin would push it off the top (its region.y going sharply negative).
+    assert top_before >= 0
+    assert top_after >= 0  # not yanked: the older card's top is still on-screen
+    assert scroll_y == 0  # the viewport did not jump to the tail
+
+
 def test_textual_tool_card_escape_returns_to_decision_panel_when_input_hidden() -> None:
     # With a decision panel open the input is hidden; Escape on a focused card must
     # hand focus to the panel's choice list (not strand the reader on the card with
