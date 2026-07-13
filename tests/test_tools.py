@@ -91,6 +91,65 @@ def test_write_tool_preserves_exact_newline_bytes(tmp_path: Path) -> None:
     assert (tmp_path / "mixed.txt").read_bytes() == b"one\ntwo\r\n"
 
 
+def test_write_tool_snapshots_prior_content_on_overwrite(tmp_path: Path) -> None:
+    # An overwrite captures the file's prior text into data["before_text"] so the
+    # TUI can render a before/after diff; the overwrite itself still happens.
+    context = ToolContext(cwd=tmp_path)
+    (tmp_path / "f.txt").write_text("old\n", encoding="utf-8")
+
+    result = run_tool(WriteTool(), {"path": "f.txt", "content": "new\n"}, context)
+
+    assert result.data["before_text"] == "old\n"
+    assert (tmp_path / "f.txt").read_text(encoding="utf-8") == "new\n"
+
+
+def test_write_tool_omits_snapshot_when_creating_new_file(tmp_path: Path) -> None:
+    # A create has no prior content: before_text must be absent so the renderer
+    # treats it as a pure addition rather than an overwrite of empty text.
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(WriteTool(), {"path": "new.txt", "content": "hello\n"}, context)
+
+    assert "before_text" not in result.data
+
+
+def test_write_tool_snapshot_preserves_prior_newline_bytes(tmp_path: Path) -> None:
+    # The snapshot is read with newline="" so the diff reflects real terminator
+    # changes; CRLF in the prior file must survive verbatim into before_text.
+    context = ToolContext(cwd=tmp_path)
+    (tmp_path / "f.txt").write_bytes(b"a\r\nb\r\n")
+
+    result = run_tool(WriteTool(), {"path": "f.txt", "content": "x\n"}, context)
+
+    assert result.data["before_text"] == "a\r\nb\r\n"
+
+
+def test_write_tool_skips_snapshot_for_non_utf8_prior_file(tmp_path: Path) -> None:
+    # A binary/non-UTF-8 prior file can't be diffed as text: omit the snapshot and
+    # let the write proceed rather than crash or ship garbage.
+    context = ToolContext(cwd=tmp_path)
+    (tmp_path / "f.bin").write_bytes(b"\xff\xfe\x00data")
+
+    result = run_tool(WriteTool(), {"path": "f.bin", "content": "text\n"}, context)
+
+    assert "before_text" not in result.data
+    assert (tmp_path / "f.bin").read_text(encoding="utf-8") == "text\n"
+
+
+def test_write_tool_skips_snapshot_for_oversize_prior_file(tmp_path: Path) -> None:
+    # A prior file too large to diff (past the snapshot cap) is dropped rather than
+    # shipped over the wire; the write still succeeds.
+    from wisp.tools.file_ops import _WRITE_SNAPSHOT_MAX_CHARS
+
+    context = ToolContext(cwd=tmp_path)
+    (tmp_path / "big.txt").write_text("x" * (_WRITE_SNAPSHOT_MAX_CHARS + 1), encoding="utf-8")
+
+    result = run_tool(WriteTool(), {"path": "big.txt", "content": "small\n"}, context)
+
+    assert "before_text" not in result.data
+    assert (tmp_path / "big.txt").read_text(encoding="utf-8") == "small\n"
+
+
 def test_file_tools_reject_paths_outside_cwd(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

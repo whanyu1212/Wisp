@@ -161,6 +161,10 @@ class ToolExecutionEnded(WispEvent):
     # ToolResult. See ToolResultReady.exit_code for why this is a narrow scalar
     # rather than the whole data mapping.
     exit_code: int | None = None
+    # Pre-write file snapshot for the diff renderer, promoted from ToolResult.data
+    # for write-like tools only. None for every other tool and for error paths.
+    # See ToolResultReady.before_text for the wire/bounding rationale.
+    before_text: str | None = None
 
 
 class ToolResultReady(WispEvent):
@@ -180,6 +184,15 @@ class ToolResultReady(WispEvent):
     # raw events) — so no schema bump is needed. Set only for tools with genuine
     # exit-code semantics, so a card is never spuriously reddened.
     exit_code: int | None = None
+    # The file's contents *before* a write overwrote them, so the renderer can show
+    # a before/after diff instead of the flat "Wrote N bytes" summary. Like
+    # exit_code, this is a bounded, JSON-safe scalar that must survive the RPC wire:
+    # the write tool captures the prior text before clobbering the file, caps it
+    # (dropping the snapshot entirely rather than shipping an unbounded or partial
+    # file), and the executor promotes it here for the write tool only. None means
+    # no diff — a newly created file (rendered as a pure addition from the tool
+    # args), a binary/oversize/unreadable prior file, or any non-write tool.
+    before_text: str | None = None
 
 
 class TurnCompleted(WispEvent):

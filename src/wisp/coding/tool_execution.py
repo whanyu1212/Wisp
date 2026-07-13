@@ -19,6 +19,12 @@ from wisp.tools.policy import ToolPolicy
 # — only these tools' exit codes reach the event and drive card styling.
 _EXIT_CODE_TOOLS = frozenset({"bash"})
 
+# Tools whose ``ToolResult.data["before_text"]`` carries a pre-write snapshot the
+# TUI renders as a before/after diff. Gated by name (like _EXIT_CODE_TOOLS) so an
+# extension tool that stashes an unrelated ``before_text`` can't inject content into
+# the diff renderer — only these tools' snapshots reach the event.
+_BEFORE_TEXT_TOOLS = frozenset({"write"})
+
 
 class ConfiguredToolExecutor:
     """Adapt Wisp's registry and approval policies to the pure loop contract."""
@@ -44,6 +50,9 @@ class ConfiguredToolExecutor:
         # synthetic error paths below (parse error, unconfigured, unknown tool,
         # blocked, denied) and for tools without exit-code semantics.
         exit_code: int | None = None
+        # Pre-write snapshot for the diff renderer; None for every non-write tool and
+        # for the synthetic/error paths, which never produce a ToolResult.
+        before_text: str | None = None
 
         if tool_call.parse_error is not None:
             output = tool_call.parse_error
@@ -87,12 +96,14 @@ class ConfiguredToolExecutor:
                         reason=decision.reason,
                     )
                     if decision.approved:
-                        output, is_error, exit_code = await self._run_tool(tool, arguments)
+                        output, is_error, exit_code, before_text = await self._run_tool(
+                            tool, arguments
+                        )
                     else:
                         output = decision.reason or "Tool execution was not approved"
                         is_error = True
                 else:
-                    output, is_error, exit_code = await self._run_tool(tool, arguments)
+                    output, is_error, exit_code, before_text = await self._run_tool(tool, arguments)
 
         yield ToolExecutionEnded(
             call_id=tool_call.call_id,
@@ -100,16 +111,22 @@ class ConfiguredToolExecutor:
             output=output,
             is_error=is_error,
             exit_code=exit_code,
+            before_text=before_text,
         )
 
     async def _run_tool(
         self, tool: Tool, arguments: dict[str, object]
-    ) -> tuple[str, bool, int | None]:
+    ) -> tuple[str, bool, int | None, str | None]:
         try:
             result = await tool.run(arguments, self._context)
-            return result.text, False, _promote_exit_code(tool.name, result.data)
+            return (
+                result.text,
+                False,
+                _promote_exit_code(tool.name, result.data),
+                _promote_before_text(tool.name, result.data),
+            )
         except Exception as exc:  # noqa: BLE001 - tool failures are model-visible results
-            return str(exc), True, None
+            return str(exc), True, None, None
 
 
 def _promote_exit_code(name: str, data: Mapping[str, object]) -> int | None:
@@ -124,6 +141,21 @@ def _promote_exit_code(name: str, data: Mapping[str, object]) -> int | None:
         return None
     exit_code = data.get("exit_code")
     return exit_code if isinstance(exit_code, int) else None
+
+
+def _promote_before_text(name: str, data: Mapping[str, object]) -> str | None:
+    """Extract a pre-write snapshot from a tool result, for write-like tools only.
+
+    Gated on ``_BEFORE_TEXT_TOOLS`` so an extension tool that stashes an unrelated
+    ``before_text`` in its ``data`` can't feed content into the diff renderer. The
+    tool already bounds the snapshot; returns None unless a recognized tool reported
+    a string.
+    """
+
+    if name not in _BEFORE_TEXT_TOOLS:
+        return None
+    before_text = data.get("before_text")
+    return before_text if isinstance(before_text, str) else None
 
 
 __all__ = ["ConfiguredToolExecutor"]

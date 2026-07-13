@@ -264,3 +264,66 @@ def test_pure_loop_rejects_malformed_terminal_results(
                 pass
 
     anyio.run(run)
+
+
+class WriteSnapshotExecutor:
+    """Emits a terminal result carrying a pre-write snapshot, like the write tool."""
+
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        yield ToolExecutionEnded(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            output="Wrote 4 bytes to f.txt",
+            is_error=False,
+            before_text="old\n",
+        )
+
+
+def test_pure_loop_forwards_before_text_across_the_wire() -> None:
+    # The write tool's pre-write snapshot must reach ToolResultReady AND survive
+    # serialization: the TUI renderer only sees events after the agent subprocess
+    # serializes them to JSON, so a before_text that doesn't round-trip renders no
+    # diff — the exact failure that retired the opaque `data` field.
+    call = ToolCall(
+        call_id="call-1",
+        name="write",
+        arguments={"path": "f.txt", "content": "new\n"},
+        response_id="response-1",
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    response_id="response-1",
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="response-2"),
+                ProviderTextDelta(delta="done"),
+                ProviderResponseCompleted(content="done", response_id="response-2"),
+            ],
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=WriteSnapshotExecutor()),
+                messages=(Message(role="user", content="write f.txt"),),
+            )
+        ]
+
+    events = anyio.run(run)
+
+    result = next(event for event in events if isinstance(event, ToolResultReady))
+    assert result.before_text == "old\n"
+    assert wisp_event_from_json(result.model_dump_json()).before_text == "old\n"
+    ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
+    assert ended.before_text == "old\n"
+    assert wisp_event_from_json(ended.model_dump_json()).before_text == "old\n"

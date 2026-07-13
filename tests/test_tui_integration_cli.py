@@ -1096,6 +1096,76 @@ def test_textual_tool_card_edit_renders_colored_diff() -> None:
     assert "$error" in styles  # deletions
 
 
+def test_textual_tool_card_write_renders_colored_diff() -> None:
+    # Issue #74 PR B2: a successful `write` renders a colored unified diff. Unlike
+    # edit, the "before" text is NOT in the request args (which carry only the new
+    # content); it rides the result event as before_text (captured by the tool
+    # before it overwrote the file) and must survive to the renderer. Drives the
+    # real request → result pipeline and asserts diff text + resolved theme colors.
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="write",
+                    arguments={"path": "src/foo.py", "content": "line b\n"},
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="write",
+                    output="Wrote 7 bytes to src/foo.py",
+                    is_error=False,
+                    before_text="line a\n",
+                )
+            )
+            await pilot.pause()
+            text = "\n".join(_transcript_texts(app_instance))
+            styles = _transcript_styles(app_instance)
+            return text, styles
+
+    text, styles = anyio.run(scenario)
+    assert "✓ write" in text
+    assert "-line a" in text  # deletion line (prior content)
+    assert "+line b" in text  # addition line (new content)
+    assert "$success" in styles  # additions
+    assert "$error" in styles  # deletions
+
+
+def test_textual_tool_card_write_create_renders_pure_addition() -> None:
+    # A newly created file has no before_text; the write still renders a diff, as an
+    # all-additions preview of the content, so the transcript shows what was written.
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="write",
+                    arguments={"path": "new.py", "content": "fresh line\n"},
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="write",
+                    output="Wrote 11 bytes to new.py",
+                    is_error=False,
+                    before_text=None,
+                )
+            )
+            await pilot.pause()
+            return "\n".join(_transcript_texts(app_instance))
+
+    text = anyio.run(scenario)
+    assert "✓ write" in text
+    assert "+fresh line" in text
+
+
 def test_textual_tool_card_edit_content_is_not_markup_injectable() -> None:
     # End-to-end injection guard: edit content containing markup metacharacters
     # must render literally in the transcript, never parsed as color markup.

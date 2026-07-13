@@ -8,7 +8,7 @@ unrelated ``exit_code`` from being styled as a failure.
 
 from __future__ import annotations
 
-from wisp.coding.tool_execution import _promote_exit_code
+from wisp.coding.tool_execution import _promote_before_text, _promote_exit_code
 
 
 def test_promote_exit_code_extracts_for_recognized_shell_tool() -> None:
@@ -27,3 +27,21 @@ def test_promote_exit_code_none_when_absent_or_non_int() -> None:
     assert _promote_exit_code("bash", {}) is None
     assert _promote_exit_code("bash", {"exit_code": "boom"}) is None
     assert _promote_exit_code("bash", {"exit_code": None}) is None
+
+
+def test_promote_before_text_extracts_for_write_tool() -> None:
+    assert _promote_before_text("write", {"before_text": "old\n"}) == "old\n"
+    assert _promote_before_text("write", {"before_text": ""}) == ""
+
+
+def test_promote_before_text_ignores_unrecognized_tools() -> None:
+    # A custom tool that stashes a "before_text" must not feed the diff renderer;
+    # only the write tool's snapshot is promoted onto the event.
+    assert _promote_before_text("edit", {"before_text": "old\n"}) is None
+    assert _promote_before_text("custom", {"before_text": "old\n"}) is None
+
+
+def test_promote_before_text_none_when_absent_or_non_str() -> None:
+    assert _promote_before_text("write", {}) is None
+    assert _promote_before_text("write", {"before_text": 123}) is None
+    assert _promote_before_text("write", {"before_text": None}) is None
