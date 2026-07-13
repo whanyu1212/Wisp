@@ -319,31 +319,57 @@ def _parse_edit_hunks(arguments: Mapping[str, object]) -> list[tuple[str, str]]:
 
 
 def _unified_diff_lines(hunks: Sequence[tuple[str, str]]) -> list[str]:
-    """Unified-diff lines across all hunks, with a file/hunk header per hunk.
+    """Unified-diff lines across all hunks, with a per-hunk label when multiple.
 
     Each hunk is diffed independently (the edit tool applies them independently),
     so a multi-edit call yields several small diffs. Lines keep their unified
     ``+``/``-``/`` ``/`` @@`` prefixes; styling happens later off the prefix.
+
+    A hunk whose old and new text are identical contributes nothing — not even a
+    label — so an all-no-op multi-edit call yields no lines and falls back to the
+    generic summary, consistent with the single-hunk no-op case.
     """
 
     lines: list[str] = []
     multi = len(hunks) > 1
     for index, (old, new) in enumerate(hunks):
+        body = _single_hunk_lines(old, new)
+        if not body:
+            continue  # a no-op hunk adds neither a label nor body
         if multi:
             lines.append(f"@@ edit {index + 1} @@")
-        hunk = difflib.unified_diff(
-            old.splitlines(),
-            new.splitlines(),
-            lineterm="",
-            n=2,
-        )
-        # Drop difflib's `--- ` / `+++ ` file headers (blank here, just noise);
-        # keep the `@@ ... @@` range markers and the +/-/space body lines.
-        for line in hunk:
-            if line.startswith("--- ") or line.startswith("+++ "):
-                continue
-            lines.append(line)
+        lines.extend(body)
     return lines
+
+
+def _single_hunk_lines(old: str, new: str) -> list[str]:
+    """Unified-diff body lines for one hunk, or an empty list when unchanged.
+
+    Splits with ``keepends=True`` so a change confined to line terminators — a
+    dropped trailing newline, a CRLF→LF conversion — makes the affected lines
+    differ and therefore show in the diff, instead of collapsing to identical
+    line sequences and looking like a no-op. The kept terminators are stripped
+    from each rendered line so the display stays one entry per line.
+    """
+
+    diff = difflib.unified_diff(
+        old.splitlines(keepends=True),
+        new.splitlines(keepends=True),
+        lineterm="",
+        n=2,
+    )
+    body: list[str] = []
+    for line in diff:
+        if line.startswith("--- ") or line.startswith("+++ "):
+            continue  # difflib's blank file headers are noise here
+        if line.startswith("@@"):
+            body.append(line)
+            continue
+        # A +/-/space body line: strip the kept terminator from the content so
+        # the rendered line doesn't carry an embedded newline (the terminator has
+        # already done its job of making the line compare as changed).
+        body.append(line[:1] + line[1:].rstrip("\r\n"))
+    return body
 
 
 def _content_from_diff_lines(diff_lines: Sequence[str]) -> Content:

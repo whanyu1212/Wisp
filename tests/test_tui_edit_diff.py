@@ -122,6 +122,35 @@ def test_render_edit_diff_none_on_noop_edit() -> None:
     assert render_edit_diff(_edit(("same", "same"))) is None
 
 
+def test_render_edit_diff_none_when_every_hunk_is_noop() -> None:
+    # A multi-edit call where every hunk is a no-op must fall back too — no
+    # leaked "@@ edit N @@" labels with empty bodies.
+    result = render_edit_diff(_edit(("same", "same"), ("also", "also")))
+    assert result is None
+
+
+def test_render_edit_diff_labels_only_changed_hunks() -> None:
+    # A mix of real and no-op hunks labels only the ones that actually changed.
+    content = render_edit_diff(_edit(("a", "b"), ("same", "same")))
+    assert content is not None
+    assert "@@ edit 1 @@" in content.plain
+    assert "@@ edit 2 @@" not in content.plain
+
+
+def test_render_edit_diff_surfaces_newline_only_change() -> None:
+    # A change confined to line terminators (dropped trailing newline, CRLF→LF)
+    # must still show in the diff rather than collapsing to a no-op fallback.
+    dropped_newline = render_edit_diff(_edit(("a\n", "a")))
+    assert dropped_newline is not None
+    crlf_to_lf = render_edit_diff(_edit(("x\r\ny", "x\ny")))
+    assert crlf_to_lf is not None
+    # The rendered lines carry no embedded terminator — the kept newline is
+    # stripped for display after difflib used it for comparison.
+    assert "\r" not in dropped_newline.plain
+    for line in dropped_newline.plain.split("\n"):
+        assert not line.endswith(("\r",))
+
+
 # --- Bounding: a huge edit is capped with honest metadata ---------------------
 
 
