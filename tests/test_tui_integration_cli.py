@@ -1096,6 +1096,47 @@ def test_textual_tool_card_edit_renders_colored_diff() -> None:
     assert "$error" in styles  # deletions
 
 
+def test_textual_tool_card_edit_diff_renders_within_a_narrow_terminal() -> None:
+    # Acceptance criterion "diff rendering handles narrow terminals": a diff whose
+    # lines are far wider than the terminal must still render (the card soft-wraps it)
+    # without overflowing the viewport width or erroring. The diff carries literal
+    # +/- prefixes, so the add/delete lines stay distinguishable even wrapped.
+    long_old = "def f(): return " + "x" * 120
+    long_new = "def f(): return " + "y" * 120
+
+    async def scenario() -> tuple[str, int, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(28, 20)) as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="edit",
+                    arguments={
+                        "path": "src/foo.py",
+                        "edits": [{"oldText": long_old, "newText": long_new}],
+                    },
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="edit",
+                    output="Applied 1 edit(s) to src/foo.py",
+                    is_error=False,
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            return card.render().plain, card.region.width, 28
+
+    text, card_width, terminal_width = anyio.run(scenario)
+    assert "✓ edit" in text  # rendered without error at 28 columns
+    assert "-def f" in text  # deletion line present
+    assert "+def f" in text  # addition line present, distinguishable by prefix
+    assert card_width <= terminal_width  # no horizontal overflow past the viewport
+
+
 def test_textual_tool_card_write_renders_colored_diff() -> None:
     # Issue #74 PR B2: a successful `write` renders a colored unified diff. Unlike
     # edit, the "before" text is NOT in the request args (which carry only the new
@@ -1257,6 +1298,56 @@ def test_textual_tool_card_grep_shows_match_summary() -> None:
 def _first_tool_card(app: TextualTui) -> ToolCard:
     transcript = app.query_one("#transcript", Transcript)
     return next(child for child in transcript.children if isinstance(child, ToolCard))
+
+
+def _all_tool_cards(app: TextualTui) -> list[ToolCard]:
+    transcript = app.query_one("#transcript", Transcript)
+    return [child for child in transcript.children if isinstance(child, ToolCard)]
+
+
+def test_textual_parallel_tool_cards_resolve_by_call_id_out_of_order() -> None:
+    # Parallel tool calls each own a stable card keyed by call_id: two requests mount
+    # two pending cards (in request order), and resolving them OUT OF ORDER routes each
+    # result to its own card — the second-requested tool finishing first must not land
+    # on the first card. Covers the acceptance-criteria "parallel tools" case.
+    async def scenario() -> tuple[list[str], list[tuple[str, str, str]]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={"path": "a"}))
+            await pilot.pause()
+            renderer.event(ToolCallRequested(call_id="c2", name="bash", arguments={"command": "b"}))
+            await pilot.pause()
+            pending = [card._tool_name for card in _all_tool_cards(app_instance)]
+
+            # Resolve c2 (the second request) BEFORE c1 — the interleaved-finish case.
+            renderer.event(
+                ToolResultReady(call_id="c2", name="bash", output="OUTPUT_B", is_error=False)
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="read",
+                    output="OUTPUT_A",
+                    is_error=False,
+                    summary="read A",
+                )
+            )
+            await pilot.pause()
+            resolved = [
+                (card._tool_name, card._glyph, card._full_output)
+                for card in _all_tool_cards(app_instance)
+            ]
+            return pending, resolved
+
+    pending, resolved = anyio.run(scenario)
+    assert pending == ["read", "bash"]  # two cards, in request order
+    # Each result routed to its own card despite the reversed finish order; mount order
+    # is preserved (the earlier request stays first).
+    assert resolved == [
+        ("read", "✓", "OUTPUT_A"),
+        ("bash", "✓", "OUTPUT_B"),
+    ]
 
 
 def test_textual_tool_card_expands_to_full_output_on_enter() -> None:
