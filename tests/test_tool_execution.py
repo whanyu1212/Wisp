@@ -17,6 +17,7 @@ from wisp.coding.tool_execution import (
     _promote_before_text,
     _promote_created,
     _promote_exit_code,
+    _promote_truncated,
 )
 from wisp.events import ToolExecutionEnded
 from wisp.providers.events import ToolCall
@@ -89,11 +90,17 @@ class _TruncatingTool:
     description = "Returns truncated output."
     input_schema: dict[str, object] = {"type": "object", "properties": {}}
 
-    def __init__(self, *, truncated: bool) -> None:
+    def __init__(self, *, truncated: object) -> None:
         self._truncated = truncated
 
     async def run(self, arguments: object, context: object) -> ToolResult:
-        return ToolResult(text="partial output", data={}, truncated=self._truncated)
+        result = ToolResult(text="partial output", data={})
+        # ToolResult is a plain frozen dataclass with no validation, so a custom or
+        # malformed extension tool can end up with a non-bool truncated. Bypass the
+        # frozen guard to plant exactly that (a normal tool can't, but the executor
+        # must still cope) without the constructor's type hint getting in the way.
+        object.__setattr__(result, "truncated", self._truncated)
+        return result
 
 
 def _run_executor(tool: object) -> ToolExecutionEnded:
@@ -120,3 +127,26 @@ def test_executor_promotes_truncated_from_tool_result() -> None:
     # mark output the tool itself capped.
     assert _run_executor(_TruncatingTool(truncated=True)).truncated is True
     assert _run_executor(_TruncatingTool(truncated=False)).truncated is False
+
+
+def test_promote_truncated_coerces_non_bool_to_false() -> None:
+    # ToolResult has no validation; only a real bool is honored (not truthiness, so a
+    # string "no" never reads as capped). Everything else defaults to not-truncated.
+    assert _promote_truncated(True) is True
+    assert _promote_truncated(False) is False
+    assert _promote_truncated(None) is False
+    assert _promote_truncated("yes") is False
+    assert _promote_truncated("no") is False
+    assert _promote_truncated(3) is False
+    assert _promote_truncated([1]) is False
+
+
+def test_executor_degrades_non_bool_truncated_instead_of_crashing() -> None:
+    # A malformed extension tool handing back a non-bool truncated must not raise a
+    # Pydantic ValidationError when ToolExecutionEnded is built (outside _run_tool's
+    # try/except) — that would abort the tool stream. It degrades to truncated=False,
+    # and the tool otherwise succeeds (the odd flag is not itself an error).
+    for bad in (None, "weird", 3, [1]):
+        ended = _run_executor(_TruncatingTool(truncated=bad))
+        assert ended.truncated is False
+        assert ended.is_error is False

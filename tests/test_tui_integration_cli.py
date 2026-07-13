@@ -1478,6 +1478,38 @@ def test_textual_tool_card_expand_of_older_card_does_not_yank_viewport() -> None
     assert scroll_y == 0  # the viewport did not jump to the tail
 
 
+def test_textual_tool_card_expand_does_not_repin_after_user_scrolls_away() -> None:
+    # The follow intent captured when a card takes focus is stale once the reader
+    # deliberately scrolls up (PageUp/wheel) before expanding. Expanding then must NOT
+    # yank the viewport back to the tail — the user has left tail-follow on purpose.
+    # The card here is tall (wide bash preview) so focusing it does drop follow via the
+    # center-scroll; the user's PageUp is a *further*, deliberate move away.
+    preview = "".join(("X" * 280 + "\n") for _ in range(8))
+    full = preview + "".join(f"tail line {i}\n" for i in range(30))
+
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={"command": "x"}))
+            await pilot.pause()
+            renderer.event(ToolResultReady(call_id="c1", name="bash", output=full, is_error=False))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            card = _first_tool_card(app_instance)
+            card.focus()  # tall card: center-scroll drops follow, intent captured
+            await pilot.pause()
+            await pilot.press("pageup")  # the reader deliberately scrolls away
+            await pilot.pause()
+            following_after_scroll = transcript.is_following
+            await pilot.press("enter")  # expand must NOT re-pin the tail now
+            await pilot.pause()
+            return following_after_scroll, transcript.is_vertical_scroll_end
+
+    following_after_scroll, at_tail_after_expand = anyio.run(scenario)
+    assert following_after_scroll is False  # the user's scroll left tail-follow
+    assert at_tail_after_expand is False  # expanding did not yank them back to the tail
+
+
 def test_textual_tool_card_escape_returns_to_decision_panel_when_input_hidden() -> None:
     # With a decision panel open the input is hidden; Escape on a focused card must
     # hand focus to the panel's choice list (not strand the reader on the card with

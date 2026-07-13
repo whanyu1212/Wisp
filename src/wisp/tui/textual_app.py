@@ -445,7 +445,9 @@ class TextualTui(App[None]):
         # A ToolCard taller than the viewport is center-scrolled by Textual when it
         # takes focus, which settles the transcript off the bottom and flips follow
         # off before an expand can re-pin. Record the follow intent now — this fires
-        # before that deferred scroll — so on_tool_card_toggled can restore it.
+        # before that deferred scroll — so on_tool_card_toggled can restore it. A
+        # deliberate user scroll before the expand clears this (_cancel_card_expand_repin),
+        # so the re-pin never yanks a reader who has since left the tail.
         if isinstance(event.widget, ToolCard) and self._transcript is not None:
             self._card_focus_was_following = self._transcript.is_following
 
@@ -474,10 +476,19 @@ class TextualTui(App[None]):
         elif self._decision_panel is not None:
             self._decision_panel.focus_options()
 
+    def _cancel_card_expand_repin(self) -> None:
+        # A user scroll after focusing a card is a deliberate move away from the tail,
+        # so an expand must no longer re-pin (see on_descendant_focus). Called only from
+        # the *user* scroll paths — the programmatic focus center-scroll doesn't route
+        # through them, so the tall-newest-card re-pin it exists for is unaffected.
+        self._card_focus_was_following = False
+
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self._cancel_card_expand_repin()
         self._forward_jump_overlay_scroll(event, direction=-1)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self._cancel_card_expand_repin()
         self._forward_jump_overlay_scroll(event, direction=1)
 
     def _forward_jump_overlay_scroll(
@@ -706,14 +717,17 @@ class TextualTui(App[None]):
     # to restore that intent atomically before jumping. None-guarded like
     # _mount_line for calls before on_mount wires the widget.
     def action_scroll_transcript_page_up(self) -> None:
+        self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_page_up()
 
     def action_scroll_transcript_page_down(self) -> None:
+        self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_page_down()
 
     def action_scroll_transcript_home(self) -> None:
+        self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_scroll_home()
 
