@@ -173,6 +173,10 @@ class ToolExecutionEnded(WispEvent):
     # the tool's structured data. None for tools without one. See
     # ToolResultReady.summary.
     summary: str | None = None
+    # Whether the tool capped its own output (past its max_output bytes/lines). The
+    # dropped content never leaves the tool, so this bool is the only signal that an
+    # expanded card is still not the whole story. See ToolResultReady.truncated.
+    truncated: bool = False
 
 
 class ToolResultReady(WispEvent):
@@ -215,6 +219,14 @@ class ToolResultReady(WispEvent):
     # at the source, and the executor promotes it only for tools that have one. None
     # for diff/shell tools, unknown tools, and error paths.
     summary: str | None = None
+    # Whether the tool capped its own output past its max_output bytes/lines. The
+    # ``output`` on this event is already the tool-bounded string, and the dropped
+    # content never crossed the wire — so even a fully expanded card can be missing
+    # more. This bool lets the expanded card say so honestly ("truncated at the
+    # tool's limit") instead of implying it shows everything. A bounded JSON-safe
+    # scalar like the others; False for tools that returned everything and for error
+    # paths that produced no ToolResult.
+    truncated: bool = False
 
 
 class TurnCompleted(WispEvent):

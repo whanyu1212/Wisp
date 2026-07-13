@@ -183,6 +183,12 @@ class TextualTui(App[None]):
         color: $text-muted;
     }
 
+    /* A focused tool card (reached by Tab) is the expand/collapse target; a subtle
+       fill marks it without competing with the role-colored left rule. */
+    ToolCard:focus {
+        background: $boost;
+    }
+
     #status-bar {
         height: auto;
         padding: 0 1;
@@ -269,6 +275,12 @@ class TextualTui(App[None]):
         # call_id → ToolCard, so the request, approval, and result events for one
         # tool call all mutate the same card instead of stacking three lines.
         self._tool_cards: dict[str, ToolCard] = {}
+        # Whether the transcript was following the tail at the moment a ToolCard
+        # took focus. Captured then (before Textual's deferred center-scroll of a
+        # card taller than the viewport flips follow off) so an explicit keyboard
+        # expand can re-pin the tail it would otherwise have scrolled away from,
+        # without yanking a reader who had deliberately scrolled up.
+        self._card_focus_was_following = False
         # Main-screen heartbeat (opencode-style): a dim WorkingIndicator row in the
         # transcript right after the user prompt, not in the stable footer chrome.
         self._working_indicator: Widget | None = None
@@ -429,10 +441,54 @@ class TextualTui(App[None]):
         elif self._decision_panel is not None:
             self._decision_panel.focus_options()
 
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        # A ToolCard taller than the viewport is center-scrolled by Textual when it
+        # takes focus, which settles the transcript off the bottom and flips follow
+        # off before an expand can re-pin. Record the follow intent now — this fires
+        # before that deferred scroll — so on_tool_card_toggled can restore it. A
+        # deliberate user scroll before the expand clears this (_cancel_card_expand_repin),
+        # so the re-pin never yanks a reader who has since left the tail.
+        if isinstance(event.widget, ToolCard) and self._transcript is not None:
+            self._card_focus_was_following = self._transcript.is_following
+
+    def on_tool_card_toggled(self, event: ToolCard.Toggled) -> None:
+        # A card grew or shrank. Re-pin the tail only when the *newest* card (the
+        # transcript's last child) is expanded while the reader was following: that
+        # keeps its output in view even though focusing a tall card scrolled the tail
+        # off first. Expanding an older card, or one the reader scrolled up to reach,
+        # leaves the viewport alone so the freshly revealed content isn't yanked away.
+        event.stop()
+        transcript = self._transcript
+        if transcript is None:
+            return
+        is_newest = bool(transcript.children) and transcript.children[-1] is event.card
+        if self._card_focus_was_following and is_newest:
+            transcript.return_to_latest()
+
+    def on_tool_card_leave_requested(self, event: ToolCard.LeaveRequested) -> None:
+        # Escape on a focused card hands focus back to the resting target: the input,
+        # or the decision panel's choice list when a panel has hidden the input (same
+        # fallback as on_jump_to_latest_selected), so the reader is never stranded on
+        # a card with no way back.
+        event.stop()
+        if self._input is not None and self._input.display:
+            self._input.focus()
+        elif self._decision_panel is not None:
+            self._decision_panel.focus_options()
+
+    def _cancel_card_expand_repin(self) -> None:
+        # A user scroll after focusing a card is a deliberate move away from the tail,
+        # so an expand must no longer re-pin (see on_descendant_focus). Called only from
+        # the *user* scroll paths — the programmatic focus center-scroll doesn't route
+        # through them, so the tall-newest-card re-pin it exists for is unaffected.
+        self._card_focus_was_following = False
+
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self._cancel_card_expand_repin()
         self._forward_jump_overlay_scroll(event, direction=-1)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self._cancel_card_expand_repin()
         self._forward_jump_overlay_scroll(event, direction=1)
 
     def _forward_jump_overlay_scroll(
@@ -661,14 +717,17 @@ class TextualTui(App[None]):
     # to restore that intent atomically before jumping. None-guarded like
     # _mount_line for calls before on_mount wires the widget.
     def action_scroll_transcript_page_up(self) -> None:
+        self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_page_up()
 
     def action_scroll_transcript_page_down(self) -> None:
+        self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_page_down()
 
     def action_scroll_transcript_home(self) -> None:
+        self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_scroll_home()
 
@@ -832,16 +891,25 @@ class TextualTui(App[None]):
         *,
         detail: str | Content = "",
         elapsed: float | None = None,
+        full_output: str = "",
+        truncated: bool = False,
     ) -> None:
         # Transition the card for this call_id in place. If the request card was
         # never seen (a result arriving with no prior request, e.g. after a
         # resume), there is nothing to mutate — drop it rather than mint a
         # half-formed card, keeping the registry the single source of truth.
         # `elapsed` is the true wall-clock duration; it freezes the live counter.
+        # `full_output`/`truncated` let the card expand past the collapsed detail.
         card = self._tool_cards.get(call_id)
         if card is None:
             return
-        card.set_state(status, detail=detail, elapsed=elapsed)
+        card.set_state(
+            status,
+            detail=detail,
+            elapsed=elapsed,
+            full_output=full_output,
+            truncated=truncated,
+        )
         self._note_transcript_update(card)
         # A terminal state (done/denied/error) ends the call's lifecycle; forget
         # the card so the registry doesn't grow across a long session. The widget

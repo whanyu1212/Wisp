@@ -335,6 +335,12 @@ class TextualTuiRenderer:
                     summary=event.summary,
                 ),
                 elapsed=self._tool_elapsed(event.call_id, event.timestamp),
+                # Retain the full (tool-bounded) output so the card can expand past
+                # the collapsed detail; the card only offers expansion when this adds
+                # something. `truncated` flags that even the full output was capped by
+                # the tool itself.
+                full_output=event.output,
+                truncated=event.truncated,
             )
         elif isinstance(event, AgentCompleted):
             self._finish_progress()

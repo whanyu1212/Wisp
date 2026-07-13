@@ -139,6 +139,7 @@ async def _execute_tool_call(
         before_text=terminal.before_text,
         created=terminal.created,
         summary=terminal.summary,
+        truncated=terminal.truncated,
     )
 
 

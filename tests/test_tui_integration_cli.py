@@ -1254,6 +1254,335 @@ def test_textual_tool_card_grep_shows_match_summary() -> None:
     assert "a.py:1:x" not in text  # raw matches replaced by the summary
 
 
+def _first_tool_card(app: TextualTui) -> ToolCard:
+    transcript = app.query_one("#transcript", Transcript)
+    return next(child for child in transcript.children if isinstance(child, ToolCard))
+
+
+def test_textual_tool_card_expands_to_full_output_on_enter() -> None:
+    # Issue #74 PR D: a resolved read card shows its one-line summary collapsed, and
+    # expands to the full (tool-bounded) output when focused and Enter is pressed —
+    # restoring what the summary replaced. Enter again collapses it back.
+    full = "".join(f"line {i}\n" for i in range(30))
+
+    async def scenario() -> tuple[str, str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={"path": "f.py"}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="read",
+                    output=full,
+                    is_error=False,
+                    summary="read 30 lines from f.py",
+                )
+            )
+            await pilot.pause()
+            collapsed = "\n".join(_transcript_texts(app_instance))
+
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            expanded = "\n".join(_transcript_texts(app_instance))
+
+            await pilot.press("enter")
+            await pilot.pause()
+            recollapsed = "\n".join(_transcript_texts(app_instance))
+            return collapsed, expanded, recollapsed
+
+    collapsed, expanded, recollapsed = anyio.run(scenario)
+    # Collapsed: summary shown, full output hidden.
+    assert "read 30 lines from f.py" in collapsed
+    assert "line 29" not in collapsed
+    # Expanded: full output revealed.
+    assert "line 29" in expanded
+    # Re-collapsed: back to the summary.
+    assert "line 29" not in recollapsed
+    assert "read 30 lines from f.py" in recollapsed
+
+
+def test_textual_tool_card_expanded_shows_tool_truncation_marker() -> None:
+    # When the tool itself capped its output (truncated=True), the expanded card says
+    # so — even the full view isn't the whole story.
+    full = "".join(f"row {i}\n" for i in range(30))
+
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={"path": "big"}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="read",
+                    output=full,
+                    is_error=False,
+                    summary="read 30 lines from big",
+                    truncated=True,
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            return "\n".join(_transcript_texts(app_instance))
+
+    text = anyio.run(scenario)
+    assert "truncated at the tool's limit" in text
+
+
+def test_textual_tool_card_small_capped_output_shows_truncation_marker_collapsed() -> None:
+    # A tool that capped its output but returned a buffer that fits the preview budget
+    # has nothing extra to expand, so the card stays collapsed with no affordance. The
+    # truncation marker must still show — otherwise the capped output reads as complete.
+    # (Codex-flagged: small max_output_bytes/lines on bash/custom tools.)
+    short = "line 1\nline 2\nline 3\n"
+
+    async def scenario() -> tuple[str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={"command": "x"}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="bash",
+                    output=short,
+                    is_error=False,
+                    truncated=True,
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            return card.render().plain, card._can_expand()
+
+    rendered, can_expand = anyio.run(scenario)
+    assert can_expand is False  # nothing more to expand than the collapsed preview
+    assert "▸" not in rendered  # so no affordance is offered
+    assert "truncated at the tool's limit" in rendered  # but truncation is still surfaced
+
+
+def test_textual_tool_card_escape_returns_focus_to_input() -> None:
+    # Escape on a focused card hands focus back to the prompt input, so the reader
+    # isn't stranded on a card.
+    async def scenario() -> bool:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={"path": "f"}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="read",
+                    output="a\nb\nc\n",
+                    is_error=False,
+                    summary="read 3 lines from f",
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            return app_instance._input is app_instance.focused
+
+    assert anyio.run(scenario) is True
+
+
+def test_textual_tool_card_expand_keeps_tail_follow() -> None:
+    # Expanding the newest card while following must keep the transcript pinned to the
+    # tail — content growth alone should not break follow-tail (acceptance criterion).
+    full = "".join(f"line {i}\n" for i in range(40))
+
+    async def scenario() -> bool:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={"path": "f"}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="read",
+                    output=full,
+                    is_error=False,
+                    summary="read 40 lines from f",
+                )
+            )
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            assert transcript.is_following  # resting at the tail
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            return transcript.is_following
+
+    assert anyio.run(scenario) is True
+
+
+def test_textual_tool_card_expand_repins_tail_when_focus_scrolled_a_tall_card() -> None:
+    # A card taller than the viewport is center-scrolled by Textual when it takes
+    # focus, which settles the transcript off the bottom and flips follow off before
+    # the expand runs. A followed reader who focuses the newest card and expands it
+    # must still end up pinned to the tail (acceptance criterion). The collapsed
+    # preview here (a bash result with no one-line summary) is wide enough to wrap
+    # past the default viewport, so focusing it genuinely triggers the center-scroll
+    # — the plain short-summary case doesn't exercise this path.
+    preview = "".join(("X" * 280 + "\n") for _ in range(8))
+    full = preview + "".join(f"tail line {i}\n" for i in range(30))
+
+    async def scenario() -> tuple[bool, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={"command": "x"}))
+            await pilot.pause()
+            renderer.event(ToolResultReady(call_id="c1", name="bash", output=full, is_error=False))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            following_before = transcript.is_following  # resting at the tail
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            # Focusing a card taller than the viewport center-scrolls it, which drops
+            # follow-tail before the expand.
+            following_after_focus = transcript.is_following
+            await pilot.press("enter")
+            await pilot.pause()
+            return following_before, following_after_focus, transcript.is_following
+
+    following_before, following_after_focus, following_after_expand = anyio.run(scenario)
+    assert following_before is True
+    assert following_after_focus is False  # the focus scroll dropped follow-tail
+    assert following_after_expand is True  # the explicit expand re-pinned it
+
+
+def test_textual_tool_card_expand_of_older_card_does_not_yank_viewport() -> None:
+    # Expanding an *older* card while the transcript is following must NOT scroll to
+    # the tail: the reader asked to see that card's output, so the freshly revealed
+    # content (its top) must stay in view rather than being yanked toward later output.
+    # Only the newest card's expansion re-pins the tail.
+    def _output(tag: str) -> str:
+        return "".join(f"{tag} line {i}\n" for i in range(30))
+
+    async def scenario() -> tuple[float, float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            for idx in (1, 2):
+                renderer.event(
+                    ToolCallRequested(call_id=f"c{idx}", name="read", arguments={"path": f"f{idx}"})
+                )
+                await pilot.pause()
+                renderer.event(
+                    ToolResultReady(
+                        call_id=f"c{idx}",
+                        name="read",
+                        output=_output(f"c{idx}"),
+                        is_error=False,
+                        summary=f"read 30 lines from f{idx}",
+                    )
+                )
+                await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            assert transcript.is_following  # resting at the tail, both cards fit
+            cards = [c for c in transcript.children if isinstance(c, ToolCard)]
+            older = cards[0]
+            older.focus()  # short card fits, so no center-scroll; follow stays on
+            await pilot.pause()
+            top_before = older.region.y
+            await pilot.press("enter")
+            await pilot.pause()
+            return top_before, older.region.y, transcript.scroll_y
+
+    top_before, top_after, scroll_y = anyio.run(scenario)
+    # The older card's top was visible before expanding and must remain in view — a
+    # re-pin would push it off the top (its region.y going sharply negative).
+    assert top_before >= 0
+    assert top_after >= 0  # not yanked: the older card's top is still on-screen
+    assert scroll_y == 0  # the viewport did not jump to the tail
+
+
+def test_textual_tool_card_expand_does_not_repin_after_user_scrolls_away() -> None:
+    # The follow intent captured when a card takes focus is stale once the reader
+    # deliberately scrolls up (PageUp/wheel) before expanding. Expanding then must NOT
+    # yank the viewport back to the tail — the user has left tail-follow on purpose.
+    # The card here is tall (wide bash preview) so focusing it does drop follow via the
+    # center-scroll; the user's PageUp is a *further*, deliberate move away.
+    preview = "".join(("X" * 280 + "\n") for _ in range(8))
+    full = preview + "".join(f"tail line {i}\n" for i in range(30))
+
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={"command": "x"}))
+            await pilot.pause()
+            renderer.event(ToolResultReady(call_id="c1", name="bash", output=full, is_error=False))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            card = _first_tool_card(app_instance)
+            card.focus()  # tall card: center-scroll drops follow, intent captured
+            await pilot.pause()
+            await pilot.press("pageup")  # the reader deliberately scrolls away
+            await pilot.pause()
+            following_after_scroll = transcript.is_following
+            await pilot.press("enter")  # expand must NOT re-pin the tail now
+            await pilot.pause()
+            return following_after_scroll, transcript.is_vertical_scroll_end
+
+    following_after_scroll, at_tail_after_expand = anyio.run(scenario)
+    assert following_after_scroll is False  # the user's scroll left tail-follow
+    assert at_tail_after_expand is False  # expanding did not yank them back to the tail
+
+
+def test_textual_tool_card_escape_returns_to_decision_panel_when_input_hidden() -> None:
+    # With a decision panel open the input is hidden; Escape on a focused card must
+    # hand focus to the panel's choice list (not strand the reader on the card with
+    # no way back), mirroring the jump-to-latest fallback.
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={"path": "f"}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="read",
+                    output="a\nb\nc\n",
+                    is_error=False,
+                    summary="read 3 lines from f",
+                )
+            )
+            await pilot.pause()
+            renderer.approval_request(
+                ToolApprovalRequested(
+                    call_id="c2",
+                    name="bash",
+                    arguments={"command": "echo ok"},
+                    safety="command",
+                )
+            )
+            await pilot.pause()
+            input_hidden = not app_instance._input.display
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            options = app_instance.query_one("#decision-options", OptionList)
+            return input_hidden, app_instance.focused is options
+
+    input_hidden, options_focused = anyio.run(scenario)
+    assert input_hidden is True  # the panel hid the input
+    assert options_focused is True  # Escape landed on the panel, not stranded on the card
+
+
 def test_textual_tool_card_edit_content_is_not_markup_injectable() -> None:
     # End-to-end injection guard: edit content containing markup metacharacters
     # must render literally in the transcript, never parsed as color markup.

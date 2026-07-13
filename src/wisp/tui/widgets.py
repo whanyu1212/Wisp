@@ -21,6 +21,7 @@ from collections.abc import Mapping
 from textual import events
 from textual.app import ComposeResult
 from textual.await_complete import AwaitComplete
+from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
@@ -801,6 +802,17 @@ class ToolCard(Static):
     }
     _TICK = 1.0  # the running counter only needs whole-second granularity
 
+    # A resolved card is a keyboard target so the reader can expand its full output.
+    # Cards without expandable content still take focus (harmless on a one-liner) but
+    # their toggle is a no-op — simpler than making focusability conditional, which
+    # Textual evaluates statically at mount.
+    can_focus = True
+    BINDINGS = [
+        Binding("enter", "toggle_expand", "Expand/collapse", show=False),
+        Binding("space", "toggle_expand", "Expand/collapse", show=False),
+        Binding("escape", "leave", "Back to input", show=False),
+    ]
+
     def __init__(self, name: str, arguments: object) -> None:
         super().__init__("")
         # Not `_name`: Textual's DOMNode uses `self._name` to back the widget
@@ -812,6 +824,14 @@ class ToolCard(Static):
         # already-styled renderable (e.g. a colored diff) whose text is literal,
         # so it is composed directly without markup escaping.
         self._detail: str | Content = ""
+        # The full (tool-bounded) output, kept so the reader can expand past the
+        # collapsed preview/summary/diff. Untrusted text, rendered literally like a
+        # str detail. Empty when there is nothing more to show than the detail.
+        self._full_output: str = ""
+        self._expanded = False
+        # Whether the tool capped its own output; drives the honest "truncated at the
+        # tool's limit" marker on the expanded view.
+        self._truncated = False
         self._role = ""
         self._glyph = "⋯"
         # While running, `_elapsed` is a live whole-second tick count (looks alive,
@@ -848,6 +868,8 @@ class ToolCard(Static):
         *,
         detail: str | Content = "",
         elapsed: float | None = None,
+        full_output: str = "",
+        truncated: bool = False,
     ) -> None:
         """Transition the card to a new status, swapping glyph, color, and detail.
 
@@ -856,15 +878,20 @@ class ToolCard(Static):
         repaint; a Textual ``Content`` is a pre-styled renderable (e.g. a colored
         diff) composed directly. ``elapsed`` is the true wall-clock duration (from
         the request/result event timestamps); passing it freezes the live counter
-        at the honest value and stops the per-card timer. The role CSS class is
-        swapped rather than added so the left-rule color reflects only the current
-        state.
+        at the honest value and stops the per-card timer. ``full_output`` is the
+        tool's full (tool-bounded) output, retained so the reader can expand past the
+        collapsed detail; ``truncated`` says the tool itself capped that output. The
+        role CSS class is swapped rather than added so the left-rule color reflects
+        only the current state.
         """
 
         glyph, role = self._STATUS.get(status, self._STATUS["pending"])
         self._glyph = glyph
         if _has_detail(detail):
             self._detail = detail
+        if full_output:
+            self._full_output = full_output
+        self._truncated = truncated
         if status != "pending":
             # Any terminal state (done/error/denied/cancelled) ends the call: stop
             # the live counter so a resolved card can never keep ticking. Freeze at
@@ -881,6 +908,56 @@ class ToolCard(Static):
         self.border_title = _ROLE_LABELS.get(role, "tool")
         self._repaint()
 
+    def _can_expand(self) -> bool:
+        """Whether expanding would show anything the collapsed detail doesn't.
+
+        True only when there is full output AND it differs from what the collapsed
+        detail already shows — a short output whose preview is the whole thing, or a
+        card with no retained output (pending, denied, error message), has nothing to
+        expand, so its toggle is a no-op and no affordance is shown.
+        """
+
+        if not self._full_output:
+            return False
+        detail_text = self._detail.plain if isinstance(self._detail, Content) else self._detail
+        return self._full_output.strip() != detail_text.strip()
+
+    def action_toggle_expand(self) -> None:
+        """Expand or collapse the full output (Enter/Space on a focused card).
+
+        Named ``toggle_expand`` rather than ``toggle`` because Textual's DOMNode
+        already defines an ``action_toggle`` (for reactive attributes) with a
+        different signature.
+        """
+
+        if not self._can_expand():
+            return
+        self._expanded = not self._expanded
+        self._repaint()
+        # A followed transcript should stay pinned to the tail when the *newest* card
+        # grows; the app decides using the follow intent captured at focus and this
+        # card's position (expanding a historical card must not yank the viewport).
+        self.post_message(self.Toggled(self))
+
+    def action_leave(self) -> None:
+        """Return focus to the prompt input (Escape on a focused card)."""
+
+        self.post_message(self.LeaveRequested())
+
+    class Toggled(Message):
+        """A card expanded or collapsed; the transcript may need to re-pin its tail.
+
+        Carries the card so the app can re-pin only when the *newest* card grew —
+        expanding an older card leaves the viewport alone so its content stays in view.
+        """
+
+        def __init__(self, card: ToolCard) -> None:
+            super().__init__()
+            self.card = card
+
+    class LeaveRequested(Message):
+        """A focused card asked to hand focus back to the prompt input."""
+
     def _repaint(self) -> None:
         # Build the whole card as Content, appending every untrusted value
         # (name, summary, detail) as LITERAL styled text. Nothing untrusted is
@@ -893,18 +970,40 @@ class ToolCard(Static):
             content += Content("  ") + Content.styled(self._summary, "dim")
         if self._elapsed is not None:
             content += Content.styled(f" · {_format_duration(self._elapsed)}", "dim")
+        # A ▸/▾ affordance signals the card can be expanded and its current state,
+        # shown only when there is genuinely more to reveal than the collapsed detail.
+        if self._can_expand():
+            content += Content.styled(" ▾" if self._expanded else " ▸", "dim")
 
-        if isinstance(self._detail, Content):
+        if self._expanded and self._full_output:
+            # Expanded: show the full (tool-bounded) output in place of the collapsed
+            # detail, so the reader sees what the preview/summary/diff stood in for.
+            content += Content("\n") + self._indent_str(self._full_output)
+        elif isinstance(self._detail, Content):
             # A pre-styled renderable (e.g. a colored diff): compose its already
             # theme-styled, literal text directly, indented under the status row.
             content += Content("\n") + _indent_content(self._detail)
         elif self._detail:
-            # A plain-string detail is untrusted output: indent it and style the
-            # whole block dim, as literal text.
-            indented = "\n".join(f"  {line}" for line in self._detail.split("\n"))
-            content += Content("\n") + Content.styled(indented, "dim")
+            content += Content("\n") + self._indent_str(self._detail)
+
+        if self._truncated:
+            # The tool capped its own output before it ever reached here, so what the
+            # card shows — collapsed preview or expanded full output — isn't the whole
+            # story. Say so honestly regardless of expand state: a capped output that
+            # fits the preview budget (so there's nothing extra to expand) would
+            # otherwise present as complete, which is exactly the case this marks.
+            content += Content("\n") + Content.styled(
+                "  ⋯ output truncated at the tool's limit", "dim"
+            )
 
         self.update(content)
+
+    @staticmethod
+    def _indent_str(text: str) -> Content:
+        """Indent untrusted output two spaces and style it dim, as literal text."""
+
+        indented = "\n".join(f"  {line}" for line in text.split("\n"))
+        return Content.styled(indented, "dim")
 
 
 class WorkingIndicator(Static):

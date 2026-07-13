@@ -46,6 +46,7 @@ class _ToolRunOutcome:
     before_text: str | None = None
     created: bool = False
     summary: str | None = None
+    truncated: bool = False
 
 
 class ConfiguredToolExecutor:
@@ -127,6 +128,7 @@ class ConfiguredToolExecutor:
             before_text=outcome.before_text,
             created=outcome.created,
             summary=outcome.summary,
+            truncated=outcome.truncated,
         )
 
     async def _run_tool(self, tool: Tool, arguments: dict[str, object]) -> _ToolRunOutcome:
@@ -141,7 +143,14 @@ class ConfiguredToolExecutor:
                 exit_code=_promote_exit_code(tool.name, result.data),
                 before_text=_promote_before_text(tool.name, result.data),
                 created=_promote_created(tool.name, result.data),
-                summary=summarize_tool_result(tool.name, result.data, truncated=result.truncated),
+                summary=summarize_tool_result(
+                    tool.name, result.data, truncated=_promote_truncated(result.truncated)
+                ),
+                # The tool's own authoritative "I capped my output" flag, so the card
+                # can be honest that an expanded view may still not be the whole story.
+                # Only a real ToolResult sets this; every synthetic/error path defaults
+                # it False.
+                truncated=_promote_truncated(result.truncated),
             )
         except Exception as exc:  # noqa: BLE001 - tool failures are model-visible results
             return _ToolRunOutcome(str(exc), is_error=True)
@@ -189,6 +198,22 @@ def _promote_created(name: str, data: Mapping[str, object]) -> bool:
         return False
     created = data.get("created")
     return created if isinstance(created, bool) else False
+
+
+def _promote_truncated(truncated: object) -> bool:
+    """Coerce a tool's ``truncated`` flag to a strict bool for the event model.
+
+    ``ToolResult`` is a plain dataclass with no validation, so a custom or malformed
+    extension tool can hand back ``None`` or a non-bool. The event models type it as a
+    strict ``bool``, and the ``ToolExecutionEnded`` that carries it is built outside
+    ``_run_tool``'s try/except — so an un-coerced odd value would raise a Pydantic
+    ``ValidationError`` there and abort the tool stream instead of degrading to a
+    model-visible tool error. Gate it like the other promoted fields: only a real
+    ``bool`` counts (not truthiness, so ``truncated="no"`` doesn't read as capped),
+    everything else defaults to "not truncated".
+    """
+
+    return truncated if isinstance(truncated, bool) else False
 
 
 __all__ = ["ConfiguredToolExecutor"]
