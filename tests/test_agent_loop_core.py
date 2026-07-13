@@ -13,6 +13,7 @@ from wisp.events import (
     ToolApprovalResolved,
     ToolExecutionEnded,
     ToolResultReady,
+    wisp_event_from_json,
 )
 from wisp.providers.events import (
     ProviderResponseCompleted,
@@ -53,6 +54,7 @@ class RecordingToolExecutor:
             name=tool_call.name,
             output="tool output",
             is_error=False,
+            exit_code=0,
         )
 
 
@@ -185,6 +187,14 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
     assert result.output == "tool output"
     assert provider.calls[1].tool_results[0].output == "tool output"
     assert provider.calls[1].previous_response_id == "response-1"
+    # The promoted exit_code reaches the event AND crosses the wire: the TUI
+    # renderer only sees events after they are serialized (agent subprocess →
+    # JSON → client), so the presentation signal must survive round-tripping.
+    assert result.exit_code == 0
+    assert wisp_event_from_json(result.model_dump_json()).exit_code == 0
+    ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
+    assert ended.exit_code == 0
+    assert wisp_event_from_json(ended.model_dump_json()).exit_code == 0
 
 
 def test_pure_loop_rejects_executor_without_terminal_result() -> None:

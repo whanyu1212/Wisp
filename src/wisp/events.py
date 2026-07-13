@@ -1,4 +1,4 @@
-"""Schema-v3 events emitted by the Wisp agent core."""
+"""Schema-v4 events emitted by the Wisp agent core."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-EVENT_SCHEMA_VERSION = 3
+EVENT_SCHEMA_VERSION = 4
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -26,7 +26,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     timestamp: datetime = Field(default_factory=utc_now)
 
 
@@ -155,6 +155,12 @@ class ToolExecutionEnded(WispEvent):
     name: str
     output: str
     is_error: bool
+    # Process exit status for shell-like tools, promoted from ToolResult.data by
+    # the executor (which knows the tool and holds the structured result). None
+    # for tools without exit-code semantics and for error paths that produced no
+    # ToolResult. See ToolResultReady.exit_code for why this is a narrow scalar
+    # rather than the whole data mapping.
+    exit_code: int | None = None
 
 
 class ToolResultReady(WispEvent):
@@ -163,6 +169,17 @@ class ToolResultReady(WispEvent):
     name: str
     output: str
     is_error: bool
+    # The one structured fact tool-aware rendering needs today: a shell command's
+    # exit status. Deliberately a bounded, JSON-safe scalar rather than the raw
+    # ToolResult.data mapping — the renderer runs in the TUI process and only sees
+    # events *after* they cross the RPC wire (agent subprocess → JSON → client),
+    # so the signal must serialize; but shipping the whole mapping would re-emit
+    # unbounded tool data (e.g. an `ls` entry list) past ToolContext's bounds and
+    # risk non-JSON payloads. This field crosses the only serialized consumer of
+    # these events — the same-version RPC transport (sessions store Messages, not
+    # raw events) — so no schema bump is needed. Set only for tools with genuine
+    # exit-code semantics, so a card is never spuriously reddened.
+    exit_code: int | None = None
 
 
 class TurnCompleted(WispEvent):
@@ -232,7 +249,7 @@ KnownWispEventAdapter: TypeAdapter[KnownWispEvent] = TypeAdapter(KnownWispEvent)
 JsonObjectAdapter: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 
-def _require_schema_v3(data: JsonObject) -> None:
+def _require_current_schema(data: JsonObject) -> None:
     version = data.get("schema_version")
     if version != EVENT_SCHEMA_VERSION:
         raise ValueError(
@@ -241,15 +258,15 @@ def _require_schema_v3(data: JsonObject) -> None:
 
 
 def wisp_event_from_json(line: str) -> KnownWispEvent:
-    """Parse one schema-v3 JSONL event line into a typed Wisp event."""
+    """Parse one current-schema JSONL event line into a typed Wisp event."""
 
     data = JsonObjectAdapter.validate_json(line)
-    _require_schema_v3(data)
+    _require_current_schema(data)
     return KnownWispEventAdapter.validate_python(data)
 
 
 def wisp_event_from_dict(data: JsonObject) -> KnownWispEvent:
-    """Parse one schema-v3 event dictionary into a typed Wisp event."""
+    """Parse one current-schema event dictionary into a typed Wisp event."""
 
-    _require_schema_v3(data)
+    _require_current_schema(data)
     return KnownWispEventAdapter.validate_python(data)

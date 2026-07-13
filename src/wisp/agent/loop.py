@@ -135,6 +135,7 @@ async def _execute_tool_call(
         name=terminal.name,
         output=terminal.output,
         is_error=terminal.is_error,
+        exit_code=terminal.exit_code,
     )
 
 
