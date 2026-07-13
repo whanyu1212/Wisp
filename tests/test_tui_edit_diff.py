@@ -13,6 +13,8 @@ from textual.content import Content
 from wisp.tui.tool_output import (
     _DIFF_ADD_STYLE,
     _DIFF_DEL_STYLE,
+    _DIFF_MAX_HUNK_LINES,
+    _DIFF_MAX_TOTAL_LINES,
     _DIFF_META_STYLE,
     _DIFF_PREVIEW_BYTES,
     _DIFF_PREVIEW_LINES,
@@ -331,6 +333,150 @@ def test_clip_line_to_bytes_returns_line_unchanged_when_it_fits() -> None:
     assert _clip_line_to_bytes("short", 100) == "short"
     # Exact-fit boundary: a line whose byte length equals the budget is kept whole.
     assert _clip_line_to_bytes("☃☃", 6) == "☃☃"
+
+
+# --- Work bounding: the guard refuses to diff pathologically large input ------
+#
+# These assert on *work*, not display: they instrument difflib to prove an
+# oversize edit never reaches the O(n*m) matcher. The display-bounding tests
+# above cannot catch this — they only check the (already bounded) output, which
+# is why they pass even against the pre-guard code that builds 100k diff lines to
+# show 8.
+
+
+def _text_with_newlines(count: int, token: str) -> str:
+    """A string containing exactly ``count`` newline characters.
+
+    The guard counts ``\\n`` (not lines), so tests express thresholds in newlines
+    directly: N joined lines carry N-1 newlines, an off-by-one trap this avoids.
+    """
+
+    return "\n".join(f"{token}{i}" for i in range(count + 1))
+
+
+def _oversize_edit(newlines: int = 60_000) -> dict[str, object]:
+    """An edit whose single hunk is far over the per-hunk newline ceiling."""
+
+    return _edit((_text_with_newlines(newlines, "old-"), _text_with_newlines(newlines, "new-")))
+
+
+def test_oversize_edit_never_invokes_difflib(monkeypatch) -> None:
+    # The anti-regression for this P2: an oversize edit must not call difflib at
+    # all. Pre-guard, render_edit_diff calls unified_diff unconditionally and
+    # materializes ~100k diff lines; here the spy would record a call.
+    import wisp.tui.tool_output as mod
+
+    calls: list[tuple] = []
+    real = mod.difflib.unified_diff
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", spy)
+
+    assert render_edit_diff(_oversize_edit()) is None
+    assert calls == []  # the matcher was never even started
+
+
+def test_oversize_edit_does_not_generate_hunk_lines(monkeypatch) -> None:
+    # Bounds the number of generated diff lines directly: _single_hunk_lines must
+    # never run for oversize input. Pre-guard it runs and returns ~100k lines.
+    import wisp.tui.tool_output as mod
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("_single_hunk_lines must not run for oversize input")
+
+    monkeypatch.setattr(mod, "_single_hunk_lines", forbidden)
+
+    assert render_edit_diff(_oversize_edit()) is None
+
+
+def test_guard_below_threshold_still_diffs(monkeypatch) -> None:
+    # A hunk just under the per-hunk ceiling still produces a real diff (difflib
+    # called exactly once) — the guard must not over-reject reviewable edits.
+    import wisp.tui.tool_output as mod
+
+    calls: list[tuple] = []
+    real = mod.difflib.unified_diff
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", spy)
+
+    # Exactly at the ceiling (not over) — the guard uses a strict `>`, so this
+    # still diffs. A full replacement renders deletions first, so the 8-line
+    # preview shows the leading "-" lines (the "+" additions fall past the cap).
+    old = _text_with_newlines(_DIFF_MAX_HUNK_LINES, "a")
+    new = _text_with_newlines(_DIFF_MAX_HUNK_LINES, "b")
+    content = render_edit_diff(_edit((old, new)))
+    assert content is not None
+    assert "-a0" in content.plain  # a real diff was produced, not the fallback
+    assert len(calls) == 1  # difflib ran exactly once
+
+
+def test_guard_above_threshold_falls_back(monkeypatch) -> None:
+    # A hunk one newline over the per-hunk ceiling falls back to None without
+    # diffing.
+    import wisp.tui.tool_output as mod
+
+    def forbidden(*_a, **_k):
+        raise AssertionError("difflib must not run above the per-hunk ceiling")
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", forbidden)
+
+    old = _text_with_newlines(_DIFF_MAX_HUNK_LINES + 1, "a")
+    new = _text_with_newlines(_DIFF_MAX_HUNK_LINES + 1, "b")
+    assert render_edit_diff(_edit((old, new))) is None
+
+
+def test_guard_total_lines_across_many_hunks(monkeypatch) -> None:
+    # Many hunks each under the per-hunk ceiling but summing over the total
+    # ceiling must also fall back — a per-hunk-only guard would let this through.
+    import wisp.tui.tool_output as mod
+
+    def forbidden(*_a, **_k):
+        raise AssertionError("difflib must not run when the total ceiling is exceeded")
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", forbidden)
+
+    # Each hunk is under the per-hunk ceiling, but three of them sum well over the
+    # total ceiling (each side counts, so 3 hunks × 2 sides × half-total newlines).
+    per_hunk = _DIFF_MAX_TOTAL_LINES // 2
+    old = _text_with_newlines(per_hunk, "a")
+    new = _text_with_newlines(per_hunk, "b")
+    hunks = ((old, new), (old, new), (old, new))
+    assert render_edit_diff(_edit(*hunks)) is None
+
+
+def test_oversize_noop_edit_returns_none_without_diffing(monkeypatch) -> None:
+    # A huge no-op edit (old == new, over the ceiling) returns None via the guard,
+    # never reaching difflib. Same result as the no-op branch, but no matcher cost.
+    import wisp.tui.tool_output as mod
+
+    def forbidden(*_a, **_k):
+        raise AssertionError("difflib must not run for an oversize no-op edit")
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", forbidden)
+
+    same = _text_with_newlines(_DIFF_MAX_HUNK_LINES + 100, "line-")
+    assert render_edit_diff(_edit((same, same))) is None
+
+
+def test_render_tool_result_oversize_edit_falls_back_to_generic() -> None:
+    # End to end: an oversize edit through the dispatcher yields the generic
+    # string preview of the output, not a diff Content and not a crash.
+    result = render_tool_result(
+        "edit",
+        _oversize_edit(),
+        "Applied 1 edit(s) to src/foo.py",
+        is_error=False,
+        exit_code=None,
+    )
+    assert isinstance(result, str)
+    assert "Applied 1 edit" in result
 
 
 # --- Dispatch: render_tool_result routes edit successes here ------------------

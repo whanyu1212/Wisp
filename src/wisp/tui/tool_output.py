@@ -60,6 +60,23 @@ _DIFF_META_STYLE = "$text-muted"
 _DIFF_PREVIEW_LINES = _TOOL_OUTPUT_PREVIEW_LINES
 _DIFF_PREVIEW_BYTES = _TOOL_OUTPUT_PREVIEW_BYTES
 
+# Upfront guard on the *work* of diffing, distinct from the display bounds above.
+# difflib.unified_diff runs an O(n*m) SequenceMatcher whose full cost is paid the
+# moment its generator is first advanced — so early-stopping its output cannot
+# bound it; only refusing to start can. Its cost driver is *line count* (n and m),
+# not bytes: one 2 MB line diffs in O(1), while tens of thousands of short lines
+# is the expensive case. So we gate on per-side line count and, above the ceiling,
+# skip difflib entirely and fall back to the generic summary. A whole-file
+# replacement (the case this guards: e.g. 50k lines) is one giant hunk far over
+# the ceiling and never reaches the matcher; an 8-line preview of a 50k-line
+# rewrite is not review signal anyway. At the ceiling the worst case is a few ms
+# on the event loop and a few thousand transient diff lines — measured, bounded.
+_DIFF_MAX_HUNK_LINES = 4000
+
+# Many hunks each just under the per-hunk ceiling still sum to unbounded work, so
+# cap the total lines diffed across all hunks of one edit call as a backstop.
+_DIFF_MAX_TOTAL_LINES = 8000
+
 # Errors surface at the tail, so the error preview keeps the last few lines
 # (a traceback's final frames, a stderr tail) rather than the first. Bounds
 # track the generic preview so a failure card is never larger than a success
@@ -286,6 +303,13 @@ def render_edit_diff(arguments: Mapping[str, object]) -> Content | None:
     if not edits:
         return None
 
+    # Bound the *work* before starting it: difflib's matcher cost is paid on first
+    # consumption and cannot be recovered by trimming its output, so a whole-file
+    # replacement must never reach it. Above the line ceiling, return None and let
+    # the caller show the generic "Applied N edit(s)" summary instead of a diff.
+    if _edit_input_too_large(edits):
+        return None
+
     diff_lines = _unified_diff_lines(edits)
     if not diff_lines:
         # Old and new text were identical for every hunk (a no-op edit). Nothing
@@ -325,6 +349,30 @@ def _parse_edit_hunks(arguments: Mapping[str, object]) -> list[tuple[str, str]]:
             return []
         hunks.append((old, new))
     return hunks
+
+
+def _edit_input_too_large(hunks: Sequence[tuple[str, str]]) -> bool:
+    """Whether these hunks are too large to diff on the event loop.
+
+    difflib's matcher is O(n*m) in *line count* and pays its full cost the moment
+    its generator is first advanced, so the decision to diff has to be made before
+    calling it. We gate on newline count — a cheap ``str.count`` scan (O(len), no
+    allocation, unlike ``splitlines``) and a tight proxy for difflib's sequence
+    length. A single hunk over :data:`_DIFF_MAX_HUNK_LINES` per side, or a total
+    across hunks over :data:`_DIFF_MAX_TOTAL_LINES`, is refused. Both checks
+    short-circuit, so one giant hunk is rejected after its first scan.
+    """
+
+    total = 0
+    for old, new in hunks:
+        old_lines = old.count("\n")
+        new_lines = new.count("\n")
+        if old_lines > _DIFF_MAX_HUNK_LINES or new_lines > _DIFF_MAX_HUNK_LINES:
+            return True
+        total += old_lines + new_lines
+        if total > _DIFF_MAX_TOTAL_LINES:
+            return True
+    return False
 
 
 def _unified_diff_lines(hunks: Sequence[tuple[str, str]]) -> list[str]:
