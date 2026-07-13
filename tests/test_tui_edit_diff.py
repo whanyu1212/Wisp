@@ -304,8 +304,12 @@ def test_render_edit_diff_bounds_single_enormous_line() -> None:
     content = render_edit_diff(_edit((old, old + "y")))
 
     # Total diff-line content bytes (what the renderer measures against the budget)
-    # and what actually survived in the rendered body.
-    total_bytes = sum(len(line.encode("utf-8")) for line in _unified_diff_lines([(old, old + "y")]))
+    # and what actually survived in the rendered body. A single changed hunk
+    # (label 1, non-multi) mirrors what render_edit_diff feeds the builder.
+    total_bytes = sum(
+        len(line.encode("utf-8"))
+        for line in _unified_diff_lines([(1, old, old + "y")], multi=False)
+    )
     kept_bytes = sum(
         len(line.encode("utf-8"))
         for line in content.plain.split("\n")
@@ -570,6 +574,47 @@ def test_guard_bounds_many_no_op_hunks(monkeypatch) -> None:
     calls.clear()
     assert render_edit_diff(_edit(*empties, ("a", "b"))) is not None
     assert len(calls) == 1
+
+
+def test_guard_survives_stateful_str_subclass(monkeypatch) -> None:
+    # The no-op filter and the work guard must agree on which hunks change. A str
+    # subclass with a stateful __eq__ (equal on the first compare, not after) could
+    # otherwise be judged a no-op by one pass and a change by the other, charging
+    # the guard zero while difflib still runs per hunk. Arguments are coerced to
+    # built-in str at the parse boundary, so the subclass never reaches the guard.
+    import wisp.tui.tool_output as mod
+
+    class FlipStr(str):
+        def __new__(cls, value: str) -> FlipStr:
+            obj = super().__new__(cls, value)
+            obj._compares = 0  # type: ignore[attr-defined]
+            return obj
+
+        def __eq__(self, other: object) -> bool:
+            self._compares += 1  # type: ignore[attr-defined]
+            return self._compares == 1  # equal once (guard), then not (diff)
+
+        def __hash__(self) -> int:
+            return super().__hash__()
+
+    def forbidden(*_a, **_k):
+        raise AssertionError("difflib must not run for a huge stateful-str batch")
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", forbidden)
+
+    hunks = tuple((FlipStr(f"old {i}"), f"new {i}") for i in range(_DIFF_MAX_TOTAL_LINES + 1))
+    # All are real changes once coerced; the aggregate ceiling rejects the batch.
+    assert render_edit_diff(_edit(*hunks)) is None
+
+
+def test_multi_hunk_label_uses_original_edit_position() -> None:
+    # The "@@ edit N @@" label names the user's edit position, not a re-indexed
+    # position among only the changed hunks. With two leading no-ops, the single
+    # changed hunk is edit 3 — and the label shows because the call had >1 edit.
+    content = render_edit_diff(_edit(("same", "same"), ("also", "also"), ("a", "b")))
+    assert content is not None
+    assert "@@ edit 3 @@" in content.plain
+    assert "@@ edit 1 @@" not in content.plain
 
 
 def test_guard_bounds_many_single_line_hunks(monkeypatch) -> None:

@@ -328,20 +328,30 @@ def render_edit_diff(arguments: Mapping[str, object]) -> Content | None:
     """
 
     edits = _parse_edit_hunks(arguments)
-    if not edits:
+    # Filter no-op hunks once, here, so the work guard and the diff builder below
+    # operate on the *same* changed-hunk list rather than each re-deciding which
+    # hunks change. A single source of truth keeps the guard's accounting exactly
+    # aligned with the work the diff actually does. Each changed hunk keeps its
+    # original 1-based position so the per-hunk label names the user's edit, not a
+    # re-indexed position; ``multi`` reflects the original edit count.
+    multi = len(edits) > 1
+    changed = [(index + 1, old, new) for index, (old, new) in enumerate(edits) if old != new]
+    if not changed:
+        # No hunks, or every hunk is a no-op: nothing to diff. Let the caller show
+        # the generic "Applied N edit(s)" summary.
         return None
 
     # Bound the *work* before starting it: difflib's matcher cost is paid on first
     # consumption and cannot be recovered by trimming its output, so a whole-file
     # replacement must never reach it. Above the line ceiling, return None and let
     # the caller show the generic "Applied N edit(s)" summary instead of a diff.
-    if _edit_input_too_large(edits):
+    if _edit_input_too_large([(old, new) for _, old, new in changed]):
         return None
 
-    diff_lines = _unified_diff_lines(edits)
+    diff_lines = _unified_diff_lines(changed, multi=multi)
     if not diff_lines:
-        # Old and new text were identical for every hunk (a no-op edit). Nothing
-        # to diff; let the caller show the generic "Applied N edit(s)" summary.
+        # Every changed hunk diffed to nothing (only line-terminator-invisible
+        # differences difflib collapses). Fall back to the generic summary.
         return None
 
     diff = _content_from_diff_lines(diff_lines)
@@ -362,6 +372,12 @@ def _parse_edit_hunks(arguments: Mapping[str, object]) -> list[tuple[str, str]]:
     Returns an empty list on any structural surprise (missing/renamed keys, wrong
     types, non-string text) rather than raising, so a malformed payload degrades
     to the generic preview instead of crashing the transcript.
+
+    Each side is normalized to a built-in ``str``. Arguments already arrive as
+    JSON-decoded built-ins on every real path, but coercing here means the guard
+    and the diff both operate on plain strings, so a ``str`` subclass with a
+    stateful ``__eq__`` (which could answer the no-op check differently across the
+    two passes and let unbounded work slip past the guard) cannot reach either.
     """
 
     raw_edits = arguments.get("edits")
@@ -375,7 +391,7 @@ def _parse_edit_hunks(arguments: Mapping[str, object]) -> list[tuple[str, str]]:
         new = item.get("newText")
         if not isinstance(old, str) or not isinstance(new, str):
             return []
-        hunks.append((old, new))
+        hunks.append((str(old), str(new)))
     return hunks
 
 
@@ -428,67 +444,66 @@ def _line_count(text: str) -> int:
 
 
 def _edit_input_too_large(hunks: Sequence[tuple[str, str]]) -> bool:
-    """Whether these hunks are too large to diff on the event loop.
+    """Whether these changed hunks are too large to diff on the event loop.
+
+    ``hunks`` are the *changed* hunks (``old != new``), filtered once by the caller
+    so this guard and :func:`_unified_diff_lines` bound and do the exact same work
+    — the guard can never charge for a hunk the diff skips, or vice versa.
 
     difflib's matcher is O(n*m) in *line count* and pays its full cost the moment
     its generator is first advanced, so the decision to diff has to be made before
     calling it. There are two independent cost axes and this guards both:
 
     * A single huge hunk — bounded per side against :data:`_DIFF_MAX_HUNK_LINES`.
-    * Many hunks — ``_unified_diff_lines`` runs difflib once per *changed* hunk,
-      so a call with thousands of tiny one-line changes (a generated batch of
-      replacements) is as expensive as one giant hunk. The aggregate line count
-      across the changed hunks is bounded against :data:`_DIFF_MAX_TOTAL_LINES`,
-      and each changed hunk is charged at least one unit so even single-character
-      edits accumulate toward the total.
+    * Many hunks — ``_unified_diff_lines`` runs difflib once per changed hunk, so a
+      call with thousands of tiny one-line changes (a generated batch of
+      replacements) is as expensive as one giant hunk. The aggregate line count is
+      bounded against :data:`_DIFF_MAX_TOTAL_LINES`, and each hunk is charged at
+      least one unit so even single-character edits accumulate toward the total.
 
-    No-op hunks (``old == new``) are skipped here exactly as ``_unified_diff_lines``
-    skips them before difflib, so the guard's accounting matches the work actually
-    done — a batch of no-op hunks costs nothing and cannot re-open the many-hunks
-    bypass. Both checks short-circuit, so an oversize input is rejected on its
-    first scan, and line counts come from :func:`_line_count` (allocation-free) so
-    the decision never materializes the line lists ``splitlines`` would.
+    Both checks short-circuit, so an oversize input is rejected on its first scan,
+    and line counts come from :func:`_line_count` (allocation-free) so the decision
+    never materializes the line lists ``splitlines`` would.
     """
 
     total = 0
     for old, new in hunks:
-        if old == new:
-            continue  # skipped before difflib in _unified_diff_lines too — no cost
         old_lines = _line_count(old)
         new_lines = _line_count(new)
         if old_lines > _DIFF_MAX_HUNK_LINES or new_lines > _DIFF_MAX_HUNK_LINES:
             return True
-        # A changed hunk always has a non-empty side (both empty would be a no-op,
-        # skipped above), so old_lines + new_lines is already >= 1; max keeps that
-        # floor explicit — difflib runs once per changed hunk regardless of size.
+        # A changed hunk always has a non-empty side, so old_lines + new_lines is
+        # already >= 1; max keeps that floor explicit — difflib runs once per hunk
+        # regardless of size, so every hunk must cost at least one aggregate unit.
         total += max(1, old_lines + new_lines)
         if total > _DIFF_MAX_TOTAL_LINES:
             return True
     return False
 
 
-def _unified_diff_lines(hunks: Sequence[tuple[str, str]]) -> list[str]:
-    """Unified-diff lines across all hunks, with a per-hunk label when multiple.
+def _unified_diff_lines(hunks: Sequence[tuple[int, str, str]], *, multi: bool) -> list[str]:
+    """Unified-diff lines across changed hunks, with a per-hunk label when multiple.
 
-    Each hunk is diffed independently (the edit tool applies them independently),
-    so a multi-edit call yields several small diffs. Lines keep their unified
-    ``+``/``-``/`` ``/`` @@`` prefixes; styling happens later off the prefix.
+    ``hunks`` are ``(label, old, new)`` triples for the *changed* hunks only,
+    pre-filtered by the caller (so this never diffs a no-op). Each hunk is diffed
+    independently — the edit tool applies them independently — so a multi-edit
+    call yields several small diffs. Lines keep their unified ``+``/``-``/`` ``/``
+    @@`` prefixes; styling happens later off the prefix. ``label`` is the hunk's
+    original 1-based position, and ``multi`` reflects whether the original call had
+    more than one edit, so a label names the user's edit rather than a re-indexed
+    changed-only position.
 
-    A hunk whose old and new text are identical contributes nothing — not even a
-    label — so an all-no-op multi-edit call yields no lines and falls back to the
-    generic summary, consistent with the single-hunk no-op case.
+    A hunk whose difference is invisible to difflib (only a collapsed line
+    terminator) contributes nothing — not even a label — so it is skipped here too.
     """
 
     lines: list[str] = []
-    multi = len(hunks) > 1
-    for index, (old, new) in enumerate(hunks):
-        if old == new:
-            continue  # identical text cannot diff — skip before invoking difflib
+    for label, old, new in hunks:
         body = _single_hunk_lines(old, new)
         if not body:
-            continue  # a no-op hunk adds neither a label nor body
+            continue  # difflib found nothing to show — no label, no body
         if multi:
-            lines.append(f"@@ edit {index + 1} @@")
+            lines.append(f"@@ edit {label} @@")
         lines.extend(body)
     return lines
 
