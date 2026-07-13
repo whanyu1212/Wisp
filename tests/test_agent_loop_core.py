@@ -398,8 +398,8 @@ def test_pure_loop_forwards_summary_across_the_wire() -> None:
     assert round_tripped.summary == "read 3 lines from f.txt"
     assert round_tripped.truncated is True
     ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
-    assert ended.truncated is True
-    assert wisp_event_from_json(ended.model_dump_json()).truncated is True
-    ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
     assert ended.summary == "read 3 lines from f.txt"
-    assert wisp_event_from_json(ended.model_dump_json()).summary == "read 3 lines from f.txt"
+    assert ended.truncated is True
+    round_tripped_ended = wisp_event_from_json(ended.model_dump_json())
+    assert round_tripped_ended.summary == "read 3 lines from f.txt"
+    assert round_tripped_ended.truncated is True

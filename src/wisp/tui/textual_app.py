@@ -275,6 +275,12 @@ class TextualTui(App[None]):
         # call_id → ToolCard, so the request, approval, and result events for one
         # tool call all mutate the same card instead of stacking three lines.
         self._tool_cards: dict[str, ToolCard] = {}
+        # Whether the transcript was following the tail at the moment a ToolCard
+        # took focus. Captured then (before Textual's deferred center-scroll of a
+        # card taller than the viewport flips follow off) so an explicit keyboard
+        # expand can re-pin the tail it would otherwise have scrolled away from,
+        # without yanking a reader who had deliberately scrolled up.
+        self._card_focus_was_following = False
         # Main-screen heartbeat (opencode-style): a dim WorkingIndicator row in the
         # transcript right after the user prompt, not in the stable footer chrome.
         self._working_indicator: Widget | None = None
@@ -435,19 +441,35 @@ class TextualTui(App[None]):
         elif self._decision_panel is not None:
             self._decision_panel.focus_options()
 
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        # A ToolCard taller than the viewport is center-scrolled by Textual when it
+        # takes focus, which settles the transcript off the bottom and flips follow
+        # off before an expand can re-pin. Record the follow intent now — this fires
+        # before that deferred scroll — so on_tool_card_toggled can restore it.
+        if isinstance(event.widget, ToolCard) and self._transcript is not None:
+            self._card_focus_was_following = self._transcript.is_following
+
     def on_tool_card_toggled(self, event: ToolCard.Toggled) -> None:
-        # A card grew or shrank. Re-pin the tail iff the user was following it, so
-        # expanding the newest card keeps it in view without yanking a reader who has
-        # scrolled up (the sticky follow flag decides).
+        # A card grew or shrank. If the transcript was following the tail when this
+        # card took focus, re-pin it — expanding the newest card should keep it in
+        # view even though focusing a tall card scrolled the tail off first. If the
+        # reader had scrolled up before focusing, leave their position alone.
         event.stop()
-        self._follow_tail_after_refresh()
+        if self._card_focus_was_following and self._transcript is not None:
+            self._transcript.return_to_latest()
+        else:
+            self._follow_tail_after_refresh()
 
     def on_tool_card_leave_requested(self, event: ToolCard.LeaveRequested) -> None:
-        # Escape on a focused card hands focus back to the resting target (the input),
-        # so the reader isn't stranded on a card with no obvious way back.
+        # Escape on a focused card hands focus back to the resting target: the input,
+        # or the decision panel's choice list when a panel has hidden the input (same
+        # fallback as on_jump_to_latest_selected), so the reader is never stranded on
+        # a card with no way back.
         event.stop()
         if self._input is not None and self._input.display:
             self._input.focus()
+        elif self._decision_panel is not None:
+            self._decision_panel.focus_options()
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         self._forward_jump_overlay_scroll(event, direction=-1)

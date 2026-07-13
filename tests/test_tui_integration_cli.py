@@ -1397,6 +1397,84 @@ def test_textual_tool_card_expand_keeps_tail_follow() -> None:
     assert anyio.run(scenario) is True
 
 
+def test_textual_tool_card_expand_repins_tail_when_focus_scrolled_a_tall_card() -> None:
+    # A card taller than the viewport is center-scrolled by Textual when it takes
+    # focus, which settles the transcript off the bottom and flips follow off before
+    # the expand runs. A followed reader who focuses the newest card and expands it
+    # must still end up pinned to the tail (acceptance criterion). The collapsed
+    # preview here (a bash result with no one-line summary) is wide enough to wrap
+    # past the default viewport, so focusing it genuinely triggers the center-scroll
+    # — the plain short-summary case doesn't exercise this path.
+    preview = "".join(("X" * 280 + "\n") for _ in range(8))
+    full = preview + "".join(f"tail line {i}\n" for i in range(30))
+
+    async def scenario() -> tuple[bool, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={"command": "x"}))
+            await pilot.pause()
+            renderer.event(ToolResultReady(call_id="c1", name="bash", output=full, is_error=False))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            following_before = transcript.is_following  # resting at the tail
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            # Focusing a card taller than the viewport center-scrolls it, which drops
+            # follow-tail before the expand.
+            following_after_focus = transcript.is_following
+            await pilot.press("enter")
+            await pilot.pause()
+            return following_before, following_after_focus, transcript.is_following
+
+    following_before, following_after_focus, following_after_expand = anyio.run(scenario)
+    assert following_before is True
+    assert following_after_focus is False  # the focus scroll dropped follow-tail
+    assert following_after_expand is True  # the explicit expand re-pinned it
+
+
+def test_textual_tool_card_escape_returns_to_decision_panel_when_input_hidden() -> None:
+    # With a decision panel open the input is hidden; Escape on a focused card must
+    # hand focus to the panel's choice list (not strand the reader on the card with
+    # no way back), mirroring the jump-to-latest fallback.
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={"path": "f"}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="read",
+                    output="a\nb\nc\n",
+                    is_error=False,
+                    summary="read 3 lines from f",
+                )
+            )
+            await pilot.pause()
+            renderer.approval_request(
+                ToolApprovalRequested(
+                    call_id="c2",
+                    name="bash",
+                    arguments={"command": "echo ok"},
+                    safety="command",
+                )
+            )
+            await pilot.pause()
+            input_hidden = not app_instance._input.display
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            options = app_instance.query_one("#decision-options", OptionList)
+            return input_hidden, app_instance.focused is options
+
+    input_hidden, options_focused = anyio.run(scenario)
+    assert input_hidden is True  # the panel hid the input
+    assert options_focused is True  # Escape landed on the panel, not stranded on the card
+
+
 def test_textual_tool_card_edit_content_is_not_markup_injectable() -> None:
     # End-to-end injection guard: edit content containing markup metacharacters
     # must render literally in the transcript, never parsed as color markup.
