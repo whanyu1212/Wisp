@@ -10,6 +10,7 @@ from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.content import Content
 from textual.widget import Widget
 from textual.widgets import Header, TextArea
 
@@ -825,7 +826,12 @@ class TextualTui(App[None]):
         self._follow_tail_after_refresh()
 
     def resolve_tool_call(
-        self, call_id: str, status: str, *, detail: str = "", elapsed: float | None = None
+        self,
+        call_id: str,
+        status: str,
+        *,
+        detail: str | Content = "",
+        elapsed: float | None = None,
     ) -> None:
         # Transition the card for this call_id in place. If the request card was
         # never seen (a result arriving with no prior request, e.g. after a

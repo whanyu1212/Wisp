@@ -1051,6 +1051,78 @@ def test_textual_tool_card_nonzero_exit_renders_as_failure() -> None:
     assert "line-39" in rendered
 
 
+def test_textual_tool_card_edit_renders_colored_diff() -> None:
+    # Issue #74 PR B1: a successful `edit` renders a colored unified diff built
+    # from the request's oldText/newText hunks — which reach the renderer on
+    # ToolCallRequested and are retained until the result arrives. Drives the real
+    # request → result pipeline (not the pure function) and asserts both the diff
+    # text and the resolved theme colors reach the transcript.
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="edit",
+                    arguments={
+                        "path": "src/foo.py",
+                        "edits": [{"oldText": "return 1", "newText": "return 2"}],
+                    },
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="edit",
+                    output="Applied 1 edit(s) to src/foo.py",
+                    is_error=False,
+                )
+            )
+            await pilot.pause()
+            text = "\n".join(_transcript_texts(app_instance))
+            styles = _transcript_styles(app_instance)
+            return text, styles
+
+    text, styles = anyio.run(scenario)
+    assert "✓ edit" in text
+    assert "-return 1" in text  # deletion line
+    assert "+return 2" in text  # addition line
+    # Diff spans carry the theme *variables* ($success/$error), not baked hex —
+    # Textual resolves them per active theme at paint time, so a theme switch
+    # recolors the diff. Asserting the variable names proves it's theme-linked,
+    # not hardcoded, which is the whole point of using $success/$error.
+    assert "$success" in styles  # additions
+    assert "$error" in styles  # deletions
+
+
+def test_textual_tool_card_edit_content_is_not_markup_injectable() -> None:
+    # End-to-end injection guard: edit content containing markup metacharacters
+    # must render literally in the transcript, never parsed as color markup.
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="edit",
+                    arguments={
+                        "path": "x",
+                        "edits": [{"oldText": "old", "newText": "[red]INJECT[/red]"}],
+                    },
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(call_id="c1", name="edit", output="Applied", is_error=False)
+            )
+            await pilot.pause()
+            return "\n".join(_transcript_texts(app_instance))
+
+    text = anyio.run(scenario)
+    assert "[red]INJECT[/red]" in text  # literal, not parsed
+
+
 def test_textual_tool_card_without_a_request_shows_no_duration() -> None:
     # A result arriving with no prior request (e.g. a resumed session) can't
     # compute a duration; the card is simply never mounted, so nothing is shown

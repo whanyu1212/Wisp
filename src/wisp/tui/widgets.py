@@ -22,6 +22,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.await_complete import AwaitComplete
 from textual.containers import Vertical, VerticalScroll
+from textual.content import Content
 from textual.message import Message
 from textual.timer import Timer
 from textual.widget import AwaitMount, Widget
@@ -37,7 +38,6 @@ from wisp.tui.decision_content import (
 )
 from wisp.tui.rendering import (
     TuiViewSnapshot,
-    _markup_escape,
     format_tui_footer_text,
 )
 
@@ -193,6 +193,36 @@ def _format_duration(seconds: float) -> str:
         return f"{seconds:.0f}s"
     minutes, secs = divmod(int(seconds), 60)
     return f"{minutes}m{secs:02d}s"
+
+
+def _has_detail(detail: str | Content) -> bool:
+    """Whether a card detail carries content, for both str and Content forms.
+
+    An empty ``str`` and an empty ``Content`` both mean "no detail", so a
+    degenerate render never overwrites a real prior detail or forces an empty
+    block. A ``Content`` is truthy by identity, so check its text explicitly.
+    """
+
+    if isinstance(detail, Content):
+        return bool(detail.plain)
+    return bool(detail)
+
+
+def _indent_content(detail: Content) -> Content:
+    """Indent each line of a pre-styled ``Content`` by two spaces.
+
+    Matches the plain-string detail's `"  " + line` indent, preserving the
+    detail's own styled spans. The indent is trusted literal chrome; the detail's
+    text stays literal (never re-parsed as markup).
+    """
+
+    lines = detail.split("\n")
+    indented = Content("")
+    for offset, line in enumerate(lines):
+        if offset:
+            indented += Content("\n")
+        indented += Content("  ") + line
+    return indented
 
 
 def _preview_tool_output(
@@ -773,9 +803,15 @@ class ToolCard(Static):
 
     def __init__(self, name: str, arguments: object) -> None:
         super().__init__("")
-        self._name = name
+        # Not `_name`: Textual's DOMNode uses `self._name` to back the widget
+        # `name` property (typed str | None), so a distinct field avoids
+        # shadowing it and keeps this a plain str.
+        self._tool_name = name
         self._summary = _summarize_arguments(arguments)
-        self._detail = ""
+        # A plain str is untrusted output escaped at repaint; a Content is an
+        # already-styled renderable (e.g. a colored diff) whose text is literal,
+        # so it is composed directly without markup escaping.
+        self._detail: str | Content = ""
         self._role = ""
         self._glyph = "⋯"
         # While running, `_elapsed` is a live whole-second tick count (looks alive,
@@ -806,20 +842,28 @@ class ToolCard(Static):
         self._elapsed = (self._elapsed or 0.0) + self._TICK
         self._repaint()
 
-    def set_state(self, status: str, *, detail: str = "", elapsed: float | None = None) -> None:
+    def set_state(
+        self,
+        status: str,
+        *,
+        detail: str | Content = "",
+        elapsed: float | None = None,
+    ) -> None:
         """Transition the card to a new status, swapping glyph, color, and detail.
 
         ``detail`` overrides the argument summary (used to show a denial reason or
-        bounded result preview). ``elapsed`` is the true wall-clock duration (from the
-        request/result event timestamps); passing it freezes the live counter at
-        the honest value and stops the per-card timer. The role CSS class is
+        bounded result preview). A plain ``str`` is untrusted output escaped at
+        repaint; a Textual ``Content`` is a pre-styled renderable (e.g. a colored
+        diff) composed directly. ``elapsed`` is the true wall-clock duration (from
+        the request/result event timestamps); passing it freezes the live counter
+        at the honest value and stops the per-card timer. The role CSS class is
         swapped rather than added so the left-rule color reflects only the current
         state.
         """
 
         glyph, role = self._STATUS.get(status, self._STATUS["pending"])
         self._glyph = glyph
-        if detail:
+        if _has_detail(detail):
             self._detail = detail
         if status != "pending":
             # Any terminal state (done/error/denied/cancelled) ends the call: stop
@@ -838,18 +882,29 @@ class ToolCard(Static):
         self._repaint()
 
     def _repaint(self) -> None:
-        # name is a fixed tool identifier; summary/detail are escaped as untrusted
-        # payload (a path or output the model or a file supplied), preserving
-        # the escape-at-boundary invariant the transcript relies on.
-        text = f"{self._glyph} [b]{_markup_escape(self._name)}[/b]"
-        if not self._detail and self._summary:
-            text += f"  [dim]{_markup_escape(self._summary)}[/dim]"
+        # Build the whole card as Content, appending every untrusted value
+        # (name, summary, detail) as LITERAL styled text. Nothing untrusted is
+        # ever routed through a markup parser, so no escaping is needed and no
+        # content — however it is truncated or whatever brackets it contains —
+        # can inject or break a style span. Trusted chrome (glyph, `·`, indent)
+        # is plain literal too; styles are applied out-of-band.
+        content = Content(f"{self._glyph} ") + Content.styled(self._tool_name, "b")
+        if not _has_detail(self._detail) and self._summary:
+            content += Content("  ") + Content.styled(self._summary, "dim")
         if self._elapsed is not None:
-            text += f" [dim]· {_format_duration(self._elapsed)}[/dim]"
-        if self._detail:
+            content += Content.styled(f" · {_format_duration(self._elapsed)}", "dim")
+
+        if isinstance(self._detail, Content):
+            # A pre-styled renderable (e.g. a colored diff): compose its already
+            # theme-styled, literal text directly, indented under the status row.
+            content += Content("\n") + _indent_content(self._detail)
+        elif self._detail:
+            # A plain-string detail is untrusted output: indent it and style the
+            # whole block dim, as literal text.
             indented = "\n".join(f"  {line}" for line in self._detail.split("\n"))
-            text += f"\n[dim]{_markup_escape(indented)}[/dim]"
-        self.update(text)
+            content += Content("\n") + Content.styled(indented, "dim")
+
+        self.update(content)
 
 
 class WorkingIndicator(Static):

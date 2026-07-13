@@ -19,21 +19,46 @@ The structured facts reach these functions as narrow, typed parameters (e.g.
 result mapping — so an unrelated tool can never drive failure styling, and the
 signal stays bounded and serialization-safe across the RPC transport.
 
-Every renderer returns an already-bounded, ``_markup_escape``-safe string. Output
-is treated as untrusted: it is escaped at this boundary and never handed to the
-Markdown parser.
+Return types and the untrusted-content rule:
+
+* The error/generic renderers return a bounded plain ``str``. The widget renders
+  it as literal, un-styled text (``Content.styled(..., "dim")``), so it is never
+  parsed as markup — bracket characters in tool output stay literal.
+* The edit-diff renderer returns a Textual ``Content`` it built itself, adding
+  every line of file content with ``Content.styled`` (literal text, out-of-band
+  theme style). File content is likewise never parsed as markup, so a diff line
+  containing ``[red]`` or ``[/]`` cannot inject or break a color span.
+
+Either way, untrusted content is bounded and reaches the screen as literal text
+with styles applied out-of-band — not through a markup parser.
 """
 
 from __future__ import annotations
 
+import difflib
 import signal
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+
+from textual.content import Content
 
 from wisp.tui.widgets import (
     _TOOL_OUTPUT_PREVIEW_BYTES,
     _TOOL_OUTPUT_PREVIEW_LINES,
     _preview_tool_output,
 )
+
+# Theme style variables (resolved per active theme, so light/dark and any future
+# a11y theme follow) applied to diff lines. Used with Content.styled, which keeps
+# the underlying text literal — untrusted file content is never parsed as markup,
+# so the color cannot be injected or escaped by the file's contents.
+_DIFF_ADD_STYLE = "$success"
+_DIFF_DEL_STYLE = "$error"
+_DIFF_META_STYLE = "$text-muted"
+
+# A colored diff is bounded like the other previews so one giant edit can't flood
+# the transcript; the tail metadata stays honest about what was hidden.
+_DIFF_PREVIEW_LINES = _TOOL_OUTPUT_PREVIEW_LINES
+_DIFF_PREVIEW_BYTES = _TOOL_OUTPUT_PREVIEW_BYTES
 
 # Errors surface at the tail, so the error preview keeps the last few lines
 # (a traceback's final frames, a stderr tail) rather than the first. Bounds
@@ -50,20 +75,28 @@ def render_tool_result(
     *,
     is_error: bool,
     exit_code: int | None,
-) -> str:
-    """Render terminal tool output into bounded, escaped card detail.
+) -> str | Content:
+    """Render terminal tool output into bounded card detail.
 
     ``name`` selects the renderer; ``arguments`` supplies structured context for
-    recognized built-ins (used by later PRs). ``exit_code`` is the promoted shell
-    exit status, or None for tools without exit-code semantics. Unknown tools and
-    successful results fall back to :func:`render_generic`.
+    recognized built-ins. ``exit_code`` is the promoted shell exit status, or None
+    for tools without exit-code semantics.
+
+    Returns a plain ``str`` for the error/generic paths (the widget escapes it as
+    untrusted markup) or a Textual ``Content`` for the colored edit diff (already
+    styled with literal, unparsed text — the widget renders it directly). Unknown
+    tools and successful results fall back to :func:`render_generic`.
     """
 
-    # PR A ships only the generic path + error rendering; built-in success
-    # renderers (diffs, summaries) are added by later PRs, each routing here
-    # first when it doesn't recognize the result.
     if tool_result_failed(is_error, exit_code):
         return render_error(output, exit_code=exit_code)
+    # A successful edit carries its before/after text in the tool-call arguments
+    # (oldText/newText per hunk); render it as a colored unified diff. Anything
+    # unrecognized or malformed falls through to the generic preview.
+    if name == "edit":
+        diff = render_edit_diff(arguments)
+        if diff is not None:
+            return diff
     return render_generic(output)
 
 
@@ -233,3 +266,119 @@ def render_generic(output: str) -> str:
     """
 
     return _preview_tool_output(output)
+
+
+def render_edit_diff(arguments: Mapping[str, object]) -> Content | None:
+    """Render an ``edit`` tool call's hunks as a colored, bounded unified diff.
+
+    The before/after text lives in the tool-call arguments as
+    ``edits[i]["oldText"]``/``["newText"]``. Returns a Textual ``Content`` with
+    add/delete lines styled via theme variables, or ``None`` when the arguments
+    are missing or malformed so the caller can fall back to the generic preview.
+
+    Safety: every line of file content is added with :meth:`Content.styled`, which
+    treats the text as literal and applies the style out-of-band. File content is
+    never parsed as markup, so it cannot inject or escape a color span — no
+    ``_markup_escape`` is needed because the text never reaches a markup parser.
+    """
+
+    edits = _parse_edit_hunks(arguments)
+    if not edits:
+        return None
+
+    diff_lines = _unified_diff_lines(edits)
+    if not diff_lines:
+        # Old and new text were identical for every hunk (a no-op edit). Nothing
+        # to diff; let the caller show the generic "Applied N edit(s)" summary.
+        return None
+
+    return _content_from_diff_lines(diff_lines)
+
+
+def _parse_edit_hunks(arguments: Mapping[str, object]) -> list[tuple[str, str]]:
+    """Extract ``(old_text, new_text)`` hunks from edit arguments, defensively.
+
+    Returns an empty list on any structural surprise (missing/renamed keys, wrong
+    types, non-string text) rather than raising, so a malformed payload degrades
+    to the generic preview instead of crashing the transcript.
+    """
+
+    raw_edits = arguments.get("edits")
+    if not isinstance(raw_edits, Sequence) or isinstance(raw_edits, str | bytes):
+        return []
+    hunks: list[tuple[str, str]] = []
+    for item in raw_edits:
+        if not isinstance(item, Mapping):
+            return []
+        old = item.get("oldText")
+        new = item.get("newText")
+        if not isinstance(old, str) or not isinstance(new, str):
+            return []
+        hunks.append((old, new))
+    return hunks
+
+
+def _unified_diff_lines(hunks: Sequence[tuple[str, str]]) -> list[str]:
+    """Unified-diff lines across all hunks, with a file/hunk header per hunk.
+
+    Each hunk is diffed independently (the edit tool applies them independently),
+    so a multi-edit call yields several small diffs. Lines keep their unified
+    ``+``/``-``/`` ``/`` @@`` prefixes; styling happens later off the prefix.
+    """
+
+    lines: list[str] = []
+    multi = len(hunks) > 1
+    for index, (old, new) in enumerate(hunks):
+        if multi:
+            lines.append(f"@@ edit {index + 1} @@")
+        hunk = difflib.unified_diff(
+            old.splitlines(),
+            new.splitlines(),
+            lineterm="",
+            n=2,
+        )
+        # Drop difflib's `--- ` / `+++ ` file headers (blank here, just noise);
+        # keep the `@@ ... @@` range markers and the +/-/space body lines.
+        for line in hunk:
+            if line.startswith("--- ") or line.startswith("+++ "):
+                continue
+            lines.append(line)
+    return lines
+
+
+def _content_from_diff_lines(diff_lines: Sequence[str]) -> Content:
+    """Bounded ``Content`` from prefixed diff lines, colored by add/delete/meta.
+
+    Bounds the number of lines the same way the previews do, appending an honest
+    ``... N more lines`` marker when the diff is longer. Each line's text is added
+    with :meth:`Content.styled` so it stays literal.
+    """
+
+    kept = list(diff_lines[:_DIFF_PREVIEW_LINES])
+    hidden = len(diff_lines) - len(kept)
+
+    content = Content("")
+    for offset, line in enumerate(kept):
+        if offset:
+            content += Content("\n")
+        content += Content.styled(line, _diff_line_style(line))
+    if hidden > 0:
+        unit = "line" if hidden == 1 else "lines"
+        content += Content("\n") + Content.styled(f"... {hidden} more {unit}", _DIFF_META_STYLE)
+    return content
+
+
+def _diff_line_style(line: str) -> str:
+    """Theme style for a unified-diff line, chosen by its leading marker.
+
+    ``@@`` range markers are metadata; ``+``/``-`` are additions/deletions;
+    everything else is unchanged context (no style, so it reads as body text).
+    """
+
+    if line.startswith("@@"):
+        return _DIFF_META_STYLE
+    if line.startswith("+"):
+        return _DIFF_ADD_STYLE
+    if line.startswith("-"):
+        return _DIFF_DEL_STYLE
+    return ""
