@@ -344,22 +344,22 @@ def test_clip_line_to_bytes_returns_line_unchanged_when_it_fits() -> None:
 # show 8.
 
 
-def _text_with_newlines(count: int, token: str, *, sep: str = "\n") -> str:
-    """A string containing exactly ``count`` line boundaries of ``sep``.
+def _text_with_lines(count: int, token: str, *, sep: str = "\n") -> str:
+    """A string of exactly ``count`` lines (as ``str.splitlines`` counts them).
 
-    The guard counts line boundaries (not lines), so tests express thresholds in
-    boundaries directly: N joined lines carry N-1 boundaries, an off-by-one trap
-    this avoids. ``sep`` defaults to LF; pass ``"\\r"`` or ``"\\r\\n"`` to exercise
+    The guard measures line count, so tests express thresholds in lines directly:
+    ``count`` tokens joined by ``sep`` give ``count`` lines and ``count - 1``
+    boundaries. ``sep`` defaults to LF; pass ``"\\r"`` or ``"\\r\\n"`` to exercise
     the other terminators the renderer supports.
     """
 
-    return sep.join(f"{token}{i}" for i in range(count + 1))
+    return sep.join(f"{token}{i}" for i in range(count))
 
 
-def _oversize_edit(newlines: int = 60_000) -> dict[str, object]:
-    """An edit whose single hunk is far over the per-hunk newline ceiling."""
+def _oversize_edit(lines: int = 60_000) -> dict[str, object]:
+    """An edit whose single hunk is far over the per-hunk line ceiling."""
 
-    return _edit((_text_with_newlines(newlines, "old-"), _text_with_newlines(newlines, "new-")))
+    return _edit((_text_with_lines(lines, "old-"), _text_with_lines(lines, "new-")))
 
 
 def test_oversize_edit_never_invokes_difflib(monkeypatch) -> None:
@@ -411,8 +411,8 @@ def test_guard_below_threshold_still_diffs(monkeypatch) -> None:
     # Exactly at the ceiling (not over) — the guard uses a strict `>`, so this
     # still diffs. A full replacement renders deletions first, so the 8-line
     # preview shows the leading "-" lines (the "+" additions fall past the cap).
-    old = _text_with_newlines(_DIFF_MAX_HUNK_LINES, "a")
-    new = _text_with_newlines(_DIFF_MAX_HUNK_LINES, "b")
+    old = _text_with_lines(_DIFF_MAX_HUNK_LINES, "a")
+    new = _text_with_lines(_DIFF_MAX_HUNK_LINES, "b")
     content = render_edit_diff(_edit((old, new)))
     assert content is not None
     assert "-a0" in content.plain  # a real diff was produced, not the fallback
@@ -420,7 +420,7 @@ def test_guard_below_threshold_still_diffs(monkeypatch) -> None:
 
 
 def test_guard_above_threshold_falls_back(monkeypatch) -> None:
-    # A hunk one newline over the per-hunk ceiling falls back to None without
+    # A hunk one line over the per-hunk ceiling falls back to None without
     # diffing.
     import wisp.tui.tool_output as mod
 
@@ -429,8 +429,8 @@ def test_guard_above_threshold_falls_back(monkeypatch) -> None:
 
     monkeypatch.setattr(mod.difflib, "unified_diff", forbidden)
 
-    old = _text_with_newlines(_DIFF_MAX_HUNK_LINES + 1, "a")
-    new = _text_with_newlines(_DIFF_MAX_HUNK_LINES + 1, "b")
+    old = _text_with_lines(_DIFF_MAX_HUNK_LINES + 1, "a")
+    new = _text_with_lines(_DIFF_MAX_HUNK_LINES + 1, "b")
     assert render_edit_diff(_edit((old, new))) is None
 
 
@@ -445,10 +445,10 @@ def test_guard_total_lines_across_many_hunks(monkeypatch) -> None:
     monkeypatch.setattr(mod.difflib, "unified_diff", forbidden)
 
     # Each hunk is under the per-hunk ceiling, but three of them sum well over the
-    # total ceiling (each side counts, so 3 hunks × 2 sides × half-total newlines).
+    # total ceiling (each side counts, so 3 hunks × 2 sides × half-total lines).
     per_hunk = _DIFF_MAX_TOTAL_LINES // 2
-    old = _text_with_newlines(per_hunk, "a")
-    new = _text_with_newlines(per_hunk, "b")
+    old = _text_with_lines(per_hunk, "a")
+    new = _text_with_lines(per_hunk, "b")
     hunks = ((old, new), (old, new), (old, new))
     assert render_edit_diff(_edit(*hunks)) is None
 
@@ -463,7 +463,7 @@ def test_oversize_noop_edit_returns_none_without_diffing(monkeypatch) -> None:
 
     monkeypatch.setattr(mod.difflib, "unified_diff", forbidden)
 
-    same = _text_with_newlines(_DIFF_MAX_HUNK_LINES + 100, "line-")
+    same = _text_with_lines(_DIFF_MAX_HUNK_LINES + 100, "line-")
     assert render_edit_diff(_edit((same, same))) is None
 
 
@@ -484,8 +484,8 @@ def test_guard_bounds_oversize_non_lf_terminators(monkeypatch) -> None:
     # separators — the full set str.splitlines honors.
     separators = ("\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
     for sep in separators:
-        old = _text_with_newlines(_DIFF_MAX_HUNK_LINES + 1, "o", sep=sep)
-        new = _text_with_newlines(_DIFF_MAX_HUNK_LINES + 1, "n", sep=sep)
+        old = _text_with_lines(_DIFF_MAX_HUNK_LINES + 1, "o", sep=sep)
+        new = _text_with_lines(_DIFF_MAX_HUNK_LINES + 1, "n", sep=sep)
         assert render_edit_diff(_edit((old, new))) is None, f"sep={sep!r} not bounded"
 
 
@@ -518,6 +518,40 @@ def test_line_boundary_count_matches_splitlines() -> None:
     assert _line_boundary_count(mixed) == len(mixed.splitlines()) - 1
 
 
+def test_line_count_charges_a_non_empty_side_at_least_one() -> None:
+    # _line_count must never score a non-empty side as zero, or many single-line
+    # hunks (which have no separators) accumulate no aggregate cost. It is an
+    # upper bound on splitlines' line count: exact without a trailing separator,
+    # one over with one \u2014 over-counting is the safe direction for a work guard.
+    from wisp.tui.tool_output import _line_count
+
+    assert _line_count("") == 0  # empty side contributes nothing
+    assert _line_count("one line") == 1  # a single-line hunk still costs one
+    assert _line_count("a\nb\nc") == 3
+    # Upper-bound invariant across mixed separators, with and without a trailer.
+    for text in ("x", "a\nb", "a\rb", "trailing\n", "\n", "a\nb\n", "caf\u00e9\u2028th\u00e9"):
+        assert _line_count(text) >= len(text.splitlines())
+
+
+def test_guard_bounds_many_single_line_hunks(monkeypatch) -> None:
+    # Many one-line hunks (a generated batch of replacements) each have zero
+    # separators, so a boundary-only aggregate never trips. But _unified_diff_lines
+    # runs difflib once PER hunk, so thousands of tiny hunks are as expensive as
+    # one giant one. Charging each non-empty side at least one line makes the
+    # aggregate ceiling catch this: difflib must never run.
+    import wisp.tui.tool_output as mod
+
+    def forbidden(*_a, **_k):
+        raise AssertionError("difflib must not run for a huge batch of single-line hunks")
+
+    monkeypatch.setattr(mod.difflib, "unified_diff", forbidden)
+
+    # Each hunk is 2 lines (1 old + 1 new); enough hunks to exceed the total.
+    count = _DIFF_MAX_TOTAL_LINES  # 2 lines/hunk \u00d7 this \u226b the ceiling
+    hunks = tuple((f"old {i}", f"new {i}") for i in range(count))
+    assert render_edit_diff(_edit(*hunks)) is None
+
+
 def test_guard_aggregate_boundary_is_strict(monkeypatch) -> None:
     # The aggregate ceiling uses a strict ">": a total of exactly
     # _DIFF_MAX_TOTAL_LINES still diffs, one boundary more falls back. This pins
@@ -534,17 +568,17 @@ def test_guard_aggregate_boundary_is_strict(monkeypatch) -> None:
     monkeypatch.setattr(mod.difflib, "unified_diff", spy)
 
     # Two hunks, each side well under the per-hunk ceiling, summing to exactly the
-    # total ceiling: old+new boundaries across both hunks == _DIFF_MAX_TOTAL_LINES.
+    # total ceiling: old+new lines across both hunks == _DIFF_MAX_TOTAL_LINES.
     quarter = _DIFF_MAX_TOTAL_LINES // 4
-    old = _text_with_newlines(quarter, "a")
-    new = _text_with_newlines(quarter, "b")
+    old = _text_with_lines(quarter, "a")
+    new = _text_with_lines(quarter, "b")
     at_ceiling = _edit((old, new), (old, new))
     assert render_edit_diff(at_ceiling) is not None  # exactly at ceiling → diffs
     assert len(calls) == 2  # difflib ran per hunk
 
-    # One boundary over the ceiling → fall back, no diffing.
+    # One line over the ceiling → fall back, no diffing.
     calls.clear()
-    over = _edit((_text_with_newlines(quarter + 1, "a"), new), (old, new))
+    over = _edit((_text_with_lines(quarter + 1, "a"), new), (old, new))
     assert render_edit_diff(over) is None
     assert calls == []
 

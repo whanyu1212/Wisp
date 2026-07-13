@@ -403,22 +403,53 @@ def _line_boundary_count(text: str) -> int:
     return total - text.count("\r\n")
 
 
+def _line_count(text: str) -> int:
+    """An allocation-free upper bound on the lines ``str.splitlines`` yields.
+
+    A non-empty side is charged its separator count plus one, so it is never
+    scored as free: a single-line hunk (zero separators) still counts as one line.
+    An empty side is zero. This is an *upper* bound, not exact — a trailing
+    separator does not start a new line for ``splitlines`` (``"a\\n"`` is one
+    line), so this over-counts by one there. For a work guard, over-counting is
+    the safe direction: it can only make the guard trip earlier, never let
+    oversize input through.
+
+    Distinct from :func:`_line_boundary_count` — that returns separators; this
+    returns (bounded) lines — because the aggregate guard must count each hunk's
+    real per-hunk cost. ``_unified_diff_lines`` runs difflib once per hunk, so a
+    single-line hunk costs one run; counting *boundaries* there would score it
+    free and let thousands of tiny hunks accumulate unbounded work. Counting
+    *lines* charges each hunk at least one.
+    """
+
+    return _line_boundary_count(text) + 1 if text else 0
+
+
 def _edit_input_too_large(hunks: Sequence[tuple[str, str]]) -> bool:
     """Whether these hunks are too large to diff on the event loop.
 
     difflib's matcher is O(n*m) in *line count* and pays its full cost the moment
     its generator is first advanced, so the decision to diff has to be made before
-    calling it. We gate on a line-boundary count (:func:`_line_boundary_count`, a
-    cheap allocation-free proxy for difflib's sequence length). A single hunk over
-    :data:`_DIFF_MAX_HUNK_LINES` per side, or a total across hunks over
-    :data:`_DIFF_MAX_TOTAL_LINES`, is refused. Both checks short-circuit, so one
-    giant hunk is rejected after its first scan.
+    calling it. There are two independent cost axes and this guards both:
+
+    * A single huge hunk — bounded per side against :data:`_DIFF_MAX_HUNK_LINES`.
+    * Many hunks — ``_unified_diff_lines`` runs difflib once *per hunk*, so a call
+      with thousands of tiny one-line hunks (a generated batch of replacements)
+      is as expensive as one giant hunk even though each hunk is small. The
+      aggregate line count across all hunks is bounded against
+      :data:`_DIFF_MAX_TOTAL_LINES`, and because a non-empty side counts as at
+      least one line, each hunk contributes to the total whether or not it spans
+      multiple lines.
+
+    Both checks short-circuit, so an oversize input is rejected on its first scan.
+    Line counts come from :func:`_line_count` (allocation-free), so the decision
+    never materializes the line lists ``splitlines`` would.
     """
 
     total = 0
     for old, new in hunks:
-        old_lines = _line_boundary_count(old)
-        new_lines = _line_boundary_count(new)
+        old_lines = _line_count(old)
+        new_lines = _line_count(new)
         if old_lines > _DIFF_MAX_HUNK_LINES or new_lines > _DIFF_MAX_HUNK_LINES:
             return True
         total += old_lines + new_lines
