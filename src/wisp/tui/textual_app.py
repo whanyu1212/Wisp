@@ -258,13 +258,14 @@ class TextualTui(App[None]):
         self._suggest: SlashSuggest | None = None
         self._decision_panel: DecisionPanel | None = None
         # Monotonic timestamp of the most recent _prepare_decision_panel() call
-        # (see on_event / _prepare_decision_panel). Any Key event timestamped
-        # before this barrier is dropped before it reaches whichever widget
-        # currently has focus, closing the race where a key already queued for
-        # the composer would otherwise land on it (still focused, only hidden)
-        # or on the decision panel's OptionList (once Widget.focus()'s deferred
+        # (see on_event / _prepare_decision_panel). Any Key/MouseDown/MouseUp/
+        # Paste event timestamped before this barrier is dropped before it
+        # reaches whichever widget currently has focus or is at its screen
+        # coordinates, closing the race where an event already queued for the
+        # composer would otherwise land on it (still focused, only hidden) or
+        # on the decision panel's OptionList (once Widget.focus()'s deferred
         # call_later lands) instead of being treated as stale.
-        self._stale_key_barrier = 0.0
+        self._stale_event_barrier = 0.0
         self._current_prompt = "wisp> "
         self._runner: Callable[[], Awaitable[None]] | None = None
         self._runner_error: Exception | None = None
@@ -561,19 +562,29 @@ class TextualTui(App[None]):
             self._input.focus()
 
     async def on_event(self, event: events.Event) -> None:
-        # App.on_event is the earliest point a Key event passes through before
-        # Textual forwards it to whatever currently has focus (self.focused or
-        # self.screen) — earlier than any widget's own on_key/BINDINGS, and
-        # earlier than this app's own on_key below. A key timestamped before
-        # _stale_key_barrier was read by the driver before a decision panel
-        # opened (or is opening — the barrier is raised in
-        # _prepare_decision_panel before the composer is hidden or focus
-        # moves), so it must never reach a focused widget: dropping it here,
-        # rather than in DecisionPanel.on_key or PromptEditor.on_key
-        # individually, closes the race for every widget that could still be
-        # focused when it arrives, not just the one the caller expected to be
-        # focused by then.
-        if isinstance(event, events.Key) and event.time < self._stale_key_barrier:
+        # App.on_event is the earliest point a Key/Mouse/Paste event passes
+        # through before Textual forwards it to whatever currently has focus
+        # or is at its screen coordinates — earlier than any widget's own
+        # on_key/BINDINGS, and earlier than this app's own on_key below. An
+        # event timestamped before _stale_event_barrier was read by the driver
+        # before a decision panel opened (or is opening — the barrier is
+        # raised in _prepare_decision_panel before the composer is hidden or
+        # focus moves), so it must never reach a focused/hit-tested widget:
+        # dropping it here, rather than in DecisionPanel.on_key or
+        # PromptEditor.on_key individually, closes the race for every widget
+        # that could still be focused (or at those coordinates) when it
+        # arrives, not just the one the caller expected by then.
+        #
+        # MouseDown/MouseUp (not just Key) are gated because Click is
+        # synthesized from an already-forwarded MouseUp inside App.on_event's
+        # own body (see textual.app.App.on_event) rather than delivered as an
+        # independent top-level event — gating MouseUp here transitively
+        # blocks a stale Click too, since one can never exist without first
+        # passing this check as a MouseUp. Paste is gated because a stale
+        # paste could otherwise still reach a focused-but-hidden PromptEditor
+        # or an OptionList, same as a stale Key.
+        stale_event_types = (events.Key, events.MouseDown, events.MouseUp, events.Paste)
+        if isinstance(event, stale_event_types) and event.time < self._stale_event_barrier:
             return
         await super().on_event(event)
 
@@ -837,7 +848,7 @@ class TextualTui(App[None]):
         # on_event) before touching focus/visibility, so there is no window
         # where a key already queued for the composer could still land on it
         # after this method hides it but before the barrier is active.
-        self._stale_key_barrier = time.monotonic()
+        self._stale_event_barrier = time.monotonic()
         if self._suggest is not None:
             self._suggest.hide()
         if self._input is not None:

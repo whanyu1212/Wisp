@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 from unittest import mock
@@ -437,12 +438,12 @@ def test_app_on_event_drops_key_queued_before_decision_panel_opened() -> None:
             with mock.patch.object(App, "on_event", recording_app_on_event):
                 stale_key = events.Key("enter", None)
                 stale_key.set_sender(app)
-                stale_key.time = app._stale_key_barrier - 1.0
+                stale_key.time = app._stale_event_barrier - 1.0
                 await app.on_event(stale_key)
 
                 fresh_key = events.Key("enter", None)
                 fresh_key.set_sender(app)
-                fresh_key.time = app._stale_key_barrier + 1.0
+                fresh_key.time = app._stale_event_barrier + 1.0
                 await app.on_event(fresh_key)
 
             return stale_key not in forwarded, fresh_key in forwarded
@@ -452,8 +453,64 @@ def test_app_on_event_drops_key_queued_before_decision_panel_opened() -> None:
     assert fresh_forwarded
 
 
+@pytest.mark.parametrize(
+    "make_event",
+    [
+        lambda: events.MouseDown(None, 0, 0, 0, 0, 1, False, False, False),
+        lambda: events.MouseUp(None, 0, 0, 0, 0, 1, False, False, False),
+        lambda: events.Paste("y"),
+    ],
+    ids=["MouseDown", "MouseUp", "Paste"],
+)
+def test_app_on_event_drops_stale_mouse_and_paste_events_too(
+    make_event: Callable[[], events.Event],
+) -> None:
+    # Click is synthesized from an already-forwarded MouseUp inside
+    # App.on_event's own body (see textual.app.App.on_event), not delivered
+    # independently, so gating MouseUp here transitively covers a stale Click
+    # too. Paste is gated because a stale paste could otherwise still reach a
+    # focused-but-hidden PromptEditor or an OptionList, same as a stale Key.
+    async def scenario() -> tuple[bool, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test() as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="waiting for approval",
+                    input_hint="approve> ",
+                    input_mode="approval",
+                    cwd="/work/project",
+                )
+            )
+            renderer.approval_request(
+                _approval("write", {"path": "file.txt", "content": "content"})
+            )
+            await pilot.pause()
+
+            forwarded: list[events.Event] = []
+
+            async def recording_app_on_event(_self: object, event: events.Event) -> None:
+                forwarded.append(event)
+
+            with mock.patch.object(App, "on_event", recording_app_on_event):
+                stale_event = make_event()
+                stale_event.set_sender(app)
+                stale_event.time = app._stale_event_barrier - 1.0
+                await app.on_event(stale_event)
+
+                fresh_event = make_event()
+                fresh_event.set_sender(app)
+                fresh_event.time = app._stale_event_barrier + 1.0
+                await app.on_event(fresh_event)
+
+            return stale_event not in forwarded, fresh_event in forwarded
+
+    stale_rejected, fresh_forwarded = anyio.run(scenario)
+    assert stale_rejected
+    assert fresh_forwarded
+
+
 def test_trust_panel_stale_home_does_not_move_deny_first_highlight() -> None:
-    # Same _stale_key_barrier protects Home/PageUp/PageDown/End too, not just
+    # Same _stale_event_barrier protects Home/PageUp/PageDown/End too, not just
     # Enter/digits: those are app-level priority bindings (see BINDINGS),
     # dispatched via App._check_bindings before DecisionPanel.on_key ever sees
     # them, so a per-widget guard couldn't catch a stale one regardless. The
@@ -477,7 +534,7 @@ def test_trust_panel_stale_home_does_not_move_deny_first_highlight() -> None:
 
             stale_key = events.Key("home", None)
             stale_key.set_sender(app)
-            stale_key.time = app._stale_key_barrier - 1.0
+            stale_key.time = app._stale_event_barrier - 1.0
             await app.on_event(stale_key)
             await pilot.pause()
             after_stale = options.highlighted
