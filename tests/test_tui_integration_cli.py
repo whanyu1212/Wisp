@@ -2808,6 +2808,51 @@ def test_textual_jump_to_latest_preserves_approval_and_trust_focus() -> None:
     assert trust == (True, True, True)
 
 
+def test_textual_jump_to_latest_scrolls_transcript_not_decision_highlight() -> None:
+    # Regression: action_scroll_transcript_end() was taught to move the
+    # decision panel's highlight instead of scrolling the transcript while a
+    # panel is open (so a real End keypress moves the highlight to "Deny"
+    # rather than scrolling past it). But the jump-to-latest overlay is a
+    # mouse affordance meaning "scroll the transcript to the bottom" — it is
+    # never a decision-panel-navigation gesture, so clicking it while a panel
+    # happens to be open must still scroll the transcript and clear the
+    # unseen-output badge, and must NOT move the panel's highlighted option.
+    async def scenario() -> tuple[bool, int | None]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            await pilot.press("pageup")
+            await pilot.pause()
+            renderer.notice("new output")
+            await pilot.pause()
+
+            renderer.approval_request(
+                ToolApprovalRequested(
+                    call_id="latest",
+                    name="bash",
+                    arguments={"command": "echo ok"},
+                    safety="command",
+                )
+            )
+            await pilot.pause()
+
+            options = app_instance.query_one("#decision-options", OptionList)
+
+            await pilot.click("#jump-latest")
+            await pilot.pause()
+
+            scrolled_to_bottom = transcript.scroll_y >= transcript.max_scroll_y - 1
+            return scrolled_to_bottom, options.highlighted
+
+    scrolled_to_bottom, highlighted_after = anyio.run(scenario)
+    assert scrolled_to_bottom
+    assert highlighted_after == 0  # unchanged from "Approve once" default
+
+
 def test_textual_returning_to_the_bottom_resumes_following() -> None:
     # After scrolling up and back down, the reader is following again: the next
     # streamed output should pin to the tail once more.

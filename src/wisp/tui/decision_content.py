@@ -80,9 +80,14 @@ def _bounded_tool_session_option_name(name: str) -> str:
     """Truncate a tool name for the "Allow <name> for this session" option label.
 
     Keeps the option to a single line so it can't wrap and push later options
-    (notably "Deny") out of the fixed-height option-list viewport.
+    (notably "Deny") out of the fixed-height option-list viewport. In-repo tool
+    names are short plain-ASCII literals, but a name could in principle come
+    from an MCP/custom tool: collapse embedded newlines first, since a
+    character-count cap alone doesn't stop an embedded "\n" from still
+    splitting the option onto a second rendered line.
     """
 
+    name = name.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
     if len(name) <= _TOOL_SESSION_OPTION_NAME_CHARS:
         return name
     return f"{name[: _TOOL_SESSION_OPTION_NAME_CHARS - 1]}…"

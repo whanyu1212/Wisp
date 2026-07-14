@@ -493,8 +493,18 @@ class DecisionPanel(Vertical):
         if not self.is_open:
             return
         if event.time < self._opened_at:
-            # See _opened_at / on_option_list_option_selected: a key queued
-            # before this panel opened must not act on the newly-shown choices.
+            # A key queued before this panel opened (e.g. for the composer)
+            # must not act on the newly-shown choices, INCLUDING Enter: Enter
+            # is deliberately not handled below so OptionList's own native
+            # enter->select binding fires normally for real presses. But that
+            # binding resolution happens only if this handler doesn't stop the
+            # event, so a stale Enter must be stopped explicitly here or it
+            # falls through to select() and posts a freshly-timestamped
+            # OptionSelected the guard in on_option_list_option_selected can no
+            # longer catch (that message's .time is stamped when Textual's
+            # binding machinery constructs it, i.e. "now" — never < _opened_at).
+            event.stop()
+            event.prevent_default()
             return
         key = event.key.lower()
         answer: str | None = None

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
+from unittest import mock
 
 import anyio
 import pytest
 from textual import events
+from textual.app import App
 from textual.widgets import OptionList, Static
 
 from wisp.events import ToolApprovalRequested, TrustRequested
@@ -57,6 +59,15 @@ def test_bounded_tool_session_option_name_truncates_long_names() -> None:
     assert len(truncated) == 40
     assert truncated.endswith("…")
     assert truncated[:-1] == long_name[:39]
+
+
+def test_bounded_tool_session_option_name_collapses_embedded_newlines() -> None:
+    # A character-count cap alone doesn't stop an embedded newline from still
+    # splitting the option onto a second rendered line — collapse first.
+    assert _bounded_tool_session_option_name("bash\ntool") == "bash tool"
+    assert _bounded_tool_session_option_name("a\r\nb\rc\nd") == "a b c d"
+    assert "\n" not in _bounded_tool_session_option_name("x\n" * 30)
+    assert "\r" not in _bounded_tool_session_option_name("x\r" * 30)
 
 
 def test_bash_approval_content_summarizes_command_context() -> None:
@@ -327,12 +338,12 @@ def test_approval_panel_enter_follows_approve_once_default() -> None:
 
 
 def test_approval_panel_drops_key_queued_before_panel_opened() -> None:
-    # Widget.focus() defers the actual focus change via call_later, so a key
-    # already queued for the previously-focused composer can still reach the
-    # OptionList's handlers once focus lands here. Simulate that by dispatching
-    # synthetic events timestamped before the panel opened: both the on_key
-    # digit/Escape path and the OptionList Enter-selects-highlighted path must
-    # ignore them rather than treat them as an intentional approval. A
+    # Widget-level defense in depth: even if a stale Key/OptionSelected message
+    # reaches DecisionPanel directly (e.g. posted by code other than the normal
+    # driver pipeline — see the app-level barrier test below for the real
+    # end-to-end race), both the on_key digit/Escape path and the OptionList
+    # Enter-selects-highlighted path must ignore events timestamped before the
+    # panel opened rather than treat them as an intentional approval. A
     # genuinely fresh key afterward must still work — the guard must not wedge
     # the panel shut.
     async def scenario() -> tuple[bool, str]:
@@ -377,6 +388,105 @@ def test_approval_panel_drops_key_queued_before_panel_opened() -> None:
     rejected, answer = anyio.run(scenario)
     assert rejected
     assert answer == "n"
+
+
+def test_app_on_event_drops_key_queued_before_decision_panel_opened() -> None:
+    # The actual race (see test_approval_panel_drops_key_queued_before_panel_
+    # opened's docstring): a key already read by the driver — e.g. a stray
+    # Enter queued for the composer — can still be delivered after a decision
+    # panel opens. OptionList's own native enter->select binding builds a
+    # *fresh*-timestamped OptionSelected once it finally runs, so a
+    # DecisionPanel-level guard comparing that message's .time can never see
+    # it as stale; and the composer itself may still be focused (only hidden,
+    # not blurred) in the same window, so a per-widget guard can't cover every
+    # place the key might land either. The barrier has to sit earlier, before
+    # Textual forwards the key to whatever currently has focus — App.on_event,
+    # which every InputEvent passes through first (see TextualTui.on_event).
+    # Reproduced here by calling on_event directly with a controlled timestamp
+    # rather than racing Textual's real focus-change scheduling, which is
+    # nondeterministic from a test (whether the deferred call_later that moves
+    # focus to the OptionList has already run by the time a posted message is
+    # processed varies with the event loop's own scheduling).
+    async def scenario() -> tuple[bool, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test() as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="waiting for approval",
+                    input_hint="approve> ",
+                    input_mode="approval",
+                    cwd="/work/project",
+                )
+            )
+            renderer.approval_request(
+                _approval("write", {"path": "file.txt", "content": "content"})
+            )
+            await pilot.pause()
+
+            forwarded: list[events.Key] = []
+
+            # Patch the exact call TextualTui.on_event delegates a non-stale
+            # event to (App.on_event), so this asserts the barrier's own
+            # control flow — whether it forwards the event at all — rather
+            # than depending on how far downstream dispatch (itself
+            # timing-sensitive, per this test's docstring) happens to go.
+            async def recording_app_on_event(_self: object, event: events.Event) -> None:
+                if isinstance(event, events.Key):
+                    forwarded.append(event)
+
+            with mock.patch.object(App, "on_event", recording_app_on_event):
+                stale_key = events.Key("enter", None)
+                stale_key.set_sender(app)
+                stale_key.time = app._stale_key_barrier - 1.0
+                await app.on_event(stale_key)
+
+                fresh_key = events.Key("enter", None)
+                fresh_key.set_sender(app)
+                fresh_key.time = app._stale_key_barrier + 1.0
+                await app.on_event(fresh_key)
+
+            return stale_key not in forwarded, fresh_key in forwarded
+
+    stale_rejected, fresh_forwarded = anyio.run(scenario)
+    assert stale_rejected
+    assert fresh_forwarded
+
+
+def test_trust_panel_stale_home_does_not_move_deny_first_highlight() -> None:
+    # Same _stale_key_barrier protects Home/PageUp/PageDown/End too, not just
+    # Enter/digits: those are app-level priority bindings (see BINDINGS),
+    # dispatched via App._check_bindings before DecisionPanel.on_key ever sees
+    # them, so a per-widget guard couldn't catch a stale one regardless. The
+    # trust and YOLO-confirmation panels are deny-first (highlighted defaults
+    # to the safe option) — a stale Home/PageUp must not flip that highlight
+    # to the affirmative option before a legitimate Enter lands.
+    async def scenario() -> tuple[int | None, int | None]:
+        app, renderer = create_textual_tui()
+        async with app.run_test() as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="waiting for trust", input_hint="trust> ", input_mode="trust"
+                )
+            )
+            renderer.trust_request(
+                TrustRequested(request_id="trust-1", project_path=Path("/work/project"))
+            )
+            await pilot.pause()
+            options = app.query_one("#decision-options", OptionList)
+            initial_highlighted = options.highlighted
+
+            stale_key = events.Key("home", None)
+            stale_key.set_sender(app)
+            stale_key.time = app._stale_key_barrier - 1.0
+            await app.on_event(stale_key)
+            await pilot.pause()
+            after_stale = options.highlighted
+
+            return initial_highlighted, after_stale
+
+    initial_highlighted, after_stale = anyio.run(scenario)
+    assert initial_highlighted == 1
+    assert after_stale == 1
 
 
 def test_approval_panel_end_key_moves_highlight_not_transcript() -> None:
