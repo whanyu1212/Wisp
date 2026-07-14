@@ -575,15 +575,22 @@ class TextualTui(App[None]):
         # that could still be focused (or at those coordinates) when it
         # arrives, not just the one the caller expected by then.
         #
-        # MouseDown/MouseUp (not just Key) are gated because Click is
+        # events.MouseEvent (not just Key) is gated as a whole base class,
+        # not enumerated per subclass: every mouse variant Textual defines
+        # (MouseDown, MouseUp, MouseMove, MouseScrollUp/Down/Left/Right) can
+        # reach a widget the same way a stale key can, and Click is
         # synthesized from an already-forwarded MouseUp inside App.on_event's
         # own body (see textual.app.App.on_event) rather than delivered as an
-        # independent top-level event — gating MouseUp here transitively
-        # blocks a stale Click too, since one can never exist without first
-        # passing this check as a MouseUp. Paste is gated because a stale
-        # paste could otherwise still reach a focused-but-hidden PromptEditor
-        # or an OptionList, same as a stale Key.
-        stale_event_types = (events.Key, events.MouseDown, events.MouseUp, events.Paste)
+        # independent top-level event, so gating the MouseEvent family here
+        # transitively blocks a stale Click too. A stale MouseScrollDown in
+        # particular could otherwise scroll the decision panel's highlighted
+        # option out of view before a legitimate Enter lands, without ever
+        # changing which option is logically selected — the same class of bug
+        # this barrier exists to prevent, just via scroll instead of a key.
+        # Paste is gated separately (it is not a MouseEvent or Key) because a
+        # stale paste could otherwise still reach a focused-but-hidden
+        # PromptEditor or an OptionList.
+        stale_event_types = (events.Key, events.MouseEvent, events.Paste)
         if isinstance(event, stale_event_types) and event.time < self._stale_event_barrier:
             return
         await super().on_event(event)
@@ -844,10 +851,10 @@ class TextualTui(App[None]):
             self._input.placeholder = _input_placeholder(hint)
 
     def _prepare_decision_panel(self) -> None:
-        # Shared by every show_*() below. Raises the stale-key barrier (see
+        # Shared by every show_*() below. Raises the stale-event barrier (see
         # on_event) before touching focus/visibility, so there is no window
-        # where a key already queued for the composer could still land on it
-        # after this method hides it but before the barrier is active.
+        # where an event already queued for the composer could still land on
+        # it after this method hides it but before the barrier is active.
         self._stale_event_barrier = time.monotonic()
         if self._suggest is not None:
             self._suggest.hide()

@@ -458,18 +458,28 @@ def test_app_on_event_drops_key_queued_before_decision_panel_opened() -> None:
     [
         lambda: events.MouseDown(None, 0, 0, 0, 0, 1, False, False, False),
         lambda: events.MouseUp(None, 0, 0, 0, 0, 1, False, False, False),
+        lambda: events.MouseScrollDown(None, 0, 0, 0, 0, 1, False, False, False),
+        lambda: events.MouseScrollUp(None, 0, 0, 0, 0, 1, False, False, False),
         lambda: events.Paste("y"),
     ],
-    ids=["MouseDown", "MouseUp", "Paste"],
+    ids=["MouseDown", "MouseUp", "MouseScrollDown", "MouseScrollUp", "Paste"],
 )
 def test_app_on_event_drops_stale_mouse_and_paste_events_too(
     make_event: Callable[[], events.Event],
 ) -> None:
-    # Click is synthesized from an already-forwarded MouseUp inside
+    # The barrier gates events.MouseEvent as a whole family, not each
+    # subclass individually — this covers MouseScrollDown/Up too, which a
+    # narrower per-subclass gate previously missed: a stale scroll event
+    # could otherwise scroll the highlighted option out of the fixed-height
+    # viewport (without changing which option is logically selected) right
+    # before a legitimate Enter approves whatever is still highlighted, the
+    # same class of bug this barrier exists to prevent via a different input
+    # channel. Click is synthesized from an already-forwarded MouseUp inside
     # App.on_event's own body (see textual.app.App.on_event), not delivered
-    # independently, so gating MouseUp here transitively covers a stale Click
-    # too. Paste is gated because a stale paste could otherwise still reach a
-    # focused-but-hidden PromptEditor or an OptionList, same as a stale Key.
+    # independently, so gating MouseUp transitively covers a stale Click too.
+    # Paste is gated separately (not a MouseEvent or Key) because a stale
+    # paste could otherwise still reach a focused-but-hidden PromptEditor or
+    # an OptionList, same as a stale Key.
     async def scenario() -> tuple[bool, bool]:
         app, renderer = create_textual_tui()
         async with app.run_test() as pilot:
