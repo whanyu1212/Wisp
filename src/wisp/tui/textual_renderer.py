@@ -191,7 +191,14 @@ class TextualTuiRenderer:
         pass
 
     def help(self) -> None:
-        self.app.write_notice(_tui_help_text())
+        self.app.write_notice(
+            _tui_help_text(
+                approval_hint=(
+                    "Tool approvals default to 1 (Approve once) — Enter approves; "
+                    "Escape or 4 denies."
+                )
+            )
+        )
 
     def notice(self, message: str) -> None:
         self.app.write_notice(message)

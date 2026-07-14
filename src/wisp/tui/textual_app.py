@@ -716,22 +716,42 @@ class TextualTui(App[None]):
     # watcher derives follow intent for normal movement; End uses return_to_latest
     # to restore that intent atomically before jumping. None-guarded like
     # _mount_line for calls before on_mount wires the widget.
+    #
+    # These are priority bindings (see BINDINGS), so they always win over the
+    # focused widget's own PageUp/PageDown/Home/End handling. While a decision
+    # panel is open, that would otherwise scroll the transcript out from under
+    # the user instead of moving the approval highlight — stranding it on
+    # whatever option was last selected (e.g. "Approve once") and turning the
+    # next Enter into an unintended approval. Delegate to the panel's own
+    # OptionList navigation in that case instead.
     def action_scroll_transcript_page_up(self) -> None:
+        if self._decision_panel is not None and self._decision_panel.is_open:
+            self._decision_panel.move_highlight_page_up()
+            return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_page_up()
 
     def action_scroll_transcript_page_down(self) -> None:
+        if self._decision_panel is not None and self._decision_panel.is_open:
+            self._decision_panel.move_highlight_page_down()
+            return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_page_down()
 
     def action_scroll_transcript_home(self) -> None:
+        if self._decision_panel is not None and self._decision_panel.is_open:
+            self._decision_panel.move_highlight_first()
+            return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_scroll_home()
 
     def action_scroll_transcript_end(self) -> None:
+        if self._decision_panel is not None and self._decision_panel.is_open:
+            self._decision_panel.move_highlight_last()
+            return
         if self._transcript is not None:
             self._transcript.return_to_latest()
         self._clear_unseen_output()

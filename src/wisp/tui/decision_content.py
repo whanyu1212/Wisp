@@ -67,6 +67,27 @@ def _bounded_decision_preview(
     return "\n".join(selected)
 
 
+# The DecisionPanel's #decision-options viewport is a fixed 4 lines (one per
+# option) with no auto-scroll to the highlighted option once the default
+# highlight is no longer the last one. An unbounded tool name in the "Allow
+# <name> for this session" option can wrap to a second line, pushing "4 Deny"
+# out of the visible viewport with nothing to scroll it back into view. Cap
+# the name so that option can never wrap regardless of terminal width.
+_TOOL_SESSION_OPTION_NAME_CHARS = 40
+
+
+def _bounded_tool_session_option_name(name: str) -> str:
+    """Truncate a tool name for the "Allow <name> for this session" option label.
+
+    Keeps the option to a single line so it can't wrap and push later options
+    (notably "Deny") out of the fixed-height option-list viewport.
+    """
+
+    if len(name) <= _TOOL_SESSION_OPTION_NAME_CHARS:
+        return name
+    return f"{name[: _TOOL_SESSION_OPTION_NAME_CHARS - 1]}…"
+
+
 def _safety_label(safety: str) -> str:
     return {
         "read": "read-only access",

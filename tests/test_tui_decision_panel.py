@@ -5,6 +5,7 @@ from typing import Literal
 
 import anyio
 import pytest
+from textual import events
 from textual.widgets import OptionList, Static
 
 from wisp.events import ToolApprovalRequested, TrustRequested
@@ -12,6 +13,7 @@ from wisp.tui import TuiViewSnapshot
 from wisp.tui.decision_content import (
     _approval_content,
     _bounded_decision_preview,
+    _bounded_tool_session_option_name,
     _trust_content,
 )
 from wisp.tui.textual_app import create_textual_tui
@@ -46,6 +48,15 @@ def test_bounded_decision_preview_marks_line_and_character_truncation() -> None:
         "one\n... preview truncated"
     )
     assert _bounded_decision_preview(["abcdefgh"], max_chars=4) == ("abcd\n... preview truncated")
+
+
+def test_bounded_tool_session_option_name_truncates_long_names() -> None:
+    assert _bounded_tool_session_option_name("bash") == "bash"
+    long_name = "a" * 71
+    truncated = _bounded_tool_session_option_name(long_name)
+    assert len(truncated) == 40
+    assert truncated.endswith("…")
+    assert truncated[:-1] == long_name[:39]
 
 
 def test_bash_approval_content_summarizes_command_context() -> None:
@@ -315,6 +326,118 @@ def test_approval_panel_enter_follows_approve_once_default() -> None:
     assert anyio.run(scenario) == "y"
 
 
+def test_approval_panel_drops_key_queued_before_panel_opened() -> None:
+    # Widget.focus() defers the actual focus change via call_later, so a key
+    # already queued for the previously-focused composer can still reach the
+    # OptionList's handlers once focus lands here. Simulate that by dispatching
+    # synthetic events timestamped before the panel opened: both the on_key
+    # digit/Escape path and the OptionList Enter-selects-highlighted path must
+    # ignore them rather than treat them as an intentional approval. A
+    # genuinely fresh key afterward must still work — the guard must not wedge
+    # the panel shut.
+    async def scenario() -> tuple[bool, str]:
+        app, renderer = create_textual_tui()
+        async with app.run_test() as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="waiting for approval",
+                    input_hint="approve> ",
+                    input_mode="approval",
+                    cwd="/work/project",
+                )
+            )
+            renderer.approval_request(
+                _approval("write", {"path": "file.txt", "content": "content"})
+            )
+            await pilot.pause()
+
+            panel = app.query_one("#decision-panel", DecisionPanel)
+            options = app.query_one("#decision-options", OptionList)
+
+            stale_key = events.Key("enter", None)
+            stale_key.set_sender(app)
+            stale_key.time = panel._opened_at - 1.0
+            panel.on_key(stale_key)
+
+            option = options.get_option_at_index(0)
+            assert option.id is not None
+            stale_selected = OptionList.OptionSelected(options, option, 0)
+            stale_selected.time = panel._opened_at - 1.0
+            panel.on_option_list_option_selected(stale_selected)
+
+            await pilot.pause()
+            rejected = not panel._submitted
+
+            await pilot.press("4")
+            with anyio.fail_after(1):
+                answer = await app._prompt_receive.receive()
+            assert isinstance(answer, str)
+            return rejected, answer
+
+    rejected, answer = anyio.run(scenario)
+    assert rejected
+    assert answer == "n"
+
+
+def test_approval_panel_end_key_moves_highlight_not_transcript() -> None:
+    # `end`/`pagedown` are priority app bindings (needed so they reach the
+    # transcript through a focused TextArea composer) that would otherwise
+    # always intercept the key before OptionList's own End/PageDown handling
+    # while the decision panel is focused — scrolling the transcript instead
+    # of moving the highlight, stranding it on "Approve once" and turning a
+    # follow-up Enter into an unintended approval. Assert End instead reaches
+    # the panel and moves the highlight to the last option ("Deny").
+    async def scenario() -> tuple[int | None, str]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="waiting for approval",
+                    input_hint="approve> ",
+                    input_mode="approval",
+                    cwd="/work/project",
+                )
+            )
+            renderer.approval_request(_approval("bash", {"command": "echo hi"}, safety="command"))
+            await pilot.pause()
+
+            options = app.query_one("#decision-options", OptionList)
+            assert options.highlighted == 0
+
+            await pilot.press("end")
+            await pilot.pause()
+            highlighted = options.highlighted
+
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                answer = await app._prompt_receive.receive()
+            assert isinstance(answer, str)
+            return highlighted, answer
+
+    highlighted, answer = anyio.run(scenario)
+    assert highlighted == 3
+    assert answer == "n"
+
+
+def test_textual_help_describes_approve_once_default_not_deny_default() -> None:
+    # The shared _tui_help_text() default ("approve? [y/N]") is still accurate
+    # for the line/fullscreen renderers' free-text approval prompt, but the
+    # Textual decision panel now defaults its highlight to "Approve once" —
+    # the help text seen through the Textual renderer must say so, not repeat
+    # the now-backwards y/N (deny-on-Enter) convention.
+    async def scenario() -> str:
+        app, renderer = create_textual_tui()
+        async with app.run_test() as pilot:
+            renderer.help()
+            await pilot.pause()
+            lines = [str(widget.render()) for widget in app.query(Static)]
+            return "\n".join(lines)
+
+    rendered = anyio.run(scenario)
+    assert "approve? [y/N]" not in rendered
+    assert "1 (Approve once)" in rendered
+
+
 def test_trust_panel_uses_deny_first_project_wording() -> None:
     async def scenario() -> tuple[str, str, str, int | None]:
         app, renderer = create_textual_tui()
@@ -383,3 +506,31 @@ def test_decision_panel_fits_above_footer_in_narrow_terminal(theme: str) -> None
     assert panel_bottom <= footer_top
     assert panel_height <= 12
     assert transcript_height > 0
+
+
+def test_approval_panel_options_stay_unwrapped_with_long_tool_name() -> None:
+    # A long tool name in the "Allow <name> for this session" option can wrap
+    # the fixed-height #decision-options viewport, scrolling "4 Deny" out of
+    # view with nothing to auto-scroll it back (the default highlight is no
+    # longer the last option). At the project's supported narrow-terminal
+    # width (see test_decision_panel_fits_above_footer_in_narrow_terminal),
+    # the truncated label must keep the option list's virtual size equal to
+    # its viewport size — i.e. no wrapping, all four options visible.
+    async def scenario() -> tuple[int, int]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(72, 20)) as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="waiting for approval",
+                    input_hint="approve> ",
+                    input_mode="approval",
+                    cwd="/work/project",
+                )
+            )
+            renderer.approval_request(_approval("a" * 71, {}, safety="command"))
+            await pilot.pause()
+            options = app.query_one("#decision-options", OptionList)
+            return options.virtual_size.height, options.size.height
+
+    virtual_height, viewport_height = anyio.run(scenario)
+    assert virtual_height == viewport_height == 4
