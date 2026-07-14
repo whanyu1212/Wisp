@@ -801,7 +801,12 @@ def create_tui_renderer(kind: TuiRendererKind, console: Console | None = None) -
     return _BUILT_IN_RENDERERS[kind](console)
 
 
-def _tui_help_text() -> str:
+def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? [y/N].") -> str:
+    """Shared TUI help text. ``approval_hint`` differs by renderer: the line and
+    fullscreen renderers still read free-text `y`/`n` where blank/Enter denies, but
+    the Textual renderer's decision panel defaults its highlight to "Approve once"
+    (Enter approves) — see ``textual_renderer.help()`` for its override.
+    """
     return (
         "Commands:\n"
         "  /help                    show this help\n"
@@ -812,7 +817,7 @@ def _tui_help_text() -> str:
         "  /model [model]           show or switch model for future prompts\n"
         "  /quit, /exit             quit the TUI\n"
         "While a prompt is running, submitted input is queued as a follow-up.\n"
-        "Tool approvals prompt with approve? [y/N]."
+        f"{approval_hint}"
     )
 
 

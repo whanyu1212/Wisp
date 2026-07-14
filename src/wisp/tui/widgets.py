@@ -16,6 +16,7 @@ Stage 2 replaces the append-only ``RichLog`` transcript with a
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 
 from textual import events
@@ -34,6 +35,7 @@ from wisp.events import ToolApprovalRequested, TrustRequested
 from wisp.tui.commands import SLASH_COMMAND_SPECS, SlashCommandSpec
 from wisp.tui.decision_content import (
     _approval_content,
+    _bounded_tool_session_option_name,
     _DecisionContent,
     _trust_content,
 )
@@ -282,7 +284,13 @@ def _summarize_arguments(arguments: object, *, limit: int = 48) -> str:
 
 
 class DecisionPanel(Vertical):
-    """Deny-first approval/trust selector that temporarily replaces the composer."""
+    """Approval/trust selector that temporarily replaces the composer.
+
+    The main approval prompt defaults its highlight to "Approve once" (Enter
+    approves); the YOLO-confirmation and trust prompts remain deny-first
+    (Enter/Escape decline). Escape always denies/cancels on every panel,
+    regardless of which option is highlighted.
+    """
 
     DEFAULT_CSS = """
     DecisionPanel {
@@ -343,6 +351,16 @@ class DecisionPanel(Vertical):
         self._options = OptionList(id="decision-options")
         self._submitted = False
         self._mode = "approval"
+        # Monotonic timestamp of the panel's most recent _show(). Widget.focus()
+        # defers the actual focus change via call_later, so a key already queued
+        # for the previously-focused widget (e.g. the composer) can still be
+        # dispatched to this panel once focus lands — landing on whatever option
+        # is highlighted by default. on_key drops any key whose event.time
+        # predates this open, closing that race regardless of Textual's focus
+        # scheduling. events.Key.time is stamped at event construction (when the
+        # driver reads the keypress), not at dispatch, so it reliably predates
+        # keys typed after the panel opened.
+        self._opened_at = 0.0
 
     def compose(self) -> ComposeResult:
         yield self._title
@@ -355,22 +373,35 @@ class DecisionPanel(Vertical):
         return self.display
 
     def focus_options(self) -> None:
-        """Restore keyboard focus to the active deny-first choice list."""
+        """Restore keyboard focus to the active decision panel's choice list."""
 
         if self.is_open:
             self._options.focus()
 
+    def move_highlight_page_up(self) -> None:
+        self._options.action_page_up()  # type: ignore[no-untyped-call]
+
+    def move_highlight_page_down(self) -> None:
+        self._options.action_page_down()  # type: ignore[no-untyped-call]
+
+    def move_highlight_first(self) -> None:
+        self._options.action_first()
+
+    def move_highlight_last(self) -> None:
+        self._options.action_last()
+
     def show_approval(self, event: ToolApprovalRequested, *, cwd: str) -> None:
         content = _approval_content(event, cwd=cwd)
+        tool_name = _bounded_tool_session_option_name(event.name)
         self._show(
             content,
             options=[
-                Option("Y  Approve once", id="approve_once"),
-                Option(f"T  Allow {event.name} for this session", id="tool_session"),
-                Option("A  YOLO: allow all tools for this session", id="all_session"),
-                Option("N  Deny (default)", id="deny"),
+                Option("1  Approve once (default)", id="approve_once"),
+                Option(f"2  Allow {tool_name} for this session", id="tool_session"),
+                Option("3  YOLO: allow all tools for this session", id="all_session"),
+                Option("4  Deny", id="deny"),
             ],
-            default_index=3,
+            default_index=0,
             mode="approval",
         )
 
@@ -385,8 +416,8 @@ class DecisionPanel(Vertical):
                 ),
             ),
             options=[
-                Option("Y  Enable YOLO for this run", id="confirm_all"),
-                Option("N  Go back (default)", id="cancel_all"),
+                Option("1  Enable YOLO for this run", id="confirm_all"),
+                Option("2  Go back (default)", id="cancel_all"),
             ],
             default_index=1,
             mode="all_confirmation",
@@ -396,8 +427,8 @@ class DecisionPanel(Vertical):
         self._show(
             _trust_content(event),
             options=[
-                Option("Y  Trust project", id="approve"),
-                Option("N  Keep untrusted (default)", id="deny"),
+                Option("1  Trust project", id="approve"),
+                Option("2  Keep untrusted (default)", id="deny"),
             ],
             default_index=1,
             mode="trust",
@@ -413,6 +444,7 @@ class DecisionPanel(Vertical):
     ) -> None:
         self._submitted = False
         self._mode = mode
+        self._opened_at = time.monotonic()
         self._title.update(content.title)
         self._meta.update(content.meta)
         self._detail.update(content.detail)
@@ -436,6 +468,12 @@ class DecisionPanel(Vertical):
         if event.option_list is not self._options:
             return
         event.stop()
+        if event.time < self._opened_at:
+            # A key (typically Enter) queued for the previously-focused widget
+            # before this panel opened, delivered only after Widget.focus()'s
+            # deferred call_later landed focus here. Drop it rather than acting
+            # on whatever option happens to be highlighted. See _opened_at.
+            return
         option_id = event.option.id
         if option_id is None:
             return
@@ -454,18 +492,32 @@ class DecisionPanel(Vertical):
     def on_key(self, event: events.Key) -> None:
         if not self.is_open:
             return
+        if event.time < self._opened_at:
+            # A key queued before this panel opened (e.g. for the composer)
+            # must not act on the newly-shown choices, INCLUDING Enter: Enter
+            # is deliberately not handled below so OptionList's own native
+            # enter->select binding fires normally for real presses. But that
+            # binding resolution happens only if this handler doesn't stop the
+            # event, so a stale Enter must be stopped explicitly here or it
+            # falls through to select() and posts a freshly-timestamped
+            # OptionSelected the guard in on_option_list_option_selected can no
+            # longer catch (that message's .time is stamped when Textual's
+            # binding machinery constructs it, i.e. "now" — never < _opened_at).
+            event.stop()
+            event.prevent_default()
+            return
         key = event.key.lower()
         answer: str | None = None
         if self._mode == "approval":
-            answer = {"y": "y", "t": "t", "a": "a", "n": "n", "escape": "n"}.get(key)
+            answer = {"1": "y", "2": "t", "3": "a", "4": "n", "escape": "n"}.get(key)
         elif self._mode == "all_confirmation":
             answer = {
-                "y": "confirm-all",
-                "n": "cancel-all",
+                "1": "confirm-all",
+                "2": "cancel-all",
                 "escape": "cancel-all",
             }.get(key)
         elif self._mode == "trust":
-            answer = {"y": "y", "n": "n", "escape": "n"}.get(key)
+            answer = {"1": "y", "2": "n", "escape": "n"}.get(key)
         if answer is None:
             return
         self.submit_answer(answer)

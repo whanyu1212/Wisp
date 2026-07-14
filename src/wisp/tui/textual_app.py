@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
@@ -256,6 +257,15 @@ class TextualTui(App[None]):
         self._input: PromptEditor | None = None
         self._suggest: SlashSuggest | None = None
         self._decision_panel: DecisionPanel | None = None
+        # Monotonic timestamp of the most recent _prepare_decision_panel() call
+        # (see on_event / _prepare_decision_panel). Any Key/MouseDown/MouseUp/
+        # Paste event timestamped before this barrier is dropped before it
+        # reaches whichever widget currently has focus or is at its screen
+        # coordinates, closing the race where an event already queued for the
+        # composer would otherwise land on it (still focused, only hidden) or
+        # on the decision panel's OptionList (once Widget.focus()'s deferred
+        # call_later lands) instead of being treated as stale.
+        self._stale_event_barrier = 0.0
         self._current_prompt = "wisp> "
         self._runner: Callable[[], Awaitable[None]] | None = None
         self._runner_error: Exception | None = None
@@ -435,7 +445,7 @@ class TextualTui(App[None]):
 
     def on_jump_to_latest_selected(self, event: JumpToLatest.Selected) -> None:
         event.stop()
-        self.action_scroll_transcript_end()
+        self._scroll_transcript_to_latest()
         if self._input is not None and self._input.display:
             self._input.focus()
         elif self._decision_panel is not None:
@@ -550,6 +560,40 @@ class TextualTui(App[None]):
             self._input.value = prefix
             self._input.cursor_position = len(prefix)
             self._input.focus()
+
+    async def on_event(self, event: events.Event) -> None:
+        # App.on_event is the earliest point a Key/Mouse/Paste event passes
+        # through before Textual forwards it to whatever currently has focus
+        # or is at its screen coordinates — earlier than any widget's own
+        # on_key/BINDINGS, and earlier than this app's own on_key below. An
+        # event timestamped before _stale_event_barrier was read by the driver
+        # before a decision panel opened (or is opening — the barrier is
+        # raised in _prepare_decision_panel before the composer is hidden or
+        # focus moves), so it must never reach a focused/hit-tested widget:
+        # dropping it here, rather than in DecisionPanel.on_key or
+        # PromptEditor.on_key individually, closes the race for every widget
+        # that could still be focused (or at those coordinates) when it
+        # arrives, not just the one the caller expected by then.
+        #
+        # events.MouseEvent (not just Key) is gated as a whole base class,
+        # not enumerated per subclass: every mouse variant Textual defines
+        # (MouseDown, MouseUp, MouseMove, MouseScrollUp/Down/Left/Right) can
+        # reach a widget the same way a stale key can, and Click is
+        # synthesized from an already-forwarded MouseUp inside App.on_event's
+        # own body (see textual.app.App.on_event) rather than delivered as an
+        # independent top-level event, so gating the MouseEvent family here
+        # transitively blocks a stale Click too. A stale MouseScrollDown in
+        # particular could otherwise scroll the decision panel's highlighted
+        # option out of view before a legitimate Enter lands, without ever
+        # changing which option is logically selected — the same class of bug
+        # this barrier exists to prevent, just via scroll instead of a key.
+        # Paste is gated separately (it is not a MouseEvent or Key) because a
+        # stale paste could otherwise still reach a focused-but-hidden
+        # PromptEditor or an OptionList.
+        stale_event_types = (events.Key, events.MouseEvent, events.Paste)
+        if isinstance(event, stale_event_types) and event.time < self._stale_event_barrier:
+            return
+        await super().on_event(event)
 
     async def on_key(self, event: events.Key) -> None:
         # Menu-scoped keys, handled only while the slash menu is open so normal
@@ -716,22 +760,52 @@ class TextualTui(App[None]):
     # watcher derives follow intent for normal movement; End uses return_to_latest
     # to restore that intent atomically before jumping. None-guarded like
     # _mount_line for calls before on_mount wires the widget.
+    #
+    # These are priority bindings (see BINDINGS), so they always win over the
+    # focused widget's own PageUp/PageDown/Home/End handling. While a decision
+    # panel is open, that would otherwise scroll the transcript out from under
+    # the user instead of moving the approval highlight — stranding it on
+    # whatever option was last selected (e.g. "Approve once") and turning the
+    # next Enter into an unintended approval. Delegate to the panel's own
+    # OptionList navigation in that case instead.
     def action_scroll_transcript_page_up(self) -> None:
+        if self._decision_panel is not None and self._decision_panel.is_open:
+            self._decision_panel.move_highlight_page_up()
+            return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_page_up()
 
     def action_scroll_transcript_page_down(self) -> None:
+        if self._decision_panel is not None and self._decision_panel.is_open:
+            self._decision_panel.move_highlight_page_down()
+            return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_page_down()
 
     def action_scroll_transcript_home(self) -> None:
+        if self._decision_panel is not None and self._decision_panel.is_open:
+            self._decision_panel.move_highlight_first()
+            return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_scroll_home()
 
     def action_scroll_transcript_end(self) -> None:
+        if self._decision_panel is not None and self._decision_panel.is_open:
+            self._decision_panel.move_highlight_last()
+            return
+        self._scroll_transcript_to_latest()
+
+    def _scroll_transcript_to_latest(self) -> None:
+        # The actual "scroll to bottom" behavior, split from
+        # action_scroll_transcript_end so the jump-to-latest overlay's click
+        # handler (on_jump_to_latest_selected) can call it directly. That
+        # overlay is a mouse affordance meaning "get me to the bottom of the
+        # transcript" — never a decision-panel-navigation gesture — so it must
+        # not be redirected to move the panel highlight just because one
+        # happens to be open, unlike a real End keypress.
         if self._transcript is not None:
             self._transcript.return_to_latest()
         self._clear_unseen_output()
@@ -776,34 +850,36 @@ class TextualTui(App[None]):
         if self._input is not None:
             self._input.placeholder = _input_placeholder(hint)
 
-    def show_approval(self, event: ToolApprovalRequested, *, cwd: str) -> None:
-        panel = self._decision_panel
-        if panel is None:
-            return
+    def _prepare_decision_panel(self) -> None:
+        # Shared by every show_*() below. Raises the stale-event barrier (see
+        # on_event) before touching focus/visibility, so there is no window
+        # where an event already queued for the composer could still land on
+        # it after this method hides it but before the barrier is active.
+        self._stale_event_barrier = time.monotonic()
         if self._suggest is not None:
             self._suggest.hide()
         if self._input is not None:
             self._input.display = False
+
+    def show_approval(self, event: ToolApprovalRequested, *, cwd: str) -> None:
+        panel = self._decision_panel
+        if panel is None:
+            return
+        self._prepare_decision_panel()
         panel.show_approval(event, cwd=cwd)
 
     def show_approval_all_confirmation(self, event: ToolApprovalRequested) -> None:
         panel = self._decision_panel
         if panel is None:
             return
-        if self._suggest is not None:
-            self._suggest.hide()
-        if self._input is not None:
-            self._input.display = False
+        self._prepare_decision_panel()
         panel.show_all_confirmation(event)
 
     def show_trust(self, event: TrustRequested) -> None:
         panel = self._decision_panel
         if panel is None:
             return
-        if self._suggest is not None:
-            self._suggest.hide()
-        if self._input is not None:
-            self._input.display = False
+        self._prepare_decision_panel()
         panel.show_trust(event)
 
     def hide_decision(self) -> None:

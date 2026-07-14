@@ -67,6 +67,38 @@ def _bounded_decision_preview(
     return "\n".join(selected)
 
 
+# The DecisionPanel's #decision-options viewport is a fixed 4 lines (one per
+# option) with no auto-scroll to the highlighted option once the default
+# highlight is no longer the last one. An unbounded tool name in the "Allow
+# <name> for this session" option can wrap to a second line, pushing "4 Deny"
+# out of the visible viewport with nothing to scroll it back into view. This
+# cap keeps the option unwrapped at the project's supported narrow-terminal
+# floor (72 columns, see test_decision_panel_fits_above_footer_in_narrow_
+# terminal) — it is a character count, not a terminal-column/display-width
+# measurement, so it does not guarantee no wrap at every possible width (very
+# narrow terminals, or names with wide/multi-column characters, can still
+# wrap); logical option selection is unaffected either way (Textual indexes
+# by option, not rendered line).
+_TOOL_SESSION_OPTION_NAME_CHARS = 40
+
+
+def _bounded_tool_session_option_name(name: str) -> str:
+    """Truncate a tool name for the "Allow <name> for this session" option label.
+
+    Keeps the option to a single line so it can't wrap and push later options
+    (notably "Deny") out of the fixed-height option-list viewport. In-repo tool
+    names are short plain-ASCII literals, but a name could in principle come
+    from an MCP/custom tool: collapse embedded newlines first, since a
+    character-count cap alone doesn't stop an embedded "\n" from still
+    splitting the option onto a second rendered line.
+    """
+
+    name = name.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    if len(name) <= _TOOL_SESSION_OPTION_NAME_CHARS:
+        return name
+    return f"{name[: _TOOL_SESSION_OPTION_NAME_CHARS - 1]}…"
+
+
 def _safety_label(safety: str) -> str:
     return {
         "read": "read-only access",
