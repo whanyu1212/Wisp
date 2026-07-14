@@ -117,7 +117,7 @@ def test_trust_content_explains_scope_without_implying_persistence() -> None:
     assert content.detail == ("Trusting allows project-local settings and instructions to load.")
 
 
-def test_approval_panel_defaults_to_deny_and_preserves_composer_draft() -> None:
+def test_approval_panel_defaults_to_approve_once_and_preserves_composer_draft() -> None:
     async def scenario() -> tuple[str, str, bool, bool, bool, int | None, str]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
@@ -144,7 +144,7 @@ def test_approval_panel_defaults_to_deny_and_preserves_composer_draft() -> None:
             focused = app.focused is options
             highlighted = options.highlighted
 
-            await pilot.press("y")
+            await pilot.press("1")
             with anyio.fail_after(1):
                 answer = await app._prompt_receive.receive()
             assert isinstance(answer, str)
@@ -166,7 +166,7 @@ def test_approval_panel_defaults_to_deny_and_preserves_composer_draft() -> None:
     assert visible
     assert focused
     assert restored
-    assert highlighted == 3
+    assert highlighted == 0
     assert "Run command?" in rendered
     assert "$ rm output.txt" in rendered
 
@@ -193,15 +193,15 @@ def test_approval_panel_exposes_once_tool_session_and_yolo_choices() -> None:
 
     options, highlighted = anyio.run(scenario)
     assert options == [
-        "Y  Approve once",
-        "T  Allow bash for this session",
-        "A  YOLO: allow all tools for this session",
-        "N  Deny (default)",
+        "1  Approve once (default)",
+        "2  Allow bash for this session",
+        "3  YOLO: allow all tools for this session",
+        "4  Deny",
     ]
-    assert highlighted == 3
+    assert highlighted == 0
 
 
-@pytest.mark.parametrize("cancel_key", ["enter", "n", "escape"])
+@pytest.mark.parametrize("cancel_key", ["enter", "2", "escape"])
 def test_approval_panel_yolo_confirmation_defaults_back(cancel_key: str) -> None:
     async def scenario() -> tuple[str, str, int | None, str]:
         app, renderer = create_textual_tui()
@@ -217,7 +217,7 @@ def test_approval_panel_yolo_confirmation_defaults_back(cancel_key: str) -> None
             )
             renderer.approval_request(approval)
             await pilot.pause()
-            await pilot.press("a")
+            await pilot.press("3")
             with anyio.fail_after(1):
                 first = await app._prompt_receive.receive()
             assert isinstance(first, str)
@@ -264,8 +264,8 @@ def test_approval_panel_yolo_confirmation_hides_composer_and_preserves_draft() -
     assert restored
 
 
-@pytest.mark.parametrize(("key", "expected"), [("enter", "n"), ("n", "n"), ("escape", "n")])
-def test_approval_panel_deny_paths_are_fail_closed(key: str, expected: str) -> None:
+@pytest.mark.parametrize(("key", "expected"), [("4", "n"), ("escape", "n")])
+def test_approval_panel_explicit_deny_paths_are_fail_closed(key: str, expected: str) -> None:
     async def scenario() -> str:
         app, renderer = create_textual_tui()
         async with app.run_test() as pilot:
@@ -288,6 +288,31 @@ def test_approval_panel_deny_paths_are_fail_closed(key: str, expected: str) -> N
             return answer
 
     assert anyio.run(scenario) == expected
+
+
+def test_approval_panel_enter_follows_approve_once_default() -> None:
+    async def scenario() -> str:
+        app, renderer = create_textual_tui()
+        async with app.run_test() as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="waiting for approval",
+                    input_hint="approve> ",
+                    input_mode="approval",
+                    cwd="/work/project",
+                )
+            )
+            renderer.approval_request(
+                _approval("write", {"path": "file.txt", "content": "content"})
+            )
+            await pilot.pause()
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                answer = await app._prompt_receive.receive()
+            assert isinstance(answer, str)
+            return answer
+
+    assert anyio.run(scenario) == "y"
 
 
 def test_trust_panel_uses_deny_first_project_wording() -> None:

@@ -282,7 +282,13 @@ def _summarize_arguments(arguments: object, *, limit: int = 48) -> str:
 
 
 class DecisionPanel(Vertical):
-    """Deny-first approval/trust selector that temporarily replaces the composer."""
+    """Approval/trust selector that temporarily replaces the composer.
+
+    The main approval prompt defaults its highlight to "Approve once" (Enter
+    approves); the YOLO-confirmation and trust prompts remain deny-first
+    (Enter/Escape decline). Escape always denies/cancels on every panel,
+    regardless of which option is highlighted.
+    """
 
     DEFAULT_CSS = """
     DecisionPanel {
@@ -355,7 +361,7 @@ class DecisionPanel(Vertical):
         return self.display
 
     def focus_options(self) -> None:
-        """Restore keyboard focus to the active deny-first choice list."""
+        """Restore keyboard focus to the active decision panel's choice list."""
 
         if self.is_open:
             self._options.focus()
@@ -365,12 +371,12 @@ class DecisionPanel(Vertical):
         self._show(
             content,
             options=[
-                Option("Y  Approve once", id="approve_once"),
-                Option(f"T  Allow {event.name} for this session", id="tool_session"),
-                Option("A  YOLO: allow all tools for this session", id="all_session"),
-                Option("N  Deny (default)", id="deny"),
+                Option("1  Approve once (default)", id="approve_once"),
+                Option(f"2  Allow {event.name} for this session", id="tool_session"),
+                Option("3  YOLO: allow all tools for this session", id="all_session"),
+                Option("4  Deny", id="deny"),
             ],
-            default_index=3,
+            default_index=0,
             mode="approval",
         )
 
@@ -385,8 +391,8 @@ class DecisionPanel(Vertical):
                 ),
             ),
             options=[
-                Option("Y  Enable YOLO for this run", id="confirm_all"),
-                Option("N  Go back (default)", id="cancel_all"),
+                Option("1  Enable YOLO for this run", id="confirm_all"),
+                Option("2  Go back (default)", id="cancel_all"),
             ],
             default_index=1,
             mode="all_confirmation",
@@ -396,8 +402,8 @@ class DecisionPanel(Vertical):
         self._show(
             _trust_content(event),
             options=[
-                Option("Y  Trust project", id="approve"),
-                Option("N  Keep untrusted (default)", id="deny"),
+                Option("1  Trust project", id="approve"),
+                Option("2  Keep untrusted (default)", id="deny"),
             ],
             default_index=1,
             mode="trust",
@@ -457,15 +463,15 @@ class DecisionPanel(Vertical):
         key = event.key.lower()
         answer: str | None = None
         if self._mode == "approval":
-            answer = {"y": "y", "t": "t", "a": "a", "n": "n", "escape": "n"}.get(key)
+            answer = {"1": "y", "2": "t", "3": "a", "4": "n", "escape": "n"}.get(key)
         elif self._mode == "all_confirmation":
             answer = {
-                "y": "confirm-all",
-                "n": "cancel-all",
+                "1": "confirm-all",
+                "2": "cancel-all",
                 "escape": "cancel-all",
             }.get(key)
         elif self._mode == "trust":
-            answer = {"y": "y", "n": "n", "escape": "n"}.get(key)
+            answer = {"1": "y", "2": "n", "escape": "n"}.get(key)
         if answer is None:
             return
         self.submit_answer(answer)
