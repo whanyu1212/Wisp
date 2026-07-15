@@ -211,7 +211,10 @@ def test_tui_footer_formatter_compacts_and_truncates() -> None:
     assert len(lines) == 2
     assert all(len(line) <= 32 for line in lines)
     assert "…" in lines[0]
-    assert lines[1].endswith("openai/gpt-4.1")
+    # status outranks model (issue #72): the model is dropped entirely here
+    # rather than kept whole at the cost of clipping live status text.
+    assert lines[1] == "running • queued 12"
+    assert "openai/gpt-4.1" not in lines[1]
 
 
 def test_tui_footer_line_one_drops_session_before_truncating_cwd() -> None:
@@ -234,8 +237,8 @@ def test_tui_footer_line_one_drops_session_before_truncating_cwd() -> None:
 
 def test_tui_footer_line_two_still_protects_status_over_model() -> None:
     # status/queued outranks provider+model (issue #72): under pressure the
-    # model string truncates (or is fully dropped, at extreme widths) before
-    # live status text is ever clipped.
+    # model string truncates, or is dropped entirely, before live status text
+    # is ever clipped — status must render whole whenever it fits alone.
     lines = format_tui_footer_lines(
         TuiViewSnapshot(
             status="running",
@@ -246,13 +249,13 @@ def test_tui_footer_line_two_still_protects_status_over_model() -> None:
         width=30,
     )
 
-    assert lines[1].startswith("running")
-    assert "…" in lines[1]
-    assert len(lines[1]) <= 30
+    assert lines[1] == "running"  # status renders whole; model dropped, not truncated
+    assert "openai-codex" not in lines[1]
 
-    # Long status text still wins over the model even when the model would
-    # otherwise fit whole — this is the historical bug the priority fix
-    # closes: a status field must never be dropped in favor of the model.
+    # A long status still wins over the model even where a naive "protect the
+    # model" implementation would keep it whole and clip status instead — the
+    # exact regression a P2 review caught: priority="right" on this line
+    # protects model_right (the lower-priority field), not status_left.
     long_status_lines = format_tui_footer_lines(
         TuiViewSnapshot(
             status="Retrying openai-codex, attempt 2 of 3, waiting 2.0s",
@@ -263,7 +266,10 @@ def test_tui_footer_line_two_still_protects_status_over_model() -> None:
         width=40,
     )
 
-    assert long_status_lines[1].startswith("Retrying op")
+    assert long_status_lines[1].startswith(
+        "Retrying openai-codex, attempt 2 of 3, "
+    )  # status rendered whole (only its trailing ellipsis is clipped)
+    assert "openai-codex/gpt-5.5-codex" not in long_status_lines[1]  # model dropped
     assert len(long_status_lines[1]) <= 40
 
 

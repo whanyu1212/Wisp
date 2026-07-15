@@ -709,11 +709,10 @@ def format_tui_footer_lines(
     """Return Pi-style compact footer lines for a renderer snapshot.
 
     Field priority (highest to lowest, protected in that order under width
-    pressure): status+queued, cwd, provider/model, session id. Line 1 (cwd /
-    session) truncates with ``priority="left"`` — cwd is the higher-priority
-    field, so session drops entirely before cwd is ever clipped. Line 2
-    (status / model) truncates with ``priority="right"`` — status is the
-    higher-priority field there, so model clips before status does.
+    pressure): status+queued, cwd, provider/model, session id. Both lines
+    truncate with ``priority="left"``: line 1's left field is cwd (session
+    drops entirely before cwd is ever clipped), line 2's left field is status
+    (model clips, or drops entirely, before status is ever clipped).
     """
 
     display_width = max(1, width) if width is not None else None
@@ -730,7 +729,7 @@ def format_tui_footer_lines(
 
     return (
         _align_footer_line(context_left, context_right, display_width, priority="left"),
-        _align_footer_line(status_left, model_right, display_width, priority="right"),
+        _align_footer_line(status_left, model_right, display_width, priority="left"),
     )
 
 
