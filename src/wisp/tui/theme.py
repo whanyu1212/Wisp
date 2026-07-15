@@ -10,7 +10,6 @@ after a theme switch; `RichLog` cannot restyle already-written lines).
 
 from __future__ import annotations
 
-from textual.content import Content
 from textual.theme import Theme
 
 # A cool, vaporous identity: a muted teal-cyan accent over cool-biased neutrals,
@@ -83,45 +82,3 @@ def role_styles(theme: Theme) -> dict[str, str]:
             parts.append("dim")
         styles[role] = " ".join(parts)
     return styles
-
-
-def _hex_to_rgb(color: str) -> tuple[int, int, int]:
-    color = color.lstrip("#")
-    return (int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16))
-
-
-def _lerp_hex(start: str, end: str, fraction: float) -> str:
-    r1, g1, b1 = _hex_to_rgb(start)
-    r2, g2, b2 = _hex_to_rgb(end)
-    r = round(r1 + (r2 - r1) * fraction)
-    g = round(g1 + (g2 - g1) * fraction)
-    b = round(b1 + (b2 - b1) * fraction)
-    return f"#{r:02x}{g:02x}{b:02x}"
-
-
-def wordmark_gradient_content(theme: Theme, art: str) -> Content:
-    """The block-letter wordmark, colored in a left-to-right gradient from
-    ``theme.primary`` to ``theme.accent`` — both structural colors already in
-    the palette (see the comments on ``WISP_THEME_DARK``), so this needs no
-    new theme entries. Colored by COLUMN (not per-line) so the gradient stays
-    consistent across every row of the multi-line art, reading as one smooth
-    sweep rather than a repeated per-line gradient. Re-call after a theme
-    change to track the new palette, same contract as ``role_styles``.
-    """
-
-    # Theme.accent is optional in Textual's general API (a theme may omit it
-    # and fall back to primary elsewhere), even though both Wisp themes
-    # always set it explicitly — fall back to primary here too so a gradient
-    # never crashes on a theme that happens not to define one.
-    accent = theme.accent or theme.primary
-    lines = art.split("\n")
-    width = max((len(line) for line in lines), default=1)
-    content = Content("")
-    for row_index, line in enumerate(lines):
-        if row_index:
-            content += Content("\n")
-        for col_index, char in enumerate(line):
-            fraction = col_index / max(1, width - 1)
-            color = _lerp_hex(theme.primary, accent, fraction)
-            content += Content.styled(char, color)
-    return content
