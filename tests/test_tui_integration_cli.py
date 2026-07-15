@@ -1825,6 +1825,28 @@ def test_textual_theme_switch_rederives_transcript_styles() -> None:
     assert "#5cc9a7" not in rendered  # dark wisp success must be gone
 
 
+def test_textual_theme_switch_rederives_muted_text_color() -> None:
+    # Issue #76's baked MUTED_DARK/MUTED_LIGHT constants (theme.py) are new
+    # since the general rederive test above was written — a "dim"-styled line
+    # written after a theme switch must resolve to the *new* theme's muted
+    # color, not linger on the old one. watch_theme() only re-derives
+    # _role_styles for lines written after the switch; already-mounted lines
+    # keep their baked-in markup, which this test isn't exercising.
+    from wisp.tui.theme import MUTED_DARK, MUTED_LIGHT
+
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            app_instance.theme = "wisp-light"
+            renderer.input_cleared()  # -> write_dim("input cleared")
+            await pilot.pause()
+            return _transcript_styles(app_instance)
+
+    rendered = anyio.run(scenario)
+    assert MUTED_LIGHT in rendered
+    assert MUTED_DARK not in rendered
+
+
 def test_textual_themed_transcript_still_escapes_untrusted_payloads() -> None:
     # Routing colors through the theme must not weaken the escape invariant.
     rendered = _render_events_to_transcript(
@@ -2018,6 +2040,48 @@ def test_textual_cancelled_tool_card_border_title_is_not_denied() -> None:
     title = anyio.run(scenario)
     assert title == "cancelled"
     assert title != "denied"
+
+
+def test_textual_no_color_env_var_keeps_transcript_legible(monkeypatch: MonkeyPatch) -> None:
+    # Issue #76: NO_COLOR isn't Wisp-implemented — Textual's App.__init__ reads
+    # it from the environment once, at construction, and appends its own
+    # Monochrome filter. That's free coverage Wisp never explicitly verified.
+    # Set the env var BEFORE constructing the app (create_textual_tui() builds
+    # a fresh TextualTui()); setting it after construction would be a no-op,
+    # since App.__init__ already popped it from os.environ by then.
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    async def scenario() -> tuple[bool, list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={}))
+            renderer.event(ToolResultReady(call_id="c1", name="bash", output="ok", is_error=False))
+            renderer.event(ToolCallRequested(call_id="c2", name="write", arguments={}))
+            renderer.event(
+                ToolApprovalResolved(call_id="c2", name="write", approved=False, reason="no")
+            )
+            renderer.event(ToolCallRequested(call_id="c3", name="bash", arguments={}))
+            renderer.event(ToolResultReady(call_id="c3", name="bash", output="boom", is_error=True))
+            renderer.notice("heads up")
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            texts = [
+                child.render().plain
+                for child in transcript.children
+                if isinstance(child, LineMessage | ToolCard)
+            ]
+            return app_instance.no_color, texts
+
+    no_color, texts = anyio.run(scenario)
+    rendered = "\n".join(texts)
+
+    assert no_color is True  # the env var was actually observed
+    # Every mounted card's glyph/label/text content survives color removal —
+    # nothing here depended on color alone to be legible or present.
+    assert "✓ bash" in rendered
+    assert "⊘ write" in rendered
+    assert "✗ bash" in rendered
+    assert "heads up" in rendered
 
 
 def test_textual_line_message_border_title_from_role_labels() -> None:
