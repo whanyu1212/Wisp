@@ -53,12 +53,35 @@ _ROLE_FALLBACK: dict[str, str] = {
     "denied": "red",
 }
 
-# The Wisp wordmark, shown while the transcript is empty. Lowercase, bold,
-# and letter-spaced (Textual CSS has no letter-spacing property, so the
-# spacing is literal characters in the string) for more visual weight than
-# a single terminal-width word carries on its own — still plain text, no
-# custom glyph/pixel-art font, just bold + spacing + the existing accent
-# color doing the work. Quiet over loud, just less quiet than before.
+# The Wisp wordmark, shown while the transcript is empty. Two forms, chosen
+# by available width (see TranscriptEmptyState.on_resize) — the same
+# responsive long/short pattern Gemini CLI's own startup ASCII art uses:
+#
+# _WORDMARK_ART: an ASCII wordmark (pyfiglet's "standard" font, generated
+# once and hardcoded here — not a runtime dependency for one fixed string,
+# same approach Gemini CLI's AsciiArt.ts takes). Deliberately built only from
+# \ / _ | — no solid block-fill glyphs (█): those render fine in some
+# terminals but visibly gap/merge letters together in others depending on the
+# font's cell-tiling (confirmed broken in Zed's built-in terminal with the
+# earlier "blocky" font, where the letters ran together into an unreadable
+# blob). Line-drawing ASCII punctuation has no equivalent cross-terminal risk
+# — every monospace font renders \, /, _, | as a single unambiguous glyph.
+# 28 columns x 5 rows, shown when the empty-state region is wide enough not
+# to wrap/clip it (the height is fixed in
+# #transcript-empty-wordmark.wordmark--art's CSS).
+_WORDMARK_ART = (
+    "__        _____ ____  ____\n"
+    "\\ \\      / /_ _/ ___||  _ \\\n"
+    " \\ \\ /\\ / / | |\\___ \\| |_) |\n"
+    "  \\ V  V /  | | ___) |  __/\n"
+    "   \\_/\\_/  |___|____/|_|"
+)
+_WORDMARK_ART_WIDTH = 28
+
+# _WORDMARK: the narrow-terminal fallback — lowercase, bold, letter-spaced
+# (Textual CSS has no letter-spacing property, so the spacing is literal
+# characters in the string) for more visual weight than a single
+# terminal-width word carries on its own, still plain text.
 _WORDMARK = "w i s p"
 _TAGLINE = "tethered to you"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
@@ -134,8 +157,16 @@ class TextualTui(App[None]):
         max-width: 100%;
         height: 1;
         color: $accent;
-        text-style: bold;
         text-align: center;
+    }
+
+    #transcript-empty-wordmark.wordmark--text {
+        text-style: bold;
+    }
+
+    #transcript-empty-wordmark.wordmark--art {
+        width: 40;
+        height: 5;
     }
 
     #transcript-empty-hint {
@@ -338,6 +369,8 @@ class TextualTui(App[None]):
             yield Transcript(
                 empty_wordmark=_WORDMARK,
                 empty_hint=_EMPTY_TRANSCRIPT_HINT,
+                empty_wordmark_art=_WORDMARK_ART,
+                empty_wordmark_art_width=_WORDMARK_ART_WIDTH,
                 id="transcript",
             )
             # A full-width transparent overlay row provides right alignment while
@@ -389,6 +422,8 @@ class TextualTui(App[None]):
         # mounted LineMessage widgets keep their baked-in markup colors.
         if self.is_running:
             self._role_styles = role_styles(self.current_theme)
+            if self._transcript is not None:
+                self._transcript.refresh_empty_state_theme()
 
     async def on_prompt_editor_submitted(self, event: PromptEditor.Submitted) -> None:
         # Enter on a highlighted menu item accepts THAT command (Claude-Code/Codex/

@@ -28,6 +28,7 @@ from wisp.tui.textual_app import (
     TextualTuiRenderer,
     create_textual_tui,
 )
+from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT, wordmark_gradient_content
 from wisp.tui.widgets import (
     _ROLE_LABELS,
     JumpToLatest,
@@ -3751,9 +3752,12 @@ def test_textual_enter_on_fully_typed_command_runs_it_once() -> None:
 
 def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
     # The wordmark identifies an empty session without consuming permanent
-    # scrollback. Its ultra-minimal form and prompt hint must fit the compact
-    # audit viewport, then disappear before the first real transcript item is
-    # mounted.
+    # scrollback, and disappears before the first real transcript item is
+    # mounted. At 72 columns (the project's supported narrow-terminal floor)
+    # the ASCII-art wordmark fits (28 cols wide) and is shown, not the
+    # letter-spaced text fallback — see
+    # test_textual_startup_empty_state_falls_back_to_text_wordmark_when_narrow
+    # for the narrower case.
     async def scenario() -> tuple[
         tuple[str, str],
         tuple[int, int, int],
@@ -3788,11 +3792,94 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
 
     content, centers, initial_children, final_children = anyio.run(scenario)
     wordmark, hint = content
-    assert wordmark.strip() == "w i s p"
+    assert wordmark.startswith("__")  # ASCII-art wordmark, not the "w i s p" fallback
+    assert "w i s p" not in wordmark.lower()  # sanity: not the text fallback either
     assert hint == "Type a prompt or / for commands."
     assert centers[0] == centers[1] == centers[2]
     assert initial_children == ["TranscriptEmptyState"]
     assert final_children == ["LineMessage"]
+
+
+def test_textual_startup_empty_state_falls_back_to_text_wordmark_when_narrow() -> None:
+    # Below the ASCII-art wordmark's width (28 columns), the empty state must
+    # fall back to the small letter-spaced text wordmark instead of letting
+    # the art wrap or clip — the same responsive long/short-logo pattern
+    # Gemini CLI's own startup art uses.
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(25, 20)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
+            content = wordmark.render()
+            assert isinstance(content, Content)
+            return content.plain
+
+    wordmark = anyio.run(scenario)
+    assert wordmark.strip() == "w i s p"
+
+
+def test_wordmark_gradient_content_spans_primary_to_accent_per_theme() -> None:
+    # wordmark_gradient_content colors the block-art wordmark column-by-column
+    # from theme.primary (leftmost) to theme.accent (rightmost) — both already
+    # in the palette (see WISP_THEME_DARK's comments), no new theme entries.
+    # The plain text must still spell out the art literally regardless of
+    # styling, and every styled span's color must actually come from
+    # interpolating between the two theme colors (not some unrelated hardcode).
+    art = "AB\nCD"
+    for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
+        content = wordmark_gradient_content(theme, art)
+        assert content.plain == art
+        spans = list(content.spans)
+        assert len(spans) == 4  # one per non-newline character: A, B, C, D
+        # Leftmost column (A, C) is exactly primary; rightmost (B, D) is
+        # exactly accent — width=2 means only two columns, fraction 0 and 1.
+        assert spans[0].style == theme.primary
+        assert spans[1].style == theme.accent
+        assert spans[2].style == theme.primary
+        assert spans[3].style == theme.accent
+
+
+def test_wordmark_gradient_content_falls_back_to_primary_without_accent() -> None:
+    # Theme.accent is optional in Textual's general API even though both Wisp
+    # themes always set it explicitly — a theme without one must not crash,
+    # and degrades to a flat primary-colored wordmark rather than erroring.
+    from textual.theme import Theme
+
+    theme = Theme(name="no-accent", primary="#112233", accent=None)
+    content = wordmark_gradient_content(theme, "AB")
+    spans = list(content.spans)
+    assert all(span.style == "#112233" for span in spans)
+
+
+def test_textual_empty_state_wordmark_regradients_on_theme_switch() -> None:
+    # TextualTui.watch_theme re-derives _role_styles on a theme switch (see
+    # that method); the empty state's gradient wordmark isn't in that map (its
+    # content is a Content built once, not RichLog markup resolved per-write)
+    # so it needs its own hook — Transcript.refresh_empty_state_theme — to
+    # pick up the new theme's primary/accent colors instead of staying frozen
+    # on whatever theme was active when the wordmark first rendered.
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(72, 20)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
+            dark_content = wordmark.render()
+            assert isinstance(dark_content, Content)
+            dark_first_span = next(iter(dark_content.spans)).style
+
+            app_instance.theme = "wisp-light"
+            await pilot.pause()
+            light_content = wordmark.render()
+            assert isinstance(light_content, Content)
+            light_first_span = next(iter(light_content.spans)).style
+            return dark_first_span, light_first_span
+
+    dark_color, light_color = anyio.run(scenario)
+    assert dark_color == WISP_THEME_DARK.primary
+    assert light_color == WISP_THEME_LIGHT.primary
+    assert dark_color != light_color
 
 
 def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
