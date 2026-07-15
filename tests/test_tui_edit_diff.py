@@ -889,32 +889,48 @@ def test_intra_line_highlight_runs_below_its_ceiling(monkeypatch) -> None:
     assert _bold_spans(content) != []
 
 
-def test_intra_line_highlight_respects_own_size_ceiling(monkeypatch) -> None:
-    # A group at/over the per-group line ceiling must never invoke the
-    # intra-line matcher — the outer diff still renders, whole-line-only.
-    # Spying on _intra_line_ranges_for_group directly (rather than shared
-    # difflib.SequenceMatcher, which unified_diff's own line-level pass also
-    # calls) isolates exactly the pass under test.
+def test_intra_line_ranges_for_group_respects_own_size_ceiling(monkeypatch) -> None:
+    # A group at/over the per-group line ceiling must return None — the
+    # caller then falls back to whole-line-only styling for that group.
+    # Exercises _intra_line_ranges_for_group directly rather than through the
+    # full render_edit_diff pipeline: at _INTRA_LINE_MAX_GROUP_LINES's actual
+    # value, a group that large would already be cut short by the much
+    # smaller _DIFF_PREVIEW_LINES preview window before _equal_length_replace
+    # _groups could ever see it as a complete, equal-count group — this test
+    # isolates the size-ceiling guard itself from that separate, tighter
+    # preview-window guard (see test_intra_line_highlight_skips_groups_past
+    # _the_preview_window / ..._never_scans_a_group_entirely_past_the_preview
+    # for that one).
     import wisp.tui.tool_output as mod
 
     calls: list[tuple] = []
-    real = mod._intra_line_ranges_for_group
+    real_matcher = mod.difflib.SequenceMatcher
 
     def spy(*args, **kwargs):
         calls.append((args, kwargs))
-        return real(*args, **kwargs)
+        return real_matcher(*args, **kwargs)
 
-    monkeypatch.setattr(mod, "_intra_line_ranges_for_group", spy)
+    monkeypatch.setattr(mod.difflib, "SequenceMatcher", spy)
 
+    old_lines = [f"old-{i}" for i in range(_INTRA_LINE_MAX_GROUP_LINES + 1)]
+    new_lines = [f"new-{i}" for i in range(_INTRA_LINE_MAX_GROUP_LINES + 1)]
+    result = mod._intra_line_ranges_for_group(old_lines, new_lines)
+
+    assert result is None
+    assert calls == []  # the matcher was never even started
+
+
+def test_render_edit_diff_large_group_falls_back_to_whole_line_via_preview_cutoff() -> None:
+    # End-to-end confirmation that an oversized equal-length replace group
+    # still renders as a real, whole-line-only diff (not None, not a crash) —
+    # in practice via the preview-window guard rather than the size ceiling,
+    # since the former is tighter for a single-hunk fixture at this scale.
     old = _text_with_lines(_INTRA_LINE_MAX_GROUP_LINES + 1, "old-")
     new = _text_with_lines(_INTRA_LINE_MAX_GROUP_LINES + 1, "new-")
     content = render_edit_diff(_edit((old, new)))
 
-    assert len(calls) == 1  # the guard function ran (and returned None) ...
     assert content is not None
-    assert _bold_spans(content) == []  # ... but no highlighting resulted
-    # Still a real diff (not a rejected/None whole-diff render) — the preview
-    # byte budget may hide later lines, so just check the diff body started.
+    assert _bold_spans(content) == []
     assert "old-0" in content.plain
 
 
@@ -940,17 +956,15 @@ def test_intra_line_highlight_respects_own_char_ceiling(monkeypatch) -> None:
     assert _bold_spans(content) == []
 
 
-def test_intra_line_highlight_many_small_groups_stress(monkeypatch) -> None:
-    # Several small, independent equal-length replace-groups (separated by
-    # context lines so they don't merge into one big group) each comfortably
-    # under the per-group ceiling — proving the per-group guard alone handles
-    # many eligible groups cheaply, without needing a separate aggregate
-    # guard. Spies on the guard function directly rather than inspecting the
-    # rendered preview, since the *existing*, unrelated preview line/byte cap
-    # (_DIFF_PREVIEW_LINES/_DIFF_PREVIEW_BYTES) would truncate the visible
-    # diff long before all 20 hunks render — orthogonal to what this test
-    # proves (the guard scales to many eligible groups without ballooning
-    # cost or crashing).
+def test_intra_line_highlight_skips_groups_past_the_preview_window(monkeypatch) -> None:
+    # P2 regression guard: intra-line matching must never run for a
+    # replace-group entirely beyond diff_lines[:_DIFF_PREVIEW_LINES] —
+    # _content_from_diff_lines never renders those lines, so computing
+    # ranges for them is wasted SequenceMatcher work a guard-admitted-but-
+    # hidden edit could otherwise use to block the TUI. Many small,
+    # independent equal-length replace-groups (separated by context lines so
+    # they don't merge into one big group), only the first of which falls
+    # inside the preview window.
     import wisp.tui.tool_output as mod
 
     calls: list[tuple] = []
@@ -968,8 +982,38 @@ def test_intra_line_highlight_many_small_groups_stress(monkeypatch) -> None:
     ]
     content = render_edit_diff(_edit(*hunk_pairs, path=""))
 
-    assert len(calls) == 20  # every eligible group was checked, none skipped
+    assert len(calls) == 1  # only the group inside the preview window was checked
     assert content is not None
+    bold_text = {text for text, _ in _bold_spans(content)}
+    assert bold_text == {"old", "new"}  # the one visible group is still highlighted
+
+
+def test_intra_line_highlight_never_scans_a_group_entirely_past_the_preview(
+    monkeypatch,
+) -> None:
+    # Minimal, direct version of the P2 finding: a multi-edit diff where an
+    # earlier hunk's own lines push a later equal-length replace-group
+    # entirely past diff_lines[:_DIFF_PREVIEW_LINES] — that later group must
+    # never reach _intra_line_ranges_for_group at all, not "guarded and
+    # skipped past its own ceiling", genuinely never invoked for that group.
+    import wisp.tui.tool_output as mod
+
+    calls: list[tuple] = []
+    real = mod._intra_line_ranges_for_group
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_intra_line_ranges_for_group", spy)
+
+    # 5 independent equal-length-replace hunks; only the first is fully
+    # within the 8-line preview window (see the module-level constant).
+    hunks = [(f"ctx{i}\nold{i}", f"ctx{i}\nnew{i}") for i in range(5)]
+    render_edit_diff(_edit(*hunks, path=""))
+
+    assert len(calls) == 1
+    assert calls[0] == (["old0"], ["new0"])
 
 
 def test_intra_line_highlight_style_is_distinguishable_without_color() -> None:

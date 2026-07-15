@@ -878,13 +878,23 @@ def _split_range_across_lines(
 def _intra_line_highlight_map(diff_lines: Sequence[str]) -> dict[int, list[tuple[int, int]]]:
     """Word/char-level highlight ranges, keyed by index into ``diff_lines``.
 
-    Issue #111: finds every equal-length replace-group in ``diff_lines`` (via
-    :func:`_equal_length_replace_groups`) and, for each one still within
-    :func:`_intra_line_ranges_for_group`'s size guard, computes the specific
-    changed sub-span within each of its lines. A group over the guard, or a
-    replace whose line counts differ (or an insert/delete-only span), simply
-    contributes no entries — those lines keep the existing whole-line-only
-    styling untouched.
+    Issue #111: finds every equal-length replace-group in the *previewed*
+    slice of ``diff_lines`` — :func:`_content_from_diff_lines` never renders
+    past ``diff_lines[:_DIFF_PREVIEW_LINES]`` (further cut by the byte
+    budget), so a group entirely beyond that window would cost real
+    ``SequenceMatcher`` work for a diff hunk the reader never sees. Scanning
+    the same prefix :func:`_content_from_diff_lines` keeps means this can
+    only ever compute ranges for lines that will actually render — a group
+    straddling the boundary naturally fails the equal-length check once its
+    other side falls outside the slice (an unequal run count is just as safe
+    a "no highlight" outcome as an out-of-range one), so no extra boundary
+    handling is needed here.
+
+    For each group still within :func:`_intra_line_ranges_for_group`'s size
+    guard, computes the specific changed sub-span within each of its lines. A
+    group over the guard, or a replace whose line counts differ (or an
+    insert/delete-only span), simply contributes no entries — those lines
+    keep the existing whole-line-only styling untouched.
 
     Each returned range is relative to the line's *content* — after the
     leading ``+``/``-`` marker and before any :func:`_terminator_note` suffix
@@ -892,8 +902,9 @@ def _intra_line_highlight_map(diff_lines: Sequence[str]) -> dict[int, list[tuple
     line when building its styled segments.
     """
 
+    previewed = diff_lines[:_DIFF_PREVIEW_LINES]
     highlight_map: dict[int, list[tuple[int, int]]] = {}
-    for minus_start, plus_start, size in _equal_length_replace_groups(diff_lines):
+    for minus_start, plus_start, size in _equal_length_replace_groups(previewed):
         old_stripped = [
             _strip_terminator_note(diff_lines[minus_start + k][1:])[0] for k in range(size)
         ]
