@@ -278,6 +278,17 @@ uv run wisp tui --line          # simple line renderer, for fallback/debugging
 The legacy `--mode tui` entrypoint remains for compatibility and honors
 `--tui-renderer line|fullscreen|textual` plus `WISP_TUI_RENDERER`.
 
+### Terminal capabilities
+
+The Textual TUI targets truecolor terminals but degrades gracefully. 256-color and
+16-color/ANSI terminals are handled automatically by Textual's own color-system
+detection — no Wisp-specific configuration needed. Setting `NO_COLOR` (any value)
+switches the whole interface to a deterministic grayscale rendering, inherited
+automatically from Textual; Wisp adds no color-only information on top of that, so
+every semantic state (approval, denial, error, retry, tool status) still carries a
+non-color cue — a distinct glyph, text label, or border form — and remains fully
+legible and structurally correct with color disabled.
+
 ## Machine-readable output
 
 Every outbound `WispEvent` includes `"schema_version": 4`. A successful prompt follows this

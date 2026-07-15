@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tests.tui_support import *
 from wisp.events import ProviderRetrying
 
@@ -321,6 +323,56 @@ def test_cancelled_tool_card_label_does_not_read_denied() -> None:
 
     assert resolved_title == "cancelled"
     assert resolved_title != _ROLE_LABELS["denied"]
+
+
+def test_contrast_ratio_helper_matches_known_wcag_examples() -> None:
+    # Sanity-check the helper against textbook values before trusting it for
+    # theme assertions below.
+    from wisp.tui.theme import contrast_ratio
+
+    assert contrast_ratio("#000000", "#ffffff") == pytest.approx(21.0, abs=0.01)
+    # order-independent
+    assert contrast_ratio("#ffffff", "#000000") == pytest.approx(21.0, abs=0.01)
+    # identical colors
+    assert contrast_ratio("#777777", "#777777") == pytest.approx(1.0, abs=0.01)
+
+
+def test_dark_theme_foreground_meets_normal_text_contrast_target() -> None:
+    from wisp.tui.theme import WISP_THEME_DARK, contrast_ratio
+
+    assert contrast_ratio(WISP_THEME_DARK.foreground, WISP_THEME_DARK.background) >= 4.5
+
+
+def test_light_theme_foreground_meets_normal_text_contrast_target() -> None:
+    from wisp.tui.theme import WISP_THEME_LIGHT, contrast_ratio
+
+    assert contrast_ratio(WISP_THEME_LIGHT.foreground, WISP_THEME_LIGHT.background) >= 4.5
+
+
+def test_muted_text_role_meets_contrast_target() -> None:
+    # Issue #76: dim/session previously stacked Rich's undefined "dim"
+    # attribute on top of the already-muted secondary color (raw ANSI SGR-2,
+    # not a deterministic blend — see theme.py's MUTED_DARK/MUTED_LIGHT
+    # comment). The baked replacement must clear 4.5:1 against both the main
+    # background and the panel background, in both themes.
+    from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT, contrast_ratio, role_styles
+
+    for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
+        muted = role_styles(theme)["dim"]
+        assert contrast_ratio(muted, theme.background) >= 4.5
+        assert contrast_ratio(muted, theme.panel) >= 4.5
+
+
+def test_role_styles_no_longer_uses_bare_dim_attribute_for_muted_roles() -> None:
+    # Regression guard for the #76 fix: the literal "dim" Rich attribute must
+    # never appear in role_styles()'s output — it's non-deterministic in
+    # Wisp's rendering path (no DimFilter in the chain) and was the root
+    # cause of the double-dimming contrast bug.
+    from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT, role_styles
+
+    for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
+        for role, style in role_styles(theme).items():
+            assert "dim" not in style.split(), f"{role!r} still uses the dim attribute: {style!r}"
 
 
 def test_fullscreen_tui_renderer_messages_do_not_infer_footer_state() -> None:
