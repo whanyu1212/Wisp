@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -54,68 +53,14 @@ _ROLE_FALLBACK: dict[str, str] = {
     "denied": "red",
 }
 
-# The Wisp wordmark, shown while the transcript is empty. Three tiers, from
-# most to least visually elaborate — see TranscriptEmptyState._render_wordmark
-# and _supports_block_glyphs for how they're chosen:
-#
-# 1. _WORDMARK_ART: a slant-shadow ASCII wordmark (█/░, a figlet-style
-#    treatment), the default on terminals known to render solid Unicode
-#    block glyphs cleanly. Widest and most visually distinctive tier.
-# 2. _WORDMARK_ART_SAFE: the same wordmark rebuilt from plain \ / _ | line-
-#    drawing ASCII punctuation only — every monospace font renders those as a
-#    single unambiguous glyph, unlike solid block-fill characters, which
-#    render fine in some terminals but visibly gap/merge adjacent cells in
-#    others depending on the font's cell-tiling (confirmed broken in Zed's
-#    built-in terminal — the letters ran together into an unreadable blob).
-#    Used on terminals in _BLOCK_GLYPH_UNSAFE_TERM_PROGRAMS.
-# 3. _WORDMARK: the narrow-terminal fallback for both art tiers — lowercase,
-#    bold, letter-spaced (Textual CSS has no letter-spacing property, so the
-#    spacing is literal characters in the string) plain text.
-_WORDMARK_ART = (
-    " █████   ███   █████ █████  █████████  ███████████\n"
-    "░░███   ░███  ░░███ ░░███  ███░░░░░███░░███░░░░░███\n"
-    " ░███   ░███   ░███  ░███ ░███    ░░░  ░███    ░███\n"
-    " ░███   ░███   ░███  ░███ ░░█████████  ░██████████\n"
-    " ░░███  █████  ███   ░███  ░░░░░░░░███ ░███░░░░░░\n"
-    "  ░░░█████░█████░    ░███  ███    ░███ ░███\n"
-    "    ░░███ ░░███      █████░░█████████  █████\n"
-    "     ░░░   ░░░      ░░░░░  ░░░░░░░░░  ░░░░░"
-)
-_WORDMARK_ART_WIDTH = 51
-_WORDMARK_ART_HEIGHT = 8
-
-_WORDMARK_ART_SAFE = (
-    "__        _____ ____  ____\n"
-    "\\ \\      / /_ _/ ___||  _ \\\n"
-    " \\ \\ /\\ / / | |\\___ \\| |_) |\n"
-    "  \\ V  V /  | | ___) |  __/\n"
-    "   \\_/\\_/  |___|____/|_|"
-)
-_WORDMARK_ART_SAFE_WIDTH = 28
-_WORDMARK_ART_SAFE_HEIGHT = 5
-
-# $TERM_PROGRAM values for terminals confirmed (or strongly suspected, by the
-# same class of cell-tiling issue) not to render solid Unicode block glyphs
-# (░▒▓█) cleanly. Checked once at TranscriptEmptyState mount — the terminal
-# doesn't change mid-session, so this needs no reactivity. An unset or
-# unrecognized $TERM_PROGRAM is assumed safe (block glyphs are the common
-# case that works almost everywhere; only opt OUT known-bad terminals rather
-# than opt IN known-good ones, so a terminal we haven't tested still gets the
-# nicer default instead of silently downgrading).
-_BLOCK_GLYPH_UNSAFE_TERM_PROGRAMS = frozenset({"zed"})
-
-
-def _supports_block_glyphs() -> bool:
-    """Whether the current terminal is expected to render ░▒▓█ cleanly.
-
-    See _BLOCK_GLYPH_UNSAFE_TERM_PROGRAMS for the fail-open reasoning.
-    """
-
-    term_program = os.environ.get("TERM_PROGRAM", "").strip().lower()
-    return term_program not in _BLOCK_GLYPH_UNSAFE_TERM_PROGRAMS
-
-
-_WORDMARK = "w i s p"
+# The Wisp wordmark, shown while the transcript is empty. Plain lowercase
+# text — an ASCII-art figlet-style treatment (solid Unicode block glyphs)
+# was tried twice, with two different fonts, and both rendered with visible
+# gaps/misalignment depending on the terminal's font rendering — a
+# font-independent limitation, not something a different figlet font fixes.
+# Styled bold (see #transcript-empty-wordmark CSS) for more visual weight
+# than the header's plain "tethered to you" subtitle.
+_WORDMARK = "wisp"
 _TAGLINE = "tethered to you"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 
@@ -186,23 +131,18 @@ class TextualTui(App[None]):
     }
 
     #transcript-empty-wordmark {
-        /* width/height are set dynamically in Python (TranscriptEmptyState.
-           _render_wordmark), not fixed here — the two ASCII-art variants and
-           the plain-text fallback have different footprints, and the hint
-           below must match whichever one is active for both to land on the
-           same true center (see the class docstring for why). */
+        /* Width is also set explicitly in Python (TranscriptEmptyState.compose),
+           matching #transcript-empty-hint's width so both land on the same true
+           center (see the class docstring for why that can't rely on `align:
+           center middle` alone). Bold gives it more visual weight than the
+           header's plain "tethered to you" subtitle. */
         max-width: 100%;
         color: $accent;
+        text-style: bold;
         text-align: center;
     }
 
-    #transcript-empty-wordmark.wordmark--text {
-        text-style: bold;
-    }
-
     #transcript-empty-hint {
-        /* width set dynamically in Python, matching the wordmark's — see
-           #transcript-empty-wordmark's comment. */
         max-width: 100%;
         height: 1;
         margin-top: 1;
@@ -398,26 +338,9 @@ class TextualTui(App[None]):
             # footer hug the bottom, matching Pi's editor-above-footer visual shape.
             # The input is yielded directly — a wrapping Container would default to
             # height: 1fr and float the input into the middle of the screen.
-            # The shading-block art is the default; terminals in
-            # _BLOCK_GLYPH_UNSAFE_TERM_PROGRAMS (checked once here, not
-            # reactively — the terminal doesn't change mid-session) get the
-            # plain line-drawing variant instead. TranscriptEmptyState sizes
-            # itself to whichever one was actually chosen (see its docstring
-            # for why that has to be dynamic, not fixed CSS).
-            if _supports_block_glyphs():
-                wordmark_art = _WORDMARK_ART
-                wordmark_art_width = _WORDMARK_ART_WIDTH
-                wordmark_art_height = _WORDMARK_ART_HEIGHT
-            else:
-                wordmark_art = _WORDMARK_ART_SAFE
-                wordmark_art_width = _WORDMARK_ART_SAFE_WIDTH
-                wordmark_art_height = _WORDMARK_ART_SAFE_HEIGHT
             yield Transcript(
                 empty_wordmark=_WORDMARK,
                 empty_hint=_EMPTY_TRANSCRIPT_HINT,
-                empty_wordmark_art=wordmark_art,
-                empty_wordmark_art_width=wordmark_art_width,
-                empty_wordmark_art_height=wordmark_art_height,
                 id="transcript",
             )
             # A full-width transparent overlay row provides right alignment while
@@ -469,8 +392,6 @@ class TextualTui(App[None]):
         # mounted LineMessage widgets keep their baked-in markup colors.
         if self.is_running:
             self._role_styles = role_styles(self.current_theme)
-            if self._transcript is not None:
-                self._transcript.refresh_empty_state_theme()
 
     async def on_prompt_editor_submitted(self, event: PromptEditor.Submitted) -> None:
         # Enter on a highlighted menu item accepts THAT command (Claude-Code/Codex/
