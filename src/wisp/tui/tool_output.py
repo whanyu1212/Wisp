@@ -483,13 +483,13 @@ def _render_diff_content(
     if _edit_input_too_large([(old, new) for _, old, new in changed]):
         return None
 
-    diff_lines = _unified_diff_lines(changed, multi=multi)
+    diff_lines, note_lengths = _unified_diff_lines(changed, multi=multi)
     if not diff_lines:
         # Every changed hunk diffed to nothing (only line-terminator-invisible
         # differences difflib collapses). Fall back to the generic summary.
         return None
 
-    intra_line_ranges = _intra_line_highlight_map(diff_lines)
+    intra_line_ranges = _intra_line_highlight_map(diff_lines, note_lengths)
     diff = _content_from_diff_lines(diff_lines, intra_line_ranges)
 
     # Lead with the file path so a resolved card names its file — the diff replaces
@@ -632,7 +632,9 @@ def _edit_input_too_large(hunks: Sequence[tuple[str, str]]) -> bool:
     return False
 
 
-def _unified_diff_lines(hunks: Sequence[tuple[int, str, str]], *, multi: bool) -> list[str]:
+def _unified_diff_lines(
+    hunks: Sequence[tuple[int, str, str]], *, multi: bool
+) -> tuple[list[str], list[int]]:
     """Unified-diff lines across changed hunks, with a per-hunk label when multiple.
 
     ``hunks`` are ``(label, old, new)`` triples for the *changed* hunks only,
@@ -646,21 +648,32 @@ def _unified_diff_lines(hunks: Sequence[tuple[int, str, str]], *, multi: bool) -
 
     A hunk whose difference is invisible to difflib (only a collapsed line
     terminator) contributes nothing — not even a label — so it is skipped here too.
+
+    Returns ``(lines, note_lengths)``: ``note_lengths[i]`` is the number of
+    trailing characters of ``lines[i]`` that :func:`_terminator_note` actually
+    appended (0 for context/``@@`` lines and for changed lines that got no
+    annotation) — a caller that needs a changed line's *real* content (e.g.
+    the intra-line matcher) must slice off exactly this many characters, not
+    pattern-match against the annotation vocabulary, since real file content
+    can coincidentally end with the same text (see issue #111's follow-up).
     """
 
     lines: list[str] = []
+    note_lengths: list[int] = []
     for label, old, new in hunks:
-        body = _single_hunk_lines(old, new)
+        body, body_note_lengths = _single_hunk_lines(old, new)
         if not body:
             continue  # difflib found nothing to show — no label, no body
         if multi:
             lines.append(f"@@ edit {label} @@")
+            note_lengths.append(0)
         lines.extend(body)
-    return lines
+        note_lengths.extend(body_note_lengths)
+    return lines, note_lengths
 
 
-def _single_hunk_lines(old: str, new: str) -> list[str]:
-    """Unified-diff body lines for one hunk, or an empty list when unchanged.
+def _single_hunk_lines(old: str, new: str) -> tuple[list[str], list[int]]:
+    """Unified-diff body lines for one hunk, or ``([], [])`` when unchanged.
 
     Splits with ``keepends=True`` so a change confined to line terminators — a
     dropped trailing newline, a CRLF↔LF conversion — makes the affected lines
@@ -669,6 +682,10 @@ def _single_hunk_lines(old: str, new: str) -> list[str]:
     each rendered line (so the display stays one entry per line) but its *kind*
     is annotated when notable, so ``a`` → ``a\\n`` reads differently from its
     reverse instead of both rendering as an unexplained ``-a`` / ``+a``.
+
+    Returns the body lines alongside an index-aligned list of how many
+    trailing characters of each line are the appended annotation (0 when
+    none) — see :func:`_unified_diff_lines`.
     """
 
     diff = difflib.unified_diff(
@@ -678,6 +695,7 @@ def _single_hunk_lines(old: str, new: str) -> list[str]:
         n=2,
     )
     body: list[str] = []
+    note_lengths: list[int] = []
     seen_hunk = False
     for line in diff:
         if line.startswith("@@"):
@@ -687,6 +705,7 @@ def _single_hunk_lines(old: str, new: str) -> list[str]:
             # line ``-- comment`` with difflib's ``-`` marker) shares that prefix.
             seen_hunk = True
             body.append(line)
+            note_lengths.append(0)
             continue
         if not seen_hunk:
             continue  # difflib's blank file headers, positionally before any hunk
@@ -696,8 +715,10 @@ def _single_hunk_lines(old: str, new: str) -> list[str]:
         # self-describing.
         marker = line[:1]
         content = line[1:]
-        body.append(marker + content.rstrip("\r\n") + _terminator_note(marker, content))
-    return body
+        note = _terminator_note(marker, content)
+        body.append(marker + content.rstrip("\r\n") + note)
+        note_lengths.append(len(note))
+    return body, note_lengths
 
 
 def _terminator_note(marker: str, content: str) -> str:
@@ -727,29 +748,6 @@ def _terminator_note(marker: str, content: str) -> str:
     if content.endswith("\r"):
         return "  ⏎ CR"
     return "  ⏎ no newline"
-
-
-# The fixed vocabulary _terminator_note can append to a changed line. Matched
-# longest-first (mirroring _terminator_note's own check order) so a suffix is
-# never partially stripped.
-_TERMINATOR_NOTES = ("  ⏎ CRLF", "  ⏎ CR", "  ⏎ no newline")
-
-
-def _strip_terminator_note(content: str) -> tuple[str, str]:
-    """Split a changed line's content into (real text, terminator-note suffix).
-
-    ``_terminator_note`` appends one of a small fixed vocabulary of
-    annotations to +/- lines (e.g. ``"  ⏎ no newline"``). The intra-line
-    matcher must compare only the real line content — including the
-    annotation text would highlight it as a spurious "change" even when the
-    underlying line is otherwise identical. Returns ``(content, "")`` when no
-    known suffix is present.
-    """
-
-    for note in _TERMINATOR_NOTES:
-        if content.endswith(note):
-            return content[: -len(note)], note
-    return content, ""
 
 
 def _equal_length_replace_groups(
@@ -898,7 +896,21 @@ def _split_range_across_lines(
             out[index].append((clipped_start - line_start, clipped_end - line_start))
 
 
-def _intra_line_highlight_map(diff_lines: Sequence[str]) -> dict[int, list[tuple[int, int]]]:
+def _line_content_without_note(line: str, note_length: int) -> str:
+    """A diff line's real content: marker character and known note stripped.
+
+    ``note_length`` is the exact count from :func:`_unified_diff_lines`, not
+    a guess — see :func:`_intra_line_highlight_map` for why pattern-matching
+    the annotation vocabulary against arbitrary line content is unsafe.
+    """
+
+    content = line[1:]
+    return content[: len(content) - note_length] if note_length else content
+
+
+def _intra_line_highlight_map(
+    diff_lines: Sequence[str], note_lengths: Sequence[int]
+) -> dict[int, list[tuple[int, int]]]:
     """Word/char-level highlight ranges, keyed by index into ``diff_lines``.
 
     Issue #111: finds every equal-length replace-group ending within the
@@ -921,20 +933,31 @@ def _intra_line_highlight_map(diff_lines: Sequence[str]) -> dict[int, list[tuple
     insert/delete-only span), simply contributes no entries — those lines
     keep the existing whole-line-only styling untouched.
 
+    ``note_lengths`` is :func:`_unified_diff_lines`'s index-aligned count of
+    each line's actually-appended :func:`_terminator_note` suffix (0 when
+    none). Slicing exactly that many trailing characters off — rather than
+    pattern-matching the line against the annotation vocabulary — is the only
+    safe way to isolate a changed line's real content: real file content can
+    coincidentally end with text identical to an annotation's spelling (e.g.
+    a line literally ending in the text ``"  ⏎ CRLF"``), and pattern-matching
+    would strip that real content too, hiding it from the matcher entirely.
+
     Each returned range is relative to the line's *content* — after the
-    leading ``+``/``-`` marker and before any :func:`_terminator_note` suffix
-    — matching how :func:`_content_from_diff_lines` will need to slice the
-    line when building its styled segments.
+    leading ``+``/``-`` marker and before its known-length terminator-note
+    suffix — matching how :func:`_content_from_diff_lines` will need to slice
+    the line when building its styled segments.
     """
 
     highlight_map: dict[int, list[tuple[int, int]]] = {}
     groups = _equal_length_replace_groups(diff_lines, limit=_DIFF_PREVIEW_LINES)
     for minus_start, plus_start, size in groups:
         old_stripped = [
-            _strip_terminator_note(diff_lines[minus_start + k][1:])[0] for k in range(size)
+            _line_content_without_note(diff_lines[minus_start + k], note_lengths[minus_start + k])
+            for k in range(size)
         ]
         new_stripped = [
-            _strip_terminator_note(diff_lines[plus_start + k][1:])[0] for k in range(size)
+            _line_content_without_note(diff_lines[plus_start + k], note_lengths[plus_start + k])
+            for k in range(size)
         ]
         result = _intra_line_ranges_for_group(old_stripped, new_stripped)
         if result is None:

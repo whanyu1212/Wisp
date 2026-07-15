@@ -320,10 +320,8 @@ def test_render_edit_diff_bounds_single_enormous_line() -> None:
     # Total diff-line content bytes (what the renderer measures against the budget)
     # and what actually survived in the rendered body. A single changed hunk
     # (label 1, non-multi) mirrors what render_edit_diff feeds the builder.
-    total_bytes = sum(
-        len(line.encode("utf-8"))
-        for line in _unified_diff_lines([(1, old, old + "y")], multi=False)
-    )
+    diff_lines, _note_lengths = _unified_diff_lines([(1, old, old + "y")], multi=False)
+    total_bytes = sum(len(line.encode("utf-8")) for line in diff_lines)
     kept_bytes = sum(
         len(line.encode("utf-8"))
         for line in content.plain.split("\n")
@@ -864,6 +862,22 @@ def test_render_edit_diff_intra_line_highlight_survives_terminator_note() -> Non
         assert "⏎" not in text
     bold_text = {text for text, _ in _bold_spans(content)}
     assert bold_text == {"e", "a"}
+
+
+def test_render_edit_diff_intra_line_highlight_covers_text_matching_a_note_spelling() -> None:
+    # P3 regression guard: real file content that happens to end with the
+    # literal text of a terminator-note annotation (e.g. a line genuinely
+    # ending in "  ⏎ CRLF", both sides properly LF-terminated so no
+    # annotation is actually appended by _terminator_note here) must still
+    # be compared and highlighted like any other content — not silently
+    # stripped because it pattern-matches the annotation vocabulary. Both
+    # lines end with a real "\n", so _terminator_note appends nothing; the
+    # trailing "  ⏎ CRLF" text is genuine file content that changed.
+    old = "status  ⏎ CRLF\n"
+    new = "status\n"
+    content = render_edit_diff(_edit((old, new)))
+    bold_text = {text for text, _ in _bold_spans(content)}
+    assert bold_text == {"  ⏎ CRLF"}
 
 
 def test_intra_line_highlight_runs_below_its_ceiling(monkeypatch) -> None:
