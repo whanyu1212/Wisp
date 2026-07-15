@@ -284,10 +284,10 @@ The Textual TUI targets truecolor terminals but degrades gracefully. 256-color a
 16-color/ANSI terminals are handled automatically by Textual's own color-system
 detection — no Wisp-specific configuration needed. Setting `NO_COLOR` (any value)
 switches the whole interface to a deterministic grayscale rendering, inherited
-automatically from Textual; Wisp adds no color-only information on top of that, so
-every semantic state (approval, denial, error, retry, tool status) still carries a
-non-color cue — a distinct glyph, text label, or border form — and remains fully
-legible and structurally correct with color disabled.
+automatically from Textual. Wisp is working toward every semantic state (approval,
+denial, error, retry, tool status) carrying a non-color cue — a distinct glyph, text
+label, or border form — so the interface stays legible and structurally correct with
+color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
