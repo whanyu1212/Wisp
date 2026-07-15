@@ -470,6 +470,53 @@ def test_tui_shell_provider_and_model_commands_configure_future_prompts() -> Non
     anyio.run(run)
 
 
+def test_tui_shell_bare_model_command_lists_catalog_models_grouped_by_provider() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model", "/quit"]),
+            provider="openai",
+            model="gpt-5.5",
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert "Available models:" in rendered
+        assert "openai:" in rendered
+        assert "openai-codex:" in rendered
+        assert "fake:" in rendered
+        assert "gpt-5.5 (current)" in rendered
+        assert "Current model: gpt-5.5" in rendered
+        assert "Current provider: openai" in rendered
+        # No configure command should be sent for a bare, argument-less /model.
+        assert controller.configurations == []
+
+    anyio.run(run)
+
+
+def test_tui_shell_bare_model_command_shows_pending_configure() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model gpt-5.5-pro", "/model", "/quit"]),
+            provider="openai",
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert "(pending: gpt-5.5-pro)" in rendered
+
+    anyio.run(run)
+
+
 def test_tui_shell_provider_and_model_updates_footer_snapshots() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:

@@ -20,6 +20,7 @@ from wisp.cli import _print_mode_tool_approval_policy, _print_mode_tool_registry
 from wisp.coding import CodingSession
 from wisp.events import ToolApprovalRequested, ToolApprovalResolved, ToolResultReady
 from wisp.providers.base import ToolCall, ToolCallResult, ToolSpec
+from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
@@ -191,6 +192,16 @@ class DangerTool:
         return ToolResult(text=f"changed {arguments['path']}")
 
 
+def _test_model_registry() -> ModelRegistry:
+    """Return a `ModelRegistry` for test runtimes, built from the packaged catalog.
+
+    Uses the built-in catalog only (no user overlay) so tests stay hermetic
+    regardless of what, if anything, is on disk at ``~/.wisp/catalog.toml``.
+    """
+
+    return ModelRegistry(effective_catalog(home_dir=Path("/nonexistent-test-home")))
+
+
 async def build_tool_runtime() -> WispRuntime:
     providers = ProviderRegistry()
     tools = ToolRegistry()
@@ -198,7 +209,9 @@ async def build_tool_runtime() -> WispRuntime:
     api = ExtensionAPI(providers=providers, tools=tools, events=events)
     providers.register(ToolCallingProvider())
     tools.register(DangerTool())
-    return WispRuntime(providers=providers, tools=tools, events=events, api=api)
+    return WispRuntime(
+        providers=providers, tools=tools, events=events, api=api, models=_test_model_registry()
+    )
 
 
 async def build_cancellable_runtime() -> WispRuntime:
@@ -207,7 +220,9 @@ async def build_cancellable_runtime() -> WispRuntime:
     events = EventBus()
     api = ExtensionAPI(providers=providers, tools=tools, events=events)
     providers.register(CancellableProvider())
-    return WispRuntime(providers=providers, tools=tools, events=events, api=api)
+    return WispRuntime(
+        providers=providers, tools=tools, events=events, api=api, models=_test_model_registry()
+    )
 
 
 async def build_completion_only_runtime() -> WispRuntime:
@@ -216,7 +231,9 @@ async def build_completion_only_runtime() -> WispRuntime:
     events = EventBus()
     api = ExtensionAPI(providers=providers, tools=tools, events=events)
     providers.register(CompletionOnlyProvider())
-    return WispRuntime(providers=providers, tools=tools, events=events, api=api)
+    return WispRuntime(
+        providers=providers, tools=tools, events=events, api=api, models=_test_model_registry()
+    )
 
 
 async def build_failing_runtime() -> WispRuntime:
@@ -225,7 +242,9 @@ async def build_failing_runtime() -> WispRuntime:
     events = EventBus()
     api = ExtensionAPI(providers=providers, tools=tools, events=events)
     providers.register(FailingProvider())
-    return WispRuntime(providers=providers, tools=tools, events=events, api=api)
+    return WispRuntime(
+        providers=providers, tools=tools, events=events, api=api, models=_test_model_registry()
+    )
 
 
 async def build_mixed_tool_runtime() -> WispRuntime:
@@ -235,7 +254,9 @@ async def build_mixed_tool_runtime() -> WispRuntime:
     api = ExtensionAPI(providers=providers, tools=tools, events=events)
     providers.register(MixedTextToolProvider())
     tools.register(DangerTool())
-    return WispRuntime(providers=providers, tools=tools, events=events, api=api)
+    return WispRuntime(
+        providers=providers, tools=tools, events=events, api=api, models=_test_model_registry()
+    )
 
 
 def _jsonl_records(output: str) -> list[dict[str, object]]:

@@ -39,6 +39,7 @@ from wisp.events import (
     WispEvent,
 )
 from wisp.providers.base import ProviderError
+from wisp.providers.catalog import AmbiguousModelError, UnknownModelError
 from wisp.rpc.commands import ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
@@ -1057,12 +1058,49 @@ def _handle_rpc_configure_command(
             if configure_overrides is not None:
                 configure_overrides.model = None
                 configure_overrides.has_model = True
+    if has_model and not has_provider and isinstance(model, str):
+        _auto_switch_provider_for_model(
+            model,
+            agent=agent,
+            runtime=runtime,
+            configure_overrides=configure_overrides,
+        )
     if has_model:
         agent.model = model
         if configure_overrides is not None:
             configure_overrides.model = model
             configure_overrides.has_model = True
     _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def _auto_switch_provider_for_model(
+    model: str,
+    *,
+    agent: CodingSession,
+    runtime: WispRuntime,
+    configure_overrides: _RpcConfigureOverrides | None,
+) -> None:
+    """Switch ``agent.provider`` if ``model`` unambiguously belongs elsewhere.
+
+    Advisory, never blocking: an unknown or ambiguous model id is left entirely
+    to the existing free-text ``agent.model = model`` assignment -- this must
+    never reject a model string that would have worked before the registry
+    existed (a brand-new model ahead of a catalog update, a custom provider, or
+    a model shared by two providers while already on one of them).
+    """
+
+    try:
+        resolved_provider, _entry = runtime.models.resolve(model, prefer=agent.provider.name)
+    except (UnknownModelError, AmbiguousModelError):
+        return
+    if resolved_provider == agent.provider.name:
+        return
+    try:
+        agent.provider = runtime.providers.get(resolved_provider)
+    except UnknownProviderError:
+        return
+    if configure_overrides is not None:
+        configure_overrides.provider = resolved_provider
 
 
 def _handle_rpc_approval_command(

@@ -29,6 +29,7 @@ from wisp.events import (
     ToolApprovalRequested,
     TrustRequested,
 )
+from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.rpc.commands import ApprovalScope
 from wisp.tui.auth_commands import AuthCommands
 from wisp.tui.commands import (
@@ -137,6 +138,7 @@ class TuiShell:
         self.current_provider = provider
         self.current_model = model
         self.pending_configures: dict[str, _PendingConfigure] = {}
+        self.models = ModelRegistry(effective_catalog())
         self.auth_store = JsonAuthStore(auth_path or default_auth_path())
         # Credential commands read auth_store lazily (it is rebound on a trusted-
         # project rebuild) and the default provider from live shell state.
@@ -351,11 +353,7 @@ class TuiShell:
             self.renderer.command_error("Usage: /model [model]")
             return
         if not args:
-            line = f"Current model: {self.current_model or 'provider default'}"
-            pending_model = self._latest_pending_model()
-            if pending_model is not None:
-                line += f" (pending: {pending_model})"
-            self.renderer.notice(line)
+            self.renderer.notice(self._render_model_listing())
             return
         model = args[0]
         try:
@@ -823,6 +821,25 @@ class TuiShell:
             if pending.model is not None:
                 return pending.model
         return None
+
+    def _render_model_listing(self) -> str:
+        """Render every catalog model grouped by provider, current one marked."""
+
+        current_model = self.current_model
+        lines = ["Available models:"]
+        for entry in self.models.providers():
+            names = [
+                f"{model_id} (current)" if model_id == current_model else model_id
+                for model_id in entry.models
+            ]
+            lines.append(f"  {entry.name}: {', '.join(names)}")
+        model_line = f"Current model: {current_model or 'provider default'}"
+        pending_model = self._latest_pending_model()
+        if pending_model is not None:
+            model_line += f" (pending: {pending_model})"
+        lines.append(model_line)
+        lines.append(f"Current provider: {self.current_provider}")
+        return "\n".join(lines)
 
     def _render_help(self) -> None:
         self.renderer.help()
