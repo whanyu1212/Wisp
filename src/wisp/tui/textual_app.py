@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -53,35 +54,66 @@ _ROLE_FALLBACK: dict[str, str] = {
     "denied": "red",
 }
 
-# The Wisp wordmark, shown while the transcript is empty. Two forms, chosen
-# by available width (see TranscriptEmptyState.on_resize) — the same
-# responsive long/short pattern Gemini CLI's own startup ASCII art uses:
+# The Wisp wordmark, shown while the transcript is empty. Three tiers, from
+# most to least visually elaborate — see TranscriptEmptyState._render_wordmark
+# and _supports_block_glyphs for how they're chosen:
 #
-# _WORDMARK_ART: an ASCII wordmark (pyfiglet's "standard" font, generated
-# once and hardcoded here — not a runtime dependency for one fixed string,
-# same approach Gemini CLI's AsciiArt.ts takes). Deliberately built only from
-# \ / _ | — no solid block-fill glyphs (█): those render fine in some
-# terminals but visibly gap/merge letters together in others depending on the
-# font's cell-tiling (confirmed broken in Zed's built-in terminal with the
-# earlier "blocky" font, where the letters ran together into an unreadable
-# blob). Line-drawing ASCII punctuation has no equivalent cross-terminal risk
-# — every monospace font renders \, /, _, | as a single unambiguous glyph.
-# 28 columns x 5 rows, shown when the empty-state region is wide enough not
-# to wrap/clip it (the height is fixed in
-# #transcript-empty-wordmark.wordmark--art's CSS).
+# 1. _WORDMARK_ART: a shading-block ASCII wordmark (░▒▓█, a dense figlet-style
+#    "shadow" treatment), the default on terminals known to render solid
+#    Unicode block glyphs cleanly. Widest and most visually distinctive tier.
+# 2. _WORDMARK_ART_SAFE: the same wordmark rebuilt from plain \ / _ | line-
+#    drawing ASCII punctuation only — every monospace font renders those as a
+#    single unambiguous glyph, unlike solid block-fill characters, which
+#    render fine in some terminals but visibly gap/merge adjacent cells in
+#    others depending on the font's cell-tiling (confirmed broken in Zed's
+#    built-in terminal — the letters ran together into an unreadable blob).
+#    Used on terminals in _BLOCK_GLYPH_UNSAFE_TERM_PROGRAMS.
+# 3. _WORDMARK: the narrow-terminal fallback for both art tiers — lowercase,
+#    bold, letter-spaced (Textual CSS has no letter-spacing property, so the
+#    spacing is literal characters in the string) plain text.
 _WORDMARK_ART = (
+    "░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓███████▓▒░▒▓███████▓▒░\n"
+    "░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░\n"
+    "░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░░▒▓█▓▒░\n"
+    "░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░░▒▓██████▓▒░░▒▓███████▓▒░\n"
+    "░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░▒▓█▓▒░\n"
+    "░▒▓█▓▒░░▒▓█▓▒░░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░▒▓█▓▒░\n"
+    " ░▒▓█████████████▓▒░░▒▓█▓▒░▒▓███████▓▒░░▒▓█▓▒░"
+)
+_WORDMARK_ART_WIDTH = 53
+_WORDMARK_ART_HEIGHT = 7
+
+_WORDMARK_ART_SAFE = (
     "__        _____ ____  ____\n"
     "\\ \\      / /_ _/ ___||  _ \\\n"
     " \\ \\ /\\ / / | |\\___ \\| |_) |\n"
     "  \\ V  V /  | | ___) |  __/\n"
     "   \\_/\\_/  |___|____/|_|"
 )
-_WORDMARK_ART_WIDTH = 28
+_WORDMARK_ART_SAFE_WIDTH = 28
+_WORDMARK_ART_SAFE_HEIGHT = 5
 
-# _WORDMARK: the narrow-terminal fallback — lowercase, bold, letter-spaced
-# (Textual CSS has no letter-spacing property, so the spacing is literal
-# characters in the string) for more visual weight than a single
-# terminal-width word carries on its own, still plain text.
+# $TERM_PROGRAM values for terminals confirmed (or strongly suspected, by the
+# same class of cell-tiling issue) not to render solid Unicode block glyphs
+# (░▒▓█) cleanly. Checked once at TranscriptEmptyState mount — the terminal
+# doesn't change mid-session, so this needs no reactivity. An unset or
+# unrecognized $TERM_PROGRAM is assumed safe (block glyphs are the common
+# case that works almost everywhere; only opt OUT known-bad terminals rather
+# than opt IN known-good ones, so a terminal we haven't tested still gets the
+# nicer default instead of silently downgrading).
+_BLOCK_GLYPH_UNSAFE_TERM_PROGRAMS = frozenset({"zed"})
+
+
+def _supports_block_glyphs() -> bool:
+    """Whether the current terminal is expected to render ░▒▓█ cleanly.
+
+    See _BLOCK_GLYPH_UNSAFE_TERM_PROGRAMS for the fail-open reasoning.
+    """
+
+    term_program = os.environ.get("TERM_PROGRAM", "").strip().lower()
+    return term_program not in _BLOCK_GLYPH_UNSAFE_TERM_PROGRAMS
+
+
 _WORDMARK = "w i s p"
 _TAGLINE = "tethered to you"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
@@ -153,9 +185,12 @@ class TextualTui(App[None]):
     }
 
     #transcript-empty-wordmark {
-        width: 40;
+        /* width/height are set dynamically in Python (TranscriptEmptyState.
+           _render_wordmark), not fixed here — the two ASCII-art variants and
+           the plain-text fallback have different footprints, and the hint
+           below must match whichever one is active for both to land on the
+           same true center (see the class docstring for why). */
         max-width: 100%;
-        height: 1;
         color: $accent;
         text-align: center;
     }
@@ -164,13 +199,9 @@ class TextualTui(App[None]):
         text-style: bold;
     }
 
-    #transcript-empty-wordmark.wordmark--art {
-        width: 40;
-        height: 5;
-    }
-
     #transcript-empty-hint {
-        width: 40;
+        /* width set dynamically in Python, matching the wordmark's — see
+           #transcript-empty-wordmark's comment. */
         max-width: 100%;
         height: 1;
         margin-top: 1;
@@ -366,11 +397,26 @@ class TextualTui(App[None]):
             # footer hug the bottom, matching Pi's editor-above-footer visual shape.
             # The input is yielded directly — a wrapping Container would default to
             # height: 1fr and float the input into the middle of the screen.
+            # The shading-block art is the default; terminals in
+            # _BLOCK_GLYPH_UNSAFE_TERM_PROGRAMS (checked once here, not
+            # reactively — the terminal doesn't change mid-session) get the
+            # plain line-drawing variant instead. TranscriptEmptyState sizes
+            # itself to whichever one was actually chosen (see its docstring
+            # for why that has to be dynamic, not fixed CSS).
+            if _supports_block_glyphs():
+                wordmark_art = _WORDMARK_ART
+                wordmark_art_width = _WORDMARK_ART_WIDTH
+                wordmark_art_height = _WORDMARK_ART_HEIGHT
+            else:
+                wordmark_art = _WORDMARK_ART_SAFE
+                wordmark_art_width = _WORDMARK_ART_SAFE_WIDTH
+                wordmark_art_height = _WORDMARK_ART_SAFE_HEIGHT
             yield Transcript(
                 empty_wordmark=_WORDMARK,
                 empty_hint=_EMPTY_TRANSCRIPT_HINT,
-                empty_wordmark_art=_WORDMARK_ART,
-                empty_wordmark_art_width=_WORDMARK_ART_WIDTH,
+                empty_wordmark_art=wordmark_art,
+                empty_wordmark_art_width=wordmark_art_width,
+                empty_wordmark_art_height=wordmark_art_height,
                 id="transcript",
             )
             # A full-width transparent overlay row provides right alignment while

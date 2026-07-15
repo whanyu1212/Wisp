@@ -529,10 +529,24 @@ class DecisionPanel(Vertical):
 class TranscriptEmptyState(Vertical):
     """Centered identity shown only while the transcript has no output.
 
-    Picks between a block-letter ASCII wordmark and a smaller letter-spaced
-    text fallback by available width — the same responsive long/short-logo
-    pattern Gemini CLI's own startup art uses, so the big art never wraps or
-    clips on a narrow terminal.
+    Picks between an ASCII-art wordmark and a smaller letter-spaced text
+    fallback by available width — the same responsive long/short-logo
+    pattern Gemini CLI's own startup art uses, so the art never wraps or
+    clips on a narrow terminal. The art itself has two variants (a caller
+    decides which is active up front, e.g. by terminal capability, and passes
+    just its string + width + height); this widget only handles the
+    width-driven art-vs-text switch against whichever one it was given.
+
+    The wordmark and hint widgets are given matching explicit widths (set on
+    ``.styles``, not fixed CSS) rather than relying on Textual's
+    ``align: center middle`` to center each child independently — empirically
+    it doesn't: siblings under it share a left edge, not a center, so two
+    boxes of different widths end up with visibly different true centers
+    (confirmed by a probe: two Statics at width 51 vs 40 landed at x=14 both,
+    centers 39 vs 34). Matching widths was the only combination that produced
+    matching centers, so the wordmark's width must track whichever art
+    variant (or the plain text) is actually showing, not a value baked into
+    static CSS that can't vary by which art string was chosen at compose time.
     """
 
     def __init__(
@@ -542,13 +556,16 @@ class TranscriptEmptyState(Vertical):
         *,
         wordmark_art: str | None = None,
         wordmark_art_width: int = 0,
+        wordmark_art_height: int = 0,
     ) -> None:
         super().__init__(id="transcript-empty")
         self._wordmark = wordmark
         self._hint = hint
         self._wordmark_art = wordmark_art
         self._wordmark_art_width = wordmark_art_width
+        self._wordmark_art_height = wordmark_art_height
         self._wordmark_static: Static | None = None
+        self._hint_static: Static | None = None
         self._wordmark_showing_art = False
 
     def compose(self) -> ComposeResult:
@@ -558,11 +575,12 @@ class TranscriptEmptyState(Vertical):
             markup=False,
         )
         yield self._wordmark_static
-        yield Static(
+        self._hint_static = Static(
             self._hint,
             id="transcript-empty-hint",
             markup=False,
         )
+        yield self._hint_static
 
     def on_mount(self) -> None:
         self._render_wordmark()
@@ -585,7 +603,8 @@ class TranscriptEmptyState(Vertical):
 
     def _render_wordmark(self) -> None:
         static = self._wordmark_static
-        if static is None:
+        hint_static = self._hint_static
+        if static is None or hint_static is None:
             return
         art = self._wordmark_art
         show_art = art is not None and self.content_size.width >= self._wordmark_art_width
@@ -597,10 +616,16 @@ class TranscriptEmptyState(Vertical):
             static.update(wordmark_gradient_content(self.app.current_theme, art))
             static.remove_class("wordmark--text")
             static.add_class("wordmark--art")
+            static.styles.width = self._wordmark_art_width
+            static.styles.height = self._wordmark_art_height
+            hint_static.styles.width = self._wordmark_art_width
         else:
             static.update(self._wordmark)
             static.remove_class("wordmark--art")
             static.add_class("wordmark--text")
+            static.styles.width = 40
+            static.styles.height = 1
+            hint_static.styles.width = 40
 
 
 class JumpToLatest(Static):
@@ -685,6 +710,7 @@ class Transcript(VerticalScroll):
         empty_hint: str = "",
         empty_wordmark_art: str | None = None,
         empty_wordmark_art_width: int = 0,
+        empty_wordmark_art_height: int = 0,
         **kwargs: object,
     ) -> None:
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
@@ -693,6 +719,7 @@ class Transcript(VerticalScroll):
         self._empty_hint = empty_hint
         self._empty_wordmark_art = empty_wordmark_art
         self._empty_wordmark_art_width = empty_wordmark_art_width
+        self._empty_wordmark_art_height = empty_wordmark_art_height
         self._empty_state: TranscriptEmptyState | None = None
 
     def compose(self) -> ComposeResult:
@@ -702,6 +729,7 @@ class Transcript(VerticalScroll):
                 self._empty_hint,
                 wordmark_art=self._empty_wordmark_art,
                 wordmark_art_width=self._empty_wordmark_art_width,
+                wordmark_art_height=self._empty_wordmark_art_height,
             )
             yield self._empty_state
 

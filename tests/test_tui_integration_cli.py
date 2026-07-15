@@ -26,6 +26,7 @@ from wisp.tui.compact_echo import MAX_PENDING_ECHOES as _MAX_PENDING_ECHOES
 from wisp.tui.textual_app import (
     TextualTui,
     TextualTuiRenderer,
+    _supports_block_glyphs,
     create_textual_tui,
 )
 from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT, wordmark_gradient_content
@@ -3800,11 +3801,19 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
     assert final_children == ["LineMessage"]
 
 
-def test_textual_startup_empty_state_falls_back_to_text_wordmark_when_narrow() -> None:
-    # Below the ASCII-art wordmark's width (28 columns), the empty state must
-    # fall back to the small letter-spaced text wordmark instead of letting
-    # the art wrap or clip — the same responsive long/short-logo pattern
-    # Gemini CLI's own startup art uses.
+def test_textual_startup_empty_state_falls_back_to_text_wordmark_when_narrow(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # Below the active ASCII-art wordmark's width, the empty state must fall
+    # back to the small letter-spaced text wordmark instead of letting the
+    # art wrap or clip — the same responsive long/short-logo pattern Gemini
+    # CLI's own startup art uses. 25 columns is narrower than either art
+    # variant's width (53 block-glyph, 28 safe line-drawing), so the
+    # fallback must trigger regardless of which one $TERM_PROGRAM selects —
+    # pin it explicitly rather than letting whatever environment the test
+    # happens to run in (e.g. a Zed-launched dev shell) decide.
+    monkeypatch.delenv("TERM_PROGRAM", raising=False)
+
     async def scenario() -> str:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(25, 20)) as pilot:
@@ -3817,6 +3826,105 @@ def test_textual_startup_empty_state_falls_back_to_text_wordmark_when_narrow() -
 
     wordmark = anyio.run(scenario)
     assert wordmark.strip() == "w i s p"
+
+
+def test_supports_block_glyphs_fails_open_and_opts_out_known_bad_terminals(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # Fail-open by design: an unset or unrecognized $TERM_PROGRAM is treated
+    # as safe (block glyphs are the common case that works almost
+    # everywhere), so only known-bad terminals are opted OUT rather than
+    # requiring every good terminal to be opted IN.
+    monkeypatch.delenv("TERM_PROGRAM", raising=False)
+    assert _supports_block_glyphs() is True
+
+    monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+    assert _supports_block_glyphs() is True
+
+    monkeypatch.setenv("TERM_PROGRAM", "some-terminal-nobody-has-tested")
+    assert _supports_block_glyphs() is True
+
+    # The one confirmed-bad terminal from dogfooding (letters ran together
+    # into an unreadable blob) — case-insensitive, since $TERM_PROGRAM
+    # casing isn't a documented contract.
+    monkeypatch.setenv("TERM_PROGRAM", "zed")
+    assert _supports_block_glyphs() is False
+    monkeypatch.setenv("TERM_PROGRAM", "ZED")
+    assert _supports_block_glyphs() is False
+
+
+def test_textual_startup_empty_state_uses_block_glyph_art_on_safe_terminals(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # A terminal not in the known-bad list gets the more visually elaborate
+    # shading-block wordmark (░▒▓█), not the plain line-drawing fallback.
+    monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(90, 20)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
+            content = wordmark.render()
+            assert isinstance(content, Content)
+            return content.plain
+
+    wordmark = anyio.run(scenario)
+    assert wordmark.startswith("░▒▓")
+
+
+def test_textual_startup_empty_state_uses_safe_art_on_known_bad_terminals(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # Zed's built-in terminal is a confirmed-bad terminal for block glyphs
+    # (dogfooding found the letters ran together into an unreadable blob) —
+    # it must get the plain line-drawing wordmark instead, not the shading-
+    # block one, even at a width that would otherwise fit the block variant.
+    monkeypatch.setenv("TERM_PROGRAM", "zed")
+
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(90, 20)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
+            content = wordmark.render()
+            assert isinstance(content, Content)
+            return content.plain
+
+    wordmark = anyio.run(scenario)
+    assert wordmark.startswith("__")
+    assert "░" not in wordmark
+
+
+def test_textual_startup_empty_state_wordmark_centers_match_hint_for_both_art_variants(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # Regression: the block-glyph (53 cols) and safe (28 cols) art variants
+    # have different widths, and Textual's align: center middle centers
+    # SIBLINGS AS A BLOCK (sharing a left edge), not each one independently —
+    # confirmed by direct probe: two Statics of width 51 vs 40 landed at the
+    # same region.x, so their true centers (x + width // 2) differed by 5
+    # columns. The wordmark and hint must be given matching explicit widths
+    # (TranscriptEmptyState._render_wordmark) so their centers always match,
+    # for whichever art variant is actually active.
+    async def scenario(term_program: str) -> tuple[int, int]:
+        monkeypatch.setenv("TERM_PROGRAM", term_program)
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(90, 20)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
+            hint = app_instance.query_one("#transcript-empty-hint", Static)
+            wordmark_center = wordmark.region.x + wordmark.region.width // 2
+            hint_center = hint.region.x + hint.region.width // 2
+            return wordmark_center, hint_center
+
+    block_glyph_centers = anyio.run(scenario, "iTerm.app")
+    safe_centers = anyio.run(scenario, "zed")
+    assert block_glyph_centers[0] == block_glyph_centers[1]
+    assert safe_centers[0] == safe_centers[1]
 
 
 def test_wordmark_gradient_content_spans_primary_to_accent_per_theme() -> None:
