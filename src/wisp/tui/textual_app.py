@@ -58,10 +58,10 @@ _ROLE_FALLBACK: dict[str, str] = {
 # was tried twice, with two different fonts, and both rendered with visible
 # gaps/misalignment depending on the terminal's font rendering — a
 # font-independent limitation, not something a different figlet font fixes.
-# Styled bold (see #transcript-empty-wordmark CSS) for more visual weight
-# than the header's plain "tethered to you" subtitle.
+# Styled bold (see #transcript-empty-wordmark CSS) for more visual weight.
+# This is the app's only "wisp" identity treatment beyond the bare Header
+# title — no separate tagline; that's what previously duplicated here.
 _WORDMARK = "wisp"
-_TAGLINE = "tethered to you"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 
 # Persistent, low-contrast keybinding reminder below the composer. Only real,
@@ -134,8 +134,8 @@ class TextualTui(App[None]):
         /* Width is also set explicitly in Python (TranscriptEmptyState.compose),
            matching #transcript-empty-hint's width so both land on the same true
            center (see the class docstring for why that can't rely on `align:
-           center middle` alone). Bold gives it more visual weight than the
-           header's plain "tethered to you" subtitle. */
+           center middle` alone). Bold gives it more visual weight — this is
+           the app's one full-identity treatment; the header stays plain. */
         max-width: 100%;
         color: $accent;
         text-style: bold;
@@ -368,10 +368,14 @@ class TextualTui(App[None]):
             yield Static(_KEYBINDING_HINT, id="keybinding-hint", markup=False)
 
     async def on_mount(self) -> None:
-        # The Header renders these as the wordmark in the top bar: a quiet,
-        # lowercase identity that complements the startup splash.
+        # Bare lowercase title only — no subtitle. The wordmark (below, via
+        # TranscriptEmptyState) is the app's one full-identity treatment,
+        # shown once while the transcript is empty; the always-visible header
+        # only needs a quiet "wisp" so the two don't compete for attention.
+        # A subtitle here also previously round-tripped through Textual's
+        # title/subtitle em-dash separator, which was the source of mojibake
+        # at narrow widths under some terminal encodings.
         self.title = "wisp"
-        self.sub_title = _TAGLINE
         for theme in WISP_THEMES:
             self.register_theme(theme)
         self.theme = WISP_THEMES[0].name

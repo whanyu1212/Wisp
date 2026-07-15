@@ -536,6 +536,18 @@ class TranscriptEmptyState(Vertical):
     true centers (confirmed by a probe: two Statics at width 51 vs 40 landed
     at x=14 both, centers 39 vs 34). Matching widths is the only combination
     that produces matching centers.
+
+    Below all four of Wisp's supported breakpoints (72x20 and up), this
+    already fits with room to spare, so the hint-hiding below is a defensive
+    floor for smaller-than-spec terminals, not the primary responsive
+    mechanism for issue #72 — it just avoids the hint line ever crowding or
+    clipping against the wordmark on an unusually short screen.
+    """
+
+    DEFAULT_CSS = """
+    TranscriptEmptyState.-compact #transcript-empty-hint {
+        display: none;
+    }
     """
 
     def __init__(self, wordmark: str, hint: str) -> None:
@@ -558,6 +570,9 @@ class TranscriptEmptyState(Vertical):
         )
         hint_static.styles.width = 40
         yield hint_static
+
+    def on_resize(self, event: events.Resize) -> None:
+        self.set_class(self.size.height < 5, "-compact")
 
 
 class JumpToLatest(Static):
