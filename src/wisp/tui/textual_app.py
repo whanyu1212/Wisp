@@ -180,9 +180,12 @@ class TextualTui(App[None]):
         border-left: vkey $success;
     }
 
-    .message--tool,
-    .message--notice {
+    .message--tool {
         border-left: vkey $accent;
+    }
+
+    .message--notice {
+        border-left: vkey $warning;
     }
 
     .message--approved {

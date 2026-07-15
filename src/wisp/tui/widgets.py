@@ -41,6 +41,7 @@ from wisp.tui.decision_content import (
 )
 from wisp.tui.rendering import (
     TuiViewSnapshot,
+    _truncate_to_cell_width,
     format_tui_footer_text,
 )
 
@@ -750,11 +751,19 @@ class SlashSuggest(OptionList):
         border: round $accent;
         background: $panel;
         padding: 0 1;
+        scrollbar-size-vertical: 1;
     }
     SlashSuggest > .option-list--option-highlighted {
         background: $accent 30%;
     }
     """
+
+    # CSS max-width ceiling on wide terminals (DEFAULT_CSS above); on_resize
+    # narrows self.styles.max_width below this only when the screen itself
+    # can't fit it. Tracked here too (not read back from styles.max_width,
+    # a Scalar) so show_for's column-alignment truncation has a plain int
+    # content-width budget to compute against.
+    _MAX_WIDTH_CEILING = 60
 
     def __init__(self, id: str | None = None) -> None:  # noqa: A002 - Textual's param name
         super().__init__(id=id)
@@ -763,6 +772,12 @@ class SlashSuggest(OptionList):
             spec.command: spec for spec in SLASH_COMMAND_SPECS
         }
         self._visible_specs: tuple[SlashCommandSpec, ...] = ()
+        self._max_width = self._MAX_WIDTH_CEILING
+
+    def on_resize(self, event: events.Resize) -> None:
+        # Same `on_resize`-driven pattern as StatusBar (widgets.py, below).
+        self._max_width = min(self._MAX_WIDTH_CEILING, max(1, self.screen.size.width - 4))
+        self.styles.max_width = self._max_width
 
     @staticmethod
     def query_from_value(value: str) -> str | None:
@@ -798,8 +813,23 @@ class SlashSuggest(OptionList):
         if not specs:
             self.display = False
             return 0
+        # Pad every command to the widest *currently visible* spelling so
+        # descriptions line up in a column, tightening as the user filters
+        # rather than reserving space for commands no longer shown. At
+        # narrow widths, truncate the description to fit the menu's content
+        # width (max_width minus the 2-cell border + 2-cell padding).
+        name_width = max(len(spec.command) for spec in specs)
+        content_width = max(1, self._max_width - 4)
         self.add_options(
-            [Option(f"{spec.command}  {spec.description}", id=spec.command) for spec in specs]
+            [
+                Option(
+                    _truncate_to_cell_width(
+                        f"{spec.command:<{name_width}}  {spec.description}", content_width
+                    ),
+                    id=spec.command,
+                )
+                for spec in specs
+            ]
         )
         self.highlighted = 0
         self.display = True
