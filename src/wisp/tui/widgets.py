@@ -853,13 +853,18 @@ class SlashSuggest(OptionList):
 
 
 # CSS role classes are applied per message so Stage 3 can style cards purely in
-# CSS; the role also names the border_title label.
+# CSS; the role also names the border_title label — with one exception:
+# ToolCard.set_state() checks its own _STATUS_LABELS (below _STATUS on the
+# class) before falling back to this dict by role, since it intentionally
+# reuses the "denied" CSS role class for both "denied" and "cancelled" (same
+# left-rule color and glyph family — both mean "stopped by a decision, not a
+# failure") while still needing their border titles to read differently.
 _ROLE_LABELS: dict[str, str] = {
     "user": "you",
     "assistant": "assistant",
     "tool": "tool",
     "approved": "tool",
-    "denied": "tool",
+    "denied": "denied",
     "error": "error",
     "notice": "wisp",
     "dim": "",
@@ -901,12 +906,30 @@ class ToolCard(Static):
 
     # status → (leading glyph, role class). The role class drives the left-rule
     # color via the shared `.message--{role}` CSS in TextualTui.
+    #
+    # denied and error previously shared both the "✗" glyph AND the "denied"
+    # role class, making a user-denied tool call visually identical to a
+    # genuine execution failure (issue #76). denied now gets its own glyph
+    # ("⊘", already used for cancelled — both mean "stopped by a decision,
+    # not a failure") and error gets its own "error" role class (CSS already
+    # defines `.message--error`, it just was never applied here) — denied and
+    # error are now distinguishable by glyph, label (_ROLE_LABELS below), and
+    # color, not by color alone.
     _STATUS: dict[str, tuple[str, str]] = {
         "pending": ("⋯", "tool"),
-        "denied": ("✗", "denied"),
-        "error": ("✗", "denied"),
+        "denied": ("⊘", "denied"),
+        "error": ("✗", "error"),
         "cancelled": ("⊘", "denied"),
         "done": ("✓", "approved"),
+    }
+
+    # Border-title override for statuses whose role class (above) is shared
+    # with another status that must read differently — "cancelled" reuses
+    # "denied"'s role (same color/glyph family), but a cancelled tool call
+    # was never actually denied, so its title must not say "denied". Statuses
+    # not listed here fall back to _ROLE_LABELS keyed by role, as normal.
+    _STATUS_LABELS: dict[str, str] = {
+        "cancelled": "cancelled",
     }
     _TICK = 1.0  # the running counter only needs whole-second granularity
 
@@ -1013,7 +1036,7 @@ class ToolCard(Static):
                 self.remove_class(f"message--{self._role}")
             self.add_class("message", f"message--{role}")
             self._role = role
-        self.border_title = _ROLE_LABELS.get(role, "tool")
+        self.border_title = self._STATUS_LABELS.get(status, _ROLE_LABELS.get(role, "tool"))
         self._repaint()
 
     def _can_expand(self) -> bool:

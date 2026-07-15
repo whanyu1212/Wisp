@@ -886,8 +886,10 @@ def test_textual_renderer_dispatches_events_by_type() -> None:
     assert "✓ bash" in rendered
     assert "file-a" in rendered
     assert "file-b" in rendered
-    # The denied card carries the reason.
-    assert "✗ write" in rendered
+    # The denied card carries the reason. Issue #76: denied now uses the "⊘"
+    # glyph (shared with cancelled — both mean "stopped by a decision, not a
+    # failure"), distinct from a genuine tool error's "✗".
+    assert "⊘ write" in rendered
     assert "too risky" in rendered
     assert "error: boom" in rendered
     assert "command failed: nope" in rendered
@@ -1942,7 +1944,10 @@ def test_textual_line_messages_carry_role_classes() -> None:
     # Every event type maps to a message--<role> class so the card CSS can style
     # it. Tool cards evolve in place, so drive each through its full lifecycle and
     # assert the terminal role class. c1 succeeds (→ approved), c2 errors (→
-    # denied), c4 is denied at approval (→ denied). One card per call_id.
+    # error), c4 is denied at approval (→ denied). One card per call_id. Issue
+    # #76: a tool-execution error and a user denial previously both landed on
+    # "denied" (glyph AND color AND label collision); a genuine error now gets
+    # its own "error" role class, distinct from a user's "denied" decision.
     cards = _cards_for_events(
         [
             completed_message(content="hi"),
@@ -1959,10 +1964,60 @@ def test_textual_line_messages_carry_role_classes() -> None:
     assert role_classes == [
         "message--assistant",
         "message--approved",  # c1 succeeded
-        "message--denied",  # c2 errored
+        "message--error",  # c2 errored
         "message--denied",  # c4 denied at approval
         "message--error",
     ]
+
+
+def test_textual_denied_and_error_tool_cards_render_distinct_glyphs() -> None:
+    # Issue #76, live-rendering counterpart to the pure-dict test in
+    # test_tui_rendering.py: drives an actual denial and an actual error
+    # through a live app and asserts the two mounted cards diverge on glyph
+    # and border title, not just in the underlying _STATUS/_ROLE_LABELS dicts
+    # (catches any wiring bug between them and set_state/_repaint).
+    async def scenario() -> list[tuple[str, str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="denied", name="write", arguments={}))
+            renderer.event(
+                ToolApprovalResolved(call_id="denied", name="write", approved=False, reason="no")
+            )
+            renderer.event(ToolCallRequested(call_id="errored", name="bash", arguments={}))
+            renderer.event(
+                ToolResultReady(call_id="errored", name="bash", output="boom", is_error=True)
+            )
+            await pilot.pause()
+            cards = _all_tool_cards(app_instance)
+            return [(card._glyph, str(card.border_title)) for card in cards]
+
+    denied_card, error_card = anyio.run(scenario)
+    denied_glyph, denied_title = denied_card
+    error_glyph, error_title = error_card
+
+    assert denied_glyph != error_glyph
+    assert denied_title != error_title
+
+
+def test_textual_cancelled_tool_card_border_title_is_not_denied() -> None:
+    # Regression (P2 review on #76's denied/error fix): cancelled shares
+    # denied's CSS role class intentionally, but fail_pending_tool_calls()
+    # (the real live-app path that produces a "cancelled" status, e.g. on
+    # renderer.cancelled()) must not leave the card's border_title reading
+    # "denied" — a cancelled tool call was never actually denied approval.
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="a", name="read_file", arguments={}))
+            await pilot.pause()
+            renderer.cancelled()
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            return str(card.border_title)
+
+    title = anyio.run(scenario)
+    assert title == "cancelled"
+    assert title != "denied"
 
 
 def test_textual_line_message_border_title_from_role_labels() -> None:
