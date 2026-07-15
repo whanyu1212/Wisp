@@ -13,7 +13,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.widget import Widget
-from textual.widgets import Header, TextArea
+from textual.widgets import Header, Static, TextArea
 
 from wisp.events import (
     ToolApprovalRequested,
@@ -53,11 +53,25 @@ _ROLE_FALLBACK: dict[str, str] = {
     "denied": "red",
 }
 
-# The Wisp wordmark, shown while the transcript is empty. Ultra-minimal -
-# lowercase, accent color + centering does the work. Quiet over loud.
+# The Wisp wordmark, shown while the transcript is empty. Plain lowercase
+# text — an ASCII-art figlet-style treatment (solid Unicode block glyphs)
+# was tried twice, with two different fonts, and both rendered with visible
+# gaps/misalignment depending on the terminal's font rendering — a
+# font-independent limitation, not something a different figlet font fixes.
+# Styled bold (see #transcript-empty-wordmark CSS) for more visual weight
+# than the header's plain "tethered to you" subtitle.
 _WORDMARK = "wisp"
 _TAGLINE = "tethered to you"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
+
+# Persistent, low-contrast keybinding reminder below the composer. Only real,
+# currently-hidden (show=False) affordances — not aspirational: `/` opens the
+# slash-command menu (detected from typed input, not a Binding); Enter/Space
+# toggle a focused ToolCard's expand/collapse (ToolCard.BINDINGS); Escape
+# returns focus from a card to the input (ToolCard.BINDINGS "leave" action).
+# Textual-only chrome — deliberately not folded into format_tui_footer_lines,
+# which the line/fullscreen renderers also consume.
+_KEYBINDING_HINT = "/ commands   enter expand   esc back"
 
 # The input's prompt glyph. The shell hands the Textual renderer a semantic hint
 # (`wisp> `, `wisp(running)> `, `approve? [y/N] `) shared with the line/fullscreen
@@ -117,15 +131,18 @@ class TextualTui(App[None]):
     }
 
     #transcript-empty-wordmark {
-        width: 40;
+        /* Width is also set explicitly in Python (TranscriptEmptyState.compose),
+           matching #transcript-empty-hint's width so both land on the same true
+           center (see the class docstring for why that can't rely on `align:
+           center middle` alone). Bold gives it more visual weight than the
+           header's plain "tethered to you" subtitle. */
         max-width: 100%;
-        height: 1;
         color: $accent;
+        text-style: bold;
         text-align: center;
     }
 
     #transcript-empty-hint {
-        width: 40;
         max-width: 100%;
         height: 1;
         margin-top: 1;
@@ -190,12 +207,28 @@ class TextualTui(App[None]):
         background: $boost;
     }
 
+    /* One bordered panel frames the editor and its status line as a single
+       card — quiet ($secondary) at rest, accent when the editor has focus,
+       matching the focus-driven color the old underline-only input used
+       (kept as a CSS variable swap, not a new interaction pattern). */
+    #composer {
+        height: auto;
+        border: round $secondary;
+        background: $background;
+        transition: border 200ms;
+    }
+
+    #composer:focus-within {
+        border: round $accent;
+        background: $surface;
+    }
+
     #status-bar {
         height: auto;
         padding: 0 1;
-        background: $panel;
         color: $text-muted;
         align-vertical: middle;
+        border-top: solid $secondary 40%;
     }
 
     #status {
@@ -204,23 +237,20 @@ class TextualTui(App[None]):
         height: auto;
     }
 
-    /* Underline-only input: no box, just a bottom rule that matches the
-       left-rule card language — quiet by default, accent when focused. The
-       `❯` prompt glyph (in the placeholder) is the visual anchor, not a frame. */
+    #keybinding-hint {
+        height: 1;
+        padding: 0 2;
+        color: $text-muted;
+        text-align: right;
+        text-style: dim;
+    }
+
     #input {
         height: auto;
         max-height: 8;
         border: none;
-        border-bottom: heavy $surface-lighten-2;
         padding: 0 1;
-        background: $background;
-        transition: border 200ms;
-    }
-
-    #input:focus {
-        border: none;
-        border-bottom: heavy $accent;
-        background: $surface;
+        background: transparent;
     }
     """
 
@@ -321,11 +351,21 @@ class TextualTui(App[None]):
             # input; yielded here so it shares the Vertical's coordinate space.
             yield SlashSuggest(id="suggest")
             yield DecisionPanel(id="decision-panel")
-            yield PromptEditor(placeholder=_input_placeholder("wisp> "), id="input")
-            with Horizontal(id="status-bar"):
-                # StatusBar owns the shell snapshot and transient spinner so the
-                # same two-line footer surface can reflow safely at compact widths.
-                yield StatusBar(id="status")
+            # #composer frames the editor and status line as one bordered panel
+            # (input above, status below, no divider between them) instead of a
+            # borderless underline input floating over a separately-backgrounded
+            # status bar. height: auto is required here — an unstyled Vertical
+            # inside this outer Vertical defaults to 1fr and would float the
+            # whole composer into the middle of the screen (see the note this
+            # replaces, same landmine, now on the wrapper instead of #input).
+            with Vertical(id="composer"):
+                yield PromptEditor(placeholder=_input_placeholder("wisp> "), id="input")
+                with Horizontal(id="status-bar"):
+                    # StatusBar owns the shell snapshot and transient spinner so
+                    # the same two-line footer surface can reflow safely at
+                    # compact widths.
+                    yield StatusBar(id="status")
+            yield Static(_KEYBINDING_HINT, id="keybinding-hint", markup=False)
 
     async def on_mount(self) -> None:
         # The Header renders these as the wordmark in the top bar: a quiet,

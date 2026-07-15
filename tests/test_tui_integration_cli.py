@@ -2407,9 +2407,12 @@ def test_textual_status_bar_renders_compact_footer_summary() -> None:
 
 def test_textual_footer_fits_the_status_content_region() -> None:
     # The footer is sized to the #status content region (padding-excluded), not
-    # the app width. The status bar has horizontal padding, so sizing from app
-    # width would over-pad each line and make the two-line footer wrap/clip. At an
-    # 80-col terminal the render region is 78; no footer line may exceed it.
+    # the app width. The status bar has horizontal padding, and #status-bar now
+    # also sits inside the #composer panel's round border (1 column each side),
+    # so sizing from app width would over-pad each line and make the two-line
+    # footer wrap/clip. At an 80-col terminal the render region is 76 (80 minus
+    # 2 for #composer's border minus 2 for #status-bar's padding); no footer
+    # line may exceed it.
     from rich.cells import cell_len
 
     async def scenario() -> tuple[int | None, list[int]]:
@@ -2433,8 +2436,8 @@ def test_textual_footer_fits_the_status_content_region() -> None:
             return app_instance.status_width(), [cell_len(ln) for ln in lines]
 
     region_width, line_widths = anyio.run(scenario)
-    assert region_width == 78  # app width 80 minus the status-bar's 1-cell side padding
-    assert all(w <= 78 for w in line_widths)  # no line overflows the render region
+    assert region_width == 76  # app width 80 minus #composer's 2-col border minus 2-col padding
+    assert all(w <= 76 for w in line_widths)  # no line overflows the render region
 
 
 def test_textual_footer_renders_markup_in_cwd_and_model_literally() -> None:
@@ -3443,8 +3446,13 @@ def test_textual_slash_menu_is_anchored_near_the_input() -> None:
 
     menu_top, menu_bottom, input_y, height = anyio.run(scenario)
     assert menu_top >= height // 2  # menu is in the lower half, not floating at top
-    assert input_y >= height - 4  # input stays pinned near the bottom (not shoved)
-    assert abs(menu_bottom - input_y) <= 5  # menu sits adjacent to the input
+    # input stays pinned near the bottom (not shoved); margin widened from 4 to 6
+    # rows for the #composer panel's border + status-divider rows (see
+    # test_textual_input_is_pinned_to_the_bottom).
+    assert input_y >= height - 6
+    # menu sits adjacent to the input; widened from 5 to 6 for the keybinding
+    # hint row now occupying the last screen row below the composer.
+    assert abs(menu_bottom - input_y) <= 6
 
 
 def test_textual_tab_completes_highlighted_command() -> None:
@@ -3743,8 +3751,7 @@ def test_textual_enter_on_fully_typed_command_runs_it_once() -> None:
 
 def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
     # The wordmark identifies an empty session without consuming permanent
-    # scrollback. Its ultra-minimal form and prompt hint must fit the compact
-    # audit viewport, then disappear before the first real transcript item is
+    # scrollback, and disappears before the first real transcript item is
     # mounted.
     async def scenario() -> tuple[
         tuple[str, str],
@@ -3780,14 +3787,43 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
 
     content, centers, initial_children, final_children = anyio.run(scenario)
     wordmark, hint = content
-    assert wordmark.strip() == "wisp"
+    assert wordmark == "wisp"
     assert hint == "Type a prompt or / for commands."
     assert centers[0] == centers[1] == centers[2]
     assert initial_children == ["TranscriptEmptyState"]
     assert final_children == ["LineMessage"]
 
 
+def test_textual_startup_empty_state_wordmark_centers_match_hint() -> None:
+    # Regression: Textual's align: center middle centers SIBLINGS AS A BLOCK
+    # (sharing a left edge), not each one independently — confirmed by direct
+    # probe: two Statics of different widths landed at the same region.x, so
+    # their true centers (x + width // 2) differed. The wordmark and hint
+    # must be given matching explicit widths (TranscriptEmptyState.compose)
+    # so their centers always match.
+    async def scenario() -> tuple[int, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(90, 20)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
+            hint = app_instance.query_one("#transcript-empty-hint", Static)
+            wordmark_center = wordmark.region.x + wordmark.region.width // 2
+            hint_center = hint.region.x + hint.region.width // 2
+            return wordmark_center, hint_center
+
+    wordmark_center, hint_center = anyio.run(scenario)
+    assert wordmark_center == hint_center
+
+
 def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
+    # The editor+status frame now lives on the shared #composer panel, not on
+    # #input directly (see test_textual_composer_frames_input_and_status_as_
+    # one_panel) — #input itself has no border or background of its own, so
+    # the idle-vs-focused visual state this test guards moved to #composer's
+    # `border`/`background` (round border, not the old underline-only
+    # `border_bottom`), driven by the same `:focus-within` a child gaining
+    # focus triggers.
     async def scenario() -> dict[str, tuple[str, str, str, str, float]]:
         styles: dict[str, tuple[str, str, str, str, float]] = {}
         for theme in ("wisp", "wisp-light"):
@@ -3795,19 +3831,20 @@ def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
             async with app_instance.run_test() as pilot:
                 app_instance.theme = theme
                 input_widget = app_instance.query_one("#input", Input)
+                composer = app_instance.query_one("#composer")
                 app_instance.screen.set_focus(None)
                 await pilot.pause(0.25)
-                idle_background = input_widget.styles.background.hex
-                idle_border = input_widget.styles.border_bottom[1].hex
+                idle_background = composer.styles.background.hex
+                idle_border = composer.styles.border_top[1].hex
 
                 input_widget.focus()
                 await pilot.pause(0.25)
-                transition = input_widget.styles.transitions["border"]
+                transition = composer.styles.transitions["border"]
                 styles[theme] = (
                     idle_background,
-                    input_widget.styles.background.hex,
+                    composer.styles.background.hex,
                     idle_border,
-                    input_widget.styles.border_bottom[1].hex,
+                    composer.styles.border_top[1].hex,
                     transition.duration,
                 )
         return styles
@@ -3859,19 +3896,56 @@ def test_textual_scrollbar_colors_resolve_for_both_themes() -> None:
 def test_textual_input_is_pinned_to_the_bottom() -> None:
     # Regression: a wrapping Container defaulted to height:1fr and floated the
     # input into the middle. The transcript should own the free space (1fr) while
-    # the input hugs the bottom rows.
-    async def scenario() -> tuple[int, int, int]:
+    # the composer (bordered editor + status panel) plus the keybinding hint row
+    # below it hug the bottom rows. The composer is taller than the old
+    # borderless input (border top/bottom rules plus an internal status divider
+    # add rows) and the hint row adds one more below it, so the margin from the
+    # bottom is wider than before — the input itself must still sit in the
+    # composer's top row, not floated into the middle of the screen.
+    async def scenario() -> tuple[int, int, int, int]:
         app_instance = TextualTui()
         async with app_instance.run_test(size=(74, 24)) as pilot:
             await pilot.pause()
             input_widget = app_instance.query_one("#input", Input)
             transcript = app_instance.query_one("#transcript", Transcript)
-            return app_instance.size.height, input_widget.region.y, transcript.region.height
+            hint = app_instance.query_one("#keybinding-hint")
+            return (
+                app_instance.size.height,
+                input_widget.region.y,
+                transcript.region.height,
+                hint.region.bottom,
+            )
 
-    screen_h, input_top, transcript_h = anyio.run(scenario)
-    # The input sits in the last few rows; the transcript fills most of the height.
-    assert input_top >= screen_h - 4
+    screen_h, input_top, transcript_h, hint_bottom = anyio.run(scenario)
+    # The composer (and the input inside it) sits in the last several rows; the
+    # transcript fills most of the height above it; the hint row is the very
+    # last thing on screen.
+    assert input_top >= screen_h - 7
+    assert hint_bottom == screen_h
     assert transcript_h >= screen_h // 2
+
+
+def test_textual_keybinding_hint_lists_only_real_bindings() -> None:
+    # Persistent, low-contrast reminder below the composer — must only name
+    # affordances that actually exist (all currently show=False, i.e. hidden
+    # from Textual's own footer/help): `/` for the slash-command menu, Enter/
+    # Space to expand a focused ToolCard, Escape to leave a card back to the
+    # input. Not folded into format_tui_footer_lines (shared with line/
+    # fullscreen renderers) — this is Textual-only chrome.
+    async def scenario() -> tuple[str, bool]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            await pilot.pause()
+            hint = app_instance.query_one("#keybinding-hint", Static)
+            content = hint.render()
+            assert isinstance(content, Content)
+            return content.plain, hint.display
+
+    text, displayed = anyio.run(scenario)
+    assert "/ commands" in text
+    assert "enter expand" in text
+    assert "esc back" in text
+    assert displayed
 
 
 def test_textual_input_placeholder_uses_the_prompt_glyph() -> None:
@@ -3893,24 +3967,34 @@ def test_textual_input_placeholder_uses_the_prompt_glyph() -> None:
     assert running_placeholder == "❯ running…"
 
 
-def test_textual_input_has_no_box_border() -> None:
-    # The input is underline-only — a bottom rule, no four-sided box. Asserting the
-    # border is absent on the top/left/right edges (only bottom is styled) guards
-    # against a regression back to the heavy `tall` box.
-    async def scenario() -> object:
+def test_textual_composer_frames_input_and_status_as_one_panel() -> None:
+    # The editor and status line are framed together as one bordered #composer
+    # panel (input above, status below, no divider between them save the
+    # status bar's own top rule) rather than a borderless underline input
+    # floating over a separately-backgrounded status bar. #input itself carries
+    # no border of its own — the frame belongs to the shared parent, not
+    # duplicated on the child — so this asserts that split explicitly, guarding
+    # against a regression back to either the old per-widget underline or an
+    # accidental double border.
+    async def scenario() -> tuple[object, object]:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
             await pilot.pause()
             input_widget = app_instance.query_one("#input", Input)
-            return input_widget.styles.border
+            composer = app_instance.query_one("#composer")
+            return input_widget.styles.border, composer.styles.border
 
-    border = anyio.run(scenario)
-    # Textual's Edges exposes each side as an (edge_type, color) tuple; only the
-    # bottom edge carries a rule. top/left/right have an empty ("") edge type.
-    assert border.top[0] == ""
-    assert border.left[0] == ""
-    assert border.right[0] == ""
-    assert border.bottom[0] == "heavy"
+    input_border, composer_border = anyio.run(scenario)
+    # Textual's Edges exposes each side as an (edge_type, color) tuple; "" means
+    # no rule on that side.
+    assert input_border.top[0] == ""
+    assert input_border.left[0] == ""
+    assert input_border.right[0] == ""
+    assert input_border.bottom[0] == ""
+    assert composer_border.top[0] == "round"
+    assert composer_border.bottom[0] == "round"
+    assert composer_border.left[0] == "round"
+    assert composer_border.right[0] == "round"
 
 
 def test_textual_run_shell_enables_mouse_for_wheel_scrolling() -> None:

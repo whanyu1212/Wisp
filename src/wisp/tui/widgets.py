@@ -526,7 +526,17 @@ class DecisionPanel(Vertical):
 
 
 class TranscriptEmptyState(Vertical):
-    """Centered identity shown only while the transcript has no output."""
+    """Centered identity shown only while the transcript has no output.
+
+    Just a wordmark line plus a hint line, both given matching explicit
+    widths (set on ``.styles``, not fixed CSS) rather than relying on
+    Textual's ``align: center middle`` to center each child independently —
+    empirically it doesn't: siblings under it share a left edge, not a
+    center, so two boxes of different widths end up with visibly different
+    true centers (confirmed by a probe: two Statics at width 51 vs 40 landed
+    at x=14 both, centers 39 vs 34). Matching widths is the only combination
+    that produces matching centers.
+    """
 
     def __init__(self, wordmark: str, hint: str) -> None:
         super().__init__(id="transcript-empty")
@@ -534,16 +544,20 @@ class TranscriptEmptyState(Vertical):
         self._hint = hint
 
     def compose(self) -> ComposeResult:
-        yield Static(
+        wordmark_static = Static(
             self._wordmark,
             id="transcript-empty-wordmark",
             markup=False,
         )
-        yield Static(
+        wordmark_static.styles.width = 40
+        yield wordmark_static
+        hint_static = Static(
             self._hint,
             id="transcript-empty-hint",
             markup=False,
         )
+        hint_static.styles.width = 40
+        yield hint_static
 
 
 class JumpToLatest(Static):
@@ -636,10 +650,7 @@ class Transcript(VerticalScroll):
 
     def compose(self) -> ComposeResult:
         if self._empty_wordmark is not None:
-            self._empty_state = TranscriptEmptyState(
-                self._empty_wordmark,
-                self._empty_hint,
-            )
+            self._empty_state = TranscriptEmptyState(self._empty_wordmark, self._empty_hint)
             yield self._empty_state
 
     def mount_message(self, widget: Widget) -> AwaitMount:
