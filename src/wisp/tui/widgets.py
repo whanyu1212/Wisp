@@ -859,7 +859,7 @@ _ROLE_LABELS: dict[str, str] = {
     "assistant": "assistant",
     "tool": "tool",
     "approved": "tool",
-    "denied": "tool",
+    "denied": "denied",
     "error": "error",
     "notice": "wisp",
     "dim": "",
@@ -901,10 +901,19 @@ class ToolCard(Static):
 
     # status → (leading glyph, role class). The role class drives the left-rule
     # color via the shared `.message--{role}` CSS in TextualTui.
+    #
+    # denied and error previously shared both the "✗" glyph AND the "denied"
+    # role class, making a user-denied tool call visually identical to a
+    # genuine execution failure (issue #76). denied now gets its own glyph
+    # ("⊘", already used for cancelled — both mean "stopped by a decision,
+    # not a failure") and error gets its own "error" role class (CSS already
+    # defines `.message--error`, it just was never applied here) — denied and
+    # error are now distinguishable by glyph, label (_ROLE_LABELS below), and
+    # color, not by color alone.
     _STATUS: dict[str, tuple[str, str]] = {
         "pending": ("⋯", "tool"),
-        "denied": ("✗", "denied"),
-        "error": ("✗", "denied"),
+        "denied": ("⊘", "denied"),
+        "error": ("✗", "error"),
         "cancelled": ("⊘", "denied"),
         "done": ("✓", "approved"),
     }

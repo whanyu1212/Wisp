@@ -286,6 +286,25 @@ def test_tui_notice_role_uses_a_distinct_color_from_tool() -> None:
         assert theme.accent in styles["tool"]
 
 
+def test_denied_and_error_tool_cards_have_distinct_glyph_and_label() -> None:
+    # Issue #76: a user-denied tool call and a genuine execution error
+    # previously shared the same glyph ("✗"), the same "denied" CSS role
+    # class, and (denied falling through to the generic "tool" label) the
+    # same border title — visually indistinguishable apart from buried detail
+    # text. denied now gets its own glyph and label; error gets its own role
+    # class. All three signals (glyph, label, color-driving role) now differ.
+    from wisp.tui.widgets import _ROLE_LABELS, ToolCard
+
+    denied_glyph, denied_role = ToolCard._STATUS["denied"]
+    error_glyph, error_role = ToolCard._STATUS["error"]
+
+    assert denied_glyph != error_glyph
+    assert denied_role != error_role
+    assert _ROLE_LABELS[denied_role] != _ROLE_LABELS[error_role]
+    assert _ROLE_LABELS[denied_role]
+    assert _ROLE_LABELS[error_role]
+
+
 def test_fullscreen_tui_renderer_messages_do_not_infer_footer_state() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
     renderer.view_updated(
