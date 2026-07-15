@@ -104,6 +104,11 @@ def test_tui_trust_on_closed_input_sends_transient_denial() -> None:
 
 
 def test_fullscreen_tui_renderer_renders_layout_regions(tmp_path: Path) -> None:
+    # A short cwd here (rather than the long pytest tmp_path) so all four
+    # footer fields fit without triggering issue #72's cwd-outranks-session
+    # priority truncation — this test is a layout smoke test, not a
+    # footer-priority test (see test_tui_footer_line_one_drops_session_before
+    # _truncating_cwd for that).
     console, output = _console()
     renderer = FullscreenTuiRenderer(console, clear_screen=False)
 
@@ -116,7 +121,7 @@ def test_fullscreen_tui_renderer_renders_layout_regions(tmp_path: Path) -> None:
             status="idle",
             input_hint="wisp> ",
             last_session="session.jsonl",
-            cwd=str(tmp_path),
+            cwd="/tmp",
             provider="openai",
             model="gpt-test",
         )
@@ -207,6 +212,59 @@ def test_tui_footer_formatter_compacts_and_truncates() -> None:
     assert all(len(line) <= 32 for line in lines)
     assert "…" in lines[0]
     assert lines[1].endswith("openai/gpt-4.1")
+
+
+def test_tui_footer_line_one_drops_session_before_truncating_cwd() -> None:
+    # cwd outranks session id (issue #72): when both don't fit, session drops
+    # entirely rather than surviving as a truncated, unreadable fragment.
+    lines = format_tui_footer_lines(
+        TuiViewSnapshot(
+            status="idle",
+            input_hint="wisp> ",
+            last_session="01JZ8K2Q8F7W9WISP4M2.jsonl",
+            cwd="/very/long/project/path/that/will/not/fit/alongside/a/session/id",
+        ),
+        width=32,
+    )
+
+    assert "session:" not in lines[0]
+    assert lines[0].startswith("/very/long/project/path")
+    assert len(lines[0]) <= 32
+
+
+def test_tui_footer_line_two_still_protects_status_over_model() -> None:
+    # status/queued outranks provider+model (issue #72): under pressure the
+    # model string truncates (or is fully dropped, at extreme widths) before
+    # live status text is ever clipped.
+    lines = format_tui_footer_lines(
+        TuiViewSnapshot(
+            status="running",
+            input_hint="wisp(running)> ",
+            provider="openai-codex",
+            model="gpt-5.5-codex-preview-with-a-long-suffix",
+        ),
+        width=30,
+    )
+
+    assert lines[1].startswith("running")
+    assert "…" in lines[1]
+    assert len(lines[1]) <= 30
+
+    # Long status text still wins over the model even when the model would
+    # otherwise fit whole — this is the historical bug the priority fix
+    # closes: a status field must never be dropped in favor of the model.
+    long_status_lines = format_tui_footer_lines(
+        TuiViewSnapshot(
+            status="Retrying openai-codex, attempt 2 of 3, waiting 2.0s",
+            input_hint="wisp(running)> ",
+            provider="openai-codex",
+            model="gpt-5.5-codex",
+        ),
+        width=40,
+    )
+
+    assert long_status_lines[1].startswith("Retrying op")
+    assert len(long_status_lines[1]) <= 40
 
 
 def test_fullscreen_tui_renderer_messages_do_not_infer_footer_state() -> None:

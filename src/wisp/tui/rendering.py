@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol
+from typing import Literal, Protocol
 
 from rich.cells import cell_len, set_cell_size
 from rich.console import Console
@@ -706,7 +706,15 @@ class FullscreenTuiRenderer:
 def format_tui_footer_lines(
     snapshot: TuiViewSnapshot, *, width: int | None = None
 ) -> tuple[str, str]:
-    """Return Pi-style compact footer lines for a renderer snapshot."""
+    """Return Pi-style compact footer lines for a renderer snapshot.
+
+    Field priority (highest to lowest, protected in that order under width
+    pressure): status+queued, cwd, provider/model, session id. Line 1 (cwd /
+    session) truncates with ``priority="left"`` — cwd is the higher-priority
+    field, so session drops entirely before cwd is ever clipped. Line 2
+    (status / model) truncates with ``priority="right"`` — status is the
+    higher-priority field there, so model clips before status does.
+    """
 
     display_width = max(1, width) if width is not None else None
     context_left = _sanitize_footer_text(_format_cwd_for_footer(snapshot.cwd))
@@ -721,8 +729,8 @@ def format_tui_footer_lines(
     model_right = _sanitize_footer_text(_footer_model_text(snapshot.provider, snapshot.model))
 
     return (
-        _align_footer_line(context_left, context_right, display_width),
-        _align_footer_line(status_left, model_right, display_width),
+        _align_footer_line(context_left, context_right, display_width, priority="left"),
+        _align_footer_line(status_left, model_right, display_width, priority="right"),
     )
 
 
@@ -753,7 +761,18 @@ def _footer_model_text(provider: str | None, model: str | None) -> str:
     return model or ""
 
 
-def _align_footer_line(left: str, right: str, width: int | None) -> str:
+def _align_footer_line(
+    left: str, right: str, width: int | None, *, priority: Literal["left", "right"] = "right"
+) -> str:
+    """Right-align ``right`` against ``left`` in ``width`` cells.
+
+    ``priority`` names the field protected from truncation when both don't
+    fit. ``"right"`` keeps the historical behavior (right field always kept
+    whole, left field truncates). ``"left"`` protects the left field instead:
+    the right field is dropped entirely — not character-truncated into an
+    unreadable fragment — before the left field is ever clipped.
+    """
+
     if not right:
         return _truncate_to_cell_width(left, width)
     if width is None:
@@ -763,8 +782,25 @@ def _align_footer_line(left: str, right: str, width: int | None) -> str:
     right_width = cell_len(right)
     if left_width + 2 + right_width <= width:
         return left + " " * (width - left_width - right_width) + right
-    if right_width >= width:
+
+    if priority == "left":
+        if left_width >= width:
+            return _truncate_to_cell_width(left, width)
+        return _align_footer_line(left, "", width, priority="left")
+
+    if not left:
         return _truncate_to_cell_width(right, width)
+    if right_width >= width:
+        # A protected left field still gets first claim on the width: give it
+        # a minimum share rather than letting an oversized right field push
+        # it out entirely (the historical bug this priority scheme fixes).
+        available_right = width - min(left_width, width // 2) - 2
+        if available_right > 0:
+            truncated_left = _truncate_to_cell_width(left, width - available_right - 2)
+            truncated_right = _truncate_to_cell_width(right, available_right)
+            padding = " " * max(1, width - cell_len(truncated_left) - cell_len(truncated_right))
+            return truncated_left + padding + truncated_right
+        return _truncate_to_cell_width(left, width)
 
     available_left = width - right_width - 2
     if available_left > 0:

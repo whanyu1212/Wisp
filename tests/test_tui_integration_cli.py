@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+import pytest
 from pytest import MonkeyPatch
 from textual import events
 from textual.await_complete import AwaitComplete
@@ -2385,7 +2386,10 @@ def test_textual_footer_updates_without_stealing_input_focus() -> None:
 
 
 def test_textual_status_bar_renders_compact_footer_summary() -> None:
-    # The footer keeps cwd/session on the first line and status/model on the second.
+    # The footer keeps cwd/session on the first line and status/model on the
+    # second. Tests run with cwd chdir'd into a long pytest tmp path (see
+    # conftest._isolate_settings), so under issue #72's cwd-outranks-session
+    # priority, session correctly drops here rather than surviving as before.
     status_text, _ = _status_after_snapshots(
         [
             TuiViewSnapshot(
@@ -2400,9 +2404,27 @@ def test_textual_status_bar_renders_compact_footer_summary() -> None:
         ]
     )
     assert "\n" in status_text
-    assert "session: sess.json" in status_text
     assert "running • queued 2" in status_text
     assert "openai/gpt-test" in status_text
+
+
+def test_textual_status_bar_shows_session_when_cwd_is_short() -> None:
+    # With a short cwd both fields fit, so session id still shows up whole —
+    # proving priority=left only drops session under genuine width pressure.
+    status_text, _ = _status_after_snapshots(
+        [
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp> ",
+                input_mode="running",
+                cwd="/tmp",
+                last_session="sess.json",
+                provider="openai",
+                model="gpt-test",
+            )
+        ]
+    )
+    assert "session: sess.json" in status_text
 
 
 def test_textual_footer_fits_the_status_content_region() -> None:
@@ -4020,7 +4042,9 @@ def test_textual_run_shell_enables_mouse_for_wheel_scrolling() -> None:
 
 
 def test_textual_header_shows_the_wisp_wordmark() -> None:
-    # The header title is the lowercase wordmark; the clock chrome is gone.
+    # The header title is the bare lowercase wordmark, no subtitle: the full
+    # identity treatment lives in TranscriptEmptyState, not the header, so
+    # the two never show the "wisp" identity at the same time.
     async def scenario() -> tuple[str, str]:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
@@ -4029,7 +4053,39 @@ def test_textual_header_shows_the_wisp_wordmark() -> None:
 
     title, sub_title = anyio.run(scenario)
     assert title == "wisp"
-    assert sub_title == "tethered to you"
+    assert sub_title == ""
+
+
+@pytest.mark.parametrize("size", [(120, 40), (100, 30), (80, 24), (72, 20)])
+@pytest.mark.parametrize("theme", ["wisp", "wisp-light"])
+def test_textual_no_duplicate_identity_at_any_breakpoint(size: tuple[int, int], theme: str) -> None:
+    # Issue #72: "wisp" must appear as a prominent identity in exactly one
+    # place at a time — the header stays bare, and the full wordmark
+    # treatment (TranscriptEmptyState) is gone once the transcript has
+    # content, at every supported breakpoint and both themes.
+    async def scenario() -> tuple[str, str, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=size) as pilot:
+            app_instance.theme = theme
+            await pilot.pause()
+            empty_state_present_initially = bool(list(app_instance.query(TranscriptEmptyState)))
+
+            renderer.prompt_submitted("hello")
+            await pilot.pause()
+            empty_state_present_after_prompt = bool(list(app_instance.query(TranscriptEmptyState)))
+
+            return (
+                app_instance.title,
+                app_instance.sub_title,
+                empty_state_present_initially,
+                empty_state_present_after_prompt,
+            )
+
+    title, sub_title, empty_before, empty_after = anyio.run(scenario)
+    assert title == "wisp"
+    assert sub_title == ""
+    assert empty_before is True
+    assert empty_after is False
 
 
 def _read_prompt_signal_for_key(key: str) -> type[BaseException] | None:
