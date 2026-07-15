@@ -752,8 +752,10 @@ def _strip_terminator_note(content: str) -> tuple[str, str]:
     return content, ""
 
 
-def _equal_length_replace_groups(diff_lines: Sequence[str]) -> list[tuple[int, int, int]]:
-    """Indices of equal-length replace-groups in ``diff_lines``.
+def _equal_length_replace_groups(
+    diff_lines: Sequence[str], *, limit: int
+) -> list[tuple[int, int, int]]:
+    """Indices of equal-length replace-groups within ``diff_lines[:limit]``.
 
     A "replace-group" is a contiguous run of ``-``-prefixed lines immediately
     followed (no intervening context/``@@`` line) by a contiguous run of
@@ -762,6 +764,19 @@ def _equal_length_replace_groups(diff_lines: Sequence[str]) -> list[tuple[int, i
     unified-diff text output serializes a replace-group as contiguous marker
     runs by construction — so it needs no access to ``difflib``'s internal
     opcodes and touches none of the existing diff-building functions.
+
+    ``diff_lines`` is the FULL, unclipped line list; ``limit`` is where the
+    caller's preview window ends (matching :func:`_content_from_diff_lines`'s
+    ``diff_lines[:_DIFF_PREVIEW_LINES]``). The scan only considers lines
+    within ``limit``, but for a group whose ``+``-run reaches exactly the
+    boundary, it also checks ``diff_lines`` PAST ``limit`` for more ``+``
+    lines belonging to the same run — a group truncated by the preview
+    window can look artificially equal-length within the slice alone (e.g. a
+    genuine 3-deleted/4-added replace, cut off after the third ``+`` line,
+    reads as a false 3-for-3 match if only the slice is scanned). Any group
+    whose true, full-diff run continues past what's visible is excluded
+    entirely, not partially highlighted — an unequal-length replace must
+    never get intra-line treatment, full diff or clipped.
 
     Returns a list of ``(minus_start, plus_start, group_size)`` triples: the
     index of the first ``-`` line, the index of the first ``+`` line
@@ -772,7 +787,7 @@ def _equal_length_replace_groups(diff_lines: Sequence[str]) -> list[tuple[int, i
 
     groups: list[tuple[int, int, int]] = []
     i = 0
-    n = len(diff_lines)
+    n = min(limit, len(diff_lines))
     while i < n:
         if not diff_lines[i].startswith("-"):
             i += 1
@@ -780,11 +795,19 @@ def _equal_length_replace_groups(diff_lines: Sequence[str]) -> list[tuple[int, i
         minus_start = i
         while i < n and diff_lines[i].startswith("-"):
             i += 1
+        if i >= n:
+            break  # the minus-run itself was truncated by the window; incomplete
         minus_count = i - minus_start
         plus_start = i
         while i < n and diff_lines[i].startswith("+"):
             i += 1
         plus_count = i - plus_start
+        if i == n and i < len(diff_lines) and diff_lines[i].startswith("+"):
+            # The plus-run reached the window boundary and the FULL diff has
+            # more "+" lines right after it — this group's true size is
+            # larger than what the slice shows, so treat it as incomplete
+            # rather than trust the possibly-false equal count above.
+            continue
         if minus_count == plus_count and minus_count > 0:
             groups.append((minus_start, plus_start, minus_count))
     return groups
@@ -878,17 +901,19 @@ def _split_range_across_lines(
 def _intra_line_highlight_map(diff_lines: Sequence[str]) -> dict[int, list[tuple[int, int]]]:
     """Word/char-level highlight ranges, keyed by index into ``diff_lines``.
 
-    Issue #111: finds every equal-length replace-group in the *previewed*
-    slice of ``diff_lines`` — :func:`_content_from_diff_lines` never renders
-    past ``diff_lines[:_DIFF_PREVIEW_LINES]`` (further cut by the byte
-    budget), so a group entirely beyond that window would cost real
-    ``SequenceMatcher`` work for a diff hunk the reader never sees. Scanning
-    the same prefix :func:`_content_from_diff_lines` keeps means this can
-    only ever compute ranges for lines that will actually render — a group
-    straddling the boundary naturally fails the equal-length check once its
-    other side falls outside the slice (an unequal run count is just as safe
-    a "no highlight" outcome as an out-of-range one), so no extra boundary
-    handling is needed here.
+    Issue #111: finds every equal-length replace-group ending within the
+    *previewed* window of ``diff_lines`` — :func:`_content_from_diff_lines`
+    never renders past ``diff_lines[:_DIFF_PREVIEW_LINES]`` (further cut by
+    the byte budget), so a group entirely beyond that window would cost real
+    ``SequenceMatcher`` work for a diff hunk the reader never sees.
+    :func:`_equal_length_replace_groups` is given the FULL ``diff_lines``
+    plus the window's ``limit``, not a pre-sliced list — a group whose
+    ``+``-run is merely cut off exactly at the window boundary can look
+    artificially equal-length within a naive slice alone (a genuine 3-for-4
+    unequal replace, truncated after its third ``+`` line, would otherwise
+    read as a false 3-for-3 match), so the boundary itself needs the
+    look-past-the-window check :func:`_equal_length_replace_groups` does
+    internally, not just a slice.
 
     For each group still within :func:`_intra_line_ranges_for_group`'s size
     guard, computes the specific changed sub-span within each of its lines. A
@@ -902,9 +927,9 @@ def _intra_line_highlight_map(diff_lines: Sequence[str]) -> dict[int, list[tuple
     line when building its styled segments.
     """
 
-    previewed = diff_lines[:_DIFF_PREVIEW_LINES]
     highlight_map: dict[int, list[tuple[int, int]]] = {}
-    for minus_start, plus_start, size in _equal_length_replace_groups(previewed):
+    groups = _equal_length_replace_groups(diff_lines, limit=_DIFF_PREVIEW_LINES)
+    for minus_start, plus_start, size in groups:
         old_stripped = [
             _strip_terminator_note(diff_lines[minus_start + k][1:])[0] for k in range(size)
         ]

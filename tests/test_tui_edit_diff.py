@@ -1016,6 +1016,38 @@ def test_intra_line_highlight_never_scans_a_group_entirely_past_the_preview(
     assert calls[0] == (["old0"], ["new0"])
 
 
+def test_intra_line_highlight_does_not_treat_a_truncated_replace_as_equal_length() -> None:
+    # P2 regression guard: a genuinely UNEQUAL-length replace (3 deleted
+    # lines, 4 added lines) whose "+" run is cut off exactly at the preview
+    # window boundary must never be highlighted — scanning only the clipped
+    # slice would see 3 "-" lines followed by 3 visible "+" lines (the 4th
+    # "+" line falls outside the window) and misread it as a false 3-for-3
+    # equal-length group. _equal_length_replace_groups must look past the
+    # window to see the 4th "+" line still belongs to the same run and
+    # exclude the whole group, not partially highlight it.
+    old = "ctx\nA\nB\nC"
+    new = "ctx\nA2\nB2\nC2\nD2"
+    content = render_edit_diff(_edit((old, new)))
+
+    assert content is not None
+    assert _bold_spans(content) == []
+
+
+def test_intra_line_highlight_still_applies_when_equal_length_group_ends_at_diff_end() -> None:
+    # Companion to the truncation-false-positive guard above: a group whose
+    # "+" run happens to end exactly where the whole diff ends (genuinely
+    # equal-length, not cut off by the preview window — there's nothing more
+    # after it in the FULL diff either) must still get highlighted. Proves
+    # the look-past-the-window check distinguishes "truncated by the window"
+    # from "the diff naturally ends here".
+    old = "ctx\nA\nB\nC"
+    new = "ctx\nA2\nB2\nC2"  # exactly 3-for-3, nothing follows
+    content = render_edit_diff(_edit((old, new)))
+
+    bold_text = {text for text, _ in _bold_spans(content)}
+    assert bold_text == {"2"}
+
+
 def test_intra_line_highlight_style_is_distinguishable_without_color() -> None:
     # The non-color-cue acceptance criterion, directly: the highlighted span's
     # style carries the bold modifier; the surrounding whole-line span at the
