@@ -305,6 +305,24 @@ def test_denied_and_error_tool_cards_have_distinct_glyph_and_label() -> None:
     assert _ROLE_LABELS[error_role]
 
 
+def test_cancelled_tool_card_label_does_not_read_denied() -> None:
+    # Regression (P2 review on #76's denied/error fix): "cancelled" shares
+    # "denied"'s CSS role class intentionally (same left-rule color and glyph
+    # family — both mean "stopped by a decision, not a failure"), but a
+    # cancelled tool call was never actually denied approval. Its
+    # border-title must come from ToolCard._STATUS_LABELS's status-keyed
+    # override, not fall through to _ROLE_LABELS[role] and read "denied".
+    from wisp.tui.widgets import _ROLE_LABELS, ToolCard
+
+    _, cancelled_role = ToolCard._STATUS["cancelled"]
+    resolved_title = ToolCard._STATUS_LABELS.get(
+        "cancelled", _ROLE_LABELS.get(cancelled_role, "tool")
+    )
+
+    assert resolved_title == "cancelled"
+    assert resolved_title != _ROLE_LABELS["denied"]
+
+
 def test_fullscreen_tui_renderer_messages_do_not_infer_footer_state() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
     renderer.view_updated(

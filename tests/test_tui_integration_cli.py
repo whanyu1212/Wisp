@@ -1999,6 +1999,27 @@ def test_textual_denied_and_error_tool_cards_render_distinct_glyphs() -> None:
     assert denied_title != error_title
 
 
+def test_textual_cancelled_tool_card_border_title_is_not_denied() -> None:
+    # Regression (P2 review on #76's denied/error fix): cancelled shares
+    # denied's CSS role class intentionally, but fail_pending_tool_calls()
+    # (the real live-app path that produces a "cancelled" status, e.g. on
+    # renderer.cancelled()) must not leave the card's border_title reading
+    # "denied" — a cancelled tool call was never actually denied approval.
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="a", name="read_file", arguments={}))
+            await pilot.pause()
+            renderer.cancelled()
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            return str(card.border_title)
+
+    title = anyio.run(scenario)
+    assert title == "cancelled"
+    assert title != "denied"
+
+
 def test_textual_line_message_border_title_from_role_labels() -> None:
     # Stage 3: the card's role label comes ONLY from _ROLE_LABELS (fixed literals),
     # never from untrusted payload — so it's safe as border chrome.
