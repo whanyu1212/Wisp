@@ -273,6 +273,19 @@ def test_tui_footer_line_two_still_protects_status_over_model() -> None:
     assert len(long_status_lines[1]) <= 40
 
 
+def test_tui_notice_role_uses_a_distinct_color_from_tool() -> None:
+    # Issue #72: notice and tool previously shared the accent color, making
+    # them visually identical. notice now uses the (previously unused)
+    # warning token instead, in both themes.
+    from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT, role_styles
+
+    for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
+        styles = role_styles(theme)
+        assert styles["notice"] != styles["tool"]
+        assert theme.warning in styles["notice"]
+        assert theme.accent in styles["tool"]
+
+
 def test_fullscreen_tui_renderer_messages_do_not_infer_footer_state() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
     renderer.view_updated(

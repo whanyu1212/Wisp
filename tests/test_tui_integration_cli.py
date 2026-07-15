@@ -3477,6 +3477,85 @@ def test_textual_slash_menu_is_anchored_near_the_input() -> None:
     assert abs(menu_bottom - input_y) <= 6
 
 
+@pytest.mark.parametrize("size", [(120, 40), (100, 30), (80, 24), (72, 20)])
+def test_textual_slash_suggest_stays_anchored_near_the_input_at_every_breakpoint(
+    size: tuple[int, int],
+) -> None:
+    # Issue #72's command-overlay-placement acceptance criterion, generalized
+    # across all four required breakpoints: same invariants as the 80x24-only
+    # test_textual_slash_menu_is_anchored_near_the_input above (menu in the
+    # lower half, adjacent to the input, within the same tolerance — that
+    # test found the gap is the #composer panel's own border + status-divider
+    # rows, not overlap; it holds unchanged at every breakpoint).
+    async def scenario() -> tuple[int, int, int, int]:
+        app_instance = TextualTui()
+        async with app_instance.run_test(size=size) as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+            await pilot.press("/")
+            await pilot.pause()
+            return (
+                suggest.region.y,
+                suggest.region.y + suggest.region.height,
+                input_widget.region.y,
+                suggest.region.width,
+            )
+
+    menu_top, menu_bottom, input_y, menu_width = anyio.run(scenario)
+    height, width = size[1], size[0]
+    assert menu_top >= height // 2
+    assert abs(menu_bottom - input_y) <= 6
+    assert menu_width <= width  # never overflows the viewport
+
+
+@pytest.mark.parametrize("size", [(120, 40), (100, 30), (80, 24), (72, 20)])
+def test_textual_slash_suggest_fits_within_the_terminal_width(size: tuple[int, int]) -> None:
+    # SlashSuggest.on_resize clamps max-width to the screen, so the menu
+    # (border + padding included) never overflows the viewport even at the
+    # 72-column breakpoint, where the unclamped 60-column ceiling would be
+    # uncomfortably close to the full width.
+    async def scenario() -> int:
+        app_instance = TextualTui()
+        async with app_instance.run_test(size=size) as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+            await pilot.press("/")
+            await pilot.pause()
+            return suggest.region.right
+
+    menu_right = anyio.run(scenario)
+    assert menu_right <= size[0]
+
+
+def test_textual_slash_suggest_aligns_command_and_description_columns() -> None:
+    # Descriptions of different-length commands (e.g. /help vs /provider)
+    # must start at the same column, not a literal two-space join that drifts
+    # per command length.
+    from wisp.tui.commands import SLASH_COMMAND_SPECS
+
+    async def scenario() -> list[str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+            await pilot.press("/")
+            await pilot.pause()
+            return [str(suggest.get_option_at_index(i).prompt) for i in range(suggest.option_count)]
+
+    prompts = anyio.run(scenario)
+    assert len(prompts) == len(SLASH_COMMAND_SPECS)
+    name_width = max(len(spec.command) for spec in SLASH_COMMAND_SPECS)
+
+    for spec, prompt in zip(SLASH_COMMAND_SPECS, prompts, strict=True):
+        assert prompt == f"{spec.command:<{name_width}}  {spec.description}"
+
+
 def test_textual_tab_completes_highlighted_command() -> None:
     # Tab fills the highlighted command: a trailing space for arg-taking commands
     # (so the user types the value), none for arg-less ones.

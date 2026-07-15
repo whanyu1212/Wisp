@@ -51,7 +51,7 @@ WISP_THEMES = (WISP_THEME_DARK, WISP_THEME_LIGHT)
 # the label reads bold. Kept as attribute names, not literal colors, so a theme
 # switch re-derives the whole palette from role_styles().
 _ROLE_COLOR_ATTR: dict[str, str] = {
-    "notice": "accent",
+    "notice": "warning",
     "error": "error",
     "dim": "secondary",
     "user": "primary",
