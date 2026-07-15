@@ -63,6 +63,15 @@ _DIFF_ADD_STYLE = "$text-success on $success-muted"
 _DIFF_DEL_STYLE = "$text-error on $error-muted"
 _DIFF_META_STYLE = "$text-muted"
 
+# Issue #111: the intra-line (word/char-level) highlight is a second,
+# additive non-color cue layered on top of the whole-line add/delete style
+# above — not a replacement for it, and not the diff's only non-color cue
+# (the +/- marker, preserved verbatim in the line text, already is one).
+# Bold rather than a new color: it survives Textual's NO_COLOR/Monochrome
+# conversion (a text-weight attribute, not a color) and matches the existing
+# in-repo precedent for non-color emphasis (theme.py's _BOLD_ROLES).
+_DIFF_INTRA_HIGHLIGHT_MODIFIER = "bold"
+
 # A colored diff is bounded like the other previews so one giant edit can't flood
 # the transcript; the tail metadata stays honest about what was hidden.
 _DIFF_PREVIEW_LINES = _TOOL_OUTPUT_PREVIEW_LINES
@@ -116,6 +125,20 @@ _DIFF_MAX_HUNK_CHARS = 1_000_000
 # allocation (thousands of near-1M-char single-line changes), so cap the aggregate
 # too — the character mirror of _DIFF_MAX_TOTAL_LINES.
 _DIFF_MAX_TOTAL_CHARS = 2_000_000
+
+# Issue #111: a second, independent guard for the intra-line (word/char-level)
+# highlighting pass. This pass runs a character-level SequenceMatcher over the
+# *joined* block of an equal-length replace-group's lines — a different
+# comparison unit (one character, not one line) than the line-level matcher
+# above, so it is NOT bounded by _DIFF_MAX_HUNK_LINES/_DIFF_MAX_HUNK_CHARS:
+# measured directly, a 100-150 line equal-length replace block already costs
+# 0.4-0.6s on its own, well within what the line-level ceilings would still
+# admit. This ceiling is deliberately much tighter than the line-level one and
+# applies PER REPLACE-GROUP, not per hunk or aggregate — exceeding it skips
+# intra-line highlighting for that group only (falls back to the existing
+# whole-line-only styling), it never rejects the surrounding diff.
+_INTRA_LINE_MAX_GROUP_LINES = 60
+_INTRA_LINE_MAX_GROUP_CHARS = 12_000
 
 # The single-character boundaries ``str.splitlines`` breaks on. The work guard
 # below must count boundaries the SAME way the diff later splits them, or an input
@@ -460,13 +483,14 @@ def _render_diff_content(
     if _edit_input_too_large([(old, new) for _, old, new in changed]):
         return None
 
-    diff_lines = _unified_diff_lines(changed, multi=multi)
+    diff_lines, note_lengths = _unified_diff_lines(changed, multi=multi)
     if not diff_lines:
         # Every changed hunk diffed to nothing (only line-terminator-invisible
         # differences difflib collapses). Fall back to the generic summary.
         return None
 
-    diff = _content_from_diff_lines(diff_lines)
+    intra_line_ranges = _intra_line_highlight_map(diff_lines, note_lengths)
+    diff = _content_from_diff_lines(diff_lines, intra_line_ranges)
 
     # Lead with the file path so a resolved card names its file — the diff replaces
     # the argument summary, which otherwise carried the path. It's metadata, not a
@@ -608,7 +632,9 @@ def _edit_input_too_large(hunks: Sequence[tuple[str, str]]) -> bool:
     return False
 
 
-def _unified_diff_lines(hunks: Sequence[tuple[int, str, str]], *, multi: bool) -> list[str]:
+def _unified_diff_lines(
+    hunks: Sequence[tuple[int, str, str]], *, multi: bool
+) -> tuple[list[str], list[int]]:
     """Unified-diff lines across changed hunks, with a per-hunk label when multiple.
 
     ``hunks`` are ``(label, old, new)`` triples for the *changed* hunks only,
@@ -622,21 +648,32 @@ def _unified_diff_lines(hunks: Sequence[tuple[int, str, str]], *, multi: bool) -
 
     A hunk whose difference is invisible to difflib (only a collapsed line
     terminator) contributes nothing — not even a label — so it is skipped here too.
+
+    Returns ``(lines, note_lengths)``: ``note_lengths[i]`` is the number of
+    trailing characters of ``lines[i]`` that :func:`_terminator_note` actually
+    appended (0 for context/``@@`` lines and for changed lines that got no
+    annotation) — a caller that needs a changed line's *real* content (e.g.
+    the intra-line matcher) must slice off exactly this many characters, not
+    pattern-match against the annotation vocabulary, since real file content
+    can coincidentally end with the same text (see issue #111's follow-up).
     """
 
     lines: list[str] = []
+    note_lengths: list[int] = []
     for label, old, new in hunks:
-        body = _single_hunk_lines(old, new)
+        body, body_note_lengths = _single_hunk_lines(old, new)
         if not body:
             continue  # difflib found nothing to show — no label, no body
         if multi:
             lines.append(f"@@ edit {label} @@")
+            note_lengths.append(0)
         lines.extend(body)
-    return lines
+        note_lengths.extend(body_note_lengths)
+    return lines, note_lengths
 
 
-def _single_hunk_lines(old: str, new: str) -> list[str]:
-    """Unified-diff body lines for one hunk, or an empty list when unchanged.
+def _single_hunk_lines(old: str, new: str) -> tuple[list[str], list[int]]:
+    """Unified-diff body lines for one hunk, or ``([], [])`` when unchanged.
 
     Splits with ``keepends=True`` so a change confined to line terminators — a
     dropped trailing newline, a CRLF↔LF conversion — makes the affected lines
@@ -645,6 +682,10 @@ def _single_hunk_lines(old: str, new: str) -> list[str]:
     each rendered line (so the display stays one entry per line) but its *kind*
     is annotated when notable, so ``a`` → ``a\\n`` reads differently from its
     reverse instead of both rendering as an unexplained ``-a`` / ``+a``.
+
+    Returns the body lines alongside an index-aligned list of how many
+    trailing characters of each line are the appended annotation (0 when
+    none) — see :func:`_unified_diff_lines`.
     """
 
     diff = difflib.unified_diff(
@@ -654,6 +695,7 @@ def _single_hunk_lines(old: str, new: str) -> list[str]:
         n=2,
     )
     body: list[str] = []
+    note_lengths: list[int] = []
     seen_hunk = False
     for line in diff:
         if line.startswith("@@"):
@@ -663,6 +705,7 @@ def _single_hunk_lines(old: str, new: str) -> list[str]:
             # line ``-- comment`` with difflib's ``-`` marker) shares that prefix.
             seen_hunk = True
             body.append(line)
+            note_lengths.append(0)
             continue
         if not seen_hunk:
             continue  # difflib's blank file headers, positionally before any hunk
@@ -672,8 +715,10 @@ def _single_hunk_lines(old: str, new: str) -> list[str]:
         # self-describing.
         marker = line[:1]
         content = line[1:]
-        body.append(marker + content.rstrip("\r\n") + _terminator_note(marker, content))
-    return body
+        note = _terminator_note(marker, content)
+        body.append(marker + content.rstrip("\r\n") + note)
+        note_lengths.append(len(note))
+    return body, note_lengths
 
 
 def _terminator_note(marker: str, content: str) -> str:
@@ -705,7 +750,230 @@ def _terminator_note(marker: str, content: str) -> str:
     return "  ⏎ no newline"
 
 
-def _content_from_diff_lines(diff_lines: Sequence[str]) -> Content:
+def _equal_length_replace_groups(
+    diff_lines: Sequence[str], *, limit: int
+) -> list[tuple[int, int, int]]:
+    """Indices of equal-length replace-groups within ``diff_lines[:limit]``.
+
+    A "replace-group" is a contiguous run of ``-``-prefixed lines immediately
+    followed (no intervening context/``@@`` line) by a contiguous run of
+    ``+``-prefixed lines. This scan over the already-produced, marker-prefixed
+    line list is exactly equivalent to grouping on ``difflib``'s own opcodes —
+    unified-diff text output serializes a replace-group as contiguous marker
+    runs by construction — so it needs no access to ``difflib``'s internal
+    opcodes and touches none of the existing diff-building functions.
+
+    ``diff_lines`` is the FULL, unclipped line list; ``limit`` is where the
+    caller's preview window ends (matching :func:`_content_from_diff_lines`'s
+    ``diff_lines[:_DIFF_PREVIEW_LINES]``). The scan only considers lines
+    within ``limit``, but for a group whose ``+``-run reaches exactly the
+    boundary, it also checks ``diff_lines`` PAST ``limit`` for more ``+``
+    lines belonging to the same run — a group truncated by the preview
+    window can look artificially equal-length within the slice alone (e.g. a
+    genuine 3-deleted/4-added replace, cut off after the third ``+`` line,
+    reads as a false 3-for-3 match if only the slice is scanned). Any group
+    whose true, full-diff run continues past what's visible is excluded
+    entirely, not partially highlighted — an unequal-length replace must
+    never get intra-line treatment, full diff or clipped.
+
+    Returns a list of ``(minus_start, plus_start, group_size)`` triples: the
+    index of the first ``-`` line, the index of the first ``+`` line
+    (``minus_start + group_size``), and the equal run length N on both sides.
+    Runs of unequal length, insert-only, or delete-only spans are not
+    returned — they keep the existing whole-line-only treatment.
+    """
+
+    groups: list[tuple[int, int, int]] = []
+    i = 0
+    n = min(limit, len(diff_lines))
+    while i < n:
+        if not diff_lines[i].startswith("-"):
+            i += 1
+            continue
+        minus_start = i
+        while i < n and diff_lines[i].startswith("-"):
+            i += 1
+        if i >= n:
+            break  # the minus-run itself was truncated by the window; incomplete
+        minus_count = i - minus_start
+        plus_start = i
+        while i < n and diff_lines[i].startswith("+"):
+            i += 1
+        plus_count = i - plus_start
+        if i == n and i < len(diff_lines) and diff_lines[i].startswith("+"):
+            # The plus-run reached the window boundary and the FULL diff has
+            # more "+" lines right after it — this group's true size is
+            # larger than what the slice shows, so treat it as incomplete
+            # rather than trust the possibly-false equal count above.
+            continue
+        if minus_count == plus_count and minus_count > 0:
+            groups.append((minus_start, plus_start, minus_count))
+    return groups
+
+
+def _intra_line_ranges_for_group(
+    old_lines: Sequence[str], new_lines: Sequence[str]
+) -> tuple[list[list[tuple[int, int]]], list[list[tuple[int, int]]]] | None:
+    """Per-line highlight ranges for one equal-length replace-group, or None.
+
+    ``old_lines``/``new_lines`` are the group's real line content (marker and
+    terminator-note suffix already stripped by the caller), N entries each.
+    Returns ``None`` when the group exceeds :data:`_INTRA_LINE_MAX_GROUP_LINES`
+    / :data:`_INTRA_LINE_MAX_GROUP_CHARS` — the caller must then render the
+    group with the existing whole-line-only styling, not retry with a smaller
+    input. This is a refuse-to-start guard computed from cheap length
+    arithmetic, matching :func:`_edit_input_too_large`'s philosophy: the
+    matcher's cost is paid on first consumption and cannot be bounded after
+    the fact.
+
+    Joins each side into one string (mirroring toad's ``textual-diff-view``
+    technique) and runs a single character-level ``SequenceMatcher`` over the
+    joined pair, then splits the resulting opcodes back into per-original-line
+    ranges. Both sides get their own ranges — the removed span within each old
+    line, and the added span within each new line — not "new side only".
+    """
+
+    if len(old_lines) > _INTRA_LINE_MAX_GROUP_LINES:
+        return None
+    old_joined = "\n".join(old_lines)
+    new_joined = "\n".join(new_lines)
+    if (
+        len(old_joined) > _INTRA_LINE_MAX_GROUP_CHARS
+        or len(new_joined) > _INTRA_LINE_MAX_GROUP_CHARS
+    ):
+        return None
+
+    matcher = difflib.SequenceMatcher(
+        lambda character: character in " \t", old_joined, new_joined, autojunk=True
+    )
+    old_ranges: list[list[tuple[int, int]]] = [[] for _ in old_lines]
+    new_ranges: list[list[tuple[int, int]]] = [[] for _ in new_lines]
+    old_offsets = _cumulative_line_offsets(old_lines)
+    new_offsets = _cumulative_line_offsets(new_lines)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("delete", "replace") and i2 > i1:
+            _split_range_across_lines(i1, i2, old_offsets, old_ranges)
+        if tag in ("insert", "replace") and j2 > j1:
+            _split_range_across_lines(j1, j2, new_offsets, new_ranges)
+    return old_ranges, new_ranges
+
+
+def _cumulative_line_offsets(lines: Sequence[str]) -> list[int]:
+    """Start offset of each line within its ``"\\n"``-joined string.
+
+    ``offsets[k]`` is where ``lines[k]`` begins in ``"\\n".join(lines)`` — each
+    line's own length plus one separator character after every line but the
+    last.
+    """
+
+    offsets: list[int] = []
+    pos = 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line) + 1  # +1 for the "\n" joiner (harmless past the end)
+    return offsets
+
+
+def _split_range_across_lines(
+    start: int, end: int, line_offsets: Sequence[int], out: list[list[tuple[int, int]]]
+) -> None:
+    """Distribute a joined-string ``[start, end)`` range onto per-line ``out``.
+
+    A ``SequenceMatcher`` opcode range operates on the joined multi-line
+    string and can span a ``"\\n"`` separator (spilling across an original
+    line boundary); this clips the range at each line's bounds so no
+    highlight span is ever attributed to the wrong line or bleeds across the
+    separator into style it shouldn't own.
+    """
+
+    for index, line_start in enumerate(line_offsets):
+        line_end = (
+            line_offsets[index + 1] - 1 if index + 1 < len(line_offsets) else line_start + 10**9
+        )
+        clipped_start = max(start, line_start)
+        clipped_end = min(end, line_end)
+        if clipped_start < clipped_end:
+            out[index].append((clipped_start - line_start, clipped_end - line_start))
+
+
+def _line_content_without_note(line: str, note_length: int) -> str:
+    """A diff line's real content: marker character and known note stripped.
+
+    ``note_length`` is the exact count from :func:`_unified_diff_lines`, not
+    a guess — see :func:`_intra_line_highlight_map` for why pattern-matching
+    the annotation vocabulary against arbitrary line content is unsafe.
+    """
+
+    content = line[1:]
+    return content[: len(content) - note_length] if note_length else content
+
+
+def _intra_line_highlight_map(
+    diff_lines: Sequence[str], note_lengths: Sequence[int]
+) -> dict[int, list[tuple[int, int]]]:
+    """Word/char-level highlight ranges, keyed by index into ``diff_lines``.
+
+    Issue #111: finds every equal-length replace-group ending within the
+    *previewed* window of ``diff_lines`` — :func:`_content_from_diff_lines`
+    never renders past ``diff_lines[:_DIFF_PREVIEW_LINES]`` (further cut by
+    the byte budget), so a group entirely beyond that window would cost real
+    ``SequenceMatcher`` work for a diff hunk the reader never sees.
+    :func:`_equal_length_replace_groups` is given the FULL ``diff_lines``
+    plus the window's ``limit``, not a pre-sliced list — a group whose
+    ``+``-run is merely cut off exactly at the window boundary can look
+    artificially equal-length within a naive slice alone (a genuine 3-for-4
+    unequal replace, truncated after its third ``+`` line, would otherwise
+    read as a false 3-for-3 match), so the boundary itself needs the
+    look-past-the-window check :func:`_equal_length_replace_groups` does
+    internally, not just a slice.
+
+    For each group still within :func:`_intra_line_ranges_for_group`'s size
+    guard, computes the specific changed sub-span within each of its lines. A
+    group over the guard, or a replace whose line counts differ (or an
+    insert/delete-only span), simply contributes no entries — those lines
+    keep the existing whole-line-only styling untouched.
+
+    ``note_lengths`` is :func:`_unified_diff_lines`'s index-aligned count of
+    each line's actually-appended :func:`_terminator_note` suffix (0 when
+    none). Slicing exactly that many trailing characters off — rather than
+    pattern-matching the line against the annotation vocabulary — is the only
+    safe way to isolate a changed line's real content: real file content can
+    coincidentally end with text identical to an annotation's spelling (e.g.
+    a line literally ending in the text ``"  ⏎ CRLF"``), and pattern-matching
+    would strip that real content too, hiding it from the matcher entirely.
+
+    Each returned range is relative to the line's *content* — after the
+    leading ``+``/``-`` marker and before its known-length terminator-note
+    suffix — matching how :func:`_content_from_diff_lines` will need to slice
+    the line when building its styled segments.
+    """
+
+    highlight_map: dict[int, list[tuple[int, int]]] = {}
+    groups = _equal_length_replace_groups(diff_lines, limit=_DIFF_PREVIEW_LINES)
+    for minus_start, plus_start, size in groups:
+        old_stripped = [
+            _line_content_without_note(diff_lines[minus_start + k], note_lengths[minus_start + k])
+            for k in range(size)
+        ]
+        new_stripped = [
+            _line_content_without_note(diff_lines[plus_start + k], note_lengths[plus_start + k])
+            for k in range(size)
+        ]
+        result = _intra_line_ranges_for_group(old_stripped, new_stripped)
+        if result is None:
+            continue
+        old_ranges, new_ranges = result
+        for k in range(size):
+            if old_ranges[k]:
+                highlight_map[minus_start + k] = old_ranges[k]
+            if new_ranges[k]:
+                highlight_map[plus_start + k] = new_ranges[k]
+    return highlight_map
+
+
+def _content_from_diff_lines(
+    diff_lines: Sequence[str], intra_line_ranges: dict[int, list[tuple[int, int]]] | None = None
+) -> Content:
     """Bounded ``Content`` from prefixed diff lines, colored by add/delete/meta.
 
     Bounds the diff on *both* axes — line count and byte size — so neither a
@@ -740,11 +1008,61 @@ def _content_from_diff_lines(diff_lines: Sequence[str]) -> Content:
     for offset, line in enumerate(kept):
         if offset:
             content += Content("\n")
-        content += Content.styled(line, _diff_line_style(line))
+        ranges = (intra_line_ranges or {}).get(offset)
+        if ranges:
+            content += _styled_line_with_intra_highlights(line, ranges, _diff_line_style(line))
+        else:
+            content += Content.styled(line, _diff_line_style(line))
 
     trailer = _hidden_trailer(hidden_lines, hidden_bytes)
     if trailer is not None:
         content += Content("\n") + Content.styled(trailer, _DIFF_META_STYLE)
+    return content
+
+
+def _styled_line_with_intra_highlights(
+    line: str, ranges: Sequence[tuple[int, int]], base_style: str
+) -> Content:
+    """A diff line's ``Content``, with ``ranges`` bold on top of ``base_style``.
+
+    ``ranges`` are offsets into the line's *content* (after the leading
+    ``+``/``-`` marker) as computed by :func:`_intra_line_highlight_map` —
+    against the FULL, unclipped line. This line may have since been clipped
+    to the byte-preview budget by the caller, so every range is clamped to
+    the line's actual (possibly shorter) length here; a range entirely past
+    the clip point contributes nothing, and one straddling it is truncated.
+
+    Builds the line as several concatenated ``Content.styled`` segments — an
+    unhighlighted segment, a bold-modified highlighted segment, repeating —
+    rather than one call for the whole line, so each segment gets its own
+    independent style span (verified: concatenating ``Content.styled`` calls
+    produces correctly offset, independent spans). A line with no highlight
+    range never reaches this function, so the common case is unaffected.
+    """
+
+    marker_width = 1 if line[:1] in ("+", "-") else 0
+    line_len = len(line)
+    highlighted_style = f"{base_style} {_DIFF_INTRA_HIGHLIGHT_MODIFIER}".strip()
+
+    segments: list[tuple[int, int, bool]] = []  # (start, end, is_highlighted)
+    cursor = marker_width
+    for start, end in sorted(ranges):
+        abs_start = min(marker_width + start, line_len)
+        abs_end = min(marker_width + end, line_len)
+        if abs_end <= cursor or abs_start >= abs_end:
+            continue
+        abs_start = max(abs_start, cursor)
+        if abs_start > cursor:
+            segments.append((cursor, abs_start, False))
+        segments.append((abs_start, abs_end, True))
+        cursor = abs_end
+    if cursor < line_len:
+        segments.append((cursor, line_len, False))
+
+    content = Content.styled(line[:marker_width], base_style) if marker_width else Content("")
+    for start, end, is_highlighted in segments:
+        style = highlighted_style if is_highlighted else base_style
+        content += Content.styled(line[start:end], style)
     return content
 
 

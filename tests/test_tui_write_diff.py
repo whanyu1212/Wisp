@@ -61,6 +61,20 @@ def test_render_write_diff_leads_with_path_header() -> None:
     assert _DIFF_META_STYLE in _styles_at(content, "pkg/mod.py")
 
 
+def test_render_write_diff_equal_length_replace_highlights_changed_token() -> None:
+    # Confirmatory only (issue #111): render_write_diff shares
+    # _render_diff_content with render_edit_diff, which already has the full
+    # test coverage for this feature — this proves the write path benefits
+    # too, without re-deriving every edge case.
+    content = render_write_diff("return old_value\n", _write("return new_value\n"))
+    assert isinstance(content, Content)
+    bold_text = {
+        content.plain[span.start : span.end] for span in content.spans if "bold" in str(span.style)
+    }
+    assert "old" in bold_text
+    assert "new" in bold_text
+
+
 # --- render_write_diff: create (no prior content) ---------------------------
 
 

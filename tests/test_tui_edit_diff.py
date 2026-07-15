@@ -13,6 +13,7 @@ from textual.content import Content
 from wisp.tui.tool_output import (
     _DIFF_ADD_STYLE,
     _DIFF_DEL_STYLE,
+    _DIFF_INTRA_HIGHLIGHT_MODIFIER,
     _DIFF_MAX_HUNK_CHARS,
     _DIFF_MAX_HUNK_LINES,
     _DIFF_MAX_TOTAL_CHARS,
@@ -20,6 +21,8 @@ from wisp.tui.tool_output import (
     _DIFF_META_STYLE,
     _DIFF_PREVIEW_BYTES,
     _DIFF_PREVIEW_LINES,
+    _INTRA_LINE_MAX_GROUP_CHARS,
+    _INTRA_LINE_MAX_GROUP_LINES,
     _clip_line_to_bytes,
     _unified_diff_lines,
     render_edit_diff,
@@ -102,12 +105,21 @@ def test_render_edit_diff_markup_in_content_stays_literal() -> None:
 
 
 def test_render_edit_diff_injected_markup_carries_only_the_add_style() -> None:
-    # The injected line is styled solely by the out-of-band add span; the markup
-    # inside it produced no additional spans (it was never parsed).
+    # The injected line is styled solely by the out-of-band add span (plus,
+    # since "old" -> "[red]evil[/red]" is a same-line-count replace, issue
+    # #111's legitimate intra-line bold variant on the changed sub-span) —
+    # the markup text itself produced no additional, unexpected spans (it was
+    # never parsed).
     injected = "[red]evil[/red]"
     content = render_edit_diff(_edit(("old", injected)))
-    styles = _styles_at(content, injected)
-    assert styles == {_DIFF_ADD_STYLE}
+    styles = {
+        str(span.style)
+        for span in content.spans
+        if injected in content.plain[span.start : span.end]
+        or content.plain[span.start : span.end] in injected
+    }
+    assert styles <= {_DIFF_ADD_STYLE, f"{_DIFF_ADD_STYLE} bold"}
+    assert styles  # sanity: the injected text was actually styled at all
 
 
 # --- Defensive parsing: malformed args fall back (None) -----------------------
@@ -308,10 +320,8 @@ def test_render_edit_diff_bounds_single_enormous_line() -> None:
     # Total diff-line content bytes (what the renderer measures against the budget)
     # and what actually survived in the rendered body. A single changed hunk
     # (label 1, non-multi) mirrors what render_edit_diff feeds the builder.
-    total_bytes = sum(
-        len(line.encode("utf-8"))
-        for line in _unified_diff_lines([(1, old, old + "y")], multi=False)
-    )
+    diff_lines, _note_lengths = _unified_diff_lines([(1, old, old + "y")], multi=False)
+    total_bytes = sum(len(line.encode("utf-8")) for line in diff_lines)
     kept_bytes = sum(
         len(line.encode("utf-8"))
         for line in content.plain.split("\n")
@@ -770,6 +780,314 @@ def test_render_tool_result_oversize_edit_falls_back_to_generic() -> None:
     )
     assert isinstance(result, str)
     assert "Applied 1 edit" in result
+
+
+# --- Intra-line highlighting: equal-length replace groups (issue #111) --------
+
+
+def _bold_spans(content: Content) -> list[tuple[str, str]]:
+    """(substring, style) for every span whose style carries the bold modifier."""
+
+    return [
+        (content.plain[span.start : span.end], str(span.style))
+        for span in content.spans
+        if _DIFF_INTRA_HIGHLIGHT_MODIFIER in str(span.style).split()
+    ]
+
+
+def test_render_edit_diff_equal_length_replace_highlights_changed_token() -> None:
+    # A single-word change in a 1-line -> 1-line replace: the changed word is
+    # bold, the unchanged surrounding text is not.
+    content = render_edit_diff(_edit(("return old_value", "return new_value")))
+    bold = _bold_spans(content)
+    bold_text = {text for text, _ in bold}
+    assert "old" in bold_text
+    assert "new" in bold_text
+    assert "return " not in bold_text
+    assert "_value" not in bold_text
+
+
+def test_render_edit_diff_equal_length_replace_highlights_both_sides() -> None:
+    # Both the removed (old) and added (new) sub-spans get their own bold
+    # highlight — not "new side only".
+    content = render_edit_diff(_edit(("return old_value", "return new_value")))
+    bold = _bold_spans(content)
+    del_bold = [style for text, style in bold if text == "old"]
+    add_bold = [style for text, style in bold if text == "new"]
+    assert del_bold == [f"{_DIFF_DEL_STYLE} bold"]
+    assert add_bold == [f"{_DIFF_ADD_STYLE} bold"]
+
+
+def test_render_edit_diff_multi_line_equal_length_replace_highlights_only_changed_line() -> None:
+    content = render_edit_diff(_edit(("aaa\nbbb\nccc", "aaa\nBBB\nccc")))
+    bold_text = {text for text, _ in _bold_spans(content)}
+    assert bold_text == {"bbb", "BBB"}
+
+
+def test_render_edit_diff_unequal_length_replace_has_no_intra_line_highlight() -> None:
+    # A replace where old/new have different line counts must fall back to
+    # whole-line-only styling — no bold anywhere, matching toad's own guard.
+    content = render_edit_diff(_edit(("one line", "one line\nanother line")))
+    assert _bold_spans(content) == []
+    styles = {str(span.style) for span in content.spans}
+    assert styles <= {_DIFF_ADD_STYLE, _DIFF_DEL_STYLE, _DIFF_META_STYLE, ""}
+
+
+def test_render_edit_diff_insert_only_has_no_intra_line_highlight() -> None:
+    content = render_edit_diff(_edit(("keep", "keep\nadded")))
+    assert _bold_spans(content) == []
+
+
+def test_render_edit_diff_delete_only_has_no_intra_line_highlight() -> None:
+    content = render_edit_diff(_edit(("keep\nremoved", "keep")))
+    assert _bold_spans(content) == []
+
+
+def test_render_edit_diff_adjacent_replace_groups_with_different_lengths_do_not_merge() -> None:
+    # Two back-to-back replace-groups with no context line between them, one
+    # equal-length and one not: difflib's own get_grouped_opcodes would merge
+    # these into a single unequal-length replace, so NEITHER gets intra-line
+    # highlighting — a documented, accepted conservative trade-off, not a bug.
+    old = "aaa\nx1\nx2"
+    new = "aaa\ny1\ny2\ny3"
+    content = render_edit_diff(_edit((old, new)))
+    assert _bold_spans(content) == []
+
+
+def test_render_edit_diff_intra_line_highlight_survives_terminator_note() -> None:
+    # old has no trailing newline (annotated "no newline"); the intra-line
+    # highlight must never touch that annotation's text, only the real content.
+    content = render_edit_diff(_edit(("hello", "hallo\n")))
+    for text, _ in _bold_spans(content):
+        assert "⏎" not in text
+    bold_text = {text for text, _ in _bold_spans(content)}
+    assert bold_text == {"e", "a"}
+
+
+def test_render_edit_diff_intra_line_highlight_covers_text_matching_a_note_spelling() -> None:
+    # P3 regression guard: real file content that happens to end with the
+    # literal text of a terminator-note annotation (e.g. a line genuinely
+    # ending in "  ⏎ CRLF", both sides properly LF-terminated so no
+    # annotation is actually appended by _terminator_note here) must still
+    # be compared and highlighted like any other content — not silently
+    # stripped because it pattern-matches the annotation vocabulary. Both
+    # lines end with a real "\n", so _terminator_note appends nothing; the
+    # trailing "  ⏎ CRLF" text is genuine file content that changed.
+    old = "status  ⏎ CRLF\n"
+    new = "status\n"
+    content = render_edit_diff(_edit((old, new)))
+    bold_text = {text for text, _ in _bold_spans(content)}
+    assert bold_text == {"  ⏎ CRLF"}
+
+
+def test_intra_line_highlight_runs_below_its_ceiling(monkeypatch) -> None:
+    # A group comfortably under the per-group ceiling gets highlighted — the
+    # guard must not over-reject a normal small edit.
+    import wisp.tui.tool_output as mod
+
+    calls: list[tuple] = []
+    real = mod.difflib.SequenceMatcher
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod.difflib, "SequenceMatcher", spy)
+
+    content = render_edit_diff(_edit(("return old_value", "return new_value")))
+    # difflib.unified_diff itself calls SequenceMatcher once internally (the
+    # line-level diff), so one equal-length replace-group hunk costs exactly
+    # two SequenceMatcher calls total: one from unified_diff, one from
+    # _intra_line_ranges_for_group's own char-level pass.
+    assert len(calls) == 2
+    assert _bold_spans(content) != []
+
+
+def test_intra_line_ranges_for_group_respects_own_size_ceiling(monkeypatch) -> None:
+    # A group at/over the per-group line ceiling must return None — the
+    # caller then falls back to whole-line-only styling for that group.
+    # Exercises _intra_line_ranges_for_group directly rather than through the
+    # full render_edit_diff pipeline: at _INTRA_LINE_MAX_GROUP_LINES's actual
+    # value, a group that large would already be cut short by the much
+    # smaller _DIFF_PREVIEW_LINES preview window before _equal_length_replace
+    # _groups could ever see it as a complete, equal-count group — this test
+    # isolates the size-ceiling guard itself from that separate, tighter
+    # preview-window guard (see test_intra_line_highlight_skips_groups_past
+    # _the_preview_window / ..._never_scans_a_group_entirely_past_the_preview
+    # for that one).
+    import wisp.tui.tool_output as mod
+
+    calls: list[tuple] = []
+    real_matcher = mod.difflib.SequenceMatcher
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_matcher(*args, **kwargs)
+
+    monkeypatch.setattr(mod.difflib, "SequenceMatcher", spy)
+
+    old_lines = [f"old-{i}" for i in range(_INTRA_LINE_MAX_GROUP_LINES + 1)]
+    new_lines = [f"new-{i}" for i in range(_INTRA_LINE_MAX_GROUP_LINES + 1)]
+    result = mod._intra_line_ranges_for_group(old_lines, new_lines)
+
+    assert result is None
+    assert calls == []  # the matcher was never even started
+
+
+def test_render_edit_diff_large_group_falls_back_to_whole_line_via_preview_cutoff() -> None:
+    # End-to-end confirmation that an oversized equal-length replace group
+    # still renders as a real, whole-line-only diff (not None, not a crash) —
+    # in practice via the preview-window guard rather than the size ceiling,
+    # since the former is tighter for a single-hunk fixture at this scale.
+    old = _text_with_lines(_INTRA_LINE_MAX_GROUP_LINES + 1, "old-")
+    new = _text_with_lines(_INTRA_LINE_MAX_GROUP_LINES + 1, "new-")
+    content = render_edit_diff(_edit((old, new)))
+
+    assert content is not None
+    assert _bold_spans(content) == []
+    assert "old-0" in content.plain
+
+
+def test_intra_line_highlight_respects_own_char_ceiling(monkeypatch) -> None:
+    import wisp.tui.tool_output as mod
+
+    calls: list[tuple] = []
+    real = mod._intra_line_ranges_for_group
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_intra_line_ranges_for_group", spy)
+
+    # A single line whose length alone exceeds the char ceiling.
+    old = "a" * (_INTRA_LINE_MAX_GROUP_CHARS + 1)
+    new = "b" * (_INTRA_LINE_MAX_GROUP_CHARS + 1)
+    content = render_edit_diff(_edit((old, new)))
+
+    assert len(calls) == 1
+    assert content is not None
+    assert _bold_spans(content) == []
+
+
+def test_intra_line_highlight_skips_groups_past_the_preview_window(monkeypatch) -> None:
+    # P2 regression guard: intra-line matching must never run for a
+    # replace-group entirely beyond diff_lines[:_DIFF_PREVIEW_LINES] —
+    # _content_from_diff_lines never renders those lines, so computing
+    # ranges for them is wasted SequenceMatcher work a guard-admitted-but-
+    # hidden edit could otherwise use to block the TUI. Many small,
+    # independent equal-length replace-groups (separated by context lines so
+    # they don't merge into one big group), only the first of which falls
+    # inside the preview window.
+    import wisp.tui.tool_output as mod
+
+    calls: list[tuple] = []
+    real = mod._intra_line_ranges_for_group
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_intra_line_ranges_for_group", spy)
+
+    hunk_pairs = [
+        (f"context{i}\nold_word{i}\nmore_context{i}", f"context{i}\nnew_word{i}\nmore_context{i}")
+        for i in range(20)
+    ]
+    content = render_edit_diff(_edit(*hunk_pairs, path=""))
+
+    assert len(calls) == 1  # only the group inside the preview window was checked
+    assert content is not None
+    bold_text = {text for text, _ in _bold_spans(content)}
+    assert bold_text == {"old", "new"}  # the one visible group is still highlighted
+
+
+def test_intra_line_highlight_never_scans_a_group_entirely_past_the_preview(
+    monkeypatch,
+) -> None:
+    # Minimal, direct version of the P2 finding: a multi-edit diff where an
+    # earlier hunk's own lines push a later equal-length replace-group
+    # entirely past diff_lines[:_DIFF_PREVIEW_LINES] — that later group must
+    # never reach _intra_line_ranges_for_group at all, not "guarded and
+    # skipped past its own ceiling", genuinely never invoked for that group.
+    import wisp.tui.tool_output as mod
+
+    calls: list[tuple] = []
+    real = mod._intra_line_ranges_for_group
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_intra_line_ranges_for_group", spy)
+
+    # 5 independent equal-length-replace hunks; only the first is fully
+    # within the 8-line preview window (see the module-level constant).
+    hunks = [(f"ctx{i}\nold{i}", f"ctx{i}\nnew{i}") for i in range(5)]
+    render_edit_diff(_edit(*hunks, path=""))
+
+    assert len(calls) == 1
+    assert calls[0] == (["old0"], ["new0"])
+
+
+def test_intra_line_highlight_does_not_treat_a_truncated_replace_as_equal_length() -> None:
+    # P2 regression guard: a genuinely UNEQUAL-length replace (3 deleted
+    # lines, 4 added lines) whose "+" run is cut off exactly at the preview
+    # window boundary must never be highlighted — scanning only the clipped
+    # slice would see 3 "-" lines followed by 3 visible "+" lines (the 4th
+    # "+" line falls outside the window) and misread it as a false 3-for-3
+    # equal-length group. _equal_length_replace_groups must look past the
+    # window to see the 4th "+" line still belongs to the same run and
+    # exclude the whole group, not partially highlight it.
+    old = "ctx\nA\nB\nC"
+    new = "ctx\nA2\nB2\nC2\nD2"
+    content = render_edit_diff(_edit((old, new)))
+
+    assert content is not None
+    assert _bold_spans(content) == []
+
+
+def test_intra_line_highlight_still_applies_when_equal_length_group_ends_at_diff_end() -> None:
+    # Companion to the truncation-false-positive guard above: a group whose
+    # "+" run happens to end exactly where the whole diff ends (genuinely
+    # equal-length, not cut off by the preview window — there's nothing more
+    # after it in the FULL diff either) must still get highlighted. Proves
+    # the look-past-the-window check distinguishes "truncated by the window"
+    # from "the diff naturally ends here".
+    old = "ctx\nA\nB\nC"
+    new = "ctx\nA2\nB2\nC2"  # exactly 3-for-3, nothing follows
+    content = render_edit_diff(_edit((old, new)))
+
+    bold_text = {text for text, _ in _bold_spans(content)}
+    assert bold_text == {"2"}
+
+
+def test_intra_line_highlight_style_is_distinguishable_without_color() -> None:
+    # The non-color-cue acceptance criterion, directly: the highlighted span's
+    # style carries the bold modifier; the surrounding whole-line span at the
+    # same line does not.
+    content = render_edit_diff(_edit(("return old_value", "return new_value")))
+    plain_del_spans = [
+        str(span.style)
+        for span in content.spans
+        if str(span.style) == _DIFF_DEL_STYLE and content.plain[span.start : span.end]
+    ]
+    bold_del_spans = [style for _, style in _bold_spans(content) if _DIFF_DEL_STYLE in style]
+    assert plain_del_spans  # unhighlighted portion of the line still present
+    assert bold_del_spans  # highlighted portion carries the extra modifier
+    assert plain_del_spans[0] != bold_del_spans[0]
+
+
+def test_render_edit_diff_intra_line_highlight_clipped_by_preview_bounds() -> None:
+    # A highlighted line truncated by the existing byte-preview clip must not
+    # crash and must not produce an out-of-range span.
+    padding = "x" * (_DIFF_PREVIEW_BYTES - 20)
+    old = f"return old_value {padding}"
+    new = f"return new_value {padding}"
+    content = render_edit_diff(_edit((old, new)))
+    assert isinstance(content, Content)
+    for span in content.spans:
+        assert 0 <= span.start <= span.end <= len(content.plain)
 
 
 # --- Dispatch: render_tool_result routes edit successes here ------------------
