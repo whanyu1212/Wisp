@@ -375,6 +375,50 @@ def test_role_styles_no_longer_uses_bare_dim_attribute_for_muted_roles() -> None
             assert "dim" not in style.split(), f"{role!r} still uses the dim attribute: {style!r}"
 
 
+def _monochrome_gray(hex_color: str) -> int:
+    """Textual's exact NO_COLOR conversion: Rec. 709 luma, rounded."""
+    from textual.color import Color
+
+    return Color.parse(hex_color).monochrome.r  # r == g == b once converted
+
+
+def test_monochrome_role_color_collisions_still_have_distinct_non_color_cues() -> None:
+    # Issue #76: NO_COLOR runs every rendered color through Textual's built-in
+    # Monochrome filter (a fixed Rec. 709 luma conversion), which Wisp gets
+    # for free but never explicitly verified. Roles that collide (or land
+    # within a couple of gray levels of each other) once color is gone must
+    # still be told apart some other way — a border-title label is Wisp's
+    # primary mechanism (ToolCard also adds a glyph on top). "dim"/"session"
+    # are deliberately excluded from cross-role comparison: they're quiet,
+    # borderless metadata (no label at all, by design — see _ROLE_LABELS)
+    # that never appears as a competing alternative to a labeled role like
+    # "error" or "denied", so a shared gray with them carries no ambiguity.
+    from wisp.tui.theme import _ROLE_COLOR_ATTR, WISP_THEME_DARK, WISP_THEME_LIGHT
+    from wisp.tui.widgets import _ROLE_LABELS
+
+    comparable_roles = sorted(set(_ROLE_COLOR_ATTR) - {"dim", "session"})
+    collision_threshold = 5  # gray levels; "near-collision" per the issue's audit
+
+    for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
+        grays = {
+            role: _monochrome_gray(getattr(theme, _ROLE_COLOR_ATTR[role]))
+            for role in comparable_roles
+        }
+        for i, role_a in enumerate(comparable_roles):
+            for role_b in comparable_roles[i + 1 :]:
+                if abs(grays[role_a] - grays[role_b]) <= collision_threshold:
+                    label_a, label_b = _ROLE_LABELS.get(role_a, ""), _ROLE_LABELS.get(role_b, "")
+                    assert label_a != label_b, (
+                        f"{theme.name}: {role_a!r} (gray={grays[role_a]}) and {role_b!r} "
+                        f"(gray={grays[role_b]}) collide under NO_COLOR and share the same "
+                        f"label {label_a!r} — no non-color cue distinguishes them"
+                    )
+                    assert label_a and label_b, (
+                        f"{theme.name}: {role_a!r}/{role_b!r} collide under NO_COLOR but at "
+                        "least one has no label to fall back on"
+                    )
+
+
 def test_fullscreen_tui_renderer_messages_do_not_infer_footer_state() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
     renderer.view_updated(
