@@ -45,6 +45,40 @@ def test_configure_model_auto_switches_provider_when_unambiguous(tmp_path: Path)
     )
 
 
+def test_configure_model_auto_switches_provider_when_provider_is_explicit_null(
+    tmp_path: Path,
+) -> None:
+    # Regression test: ConfigureCommand.provider is optional (str | None), so a
+    # raw JSONL client (not the typed RpcController, which omits None fields via
+    # exclude_none=True) can reasonably serialize an omitted provider as
+    # "provider": null rather than leaving the key out entirely. The auto-switch
+    # gate must treat that the same as omission, not as "an explicit provider
+    # was given" -- confirmed the same way as the omitted-key case, via the
+    # openai provider's specific missing-API-key error surfacing after the
+    # switch.
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"configure-1","type":"configure","provider":null,"model":"gpt-5.5-pro"}\n'
+            '{"id":"cmd-1","type":"prompt","prompt":"hello"}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "OPENAI_API_KEY": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    auto_switched = [r for r in records if r["type"] == "model.provider_auto_switched"]
+    assert len(auto_switched) == 1
+    assert auto_switched[0]["provider"] == "openai"
+    assert any(
+        record.get("message") == "OPENAI_API_KEY is required when using the openai provider"
+        for record in records
+    )
+
+
 def test_configure_model_leaves_provider_alone_when_model_belongs_to_current_provider(
     tmp_path: Path,
 ) -> None:

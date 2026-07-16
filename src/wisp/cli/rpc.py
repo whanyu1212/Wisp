@@ -1059,7 +1059,7 @@ def _handle_rpc_configure_command(
             if configure_overrides is not None:
                 configure_overrides.model = None
                 configure_overrides.has_model = True
-    if has_model and not has_provider and isinstance(model, str):
+    if has_model and provider is None and isinstance(model, str):
         _auto_switch_provider_for_model(
             model,
             command_id=command_id,
