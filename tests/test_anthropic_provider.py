@@ -280,9 +280,9 @@ def test_anthropic_provider_streams_tool_call_parse_errors() -> None:
     [
         ("end_turn", "stop"),
         ("stop_sequence", "stop"),
-        ("pause_turn", "stop"),
         ("refusal", "stop"),
         ("max_tokens", "length"),
+        ("pause_turn", "length"),
     ],
 )
 def test_anthropic_provider_maps_stop_reasons_to_finish_reasons(

@@ -67,10 +67,19 @@ _MAX_OUTPUT_TOKENS = 64_000
 _STOP_REASON_TO_FINISH_REASON: dict[str, ProviderFinishReason] = {
     "end_turn": "stop",
     "stop_sequence": "stop",
-    "pause_turn": "stop",
     "refusal": "stop",
     "tool_use": "tool_calls",
     "max_tokens": "length",
+    # pause_turn is Anthropic's server-side sampling loop (server-side tools
+    # like web search/code execution) hitting its internal iteration cap --
+    # unreachable today since this provider only ever sends client-defined
+    # tools (see _tool_spec_to_anthropic_tool), never a server-tool type. If
+    # server-tool support is added later, Anthropic's docs say the client
+    # must resend the conversation with the paused assistant turn appended to
+    # let the server resume -- reporting it as a clean "stop" would silently
+    # truncate the response instead, so it maps to "length" (incomplete)
+    # defensively, matching model_context_window_exceeded/compaction below.
+    "pause_turn": "length",
     # Beta-only stop reasons not in the GA API this provider calls (server-side
     # compaction's "compaction", and context-window truncation) -- included
     # defensively in case Anthropic starts returning them outside the beta
