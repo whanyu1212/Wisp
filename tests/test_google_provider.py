@@ -222,6 +222,44 @@ def test_google_provider_streams_tool_calls() -> None:
     assert provider.seen_tools == [tool]
 
 
+def test_google_provider_generates_unique_fallback_ids_for_parallel_calls_without_an_id() -> None:
+    # Regression test: confirmed live against gemini-2.5-flash that a
+    # parallel response with two calls to the same tool both return
+    # function_call.id == None. Falling back to a name-only id would
+    # collapse both calls to the same ToolCall.call_id, corrupting
+    # parallel tool execution and functionResponse matching on replay.
+    provider = StubGoogleProvider(
+        [
+            _parts_chunk(
+                [
+                    genai_types.Part(
+                        function_call=genai_types.FunctionCall(
+                            name="lookup", args={"query": "wisp"}
+                        )
+                    ),
+                    genai_types.Part(
+                        function_call=genai_types.FunctionCall(name="lookup", args={"query": "fog"})
+                    ),
+                ],
+                response_id="response-id",
+                finish_reason=genai_types.FinishReason.STOP,
+            )
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event async for event in provider.stream([WispMessage(role="user", content="hello")])
+        ]
+
+    events = anyio.run(run)
+    completed = events[-1]
+    assert isinstance(completed, ProviderResponseCompleted)
+    call_ids = [call.call_id for call in completed.tool_calls]
+    assert len(call_ids) == 2
+    assert len(set(call_ids)) == 2
+
+
 def test_google_provider_does_not_execute_a_tool_call_truncated_by_max_tokens() -> None:
     # Regression test, mirroring the same fix applied to AnthropicProvider: a
     # function_call part that arrived before Gemini hit MAX_TOKENS must never
@@ -637,11 +675,20 @@ def _part_chunk(
     response_id: str | None = None,
     finish_reason: genai_types.FinishReason | None = None,
 ) -> genai_types.GenerateContentResponse:
+    return _parts_chunk([part], response_id=response_id, finish_reason=finish_reason)
+
+
+def _parts_chunk(
+    parts: Sequence[genai_types.Part],
+    *,
+    response_id: str | None = None,
+    finish_reason: genai_types.FinishReason | None = None,
+) -> genai_types.GenerateContentResponse:
     return genai_types.GenerateContentResponse(
         response_id=response_id,
         candidates=[
             genai_types.Candidate(
-                content=genai_types.Content(role="model", parts=[part]),
+                content=genai_types.Content(role="model", parts=list(parts)),
                 finish_reason=finish_reason,
             )
         ],

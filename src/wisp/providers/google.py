@@ -211,7 +211,9 @@ class GoogleProvider:
             for index, part in enumerate(parts):
                 if part.function_call is None:
                     continue
-                tool_call = _tool_call_from_google(part.function_call, response_id=response_id)
+                tool_call = _tool_call_from_google(
+                    part.function_call, index=index, response_id=response_id
+                )
                 tool_calls.append(tool_call)
                 yield ProviderToolCallCompleted(tool_call=tool_call, content_index=index)
 
@@ -341,11 +343,17 @@ def _google_retry_decision(
 
 
 def _tool_call_from_google(
-    function_call: genai_types.FunctionCall, *, response_id: str | None
+    function_call: genai_types.FunctionCall, *, index: int, response_id: str | None
 ) -> ToolCall:
     name = function_call.name or ""
     arguments = function_call.args or {}
-    call_id = function_call.id or f"call-{name}"
+    # Gemini does not guarantee an id on non-Gemini-3 models -- a parallel
+    # response with two calls to the same tool would otherwise collapse to
+    # the same fallback id (confirmed live: gemini-2.5-flash returns
+    # id=None on every function_call part), producing duplicate
+    # ToolCall.call_ids and ambiguous functionResponse matching on replay.
+    # The part's stream position is already a stable per-call value.
+    call_id = function_call.id or f"call-{name}-{index}"
     return ToolCall(
         call_id=call_id,
         name=name,
