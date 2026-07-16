@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from copy import deepcopy
 from json import JSONDecodeError, loads
@@ -26,6 +27,7 @@ from anthropic.types import (
     TextBlockParam,
     ToolParam,
     ToolResultBlockParam,
+    ToolUseBlockParam,
 )
 
 from wisp.agent.messages import Message
@@ -66,7 +68,28 @@ _STOP_REASON_TO_FINISH_REASON: dict[str, ProviderFinishReason] = {
     "refusal": "stop",
     "tool_use": "tool_calls",
     "max_tokens": "length",
+    # Beta-only stop reasons not in the GA API this provider calls (server-side
+    # compaction's "compaction", and context-window truncation) -- included
+    # defensively in case Anthropic starts returning them outside the beta
+    # surface. Both mean the response is incomplete, matching "max_tokens".
+    "model_context_window_exceeded": "length",
+    "compaction": "length",
 }
+# Anthropic may add stop reasons this provider doesn't yet recognize. Default
+# to "length" (incomplete), not "stop" (success) -- an unrecognized reason
+# must never be silently reported as a clean completion.
+_DEFAULT_FINISH_REASON_FOR_UNKNOWN_STOP_REASON: ProviderFinishReason = "length"
+
+# Anthropic's Messages API is stateless and requires the assistant's tool_use
+# turn to immediately precede its matching tool_result -- but AgentHarness's
+# provider-neutral loop assumes a Responses-API-style backend (like OpenAI's)
+# that remembers a turn server-side via previous_response_id, so it only ever
+# passes the *new* tool_results, never re-appending the assistant message that
+# requested them. Wisp bridges this the same way OpenAICodexProvider bridges
+# its own non-conversational backend: cache the assistant's tool_use content
+# for a turn keyed by response_id, and replay it ahead of the next call's tool
+# results. Bounded and LRU-evicted so a long-running session can't leak memory.
+_MAX_PENDING_REPLAYS = 128
 
 
 class AnthropicProvider:
@@ -86,6 +109,7 @@ class AnthropicProvider:
         self._api_key = _normalize_optional(api_key)
         self._client = client
         self._retry_policy = retry_policy or RetryPolicy()
+        self._replays: OrderedDict[str, MessageParam] = OrderedDict()
 
     async def stream(
         self,
@@ -98,9 +122,13 @@ class AnthropicProvider:
     ) -> AsyncIterator[ProviderEvent]:
         """Stream a normalized Anthropic response lifecycle.
 
-        Anthropic's Messages API is stateless -- ``previous_response_id`` is
-        accepted per the ``Provider`` protocol but never used to shortcut
-        history; the full ``messages`` sequence is sent on every call.
+        Anthropic's Messages API is stateless, so a follow-up call carrying
+        ``tool_results`` must resend the assistant's own tool_use turn
+        immediately before them. ``AgentHarness``'s ``messages`` never
+        contains that turn (it assumes a Responses-API-style backend that
+        remembers it server-side), so this provider reconstructs it from its
+        own ``_replays`` cache keyed by ``previous_response_id`` -- see
+        ``_MAX_PENDING_REPLAYS``.
         """
 
         selected_model = model or self.default_model or DEFAULT_ANTHROPIC_MODEL
@@ -170,7 +198,9 @@ class AnthropicProvider:
                 elif isinstance(event, RawMessageDeltaEvent):
                     stop_reason = event.delta.stop_reason
                     if stop_reason is not None:
-                        finish_reason = _STOP_REASON_TO_FINISH_REASON.get(stop_reason, "stop")
+                        finish_reason = _STOP_REASON_TO_FINISH_REASON.get(
+                            stop_reason, _DEFAULT_FINISH_REASON_FOR_UNKNOWN_STOP_REASON
+                        )
         except AnthropicError as exc:
             failure = ProviderResponseFailed(
                 message=f"Anthropic stream error: {exc}",
@@ -193,6 +223,26 @@ class AnthropicProvider:
             tool_calls.append(tool_call)
             yield ProviderToolCallCompleted(tool_call=tool_call, content_index=len(tool_calls) - 1)
 
+        if tool_calls:
+            if response_id is None:
+                failure = ProviderResponseFailed(
+                    message="Anthropic tool-call response did not include a message id",
+                    partial_content="".join(chunks),
+                    response_id=None,
+                )
+                yield failure
+                return
+            replay = _replay_message_from_stream(
+                text="".join(chunks),
+                pending_tool_use=pending_tool_use,
+                pending_tool_json=pending_tool_json,
+            )
+            if previous_response_id is not None and previous_response_id != response_id:
+                self._replays.pop(previous_response_id, None)
+            self._store_replay(response_id, replay)
+        elif previous_response_id is not None:
+            self._replays.pop(previous_response_id, None)
+
         yield ProviderResponseCompleted(
             content="".join(chunks),
             tool_calls=tuple(tool_calls),
@@ -213,6 +263,9 @@ class AnthropicProvider:
         system = _system_from_messages(messages)
         anthropic_messages = _messages_to_anthropic(messages)
         if tool_results:
+            replay = self._get_replay(previous_response_id)
+            if replay is not None:
+                anthropic_messages.append(replay)
             anthropic_messages.append(_tool_results_to_message(tool_results))
         anthropic_tools = _tool_specs_to_anthropic_tools(tools)
 
@@ -263,6 +316,49 @@ class AnthropicProvider:
         # Wisp emits retry progress itself. A caller-injected client stays caller-owned.
         self._client = AsyncAnthropic(api_key=api_key, max_retries=0)
         return self._client
+
+    def _get_replay(self, previous_response_id: str | None) -> MessageParam | None:
+        if previous_response_id is None:
+            return None
+        # A peek, not a pop: _create_stream can be re-invoked by the retry loop
+        # in `stream()` before a response ever completes, so the replay must
+        # survive a failed attempt to be available to the next one.
+        return self._replays.get(previous_response_id)
+
+    def _store_replay(self, response_id: str, replay: MessageParam) -> None:
+        self._replays.pop(response_id, None)
+        self._replays[response_id] = replay
+        while len(self._replays) > _MAX_PENDING_REPLAYS:
+            self._replays.popitem(last=False)
+
+
+def _replay_message_from_stream(
+    *,
+    text: str,
+    pending_tool_use: dict[int, tuple[str, str]],
+    pending_tool_json: dict[int, list[str]],
+) -> MessageParam:
+    """Build the assistant-turn replay for a completed tool-use response.
+
+    Anthropic's ``tool_use.input`` must be a valid JSON object; a tool call
+    whose accumulated ``input_json_delta`` text failed to parse (surfaced to
+    the caller via ``ToolCall.parse_error``) still needs *some* valid input
+    to replay -- falling back to ``{}`` here only affects what is echoed back
+    to Anthropic's own conversation history, not the ``ToolCall.raw_arguments``
+    Wisp's tool-execution layer sees.
+    """
+
+    content: list[TextBlockParam | ToolUseBlockParam] = []
+    if text:
+        content.append({"type": "text", "text": text})
+    for index in sorted(pending_tool_use):
+        call_id, tool_name = pending_tool_use[index]
+        raw_arguments = "".join(pending_tool_json.get(index, ()))
+        arguments, _parse_error = _parse_tool_arguments(name=tool_name, raw_arguments=raw_arguments)
+        content.append(
+            {"type": "tool_use", "id": call_id, "name": tool_name, "input": dict(arguments)}
+        )
+    return cast(MessageParam, {"role": "assistant", "content": content})
 
 
 def _anthropic_retry_decision(exc: AnthropicError) -> RetryDecision | None:

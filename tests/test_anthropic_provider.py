@@ -188,6 +188,7 @@ def test_anthropic_provider_streams_thinking_deltas() -> None:
 def test_anthropic_provider_streams_tool_calls() -> None:
     provider = StubAnthropicProvider(
         [
+            _message_start("response-id"),
             _tool_use_start("call-id", "lookup", index=0),
             _input_json_delta('{"query": ', index=0),
             _input_json_delta('"wisp"}', index=0),
@@ -216,6 +217,7 @@ def test_anthropic_provider_streams_tool_calls() -> None:
         name="lookup",
         arguments={"query": "wisp"},
         raw_arguments='{"query": "wisp"}',
+        response_id="response-id",
     )
     assert events == [
         ProviderResponseStarted(model="default-test-model"),
@@ -223,6 +225,7 @@ def test_anthropic_provider_streams_tool_calls() -> None:
         ProviderResponseCompleted(
             content="",
             tool_calls=(tool_call,),
+            response_id="response-id",
             finish_reason="tool_calls",
         ),
     ]
@@ -232,6 +235,7 @@ def test_anthropic_provider_streams_tool_calls() -> None:
 def test_anthropic_provider_streams_tool_call_parse_errors() -> None:
     provider = StubAnthropicProvider(
         [
+            _message_start("response-id"),
             _tool_use_start("call-id", "lookup", index=0),
             _input_json_delta("not-json", index=0),
             _message_delta("tool_use"),
@@ -250,6 +254,7 @@ def test_anthropic_provider_streams_tool_call_parse_errors() -> None:
         name="lookup",
         arguments={},
         raw_arguments="not-json",
+        response_id="response-id",
         parse_error="Invalid JSON arguments for tool lookup: Expecting value",
     )
     assert events == [
@@ -258,6 +263,7 @@ def test_anthropic_provider_streams_tool_call_parse_errors() -> None:
         ProviderResponseCompleted(
             content="",
             tool_calls=(tool_call,),
+            response_id="response-id",
             finish_reason="tool_calls",
         ),
     ]
@@ -530,21 +536,222 @@ def test_anthropic_provider_serializes_tool_specs() -> None:
     ]
 
 
+def test_anthropic_provider_replays_tool_use_turn_before_tool_results() -> None:
+    # Regression test: Anthropic's Messages API requires the assistant's
+    # tool_use turn to immediately precede the matching tool_result -- but
+    # AgentHarness's provider-neutral loop only ever passes the *new*
+    # tool_results on a follow-up call, assuming a Responses-API-style
+    # backend that remembers the prior turn server-side (previous_response_id
+    # is otherwise unused, per stream()'s docstring). Without a replay, the
+    # second request would 400 against the real API.
+    messages_resource = StubMessagesResource(
+        responses=[
+            [
+                _message_start("response-id"),
+                _tool_use_start("call-id", "lookup", index=0),
+                _input_json_delta('{"query": "wisp"}', index=0),
+                _message_delta("tool_use"),
+            ],
+            [],
+        ]
+    )
+    provider = AnthropicProvider(
+        api_key="test-key",
+        client=cast(AsyncAnthropic, StubAsyncAnthropic(messages_resource)),
+    )
+    tool = ToolSpec(
+        name="lookup",
+        description="Look something up.",
+        input_schema={"type": "object", "properties": {}},
+    )
+    messages = [WispMessage(role="user", content="hello")]
+
+    async def run() -> tuple[list[object], str | None]:
+        first_events = [
+            event async for event in provider.stream(messages, model="claude-test", tools=[tool])
+        ]
+        completed = first_events[-1]
+        assert isinstance(completed, ProviderResponseCompleted)
+        second_events = [
+            event
+            async for event in provider.stream(
+                messages,
+                model="claude-test",
+                tools=[tool],
+                tool_results=[ToolCallResult(call_id="call-id", output="found it")],
+                previous_response_id=completed.response_id,
+            )
+        ]
+        return second_events, completed.response_id
+
+    anyio.run(run)
+
+    assert len(messages_resource.calls) == 2
+    second_call_messages = messages_resource.calls[1]["messages"]
+    assert second_call_messages == [
+        {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call-id", "name": "lookup", "input": {"query": "wisp"}}
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-id",
+                    "content": "found it",
+                    "is_error": False,
+                }
+            ],
+        },
+    ]
+
+
+def test_anthropic_provider_replay_includes_text_alongside_tool_use() -> None:
+    messages_resource = StubMessagesResource(
+        responses=[
+            [
+                _message_start("response-id"),
+                _text_delta("Let me check.", index=0),
+                _tool_use_start("call-id", "lookup", index=1),
+                _input_json_delta("{}", index=1),
+                _message_delta("tool_use"),
+            ],
+            [],
+        ]
+    )
+    provider = AnthropicProvider(
+        api_key="test-key",
+        client=cast(AsyncAnthropic, StubAsyncAnthropic(messages_resource)),
+    )
+    messages = [WispMessage(role="user", content="hello")]
+
+    async def run() -> None:
+        first_events = [event async for event in provider.stream(messages, model="claude-test")]
+        completed = first_events[-1]
+        assert isinstance(completed, ProviderResponseCompleted)
+        async for _event in provider.stream(
+            messages,
+            model="claude-test",
+            tool_results=[ToolCallResult(call_id="call-id", output="ok")],
+            previous_response_id=completed.response_id,
+        ):
+            pass
+
+    anyio.run(run)
+
+    replay_message = messages_resource.calls[1]["messages"][1]
+    assert replay_message == {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "Let me check."},
+            {"type": "tool_use", "id": "call-id", "name": "lookup", "input": {}},
+        ],
+    }
+
+
+def test_anthropic_provider_tool_results_without_a_replay_omit_the_assistant_turn() -> None:
+    # No prior tool-use turn was ever streamed for this previous_response_id
+    # (e.g. it predates this provider instance, or belonged to a different
+    # provider) -- fall through gracefully rather than raising or fabricating
+    # a turn, matching the "advisory, never blocking" spirit of the rest of
+    # the registry-adjacent code in this codebase.
+    messages_resource = StubMessagesResource(responses=[[]])
+    provider = AnthropicProvider(
+        api_key="test-key",
+        client=cast(AsyncAnthropic, StubAsyncAnthropic(messages_resource)),
+    )
+
+    async def run() -> None:
+        async for _event in provider.stream(
+            [WispMessage(role="user", content="hello")],
+            model="claude-test",
+            tool_results=[ToolCallResult(call_id="call-id", output="ok")],
+            previous_response_id="unknown-response-id",
+        ):
+            pass
+
+    anyio.run(run)
+
+    assert messages_resource.calls[0]["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-id",
+                    "content": "ok",
+                    "is_error": False,
+                }
+            ],
+        },
+    ]
+
+
+def test_anthropic_provider_maps_context_window_exceeded_to_length() -> None:
+    # "model_context_window_exceeded" is a beta-only stop reason (Anthropic's
+    # server-side compaction surface, not the GA endpoint this provider
+    # calls) included defensively in the explicit mapping table in case it
+    # ever appears outside beta. It means the response was truncated, so it
+    # must report "length", not a clean "stop".
+    provider = StubAnthropicProvider(
+        [_text_delta("partial answer"), _message_delta("model_context_window_exceeded")]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event async for event in provider.stream([WispMessage(role="user", content="hello")])
+        ]
+
+    events = anyio.run(run)
+    completed = events[-1]
+    assert isinstance(completed, ProviderResponseCompleted)
+    assert completed.finish_reason == "length"
+
+
+def test_anthropic_provider_defaults_unrecognized_stop_reason_to_length() -> None:
+    # Regression test: a stop_reason this provider has never seen before
+    # (not in _STOP_REASON_TO_FINISH_REASON at all -- distinct from the
+    # explicitly-mapped-but-beta-only "model_context_window_exceeded" case
+    # above) must never be silently reported as a clean completion via the
+    # dict .get() fallback. "we don't recognize this" must default to
+    # incomplete ("length"), not success ("stop").
+    provider = StubAnthropicProvider(
+        [_text_delta("partial answer"), _message_delta("some_future_stop_reason")]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event async for event in provider.stream([WispMessage(role="user", content="hello")])
+        ]
+
+    events = anyio.run(run)
+    completed = events[-1]
+    assert isinstance(completed, ProviderResponseCompleted)
+    assert completed.finish_reason == "length"
+
+
 class StubAsyncAnthropic:
     def __init__(self, messages: StubMessagesResource) -> None:
         self.messages = messages
 
 
 class StubMessagesResource:
-    def __init__(self) -> None:
+    def __init__(self, responses: Sequence[Sequence[RawMessageStreamEvent]] | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
+        self._responses = list(responses) if responses is not None else None
 
     async def create(self, **kwargs: object) -> AsyncIterator[RawMessageStreamEvent]:
         self.calls.append(dict(kwargs))
+        events = self._responses.pop(0) if self._responses else ()
 
         async def stream() -> AsyncIterator[RawMessageStreamEvent]:
-            if False:
-                yield _text_delta("unreachable")
+            for event in events:
+                yield event
 
         return stream()
 
