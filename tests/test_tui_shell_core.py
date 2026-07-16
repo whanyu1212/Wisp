@@ -524,6 +524,34 @@ def test_tui_shell_model_listing_marks_current_only_on_the_active_provider() -> 
     anyio.run(run)
 
 
+def test_tui_shell_model_listing_marks_provider_default_as_current_when_unset() -> None:
+    # Regression test: at startup, no /model has been run yet, so
+    # self.current_model is None -- but the provider's own default_model is
+    # what will actually be used. The listing must mark that entry current
+    # instead of leaving the whole listing unmarked (the "Current model:
+    # provider default" line below already communicates this fallback; the
+    # listing itself must be consistent with it).
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model", "/quit"]),
+            provider="openai",
+            model=None,
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert rendered.count("(current)") == 1
+        assert "  openai: gpt-5.5 (current)" in rendered
+        assert "Current model: provider default" in rendered
+
+    anyio.run(run)
+
+
 def test_tui_shell_bare_model_command_shows_pending_configure() -> None:
     async def run() -> None:
         controller = ScriptedController()

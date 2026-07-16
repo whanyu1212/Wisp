@@ -844,16 +844,20 @@ class TuiShell:
         A model id is not unique across providers (e.g. "gpt-5.5" is claimed by
         both openai and openai-codex -- see ModelRegistry.resolve()), so "current"
         is only marked on the id that also matches the active provider, not on
-        every provider's copy of that id.
+        every provider's copy of that id. When no model has been explicitly set
+        (``self.current_model is None``, the normal startup state), the active
+        provider's own ``default_model`` is what will actually be used, so that
+        entry is marked current instead of leaving the whole listing unmarked.
         """
 
         current_model = self.current_model
         lines = ["Available models:"]
         for entry in self.models.providers():
             is_current_provider = entry.name == self.current_provider
+            effective_model = current_model if current_model is not None else entry.default_model
             names = [
                 f"{model_id} (current)"
-                if is_current_provider and model_id == current_model
+                if is_current_provider and model_id == effective_model
                 else model_id
                 for model_id in entry.models
             ]
