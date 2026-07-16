@@ -1,0 +1,361 @@
+"""Anthropic Messages API provider."""
+
+from __future__ import annotations
+
+import os
+from collections.abc import AsyncIterator, Sequence
+from copy import deepcopy
+from json import JSONDecodeError, loads
+from typing import cast
+
+import anyio
+from anthropic import (
+    AnthropicError,
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncAnthropic,
+)
+from anthropic.types import (
+    MessageParam,
+    RawContentBlockDeltaEvent,
+    RawContentBlockStartEvent,
+    RawMessageDeltaEvent,
+    RawMessageStartEvent,
+    RawMessageStreamEvent,
+    TextBlockParam,
+    ToolParam,
+    ToolResultBlockParam,
+)
+
+from wisp.agent.messages import Message
+from wisp.providers.base import (
+    ProviderConfigurationError,
+    ToolCallResult,
+    ToolSpec,
+)
+from wisp.providers.events import (
+    JsonObject,
+    ProviderEvent,
+    ProviderFinishReason,
+    ProviderResponseCompleted,
+    ProviderResponseFailed,
+    ProviderResponseStarted,
+    ProviderRetrying,
+    ProviderTextDelta,
+    ProviderThinkingDelta,
+    ProviderToolCallCompleted,
+    ToolCall,
+)
+from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
+
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
+
+# Anthropic's Messages API requires an explicit max_tokens (unlike OpenAI's
+# Responses API, which Wisp calls with no output cap). Wisp always streams, so
+# this follows the streaming default recommended for current-generation models
+# rather than the lower non-streaming default -- low enough to avoid runaway
+# cost on a single turn, high enough not to truncate a long agentic response
+# or a turn with many tool calls.
+_MAX_OUTPUT_TOKENS = 64_000
+
+_STOP_REASON_TO_FINISH_REASON: dict[str, ProviderFinishReason] = {
+    "end_turn": "stop",
+    "stop_sequence": "stop",
+    "pause_turn": "stop",
+    "refusal": "stop",
+    "tool_use": "tool_calls",
+    "max_tokens": "length",
+}
+
+
+class AnthropicProvider:
+    """Provider backed by Anthropic's Messages API."""
+
+    name = "anthropic"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        default_model: str = DEFAULT_ANTHROPIC_MODEL,
+        client: AsyncAnthropic | None = None,
+        retry_policy: RetryPolicy | None = None,
+    ) -> None:
+        self.default_model: str | None = default_model
+        self._api_key = _normalize_optional(api_key)
+        self._client = client
+        self._retry_policy = retry_policy or RetryPolicy()
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        """Stream a normalized Anthropic response lifecycle.
+
+        Anthropic's Messages API is stateless -- ``previous_response_id`` is
+        accepted per the ``Provider`` protocol but never used to shortcut
+        history; the full ``messages`` sequence is sent on every call.
+        """
+
+        selected_model = model or self.default_model or DEFAULT_ANTHROPIC_MODEL
+        stream: AsyncIterator[RawMessageStreamEvent] | None = None
+        for retry_number in range(self._retry_policy.max_retries + 1):
+            try:
+                stream = await self._create_stream(
+                    messages,
+                    model=selected_model,
+                    tools=tools,
+                    tool_results=tool_results,
+                    previous_response_id=previous_response_id,
+                )
+                break
+            except AnthropicError as exc:
+                decision = _anthropic_retry_decision(exc)
+                if decision is None or retry_number >= self._retry_policy.max_retries:
+                    raise
+                delay = retry_delay_seconds(
+                    self._retry_policy,
+                    retry_number=retry_number + 1,
+                    retry_after_seconds=decision.retry_after_seconds,
+                )
+                if delay is None:
+                    raise
+                yield ProviderRetrying(
+                    attempt=retry_number + 2,
+                    max_attempts=self._retry_policy.max_retries + 1,
+                    delay_seconds=delay,
+                    reason=decision.reason,
+                    status_code=decision.status_code,
+                )
+                await anyio.sleep(delay)
+        if stream is None:
+            raise AssertionError("Anthropic retry loop completed without a stream or error")
+
+        response_id: str | None = None
+        chunks: list[str] = []
+        tool_calls: list[ToolCall] = []
+        pending_tool_use: dict[int, tuple[str, str]] = {}
+        pending_tool_json: dict[int, list[str]] = {}
+        finish_reason: ProviderFinishReason = "stop"
+        failure: ProviderResponseFailed | None = None
+
+        yield ProviderResponseStarted(model=selected_model)
+
+        try:
+            async for event in stream:
+                if isinstance(event, RawMessageStartEvent):
+                    response_id = event.message.id
+                elif isinstance(event, RawContentBlockStartEvent):
+                    block = event.content_block
+                    if block.type == "tool_use":
+                        pending_tool_use[event.index] = (block.id, block.name)
+                        pending_tool_json[event.index] = []
+                elif isinstance(event, RawContentBlockDeltaEvent):
+                    delta = event.delta
+                    if delta.type == "text_delta":
+                        chunks.append(delta.text)
+                        yield ProviderTextDelta(delta=delta.text, content_index=event.index)
+                    elif delta.type == "thinking_delta":
+                        yield ProviderThinkingDelta(delta=delta.thinking, content_index=event.index)
+                    elif delta.type == "input_json_delta":
+                        buffer = pending_tool_json.get(event.index)
+                        if buffer is not None:
+                            buffer.append(delta.partial_json)
+                elif isinstance(event, RawMessageDeltaEvent):
+                    stop_reason = event.delta.stop_reason
+                    if stop_reason is not None:
+                        finish_reason = _STOP_REASON_TO_FINISH_REASON.get(stop_reason, "stop")
+        except AnthropicError as exc:
+            failure = ProviderResponseFailed(
+                message=f"Anthropic stream error: {exc}",
+                partial_content="".join(chunks),
+                response_id=response_id,
+            )
+
+        if failure is not None:
+            yield failure
+            return
+
+        for index, (call_id, tool_name) in pending_tool_use.items():
+            raw_arguments = "".join(pending_tool_json.get(index, ()))
+            tool_call = _tool_call_from_anthropic(
+                call_id=call_id,
+                name=tool_name,
+                raw_arguments=raw_arguments,
+                response_id=response_id,
+            )
+            tool_calls.append(tool_call)
+            yield ProviderToolCallCompleted(tool_call=tool_call, content_index=len(tool_calls) - 1)
+
+        yield ProviderResponseCompleted(
+            content="".join(chunks),
+            tool_calls=tuple(tool_calls),
+            response_id=response_id,
+            finish_reason="tool_calls" if tool_calls else finish_reason,
+        )
+
+    async def _create_stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[RawMessageStreamEvent]:
+        client = self._client_or_create()
+        system = _system_from_messages(messages)
+        anthropic_messages = _messages_to_anthropic(messages)
+        if tool_results:
+            anthropic_messages.append(_tool_results_to_message(tool_results))
+        anthropic_tools = _tool_specs_to_anthropic_tools(tools)
+
+        if system is not None and anthropic_tools:
+            stream = await client.messages.create(
+                model=model,
+                max_tokens=_MAX_OUTPUT_TOKENS,
+                messages=anthropic_messages,
+                stream=True,
+                system=system,
+                tools=anthropic_tools,
+            )
+        elif system is not None:
+            stream = await client.messages.create(
+                model=model,
+                max_tokens=_MAX_OUTPUT_TOKENS,
+                messages=anthropic_messages,
+                stream=True,
+                system=system,
+            )
+        elif anthropic_tools:
+            stream = await client.messages.create(
+                model=model,
+                max_tokens=_MAX_OUTPUT_TOKENS,
+                messages=anthropic_messages,
+                stream=True,
+                tools=anthropic_tools,
+            )
+        else:
+            stream = await client.messages.create(
+                model=model,
+                max_tokens=_MAX_OUTPUT_TOKENS,
+                messages=anthropic_messages,
+                stream=True,
+            )
+        return cast(AsyncIterator[RawMessageStreamEvent], stream)
+
+    def _client_or_create(self) -> AsyncAnthropic:
+        if self._client is not None:
+            return self._client
+
+        api_key = self._api_key or _normalize_optional(os.environ.get("ANTHROPIC_API_KEY"))
+        if api_key is None:
+            raise ProviderConfigurationError(
+                "ANTHROPIC_API_KEY is required when using the anthropic provider"
+            )
+
+        # Wisp emits retry progress itself. A caller-injected client stays caller-owned.
+        self._client = AsyncAnthropic(api_key=api_key, max_retries=0)
+        return self._client
+
+
+def _anthropic_retry_decision(exc: AnthropicError) -> RetryDecision | None:
+    if isinstance(exc, APITimeoutError):
+        return RetryDecision(reason="timeout")
+    if isinstance(exc, APIConnectionError):
+        return RetryDecision(reason="network")
+    if isinstance(exc, APIStatusError):
+        return http_retry_decision(
+            status_code=exc.status_code,
+            headers=exc.response.headers,
+            error_body=exc.body,
+        )
+    return None
+
+
+def _tool_call_from_anthropic(
+    *,
+    call_id: str,
+    name: str,
+    raw_arguments: str,
+    response_id: str | None,
+) -> ToolCall:
+    arguments, parse_error = _parse_tool_arguments(name=name, raw_arguments=raw_arguments)
+    return ToolCall(
+        call_id=call_id,
+        name=name,
+        arguments=arguments,
+        raw_arguments=raw_arguments,
+        response_id=response_id,
+        parse_error=parse_error,
+    )
+
+
+def _parse_tool_arguments(*, name: str, raw_arguments: str) -> tuple[JsonObject, str | None]:
+    try:
+        parsed = loads(raw_arguments or "{}")
+    except JSONDecodeError as exc:
+        return {}, f"Invalid JSON arguments for tool {name}: {exc.msg}"
+    if not isinstance(parsed, dict):
+        return {}, f"Invalid JSON arguments for tool {name}: expected an object"
+    return cast(JsonObject, parsed), None
+
+
+def _system_from_messages(messages: Sequence[Message]) -> str | None:
+    system_parts = [message.content for message in messages if message.role == "system"]
+    return "\n\n".join(system_parts) or None
+
+
+def _messages_to_anthropic(messages: Sequence[Message]) -> list[MessageParam]:
+    anthropic_messages: list[MessageParam] = []
+    for message in messages:
+        if message.role == "system":
+            continue
+        role = "user" if message.role == "tool" else message.role
+        content: TextBlockParam = {"type": "text", "text": message.content}
+        anthropic_messages.append(cast(MessageParam, {"role": role, "content": [content]}))
+    return anthropic_messages
+
+
+def _tool_results_to_message(tool_results: Sequence[ToolCallResult]) -> MessageParam:
+    blocks: list[ToolResultBlockParam] = [
+        {
+            "type": "tool_result",
+            "tool_use_id": result.call_id,
+            "content": result.output,
+            "is_error": result.is_error,
+        }
+        for result in tool_results
+    ]
+    return cast(MessageParam, {"role": "user", "content": blocks})
+
+
+def _tool_specs_to_anthropic_tools(tools: Sequence[ToolSpec]) -> list[ToolParam]:
+    return [_tool_spec_to_anthropic_tool(tool) for tool in tools]
+
+
+def _tool_spec_to_anthropic_tool(tool: ToolSpec) -> ToolParam:
+    return cast(
+        ToolParam,
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": deepcopy(dict(tool.input_schema)),
+        },
+    )
+
+
+def _normalize_optional(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+__all__ = ["DEFAULT_ANTHROPIC_MODEL", "AnthropicProvider"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from wisp.auth.storage import JsonAuthStore
+from wisp.providers.anthropic import AnthropicProvider
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.fake import FakeProvider
 from wisp.providers.openai import OpenAIProvider
@@ -30,5 +31,6 @@ def activate(
             retry_policy=retry_policy,
         )
     )
+    api.register_provider(AnthropicProvider(retry_policy=retry_policy))
     for tool in builtin_tools():
         api.register_tool(tool)
