@@ -47,6 +47,18 @@ models = ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"]
 "claude-haiku-4-5" = 200000
 
 [[providers]]
+name = "google"
+display_name = "Google"
+default_model = "gemini-flash-latest"
+docs_url = "https://ai.google.dev/gemini-api/docs"
+models = ["gemini-flash-latest", "gemini-2.5-pro", "gemini-2.5-flash"]
+
+[providers.context_windows]
+"gemini-flash-latest" = 1048576
+"gemini-2.5-pro" = 1048576
+"gemini-2.5-flash" = 1048576
+
+[[providers]]
 name = "fake"
 display_name = "Fake (offline testing)"
 default_model = "fake"

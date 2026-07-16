@@ -51,12 +51,13 @@ Wisp runs the same agent core in four modes:
 
 ## Providers & auth
 
-Wisp supports four provider modes:
+Wisp supports five provider modes:
 
 ```bash
 uv run wisp -p "hello" --provider openai-codex --model gpt-5.5
 uv run wisp -p "hello" --provider openai --model gpt-5.5
 uv run wisp -p "hello" --provider anthropic --model claude-sonnet-5
+uv run wisp -p "hello" --provider google --model gemini-flash-latest
 uv run wisp -p "hello" --provider fake
 ```
 
@@ -71,6 +72,7 @@ uv run wisp -p "hello" --provider fake
 
 - **`openai`** — set `OPENAI_API_KEY`.
 - **`anthropic`** — set `ANTHROPIC_API_KEY`.
+- **`google`** — set `GOOGLE_API_KEY`.
 - **`fake`** — a deterministic offline provider for tests and no-credential smoke runs.
 
 Use `/model` with no arguments in the TUI to list every catalog model grouped by provider. If a
@@ -137,7 +139,7 @@ Wisp reads configuration from CLI flags, environment variables, and JSON setting
 
 | Variable | Purpose |
 |----------|---------|
-| `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `anthropic`, or `fake` |
+| `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `anthropic`, `google`, or `fake` |
 | `WISP_MODEL` | Model override; blank uses the provider default |
 | `WISP_MODE` | Default mode; set to `tui` to open the TUI directly |
 | `WISP_TUI_RENDERER` | TUI renderer: `line`, `fullscreen`, or `textual` |
@@ -148,6 +150,7 @@ Wisp reads configuration from CLI flags, environment variables, and JSON setting
 | `WISP_RETRY_MAX_DELAY_SECONDS` | Maximum retry delay; defaults to `30` |
 | `OPENAI_API_KEY` | Required only for the `openai` provider |
 | `ANTHROPIC_API_KEY` | Required only for the `anthropic` provider |
+| `GOOGLE_API_KEY` | Required only for the `google` provider |
 
 ### Settings files
 
