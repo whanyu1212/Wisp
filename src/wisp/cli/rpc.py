@@ -1075,6 +1075,17 @@ def _handle_rpc_configure_command(
             if configure_overrides is not None:
                 configure_overrides.model = None
                 configure_overrides.has_model = True
+        if not has_effort:
+            # Effort tiers are provider-native, non-normalized strings (e.g.
+            # Google's "MEDIUM" vs OpenAI's lowercase "medium") -- a tier
+            # chosen for the old provider left in place across a provider
+            # switch would reach the new provider's API unvalidated on the
+            # next prompt, matching the same staleness model already gets
+            # reset for above.
+            agent.effort = None
+            if configure_overrides is not None:
+                configure_overrides.effort = None
+                configure_overrides.has_effort = True
     if has_model and provider is None and isinstance(model, str):
         _auto_switch_provider_for_model(
             model,

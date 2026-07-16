@@ -176,7 +176,11 @@ class AnthropicProvider:
         API (``"low"``/``"medium"``/``"high"``/``"xhigh"``/``"max"``,
         model-dependent) -- passed through unvalidated; Anthropic rejects an
         unsupported tier for the selected model with a 400, which surfaces
-        as a normal retry-classified error, not a silent no-op.
+        as a normal retry-classified error, not a silent no-op. Setting
+        ``effort`` also enables ``thinking: {"type": "adaptive"}`` --
+        Anthropic's migration guide pairs the two in every documented
+        example and describes effort as controlling thinking depth, which
+        has nothing to modulate without adaptive thinking enabled.
         """
 
         selected_model = model or self.default_model or DEFAULT_ANTHROPIC_MODEL
@@ -398,6 +402,12 @@ class AnthropicProvider:
             kwargs["tools"] = anthropic_tools
         if effort is not None:
             kwargs["output_config"] = {"effort": effort}
+            # Anthropic's migration guide pairs output_config.effort with
+            # thinking: {"type": "adaptive"} in every documented example and
+            # describes effort as controlling "thinking depth" -- without
+            # adaptive thinking enabled, effort has nothing to modulate.
+            # thinking is otherwise never sent by this provider at all.
+            kwargs["thinking"] = {"type": "adaptive"}
         create = cast(Callable[..., Awaitable[object]], client.messages.create)
         stream = await create(**kwargs)
         return cast(AsyncIterator[RawMessageStreamEvent], stream)

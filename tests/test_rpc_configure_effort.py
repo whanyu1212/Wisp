@@ -31,6 +31,10 @@ def _runtime_with_capturing_provider(provider: CapturingProvider) -> WispRuntime
     )
 
 
+class _SecondCapturingProvider(CapturingProvider):
+    name = "capturing-2"
+
+
 def test_configure_effort_sets_agent_effort(tmp_path: Path) -> None:
     provider = CapturingProvider()
     runtime = _runtime_with_capturing_provider(provider)
@@ -189,3 +193,69 @@ def test_configure_overrides_records_clear_effort(tmp_path: Path) -> None:
     assert overrides.effort is None
     assert overrides.has_effort is True
     assert overrides.effective_effort("default") is None
+
+
+def test_configure_switching_provider_resets_stale_effort(tmp_path: Path) -> None:
+    # Regression test: effort tiers are provider-native, non-normalized
+    # strings (e.g. Google's "MEDIUM" vs OpenAI's lowercase "medium") -- a
+    # tier chosen for the old provider must not survive a provider switch
+    # that doesn't also specify a new effort, or it reaches the new
+    # provider's API unvalidated on the next prompt. Mirrors the existing
+    # reset already applied to `model` in the same situation.
+    first_provider = CapturingProvider()
+    second_provider = _SecondCapturingProvider()
+    providers = ProviderRegistry()
+    providers.register(first_provider)
+    providers.register(second_provider)
+    runtime = WispRuntime(
+        providers=providers,
+        tools=ToolRegistry(),
+        events=EventBus(),
+        api=ExtensionAPI(providers=providers, tools=ToolRegistry(), events=EventBus()),
+        models=_test_model_registry(),
+    )
+    agent = CodingSession(
+        provider=first_provider, sessions=JsonlSessionStore(tmp_path), effort="MEDIUM"
+    )
+
+    _handle_rpc_configure_command(
+        {"provider": "capturing-2"},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+    )
+
+    assert agent.provider is second_provider
+    assert agent.effort is None
+
+
+def test_configure_switching_provider_with_explicit_effort_keeps_the_new_value(
+    tmp_path: Path,
+) -> None:
+    first_provider = CapturingProvider()
+    second_provider = _SecondCapturingProvider()
+    providers = ProviderRegistry()
+    providers.register(first_provider)
+    providers.register(second_provider)
+    runtime = WispRuntime(
+        providers=providers,
+        tools=ToolRegistry(),
+        events=EventBus(),
+        api=ExtensionAPI(providers=providers, tools=ToolRegistry(), events=EventBus()),
+        models=_test_model_registry(),
+    )
+    agent = CodingSession(
+        provider=first_provider, sessions=JsonlSessionStore(tmp_path), effort="MEDIUM"
+    )
+
+    _handle_rpc_configure_command(
+        {"provider": "capturing-2", "effort": "medium"},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+    )
+
+    assert agent.provider is second_provider
+    assert agent.effort == "medium"

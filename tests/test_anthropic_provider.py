@@ -632,6 +632,7 @@ def test_anthropic_provider_sends_output_config_effort_when_provided() -> None:
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
             "stream": True,
             "output_config": {"effort": "high"},
+            "thinking": {"type": "adaptive"},
         }
     ]
 
@@ -653,6 +654,31 @@ def test_anthropic_provider_omits_output_config_when_effort_is_not_provided() ->
     anyio.run(run)
 
     assert "output_config" not in messages_resource.calls[0]
+    assert "thinking" not in messages_resource.calls[0]
+
+
+def test_anthropic_provider_sends_adaptive_thinking_alongside_effort() -> None:
+    # Regression test: Anthropic's migration guide pairs output_config.effort
+    # with thinking: {"type": "adaptive"} in every documented example and
+    # describes effort as controlling "thinking depth" -- without adaptive
+    # thinking enabled, effort has nothing to modulate.
+    messages_resource = StubMessagesResource()
+    provider = AnthropicProvider(
+        api_key="test-key",
+        client=cast(AsyncAnthropic, StubAsyncAnthropic(messages_resource)),
+    )
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [WispMessage(role="user", content="hello")],
+            model="claude-test",
+            effort="xhigh",
+        )
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert messages_resource.calls[0]["thinking"] == {"type": "adaptive"}
 
 
 def test_anthropic_provider_stream_forwards_effort_to_create_stream() -> None:
