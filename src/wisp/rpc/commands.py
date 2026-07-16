@@ -69,6 +69,14 @@ class ConfigureCommand(RpcCommandModel):
     provider: str | None = None
     model: str | None = None
     effort: str | None = None
+    # `to_json_line()` uses `exclude_none=True`, so a bare `effort=None` is
+    # indistinguishable on the wire from never having set `effort` at all --
+    # the RPC server keys off "effort" in command (dict key presence), not
+    # the value, to decide whether to touch agent.effort. This field is the
+    # only way a client can explicitly request clearing effort back to the
+    # provider's own default: it has no default value that `exclude_none`
+    # would ever drop, since `False` is not `None`.
+    clear_effort: bool = False
 
 
 type RpcCommand = Annotated[

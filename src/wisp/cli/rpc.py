@@ -1026,9 +1026,10 @@ def _handle_rpc_configure_command(
     provider = command.get("provider")
     model = command.get("model")
     effort = command.get("effort")
+    clear_effort = command.get("clear_effort") is True
     has_provider = "provider" in command
     has_model = "model" in command
-    has_effort = "effort" in command
+    has_effort = "effort" in command or clear_effort
     if not has_provider and not has_model and not has_effort:
         _write_rpc_command_error(
             command_id=command_id,
@@ -1088,9 +1089,9 @@ def _handle_rpc_configure_command(
             configure_overrides.model = model
             configure_overrides.has_model = True
     if has_effort:
-        agent.effort = effort
+        agent.effort = None if clear_effort else effort
         if configure_overrides is not None:
-            configure_overrides.effort = effort
+            configure_overrides.effort = None if clear_effort else effort
             configure_overrides.has_effort = True
     _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 

@@ -129,3 +129,63 @@ def test_configure_overrides_effective_effort_falls_back_to_default_when_unset()
     overrides = _RpcConfigureOverrides()
 
     assert overrides.effective_effort("fallback") == "fallback"
+
+
+def test_configure_clear_effort_resets_agent_effort_to_none(tmp_path: Path) -> None:
+    # Regression test: effort=None is indistinguishable on the wire from
+    # never having set effort at all, so clear_effort is the only way a
+    # client can explicitly reset a previously-configured effort tier back
+    # to the provider's own default.
+    provider = CapturingProvider()
+    runtime = _runtime_with_capturing_provider(provider)
+    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="high")
+
+    _handle_rpc_configure_command(
+        {"clear_effort": True},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+    )
+
+    assert agent.effort is None
+
+
+def test_configure_clear_effort_alone_is_accepted_without_model_or_provider(
+    tmp_path: Path,
+) -> None:
+    provider = CapturingProvider()
+    runtime = _runtime_with_capturing_provider(provider)
+    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="high")
+
+    _handle_rpc_configure_command(
+        {"clear_effort": True},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+    )
+
+    assert agent.effort is None
+
+
+def test_configure_overrides_records_clear_effort(tmp_path: Path) -> None:
+    from wisp.cli.rpc import _RpcConfigureOverrides
+
+    provider = CapturingProvider()
+    runtime = _runtime_with_capturing_provider(provider)
+    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="high")
+    overrides = _RpcConfigureOverrides()
+
+    _handle_rpc_configure_command(
+        {"clear_effort": True},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+        configure_overrides=overrides,
+    )
+
+    assert overrides.effort is None
+    assert overrides.has_effort is True
+    assert overrides.effective_effort("default") is None
