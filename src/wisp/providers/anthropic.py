@@ -80,15 +80,18 @@ _STOP_REASON_TO_FINISH_REASON: dict[str, ProviderFinishReason] = {
 # must never be silently reported as a clean completion.
 _DEFAULT_FINISH_REASON_FOR_UNKNOWN_STOP_REASON: ProviderFinishReason = "length"
 
-# Anthropic's Messages API is stateless and requires the assistant's tool_use
+# Anthropic's Messages API is stateless and requires each assistant tool_use
 # turn to immediately precede its matching tool_result -- but AgentHarness's
 # provider-neutral loop assumes a Responses-API-style backend (like OpenAI's)
-# that remembers a turn server-side via previous_response_id, so it only ever
-# passes the *new* tool_results, never re-appending the assistant message that
-# requested them. Wisp bridges this the same way OpenAICodexProvider bridges
-# its own non-conversational backend: cache the assistant's tool_use content
-# for a turn keyed by response_id, and replay it ahead of the next call's tool
-# results. Bounded and LRU-evicted so a long-running session can't leak memory.
+# that remembers everything server-side via previous_response_id, so on every
+# tool round it only ever passes that round's *new* tool_results, on top of
+# the *original*, never-mutated `messages`. A multi-round tool conversation
+# (call 1 -> result 1 -> call 2 -> result 2 -> ...) therefore needs the full
+# accumulated replay tail resent every time, not just the latest round --
+# Wisp bridges this the same way OpenAICodexProvider bridges its own
+# non-conversational backend: cache the whole accumulated tail keyed by
+# response_id, and grow it by one (assistant tool_use, user tool_result) pair
+# per round. Bounded and LRU-evicted so a long session can't leak memory.
 _MAX_PENDING_REPLAYS = 128
 
 
@@ -109,7 +112,7 @@ class AnthropicProvider:
         self._api_key = _normalize_optional(api_key)
         self._client = client
         self._retry_policy = retry_policy or RetryPolicy()
-        self._replays: OrderedDict[str, MessageParam] = OrderedDict()
+        self._replays: OrderedDict[str, tuple[MessageParam, ...]] = OrderedDict()
 
     async def stream(
         self,
@@ -123,12 +126,13 @@ class AnthropicProvider:
         """Stream a normalized Anthropic response lifecycle.
 
         Anthropic's Messages API is stateless, so a follow-up call carrying
-        ``tool_results`` must resend the assistant's own tool_use turn
-        immediately before them. ``AgentHarness``'s ``messages`` never
-        contains that turn (it assumes a Responses-API-style backend that
-        remembers it server-side), so this provider reconstructs it from its
-        own ``_replays`` cache keyed by ``previous_response_id`` -- see
-        ``_MAX_PENDING_REPLAYS``.
+        ``tool_results`` must resend every prior round's assistant tool_use
+        turn and tool_result immediately before the newest ones.
+        ``AgentHarness``'s ``messages`` never grows across tool rounds (it
+        assumes a Responses-API-style backend that remembers everything
+        server-side), so this provider reconstructs the accumulated tail
+        from its own ``_replays`` cache keyed by ``previous_response_id`` --
+        see ``_MAX_PENDING_REPLAYS``.
         """
 
         selected_model = model or self.default_model or DEFAULT_ANTHROPIC_MODEL
@@ -232,14 +236,26 @@ class AnthropicProvider:
                 )
                 yield failure
                 return
-            replay = _replay_message_from_stream(
+            # The accumulated tail carried into *this* call (everything up to
+            # and including the tool_use turn this round is answering) plus
+            # this round's own tool_result message plus the new tool_use turn
+            # this response just produced -- the full state the *next* round
+            # needs to resend, since Anthropic never remembers any of it
+            # server-side.
+            previous_tail = self._get_replay(previous_response_id)
+            new_turn = _replay_message_from_stream(
                 text="".join(chunks),
                 pending_tool_use=pending_tool_use,
                 pending_tool_json=pending_tool_json,
             )
+            replay_tail = (
+                *previous_tail,
+                *((_tool_results_to_message(tool_results),) if tool_results else ()),
+                new_turn,
+            )
             if previous_response_id is not None and previous_response_id != response_id:
                 self._replays.pop(previous_response_id, None)
-            self._store_replay(response_id, replay)
+            self._store_replay(response_id, replay_tail)
         elif previous_response_id is not None:
             self._replays.pop(previous_response_id, None)
 
@@ -263,9 +279,7 @@ class AnthropicProvider:
         system = _system_from_messages(messages)
         anthropic_messages = _messages_to_anthropic(messages)
         if tool_results:
-            replay = self._get_replay(previous_response_id)
-            if replay is not None:
-                anthropic_messages.append(replay)
+            anthropic_messages.extend(self._get_replay(previous_response_id))
             anthropic_messages.append(_tool_results_to_message(tool_results))
         anthropic_tools = _tool_specs_to_anthropic_tools(tools)
 
@@ -317,17 +331,17 @@ class AnthropicProvider:
         self._client = AsyncAnthropic(api_key=api_key, max_retries=0)
         return self._client
 
-    def _get_replay(self, previous_response_id: str | None) -> MessageParam | None:
+    def _get_replay(self, previous_response_id: str | None) -> tuple[MessageParam, ...]:
         if previous_response_id is None:
-            return None
+            return ()
         # A peek, not a pop: _create_stream can be re-invoked by the retry loop
         # in `stream()` before a response ever completes, so the replay must
         # survive a failed attempt to be available to the next one.
-        return self._replays.get(previous_response_id)
+        return self._replays.get(previous_response_id, ())
 
-    def _store_replay(self, response_id: str, replay: MessageParam) -> None:
+    def _store_replay(self, response_id: str, replay_tail: tuple[MessageParam, ...]) -> None:
         self._replays.pop(response_id, None)
-        self._replays[response_id] = replay
+        self._replays[response_id] = replay_tail
         while len(self._replays) > _MAX_PENDING_REPLAYS:
             self._replays.popitem(last=False)
 

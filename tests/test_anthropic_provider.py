@@ -653,6 +653,109 @@ def test_anthropic_provider_replay_includes_text_alongside_tool_use() -> None:
     }
 
 
+def test_anthropic_provider_accumulates_replay_across_multiple_tool_rounds() -> None:
+    # Regression test: run_agent_loop never grows `messages` across tool
+    # rounds and only ever passes each round's own new `tool_results` --
+    # so round 2's replay must carry BOTH round 1's tool_use/tool_result
+    # pair AND round 2's own tool_use turn, not just the latest round.
+    # Losing round 1 here would silently drop an earlier tool observation
+    # from a multi-step tool workflow.
+    messages_resource = StubMessagesResource(
+        responses=[
+            [
+                _message_start("response-1"),
+                _tool_use_start("call-1", "lookup", index=0),
+                _input_json_delta('{"query": "a"}', index=0),
+                _message_delta("tool_use"),
+            ],
+            [
+                _message_start("response-2"),
+                _tool_use_start("call-2", "lookup", index=0),
+                _input_json_delta('{"query": "b"}', index=0),
+                _message_delta("tool_use"),
+            ],
+            [],
+        ]
+    )
+    provider = AnthropicProvider(
+        api_key="test-key",
+        client=cast(AsyncAnthropic, StubAsyncAnthropic(messages_resource)),
+    )
+    messages = [WispMessage(role="user", content="hello")]
+
+    async def run() -> None:
+        # Round 1: no prior tool state.
+        first_events = [event async for event in provider.stream(messages, model="claude-test")]
+        first_completed = first_events[-1]
+        assert isinstance(first_completed, ProviderResponseCompleted)
+
+        # Round 2: mirrors run_agent_loop exactly -- same fixed `messages`,
+        # only this round's own tool_results, previous_response_id carried
+        # forward from round 1's response.
+        second_events = [
+            event
+            async for event in provider.stream(
+                messages,
+                model="claude-test",
+                tool_results=[ToolCallResult(call_id="call-1", output="result-a")],
+                previous_response_id=first_completed.response_id,
+            )
+        ]
+        second_completed = second_events[-1]
+        assert isinstance(second_completed, ProviderResponseCompleted)
+
+        # Round 3: same shape again, now carrying round 2's tool_results.
+        async for _event in provider.stream(
+            messages,
+            model="claude-test",
+            tool_results=[ToolCallResult(call_id="call-2", output="result-b")],
+            previous_response_id=second_completed.response_id,
+        ):
+            pass
+
+    anyio.run(run)
+
+    assert len(messages_resource.calls) == 3
+    third_call_messages = messages_resource.calls[2]["messages"]
+    assert third_call_messages == [
+        {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call-1", "name": "lookup", "input": {"query": "a"}}
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-1",
+                    "content": "result-a",
+                    "is_error": False,
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call-2", "name": "lookup", "input": {"query": "b"}}
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-2",
+                    "content": "result-b",
+                    "is_error": False,
+                }
+            ],
+        },
+    ]
+
+
 def test_anthropic_provider_tool_results_without_a_replay_omit_the_assistant_turn() -> None:
     # No prior tool-use turn was ever streamed for this previous_response_id
     # (e.g. it predates this provider instance, or belonged to a different
