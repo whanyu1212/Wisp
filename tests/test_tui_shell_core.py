@@ -470,6 +470,147 @@ def test_tui_shell_provider_and_model_commands_configure_future_prompts() -> Non
     anyio.run(run)
 
 
+def test_tui_shell_bare_model_command_lists_catalog_models_grouped_by_provider() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model", "/quit"]),
+            provider="openai",
+            model="gpt-5.5",
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert "Available models:" in rendered
+        assert "openai:" in rendered
+        assert "openai-codex:" in rendered
+        assert "fake:" in rendered
+        assert "gpt-5.5 (current)" in rendered
+        assert "Current model: gpt-5.5" in rendered
+        assert "Current provider: openai" in rendered
+        # No configure command should be sent for a bare, argument-less /model.
+        assert controller.configurations == []
+
+    anyio.run(run)
+
+
+def test_tui_shell_model_listing_marks_current_only_on_the_active_provider() -> None:
+    # "gpt-5.5" is claimed by both openai and openai-codex in the built-in
+    # catalog (see ModelRegistry.resolve()'s ambiguity handling). The listing
+    # must mark (current) only on the entry under the active provider, not on
+    # every provider's copy of the shared model id.
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model", "/quit"]),
+            provider="openai",
+            model="gpt-5.5",
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert rendered.count("(current)") == 1
+        assert "  openai: gpt-5.5 (current)" in rendered
+        assert "  openai-codex: gpt-5.5," in rendered or "  openai-codex: gpt-5.5\n" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_model_listing_marks_provider_default_as_current_when_unset() -> None:
+    # Regression test: at startup, no /model has been run yet, so
+    # self.current_model is None -- but the provider's own default_model is
+    # what will actually be used. The listing must mark that entry current
+    # instead of leaving the whole listing unmarked (the "Current model:
+    # provider default" line below already communicates this fallback; the
+    # listing itself must be consistent with it).
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model", "/quit"]),
+            provider="openai",
+            model=None,
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert rendered.count("(current)") == 1
+        assert "  openai: gpt-5.5 (current)" in rendered
+        assert "Current model: provider default" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_bare_model_command_shows_pending_configure() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model gpt-5.5-pro", "/model", "/quit"]),
+            provider="openai",
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert "(pending: gpt-5.5-pro)" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_adopts_server_side_auto_switched_provider() -> None:
+    # Regression test: a model-only /model <id> can resolve server-side to a
+    # different provider than the one the TUI thinks is active (see
+    # _auto_switch_provider_for_model in wisp.cli.rpc). Without handling
+    # ModelProviderAutoSwitched, the shell would only update current_model and
+    # leave current_provider stale, so /provider, /auth, and the header would
+    # keep showing the old provider even though the RPC agent had moved on.
+    async def run() -> None:
+        controller = ScriptedController(
+            configure_events=[
+                [
+                    ModelProviderAutoSwitched(
+                        command_id="configure-1", provider="openai", model="gpt-5.5-pro"
+                    ),
+                    RpcCommandFinished(command_id="configure-1", command_type="configure", ok=True),
+                ]
+            ]
+        )
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model gpt-5.5-pro", "/quit"]),
+            provider="fake",
+        )
+
+        await shell.run()
+
+        assert shell.current_provider == "openai"
+        assert shell.current_model == "gpt-5.5-pro"
+        rendered = output.getvalue()
+        assert "Provider set to openai" in rendered
+        assert "Model set to gpt-5.5-pro" in rendered
+        # The model was not "reset" by the auto-switch -- it was explicitly
+        # requested, so the reset-to-default wording must not appear.
+        assert "reset to provider default" not in rendered
+
+    anyio.run(run)
+
+
 def test_tui_shell_provider_and_model_updates_footer_snapshots() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:

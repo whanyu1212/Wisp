@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from wisp.providers.base import Provider
+from wisp.providers.catalog import ModelRegistry
 from wisp.runtime.event_bus import EventBus, EventHandler
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 from wisp.tools.base import Tool
@@ -44,3 +45,4 @@ class WispRuntime:
     tools: ToolRegistry
     events: EventBus
     api: ExtensionAPI
+    models: ModelRegistry

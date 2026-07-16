@@ -37,7 +37,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "agent.completed",
         "rpc.command.finished",
     ]
-    assert all(record["schema_version"] == 4 for record in records)
+    assert all(record["schema_version"] == 5 for record in records)
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"

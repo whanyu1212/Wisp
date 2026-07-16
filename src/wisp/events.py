@@ -1,4 +1,4 @@
-"""Schema-v4 events emitted by the Wisp agent core."""
+"""Schema-v5 events emitted by the Wisp agent core."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-EVENT_SCHEMA_VERSION = 4
+EVENT_SCHEMA_VERSION = 5
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -26,7 +26,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[4] = 4
+    schema_version: Literal[5] = 5
     timestamp: datetime = Field(default_factory=utc_now)
 
 
@@ -263,6 +263,24 @@ class RpcCommandFinished(WispEvent):
     error: str | None = None
 
 
+class ModelProviderAutoSwitched(WispEvent):
+    """A model-only ``configure`` command's resolved model belonged to another provider.
+
+    Emitted by the RPC process immediately before the ``configure`` command's
+    ``RpcCommandFinished`` when the model-registry-backed auto-switch in
+    ``_handle_rpc_configure_command`` changes ``agent.provider`` as a side effect
+    of a model-only ``/model <id>`` request. Without this, an out-of-process
+    front-end (the TUI) that only tracks provider changes it explicitly
+    requested would keep displaying and using its old provider while the RPC
+    agent has actually moved to a different one.
+    """
+
+    type: Literal["model.provider_auto_switched"] = "model.provider_auto_switched"
+    command_id: str
+    provider: str
+    model: str
+
+
 class ErrorEvent(WispEvent):
     type: Literal["error"] = "error"
     message: str
@@ -289,6 +307,7 @@ type KnownWispEvent = Annotated[
     | AgentCompleted
     | RpcCommandStarted
     | RpcCommandFinished
+    | ModelProviderAutoSwitched
     | ErrorEvent,
     Field(discriminator="type"),
 ]

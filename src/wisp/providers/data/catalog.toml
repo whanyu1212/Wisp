@@ -1,0 +1,45 @@
+# Wisp built-in model catalog.
+#
+# Describes which models each registered provider supports, for validation and
+# `/model` enumeration only -- it does not configure providers (base URLs, auth
+# env vars, and wire formats stay hardcoded in each Provider implementation).
+#
+# A user-only overlay at ~/.wisp/catalog.toml may add or extend provider entries.
+# Project-local catalogs are never read: a cloned repository must not be able to
+# redirect provider metadata.
+
+schema_version = 1
+
+[[providers]]
+name = "openai"
+display_name = "OpenAI"
+default_model = "gpt-5.5"
+docs_url = "https://platform.openai.com/docs"
+models = ["gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.4-mini"]
+
+[providers.context_windows]
+"gpt-5.5" = 272000
+"gpt-5.5-pro" = 1050000
+"gpt-5.4" = 272000
+"gpt-5.4-mini" = 400000
+
+[[providers]]
+name = "openai-codex"
+display_name = "OpenAI (Codex subscription)"
+default_model = "gpt-5.5"
+docs_url = "https://platform.openai.com/docs"
+models = ["gpt-5.5", "gpt-5.4"]
+
+[providers.context_windows]
+"gpt-5.5" = 272000
+"gpt-5.4" = 272000
+
+[[providers]]
+name = "fake"
+display_name = "Fake (offline testing)"
+default_model = "fake"
+docs_url = "https://github.com/whanyu1212/Wisp"
+models = ["fake"]
+
+[providers.context_windows]
+fake = 1000
