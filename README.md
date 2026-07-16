@@ -291,7 +291,7 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 4`. A successful prompt follows this
+Every outbound `WispEvent` includes `"schema_version": 5`. A successful prompt follows this
 lifecycle (tool events repeat inside a turn when the model requests tools):
 
 ```text

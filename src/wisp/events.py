@@ -1,4 +1,4 @@
-"""Schema-v4 events emitted by the Wisp agent core."""
+"""Schema-v5 events emitted by the Wisp agent core."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-EVENT_SCHEMA_VERSION = 4
+EVENT_SCHEMA_VERSION = 5
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -26,7 +26,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[4] = 4
+    schema_version: Literal[5] = 5
     timestamp: datetime = Field(default_factory=utc_now)
 
 

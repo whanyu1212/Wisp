@@ -158,7 +158,7 @@ def test_rpc_commands_allow_protocol_optional_id() -> None:
 
 def test_wisp_event_from_json_returns_typed_event() -> None:
     event = wisp_event_from_json(
-        '{"schema_version":4,"type":"rpc.command.finished","command_id":"cmd-1",'
+        '{"schema_version":5,"type":"rpc.command.finished","command_id":"cmd-1",'
         '"command_type":"prompt","ok":true}'
     )
 
@@ -181,7 +181,7 @@ def test_wisp_event_from_json_parses_provider_retry_progress() -> None:
     assert wisp_event_from_json(retry.model_dump_json()) == retry
 
 
-@pytest.mark.parametrize("schema_version", [None, 1, 2, 3, 5])
+@pytest.mark.parametrize("schema_version", [None, 1, 2, 3, 4])
 def test_wisp_event_from_json_rejects_unsupported_schema_version(
     schema_version: int | None,
 ) -> None:
@@ -263,13 +263,13 @@ import json
 import sys
 command = json.loads(sys.stdin.readline())
 started = {
-    "schema_version": 4,
+    "schema_version": 5,
     "type": "rpc.command.started",
     "command_id": command["id"],
     "command_type": command["type"],
 }
 finished = {
-    "schema_version": 4,
+    "schema_version": 5,
     "type": "rpc.command.finished",
     "command_id": command["id"],
     "command_type": command["type"],
@@ -309,7 +309,7 @@ sys.stderr.write("x" * 200000)
 sys.stderr.flush()
 command = json.loads(sys.stdin.readline())
 print(json.dumps({
-    "schema_version": 4,
+    "schema_version": 5,
     "type": "rpc.command.finished",
     "command_id": command["id"],
     "command_type": command["type"],

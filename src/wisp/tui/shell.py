@@ -839,13 +839,22 @@ class TuiShell:
         return None
 
     def _render_model_listing(self) -> str:
-        """Render every catalog model grouped by provider, current one marked."""
+        """Render every catalog model grouped by provider, current one marked.
+
+        A model id is not unique across providers (e.g. "gpt-5.5" is claimed by
+        both openai and openai-codex -- see ModelRegistry.resolve()), so "current"
+        is only marked on the id that also matches the active provider, not on
+        every provider's copy of that id.
+        """
 
         current_model = self.current_model
         lines = ["Available models:"]
         for entry in self.models.providers():
+            is_current_provider = entry.name == self.current_provider
             names = [
-                f"{model_id} (current)" if model_id == current_model else model_id
+                f"{model_id} (current)"
+                if is_current_provider and model_id == current_model
+                else model_id
                 for model_id in entry.models
             ]
             lines.append(f"  {entry.name}: {', '.join(names)}")

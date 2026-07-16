@@ -498,6 +498,32 @@ def test_tui_shell_bare_model_command_lists_catalog_models_grouped_by_provider()
     anyio.run(run)
 
 
+def test_tui_shell_model_listing_marks_current_only_on_the_active_provider() -> None:
+    # "gpt-5.5" is claimed by both openai and openai-codex in the built-in
+    # catalog (see ModelRegistry.resolve()'s ambiguity handling). The listing
+    # must mark (current) only on the entry under the active provider, not on
+    # every provider's copy of the shared model id.
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model", "/quit"]),
+            provider="openai",
+            model="gpt-5.5",
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert rendered.count("(current)") == 1
+        assert "  openai: gpt-5.5 (current)" in rendered
+        assert "  openai-codex: gpt-5.5," in rendered or "  openai-codex: gpt-5.5\n" in rendered
+
+    anyio.run(run)
+
+
 def test_tui_shell_bare_model_command_shows_pending_configure() -> None:
     async def run() -> None:
         controller = ScriptedController()
