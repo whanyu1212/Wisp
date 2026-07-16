@@ -17,12 +17,14 @@ from .events import (
     ToolCall,
 )
 from .fake import FakeProvider, ProviderRequest, ScriptedProvider
+from .google import GoogleProvider
 from .openai import OpenAIProvider
 from .openai_codex import OpenAICodexProvider
 
 __all__ = [
     "AnthropicProvider",
     "FakeProvider",
+    "GoogleProvider",
     "OpenAICodexProvider",
     "OpenAIProvider",
     "ProviderEvent",
