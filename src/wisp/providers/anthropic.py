@@ -6,6 +6,7 @@ import os
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from copy import deepcopy
+from dataclasses import dataclass, field
 from json import JSONDecodeError, loads
 from typing import cast
 
@@ -24,7 +25,9 @@ from anthropic.types import (
     RawMessageDeltaEvent,
     RawMessageStartEvent,
     RawMessageStreamEvent,
+    RedactedThinkingBlockParam,
     TextBlockParam,
+    ThinkingBlockParam,
     ToolParam,
     ToolResultBlockParam,
     ToolUseBlockParam,
@@ -93,6 +96,31 @@ _DEFAULT_FINISH_REASON_FOR_UNKNOWN_STOP_REASON: ProviderFinishReason = "length"
 # response_id, and grow it by one (assistant tool_use, user tool_result) pair
 # per round. Bounded and LRU-evicted so a long session can't leak memory.
 _MAX_PENDING_REPLAYS = 128
+
+
+@dataclass
+class _ContentBlockAccumulator:
+    """Accumulates one content block's streamed deltas for the replay tail.
+
+    Anthropic's tool-use guidance requires echoing thinking/redacted_thinking
+    blocks back to the API unmodified alongside their sibling tool_use block
+    on the same turn -- dropping them (e.g. replaying only text + tool_use)
+    can be rejected or lose reasoning continuity. This accumulates every
+    content-block type Wisp can actually receive (text, thinking,
+    redacted_thinking, tool_use -- Wisp declares no server-side tools, so the
+    other SDK block types cannot appear in its streams) so the replay is a
+    faithful reconstruction of the full assistant turn, not just its
+    tool-relevant parts.
+    """
+
+    block_type: str
+    text_chunks: list[str] = field(default_factory=list)
+    thinking_chunks: list[str] = field(default_factory=list)
+    signature: str = ""
+    redacted_data: str = ""
+    tool_use_id: str = ""
+    tool_use_name: str = ""
+    tool_use_json_chunks: list[str] = field(default_factory=list)
 
 
 class AnthropicProvider:
@@ -172,8 +200,7 @@ class AnthropicProvider:
         response_id: str | None = None
         chunks: list[str] = []
         tool_calls: list[ToolCall] = []
-        pending_tool_use: dict[int, tuple[str, str]] = {}
-        pending_tool_json: dict[int, list[str]] = {}
+        content_blocks: dict[int, _ContentBlockAccumulator] = {}
         finish_reason: ProviderFinishReason = "stop"
         stream_completed = False
         failure: ProviderResponseFailed | None = None
@@ -187,19 +214,38 @@ class AnthropicProvider:
                 elif isinstance(event, RawContentBlockStartEvent):
                     block = event.content_block
                     if block.type == "tool_use":
-                        pending_tool_use[event.index] = (block.id, block.name)
-                        pending_tool_json[event.index] = []
+                        accumulator = _ContentBlockAccumulator(block_type="tool_use")
+                        accumulator.tool_use_id = block.id
+                        accumulator.tool_use_name = block.name
+                        content_blocks[event.index] = accumulator
+                    elif block.type == "text":
+                        content_blocks[event.index] = _ContentBlockAccumulator(block_type="text")
+                    elif block.type == "thinking":
+                        content_blocks[event.index] = _ContentBlockAccumulator(
+                            block_type="thinking"
+                        )
+                    elif block.type == "redacted_thinking":
+                        accumulator = _ContentBlockAccumulator(block_type="redacted_thinking")
+                        accumulator.redacted_data = block.data
+                        content_blocks[event.index] = accumulator
                 elif isinstance(event, RawContentBlockDeltaEvent):
                     delta = event.delta
+                    block_accumulator = content_blocks.get(event.index)
                     if delta.type == "text_delta":
                         chunks.append(delta.text)
+                        if block_accumulator is not None:
+                            block_accumulator.text_chunks.append(delta.text)
                         yield ProviderTextDelta(delta=delta.text, content_index=event.index)
                     elif delta.type == "thinking_delta":
+                        if block_accumulator is not None:
+                            block_accumulator.thinking_chunks.append(delta.thinking)
                         yield ProviderThinkingDelta(delta=delta.thinking, content_index=event.index)
+                    elif delta.type == "signature_delta":
+                        if block_accumulator is not None:
+                            block_accumulator.signature += delta.signature
                     elif delta.type == "input_json_delta":
-                        buffer = pending_tool_json.get(event.index)
-                        if buffer is not None:
-                            buffer.append(delta.partial_json)
+                        if block_accumulator is not None:
+                            block_accumulator.tool_use_json_chunks.append(delta.partial_json)
                 elif isinstance(event, RawMessageDeltaEvent):
                     stop_reason = event.delta.stop_reason
                     if stop_reason is not None:
@@ -235,11 +281,14 @@ class AnthropicProvider:
             yield failure
             return
 
-        for index, (call_id, tool_name) in pending_tool_use.items():
-            raw_arguments = "".join(pending_tool_json.get(index, ()))
+        for index in sorted(content_blocks):
+            accumulator = content_blocks[index]
+            if accumulator.block_type != "tool_use":
+                continue
+            raw_arguments = "".join(accumulator.tool_use_json_chunks)
             tool_call = _tool_call_from_anthropic(
-                call_id=call_id,
-                name=tool_name,
+                call_id=accumulator.tool_use_id,
+                name=accumulator.tool_use_name,
                 raw_arguments=raw_arguments,
                 response_id=response_id,
             )
@@ -262,11 +311,7 @@ class AnthropicProvider:
             # needs to resend, since Anthropic never remembers any of it
             # server-side.
             previous_tail = self._get_replay(previous_response_id)
-            new_turn = _replay_message_from_stream(
-                text="".join(chunks),
-                pending_tool_use=pending_tool_use,
-                pending_tool_json=pending_tool_json,
-            )
+            new_turn = _replay_message_from_stream(content_blocks)
             replay_tail = (
                 *previous_tail,
                 *((_tool_results_to_message(tool_results),) if tool_results else ()),
@@ -365,13 +410,22 @@ class AnthropicProvider:
             self._replays.popitem(last=False)
 
 
+_ReplayBlockParam = (
+    TextBlockParam | ThinkingBlockParam | RedactedThinkingBlockParam | ToolUseBlockParam
+)
+
+
 def _replay_message_from_stream(
-    *,
-    text: str,
-    pending_tool_use: dict[int, tuple[str, str]],
-    pending_tool_json: dict[int, list[str]],
+    content_blocks: dict[int, _ContentBlockAccumulator],
 ) -> MessageParam:
     """Build the assistant-turn replay for a completed tool-use response.
+
+    Reconstructs every content block Anthropic actually sent, in the order it
+    sent them, not just the tool-relevant parts. Thinking and
+    redacted_thinking blocks must be echoed back unmodified alongside their
+    sibling tool_use block on the same turn -- Anthropic's tool-use guidance
+    says dropping them (e.g. replaying only text + tool_use) can be rejected
+    or lose reasoning continuity.
 
     Anthropic's ``tool_use.input`` must be a valid JSON object; a tool call
     whose accumulated ``input_json_delta`` text failed to parse (surfaced to
@@ -381,16 +435,36 @@ def _replay_message_from_stream(
     Wisp's tool-execution layer sees.
     """
 
-    content: list[TextBlockParam | ToolUseBlockParam] = []
-    if text:
-        content.append({"type": "text", "text": text})
-    for index in sorted(pending_tool_use):
-        call_id, tool_name = pending_tool_use[index]
-        raw_arguments = "".join(pending_tool_json.get(index, ()))
-        arguments, _parse_error = _parse_tool_arguments(name=tool_name, raw_arguments=raw_arguments)
-        content.append(
-            {"type": "tool_use", "id": call_id, "name": tool_name, "input": dict(arguments)}
-        )
+    content: list[_ReplayBlockParam] = []
+    for index in sorted(content_blocks):
+        accumulator = content_blocks[index]
+        if accumulator.block_type == "text":
+            text = "".join(accumulator.text_chunks)
+            if text:
+                content.append({"type": "text", "text": text})
+        elif accumulator.block_type == "thinking":
+            content.append(
+                {
+                    "type": "thinking",
+                    "thinking": "".join(accumulator.thinking_chunks),
+                    "signature": accumulator.signature,
+                }
+            )
+        elif accumulator.block_type == "redacted_thinking":
+            content.append({"type": "redacted_thinking", "data": accumulator.redacted_data})
+        elif accumulator.block_type == "tool_use":
+            raw_arguments = "".join(accumulator.tool_use_json_chunks)
+            arguments, _parse_error = _parse_tool_arguments(
+                name=accumulator.tool_use_name, raw_arguments=raw_arguments
+            )
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": accumulator.tool_use_id,
+                    "name": accumulator.tool_use_name,
+                    "input": dict(arguments),
+                }
+            )
     return cast(MessageParam, {"role": "assistant", "content": content})
 
 

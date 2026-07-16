@@ -16,7 +16,11 @@ from anthropic.types import (
     RawMessageDeltaEvent,
     RawMessageStartEvent,
     RawMessageStreamEvent,
+    RedactedThinkingBlock,
+    SignatureDelta,
+    TextBlock,
     TextDelta,
+    ThinkingBlock,
     ThinkingDelta,
     ToolUseBlock,
     Usage,
@@ -644,6 +648,7 @@ def test_anthropic_provider_replay_includes_text_alongside_tool_use() -> None:
         responses=[
             [
                 _message_start("response-id"),
+                _text_block_start(index=0),
                 _text_delta("Let me check.", index=0),
                 _tool_use_start("call-id", "lookup", index=1),
                 _input_json_delta("{}", index=1),
@@ -677,6 +682,63 @@ def test_anthropic_provider_replay_includes_text_alongside_tool_use() -> None:
         "role": "assistant",
         "content": [
             {"type": "text", "text": "Let me check."},
+            {"type": "tool_use", "id": "call-id", "name": "lookup", "input": {}},
+        ],
+    }
+
+
+def test_anthropic_provider_replay_preserves_thinking_blocks_alongside_tool_use() -> None:
+    # Regression test: Anthropic's tool-use guidance requires thinking and
+    # redacted_thinking blocks to be echoed back to the API unmodified
+    # alongside their sibling tool_use block on the same turn -- dropping
+    # them (e.g. replaying only text + tool_use) can be rejected or lose
+    # reasoning continuity.
+    messages_resource = StubMessagesResource(
+        responses=[
+            [
+                _message_start("response-id"),
+                _thinking_block_start(index=0),
+                _thinking_delta("checking the lookup table", index=0),
+                _signature_delta("sig-part-1", index=0),
+                _signature_delta("sig-part-2", index=0),
+                _redacted_thinking_block_start(index=1),
+                _tool_use_start("call-id", "lookup", index=2),
+                _input_json_delta("{}", index=2),
+                _message_delta("tool_use"),
+            ],
+            [],
+        ]
+    )
+    provider = AnthropicProvider(
+        api_key="test-key",
+        client=cast(AsyncAnthropic, StubAsyncAnthropic(messages_resource)),
+    )
+    messages = [WispMessage(role="user", content="hello")]
+
+    async def run() -> None:
+        first_events = [event async for event in provider.stream(messages, model="claude-test")]
+        completed = first_events[-1]
+        assert isinstance(completed, ProviderResponseCompleted)
+        async for _event in provider.stream(
+            messages,
+            model="claude-test",
+            tool_results=[ToolCallResult(call_id="call-id", output="ok")],
+            previous_response_id=completed.response_id,
+        ):
+            pass
+
+    anyio.run(run)
+
+    replay_message = messages_resource.calls[1]["messages"][1]
+    assert replay_message == {
+        "role": "assistant",
+        "content": [
+            {
+                "type": "thinking",
+                "thinking": "checking the lookup table",
+                "signature": "sig-part-1sig-part-2",
+            },
+            {"type": "redacted_thinking", "data": "redacted"},
             {"type": "tool_use", "id": "call-id", "name": "lookup", "input": {}},
         ],
     }
@@ -918,10 +980,47 @@ def _thinking_delta(text: str, *, index: int = 0) -> RawContentBlockDeltaEvent:
     )
 
 
+def _signature_delta(signature: str, *, index: int) -> RawContentBlockDeltaEvent:
+    return RawContentBlockDeltaEvent(
+        delta=SignatureDelta(signature=signature, type="signature_delta"),
+        index=index,
+        type="content_block_delta",
+    )
+
+
 def _tool_use_start(call_id: str, name: str, *, index: int) -> RawContentBlockStartEvent:
     content_block = cast(
         ContentBlock,
         ToolUseBlock(id=call_id, input={}, name=name, type="tool_use"),
+    )
+    return RawContentBlockStartEvent(
+        content_block=content_block,
+        index=index,
+        type="content_block_start",
+    )
+
+
+def _text_block_start(*, index: int = 0) -> RawContentBlockStartEvent:
+    content_block = cast(ContentBlock, TextBlock(text="", type="text"))
+    return RawContentBlockStartEvent(
+        content_block=content_block,
+        index=index,
+        type="content_block_start",
+    )
+
+
+def _thinking_block_start(*, index: int = 0) -> RawContentBlockStartEvent:
+    content_block = cast(ContentBlock, ThinkingBlock(thinking="", signature="", type="thinking"))
+    return RawContentBlockStartEvent(
+        content_block=content_block,
+        index=index,
+        type="content_block_start",
+    )
+
+
+def _redacted_thinking_block_start(*, index: int = 0) -> RawContentBlockStartEvent:
+    content_block = cast(
+        ContentBlock, RedactedThinkingBlock(data="redacted", type="redacted_thinking")
     )
     return RawContentBlockStartEvent(
         content_block=content_block,
