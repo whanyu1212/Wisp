@@ -28,8 +28,16 @@ def test_configure_model_auto_switches_provider_when_unambiguous(tmp_path: Path)
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
-    configure_finished = records[1]
-    assert configure_finished["type"] == "rpc.command.finished"
+    auto_switched = [r for r in records if r["type"] == "model.provider_auto_switched"]
+    assert len(auto_switched) == 1
+    assert auto_switched[0]["command_id"] == "configure-1"
+    assert auto_switched[0]["provider"] == "openai"
+    assert auto_switched[0]["model"] == "gpt-5.5-pro"
+    configure_finished = next(
+        r
+        for r in records
+        if r["type"] == "rpc.command.finished" and r["command_id"] == "configure-1"
+    )
     assert configure_finished["ok"] is True
     assert any(
         record.get("message") == "OPENAI_API_KEY is required when using the openai provider"
@@ -54,10 +62,11 @@ def test_configure_model_leaves_provider_alone_when_model_belongs_to_current_pro
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
+    # Already on openai -- the (no-op) auto-switch logic must not emit a switch
+    # event, error, or otherwise behave any differently than configuring model
+    # on an already-matching provider did before this feature existed.
+    assert not any(r["type"] == "model.provider_auto_switched" for r in records)
     assert records[1]["ok"] is True
-    # Already on openai -- the (no-op) auto-switch logic must not error or
-    # behave any differently than configuring model on an already-matching
-    # provider did before this feature existed.
     assert any(
         record.get("message") == "OPENAI_API_KEY is required when using the openai provider"
         for record in records
@@ -82,6 +91,7 @@ def test_configure_unknown_model_falls_through_without_error(tmp_path: Path) -> 
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
+    assert not any(r["type"] == "model.provider_auto_switched" for r in records)
     assert records[1]["ok"] is True
     # The prompt still runs against the unchanged (fake) provider -- proves no
     # provider switch was attempted despite the unresolvable model string.
@@ -106,6 +116,7 @@ def test_configure_ambiguous_model_falls_through_without_error(tmp_path: Path) -
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
+    assert not any(r["type"] == "model.provider_auto_switched" for r in records)
     assert records[1]["ok"] is True
     assert any(record.get("content") == "fake response to: hello" for record in records)
 

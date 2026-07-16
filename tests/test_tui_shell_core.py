@@ -517,6 +517,46 @@ def test_tui_shell_bare_model_command_shows_pending_configure() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_adopts_server_side_auto_switched_provider() -> None:
+    # Regression test: a model-only /model <id> can resolve server-side to a
+    # different provider than the one the TUI thinks is active (see
+    # _auto_switch_provider_for_model in wisp.cli.rpc). Without handling
+    # ModelProviderAutoSwitched, the shell would only update current_model and
+    # leave current_provider stale, so /provider, /auth, and the header would
+    # keep showing the old provider even though the RPC agent had moved on.
+    async def run() -> None:
+        controller = ScriptedController(
+            configure_events=[
+                [
+                    ModelProviderAutoSwitched(
+                        command_id="configure-1", provider="openai", model="gpt-5.5-pro"
+                    ),
+                    RpcCommandFinished(command_id="configure-1", command_type="configure", ok=True),
+                ]
+            ]
+        )
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model gpt-5.5-pro", "/quit"]),
+            provider="fake",
+        )
+
+        await shell.run()
+
+        assert shell.current_provider == "openai"
+        assert shell.current_model == "gpt-5.5-pro"
+        rendered = output.getvalue()
+        assert "Provider set to openai" in rendered
+        assert "Model set to gpt-5.5-pro" in rendered
+        # The model was not "reset" by the auto-switch -- it was explicitly
+        # requested, so the reset-to-default wording must not appear.
+        assert "reset to provider default" not in rendered
+
+    anyio.run(run)
+
+
 def test_tui_shell_provider_and_model_updates_footer_snapshots() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:

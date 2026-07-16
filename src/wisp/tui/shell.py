@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -22,6 +22,7 @@ from wisp.events import (
     MessageCompleted,
     MessageDelta,
     MessageStarted,
+    ModelProviderAutoSwitched,
     ProjectConfigApplied,
     ProviderRetrying,
     RpcCommandFinished,
@@ -711,6 +712,19 @@ class TuiShell:
             self._sync_view()
             return False
 
+        if isinstance(event, ModelProviderAutoSwitched):
+            # A model-only /model <id> resolved to a different provider server-side
+            # (see _auto_switch_provider_for_model in wisp.cli.rpc). Record the
+            # provider on the still-pending configure so _finish_pending_configure
+            # adopts it exactly like an explicit /provider request would, instead of
+            # only updating current_model and leaving current_provider stale.
+            pending = self.pending_configures.get(event.command_id)
+            if pending is not None:
+                self.pending_configures[event.command_id] = replace(
+                    pending, provider=event.provider
+                )
+            return False
+
         if isinstance(event, RpcCommandFinished):
             if event.command_id in self.pending_configures:
                 self._finish_pending_configure(event)
@@ -731,9 +745,11 @@ class TuiShell:
                 self.current_provider = pending.provider
                 if pending.reset_model:
                     self.current_model = None
-                self.renderer.notice(
-                    f"Provider set to {pending.provider}; model reset to provider default."
-                )
+                    self.renderer.notice(
+                        f"Provider set to {pending.provider}; model reset to provider default."
+                    )
+                else:
+                    self.renderer.notice(f"Provider set to {pending.provider}")
             if pending.model is not None:
                 self.current_model = pending.model
                 self.renderer.notice(f"Model set to {pending.model}")

@@ -31,6 +31,7 @@ from wisp.config import WispConfig
 from wisp.events import (
     AgentStarted,
     ErrorEvent,
+    ModelProviderAutoSwitched,
     ProjectConfigApplied,
     RpcCommandFinished,
     RpcCommandStarted,
@@ -1061,6 +1062,7 @@ def _handle_rpc_configure_command(
     if has_model and not has_provider and isinstance(model, str):
         _auto_switch_provider_for_model(
             model,
+            command_id=command_id,
             agent=agent,
             runtime=runtime,
             configure_overrides=configure_overrides,
@@ -1076,6 +1078,7 @@ def _handle_rpc_configure_command(
 def _auto_switch_provider_for_model(
     model: str,
     *,
+    command_id: str,
     agent: CodingSession,
     runtime: WispRuntime,
     configure_overrides: _RpcConfigureOverrides | None,
@@ -1087,6 +1090,11 @@ def _auto_switch_provider_for_model(
     never reject a model string that would have worked before the registry
     existed (a brand-new model ahead of a catalog update, a custom provider, or
     a model shared by two providers while already on one of them).
+
+    Emits :class:`ModelProviderAutoSwitched` before the switch is applied so an
+    out-of-process front-end (the TUI) that only tracks provider changes it
+    explicitly requested can resync -- otherwise it would keep displaying and
+    using its old provider while the RPC agent has actually moved on.
     """
 
     try:
@@ -1096,9 +1104,13 @@ def _auto_switch_provider_for_model(
     if resolved_provider == agent.provider.name:
         return
     try:
-        agent.provider = runtime.providers.get(resolved_provider)
+        new_provider = runtime.providers.get(resolved_provider)
     except UnknownProviderError:
         return
+    _write_json_event(
+        ModelProviderAutoSwitched(command_id=command_id, provider=resolved_provider, model=model)
+    )
+    agent.provider = new_provider
     if configure_overrides is not None:
         configure_overrides.provider = resolved_provider
 
