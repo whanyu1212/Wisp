@@ -66,6 +66,14 @@ class Provider(Protocol):
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        """Yield retry progress before one typed response lifecycle and terminal event."""
+        """Yield retry progress before one typed response lifecycle and terminal event.
+
+        ``effort`` is a provider-native reasoning-effort tier string (e.g.
+        Anthropic's ``"high"``, Google's ``"LOW"``, OpenAI's ``"medium"``) --
+        not normalized across providers. A provider that receives a value it
+        does not recognize, or ``None``, sends its own unmodified default
+        behavior; providers with no effort concept ignore it entirely.
+        """
         ...

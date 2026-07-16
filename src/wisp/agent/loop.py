@@ -81,6 +81,11 @@ class AgentLoopConfig:
     tools: tuple[ToolSpec, ...] = ()
     max_tool_iterations: int | None = None
     cancellation_token: CancellationToken | None = None
+    # Provider-native reasoning-effort tier string (e.g. Anthropic's "high",
+    # Google's "MEDIUM", OpenAI's "low") -- not normalized across providers,
+    # forwarded to Provider.stream() as-is. None means "use the provider's
+    # own default behavior."
+    effort: str | None = None
 
 
 def _is_cancelled(config: AgentLoopConfig) -> bool:
@@ -176,6 +181,7 @@ async def run_agent_loop(
                 tools=config.tools,
                 tool_results=pending_tool_results,
                 previous_response_id=previous_response_id,
+                effort=config.effort,
             ):
                 if _is_cancelled(config):
                     for event in _cancelled_turn_events(turn):

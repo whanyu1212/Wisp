@@ -34,6 +34,7 @@ class AgentHarnessConfig:
     model: str | None = None
     tools: tuple[ToolSpec, ...] = ()
     max_tool_iterations: int | None = None
+    effort: str | None = None
 
 
 class SimpleCancellationToken:
@@ -166,6 +167,7 @@ class AgentHarness:
             tools=self._config.tools,
             max_tool_iterations=self._config.max_tool_iterations,
             cancellation_token=token,
+            effort=self._config.effort,
         )
         provider_messages_list: list[Message] = []
         for message in self._messages:

@@ -241,6 +241,40 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
     anyio.run(run)
 
 
+def test_rpc_controller_configure_sends_effort() -> None:
+    async def run() -> None:
+        transport = RecordingTransport()
+        controller = RpcController(
+            transport,
+            command_id_factory=lambda prefix: f"{prefix}-id",
+        )
+
+        await controller.configure(effort="high")
+
+        assert transport.commands == [
+            ConfigureCommand(id="configure-id", effort="high"),
+        ]
+
+    anyio.run(run)
+
+
+def test_configure_command_serializes_effort_and_omits_when_unset() -> None:
+    with_effort = ConfigureCommand(id="configure-1", effort="medium")
+
+    line = with_effort.to_json_line()
+
+    assert json.loads(line) == {
+        "id": "configure-1",
+        "type": "configure",
+        "effort": "medium",
+    }
+    assert rpc_command_from_json(line) == with_effort
+
+    without_effort = ConfigureCommand(id="configure-2", model="gpt-5.5")
+
+    assert "effort" not in json.loads(without_effort.to_json_line())
+
+
 def test_rpc_controller_exposes_transport_events() -> None:
     async def run() -> None:
         expected_events = [

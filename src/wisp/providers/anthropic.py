@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from json import JSONDecodeError, loads
@@ -159,6 +159,7 @@ class AnthropicProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         """Stream a normalized Anthropic response lifecycle.
 
@@ -170,6 +171,12 @@ class AnthropicProvider:
         server-side), so this provider reconstructs the accumulated tail
         from its own ``_replays`` cache keyed by ``previous_response_id`` --
         see ``_MAX_PENDING_REPLAYS``.
+
+        ``effort`` maps directly to ``output_config.effort`` on the Messages
+        API (``"low"``/``"medium"``/``"high"``/``"xhigh"``/``"max"``,
+        model-dependent) -- passed through unvalidated; Anthropic rejects an
+        unsupported tier for the selected model with a 400, which surfaces
+        as a normal retry-classified error, not a silent no-op.
         """
 
         selected_model = model or self.default_model or DEFAULT_ANTHROPIC_MODEL
@@ -182,6 +189,7 @@ class AnthropicProvider:
                     tools=tools,
                     tool_results=tool_results,
                     previous_response_id=previous_response_id,
+                    effort=effort,
                 )
                 break
             except AnthropicError as exc:
@@ -358,6 +366,7 @@ class AnthropicProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[RawMessageStreamEvent]:
         client = self._client_or_create()
         system = _system_from_messages(messages)
@@ -367,38 +376,30 @@ class AnthropicProvider:
             anthropic_messages.append(_tool_results_to_message(tool_results))
         anthropic_tools = _tool_specs_to_anthropic_tools(tools)
 
-        if system is not None and anthropic_tools:
-            stream = await client.messages.create(
-                model=model,
-                max_tokens=_MAX_OUTPUT_TOKENS,
-                messages=anthropic_messages,
-                stream=True,
-                system=system,
-                tools=anthropic_tools,
-            )
-        elif system is not None:
-            stream = await client.messages.create(
-                model=model,
-                max_tokens=_MAX_OUTPUT_TOKENS,
-                messages=anthropic_messages,
-                stream=True,
-                system=system,
-            )
-        elif anthropic_tools:
-            stream = await client.messages.create(
-                model=model,
-                max_tokens=_MAX_OUTPUT_TOKENS,
-                messages=anthropic_messages,
-                stream=True,
-                tools=anthropic_tools,
-            )
-        else:
-            stream = await client.messages.create(
-                model=model,
-                max_tokens=_MAX_OUTPUT_TOKENS,
-                messages=anthropic_messages,
-                stream=True,
-            )
+        # Built as a single kwargs dict rather than a create() call per
+        # system/tools/effort combination: branching per optional-parameter
+        # combination doesn't scale past two independent optional dimensions
+        # (system x tools was already 4 branches; adding effort would make
+        # 8). mypy cannot match a **kwargs dict against create()'s
+        # `@overload`s (they only discriminate on `stream`, but mypy's
+        # overload resolution rejects a dict-unpack call regardless) -- the
+        # `create` rebinding below is the single, contained concession to
+        # that limitation; every kwarg's value is still built from typed
+        # sources above.
+        kwargs: dict[str, object] = {
+            "model": model,
+            "max_tokens": _MAX_OUTPUT_TOKENS,
+            "messages": anthropic_messages,
+            "stream": True,
+        }
+        if system is not None:
+            kwargs["system"] = system
+        if anthropic_tools:
+            kwargs["tools"] = anthropic_tools
+        if effort is not None:
+            kwargs["output_config"] = {"effort": effort}
+        create = cast(Callable[..., Awaitable[object]], client.messages.create)
+        stream = await create(**kwargs)
         return cast(AsyncIterator[RawMessageStreamEvent], stream)
 
     def _client_or_create(self) -> AsyncAnthropic:

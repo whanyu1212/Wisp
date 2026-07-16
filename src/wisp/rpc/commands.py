@@ -68,6 +68,7 @@ class ConfigureCommand(RpcCommandModel):
     type: Literal["configure"] = "configure"
     provider: str | None = None
     model: str | None = None
+    effort: str | None = None
 
 
 type RpcCommand = Annotated[

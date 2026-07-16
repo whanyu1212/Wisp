@@ -57,6 +57,7 @@ class StubAnthropicProvider(AnthropicProvider):
         self.seen_messages: Sequence[WispMessage] | None = None
         self.seen_tools: Sequence[ToolSpec] | None = None
         self.seen_tool_results: Sequence[ToolCallResult] | None = None
+        self.seen_effort: str | None = None
 
     async def _create_stream(
         self,
@@ -66,11 +67,13 @@ class StubAnthropicProvider(AnthropicProvider):
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[RawMessageStreamEvent]:
         self.seen_model = model
         self.seen_messages = messages
         self.seen_tools = tools
         self.seen_tool_results = tool_results
+        self.seen_effort = effort
 
         async def stream() -> AsyncIterator[RawMessageStreamEvent]:
             for event in self.events:
@@ -91,6 +94,7 @@ class FailingAnthropicProvider(AnthropicProvider):
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[RawMessageStreamEvent]:
         async def stream() -> AsyncIterator[RawMessageStreamEvent]:
             yield _text_delta("partial")
@@ -117,6 +121,7 @@ class FlakyAnthropicProvider(AnthropicProvider):
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[RawMessageStreamEvent]:
         self.attempts += 1
         if self.attempts <= self.failures:
@@ -601,6 +606,69 @@ def test_anthropic_provider_serializes_tool_specs() -> None:
             ],
         }
     ]
+
+
+def test_anthropic_provider_sends_output_config_effort_when_provided() -> None:
+    messages_resource = StubMessagesResource()
+    provider = AnthropicProvider(
+        api_key="test-key",
+        client=cast(AsyncAnthropic, StubAsyncAnthropic(messages_resource)),
+    )
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [WispMessage(role="user", content="hello")],
+            model="claude-test",
+            effort="high",
+        )
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert messages_resource.calls == [
+        {
+            "model": "claude-test",
+            "max_tokens": 64000,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+            "stream": True,
+            "output_config": {"effort": "high"},
+        }
+    ]
+
+
+def test_anthropic_provider_omits_output_config_when_effort_is_not_provided() -> None:
+    messages_resource = StubMessagesResource()
+    provider = AnthropicProvider(
+        api_key="test-key",
+        client=cast(AsyncAnthropic, StubAsyncAnthropic(messages_resource)),
+    )
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [WispMessage(role="user", content="hello")],
+            model="claude-test",
+        )
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert "output_config" not in messages_resource.calls[0]
+
+
+def test_anthropic_provider_stream_forwards_effort_to_create_stream() -> None:
+    provider = StubAnthropicProvider([_text_delta("hi"), _message_delta("end_turn")])
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in provider.stream(
+                [WispMessage(role="user", content="hello")], effort="medium"
+            )
+        ]
+
+    anyio.run(run)
+
+    assert provider.seen_effort == "medium"
 
 
 def test_anthropic_provider_replays_tool_use_turn_before_tool_results() -> None:

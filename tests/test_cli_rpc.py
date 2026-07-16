@@ -284,6 +284,7 @@ def test_rpc_prompt_cancellation_rolls_back_before_completion_boundary(tmp_path:
             tools: Sequence[ToolSpec] = (),
             tool_results: Sequence[ToolCallResult] = (),
             previous_response_id: str | None = None,
+            effort: str | None = None,
         ) -> AsyncIterator[ProviderEvent]:
             self.started.set()
             await anyio.sleep_forever()
@@ -293,6 +294,7 @@ def test_rpc_prompt_cancellation_rolls_back_before_completion_boundary(tmp_path:
                 tools=tools,
                 tool_results=tool_results,
                 previous_response_id=previous_response_id,
+                effort=effort,
             ):
                 yield event
 
@@ -349,6 +351,7 @@ def test_rpc_prestart_cancellation_preserves_loaded_tool_repair(tmp_path: Path) 
             tools: Sequence[ToolSpec] = (),
             tool_results: Sequence[ToolCallResult] = (),
             previous_response_id: str | None = None,
+            effort: str | None = None,
         ) -> AsyncIterator[ProviderEvent]:
             self.started.set()
             await anyio.sleep_forever()
@@ -358,6 +361,7 @@ def test_rpc_prestart_cancellation_preserves_loaded_tool_repair(tmp_path: Path) 
                 tools=tools,
                 tool_results=tool_results,
                 previous_response_id=previous_response_id,
+                effort=effort,
             ):
                 yield event
 

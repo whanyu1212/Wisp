@@ -39,6 +39,7 @@ class StubGoogleProvider(GoogleProvider):
         self.seen_messages: Sequence[WispMessage] | None = None
         self.seen_tools: Sequence[ToolSpec] | None = None
         self.seen_tool_results: Sequence[ToolCallResult] | None = None
+        self.seen_effort: str | None = None
 
     async def _create_stream(
         self,
@@ -48,11 +49,13 @@ class StubGoogleProvider(GoogleProvider):
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[genai_types.GenerateContentResponse]:
         self.seen_model = model
         self.seen_messages = messages
         self.seen_tools = tools
         self.seen_tool_results = tool_results
+        self.seen_effort = effort
 
         async def stream() -> AsyncIterator[genai_types.GenerateContentResponse]:
             for chunk in self.chunks:
@@ -73,6 +76,7 @@ class FailingGoogleProvider(GoogleProvider):
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[genai_types.GenerateContentResponse]:
         async def stream() -> AsyncIterator[genai_types.GenerateContentResponse]:
             yield _text_chunk("partial")
@@ -99,6 +103,7 @@ class FlakyGoogleProvider(GoogleProvider):
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[genai_types.GenerateContentResponse]:
         self.attempts += 1
         if self.attempts <= self.failures:
@@ -570,6 +575,63 @@ def test_google_provider_serializes_tool_specs_without_sanitizing_schema() -> No
         "additionalProperties": False,
         "$schema": "http://json-schema.org/draft-07/schema#",
     }
+
+
+def test_google_provider_sends_thinking_level_when_effort_provided() -> None:
+    stub_models = StubModels()
+    provider = GoogleProvider(
+        api_key="test-key",
+        client=cast(genai.Client, StubGenaiClient(stub_models)),
+    )
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [WispMessage(role="user", content="hello")],
+            model="gemini-test",
+            effort="MEDIUM",
+        )
+        assert [chunk async for chunk in stream] == []
+
+    anyio.run(run)
+
+    thinking_config = stub_models.calls[0]["config"].thinking_config
+    assert thinking_config.thinking_level == genai_types.ThinkingLevel.MEDIUM
+
+
+def test_google_provider_omits_thinking_level_when_effort_not_provided() -> None:
+    stub_models = StubModels()
+    provider = GoogleProvider(
+        api_key="test-key",
+        client=cast(genai.Client, StubGenaiClient(stub_models)),
+    )
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [WispMessage(role="user", content="hello")],
+            model="gemini-test",
+        )
+        assert [chunk async for chunk in stream] == []
+
+    anyio.run(run)
+
+    thinking_config = stub_models.calls[0]["config"].thinking_config
+    assert thinking_config.thinking_level is None
+
+
+def test_google_provider_stream_forwards_effort_to_create_stream() -> None:
+    provider = StubGoogleProvider([_text_chunk("hi", finish_reason=genai_types.FinishReason.STOP)])
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in provider.stream(
+                [WispMessage(role="user", content="hello")], effort="HIGH"
+            )
+        ]
+
+    anyio.run(run)
+
+    assert provider.seen_effort == "HIGH"
 
 
 def test_google_provider_replays_model_turn_before_tool_results() -> None:

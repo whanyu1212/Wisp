@@ -53,6 +53,7 @@ class StubOpenAIProvider(OpenAIProvider):
         self.seen_tools: Sequence[ToolSpec] | None = None
         self.seen_tool_results: Sequence[ToolCallResult] | None = None
         self.seen_previous_response_id: str | None = None
+        self.seen_effort: str | None = None
 
     async def _create_stream(
         self,
@@ -62,12 +63,14 @@ class StubOpenAIProvider(OpenAIProvider):
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         self.seen_model = model
         self.seen_messages = messages
         self.seen_tools = tools
         self.seen_tool_results = tool_results
         self.seen_previous_response_id = previous_response_id
+        self.seen_effort = effort
 
         async def stream() -> AsyncIterator[ResponseStreamEvent]:
             for event in self.events:
@@ -88,6 +91,7 @@ class FailingOpenAIProvider(OpenAIProvider):
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         async def stream() -> AsyncIterator[ResponseStreamEvent]:
             yield _text_delta("partial")
@@ -114,6 +118,7 @@ class FlakyOpenAIProvider(OpenAIProvider):
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         self.attempts += 1
         if self.attempts <= self.failures:
@@ -232,6 +237,68 @@ def test_openai_provider_serializes_tool_specs_to_responses_tools() -> None:
             ],
         }
     ]
+
+
+def test_openai_provider_sends_reasoning_effort_when_provided() -> None:
+    responses = StubResponsesResource()
+    provider = OpenAIProvider(
+        api_key="test-key",
+        client=cast(AsyncOpenAI, StubAsyncOpenAI(responses)),
+    )
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [Message(role="user", content="hello")],
+            model="gpt-test",
+            effort="high",
+        )
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert responses.calls == [
+        {
+            "model": "gpt-test",
+            "input": [{"role": "user", "content": "hello"}],
+            "stream": True,
+            "reasoning": {"effort": "high"},
+        }
+    ]
+
+
+def test_openai_provider_omits_reasoning_when_effort_is_not_provided() -> None:
+    responses = StubResponsesResource()
+    provider = OpenAIProvider(
+        api_key="test-key",
+        client=cast(AsyncOpenAI, StubAsyncOpenAI(responses)),
+    )
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [Message(role="user", content="hello")],
+            model="gpt-test",
+        )
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert "reasoning" not in responses.calls[0]
+
+
+def test_openai_provider_stream_forwards_effort_to_create_stream() -> None:
+    provider = StubOpenAIProvider([_text_delta("hi")])
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in provider.stream(
+                [Message(role="user", content="hello")], effort="low"
+            )
+        ]
+
+    anyio.run(run)
+
+    assert provider.seen_effort == "low"
 
 
 def test_openai_provider_omits_tools_when_no_tool_specs_are_provided() -> None:

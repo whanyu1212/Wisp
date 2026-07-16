@@ -60,8 +60,9 @@ class BlockingProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        del messages, tools, tool_results, previous_response_id
+        del messages, tools, tool_results, previous_response_id, effort
         try:
             yield ProviderResponseStarted(model=model or self.default_model or self.name)
             if self.delta_before_wait is not None:

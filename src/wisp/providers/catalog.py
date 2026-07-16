@@ -65,6 +65,14 @@ class ModelCatalogProviderEntry(BaseModel):
     docs_url: str
     models: tuple[str, ...]
     context_windows: dict[str, int] = {}
+    # Per-model reasoning-effort tiers, in the exact wire-format strings each
+    # provider's API accepts verbatim (e.g. Anthropic's "low"/"medium"/"high"/
+    # "xhigh"/"max", Google's "LOW"/"HIGH", OpenAI's "none"/"minimal"/"low"/
+    # "medium"/"high"/"xhigh") -- deliberately not normalized to a shared
+    # vocabulary, since the tiers differ per provider and per model within a
+    # provider (e.g. Claude Haiku supports none at all). A model absent from
+    # this table has no settable effort level.
+    effort_levels: dict[str, tuple[str, ...]] = {}
 
     @model_validator(mode="after")
     def _validate_cross_references(self) -> ModelCatalogProviderEntry:
@@ -87,6 +95,19 @@ class ModelCatalogProviderEntry(BaseModel):
                 raise ValueError(
                     f"provider {self.name!r} context_windows[{model_id!r}] "
                     f"must be positive, got {window}"
+                )
+        for model_id, levels in self.effort_levels.items():
+            if model_id not in model_set:
+                raise ValueError(
+                    f"provider {self.name!r} effort_levels references unknown model {model_id!r}"
+                )
+            if not levels:
+                raise ValueError(
+                    f"provider {self.name!r} effort_levels[{model_id!r}] must not be empty"
+                )
+            if len(set(levels)) != len(levels):
+                raise ValueError(
+                    f"provider {self.name!r} effort_levels[{model_id!r}] has duplicate entries"
                 )
         return self
 

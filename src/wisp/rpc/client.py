@@ -122,12 +122,15 @@ class RpcController:
         *,
         provider: str | None = None,
         model: str | None = None,
+        effort: str | None = None,
         command_id: str | None = None,
     ) -> str:
-        """Update provider/model settings for future prompt commands."""
+        """Update provider/model/effort settings for future prompt commands."""
 
         selected_id = command_id or self._command_id_factory("configure")
-        await self._transport.send(ConfigureCommand(id=selected_id, provider=provider, model=model))
+        await self._transport.send(
+            ConfigureCommand(id=selected_id, provider=provider, model=model, effort=effort)
+        )
         return selected_id
 
     def events(self) -> AsyncIterator[KnownWispEvent]:
