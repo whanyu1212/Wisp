@@ -1093,6 +1093,7 @@ def _handle_rpc_configure_command(
             agent=agent,
             runtime=runtime,
             configure_overrides=configure_overrides,
+            has_effort=has_effort,
         )
     if has_model:
         agent.model = model
@@ -1114,6 +1115,7 @@ def _auto_switch_provider_for_model(
     agent: CodingSession,
     runtime: WispRuntime,
     configure_overrides: _RpcConfigureOverrides | None,
+    has_effort: bool,
 ) -> None:
     """Switch ``agent.provider`` if ``model`` unambiguously belongs elsewhere.
 
@@ -1145,6 +1147,17 @@ def _auto_switch_provider_for_model(
     agent.provider = new_provider
     if configure_overrides is not None:
         configure_overrides.provider = resolved_provider
+    if not has_effort:
+        # Same staleness the explicit-provider path already guards against
+        # (see _handle_rpc_configure_command): effort tiers are
+        # provider-native, non-normalized strings, so a tier chosen for the
+        # old provider must not survive an auto-switch to a new one -- the
+        # caller's own `has_effort` block (run after this returns) still
+        # wins when the same command also supplies a new effort explicitly.
+        agent.effort = None
+        if configure_overrides is not None:
+            configure_overrides.effort = None
+            configure_overrides.has_effort = True
 
 
 def _handle_rpc_approval_command(

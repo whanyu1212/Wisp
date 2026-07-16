@@ -259,3 +259,81 @@ def test_configure_switching_provider_with_explicit_effort_keeps_the_new_value(
 
     assert agent.provider is second_provider
     assert agent.effort == "medium"
+
+
+class _FakeNamedProvider(CapturingProvider):
+    name = "fake"
+
+
+class _OpenAINamedProvider(CapturingProvider):
+    name = "openai"
+
+
+def test_configure_model_only_auto_switch_resets_stale_effort(tmp_path: Path) -> None:
+    # Regression test: _auto_switch_provider_for_model changes agent.provider
+    # via a separate code path from the explicit-provider branch above --
+    # a configure command carrying only `model` (no `provider` field) can
+    # still move the session to a different provider when the model
+    # unambiguously belongs elsewhere. That path must reset stale effort the
+    # same way, or a Google-native "MEDIUM" (say) survives an auto-switch to
+    # OpenAI and reaches its API unvalidated on the next prompt.
+    fake_provider = _FakeNamedProvider()
+    openai_provider = _OpenAINamedProvider()
+    providers = ProviderRegistry()
+    providers.register(fake_provider)
+    providers.register(openai_provider)
+    runtime = WispRuntime(
+        providers=providers,
+        tools=ToolRegistry(),
+        events=EventBus(),
+        api=ExtensionAPI(providers=providers, tools=ToolRegistry(), events=EventBus()),
+        models=_test_model_registry(),
+    )
+    agent = CodingSession(
+        provider=fake_provider, sessions=JsonlSessionStore(tmp_path), effort="MEDIUM"
+    )
+
+    # "gpt-5.5-pro" unambiguously belongs to openai in the built-in catalog
+    # (confirmed in tests/test_rpc_configure.py's auto-switch tests) -- no
+    # explicit "provider" field here, only "model".
+    _handle_rpc_configure_command(
+        {"model": "gpt-5.5-pro"},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+    )
+
+    assert agent.provider is openai_provider
+    assert agent.effort is None
+
+
+def test_configure_model_only_auto_switch_with_explicit_effort_keeps_the_new_value(
+    tmp_path: Path,
+) -> None:
+    fake_provider = _FakeNamedProvider()
+    openai_provider = _OpenAINamedProvider()
+    providers = ProviderRegistry()
+    providers.register(fake_provider)
+    providers.register(openai_provider)
+    runtime = WispRuntime(
+        providers=providers,
+        tools=ToolRegistry(),
+        events=EventBus(),
+        api=ExtensionAPI(providers=providers, tools=ToolRegistry(), events=EventBus()),
+        models=_test_model_registry(),
+    )
+    agent = CodingSession(
+        provider=fake_provider, sessions=JsonlSessionStore(tmp_path), effort="MEDIUM"
+    )
+
+    _handle_rpc_configure_command(
+        {"model": "gpt-5.5-pro", "effort": "medium"},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+    )
+
+    assert agent.provider is openai_provider
+    assert agent.effort == "medium"
