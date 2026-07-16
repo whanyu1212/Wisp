@@ -51,11 +51,12 @@ Wisp runs the same agent core in four modes:
 
 ## Providers & auth
 
-Wisp supports three provider modes:
+Wisp supports four provider modes:
 
 ```bash
 uv run wisp -p "hello" --provider openai-codex --model gpt-5.5
 uv run wisp -p "hello" --provider openai --model gpt-5.5
+uv run wisp -p "hello" --provider anthropic --model claude-sonnet-5
 uv run wisp -p "hello" --provider fake
 ```
 
@@ -69,7 +70,12 @@ uv run wisp -p "hello" --provider fake
   permissions.
 
 - **`openai`** — set `OPENAI_API_KEY`.
+- **`anthropic`** — set `ANTHROPIC_API_KEY`.
 - **`fake`** — a deterministic offline provider for tests and no-credential smoke runs.
+
+Use `/model` with no arguments in the TUI to list every catalog model grouped by provider. If a
+given model id belongs to only one registered provider, `/model <id>` switches the active provider
+to match; otherwise use `/provider <name>` first.
 
 Sessions persist to `~/.wisp/sessions` by default so transcripts survive across runs and can be
 resumed. Set `WISP_SESSION_DIR` or pass `--session-dir` to store them elsewhere, including a
@@ -131,7 +137,7 @@ Wisp reads configuration from CLI flags, environment variables, and JSON setting
 
 | Variable | Purpose |
 |----------|---------|
-| `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, or `fake` |
+| `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `anthropic`, or `fake` |
 | `WISP_MODEL` | Model override; blank uses the provider default |
 | `WISP_MODE` | Default mode; set to `tui` to open the TUI directly |
 | `WISP_TUI_RENDERER` | TUI renderer: `line`, `fullscreen`, or `textual` |
@@ -141,6 +147,7 @@ Wisp reads configuration from CLI flags, environment variables, and JSON setting
 | `WISP_RETRY_BASE_DELAY_SECONDS` | Initial retry delay; defaults to `0.5` |
 | `WISP_RETRY_MAX_DELAY_SECONDS` | Maximum retry delay; defaults to `30` |
 | `OPENAI_API_KEY` | Required only for the `openai` provider |
+| `ANTHROPIC_API_KEY` | Required only for the `anthropic` provider |
 
 ### Settings files
 
@@ -253,7 +260,8 @@ Available slash commands:
 ```
 
 TUI login currently uses the `openai-codex` device-code flow; browser login is available from the
-CLI (`uv run wisp auth login openai-codex`). A Pi-style model picker/catalog is not implemented yet.
+CLI (`uv run wisp auth login openai-codex`). `/model` with no arguments lists every catalog model
+grouped by provider; there is no interactive fuzzy-picker yet.
 
 Unlike print mode, the interactive TUI exposes the **full tool registry by
 default** — otherwise it would be a chatbot that can't read files or run
