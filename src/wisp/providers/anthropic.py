@@ -211,6 +211,7 @@ class AnthropicProvider:
         tool_calls: list[ToolCall] = []
         content_blocks: dict[int, _ContentBlockAccumulator] = {}
         finish_reason: ProviderFinishReason = "stop"
+        stop_reason: str | None = None
         stream_completed = False
         failure: ProviderResponseFailed | None = None
 
@@ -256,8 +257,9 @@ class AnthropicProvider:
                         if block_accumulator is not None:
                             block_accumulator.tool_use_json_chunks.append(delta.partial_json)
                 elif isinstance(event, RawMessageDeltaEvent):
-                    stop_reason = event.delta.stop_reason
-                    if stop_reason is not None:
+                    event_stop_reason = event.delta.stop_reason
+                    if event_stop_reason is not None:
+                        stop_reason = event_stop_reason
                         finish_reason = _STOP_REASON_TO_FINISH_REASON.get(
                             stop_reason, _DEFAULT_FINISH_REASON_FOR_UNKNOWN_STOP_REASON
                         )
@@ -290,19 +292,28 @@ class AnthropicProvider:
             yield failure
             return
 
-        for index in sorted(content_blocks):
-            accumulator = content_blocks[index]
-            if accumulator.block_type != "tool_use":
-                continue
-            raw_arguments = "".join(accumulator.tool_use_json_chunks)
-            tool_call = _tool_call_from_anthropic(
-                call_id=accumulator.tool_use_id,
-                name=accumulator.tool_use_name,
-                raw_arguments=raw_arguments,
-                response_id=response_id,
-            )
-            tool_calls.append(tool_call)
-            yield ProviderToolCallCompleted(tool_call=tool_call, content_index=len(tool_calls) - 1)
+        # Only a stop_reason of "tool_use" means Anthropic finished streaming
+        # every tool_use block's input in full. Any other terminal reason
+        # (max_tokens, model_context_window_exceeded, ...) can still leave an
+        # in-progress tool_use accumulator sitting in content_blocks -- acting
+        # on it would hand the agent loop a truncated tool call to execute
+        # instead of correctly surfacing the response as incomplete.
+        if stop_reason == "tool_use":
+            for index in sorted(content_blocks):
+                accumulator = content_blocks[index]
+                if accumulator.block_type != "tool_use":
+                    continue
+                raw_arguments = "".join(accumulator.tool_use_json_chunks)
+                tool_call = _tool_call_from_anthropic(
+                    call_id=accumulator.tool_use_id,
+                    name=accumulator.tool_use_name,
+                    raw_arguments=raw_arguments,
+                    response_id=response_id,
+                )
+                tool_calls.append(tool_call)
+                yield ProviderToolCallCompleted(
+                    tool_call=tool_call, content_index=len(tool_calls) - 1
+                )
 
         if tool_calls:
             if response_id is None:

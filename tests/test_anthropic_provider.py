@@ -275,6 +275,40 @@ def test_anthropic_provider_streams_tool_call_parse_errors() -> None:
     ]
 
 
+def test_anthropic_provider_does_not_execute_a_tool_call_truncated_by_max_tokens() -> None:
+    # Regression test: a tool_use block that was still streaming its input
+    # when Anthropic hit max_tokens (or model_context_window_exceeded) must
+    # never be surfaced as an executable tool call -- only stop_reason ==
+    # "tool_use" means the block's input finished streaming in full. Handing
+    # the agent loop a truncated tool call would execute a malformed or
+    # incomplete request instead of correctly reporting the turn as
+    # incomplete.
+    provider = StubAnthropicProvider(
+        [
+            _message_start("response-id"),
+            _tool_use_start("call-id", "lookup", index=0),
+            _input_json_delta('{"query": "wi', index=0),
+            _message_delta("max_tokens"),
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event async for event in provider.stream([WispMessage(role="user", content="hello")])
+        ]
+
+    events = anyio.run(run)
+
+    assert events == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderResponseCompleted(
+            content="",
+            response_id="response-id",
+            finish_reason="length",
+        ),
+    ]
+
+
 @pytest.mark.parametrize(
     ("stop_reason", "expected"),
     [
