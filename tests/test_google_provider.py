@@ -414,6 +414,7 @@ def test_wisp_owned_google_client_leaves_sdk_retries_unset() -> None:
 
 def test_google_provider_requires_api_key(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     provider = GoogleProvider()
 
     async def run() -> list[object]:
@@ -421,8 +422,35 @@ def test_google_provider_requires_api_key(monkeypatch: MonkeyPatch) -> None:
             event async for event in provider.stream([WispMessage(role="user", content="hello")])
         ]
 
-    with pytest.raises(ProviderConfigurationError, match="GOOGLE_API_KEY is required"):
+    with pytest.raises(
+        ProviderConfigurationError, match="GOOGLE_API_KEY or GEMINI_API_KEY is required"
+    ):
         anyio.run(run)
+
+
+def test_google_provider_falls_back_to_gemini_api_key(monkeypatch: MonkeyPatch) -> None:
+    # Regression test: mirrors google.genai's own env-var resolution order
+    # (get_env_api_key) -- a user who already has Gemini configured with only
+    # GEMINI_API_KEY should not be rejected before the SDK ever sees it.
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-env-key")
+    provider = GoogleProvider()
+
+    client = provider._client_or_create()  # noqa: SLF001
+
+    assert client._api_client.api_key == "gemini-env-key"  # noqa: SLF001
+
+
+def test_google_provider_prefers_google_api_key_over_gemini_api_key(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-env-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-env-key")
+    provider = GoogleProvider()
+
+    client = provider._client_or_create()  # noqa: SLF001
+
+    assert client._api_client.api_key == "google-env-key"  # noqa: SLF001
 
 
 def test_google_provider_splits_system_messages_from_conversation() -> None:
@@ -603,6 +631,53 @@ def test_google_provider_replays_model_turn_before_tool_results() -> None:
     assert function_response_part.function_response.id == "call-id"
     assert function_response_part.function_response.name == "lookup"
     assert function_response_part.function_response.response == {"output": "ok"}
+
+
+def test_google_provider_omits_function_response_id_when_gemini_never_issued_one() -> None:
+    # Regression test: for models where Gemini omits function_call.id (the
+    # ToolCall.call_id is then Wisp's own synthetic fallback -- see
+    # _tool_call_from_google), sending that synthetic value back as
+    # functionResponse.id would claim it as a real Gemini-issued id it never
+    # was. Only echo id when Gemini actually issued one.
+    stub_models = StubModels(
+        responses=[
+            [
+                _part_chunk(
+                    genai_types.Part(
+                        function_call=genai_types.FunctionCall(name="lookup", args={})
+                    ),
+                    response_id="response-id",
+                    finish_reason=genai_types.FinishReason.STOP,
+                )
+            ],
+            [],
+        ]
+    )
+    provider = GoogleProvider(
+        api_key="test-key",
+        client=cast(genai.Client, StubGenaiClient(stub_models)),
+    )
+    messages = [WispMessage(role="user", content="hello")]
+
+    async def run() -> None:
+        first_events = [event async for event in provider.stream(messages, model="gemini-test")]
+        completed = first_events[-1]
+        assert isinstance(completed, ProviderResponseCompleted)
+        synthetic_call_id = completed.tool_calls[0].call_id
+        async for _event in provider.stream(
+            messages,
+            model="gemini-test",
+            tool_results=[ToolCallResult(call_id=synthetic_call_id, output="ok")],
+            previous_response_id=completed.response_id,
+        ):
+            pass
+
+    anyio.run(run)
+
+    replay_contents = stub_models.calls[1]["contents"]
+    function_response_part = replay_contents[2].parts[0]
+    assert function_response_part.function_response.id is None
+    assert function_response_part.function_response.name == "lookup"
 
 
 def test_google_provider_tool_results_without_a_replay_omit_the_model_turn() -> None:

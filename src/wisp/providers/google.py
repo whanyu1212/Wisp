@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
 from json import dumps
 from typing import cast
 
@@ -58,6 +59,18 @@ _TERMINAL_FINISH_REASON_TO_PROVIDER: dict[genai_types.FinishReason, ProviderFini
 _DEFAULT_FINISH_REASON_FOR_UNKNOWN_FINISH_REASON: ProviderFinishReason = "length"
 
 
+@dataclass(frozen=True, slots=True)
+class _CallInfo:
+    """What a functionResponse needs to know about the call it answers."""
+
+    name: str
+    # None when Gemini never issued an id for this call (confirmed live:
+    # non-Gemini-3 models can omit it) -- sending back a Wisp-synthetic id
+    # Gemini never issued is semantically wrong and, per Codex's review,
+    # risks ambiguous or rejected matching on models that validate it.
+    provider_id: str | None
+
+
 class GoogleProvider:
     """Provider backed by Google's Gemini Generative Language API."""
 
@@ -79,10 +92,12 @@ class GoogleProvider:
         # Gemini's functionResponse.name is required and must match the
         # original FunctionCall.name -- but ToolCallResult (provider-neutral,
         # shared with every other provider) carries only call_id, not name.
-        # Remember each call's name at the moment its tool call is emitted so
-        # the next round's functionResponse can look it up. Keyed the same
-        # way as _replays and evicted alongside it.
-        self._call_names: OrderedDict[str, str] = OrderedDict()
+        # Remember each call's name (and whether Gemini actually issued an
+        # id, vs. Wisp's synthetic fallback -- see _tool_call_from_google) at
+        # the moment its tool call is emitted, so the next round's
+        # functionResponse can look both up. Keyed the same way as _replays
+        # and evicted alongside it.
+        self._call_info: OrderedDict[str, _CallInfo] = OrderedDict()
 
     async def stream(
         self,
@@ -207,6 +222,7 @@ class GoogleProvider:
         # the turn was cut short -- acting on a function_call part that
         # arrived before the cutoff would hand the agent loop a tool request
         # Gemini never actually finished deciding on.
+        tool_call_provider_ids: list[str | None] = []
         if raw_finish_reason == genai_types.FinishReason.STOP:
             for index, part in enumerate(parts):
                 if part.function_call is None:
@@ -215,6 +231,7 @@ class GoogleProvider:
                     part.function_call, index=index, response_id=response_id
                 )
                 tool_calls.append(tool_call)
+                tool_call_provider_ids.append(part.function_call.id)
                 yield ProviderToolCallCompleted(tool_call=tool_call, content_index=index)
 
         if tool_calls:
@@ -236,8 +253,11 @@ class GoogleProvider:
             if previous_response_id is not None and previous_response_id != response_id:
                 self._replays.pop(previous_response_id, None)
             self._store_replay(response_id, replay_tail)
-            for tool_call in tool_calls:
-                self._remember_call_name(tool_call.call_id, tool_call.name)
+            for tool_call, provider_id in zip(tool_calls, tool_call_provider_ids, strict=True):
+                self._remember_call_info(
+                    tool_call.call_id,
+                    _CallInfo(name=tool_call.name, provider_id=_normalize_optional(provider_id)),
+                )
         elif previous_response_id is not None:
             self._replays.pop(previous_response_id, None)
 
@@ -280,10 +300,19 @@ class GoogleProvider:
         if self._client is not None:
             return self._client
 
-        api_key = self._api_key or _normalize_optional(os.environ.get("GOOGLE_API_KEY"))
+        # Mirrors google.genai's own env-var resolution order (get_env_api_key
+        # in _api_client.py): GOOGLE_API_KEY takes precedence, GEMINI_API_KEY
+        # is the accepted fallback -- a user who already has Gemini configured
+        # with only GEMINI_API_KEY (the SDK's own recognized variable) should
+        # not be rejected here before the SDK ever gets a chance to use it.
+        api_key = (
+            self._api_key
+            or _normalize_optional(os.environ.get("GOOGLE_API_KEY"))
+            or _normalize_optional(os.environ.get("GEMINI_API_KEY"))
+        )
         if api_key is None:
             raise ProviderConfigurationError(
-                "GOOGLE_API_KEY is required when using the google provider"
+                "GOOGLE_API_KEY or GEMINI_API_KEY is required when using the google provider"
             )
 
         # Wisp emits retry progress itself; leave the SDK's own retry_options
@@ -305,25 +334,32 @@ class GoogleProvider:
         while len(self._replays) > _MAX_PENDING_REPLAYS:
             self._replays.popitem(last=False)
 
-    def _remember_call_name(self, call_id: str, name: str) -> None:
-        self._call_names.pop(call_id, None)
-        self._call_names[call_id] = name
-        while len(self._call_names) > _MAX_PENDING_REPLAYS:
-            self._call_names.popitem(last=False)
+    def _remember_call_info(self, call_id: str, info: _CallInfo) -> None:
+        self._call_info.pop(call_id, None)
+        self._call_info[call_id] = info
+        while len(self._call_info) > _MAX_PENDING_REPLAYS:
+            self._call_info.popitem(last=False)
 
     def _tool_results_to_content(
         self, tool_results: Sequence[ToolCallResult]
     ) -> genai_types.Content:
-        parts = [
-            genai_types.Part(
-                function_response=genai_types.FunctionResponse(
-                    id=result.call_id,
-                    name=self._call_names.get(result.call_id, result.call_id),
-                    response={"error" if result.is_error else "output": result.output},
+        parts = []
+        for result in tool_results:
+            info = self._call_info.get(result.call_id)
+            parts.append(
+                genai_types.Part(
+                    function_response=genai_types.FunctionResponse(
+                        # Only echo an id Gemini actually issued for this
+                        # call -- when it never did (info is None or its
+                        # provider_id is None), omit id entirely rather than
+                        # sending Wisp's own synthetic call_id back as if it
+                        # were a real Gemini-issued one.
+                        id=info.provider_id if info is not None else None,
+                        name=info.name if info is not None else result.call_id,
+                        response={"error" if result.is_error else "output": result.output},
+                    )
                 )
             )
-            for result in tool_results
-        ]
         return genai_types.Content(role="user", parts=parts)
 
 
