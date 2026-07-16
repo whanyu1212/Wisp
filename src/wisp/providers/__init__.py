@@ -2,6 +2,7 @@
 
 from wisp.retry import RetryPolicy, RetrySettings
 
+from .anthropic import AnthropicProvider
 from .base import ToolCallResult, ToolSpec
 from .events import (
     ProviderEvent,
@@ -20,6 +21,7 @@ from .openai import OpenAIProvider
 from .openai_codex import OpenAICodexProvider
 
 __all__ = [
+    "AnthropicProvider",
     "FakeProvider",
     "OpenAICodexProvider",
     "OpenAIProvider",

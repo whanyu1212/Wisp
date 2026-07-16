@@ -35,6 +35,18 @@ models = ["gpt-5.5", "gpt-5.4"]
 "gpt-5.4" = 272000
 
 [[providers]]
+name = "anthropic"
+display_name = "Anthropic"
+default_model = "claude-sonnet-5"
+docs_url = "https://platform.claude.com/docs"
+models = ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"]
+
+[providers.context_windows]
+"claude-sonnet-5" = 1000000
+"claude-opus-4-8" = 1000000
+"claude-haiku-4-5" = 200000
+
+[[providers]]
 name = "fake"
 display_name = "Fake (offline testing)"
 default_model = "fake"
