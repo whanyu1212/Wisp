@@ -175,6 +175,7 @@ class AnthropicProvider:
         pending_tool_use: dict[int, tuple[str, str]] = {}
         pending_tool_json: dict[int, list[str]] = {}
         finish_reason: ProviderFinishReason = "stop"
+        stream_completed = False
         failure: ProviderResponseFailed | None = None
 
         yield ProviderResponseStarted(model=selected_model)
@@ -205,9 +206,27 @@ class AnthropicProvider:
                         finish_reason = _STOP_REASON_TO_FINISH_REASON.get(
                             stop_reason, _DEFAULT_FINISH_REASON_FOR_UNKNOWN_STOP_REASON
                         )
+                        # message_delta carrying stop_reason is Anthropic's
+                        # signal that the message actually finished -- the
+                        # only remaining event is message_stop, which carries
+                        # no further information. Anything else (a dropped
+                        # connection, a truncated proxy response) ends the
+                        # async iterator without this ever being set.
+                        stream_completed = True
         except AnthropicError as exc:
             failure = ProviderResponseFailed(
                 message=f"Anthropic stream error: {exc}",
+                partial_content="".join(chunks),
+                response_id=response_id,
+            )
+
+        if failure is None and not stream_completed:
+            # Regression guard: the stream ended (cleanly or not) without
+            # Anthropic ever reporting a stop_reason. Silently yielding a
+            # ProviderResponseCompleted here would report a truncated answer
+            # as a successful "stop" turn -- treat it as failed instead.
+            failure = ProviderResponseFailed(
+                message="Anthropic stream ended before a stop_reason was received",
                 partial_content="".join(chunks),
                 response_id=response_id,
             )

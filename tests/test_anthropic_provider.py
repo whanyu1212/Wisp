@@ -120,6 +120,7 @@ class FlakyAnthropicProvider(AnthropicProvider):
 
         async def stream() -> AsyncIterator[RawMessageStreamEvent]:
             yield _text_delta("recovered")
+            yield _message_delta("end_turn")
 
         return stream()
 
@@ -149,7 +150,7 @@ def test_anthropic_provider_streams_text_deltas() -> None:
 
 
 def test_anthropic_provider_uses_default_model_when_model_is_not_provided() -> None:
-    provider = StubAnthropicProvider([_text_delta("hello")])
+    provider = StubAnthropicProvider([_text_delta("hello"), _message_delta("end_turn")])
 
     async def run() -> list[object]:
         return [
@@ -169,6 +170,7 @@ def test_anthropic_provider_streams_thinking_deltas() -> None:
         [
             _thinking_delta("let me think", index=0),
             _text_delta("the answer", index=1),
+            _message_delta("end_turn"),
         ]
     )
 
@@ -312,6 +314,33 @@ def test_anthropic_provider_emits_failed_terminal_on_stream_error() -> None:
     assert events[2] == ProviderResponseFailed(
         message="Anthropic stream error: Connection error.",
         partial_content="partial",
+    )
+
+
+def test_anthropic_provider_emits_failed_terminal_when_stream_ends_without_stop_reason() -> None:
+    # Regression test: distinct from the exception-raising failure case above
+    # -- here the async iterator ends *normally* (no exception), but a
+    # dropped connection or truncated proxy response cut it off before any
+    # message_delta ever carried a stop_reason. Silently falling through to
+    # ProviderResponseCompleted(finish_reason="stop") would report a
+    # truncated answer as a successful turn.
+    provider = StubAnthropicProvider([_message_start("response-id"), _text_delta("partial")])
+
+    async def run() -> list[object]:
+        return [
+            event async for event in provider.stream([WispMessage(role="user", content="hello")])
+        ]
+
+    events = anyio.run(run)
+
+    assert events[:2] == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderTextDelta(delta="partial"),
+    ]
+    assert events[2] == ProviderResponseFailed(
+        message="Anthropic stream ended before a stop_reason was received",
+        partial_content="partial",
+        response_id="response-id",
     )
 
 
