@@ -250,6 +250,75 @@ def test_tui_shell_adopts_trusted_project_config(tmp_path: Path) -> None:
     anyio.run(run)
 
 
+def test_tui_shell_init_drops_effort_invalid_for_the_startup_provider() -> None:
+    # Regression test (Codex review on #125): TuiShell resolves its own
+    # config.effort independently, via its own WispConfig.from_env() call in
+    # the same process launch as the separate RPC subprocess -- so it must
+    # apply the same provider/model effort-scoping wisp.cli.rpc's
+    # startup_effort() call performs on the CodingSession side, or the picker
+    # would seed a stale/incompatible tier into its "current" row (see
+    # ModelPicker.show) even after the RPC side had already filtered it out.
+    controller = ScriptedController()
+    shell = TuiShell(
+        controller,
+        renderer=LineTuiRenderer(_console()[0]),
+        provider="openai",
+        model="gpt-5.5",
+        effort="HIGH",  # Google-style, not one of gpt-5.5's real catalog tiers
+    )
+
+    assert shell.current_effort is None
+
+
+def test_tui_shell_init_keeps_effort_valid_for_the_startup_provider() -> None:
+    controller = ScriptedController()
+    shell = TuiShell(
+        controller,
+        renderer=LineTuiRenderer(_console()[0]),
+        provider="anthropic",
+        model="claude-opus-4-8",
+        effort="high",
+    )
+
+    assert shell.current_effort == "high"
+
+
+def test_tui_shell_project_config_applied_drops_effort_invalid_for_new_provider(
+    tmp_path: Path,
+) -> None:
+    # Regression test (Codex review on #125): the first-run trust flow can
+    # swap provider/model to a trusted project's (possibly different) ones --
+    # a tier valid for the untrusted-startup provider/model is not guaranteed
+    # valid for the trusted one, mirroring wisp.cli.rpc's
+    # _rebuild_agent_for_trusted_project re-filtering agent.effort on the RPC
+    # side.
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(
+            controller,
+            renderer=LineTuiRenderer(_console()[0]),
+            provider="anthropic",
+            model="claude-opus-4-8",
+            effort="high",
+            auth_path=tmp_path / "startup-auth.json",
+        )
+        assert shell.current_effort == "high"
+
+        await shell._handle_rpc_event(
+            ProjectConfigApplied(
+                provider="google",
+                model="gemini-flash-latest",
+                auth_path=tmp_path / "trusted-auth.json",
+            )
+        )
+
+        assert shell.current_provider == "google"
+        assert shell.current_model == "gemini-flash-latest"
+        assert shell.current_effort is None
+
+    anyio.run(run)
+
+
 def test_tui_shell_auth_status_uses_current_provider(tmp_path: Path) -> None:
     async def run() -> None:
         controller = ScriptedController()

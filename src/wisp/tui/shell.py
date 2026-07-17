@@ -30,7 +30,7 @@ from wisp.events import (
     ToolApprovalRequested,
     TrustRequested,
 )
-from wisp.providers.catalog import ModelRegistry, effective_catalog
+from wisp.providers.catalog import ModelRegistry, effective_catalog, startup_effort
 from wisp.rpc.commands import ApprovalScope
 from wisp.settings import persist_user_effort
 from wisp.tui.auth_commands import AuthCommands
@@ -120,6 +120,15 @@ class _PendingConfigure:
     has_effort: bool = False
 
 
+def _default_model_for(models: ModelRegistry, provider_name: str) -> str | None:
+    """Return ``provider_name``'s catalog ``default_model``, or ``None`` if unknown."""
+
+    for entry in models.providers():
+        if entry.name == provider_name:
+            return entry.default_model
+    return None
+
+
 class TuiShell:
     """Small prompt/event shell that drives Wisp through `RpcController`."""
 
@@ -146,9 +155,24 @@ class TuiShell:
         self.view = TuiViewState(provider=provider, model=model)
         self.current_provider = provider
         self.current_model = model
-        self.current_effort = effort
-        self.pending_configures: dict[str, _PendingConfigure] = {}
         self.models = ModelRegistry(effective_catalog())
+        # Mirrors wisp.providers.catalog.startup_effort's filtering on the RPC
+        # side (see CodingSession construction in cli/rpc.py and cli/__init__.py):
+        # the TUI resolves its own config.effort independently via its own
+        # WispConfig.from_env() call in the same process launch, so a stale
+        # tier from a different provider/model's vocabulary must be dropped
+        # here too -- otherwise the picker would seed it into the "current"
+        # row (see ModelPicker.show) and an untouched Enter could re-submit an
+        # incompatible tier the RPC side had already filtered out at its own
+        # startup.
+        self.current_effort = startup_effort(
+            self.models,
+            provider_name=provider,
+            model=model,
+            default_model=_default_model_for(self.models, provider),
+            effort=effort,
+        )
+        self.pending_configures: dict[str, _PendingConfigure] = {}
         self.auth_store = JsonAuthStore(auth_path or default_auth_path())
         # Overrides ~/.wisp for /model picker effort persistence in tests; None
         # in production so persist_user_effort resolves the real home dir.
@@ -752,6 +776,19 @@ class TuiShell:
             # and /provider,/model,/auth,/login stop showing the untrusted-startup ones.
             self.current_provider = event.provider
             self.current_model = event.model
+            # Re-validate effort against the trusted provider/model, the same way
+            # __init__ validates it at initial startup -- a tier valid for the
+            # untrusted-startup provider/model is not guaranteed valid for the
+            # trusted project's (possibly different) provider/model, and the RPC
+            # side performs the equivalent re-validation in
+            # _rebuild_agent_for_trusted_project (see wisp.cli.rpc).
+            self.current_effort = startup_effort(
+                self.models,
+                provider_name=event.provider,
+                model=event.model,
+                default_model=_default_model_for(self.models, event.provider),
+                effort=self.current_effort,
+            )
             self.auth_store = JsonAuthStore(event.auth_path)
             self.renderer.notice(
                 f"Applied trusted project config: provider {event.provider}"

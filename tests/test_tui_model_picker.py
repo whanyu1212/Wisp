@@ -455,3 +455,29 @@ def test_model_picker_cycling_back_to_default_sends_explicit_clear_token() -> No
     untouched_answer, cleared_answer = anyio.run(scenario)
     assert untouched_answer == "/model anthropic::claude-opus-4-8 high"
     assert cleared_answer == "/model anthropic::claude-opus-4-8 -"
+
+
+def test_model_picker_does_not_seed_a_tier_the_current_row_does_not_list() -> None:
+    # Regression test (Codex review on #125): current_effort is a
+    # caller-supplied value (e.g. a stale global setting.json string from a
+    # different provider's vocabulary, like Google's uppercase "HIGH") -- not
+    # guaranteed to be one of this exact model's catalog-listed tiers. Seeding
+    # it onto the "current" row anyway would let an untouched Enter resubmit
+    # an incompatible tier the caller never actually validated.
+    async def scenario() -> str:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            renderer.model_picker_request(
+                _ENTRIES,
+                current_provider="anthropic",
+                current_model="claude-opus-4-8",
+                current_effort="HIGH",  # not in _ANTHROPIC's ("low","medium","high")
+            )
+            await pilot.pause()
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                answer = await app._prompt_receive.receive()
+            assert isinstance(answer, str)
+            return answer
+
+    assert anyio.run(scenario) == "/model anthropic::claude-opus-4-8"

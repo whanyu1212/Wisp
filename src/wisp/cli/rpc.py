@@ -456,7 +456,19 @@ async def _run_rpc(
         effective_model = configure_overrides.effective_model(trusted_config.model)
         agent.provider = trusted_runtime.providers.get(effective_provider)
         agent.model = effective_model
-        agent.effort = configure_overrides.effective_effort(agent.effort)
+        # startup_effort's filtering at CodingSession construction only checked
+        # the untrusted-startup provider/model -- this rebuild can swap both to
+        # the trusted project's (possibly different) ones, so a tier that
+        # survived that first filter is not guaranteed valid here. Re-filter
+        # against the effective post-swap provider/model, the same way
+        # TuiShell's ProjectConfigApplied handling does client-side.
+        agent.effort = startup_effort(
+            trusted_runtime.models,
+            provider_name=effective_provider,
+            model=effective_model,
+            default_model=agent.provider.default_model,
+            effort=configure_overrides.effective_effort(agent.effort),
+        )
         agent.tool_context = ToolContext.from_config(trusted_config)
         runtime = replace(runtime, providers=trusted_runtime.providers)
         # Tell an out-of-process front-end (the TUI) the config it displays/mutates

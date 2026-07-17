@@ -662,7 +662,18 @@ class ModelPicker(Vertical):
                 is_current = is_current_provider and model_id == effective_model
                 if is_current:
                     default_index = row_index
-                    self._effort_choice[(entry.name, model_id)] = current_effort
+                    # Defense in depth: current_effort is a caller-supplied
+                    # value, not guaranteed valid for this exact model's
+                    # catalog-listed tiers (effort is provider-native,
+                    # non-normalized -- see ModelCatalogProviderEntry). Seeding
+                    # a tier this row doesn't list would let an untouched
+                    # Enter resubmit it verbatim (see submit_current_selection).
+                    seeded_effort = current_effort
+                    if seeded_effort is not None and seeded_effort not in entry.effort_levels.get(
+                        model_id, ()
+                    ):
+                        seeded_effort = None
+                    self._effort_choice[(entry.name, model_id)] = seeded_effort
                 label = f"  {model_id} (current)" if is_current else f"  {model_id}"
                 self._options.add_option(Option(label, id=f"{entry.name}::{model_id}"))
                 self._rows.append((entry.name, model_id))
