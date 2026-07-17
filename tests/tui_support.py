@@ -95,7 +95,7 @@ class ScriptedController:
         self.approval_scopes: list[ApprovalScope | None] = []
         self.trusts: list[tuple[str, bool, str | None, bool]] = []
         self.cancelled: list[str] = []
-        self.configurations: list[tuple[str | None, str | None]] = []
+        self.configurations: list[tuple[str | None, str | None, str | None, bool]] = []
         self.shutdown_count = 0
         self.closed = False
         self._send, self._receive = anyio.create_memory_object_stream[KnownWispEvent](100)
@@ -157,9 +157,11 @@ class ScriptedController:
         *,
         provider: str | None = None,
         model: str | None = None,
+        effort: str | None = None,
+        clear_effort: bool = False,
         command_id: str | None = None,
     ) -> str:
-        self.configurations.append((provider, model))
+        self.configurations.append((provider, model, effort, clear_effort))
         selected_id = command_id or f"configure-{len(self.configurations)}"
         await self._emit_scripted(
             self.configure_events,

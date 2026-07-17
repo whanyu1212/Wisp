@@ -22,6 +22,7 @@ class WispConfig(BaseModel):
 
     provider: str = DEFAULT_PROVIDER
     model: str | None = None
+    effort: str | None = None
     session_dir: Path = Field(default_factory=lambda: default_session_dir())
     auth_path: Path = Field(default_factory=lambda: default_auth_path())
     protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS
@@ -50,6 +51,7 @@ class WispConfig(BaseModel):
         *,
         provider: str | None = None,
         model: str | None = None,
+        effort: str | None = None,
         session_dir: Path | None = None,
         auth_path: Path | None = None,
         retry_policy: RetryPolicy | None = None,
@@ -73,6 +75,11 @@ class WispConfig(BaseModel):
         defaults to ``False`` so a caller that forgets to pass a decision fails closed
         — an untrusted project contributes no local settings. Higher-precedence layers
         (explicit args, environment, user settings) are unaffected by trust.
+
+        ``effort`` never consults the project settings layer, trusted or not —
+        it is resolved from the USER settings file only (see
+        :func:`wisp.settings.resolve_settings`), the same way ``retry_policy`` is,
+        since it directly controls per-request cost/latency.
         """
 
         settings = resolve_settings(project_dir=project_dir, trust_project=trusted)
@@ -88,6 +95,7 @@ class WispConfig(BaseModel):
         return cls(
             provider=provider_name,
             model=_first_non_empty(model, os.environ.get("WISP_MODEL"), settings.model),
+            effort=_first_non_empty(effort, os.environ.get("WISP_EFFORT"), settings.effort),
             session_dir=session_dir or default_session_dir(settings=settings),
             auth_path=auth_path or default_auth_path(settings=settings),
             protected_paths=_resolve_protected_paths(settings),

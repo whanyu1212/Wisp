@@ -8,7 +8,12 @@ from pathlib import Path
 from pytest import CaptureFixture, MonkeyPatch
 
 from wisp.config import WispConfig
-from wisp.settings import DEFAULT_PROTECTED_PATHS, resolve_settings
+from wisp.settings import (
+    DEFAULT_PROTECTED_PATHS,
+    persist_user_effort,
+    resolve_settings,
+    user_settings_path,
+)
 
 
 def _write_settings(directory: Path, **values: object) -> None:
@@ -156,6 +161,28 @@ def test_retry_settings_are_user_only_even_for_trusted_projects(tmp_path: Path) 
     assert settings.retry is not None
     assert settings.retry.max_retries == 3
     assert settings.retry.max_delay_seconds is None
+
+
+def test_effort_settings_are_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(home, effort="high")
+    _write_settings(project, effort="xhigh")
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.effort == "high"
+
+
+def test_project_cannot_introduce_effort(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(project, effort="xhigh")
+
+    # Even a trusted project cannot introduce effort (user-only policy).
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.effort is None  # project value ignored; user unset
 
 
 def test_invalid_project_user_only_fields_do_not_discard_project_settings(
@@ -326,3 +353,76 @@ def test_retry_policy_prefers_environment_then_user_settings(
     assert config.retry_policy.max_retries == 1
     assert config.retry_policy.base_delay_seconds == 1
     assert config.retry_policy.max_delay_seconds == 30
+
+
+# --- persist_user_effort ---
+
+
+def test_persist_user_effort_writes_a_new_file(tmp_path: Path) -> None:
+    persist_user_effort("high", home_dir=tmp_path)
+
+    path = user_settings_path(home_dir=tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"effort": "high"}
+
+
+def test_persist_user_effort_round_trips_through_resolve_settings(tmp_path: Path) -> None:
+    persist_user_effort("xhigh", home_dir=tmp_path)
+
+    settings = resolve_settings(project_dir=tmp_path / "proj", home_dir=tmp_path)
+
+    assert settings.effort == "xhigh"
+
+
+def test_persist_user_effort_preserves_other_keys(tmp_path: Path) -> None:
+    _write_settings(tmp_path, provider="user-provider", model="user-model")
+
+    persist_user_effort("medium", home_dir=tmp_path)
+
+    path = user_settings_path(home_dir=tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["provider"] == "user-provider"
+    assert data["model"] == "user-model"
+    assert data["effort"] == "medium"
+
+
+def test_persist_user_effort_overwrites_a_previous_value(tmp_path: Path) -> None:
+    persist_user_effort("low", home_dir=tmp_path)
+    persist_user_effort("high", home_dir=tmp_path)
+
+    path = user_settings_path(home_dir=tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8"))["effort"] == "high"
+
+
+def test_persist_user_effort_none_clears_the_key(tmp_path: Path) -> None:
+    _write_settings(tmp_path, provider="user-provider", effort="high")
+
+    persist_user_effort(None, home_dir=tmp_path)
+
+    path = user_settings_path(home_dir=tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert "effort" not in data
+    assert data["provider"] == "user-provider"
+
+
+def test_persist_user_effort_tolerates_a_malformed_existing_file(tmp_path: Path) -> None:
+    path = user_settings_path(home_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not valid json", encoding="utf-8")
+
+    persist_user_effort("high", home_dir=tmp_path)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"effort": "high"}
+
+
+def test_persist_user_effort_tolerates_a_non_object_existing_file(tmp_path: Path) -> None:
+    path = user_settings_path(home_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+
+    persist_user_effort("high", home_dir=tmp_path)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"effort": "high"}
+
+
+def test_user_settings_path_matches_layout(tmp_path: Path) -> None:
+    assert user_settings_path(home_dir=tmp_path) == tmp_path / ".wisp" / "settings.json"

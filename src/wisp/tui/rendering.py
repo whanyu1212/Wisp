@@ -27,6 +27,7 @@ from wisp.events import (
     ToolResultReady,
     TrustRequested,
 )
+from wisp.providers.catalog import ModelCatalogProviderEntry
 
 
 class TuiRendererKind(StrEnum):
@@ -103,6 +104,15 @@ class TuiRenderer(Protocol):
     def approval_all_confirmation(self, event: ToolApprovalRequested) -> None: ...
 
     def trust_request(self, event: TrustRequested) -> None: ...
+
+    def model_picker_request(
+        self,
+        entries: tuple[ModelCatalogProviderEntry, ...],
+        *,
+        current_provider: str,
+        current_model: str | None,
+        current_effort: str | None,
+    ) -> None: ...
 
     def event(self, event: KnownWispEvent) -> None: ...
 
@@ -208,6 +218,26 @@ class LineTuiRenderer:
             "[yellow]? trust this project?[/yellow] "
             f"{_markup_escape(event.project_path)}\n"
             "Trusting lets Wisp load this project's local configuration."
+        )
+
+    def model_picker_request(
+        self,
+        entries: tuple[ModelCatalogProviderEntry, ...],
+        *,
+        current_provider: str,
+        current_model: str | None,
+        current_effort: str | None,
+    ) -> None:
+        # No interactive picker outside the Textual renderer -- falls back to
+        # the same grouped listing bare `/model` already printed before the
+        # picker existed. Use `/model <id> [effort]` to switch.
+        self.console.print(
+            _render_model_listing_text(
+                entries,
+                current_provider=current_provider,
+                current_model=current_model,
+                current_effort=current_effort,
+            )
         )
 
     def event(self, event: KnownWispEvent) -> None:
@@ -451,6 +481,28 @@ class FullscreenTuiRenderer:
             "trust",
             f"? trust this project? {event.project_path}",
             style="yellow",
+        )
+        self._refresh()
+
+    def model_picker_request(
+        self,
+        entries: tuple[ModelCatalogProviderEntry, ...],
+        *,
+        current_provider: str,
+        current_model: str | None,
+        current_effort: str | None,
+    ) -> None:
+        # No interactive picker outside the Textual renderer -- see
+        # LineTuiRenderer.model_picker_request for the same fallback text.
+        self._append(
+            "system",
+            _render_model_listing_text(
+                entries,
+                current_provider=current_provider,
+                current_model=current_model,
+                current_effort=current_effort,
+            ),
+            style="cyan",
         )
         self._refresh()
 
@@ -873,3 +925,39 @@ def _first_line(text: str) -> str:
 
 def _markup_escape(value: object) -> str:
     return escape(str(value))
+
+
+def _render_model_listing_text(
+    entries: tuple[ModelCatalogProviderEntry, ...],
+    *,
+    current_provider: str,
+    current_model: str | None,
+    current_effort: str | None,
+) -> str:
+    """Render every catalog model grouped by provider, current one marked.
+
+    Non-Textual fallback for `model_picker_request` -- no interactive picker
+    outside the Textual renderer, so this is the same grouped-listing text
+    `TuiShell._render_model_listing` prints for a bare `/model`, plus the
+    active effort tier (which that shell-side listing predates and doesn't
+    show). Deliberately does not track "pending configure" state the way the
+    shell-side listing does -- a renderer has no access to that, only to
+    what's passed here.
+    """
+
+    lines = ["Available models:"]
+    for entry in entries:
+        is_current_provider = entry.name == current_provider
+        effective_model = current_model if current_model is not None else entry.default_model
+        names = [
+            f"{model_id} (current)"
+            if is_current_provider and model_id == effective_model
+            else model_id
+            for model_id in entry.models
+        ]
+        lines.append(f"  {entry.name}: {', '.join(names)}")
+    lines.append(f"Current model: {current_model or 'provider default'}")
+    lines.append(f"Current provider: {current_provider}")
+    lines.append(f"Current effort: {current_effort or 'provider default'}")
+    lines.append("Use /model <id> [effort] to switch.")
+    return "\n".join(lines)

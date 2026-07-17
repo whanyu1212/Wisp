@@ -19,6 +19,7 @@ from wisp.events import (
     ToolApprovalRequested,
     TrustRequested,
 )
+from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tui.compact_echo import CompactEchoLog
 from wisp.tui.rendering import (
     TuiRenderer,
@@ -32,6 +33,7 @@ from wisp.tui.widgets import (
     DecisionPanel,
     JumpToLatest,
     LineMessage,
+    ModelPicker,
     PromptEditor,
     SlashSuggest,
     StatusBar,
@@ -290,6 +292,7 @@ class TextualTui(App[None]):
         self._input: PromptEditor | None = None
         self._suggest: SlashSuggest | None = None
         self._decision_panel: DecisionPanel | None = None
+        self._model_picker: ModelPicker | None = None
         # Monotonic timestamp of the most recent _prepare_decision_panel() call
         # (see on_event / _prepare_decision_panel). Any Key/MouseDown/MouseUp/
         # Paste event timestamped before this barrier is dropped before it
@@ -354,6 +357,7 @@ class TextualTui(App[None]):
             # input; yielded here so it shares the Vertical's coordinate space.
             yield SlashSuggest(id="suggest")
             yield DecisionPanel(id="decision-panel")
+            yield ModelPicker(id="model-picker")
             # #composer frames the editor and status line as one bordered panel
             # (input above, status below, no divider between them) instead of a
             # borderless underline input floating over a separately-backgrounded
@@ -389,6 +393,7 @@ class TextualTui(App[None]):
         self._input = self.query_one("#input", PromptEditor)
         self._suggest = self.query_one("#suggest", SlashSuggest)
         self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
+        self._model_picker = self.query_one("#model-picker", ModelPicker)
         self._input.focus()  # keep the editor as the resting focus
         if self._runner is not None:
             self.run_worker(self._run_and_exit(), exclusive=True)
@@ -596,6 +601,15 @@ class TextualTui(App[None]):
     def on_decision_panel_selected(self, event: DecisionPanel.Selected) -> None:
         event.stop()
         self._submit_decision_line(event.answer)
+
+    def on_model_picker_selected(self, event: ModelPicker.Selected) -> None:
+        event.stop()
+        self.hide_model_picker()
+        self._submit_decision_line(event.answer)
+
+    def on_model_picker_cancelled(self, event: ModelPicker.Cancelled) -> None:
+        event.stop()
+        self.hide_model_picker()
 
     def prefill_command(self, prefix: str) -> None:
         """Put a command prefix in the editor, cursor at the end, without submitting.
@@ -934,6 +948,34 @@ class TextualTui(App[None]):
         if panel is None or not panel.is_open:
             return
         panel.hide()
+        if self._input is not None:
+            self._input.display = True
+            self._input.focus()
+
+    def show_model_picker(
+        self,
+        entries: tuple[ModelCatalogProviderEntry, ...],
+        *,
+        current_provider: str,
+        current_model: str | None,
+        current_effort: str | None,
+    ) -> None:
+        picker = self._model_picker
+        if picker is None:
+            return
+        self._prepare_decision_panel()
+        picker.show(
+            entries,
+            current_provider=current_provider,
+            current_model=current_model,
+            current_effort=current_effort,
+        )
+
+    def hide_model_picker(self) -> None:
+        picker = self._model_picker
+        if picker is None or not picker.is_open:
+            return
+        picker.hide()
         if self._input is not None:
             self._input.display = True
             self._input.focus()

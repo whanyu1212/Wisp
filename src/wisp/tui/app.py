@@ -97,6 +97,7 @@ async def run_tui(
         prompt_reader=selected_prompt_reader,
         provider=options.config.provider,
         model=options.config.model,
+        effort=options.config.effort,
         auth_path=options.config.auth_path,
     )
     try:

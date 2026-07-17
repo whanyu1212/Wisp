@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from tempfile import TemporaryDirectory
+
 from pytest import MonkeyPatch
 
 from tests.tui_support import *
@@ -460,7 +463,10 @@ def test_tui_shell_provider_and_model_commands_configure_future_prompts() -> Non
 
         await shell.run()
 
-        assert controller.configurations == [("openai-codex", None), (None, "gpt-5.5")]
+        assert controller.configurations == [
+            ("openai-codex", None, None, False),
+            (None, "gpt-5.5", None, False),
+        ]
         rendered = output.getvalue()
         assert "Configuring provider: openai-codex" in rendered
         assert "Provider set to openai-codex" in rendered
@@ -552,21 +558,69 @@ def test_tui_shell_model_listing_marks_provider_default_as_current_when_unset() 
     anyio.run(run)
 
 
-def test_tui_shell_bare_model_command_shows_pending_configure() -> None:
+def test_tui_shell_bare_model_command_lists_current_effort() -> None:
     async def run() -> None:
         controller = ScriptedController()
         console, output = _console()
         shell = TuiShell(
             controller,
             console=console,
-            prompt_reader=await _reader_from(["/model gpt-5.5-pro", "/model", "/quit"]),
+            prompt_reader=await _reader_from(["/model", "/quit"]),
             provider="openai",
+            model="gpt-5.5",
+            effort="high",
         )
 
         await shell.run()
 
         rendered = output.getvalue()
-        assert "(pending: gpt-5.5-pro)" in rendered
+        assert "Current effort: high" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_model_command_with_effort_configures_and_persists() -> None:
+    async def run(tmp_path: Path) -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model claude-opus-4-8 high", "/quit"]),
+            provider="anthropic",
+            settings_home_dir=tmp_path,
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [(None, "claude-opus-4-8", "high", False)]
+        assert shell.current_model == "claude-opus-4-8"
+        assert shell.current_effort == "high"
+        rendered = output.getvalue()
+        assert "Configuring model: claude-opus-4-8, effort high" in rendered
+        assert "Model set to claude-opus-4-8" in rendered
+        settings_path = tmp_path / ".wisp" / "settings.json"
+        assert json.loads(settings_path.read_text(encoding="utf-8"))["effort"] == "high"
+
+    with TemporaryDirectory() as tmp_dir:
+        anyio.run(run, Path(tmp_dir))
+
+
+def test_tui_shell_model_command_too_many_args_rejected() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model a b c", "/quit"]),
+            provider="openai",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == []
+        assert "Usage: /model [model] [effort]" in output.getvalue()
 
     anyio.run(run)
 
@@ -667,7 +721,7 @@ def test_tui_shell_provider_command_waits_for_configure_success() -> None:
 
         await shell.run()
 
-        assert controller.configurations == [("missing", None)]
+        assert controller.configurations == [("missing", None, None, False)]
         assert shell.current_provider == "fake"
         rendered = output.getvalue()
         assert "Configuring provider: missing" in rendered

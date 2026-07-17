@@ -32,6 +32,7 @@ from wisp.events import (
 )
 from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.rpc.commands import ApprovalScope
+from wisp.settings import persist_user_effort
 from wisp.tui.auth_commands import AuthCommands
 from wisp.tui.commands import (
     TuiSlashCommand,
@@ -94,6 +95,8 @@ class TuiController(Protocol):
         *,
         provider: str | None = None,
         model: str | None = None,
+        effort: str | None = None,
+        clear_effort: bool = False,
         command_id: str | None = None,
     ) -> str: ...
 
@@ -112,6 +115,8 @@ class _PendingConfigure:
     provider: str | None = None
     model: str | None = None
     reset_model: bool = False
+    effort: str | None = None
+    has_effort: bool = False
 
 
 class TuiShell:
@@ -127,7 +132,9 @@ class TuiShell:
         renderer: TuiRenderer | None = None,
         provider: str = DEFAULT_PROVIDER,
         model: str | None = None,
+        effort: str | None = None,
         auth_path: Path | None = None,
+        settings_home_dir: Path | None = None,
     ) -> None:
         self.controller = controller
         self.renderer = (
@@ -138,9 +145,13 @@ class TuiShell:
         self.view = TuiViewState(provider=provider, model=model)
         self.current_provider = provider
         self.current_model = model
+        self.current_effort = effort
         self.pending_configures: dict[str, _PendingConfigure] = {}
         self.models = ModelRegistry(effective_catalog())
         self.auth_store = JsonAuthStore(auth_path or default_auth_path())
+        # Overrides ~/.wisp for /model picker effort persistence in tests; None
+        # in production so persist_user_effort resolves the real home dir.
+        self._settings_home_dir = settings_home_dir
         # Credential commands read auth_store lazily (it is rebound on a trusted-
         # project rebuild) and the default provider from live shell state.
         self._auth = AuthCommands(
@@ -350,24 +361,33 @@ class TuiShell:
         self.renderer.notice(f"Configuring provider: {provider}")
 
     async def _handle_model_command(self, args: tuple[str, ...]) -> None:
-        if len(args) > 1:
-            self.renderer.command_error("Usage: /model [model]")
+        if len(args) > 2:
+            self.renderer.command_error("Usage: /model [model] [effort]")
             return
         if not args:
-            self.renderer.notice(self._render_model_listing())
+            self.renderer.model_picker_request(
+                self.models.providers(),
+                current_provider=self.current_provider,
+                current_model=self.current_model,
+                current_effort=self.current_effort,
+            )
             return
         model = args[0]
+        effort = args[1] if len(args) > 1 else None
         try:
-            command_id = await self.controller.configure(model=model)
+            command_id = await self.controller.configure(model=model, effort=effort)
         except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
             self.renderer.send_failed("configure", exc)
             return
         self.pending_configures[command_id] = _PendingConfigure(
             command_id=command_id,
             model=model,
+            effort=effort,
+            has_effort=effort is not None,
         )
         self._update_view(status="configuring")
-        self.renderer.notice(f"Configuring model: {model}")
+        detail = f", effort {effort}" if effort is not None else ""
+        self.renderer.notice(f"Configuring model: {model}{detail}")
 
     async def _handle_input_closed(self, signal: _InputClosed) -> bool:
         self.state.input_closed = True
@@ -753,6 +773,9 @@ class TuiShell:
             if pending.model is not None:
                 self.current_model = pending.model
                 self.renderer.notice(f"Model set to {pending.model}")
+            if pending.has_effort:
+                self.current_effort = pending.effort
+                persist_user_effort(pending.effort, home_dir=self._settings_home_dir)
             self._sync_view()
             return
         message = event.error or "configure failed"
@@ -831,44 +854,6 @@ class TuiShell:
             if pending.provider is not None:
                 return pending.provider
         return None
-
-    def _latest_pending_model(self) -> str | None:
-        for pending in reversed(self.pending_configures.values()):
-            if pending.model is not None:
-                return pending.model
-        return None
-
-    def _render_model_listing(self) -> str:
-        """Render every catalog model grouped by provider, current one marked.
-
-        A model id is not unique across providers (e.g. "gpt-5.5" is claimed by
-        both openai and openai-codex -- see ModelRegistry.resolve()), so "current"
-        is only marked on the id that also matches the active provider, not on
-        every provider's copy of that id. When no model has been explicitly set
-        (``self.current_model is None``, the normal startup state), the active
-        provider's own ``default_model`` is what will actually be used, so that
-        entry is marked current instead of leaving the whole listing unmarked.
-        """
-
-        current_model = self.current_model
-        lines = ["Available models:"]
-        for entry in self.models.providers():
-            is_current_provider = entry.name == self.current_provider
-            effective_model = current_model if current_model is not None else entry.default_model
-            names = [
-                f"{model_id} (current)"
-                if is_current_provider and model_id == effective_model
-                else model_id
-                for model_id in entry.models
-            ]
-            lines.append(f"  {entry.name}: {', '.join(names)}")
-        model_line = f"Current model: {current_model or 'provider default'}"
-        pending_model = self._latest_pending_model()
-        if pending_model is not None:
-            model_line += f" (pending: {pending_model})"
-        lines.append(model_line)
-        lines.append(f"Current provider: {self.current_provider}")
-        return "\n".join(lines)
 
     def _render_help(self) -> None:
         self.renderer.help()

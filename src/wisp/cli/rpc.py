@@ -479,6 +479,7 @@ async def _run_rpc(
         sessions=sessions,
         events=runtime.events,
         model=config.model,
+        effort=config.effort,
         tool_registry=_print_mode_tool_registry(
             runtime.tools,
             all_tools=all_tools,
