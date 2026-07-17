@@ -69,7 +69,12 @@ def test_configure_effort_alone_is_accepted_without_model_or_provider(tmp_path: 
     assert agent.effort == "medium"
 
 
-def test_configure_without_effort_key_leaves_agent_effort_unchanged(tmp_path: Path) -> None:
+def test_configure_model_change_without_effort_resets_agent_effort(tmp_path: Path) -> None:
+    # Regression test: effort support is per-model, not just per-provider
+    # (catalog.toml deliberately omits some models, e.g. claude-haiku-4-5,
+    # from effort_levels entirely) -- a model change that stays on the same
+    # provider must still reset a previously-set effort tier, or it could
+    # reach a model that doesn't support it on the next prompt.
     provider = CapturingProvider()
     runtime = _runtime_with_capturing_provider(provider)
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="low")
@@ -82,7 +87,41 @@ def test_configure_without_effort_key_leaves_agent_effort_unchanged(tmp_path: Pa
         runtime=runtime,
     )
 
-    assert agent.effort == "low"
+    assert agent.effort is None
+
+
+def test_configure_effort_only_command_leaves_it_alone_when_touched(tmp_path: Path) -> None:
+    # A configure command that touches neither `provider` nor `model` must
+    # not accidentally reset effort as a side effect of some other field.
+    provider = CapturingProvider()
+    runtime = _runtime_with_capturing_provider(provider)
+    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="low")
+
+    _handle_rpc_configure_command(
+        {"effort": "high"},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+    )
+
+    assert agent.effort == "high"
+
+
+def test_configure_model_change_with_explicit_effort_keeps_the_new_value(tmp_path: Path) -> None:
+    provider = CapturingProvider()
+    runtime = _runtime_with_capturing_provider(provider)
+    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="low")
+
+    _handle_rpc_configure_command(
+        {"model": "some-model", "effort": "high"},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+    )
+
+    assert agent.effort == "high"
 
 
 def test_configure_rejects_non_string_effort(tmp_path: Path) -> None:

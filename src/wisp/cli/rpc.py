@@ -1087,6 +1087,7 @@ def _handle_rpc_configure_command(
                 configure_overrides.effort = None
                 configure_overrides.has_effort = True
     if has_model and provider is None and isinstance(model, str):
+        provider_before_auto_switch = agent.provider.name
         _auto_switch_provider_for_model(
             model,
             command_id=command_id,
@@ -1095,6 +1096,20 @@ def _handle_rpc_configure_command(
             configure_overrides=configure_overrides,
             has_effort=has_effort,
         )
+        if not has_effort and agent.provider.name == provider_before_auto_switch:
+            # Effort support is per-model, not just per-provider --
+            # catalog.toml deliberately omits some models (e.g.
+            # claude-haiku-4-5) from effort_levels entirely. A model change
+            # that stays on the same provider skips both the explicit-
+            # provider reset above and _auto_switch_provider_for_model's own
+            # reset (it only fires when the provider actually changes), so a
+            # tier valid for the old model could be unsupported by the new
+            # one -- reset rather than risk sending an incompatible
+            # output_config.effort (or equivalent) on the next prompt.
+            agent.effort = None
+            if configure_overrides is not None:
+                configure_overrides.effort = None
+                configure_overrides.has_effort = True
     if has_model:
         agent.model = model
         if configure_overrides is not None:
