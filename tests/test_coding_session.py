@@ -59,6 +59,7 @@ class CapturingProvider:
     def __init__(self) -> None:
         self.seen_messages: Sequence[Message] | None = None
         self.seen_tools: Sequence[ToolSpec] | None = None
+        self.seen_effort: str | None = None
 
     async def stream(
         self,
@@ -68,9 +69,11 @@ class CapturingProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         self.seen_messages = messages
         self.seen_tools = tools
+        self.seen_effort = effort
         yield ProviderResponseStarted(model=model or self.default_model or self.name)
         yield ProviderTextDelta(delta="done")
         yield ProviderResponseCompleted(content="done")
@@ -92,6 +95,7 @@ class ToolLoopProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         self.calls.append((tool_results, previous_response_id))
         turn = self.turns.pop(0)
@@ -1009,6 +1013,37 @@ def test_coding_session_passes_tool_specs_to_provider(tmp_path: Path) -> None:
     assert provider.seen_messages[2].content == "hello"
     assert provider.seen_tools == (tool,)
     assert any(isinstance(event, MessageCompleted) and event.content == "done" for event in events)
+
+
+def test_coding_session_passes_effort_to_provider(tmp_path: Path) -> None:
+    provider = CapturingProvider()
+
+    async def run_agent() -> list[object]:
+        agent = CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            effort="high",
+        )
+        return [event async for event in agent.run("hello")]
+
+    anyio.run(run_agent)
+
+    assert provider.seen_effort == "high"
+
+
+def test_coding_session_defaults_effort_to_none(tmp_path: Path) -> None:
+    provider = CapturingProvider()
+
+    async def run_agent() -> list[object]:
+        agent = CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+        )
+        return [event async for event in agent.run("hello")]
+
+    anyio.run(run_agent)
+
+    assert provider.seen_effort is None
 
 
 def test_coding_session_skips_project_context_when_untrusted(tmp_path: Path) -> None:

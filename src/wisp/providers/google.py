@@ -107,6 +107,7 @@ class GoogleProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         """Stream a normalized Gemini response lifecycle.
 
@@ -117,6 +118,11 @@ class GoogleProvider:
         never grows across tool rounds, so this provider reconstructs the
         accumulated tail from its own ``_replays`` cache keyed by
         ``previous_response_id`` -- see ``_MAX_PENDING_REPLAYS``.
+
+        ``effort`` maps to ``ThinkingConfig.thinking_level`` (Gemini's
+        ``"MINIMAL"``/``"LOW"``/``"MEDIUM"``/``"HIGH"`` tiers, confirmed
+        live only on ``gemini-flash-latest`` -- see ``_create_stream``) --
+        passed through unvalidated.
         """
 
         selected_model = model or self.default_model or DEFAULT_GOOGLE_MODEL
@@ -129,6 +135,7 @@ class GoogleProvider:
                     tools=tools,
                     tool_results=tool_results,
                     previous_response_id=previous_response_id,
+                    effort=effort,
                 )
                 break
             except (genai_errors.APIError, httpx.TimeoutException, httpx.ConnectError) as exc:
@@ -276,6 +283,7 @@ class GoogleProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[genai_types.GenerateContentResponse]:
         client = self._client_or_create()
         system_instruction = _system_from_messages(messages)
@@ -284,10 +292,28 @@ class GoogleProvider:
             contents.extend(self._get_replay(previous_response_id))
             contents.append(self._tool_results_to_content(tool_results))
 
+        # thinking_level only -- confirmed live that it applies to
+        # gemini-flash-latest but is outright rejected (400) on
+        # gemini-2.5-pro/gemini-2.5-flash, which need thinking_budget (a
+        # numeric token count) instead. This provider does not translate
+        # named tiers into a budget number, so effort is a no-op on models
+        # that require thinking_budget -- Gemini raises its own 400 for an
+        # unsupported combination, which surfaces as a normal retry-
+        # classified error, not a silent no-op on Wisp's side.
+        # thinking_level is typed as ThinkingLevel | None, but the SDK's own
+        # CaseInSensitiveEnum coerces a plain string at runtime (confirmed
+        # live: "MEDIUM" -> ThinkingLevel.MEDIUM) -- effort stays an
+        # unvalidated provider-native string per the Provider protocol, so
+        # an unrecognized value reaches the API as-is rather than being
+        # rejected client-side by a premature enum cast.
+        thinking_config = genai_types.ThinkingConfig(
+            include_thoughts=True,
+            thinking_level=cast("genai_types.ThinkingLevel | None", effort),
+        )
         config = genai_types.GenerateContentConfig(
             system_instruction=system_instruction,
             tools=[_tools_to_google(tools)] if tools else None,
-            thinking_config=genai_types.ThinkingConfig(include_thoughts=True),
+            thinking_config=thinking_config,
         )
         stream = await client.aio.models.generate_content_stream(
             model=model,

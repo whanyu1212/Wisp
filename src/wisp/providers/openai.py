@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from copy import deepcopy
 from json import JSONDecodeError, loads
 from typing import Literal, cast
@@ -77,8 +77,14 @@ class OpenAIProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        """Stream a normalized OpenAI response lifecycle."""
+        """Stream a normalized OpenAI response lifecycle.
+
+        ``effort`` maps to ``reasoning.effort`` on the Responses API
+        (``"none"``/``"minimal"``/``"low"``/``"medium"``/``"high"``/
+        ``"xhigh"``, model-dependent) -- passed through unvalidated.
+        """
 
         selected_model = model or self.default_model or DEFAULT_OPENAI_MODEL
         stream: AsyncIterator[ResponseStreamEvent] | None = None
@@ -90,6 +96,7 @@ class OpenAIProvider:
                     tools=tools,
                     tool_results=tool_results,
                     previous_response_id=previous_response_id,
+                    effort=effort,
                 )
                 break
             except OpenAIError as exc:
@@ -221,6 +228,7 @@ class OpenAIProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         client = self._client_or_create()
         openai_tools = _tool_specs_to_openai_tools(tools)
@@ -229,34 +237,29 @@ class OpenAIProvider:
             if tool_results
             else _messages_to_response_input(messages)
         )
-        if openai_tools and previous_response_id is not None:
-            stream = await client.responses.create(
-                model=model,
-                input=response_input,
-                stream=True,
-                tools=openai_tools,
-                previous_response_id=previous_response_id,
-            )
-        elif openai_tools:
-            stream = await client.responses.create(
-                model=model,
-                input=response_input,
-                stream=True,
-                tools=openai_tools,
-            )
-        elif previous_response_id is not None:
-            stream = await client.responses.create(
-                model=model,
-                input=response_input,
-                stream=True,
-                previous_response_id=previous_response_id,
-            )
-        else:
-            stream = await client.responses.create(
-                model=model,
-                input=response_input,
-                stream=True,
-            )
+
+        # Built as a single kwargs dict rather than a create() call per
+        # tools/previous_response_id/effort combination: branching per
+        # optional-parameter combination doesn't scale past two independent
+        # optional dimensions. mypy cannot match a **kwargs dict against
+        # create()'s `@overload`s (they discriminate on `stream`, but mypy's
+        # overload resolution rejects a dict-unpack call regardless) -- the
+        # `create` rebinding below is the single, contained concession to
+        # that limitation; every kwarg's value is still built from typed
+        # sources above.
+        kwargs: dict[str, object] = {
+            "model": model,
+            "input": response_input,
+            "stream": True,
+        }
+        if openai_tools:
+            kwargs["tools"] = openai_tools
+        if previous_response_id is not None:
+            kwargs["previous_response_id"] = previous_response_id
+        if effort is not None:
+            kwargs["reasoning"] = {"effort": effort}
+        create = cast(Callable[..., Awaitable[object]], client.responses.create)
+        stream = await create(**kwargs)
         return cast(AsyncIterator[ResponseStreamEvent], stream)
 
     def _client_or_create(self) -> AsyncOpenAI:

@@ -126,6 +126,91 @@ def test_pure_loop_streams_without_application_dependencies() -> None:
     assert provider.calls[0].messages == messages
 
 
+class _LegacyProviderWithoutEffortParameter:
+    """A `Provider` implemented against the pre-`effort` `stream()` signature.
+
+    `Provider` is a structural `typing.Protocol` with no runtime enforcement,
+    so a third-party provider written before `effort` was added is still a
+    perfectly valid implementation. `run_agent_loop` must not unconditionally
+    pass `effort=` to every provider on every turn, or a provider like this
+    one breaks on its very first call.
+    """
+
+    name = "legacy"
+    default_model: str | None = "legacy"
+
+    async def stream(
+        self,
+        messages: object,
+        *,
+        model: str | None = None,
+        tools: object = (),
+        tool_results: object = (),
+        previous_response_id: str | None = None,
+    ) -> AsyncIterator[object]:
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        yield ProviderTextDelta(delta="hello")
+        yield ProviderResponseCompleted(content="hello")
+
+
+def test_pure_loop_does_not_break_a_provider_without_an_effort_parameter() -> None:
+    # Regression test for a real Codex finding: config.effort defaults to
+    # None, but the loop previously passed effort=None unconditionally on
+    # every call, which raised TypeError against any Provider implemented
+    # before this keyword existed.
+    provider = _LegacyProviderWithoutEffortParameter()
+    messages = (Message(role="user", content="hi"),)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),  # type: ignore[arg-type]
+                messages=messages,
+            )
+        ]
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events] == [
+        "turn.started",
+        "message.started",
+        "message.delta",
+        "message.completed",
+        "turn.completed",
+    ]
+
+
+def test_pure_loop_forwards_effort_to_a_provider_that_supports_it() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderTextDelta(delta="hello"),
+                ProviderResponseCompleted(content="hello"),
+            ]
+        ]
+    )
+    messages = (Message(role="user", content="hi"),)
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=NeverToolExecutor(),
+                    effort="high",
+                ),
+                messages=messages,
+            )
+        ]
+
+    anyio.run(run)
+
+    assert provider.calls[0].effort == "high"
+
+
 def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
     call = ToolCall(
         call_id="call-1",

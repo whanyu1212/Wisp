@@ -87,7 +87,15 @@ class OpenAICodexProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
+        """Stream a normalized OpenAI Codex response lifecycle.
+
+        ``effort`` maps to ``reasoning.effort`` on the Responses API request
+        body (same shape as ``OpenAIProvider``) -- passed through
+        unvalidated.
+        """
+
         selected_model = model or self.default_model or DEFAULT_OPENAI_CODEX_MODEL
         auth = await self._auth_resolver.bearer_token(
             self.name,
@@ -109,6 +117,7 @@ class OpenAICodexProvider:
             model=selected_model,
             tools=tools,
             continuation_input=continuation_input,
+            effort=effort,
         )
         response_id: str | None = previous_response_id
         pending_tool_calls: dict[str, dict[str, object]] = {}
@@ -366,6 +375,7 @@ def _codex_request_body(
     model: str,
     tools: Sequence[ToolSpec],
     continuation_input: Sequence[Mapping[str, object]],
+    effort: str | None = None,
 ) -> dict[str, object]:
     body: dict[str, object] = {
         "model": model,
@@ -382,6 +392,8 @@ def _codex_request_body(
         body["instructions"] = instructions
     if tools:
         body["tools"] = [_tool_spec_to_codex_tool(tool) for tool in tools]
+    if effort is not None:
+        body["reasoning"] = {"effort": effort}
     return body
 
 

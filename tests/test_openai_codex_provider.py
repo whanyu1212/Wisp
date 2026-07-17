@@ -102,6 +102,43 @@ def test_openai_codex_provider_streams_text_with_subscription_headers(tmp_path: 
     assert provider.seen_headers["OpenAI-Beta"] == "responses=experimental"
 
 
+def test_openai_codex_provider_sends_reasoning_effort_when_provided(tmp_path: Path) -> None:
+    store = _store_with_oauth(tmp_path)
+    provider = StubOpenAICodexProvider(
+        [{"type": "response.created", "response": {"id": "response-id"}}],
+        auth_resolver=StoredProviderAuthResolver(store),
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in provider.stream([Message(role="user", content="hi")], effort="high")
+        ]
+
+    anyio.run(run)
+
+    assert provider.seen_body is not None
+    assert provider.seen_body["reasoning"] == {"effort": "high"}
+
+
+def test_openai_codex_provider_omits_reasoning_when_effort_is_not_provided(
+    tmp_path: Path,
+) -> None:
+    store = _store_with_oauth(tmp_path)
+    provider = StubOpenAICodexProvider(
+        [{"type": "response.created", "response": {"id": "response-id"}}],
+        auth_resolver=StoredProviderAuthResolver(store),
+    )
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hi")])]
+
+    anyio.run(run)
+
+    assert provider.seen_body is not None
+    assert "reasoning" not in provider.seen_body
+
+
 def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path) -> None:
     store = _store_with_oauth(tmp_path)
     provider = StubOpenAICodexProvider(

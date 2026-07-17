@@ -122,12 +122,29 @@ class RpcController:
         *,
         provider: str | None = None,
         model: str | None = None,
+        effort: str | None = None,
+        clear_effort: bool = False,
         command_id: str | None = None,
     ) -> str:
-        """Update provider/model settings for future prompt commands."""
+        """Update provider/model/effort settings for future prompt commands.
+
+        ``effort=None`` (the default) leaves any previously configured effort
+        tier untouched -- the command's JSON serialization omits unset fields,
+        so there is no wire difference between "not specified" and "None."
+        Pass ``clear_effort=True`` to explicitly reset effort back to the
+        provider's own default.
+        """
 
         selected_id = command_id or self._command_id_factory("configure")
-        await self._transport.send(ConfigureCommand(id=selected_id, provider=provider, model=model))
+        await self._transport.send(
+            ConfigureCommand(
+                id=selected_id,
+                provider=provider,
+                model=model,
+                effort=effort,
+                clear_effort=clear_effort,
+            )
+        )
         return selected_id
 
     def events(self) -> AsyncIterator[KnownWispEvent]:

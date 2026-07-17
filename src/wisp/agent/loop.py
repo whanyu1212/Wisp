@@ -81,6 +81,11 @@ class AgentLoopConfig:
     tools: tuple[ToolSpec, ...] = ()
     max_tool_iterations: int | None = None
     cancellation_token: CancellationToken | None = None
+    # Provider-native reasoning-effort tier string (e.g. Anthropic's "high",
+    # Google's "MEDIUM", OpenAI's "low") -- not normalized across providers,
+    # forwarded to Provider.stream() as-is. None means "use the provider's
+    # own default behavior."
+    effort: str | None = None
 
 
 def _is_cancelled(config: AgentLoopConfig) -> bool:
@@ -170,13 +175,30 @@ async def run_agent_loop(
             terminal_response: ProviderResponseCompleted | ProviderResponseFailed | None = None
             streamed_tool_calls: list[ToolCall] = []
 
-            async for provider_event in config.provider.stream(
-                messages,
-                model=config.model,
-                tools=config.tools,
-                tool_results=pending_tool_results,
-                previous_response_id=previous_response_id,
-            ):
+            # `effort` is only passed when actually set, not unconditionally
+            # as None: it is a newer, optional Provider.stream() keyword, and
+            # Provider is a structural Protocol with no runtime enforcement
+            # -- a third-party provider implemented against the pre-effort
+            # signature would otherwise get a TypeError on every turn instead
+            # of keeping its unchanged default behavior.
+            if config.effort is not None:
+                provider_stream = config.provider.stream(
+                    messages,
+                    model=config.model,
+                    tools=config.tools,
+                    tool_results=pending_tool_results,
+                    previous_response_id=previous_response_id,
+                    effort=config.effort,
+                )
+            else:
+                provider_stream = config.provider.stream(
+                    messages,
+                    model=config.model,
+                    tools=config.tools,
+                    tool_results=pending_tool_results,
+                    previous_response_id=previous_response_id,
+                )
+            async for provider_event in provider_stream:
                 if _is_cancelled(config):
                     for event in _cancelled_turn_events(turn):
                         yield event

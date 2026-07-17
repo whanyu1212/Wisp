@@ -66,6 +66,7 @@ def test_minimal_catalog_parses() -> None:
 
     assert catalog.providers[0].name == "acme"
     assert catalog.providers[0].context_windows == {}
+    assert catalog.providers[0].effort_levels == {}
 
 
 def test_unknown_top_level_key_is_rejected() -> None:
@@ -132,6 +133,65 @@ def test_context_window_must_be_positive() -> None:
                 "context_windows": {"acme-1": 0},
             }
         )
+
+
+def test_effort_levels_must_reference_a_known_model() -> None:
+    with pytest.raises(ValidationError, match="unknown model"):
+        ModelCatalogProviderEntry.model_validate(
+            {
+                "name": "acme",
+                "display_name": "Acme",
+                "default_model": "acme-1",
+                "docs_url": "https://example.com/docs",
+                "models": ["acme-1"],
+                "effort_levels": {"acme-2": ["low", "high"]},
+            }
+        )
+
+
+def test_effort_levels_must_not_be_empty() -> None:
+    with pytest.raises(ValidationError, match="must not be empty"):
+        ModelCatalogProviderEntry.model_validate(
+            {
+                "name": "acme",
+                "display_name": "Acme",
+                "default_model": "acme-1",
+                "docs_url": "https://example.com/docs",
+                "models": ["acme-1"],
+                "effort_levels": {"acme-1": []},
+            }
+        )
+
+
+def test_effort_levels_rejects_duplicate_tiers() -> None:
+    with pytest.raises(ValidationError, match="duplicate entries"):
+        ModelCatalogProviderEntry.model_validate(
+            {
+                "name": "acme",
+                "display_name": "Acme",
+                "default_model": "acme-1",
+                "docs_url": "https://example.com/docs",
+                "models": ["acme-1"],
+                "effort_levels": {"acme-1": ["low", "low"]},
+            }
+        )
+
+
+def test_effort_levels_are_not_normalized_across_providers() -> None:
+    # Deliberately provider-specific vocabulary: Google's "LOW"/"HIGH" and
+    # Anthropic's "low"/"medium"/"high"/"xhigh"/"max" are unrelated strings,
+    # not mapped onto a shared tier scheme.
+    catalog = ModelCatalogProviderEntry.model_validate(
+        {
+            "name": "acme",
+            "display_name": "Acme",
+            "default_model": "acme-1",
+            "docs_url": "https://example.com/docs",
+            "models": ["acme-1"],
+            "effort_levels": {"acme-1": ["LOW", "HIGH"]},
+        }
+    )
+    assert catalog.effort_levels == {"acme-1": ("LOW", "HIGH")}
 
 
 def test_empty_models_list_is_rejected() -> None:

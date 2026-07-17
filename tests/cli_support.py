@@ -51,6 +51,7 @@ class MixedTextToolProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         yield ProviderResponseStarted(model=model or self.default_model or self.name)
         if not tool_results:
@@ -85,6 +86,7 @@ class CompletionOnlyProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         yield ProviderResponseStarted(model=model or self.default_model or self.name)
         yield ProviderResponseCompleted(content="completion-only response")
@@ -102,6 +104,7 @@ class CancellableProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         yield ProviderResponseStarted(model=model or self.default_model or self.name)
         user_prompts = _user_prompts(messages)
@@ -130,6 +133,7 @@ class FailingProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         yield ProviderResponseStarted(model=model or self.default_model or self.name)
         user_prompts = _user_prompts(messages)
@@ -157,6 +161,7 @@ class ToolCallingProvider:
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         yield ProviderResponseStarted(model=model or self.default_model or self.name)
         if not tool_results:

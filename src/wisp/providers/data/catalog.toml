@@ -23,6 +23,14 @@ models = ["gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.4-mini"]
 "gpt-5.4" = 272000
 "gpt-5.4-mini" = 400000
 
+# Effort tiers sourced from OpenAI's reasoning-effort guide
+# (developers.openai.com/api/docs/guides/reasoning): "Supported values are
+# model-dependent... gpt-5.5 defaults to medium." Only gpt-5.5's full tier
+# set is confirmed against that doc; the other three models' exact subsets
+# are unconfirmed, so left out rather than guessed.
+[providers.effort_levels]
+"gpt-5.5" = ["none", "minimal", "low", "medium", "high", "xhigh"]
+
 [[providers]]
 name = "openai-codex"
 display_name = "OpenAI (Codex subscription)"
@@ -34,17 +42,40 @@ models = ["gpt-5.5", "gpt-5.4"]
 "gpt-5.5" = 272000
 "gpt-5.4" = 272000
 
+[providers.effort_levels]
+"gpt-5.5" = ["none", "minimal", "low", "medium", "high", "xhigh"]
+
 [[providers]]
 name = "anthropic"
 display_name = "Anthropic"
 default_model = "claude-sonnet-5"
 docs_url = "https://platform.claude.com/docs"
-models = ["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5"]
+models = [
+    "claude-sonnet-5",
+    "claude-opus-4-8",
+    "claude-haiku-4-5",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+]
 
 [providers.context_windows]
 "claude-sonnet-5" = 1000000
 "claude-opus-4-8" = 1000000
 "claude-haiku-4-5" = 200000
+"claude-opus-4-7" = 1000000
+"claude-opus-4-6" = 1000000
+"claude-sonnet-4-6" = 1000000
+
+# Effort tiers confirmed live via client.models.retrieve(id).capabilities.effort
+# against the Anthropic API. claude-haiku-4-5 is deliberately omitted --
+# capabilities.effort.supported is False for it (no effort control at all).
+[providers.effort_levels]
+"claude-sonnet-5" = ["low", "medium", "high", "xhigh", "max"]
+"claude-opus-4-8" = ["low", "medium", "high", "xhigh", "max"]
+"claude-opus-4-7" = ["low", "medium", "high", "xhigh", "max"]
+"claude-opus-4-6" = ["low", "medium", "high", "max"]
+"claude-sonnet-4-6" = ["low", "medium", "high", "max"]
 
 [[providers]]
 name = "google"
@@ -57,6 +88,17 @@ models = ["gemini-flash-latest", "gemini-2.5-pro", "gemini-2.5-flash"]
 "gemini-flash-latest" = 1048576
 "gemini-2.5-pro" = 1048576
 "gemini-2.5-flash" = 1048576
+
+# Effort tiers confirmed live against the real API: gemini-flash-latest
+# accepts thinking_level with all 4 ThinkingLevel enum tiers (confirmed
+# MINIMAL/LOW/MEDIUM/HIGH all succeed). gemini-2.5-pro and gemini-2.5-flash
+# reject thinking_level outright ("Thinking level is not supported for this
+# model", 400) -- they need thinking_budget (a numeric token count) instead,
+# a different mechanism this provider does not yet translate named tiers
+# into, so they are deliberately omitted here rather than listing tiers
+# GoogleProvider cannot actually apply to them.
+[providers.effort_levels]
+"gemini-flash-latest" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 
 [[providers]]
 name = "fake"

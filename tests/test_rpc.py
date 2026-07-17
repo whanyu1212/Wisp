@@ -241,6 +241,71 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
     anyio.run(run)
 
 
+def test_rpc_controller_configure_sends_effort() -> None:
+    async def run() -> None:
+        transport = RecordingTransport()
+        controller = RpcController(
+            transport,
+            command_id_factory=lambda prefix: f"{prefix}-id",
+        )
+
+        await controller.configure(effort="high")
+
+        assert transport.commands == [
+            ConfigureCommand(id="configure-id", effort="high"),
+        ]
+
+    anyio.run(run)
+
+
+def test_configure_command_serializes_effort_and_omits_when_unset() -> None:
+    with_effort = ConfigureCommand(id="configure-1", effort="medium")
+
+    line = with_effort.to_json_line()
+
+    assert json.loads(line) == {
+        "id": "configure-1",
+        "type": "configure",
+        "effort": "medium",
+        "clear_effort": False,
+    }
+    assert rpc_command_from_json(line) == with_effort
+
+    without_effort = ConfigureCommand(id="configure-2", model="gpt-5.5")
+
+    assert "effort" not in json.loads(without_effort.to_json_line())
+
+
+def test_rpc_controller_configure_clear_effort() -> None:
+    # Regression test: effort=None is indistinguishable on the wire from
+    # never having set effort at all (exclude_none drops it), so a client
+    # that previously set an effort tier has no way to reset it back to the
+    # provider's own default without a distinct, always-serialized signal.
+    async def run() -> None:
+        transport = RecordingTransport()
+        controller = RpcController(
+            transport,
+            command_id_factory=lambda prefix: f"{prefix}-id",
+        )
+
+        await controller.configure(clear_effort=True)
+
+        assert transport.commands == [
+            ConfigureCommand(id="configure-id", clear_effort=True),
+        ]
+
+    anyio.run(run)
+
+
+def test_configure_command_always_serializes_clear_effort() -> None:
+    # clear_effort's default (False) must never be silently dropped the way
+    # effort=None is -- it is the only signal the server has to distinguish
+    # "leave effort untouched" from "explicitly reset effort."
+    command = ConfigureCommand(id="configure-1", model="gpt-5.5")
+
+    assert json.loads(command.to_json_line())["clear_effort"] is False
+
+
 def test_rpc_controller_exposes_transport_events() -> None:
     async def run() -> None:
         expected_events = [

@@ -68,6 +68,7 @@ class CodingSession:
         sessions: JsonlSessionStore,
         events: EventBus | None = None,
         model: str | None = None,
+        effort: str | None = None,
         tools: Sequence[ToolSpec] | None = None,
         tool_registry: ToolRegistry | None = None,
         tool_context: ToolContext | None = None,
@@ -83,6 +84,7 @@ class CodingSession:
         self.sessions = sessions
         self.events = events
         self.model = model
+        self.effort = effort
         self.tool_registry = tool_registry
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
@@ -136,6 +138,7 @@ class CodingSession:
                 model=self.model,
                 tools=self.tools,
                 max_tool_iterations=self.max_tool_iterations,
+                effort=self.effort,
             ),
             messages=(*prompt_messages, *self._conversation_history(history)),
         )

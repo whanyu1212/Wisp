@@ -382,12 +382,17 @@ class _RpcConfigureOverrides:
     provider: str | None = None
     model: str | None = None
     has_model: bool = False
+    effort: str | None = None
+    has_effort: bool = False
 
     def effective_provider(self, default: str) -> str:
         return self.provider or default
 
     def effective_model(self, default: str | None) -> str | None:
         return self.model if self.has_model else default
+
+    def effective_effort(self, default: str | None) -> str | None:
+        return self.effort if self.has_effort else default
 
 
 async def _run_rpc(
@@ -451,6 +456,7 @@ async def _run_rpc(
         effective_model = configure_overrides.effective_model(trusted_config.model)
         agent.provider = trusted_runtime.providers.get(effective_provider)
         agent.model = effective_model
+        agent.effort = configure_overrides.effective_effort(agent.effort)
         agent.tool_context = ToolContext.from_config(trusted_config)
         runtime = replace(runtime, providers=trusted_runtime.providers)
         # Tell an out-of-process front-end (the TUI) the config it displays/mutates
@@ -1019,13 +1025,16 @@ def _handle_rpc_configure_command(
 ) -> None:
     provider = command.get("provider")
     model = command.get("model")
+    effort = command.get("effort")
+    clear_effort = command.get("clear_effort") is True
     has_provider = "provider" in command
     has_model = "model" in command
-    if not has_provider and not has_model:
+    has_effort = "effort" in command or clear_effort
+    if not has_provider and not has_model and not has_effort:
         _write_rpc_command_error(
             command_id=command_id,
             command_type=command_type,
-            message="RPC configure command requires provider or model",
+            message="RPC configure command requires provider, model, or effort",
         )
         return
     if provider is not None and not isinstance(provider, str):
@@ -1040,6 +1049,13 @@ def _handle_rpc_configure_command(
             command_id=command_id,
             command_type=command_type,
             message="RPC configure command field model must be a string",
+        )
+        return
+    if effort is not None and not isinstance(effort, str):
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC configure command field effort must be a string",
         )
         return
     if isinstance(provider, str):
@@ -1059,19 +1075,51 @@ def _handle_rpc_configure_command(
             if configure_overrides is not None:
                 configure_overrides.model = None
                 configure_overrides.has_model = True
+        if not has_effort:
+            # Effort tiers are provider-native, non-normalized strings (e.g.
+            # Google's "MEDIUM" vs OpenAI's lowercase "medium") -- a tier
+            # chosen for the old provider left in place across a provider
+            # switch would reach the new provider's API unvalidated on the
+            # next prompt, matching the same staleness model already gets
+            # reset for above.
+            agent.effort = None
+            if configure_overrides is not None:
+                configure_overrides.effort = None
+                configure_overrides.has_effort = True
     if has_model and provider is None and isinstance(model, str):
+        provider_before_auto_switch = agent.provider.name
         _auto_switch_provider_for_model(
             model,
             command_id=command_id,
             agent=agent,
             runtime=runtime,
             configure_overrides=configure_overrides,
+            has_effort=has_effort,
         )
+        if not has_effort and agent.provider.name == provider_before_auto_switch:
+            # Effort support is per-model, not just per-provider --
+            # catalog.toml deliberately omits some models (e.g.
+            # claude-haiku-4-5) from effort_levels entirely. A model change
+            # that stays on the same provider skips both the explicit-
+            # provider reset above and _auto_switch_provider_for_model's own
+            # reset (it only fires when the provider actually changes), so a
+            # tier valid for the old model could be unsupported by the new
+            # one -- reset rather than risk sending an incompatible
+            # output_config.effort (or equivalent) on the next prompt.
+            agent.effort = None
+            if configure_overrides is not None:
+                configure_overrides.effort = None
+                configure_overrides.has_effort = True
     if has_model:
         agent.model = model
         if configure_overrides is not None:
             configure_overrides.model = model
             configure_overrides.has_model = True
+    if has_effort:
+        agent.effort = None if clear_effort else effort
+        if configure_overrides is not None:
+            configure_overrides.effort = None if clear_effort else effort
+            configure_overrides.has_effort = True
     _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 
@@ -1082,6 +1130,7 @@ def _auto_switch_provider_for_model(
     agent: CodingSession,
     runtime: WispRuntime,
     configure_overrides: _RpcConfigureOverrides | None,
+    has_effort: bool,
 ) -> None:
     """Switch ``agent.provider`` if ``model`` unambiguously belongs elsewhere.
 
@@ -1113,6 +1162,17 @@ def _auto_switch_provider_for_model(
     agent.provider = new_provider
     if configure_overrides is not None:
         configure_overrides.provider = resolved_provider
+    if not has_effort:
+        # Same staleness the explicit-provider path already guards against
+        # (see _handle_rpc_configure_command): effort tiers are
+        # provider-native, non-normalized strings, so a tier chosen for the
+        # old provider must not survive an auto-switch to a new one -- the
+        # caller's own `has_effort` block (run after this returns) still
+        # wins when the same command also supplies a new effort explicitly.
+        agent.effort = None
+        if configure_overrides is not None:
+            configure_overrides.effort = None
+            configure_overrides.has_effort = True
 
 
 def _handle_rpc_approval_command(
