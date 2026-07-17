@@ -274,12 +274,26 @@ class ModelRegistry:
         by design like the rest of this module: an unrecognized provider or
         model returns ``False`` rather than raising, so callers get a plain
         yes/no to gate a stored value against, not another error to catch.
+
+        Does not distinguish "model known, tier not listed" from "model
+        unknown to this provider" -- both return ``False``. A caller that
+        needs to treat an unknown model permissively (e.g. a brand-new model
+        ahead of a catalog update) must check :meth:`knows_model` first.
         """
 
         for entry in self._catalog.providers:
             if entry.name != provider_name:
                 continue
             return effort in entry.effort_levels.get(model_id, ())
+        return False
+
+    def knows_model(self, provider_name: str, model_id: str) -> bool:
+        """Return whether ``provider_name``'s catalog entry lists ``model_id`` at all."""
+
+        for entry in self._catalog.providers:
+            if entry.name != provider_name:
+                continue
+            return model_id in entry.models
         return False
 
 

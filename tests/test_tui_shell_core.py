@@ -783,6 +783,32 @@ def test_tui_shell_typed_model_command_effort_validation_is_permissive_for_unkno
     anyio.run(run)
 
 
+def test_tui_shell_typed_model_command_effort_permissive_for_qualified_unknown_model() -> None:
+    # Regression test (Codex review on #125): the picker-qualified
+    # "provider::model" form must be just as permissive for a brand-new,
+    # not-yet-cataloged model as the bare (unqualified) form already is --
+    # supports_effort() alone can't distinguish "model known, tier not
+    # listed" from "model unknown to this provider" (both return False), so
+    # _validated_effort must check knows_model() before treating a
+    # provider-qualified unknown model as an unsupported-tier rejection.
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model openai::gpt-6 high", "/quit"]),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [("openai", "gpt-6", "high", False)]
+        assert shell.current_effort == "high"
+
+    anyio.run(run)
+
+
 def test_tui_shell_model_command_without_effort_arg_also_clears_stale_effort() -> None:
     # Regression test (Codex review on #125): _handle_rpc_configure_command
     # unconditionally resets agent.effort to None whenever a configure carries

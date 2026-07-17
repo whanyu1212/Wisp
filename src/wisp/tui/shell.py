@@ -460,9 +460,14 @@ class TuiShell:
         omits from ``effort_levels`` like claude-haiku-4-5) would reach the
         RPC agent and, eventually, that provider's API unvalidated. Permissive
         like the rest of ``/model``'s validation -- an unresolvable model
-        (unknown or ambiguous) skips the check entirely rather than blocking
-        the command, since a brand-new model ahead of a catalog update must
-        still work.
+        (unknown to the catalog, or ambiguous when ``provider`` isn't given)
+        skips the check entirely rather than blocking the command, since a
+        brand-new model ahead of a catalog update must still work. This
+        applies equally to an explicitly provider-qualified unknown model
+        (``/model openai::gpt-6 high``) as to a bare one -- ``knows_model`` is
+        checked regardless of whether ``provider`` came from the caller or
+        from ``resolve()``, since ``supports_effort`` alone can't distinguish
+        "model known, tier not listed" from "model unknown to this provider."
         """
 
         target_provider = provider
@@ -471,6 +476,8 @@ class TuiShell:
                 target_provider, _entry = self.models.resolve(model, prefer=self.current_provider)
             except (UnknownModelError, AmbiguousModelError):
                 return effort
+        if not self.models.knows_model(target_provider, model):
+            return effort
         if self.models.supports_effort(target_provider, model, effort):
             return effort
         self.renderer.command_error(

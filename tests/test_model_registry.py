@@ -185,6 +185,24 @@ def test_supports_effort_false_for_an_unknown_provider() -> None:
     assert registry.supports_effort("nonexistent", "acme-1", "high") is False
 
 
+def test_knows_model_true_for_a_listed_model() -> None:
+    registry = ModelRegistry(_catalog(_provider("acme", ["acme-1"])))
+
+    assert registry.knows_model("acme", "acme-1") is True
+
+
+def test_knows_model_false_for_an_unlisted_model() -> None:
+    registry = ModelRegistry(_catalog(_provider("acme", ["acme-1"])))
+
+    assert registry.knows_model("acme", "acme-2") is False
+
+
+def test_knows_model_false_for_an_unknown_provider() -> None:
+    registry = ModelRegistry(_catalog(_provider("acme", ["acme-1"])))
+
+    assert registry.knows_model("nonexistent", "acme-1") is False
+
+
 def test_startup_effort_none_passes_through_as_none() -> None:
     registry = ModelRegistry(
         _catalog(_provider("acme", ["acme-1"], effort_levels={"acme-1": ["high"]}))
