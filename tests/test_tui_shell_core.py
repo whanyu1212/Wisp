@@ -625,6 +625,64 @@ def test_tui_shell_model_command_too_many_args_rejected() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_model_command_parses_provider_qualified_selection() -> None:
+    # Regression test: ModelPicker.submit_current_selection sends
+    # "provider::model" (see widgets.ModelPicker), not a bare model id, so a
+    # model shared by multiple providers (e.g. "gpt-5.5" under both openai and
+    # openai-codex) always switches to the exact row picked rather than
+    # depending on ModelRegistry.resolve's ambiguity handling server-side.
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model openai-codex::gpt-5.5", "/quit"]),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [("openai-codex", "gpt-5.5", None, False)]
+        assert shell.current_provider == "openai-codex"
+        assert shell.current_model == "gpt-5.5"
+        rendered = output.getvalue()
+        assert "Provider set to openai-codex" in rendered
+        assert "Model set to gpt-5.5" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_model_command_clear_effort_token_clears_persisted_effort() -> None:
+    # Regression test: ModelPicker sends MODEL_COMMAND_CLEAR_EFFORT_TOKEN ("-")
+    # when the user explicitly cycles effort back to "(default)" -- distinct
+    # from a plain "/model <id>" with no effort argument at all, which must
+    # leave any already-configured/persisted effort untouched.
+    async def run(tmp_path: Path) -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model claude-opus-4-8 -", "/quit"]),
+            provider="anthropic",
+            effort="high",
+            settings_home_dir=tmp_path,
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [(None, "claude-opus-4-8", None, True)]
+        assert shell.current_model == "claude-opus-4-8"
+        assert shell.current_effort is None
+        settings_path = tmp_path / ".wisp" / "settings.json"
+        if settings_path.exists():
+            assert "effort" not in json.loads(settings_path.read_text(encoding="utf-8"))
+
+    with TemporaryDirectory() as tmp_dir:
+        anyio.run(run, Path(tmp_dir))
+
+
 def test_tui_shell_adopts_server_side_auto_switched_provider() -> None:
     # Regression test: a model-only /model <id> can resolve server-side to a
     # different provider than the one the TUI thinks is active (see

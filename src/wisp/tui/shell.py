@@ -35,6 +35,7 @@ from wisp.rpc.commands import ApprovalScope
 from wisp.settings import persist_user_effort
 from wisp.tui.auth_commands import AuthCommands
 from wisp.tui.commands import (
+    MODEL_COMMAND_CLEAR_EFFORT_TOKEN,
     TuiSlashCommand,
     TuiSlashCommandError,
     TuiSlashCommandName,
@@ -372,21 +373,34 @@ class TuiShell:
                 current_effort=self.current_effort,
             )
             return
-        model = args[0]
-        effort = args[1] if len(args) > 1 else None
+        # ModelPicker qualifies its selection as "provider::model" (see
+        # widgets.ModelPicker.submit_current_selection) so a row for a model id
+        # shared by multiple providers (e.g. "gpt-5.5" under both openai and
+        # openai-codex) always switches to the exact provider the user picked,
+        # rather than depending on ModelRegistry.resolve's ambiguity handling.
+        # A typed /model <id> (no "::") never carries a provider -- unaffected.
+        maybe_provider, _, qualified_model = args[0].partition("::")
+        model = qualified_model if qualified_model else args[0]
+        provider: str | None = maybe_provider if qualified_model else None
+        raw_effort = args[1] if len(args) > 1 else None
+        clear_effort = raw_effort == MODEL_COMMAND_CLEAR_EFFORT_TOKEN
+        effort = None if clear_effort else raw_effort
         try:
-            command_id = await self.controller.configure(model=model, effort=effort)
+            command_id = await self.controller.configure(
+                provider=provider, model=model, effort=effort, clear_effort=clear_effort
+            )
         except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
             self.renderer.send_failed("configure", exc)
             return
         self.pending_configures[command_id] = _PendingConfigure(
             command_id=command_id,
+            provider=provider,
             model=model,
             effort=effort,
-            has_effort=effort is not None,
+            has_effort=raw_effort is not None,
         )
         self._update_view(status="configuring")
-        detail = f", effort {effort}" if effort is not None else ""
+        detail = f", effort {effort or 'provider default'}" if raw_effort is not None else ""
         self.renderer.notice(f"Configuring model: {model}{detail}")
 
     async def _handle_input_closed(self, signal: _InputClosed) -> bool:

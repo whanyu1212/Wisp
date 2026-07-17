@@ -33,7 +33,11 @@ from textual.widgets.option_list import Option
 
 from wisp.events import ToolApprovalRequested, TrustRequested
 from wisp.providers.catalog import ModelCatalogProviderEntry
-from wisp.tui.commands import SLASH_COMMAND_SPECS, SlashCommandSpec
+from wisp.tui.commands import (
+    MODEL_COMMAND_CLEAR_EFFORT_TOKEN,
+    SLASH_COMMAND_SPECS,
+    SlashCommandSpec,
+)
 from wisp.tui.decision_content import (
     _approval_content,
     _bounded_tool_session_option_name,
@@ -608,6 +612,13 @@ class ModelPicker(Vertical):
         # preserved across highlight moves so arrowing away and back doesn't
         # forget a choice, matching how the composer never discards a draft.
         self._effort_choice: dict[tuple[str, str], str | None] = {}
+        # Rows the user has explicitly cycled effort on (via left/right), even
+        # if that cycling landed back on None/"(default)". Without this, "never
+        # touched effort" and "explicitly cleared back to default" are both
+        # `_effort_choice.get(row) is None` and indistinguishable on submit --
+        # the former must omit effort from the configure call entirely (leave
+        # server-side state alone), the latter must send clear_effort=True.
+        self._effort_touched: set[tuple[str, str]] = set()
 
     def compose(self) -> ComposeResult:
         yield self._title
@@ -636,6 +647,7 @@ class ModelPicker(Vertical):
         self._opened_at = time.monotonic()
         self._entries_by_provider = {entry.name: entry for entry in entries}
         self._effort_choice = {}
+        self._effort_touched = set()
         self._options.clear_options()
         self._rows = []
         default_index = 0
@@ -724,6 +736,7 @@ class ModelPicker(Vertical):
         elif new_index >= len(levels):
             new_index = len(levels) - 1
         self._effort_choice[row] = None if new_index == -1 else levels[new_index]
+        self._effort_touched.add(row)
         self._update_effort_line()
 
     def submit_current_selection(self) -> None:
@@ -732,9 +745,23 @@ class ModelPicker(Vertical):
         row = self._highlighted_row()
         if row is None:
             return
-        _provider_name, model_id = row
+        provider_name, model_id = row
+        # provider::model, not a bare model id -- a model id is not unique
+        # across providers (e.g. "gpt-5.5" is claimed by both openai and
+        # openai-codex), and TuiShell._handle_model_command would otherwise
+        # have to guess a provider for a shared id via ModelRegistry.resolve's
+        # ambiguity handling, silently leaving an explicitly-picked row's
+        # provider unapplied. See MODEL_COMMAND_CLEAR_EFFORT_TOKEN for the
+        # effort token's three-state encoding (omitted / explicit tier /
+        # explicit clear).
+        target = f"{provider_name}::{model_id}"
         effort = self._effort_choice.get(row)
-        answer = f"/model {model_id} {effort}" if effort is not None else f"/model {model_id}"
+        if effort is not None:
+            answer = f"/model {target} {effort}"
+        elif row in self._effort_touched:
+            answer = f"/model {target} {MODEL_COMMAND_CLEAR_EFFORT_TOKEN}"
+        else:
+            answer = f"/model {target}"
         self._submitted = True
         self.post_message(self.Selected(answer))
 

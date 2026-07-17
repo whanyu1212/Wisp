@@ -131,7 +131,7 @@ def test_model_picker_enter_selects_highlighted_model_without_effort() -> None:
             assert isinstance(answer, str)
             return answer
 
-    assert anyio.run(scenario) == "/model gpt-5.5"
+    assert anyio.run(scenario) == "/model openai::gpt-5.5"
 
 
 def test_model_picker_arrow_keys_cycle_effort_and_submit_it() -> None:
@@ -161,7 +161,7 @@ def test_model_picker_arrow_keys_cycle_effort_and_submit_it() -> None:
     before, after_one_right, answer = anyio.run(scenario)
     assert "(default)" in before
     assert "[low]" in after_one_right
-    assert answer == "/model claude-opus-4-8 low"
+    assert answer == "/model anthropic::claude-opus-4-8 low"
 
 
 def test_model_picker_left_right_ignored_for_model_without_effort_levels() -> None:
@@ -183,7 +183,7 @@ def test_model_picker_left_right_ignored_for_model_without_effort_levels() -> No
             assert isinstance(answer, str)
             return answer
 
-    assert anyio.run(scenario) == "/model gpt-5.5"
+    assert anyio.run(scenario) == "/model openai::gpt-5.5"
 
 
 def test_model_picker_escape_cancels_without_submitting_and_restores_composer() -> None:
@@ -252,7 +252,7 @@ def test_model_picker_drops_stale_key_and_selection_queued_before_open() -> None
 
     rejected, answer = anyio.run(scenario)
     assert rejected
-    assert answer == "/model gpt-5.5"
+    assert answer == "/model openai::gpt-5.5"
 
 
 def test_model_picker_preserves_composer_draft_across_selection() -> None:
@@ -344,3 +344,114 @@ def test_model_picker_cancel_restores_composer_draft() -> None:
     draft, restored = anyio.run(scenario)
     assert draft == "draft follow-up"
     assert restored
+
+
+# "gpt-5.5" is deliberately claimed by two providers, mirroring the real
+# built-in catalog (openai and openai-codex both accept the same OpenAI model
+# names) -- regression fixture for the picker-must-qualify-provider finding.
+_OPENAI_SHARED = _entry(
+    "openai",
+    default_model="gpt-5.5",
+    models=("gpt-5.5",),
+)
+_OPENAI_CODEX_SHARED = _entry(
+    "openai-codex",
+    default_model="gpt-5.5",
+    models=("gpt-5.5",),
+)
+_SHARED_ID_ENTRIES = (_OPENAI_SHARED, _OPENAI_CODEX_SHARED)
+
+
+def test_model_picker_qualifies_selection_with_provider_for_a_shared_model_id() -> None:
+    # Regression test: a bare "/model gpt-5.5" is ambiguous between the two
+    # providers below -- ModelRegistry.resolve() can't disambiguate it without
+    # a `prefer` hint that matches, and the shell's active provider being
+    # neither (or the "wrong" one of the two) would silently fail to switch to
+    # the row the user actually picked. The picker must send an unambiguous,
+    # provider-qualified answer regardless of which row is highlighted.
+    async def scenario() -> tuple[str, str]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            renderer.model_picker_request(
+                _SHARED_ID_ENTRIES,
+                current_provider="anthropic",
+                current_model=None,
+                current_effort=None,
+            )
+            await pilot.pause()
+            options = app.query_one("#model-picker-options", OptionList)
+            # Row order: [0]=openai header, [1]=openai::gpt-5.5,
+            # [2]=openai-codex header, [3]=openai-codex::gpt-5.5.
+            options.highlighted = 1
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                first_answer = await app._prompt_receive.receive()
+            assert isinstance(first_answer, str)
+
+            renderer.model_picker_request(
+                _SHARED_ID_ENTRIES,
+                current_provider="anthropic",
+                current_model=None,
+                current_effort=None,
+            )
+            await pilot.pause()
+            options = app.query_one("#model-picker-options", OptionList)
+            options.highlighted = 3
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                second_answer = await app._prompt_receive.receive()
+            assert isinstance(second_answer, str)
+            return first_answer, second_answer
+
+    first_answer, second_answer = anyio.run(scenario)
+    assert first_answer == "/model openai::gpt-5.5"
+    assert second_answer == "/model openai-codex::gpt-5.5"
+
+
+def test_model_picker_cycling_back_to_default_sends_explicit_clear_token() -> None:
+    # Regression test: cycling effort left back past the lowest tier lands on
+    # None/"(default)" -- indistinguishable, by value alone, from a row whose
+    # effort was never touched at all. An untouched row must omit the effort
+    # argument entirely (so the shell leaves any already-configured effort
+    # alone); an explicitly-cleared row must send a token the shell recognizes
+    # as "clear it," or a previously-persisted tier would never be clearable
+    # through the picker.
+    async def scenario() -> tuple[str, str]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            renderer.model_picker_request(
+                _ENTRIES,
+                current_provider="anthropic",
+                current_model="claude-opus-4-8",
+                current_effort="high",
+            )
+            await pilot.pause()
+
+            # Untouched: submit immediately without cycling effort at all.
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                untouched_answer = await app._prompt_receive.receive()
+            assert isinstance(untouched_answer, str)
+
+            renderer.model_picker_request(
+                _ENTRIES,
+                current_provider="anthropic",
+                current_model="claude-opus-4-8",
+                current_effort="high",
+            )
+            await pilot.pause()
+            # "high" is the seeded/current tier -- cycle left 3 times (high ->
+            # medium -> low -> default) to explicitly land back on default.
+            await pilot.press("left")
+            await pilot.press("left")
+            await pilot.press("left")
+            await pilot.pause()
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                cleared_answer = await app._prompt_receive.receive()
+            assert isinstance(cleared_answer, str)
+            return untouched_answer, cleared_answer
+
+    untouched_answer, cleared_answer = anyio.run(scenario)
+    assert untouched_answer == "/model anthropic::claude-opus-4-8 high"
+    assert cleared_answer == "/model anthropic::claude-opus-4-8 -"
