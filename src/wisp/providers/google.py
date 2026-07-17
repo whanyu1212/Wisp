@@ -481,9 +481,7 @@ def _usage_from_google(
             else None
         ),
         reasoning_output_tokens=(
-            max(0, value.thoughts_token_count)
-            if value.thoughts_token_count is not None
-            else None
+            max(0, value.thoughts_token_count) if value.thoughts_token_count is not None else None
         ),
     )
 

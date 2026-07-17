@@ -605,9 +605,7 @@ def _usage_from_codex(value: object) -> ProviderUsage | None:
         output_tokens=max(0, output_tokens),
         total_tokens=max(0, total_tokens),
         cache_read_input_tokens=_nested_int(value, "input_tokens_details", "cached_tokens"),
-        reasoning_output_tokens=_nested_int(
-            value, "output_tokens_details", "reasoning_tokens"
-        ),
+        reasoning_output_tokens=_nested_int(value, "output_tokens_details", "reasoning_tokens"),
     )
 
 
