@@ -33,7 +33,7 @@ from wisp.retry import RetrySettings
 GLOBAL_SETTINGS_PATH = Path("~/.wisp/settings.json")
 PROJECT_SETTINGS_DIRNAME = ".wisp"
 PROJECT_SETTINGS_FILENAME = "settings.json"
-_USER_ONLY_SETTINGS_FIELDS = frozenset({"protected_paths", "retry"})
+_USER_ONLY_SETTINGS_FIELDS = frozenset({"protected_paths", "retry", "effort"})
 
 # Default glob patterns whose contents tools refuse to read. These guard secrets
 # from being pulled into model context by an over-eager read/grep. Bare patterns
@@ -90,6 +90,7 @@ class WispSettings(BaseModel):
     auth_path: str | None = None
     protected_paths: list[str] | None = None
     retry: RetrySettings | None = None
+    effort: str | None = None
 
 
 class ResolvedSettings(BaseModel):
@@ -109,6 +110,7 @@ class ResolvedSettings(BaseModel):
     auth_path: str | None = None
     protected_paths: tuple[str, ...] | None = None
     retry: RetrySettings | None = None
+    effort: str | None = None
 
 
 def resolve_settings(
@@ -167,6 +169,10 @@ def resolve_settings(
     # ``.env`` to the model. The project may not weaken (or set) this policy.
     # Retry policy is also user-only: a project must not be able to increase API
     # spending or force a user to wait longer by changing its local settings.
+    # Effort is user-only for the same reason as retry: it directly controls
+    # per-request cost/latency (a higher reasoning tier means more tokens), so a
+    # project must not be able to force an expensive tier on every prompt just by
+    # being trusted for read/write access.
     return ResolvedSettings(
         provider=_coalesce(project_settings.provider, user_settings.provider),
         model=_coalesce(project_settings.model, user_settings.model),
@@ -174,7 +180,77 @@ def resolve_settings(
         auth_path=_coalesce(project_settings.auth_path, user_settings.auth_path),
         protected_paths=_coalesce_paths(user_settings.protected_paths),
         retry=user_settings.retry,
+        effort=user_settings.effort,
     )
+
+
+def user_settings_path(*, home_dir: Path | None = None) -> Path:
+    """Return the user (global) settings file path (``~/.wisp/settings.json``)."""
+
+    home = home_dir if home_dir is not None else Path.home()
+    return (home / ".wisp" / PROJECT_SETTINGS_FILENAME).expanduser()
+
+
+def persist_user_effort(effort: str | None, *, home_dir: Path | None = None) -> None:
+    """Write ``effort`` into the user settings file, preserving other keys.
+
+    Effort is the only setting Wisp writes back from inside a running session
+    (see :func:`resolve_settings`'s docstring for why -- every other key is
+    read-only from the app's perspective, set by hand-editing the file). Scoped
+    to just this key rather than a general "persist current config" mechanism,
+    since nothing else asked for one yet. ``effort=None`` clears a previously
+    persisted tier rather than writing a ``null`` -- the key is dropped so an
+    older Wisp build reading this file sees "unset," not an explicit null it
+    would need special-casing for.
+
+    A missing or malformed existing file is tolerated the same way
+    :func:`_load_settings_file` tolerates one when reading -- persisting a new
+    preference must not fail (or silently discard the rest of the file) just
+    because the file was already broken. A write-side failure (unwritable
+    ``~/.wisp``, read-only home, full disk) is tolerated the same way -- this
+    is a best-effort preference write happening mid-session, after the
+    backend configuration it's recording has already taken effect, so it must
+    never crash the caller; it just warns and leaves the on-disk file as it
+    was.
+
+    A file that *exists* but can't be read (permission denied, I/O error --
+    anything other than simply not being there yet) aborts the write
+    entirely, rather than proceeding as if the file were empty: this
+    function's whole contract is preserving every other key, and writing a
+    fresh ``{"effort": ...}`` over an unread file would silently destroy
+    provider/model/auth/protected-paths/retry settings this function has no
+    way to recover, the opposite of "best-effort."
+    """
+
+    path = user_settings_path(home_dir=home_dir)
+    data: dict[str, object] = {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raw = None
+    except OSError as exc:
+        _warn(f"could not read settings file {path} before writing, effort not persisted: {exc}")
+        return
+    if raw is not None:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            data = parsed
+
+    if effort is None:
+        data.pop("effort", None)
+    else:
+        data["effort"] = effort
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f".{path.name}.tmp")
+        tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp_path.replace(path)
+    except OSError as exc:
+        _warn(f"could not write settings file {path}: {exc}")
 
 
 def _load_settings_file(

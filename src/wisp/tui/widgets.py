@@ -32,7 +32,12 @@ from textual.widgets import Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from wisp.events import ToolApprovalRequested, TrustRequested
-from wisp.tui.commands import SLASH_COMMAND_SPECS, SlashCommandSpec
+from wisp.providers.catalog import ModelCatalogProviderEntry
+from wisp.tui.commands import (
+    MODEL_COMMAND_CLEAR_EFFORT_TOKEN,
+    SLASH_COMMAND_SPECS,
+    SlashCommandSpec,
+)
 from wisp.tui.decision_content import (
     _approval_content,
     _bounded_tool_session_option_name,
@@ -524,6 +529,302 @@ class DecisionPanel(Vertical):
         self.submit_answer(answer)
         event.prevent_default()
         event.stop()
+
+
+class ModelPicker(Vertical):
+    """Interactive `/model` selector: pick a model, arrow-adjust its effort.
+
+    A single unified list (Claude Code style), not two separate screens —
+    left/right arrow keys cycle an effort tier for whichever model row is
+    currently highlighted, when that model has one (``effort_levels`` in the
+    catalog; a model with no entry there shows no effort control at all).
+    Confirming posts a synthesized ``/model <id> [effort]`` command text
+    through the same answer-is-a-text-line mechanism `DecisionPanel` already
+    uses for approval/trust — reusing 100% of the existing prompt-submission
+    plumbing rather than adding a second, structured return path.
+    """
+
+    DEFAULT_CSS = """
+    ModelPicker {
+        display: none;
+        height: auto;
+        max-height: 20;
+        margin: 0 1;
+        padding: 0 1;
+        border-left: heavy $accent;
+        background: $surface;
+    }
+
+    ModelPicker #model-picker-title {
+        height: 1;
+        color: $accent;
+        text-style: bold;
+    }
+
+    ModelPicker #model-picker-options {
+        height: auto;
+        max-height: 14;
+        border: none;
+        background: transparent;
+        padding: 0;
+    }
+
+    ModelPicker #model-picker-options > .option-list--option-highlighted {
+        background: $accent 30%;
+    }
+
+    ModelPicker #model-picker-options > .option-list--option-disabled {
+        text-style: bold;
+    }
+
+    ModelPicker #model-picker-effort {
+        height: 1;
+        color: $text-muted;
+        padding: 0 1;
+    }
+    """
+
+    class Selected(Message):
+        """A model (and optional effort) pick, ready for the prompt stream."""
+
+        def __init__(self, answer: str) -> None:
+            super().__init__()
+            self.answer = answer
+
+    class Cancelled(Message):
+        """The picker was dismissed (Escape) without a selection."""
+
+    def __init__(self, id: str | None = None) -> None:  # noqa: A002 - Textual's param name
+        super().__init__(id=id)
+        self._title = Static("Select a model", id="model-picker-title", markup=False)
+        self._options = OptionList(id="model-picker-options")
+        self._effort_line = Static("", id="model-picker-effort", markup=False)
+        self._submitted = False
+        self._opened_at = 0.0
+        # (provider_name, model_id) per enabled option, in the same order as
+        # _options -- id-based lookup can't be used directly since an option's
+        # id (a composite "provider::model" string) still needs splitting on
+        # every highlight change, so this list is the single source of truth
+        # for "what does the currently highlighted row mean."
+        self._rows: list[tuple[str, str] | None] = []
+        self._entries_by_provider: dict[str, ModelCatalogProviderEntry] = {}
+        # Selected effort tier per (provider, model) touched this session --
+        # preserved across highlight moves so arrowing away and back doesn't
+        # forget a choice, matching how the composer never discards a draft.
+        self._effort_choice: dict[tuple[str, str], str | None] = {}
+        # Rows the user has explicitly cycled effort on (via left/right), even
+        # if that cycling landed back on None/"(default)". Without this, "never
+        # touched effort" and "explicitly cleared back to default" are both
+        # `_effort_choice.get(row) is None` and indistinguishable on submit --
+        # the former must omit effort from the configure call entirely (leave
+        # server-side state alone), the latter must send clear_effort=True.
+        self._effort_touched: set[tuple[str, str]] = set()
+
+    def compose(self) -> ComposeResult:
+        yield self._title
+        yield self._options
+        yield self._effort_line
+
+    @property
+    def is_open(self) -> bool:
+        return self.display
+
+    def focus_options(self) -> None:
+        """Restore keyboard focus to the picker's model list."""
+
+        if self.is_open:
+            self._options.focus()
+
+    def show(
+        self,
+        entries: tuple[ModelCatalogProviderEntry, ...],
+        *,
+        current_provider: str,
+        current_model: str | None,
+        current_effort: str | None,
+    ) -> None:
+        self._submitted = False
+        self._opened_at = time.monotonic()
+        self._entries_by_provider = {entry.name: entry for entry in entries}
+        self._effort_choice = {}
+        self._effort_touched = set()
+        self._options.clear_options()
+        self._rows = []
+        default_index: int | None = None
+        first_selectable_index: int | None = None
+        row_index = 0
+        for entry in entries:
+            self._options.add_option(Option(entry.name, disabled=True))
+            self._rows.append(None)
+            row_index += 1
+            is_current_provider = entry.name == current_provider
+            effective_model = current_model if current_model is not None else entry.default_model
+            for model_id in entry.models:
+                if first_selectable_index is None:
+                    first_selectable_index = row_index
+                is_current = is_current_provider and model_id == effective_model
+                if is_current:
+                    default_index = row_index
+                    # Defense in depth: current_effort is a caller-supplied
+                    # value, not guaranteed valid for this exact model's
+                    # catalog-listed tiers (effort is provider-native,
+                    # non-normalized -- see ModelCatalogProviderEntry). Seeding
+                    # a tier this row doesn't list would let an untouched
+                    # Enter resubmit it verbatim (see submit_current_selection).
+                    seeded_effort = current_effort
+                    if seeded_effort is not None and seeded_effort not in entry.effort_levels.get(
+                        model_id, ()
+                    ):
+                        seeded_effort = None
+                    self._effort_choice[(entry.name, model_id)] = seeded_effort
+                label = f"  {model_id} (current)" if is_current else f"  {model_id}"
+                self._options.add_option(Option(label, id=f"{entry.name}::{model_id}"))
+                self._rows.append((entry.name, model_id))
+                row_index += 1
+        # A current_provider/current_model not present in the catalog (e.g.
+        # after a permissive /model <unknown-model>) leaves no row matching
+        # `is_current` -- fall back to the first selectable model row rather
+        # than defaulting to index 0, the first (disabled) provider header,
+        # which would leave the picker opened on a non-interactive row where
+        # Enter does nothing until the user manually navigates.
+        self._options.highlighted = (
+            default_index if default_index is not None else first_selectable_index
+        )
+        self._update_effort_line()
+        self.display = True
+        self.focus_options()
+
+    def hide(self) -> None:
+        self.display = False
+        self._submitted = False
+
+    def _highlighted_row(self) -> tuple[str, str] | None:
+        highlighted = self._options.highlighted
+        if highlighted is None or highlighted >= len(self._rows):
+            return None
+        return self._rows[highlighted]
+
+    def _effort_levels_for(self, row: tuple[str, str]) -> tuple[str, ...]:
+        provider_name, model_id = row
+        entry = self._entries_by_provider.get(provider_name)
+        if entry is None:
+            return ()
+        return entry.effort_levels.get(model_id, ())
+
+    def _update_effort_line(self) -> None:
+        row = self._highlighted_row()
+        if row is None:
+            self._effort_line.update("")
+            return
+        levels = self._effort_levels_for(row)
+        if not levels:
+            self._effort_line.update("")
+            return
+        chosen = self._effort_choice.get(row)
+        parts = []
+        for level in levels:
+            parts.append(f"[{level}]" if level == chosen else level)
+        prefix = "(default)" if chosen is None else ""
+        line = "effort:  " + "  ".join(([prefix] if prefix else []) + parts)
+        self._effort_line.update(line.strip())
+
+    def cycle_effort(self, *, direction: int) -> None:
+        """Move the highlighted model's effort choice by one step.
+
+        ``direction`` is ``1`` (right/higher) or ``-1`` (left/lower). Moving
+        left from the lowest tier (or from any tier when the model has none
+        chosen yet is already the leftmost state) lands on "(default)" --
+        moving further left than that is a no-op, not a wrap-around, since
+        "default" isn't a real tier to cycle past.
+        """
+
+        row = self._highlighted_row()
+        if row is None:
+            return
+        levels = self._effort_levels_for(row)
+        if not levels:
+            return
+        current = self._effort_choice.get(row)
+        if current is None:
+            index = -1
+        else:
+            try:
+                index = levels.index(current)
+            except ValueError:
+                index = -1
+        new_index = index + direction
+        if new_index < -1:
+            new_index = -1
+        elif new_index >= len(levels):
+            new_index = len(levels) - 1
+        self._effort_choice[row] = None if new_index == -1 else levels[new_index]
+        self._effort_touched.add(row)
+        self._update_effort_line()
+
+    def submit_current_selection(self) -> None:
+        if self._submitted or not self.is_open:
+            return
+        row = self._highlighted_row()
+        if row is None:
+            return
+        provider_name, model_id = row
+        # provider::model, not a bare model id -- a model id is not unique
+        # across providers (e.g. "gpt-5.5" is claimed by both openai and
+        # openai-codex), and TuiShell._handle_model_command would otherwise
+        # have to guess a provider for a shared id via ModelRegistry.resolve's
+        # ambiguity handling, silently leaving an explicitly-picked row's
+        # provider unapplied. See MODEL_COMMAND_CLEAR_EFFORT_TOKEN for the
+        # effort token's three-state encoding (omitted / explicit tier /
+        # explicit clear).
+        target = f"{provider_name}::{model_id}"
+        effort = self._effort_choice.get(row)
+        if effort is not None:
+            answer = f"/model {target} {effort}"
+        elif row in self._effort_touched:
+            answer = f"/model {target} {MODEL_COMMAND_CLEAR_EFFORT_TOKEN}"
+        else:
+            answer = f"/model {target}"
+        self._submitted = True
+        self.post_message(self.Selected(answer))
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option_list is not self._options:
+            return
+        event.stop()
+        self._update_effort_line()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list is not self._options:
+            return
+        event.stop()
+        if event.time < self._opened_at:
+            # Same stale-event guard DecisionPanel uses: a key queued for the
+            # previously-focused widget before this panel opened, delivered
+            # only after Widget.focus()'s deferred call_later landed focus
+            # here. See DecisionPanel's identical comment for the full
+            # explanation of why this can't be caught any other way.
+            return
+        self.submit_current_selection()
+
+    def on_key(self, event: events.Key) -> None:
+        if not self.is_open:
+            return
+        if event.time < self._opened_at:
+            event.stop()
+            event.prevent_default()
+            return
+        if event.key == "left":
+            self.cycle_effort(direction=-1)
+            event.prevent_default()
+            event.stop()
+        elif event.key == "right":
+            self.cycle_effort(direction=1)
+            event.prevent_default()
+            event.stop()
+        elif event.key == "escape":
+            self.post_message(self.Cancelled())
+            event.prevent_default()
+            event.stop()
 
 
 class TranscriptEmptyState(Vertical):

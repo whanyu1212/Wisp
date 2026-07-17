@@ -20,6 +20,18 @@ class TuiSlashCommandName(StrEnum):
     model = "model"
 
 
+# Sentinel effort token for "/model <id> <token>" meaning "explicitly clear
+# back to provider default" -- distinct from omitting the effort argument
+# entirely, which means "leave whatever effort is already configured
+# untouched." No provider's real effort tier is ever this bare dash
+# (confirmed against catalog.toml), so it can't collide with a genuine tier
+# string. Produced by widgets.ModelPicker, consumed by
+# TuiShell._handle_model_command -- lives here (imported by both, no
+# renderer-specific dependency) rather than in the Textual-only widgets
+# module, since TuiShell must stay renderer-agnostic.
+MODEL_COMMAND_CLEAR_EFFORT_TOKEN = "-"
+
+
 @dataclass(frozen=True)
 class TuiSlashCommand:
     """Parsed TUI slash command."""

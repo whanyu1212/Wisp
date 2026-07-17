@@ -264,6 +264,79 @@ class ModelRegistry:
 
         return self._catalog.providers
 
+    def supports_effort(self, provider_name: str, model_id: str, effort: str) -> bool:
+        """Return whether ``effort`` is one of ``model_id``'s catalog-listed tiers.
+
+        Effort tiers are provider-native, non-normalized strings (Anthropic's
+        lowercase ``"high"`` vs. Google's uppercase ``"HIGH"``, for instance) --
+        a tier valid for one provider/model is not just "probably fine" on
+        another, it can be outright rejected by that provider's API. Permissive
+        by design like the rest of this module: an unrecognized provider or
+        model returns ``False`` rather than raising, so callers get a plain
+        yes/no to gate a stored value against, not another error to catch.
+
+        Does not distinguish "model known, tier not listed" from "model
+        unknown to this provider" -- both return ``False``. A caller that
+        needs to treat an unknown model permissively (e.g. a brand-new model
+        ahead of a catalog update) must check :meth:`knows_model` first.
+        """
+
+        for entry in self._catalog.providers:
+            if entry.name != provider_name:
+                continue
+            return effort in entry.effort_levels.get(model_id, ())
+        return False
+
+    def knows_model(self, provider_name: str, model_id: str) -> bool:
+        """Return whether ``provider_name``'s catalog entry lists ``model_id`` at all."""
+
+        for entry in self._catalog.providers:
+            if entry.name != provider_name:
+                continue
+            return model_id in entry.models
+        return False
+
+
+def startup_effort(
+    registry: ModelRegistry,
+    *,
+    provider_name: str,
+    model: str | None,
+    default_model: str | None,
+    effort: str | None,
+) -> str | None:
+    """Return ``effort`` if valid for the startup provider/model, else ``None``.
+
+    Persisted effort (see :func:`wisp.settings.persist_user_effort`) is a
+    single global string with no provider/model scope -- a tier chosen for
+    one provider/model (e.g. Google's uppercase ``"HIGH"``) is not just
+    unlikely to suit whatever provider/model a later session actually starts
+    on, it can be an outright invalid wire value there. Called once at
+    session construction, before the first prompt, so a stale persisted tier
+    never reaches a provider it was never chosen for.
+
+    Permissive for a catalog-unknown provider/model (e.g. ``WISP_MODEL``/
+    ``WISP_EFFORT`` set explicitly for a brand-new model ahead of a catalog
+    update, or a custom provider) -- ``effort`` passes through unchanged
+    rather than being dropped, the same way ``TuiShell._validated_effort``
+    treats a typed ``/model <id> <effort>`` for an unresolvable model. Only a
+    *known* model whose catalog entry doesn't list ``effort`` among its tiers
+    is actually invalid and gets dropped; ``supports_effort`` alone can't
+    distinguish the two cases (both return ``False``), which is why this
+    checks ``knows_model`` first.
+    """
+
+    if effort is None:
+        return None
+    effective_model = model if model is not None else default_model
+    if effective_model is None:
+        return effort
+    if not registry.knows_model(provider_name, effective_model):
+        return effort
+    if registry.supports_effort(provider_name, effective_model, effort):
+        return effort
+    return None
+
 
 __all__ = [
     "AmbiguousModelError",
@@ -274,5 +347,6 @@ __all__ = [
     "UnknownModelError",
     "builtin_catalog",
     "effective_catalog",
+    "startup_effort",
     "user_catalog_path",
 ]

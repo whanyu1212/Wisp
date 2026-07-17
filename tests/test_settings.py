@@ -8,7 +8,12 @@ from pathlib import Path
 from pytest import CaptureFixture, MonkeyPatch
 
 from wisp.config import WispConfig
-from wisp.settings import DEFAULT_PROTECTED_PATHS, resolve_settings
+from wisp.settings import (
+    DEFAULT_PROTECTED_PATHS,
+    persist_user_effort,
+    resolve_settings,
+    user_settings_path,
+)
 
 
 def _write_settings(directory: Path, **values: object) -> None:
@@ -156,6 +161,28 @@ def test_retry_settings_are_user_only_even_for_trusted_projects(tmp_path: Path) 
     assert settings.retry is not None
     assert settings.retry.max_retries == 3
     assert settings.retry.max_delay_seconds is None
+
+
+def test_effort_settings_are_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(home, effort="high")
+    _write_settings(project, effort="xhigh")
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.effort == "high"
+
+
+def test_project_cannot_introduce_effort(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(project, effort="xhigh")
+
+    # Even a trusted project cannot introduce effort (user-only policy).
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.effort is None  # project value ignored; user unset
 
 
 def test_invalid_project_user_only_fields_do_not_discard_project_settings(
@@ -326,3 +353,142 @@ def test_retry_policy_prefers_environment_then_user_settings(
     assert config.retry_policy.max_retries == 1
     assert config.retry_policy.base_delay_seconds == 1
     assert config.retry_policy.max_delay_seconds == 30
+
+
+# --- persist_user_effort ---
+
+
+def test_persist_user_effort_writes_a_new_file(tmp_path: Path) -> None:
+    persist_user_effort("high", home_dir=tmp_path)
+
+    path = user_settings_path(home_dir=tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"effort": "high"}
+
+
+def test_persist_user_effort_round_trips_through_resolve_settings(tmp_path: Path) -> None:
+    persist_user_effort("xhigh", home_dir=tmp_path)
+
+    settings = resolve_settings(project_dir=tmp_path / "proj", home_dir=tmp_path)
+
+    assert settings.effort == "xhigh"
+
+
+def test_persist_user_effort_preserves_other_keys(tmp_path: Path) -> None:
+    _write_settings(tmp_path, provider="user-provider", model="user-model")
+
+    persist_user_effort("medium", home_dir=tmp_path)
+
+    path = user_settings_path(home_dir=tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["provider"] == "user-provider"
+    assert data["model"] == "user-model"
+    assert data["effort"] == "medium"
+
+
+def test_persist_user_effort_overwrites_a_previous_value(tmp_path: Path) -> None:
+    persist_user_effort("low", home_dir=tmp_path)
+    persist_user_effort("high", home_dir=tmp_path)
+
+    path = user_settings_path(home_dir=tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8"))["effort"] == "high"
+
+
+def test_persist_user_effort_none_clears_the_key(tmp_path: Path) -> None:
+    _write_settings(tmp_path, provider="user-provider", effort="high")
+
+    persist_user_effort(None, home_dir=tmp_path)
+
+    path = user_settings_path(home_dir=tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert "effort" not in data
+    assert data["provider"] == "user-provider"
+
+
+def test_persist_user_effort_tolerates_a_malformed_existing_file(tmp_path: Path) -> None:
+    path = user_settings_path(home_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not valid json", encoding="utf-8")
+
+    persist_user_effort("high", home_dir=tmp_path)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"effort": "high"}
+
+
+def test_persist_user_effort_tolerates_a_non_object_existing_file(tmp_path: Path) -> None:
+    path = user_settings_path(home_dir=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+
+    persist_user_effort("high", home_dir=tmp_path)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"effort": "high"}
+
+
+def test_user_settings_path_matches_layout(tmp_path: Path) -> None:
+    assert user_settings_path(home_dir=tmp_path) == tmp_path / ".wisp" / "settings.json"
+
+
+def test_persist_user_effort_tolerates_an_unwritable_home_dir(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    # Regression test (Codex review on #125): persist_user_effort is called
+    # from TuiShell._finish_pending_configure after a /model or /provider
+    # configure has already succeeded -- a best-effort local preference write
+    # failing (unwritable ~/.wisp, read-only home, full disk) must warn, not
+    # raise, or it would crash the whole TUI session over a write it doesn't
+    # actually need to complete.
+    #
+    # A plain file standing in for "home" (rather than chmod-ing a directory
+    # read-only) makes path.parent.mkdir() raise NotADirectoryError
+    # deterministically -- Unix permission bits don't block root or a
+    # CAP_DAC_OVERRIDE-equipped process (some CI containers run as root), so
+    # a chmod-based test can silently pass production code through
+    # unexercised there.
+    home = tmp_path / "home"
+    home.write_text("not a directory", encoding="utf-8")
+
+    persist_user_effort("high", home_dir=home)
+
+    assert "warning" in capsys.readouterr().err.lower()
+
+
+def test_persist_user_effort_does_not_overwrite_settings_it_could_not_read(
+    tmp_path: Path, capsys: CaptureFixture[str], monkeypatch: MonkeyPatch
+) -> None:
+    # Regression test (Codex review on #125): a file that *exists* but can't
+    # be read (permission denied, I/O error -- anything other than simply not
+    # being there) must abort the write entirely rather than proceeding as if
+    # the file were empty. This function's whole contract is preserving every
+    # other key (provider/model/auth_path/protected_paths/retry); writing a
+    # fresh {"effort": ...} over an unread file would silently destroy all of
+    # them, the opposite of "best-effort." Distinct from
+    # test_persist_user_effort_tolerates_a_malformed_existing_file (a
+    # genuinely unreadable/corrupt document with nothing salvageable) --
+    # here the file is fine, just not readable through this path right now.
+    #
+    # A directory-in-place-of-the-file fixture (like the write-side test
+    # above) doesn't isolate this: Path.replace() also fails to overwrite a
+    # directory with a file, so a *correctly* fixed function and an
+    # *incorrectly* reverted one both leave the directory untouched, for
+    # different reasons -- the write-side OSError handler masks the read-side
+    # one. Monkeypatching Path.read_text to fail only for this exact path
+    # keeps every other filesystem operation (including the real write) live,
+    # so the test can assert on the actual persisted content, the real bug
+    # this finding is about.
+    _write_settings(tmp_path, provider="user-provider", model="user-model")
+    path = user_settings_path(home_dir=tmp_path)
+    real_read_text = Path.read_text
+
+    def failing_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == path:
+            raise OSError("simulated read failure")
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+
+    persist_user_effort("high", home_dir=tmp_path)
+
+    assert "warning" in capsys.readouterr().err.lower()
+    data = json.loads(real_read_text(path, encoding="utf-8"))
+    assert data == {"provider": "user-provider", "model": "user-model"}
+    assert "effort" not in data

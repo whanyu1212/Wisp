@@ -28,6 +28,7 @@ from wisp.events import (
     TrustRequested,
     TurnStarted,
 )
+from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tui.rendering import (
     TuiViewSnapshot,
     _truncate_to_cell_width,
@@ -282,6 +283,21 @@ class TextualTuiRenderer:
     def trust_request(self, event: TrustRequested) -> None:
         self._suspend_progress()
         self.app.show_trust(event)
+
+    def model_picker_request(
+        self,
+        entries: tuple[ModelCatalogProviderEntry, ...],
+        *,
+        current_provider: str,
+        current_model: str | None,
+        current_effort: str | None,
+    ) -> None:
+        self.app.show_model_picker(
+            entries,
+            current_provider=current_provider,
+            current_model=current_model,
+            current_effort=current_effort,
+        )
 
     def event(self, event: KnownWispEvent) -> None:
         # Typed dispatch mirroring LineTuiRenderer.event() so tool calls, tool

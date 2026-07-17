@@ -30,10 +30,18 @@ from wisp.events import (
     ToolApprovalRequested,
     TrustRequested,
 )
-from wisp.providers.catalog import ModelRegistry, effective_catalog
+from wisp.providers.catalog import (
+    AmbiguousModelError,
+    ModelRegistry,
+    UnknownModelError,
+    effective_catalog,
+    startup_effort,
+)
 from wisp.rpc.commands import ApprovalScope
+from wisp.settings import persist_user_effort
 from wisp.tui.auth_commands import AuthCommands
 from wisp.tui.commands import (
+    MODEL_COMMAND_CLEAR_EFFORT_TOKEN,
     TuiSlashCommand,
     TuiSlashCommandError,
     TuiSlashCommandName,
@@ -94,6 +102,8 @@ class TuiController(Protocol):
         *,
         provider: str | None = None,
         model: str | None = None,
+        effort: str | None = None,
+        clear_effort: bool = False,
         command_id: str | None = None,
     ) -> str: ...
 
@@ -112,6 +122,17 @@ class _PendingConfigure:
     provider: str | None = None
     model: str | None = None
     reset_model: bool = False
+    effort: str | None = None
+    has_effort: bool = False
+
+
+def _default_model_for(models: ModelRegistry, provider_name: str) -> str | None:
+    """Return ``provider_name``'s catalog ``default_model``, or ``None`` if unknown."""
+
+    for entry in models.providers():
+        if entry.name == provider_name:
+            return entry.default_model
+    return None
 
 
 class TuiShell:
@@ -127,7 +148,9 @@ class TuiShell:
         renderer: TuiRenderer | None = None,
         provider: str = DEFAULT_PROVIDER,
         model: str | None = None,
+        effort: str | None = None,
         auth_path: Path | None = None,
+        settings_home_dir: Path | None = None,
     ) -> None:
         self.controller = controller
         self.renderer = (
@@ -138,9 +161,28 @@ class TuiShell:
         self.view = TuiViewState(provider=provider, model=model)
         self.current_provider = provider
         self.current_model = model
-        self.pending_configures: dict[str, _PendingConfigure] = {}
         self.models = ModelRegistry(effective_catalog())
+        # Mirrors wisp.providers.catalog.startup_effort's filtering on the RPC
+        # side (see CodingSession construction in cli/rpc.py and cli/__init__.py):
+        # the TUI resolves its own config.effort independently via its own
+        # WispConfig.from_env() call in the same process launch, so a stale
+        # tier from a different provider/model's vocabulary must be dropped
+        # here too -- otherwise the picker would seed it into the "current"
+        # row (see ModelPicker.show) and an untouched Enter could re-submit an
+        # incompatible tier the RPC side had already filtered out at its own
+        # startup.
+        self.current_effort = startup_effort(
+            self.models,
+            provider_name=provider,
+            model=model,
+            default_model=_default_model_for(self.models, provider),
+            effort=effort,
+        )
+        self.pending_configures: dict[str, _PendingConfigure] = {}
         self.auth_store = JsonAuthStore(auth_path or default_auth_path())
+        # Overrides ~/.wisp for /model picker effort persistence in tests; None
+        # in production so persist_user_effort resolves the real home dir.
+        self._settings_home_dir = settings_home_dir
         # Credential commands read auth_store lazily (it is rebound on a trusted-
         # project rebuild) and the default provider from live shell state.
         self._auth = AuthCommands(
@@ -345,29 +387,104 @@ class TuiShell:
             command_id=command_id,
             provider=provider,
             reset_model=True,
+            # _handle_rpc_configure_command unconditionally resets agent.effort
+            # to None whenever a configure carries `provider` and no explicit
+            # `effort` (see its has_provider branch) -- mirror that here so
+            # current_effort/the persisted setting don't go stale relative to
+            # what the RPC agent is actually using on the next prompt.
+            has_effort=True,
         )
         self._update_view(status="configuring")
         self.renderer.notice(f"Configuring provider: {provider}")
 
     async def _handle_model_command(self, args: tuple[str, ...]) -> None:
-        if len(args) > 1:
-            self.renderer.command_error("Usage: /model [model]")
+        if len(args) > 2:
+            self.renderer.command_error("Usage: /model [model] [effort]")
             return
         if not args:
-            self.renderer.notice(self._render_model_listing())
+            self.renderer.model_picker_request(
+                self.models.providers(),
+                current_provider=self.current_provider,
+                current_model=self.current_model,
+                current_effort=self.current_effort,
+            )
             return
-        model = args[0]
+        # ModelPicker qualifies its selection as "provider::model" (see
+        # widgets.ModelPicker.submit_current_selection) so a row for a model id
+        # shared by multiple providers (e.g. "gpt-5.5" under both openai and
+        # openai-codex) always switches to the exact provider the user picked,
+        # rather than depending on ModelRegistry.resolve's ambiguity handling.
+        # A typed /model <id> (no "::") never carries a provider -- unaffected.
+        maybe_provider, _, qualified_model = args[0].partition("::")
+        model = qualified_model if qualified_model else args[0]
+        provider: str | None = maybe_provider if qualified_model else None
+        raw_effort = args[1] if len(args) > 1 else None
+        clear_effort = raw_effort == MODEL_COMMAND_CLEAR_EFFORT_TOKEN
+        effort = None if clear_effort else raw_effort
+        if effort is not None:
+            effort = self._validated_effort(provider=provider, model=model, effort=effort)
         try:
-            command_id = await self.controller.configure(model=model)
+            command_id = await self.controller.configure(
+                provider=provider, model=model, effort=effort, clear_effort=clear_effort
+            )
         except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
             self.renderer.send_failed("configure", exc)
             return
         self.pending_configures[command_id] = _PendingConfigure(
             command_id=command_id,
+            provider=provider,
             model=model,
+            effort=effort,
+            # _handle_rpc_configure_command unconditionally resets agent.effort
+            # to None whenever a configure carries `model` and no explicit
+            # `effort` -- whether via an explicit provider switch, a
+            # model-triggered auto-switch, or a same-provider model change (the
+            # tier may not be valid for the new model). /model always sends
+            # `model` in this branch (bare /model returns via the picker path
+            # above), so has_effort is unconditionally True here too, matching
+            # the server exactly rather than only when an effort arg was given.
+            has_effort=True,
         )
         self._update_view(status="configuring")
-        self.renderer.notice(f"Configuring model: {model}")
+        detail = f", effort {effort or 'provider default'}" if raw_effort is not None else ""
+        self.renderer.notice(f"Configuring model: {model}{detail}")
+
+    def _validated_effort(self, *, provider: str | None, model: str, effort: str) -> str | None:
+        """Return ``effort`` if valid for ``model``'s resolved provider, else warn and drop it.
+
+        The picker only ever offers effort tiers a model's catalog entry
+        actually lists (see ``ModelPicker.show``'s seeding filter), but a
+        typed ``/model <id> <effort>`` bypasses the picker entirely -- without
+        this check, an unsupported tier (e.g. a tier valid for one provider's
+        vocabulary but not another's, or a model the catalog deliberately
+        omits from ``effort_levels`` like claude-haiku-4-5) would reach the
+        RPC agent and, eventually, that provider's API unvalidated. Permissive
+        like the rest of ``/model``'s validation -- an unresolvable model
+        (unknown to the catalog, or ambiguous when ``provider`` isn't given)
+        skips the check entirely rather than blocking the command, since a
+        brand-new model ahead of a catalog update must still work. This
+        applies equally to an explicitly provider-qualified unknown model
+        (``/model openai::gpt-6 high``) as to a bare one -- ``knows_model`` is
+        checked regardless of whether ``provider`` came from the caller or
+        from ``resolve()``, since ``supports_effort`` alone can't distinguish
+        "model known, tier not listed" from "model unknown to this provider."
+        """
+
+        target_provider = provider
+        if target_provider is None:
+            try:
+                target_provider, _entry = self.models.resolve(model, prefer=self.current_provider)
+            except (UnknownModelError, AmbiguousModelError):
+                return effort
+        if not self.models.knows_model(target_provider, model):
+            return effort
+        if self.models.supports_effort(target_provider, model, effort):
+            return effort
+        self.renderer.command_error(
+            f"Effort {effort!r} is not supported by {model} on {target_provider}; "
+            "configuring model without it."
+        )
+        return None
 
     async def _handle_input_closed(self, signal: _InputClosed) -> bool:
         self.state.input_closed = True
@@ -704,6 +821,15 @@ class TuiShell:
             # and /provider,/model,/auth,/login stop showing the untrusted-startup ones.
             self.current_provider = event.provider
             self.current_model = event.model
+            # Adopt the RPC agent's own already-filtered, authoritative effort
+            # (see _rebuild_agent_for_trusted_project in wisp.cli.rpc) rather
+            # than re-deriving it from self.current_effort here -- that local
+            # copy was itself already filtered once, against the
+            # untrusted-startup provider/model, in __init__. A tier invalid
+            # there but valid for the trusted project's provider/model would
+            # already be gone from it and unrecoverable, the same class of bug
+            # ProjectConfigApplied.effort's docstring explains in more detail.
+            self.current_effort = event.effort
             self.auth_store = JsonAuthStore(event.auth_path)
             self.renderer.notice(
                 f"Applied trusted project config: provider {event.provider}"
@@ -753,6 +879,9 @@ class TuiShell:
             if pending.model is not None:
                 self.current_model = pending.model
                 self.renderer.notice(f"Model set to {pending.model}")
+            if pending.has_effort:
+                self.current_effort = pending.effort
+                persist_user_effort(pending.effort, home_dir=self._settings_home_dir)
             self._sync_view()
             return
         message = event.error or "configure failed"
@@ -831,44 +960,6 @@ class TuiShell:
             if pending.provider is not None:
                 return pending.provider
         return None
-
-    def _latest_pending_model(self) -> str | None:
-        for pending in reversed(self.pending_configures.values()):
-            if pending.model is not None:
-                return pending.model
-        return None
-
-    def _render_model_listing(self) -> str:
-        """Render every catalog model grouped by provider, current one marked.
-
-        A model id is not unique across providers (e.g. "gpt-5.5" is claimed by
-        both openai and openai-codex -- see ModelRegistry.resolve()), so "current"
-        is only marked on the id that also matches the active provider, not on
-        every provider's copy of that id. When no model has been explicitly set
-        (``self.current_model is None``, the normal startup state), the active
-        provider's own ``default_model`` is what will actually be used, so that
-        entry is marked current instead of leaving the whole listing unmarked.
-        """
-
-        current_model = self.current_model
-        lines = ["Available models:"]
-        for entry in self.models.providers():
-            is_current_provider = entry.name == self.current_provider
-            effective_model = current_model if current_model is not None else entry.default_model
-            names = [
-                f"{model_id} (current)"
-                if is_current_provider and model_id == effective_model
-                else model_id
-                for model_id in entry.models
-            ]
-            lines.append(f"  {entry.name}: {', '.join(names)}")
-        model_line = f"Current model: {current_model or 'provider default'}"
-        pending_model = self._latest_pending_model()
-        if pending_model is not None:
-            model_line += f" (pending: {pending_model})"
-        lines.append(model_line)
-        lines.append(f"Current provider: {self.current_provider}")
-        return "\n".join(lines)
 
     def _render_help(self) -> None:
         self.renderer.help()

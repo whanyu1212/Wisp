@@ -268,6 +268,39 @@ def test_tui_rpc_env_carries_preflight_trust_without_mutating_parent(
     assert os.environ["WISP_TRUST"] == "1"
 
 
+def test_tui_rpc_env_forwards_explicit_config_effort(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # Regression test (Codex review on #125): an embedder constructing
+    # TuiOptions(config=WispConfig(effort=...)) directly -- bypassing
+    # WISP_EFFORT/the settings file entirely -- must still reach the RPC
+    # subprocess, or the parent shell/model picker would show and persist a
+    # tier the backend never applies to any prompt. Unlike
+    # provider/model/session_dir/auth_file, forwarding the resolved value
+    # here carries no precedence-inversion risk: effort is never trust-gated,
+    # so it resolves identically in both processes regardless of trust.
+    monkeypatch.delenv("WISP_EFFORT", raising=False)
+    options = TuiOptions(
+        config=WispConfig(provider="fake", session_dir=tmp_path, effort="high"),
+    )
+
+    child_env = tui_app_module._rpc_env(options)
+
+    assert child_env["WISP_EFFORT"] == "high"
+    assert "WISP_EFFORT" not in os.environ
+
+
+def test_tui_rpc_env_omits_effort_when_config_effort_is_unset(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.delenv("WISP_EFFORT", raising=False)
+    options = TuiOptions(config=WispConfig(provider="fake", session_dir=tmp_path))
+
+    child_env = tui_app_module._rpc_env(options)
+
+    assert "WISP_EFFORT" not in child_env
+
+
 def test_run_tui_uses_live_fullscreen_when_interactive(
     tmp_path: Path,
     monkeypatch: object,

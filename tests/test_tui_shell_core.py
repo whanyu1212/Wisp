@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from tempfile import TemporaryDirectory
+
 from pytest import MonkeyPatch
 
 from tests.tui_support import *
@@ -247,6 +250,113 @@ def test_tui_shell_adopts_trusted_project_config(tmp_path: Path) -> None:
     anyio.run(run)
 
 
+def test_tui_shell_init_drops_effort_invalid_for_the_startup_provider() -> None:
+    # Regression test (Codex review on #125): TuiShell resolves its own
+    # config.effort independently, via its own WispConfig.from_env() call in
+    # the same process launch as the separate RPC subprocess -- so it must
+    # apply the same provider/model effort-scoping wisp.cli.rpc's
+    # startup_effort() call performs on the CodingSession side, or the picker
+    # would seed a stale/incompatible tier into its "current" row (see
+    # ModelPicker.show) even after the RPC side had already filtered it out.
+    controller = ScriptedController()
+    shell = TuiShell(
+        controller,
+        renderer=LineTuiRenderer(_console()[0]),
+        provider="openai",
+        model="gpt-5.5",
+        effort="HIGH",  # Google-style, not one of gpt-5.5's real catalog tiers
+    )
+
+    assert shell.current_effort is None
+
+
+def test_tui_shell_init_keeps_effort_valid_for_the_startup_provider() -> None:
+    controller = ScriptedController()
+    shell = TuiShell(
+        controller,
+        renderer=LineTuiRenderer(_console()[0]),
+        provider="anthropic",
+        model="claude-opus-4-8",
+        effort="high",
+    )
+
+    assert shell.current_effort == "high"
+
+
+def test_tui_shell_project_config_applied_adopts_the_events_own_effort(
+    tmp_path: Path,
+) -> None:
+    # Regression test (Codex review on #125): ProjectConfigApplied.effort
+    # carries the RPC agent's already-filtered, authoritative post-rebuild
+    # value -- the TUI must adopt it directly rather than re-deriving effort
+    # from its own local current_effort. That local copy was itself already
+    # filtered once, against the untrusted-startup provider/model, in
+    # __init__; a tier invalid there but valid for the trusted project's
+    # provider/model would already be gone from it and unrecoverable, so
+    # re-deriving from it (instead of trusting the event) can never recover a
+    # tier that's only valid on the trusted side. Here the startup tier
+    # ("HIGH", invalid for anthropic/claude-opus-4-8's lowercase vocabulary)
+    # is correctly dropped at __init__, and the *event* carries a different,
+    # freshly-valid tier the RPC side determined for the trusted provider --
+    # proving the TUI takes the event's value, not its own stale local one.
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(
+            controller,
+            renderer=LineTuiRenderer(_console()[0]),
+            provider="anthropic",
+            model="claude-opus-4-8",
+            effort="HIGH",
+            auth_path=tmp_path / "startup-auth.json",
+        )
+        assert shell.current_effort is None
+
+        await shell._handle_rpc_event(
+            ProjectConfigApplied(
+                provider="google",
+                model="gemini-flash-latest",
+                effort="HIGH",
+                auth_path=tmp_path / "trusted-auth.json",
+            )
+        )
+
+        assert shell.current_provider == "google"
+        assert shell.current_model == "gemini-flash-latest"
+        assert shell.current_effort == "HIGH"
+
+    anyio.run(run)
+
+
+def test_tui_shell_project_config_applied_drops_effort_invalid_for_new_provider(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(
+            controller,
+            renderer=LineTuiRenderer(_console()[0]),
+            provider="anthropic",
+            model="claude-opus-4-8",
+            effort="high",
+            auth_path=tmp_path / "startup-auth.json",
+        )
+        assert shell.current_effort == "high"
+
+        await shell._handle_rpc_event(
+            ProjectConfigApplied(
+                provider="google",
+                model="gemini-flash-latest",
+                auth_path=tmp_path / "trusted-auth.json",
+            )
+        )
+
+        assert shell.current_provider == "google"
+        assert shell.current_model == "gemini-flash-latest"
+        assert shell.current_effort is None
+
+    anyio.run(run)
+
+
 def test_tui_shell_auth_status_uses_current_provider(tmp_path: Path) -> None:
     async def run() -> None:
         controller = ScriptedController()
@@ -460,7 +570,10 @@ def test_tui_shell_provider_and_model_commands_configure_future_prompts() -> Non
 
         await shell.run()
 
-        assert controller.configurations == [("openai-codex", None), (None, "gpt-5.5")]
+        assert controller.configurations == [
+            ("openai-codex", None, None, False),
+            (None, "gpt-5.5", None, False),
+        ]
         rendered = output.getvalue()
         assert "Configuring provider: openai-codex" in rendered
         assert "Provider set to openai-codex" in rendered
@@ -552,23 +665,292 @@ def test_tui_shell_model_listing_marks_provider_default_as_current_when_unset() 
     anyio.run(run)
 
 
-def test_tui_shell_bare_model_command_shows_pending_configure() -> None:
+def test_tui_shell_bare_model_command_lists_current_effort() -> None:
     async def run() -> None:
         controller = ScriptedController()
         console, output = _console()
         shell = TuiShell(
             controller,
             console=console,
-            prompt_reader=await _reader_from(["/model gpt-5.5-pro", "/model", "/quit"]),
+            prompt_reader=await _reader_from(["/model", "/quit"]),
             provider="openai",
+            model="gpt-5.5",
+            effort="high",
         )
 
         await shell.run()
 
         rendered = output.getvalue()
-        assert "(pending: gpt-5.5-pro)" in rendered
+        assert "Current effort: high" in rendered
 
     anyio.run(run)
+
+
+def test_tui_shell_model_command_with_effort_configures_and_persists() -> None:
+    async def run(tmp_path: Path) -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model claude-opus-4-8 high", "/quit"]),
+            provider="anthropic",
+            settings_home_dir=tmp_path,
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [(None, "claude-opus-4-8", "high", False)]
+        assert shell.current_model == "claude-opus-4-8"
+        assert shell.current_effort == "high"
+        rendered = output.getvalue()
+        assert "Configuring model: claude-opus-4-8, effort high" in rendered
+        assert "Model set to claude-opus-4-8" in rendered
+        settings_path = tmp_path / ".wisp" / "settings.json"
+        assert json.loads(settings_path.read_text(encoding="utf-8"))["effort"] == "high"
+
+    with TemporaryDirectory() as tmp_dir:
+        anyio.run(run, Path(tmp_dir))
+
+
+def test_tui_shell_typed_model_command_rejects_effort_the_model_does_not_support() -> None:
+    # Regression test (Codex review on #125): the picker only ever offers
+    # tiers a model's catalog entry lists (see ModelPicker.show's seeding
+    # filter), but a typed "/model <id> <effort>" bypasses the picker
+    # entirely -- claude-haiku-4-5 is deliberately absent from anthropic's
+    # effort_levels, so an unvalidated typed effort would otherwise reach the
+    # RPC agent (and eventually the provider's API) unsupported.
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model claude-haiku-4-5 high", "/quit"]),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [(None, "claude-haiku-4-5", None, False)]
+        assert shell.current_model == "claude-haiku-4-5"
+        assert shell.current_effort is None
+        rendered = output.getvalue()
+        assert "not supported by claude-haiku-4-5 on anthropic" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_typed_model_command_keeps_a_supported_effort() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model claude-opus-4-8 high", "/quit"]),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [(None, "claude-opus-4-8", "high", False)]
+        assert shell.current_effort == "high"
+
+    anyio.run(run)
+
+
+def test_tui_shell_typed_model_command_effort_validation_is_permissive_for_unknown_model() -> None:
+    # A brand-new model ahead of a catalog update must still work -- effort
+    # validation must not hard-block the command just because the model
+    # itself can't be resolved (mirrors /model's existing permissive
+    # fallthrough for unrecognized model ids).
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model brand-new-model high", "/quit"]),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [(None, "brand-new-model", "high", False)]
+        assert shell.current_effort == "high"
+
+    anyio.run(run)
+
+
+def test_tui_shell_typed_model_command_effort_permissive_for_qualified_unknown_model() -> None:
+    # Regression test (Codex review on #125): the picker-qualified
+    # "provider::model" form must be just as permissive for a brand-new,
+    # not-yet-cataloged model as the bare (unqualified) form already is --
+    # supports_effort() alone can't distinguish "model known, tier not
+    # listed" from "model unknown to this provider" (both return False), so
+    # _validated_effort must check knows_model() before treating a
+    # provider-qualified unknown model as an unsupported-tier rejection.
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model openai::gpt-6 high", "/quit"]),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [("openai", "gpt-6", "high", False)]
+        assert shell.current_effort == "high"
+
+    anyio.run(run)
+
+
+def test_tui_shell_model_command_without_effort_arg_also_clears_stale_effort() -> None:
+    # Regression test (Codex review on #125): _handle_rpc_configure_command
+    # unconditionally resets agent.effort to None whenever a configure carries
+    # `model` (or `provider`) and no explicit `effort` -- via an explicit
+    # provider switch, a model-triggered auto-switch, or a same-provider model
+    # change (the old tier may not be valid for the new model; see
+    # wisp.cli.rpc's has_model branch). Before this fix, the shell only
+    # cleared current_effort/the persisted setting when the picker's explicit
+    # clear-token was sent, leaving both stale (and the picker seeding a tier
+    # the backend no longer uses) after a plain "/model <id>" with no effort
+    # argument at all.
+    async def run(tmp_path: Path) -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model claude-haiku-4-5", "/quit"]),
+            provider="anthropic",
+            effort="high",
+            settings_home_dir=tmp_path,
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [(None, "claude-haiku-4-5", None, False)]
+        assert shell.current_model == "claude-haiku-4-5"
+        assert shell.current_effort is None
+        settings_path = tmp_path / ".wisp" / "settings.json"
+        if settings_path.exists():
+            assert "effort" not in json.loads(settings_path.read_text(encoding="utf-8"))
+
+    with TemporaryDirectory() as tmp_dir:
+        anyio.run(run, Path(tmp_dir))
+
+
+def test_tui_shell_provider_command_clears_stale_effort() -> None:
+    # Same server-side unconditional-reset rule as the /model regression above
+    # (wisp.cli.rpc's has_provider branch), exercised via /provider instead.
+    async def run(tmp_path: Path) -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/provider openai", "/quit"]),
+            provider="anthropic",
+            effort="high",
+            settings_home_dir=tmp_path,
+        )
+
+        await shell.run()
+
+        assert shell.current_provider == "openai"
+        assert shell.current_effort is None
+        settings_path = tmp_path / ".wisp" / "settings.json"
+        if settings_path.exists():
+            assert "effort" not in json.loads(settings_path.read_text(encoding="utf-8"))
+
+    with TemporaryDirectory() as tmp_dir:
+        anyio.run(run, Path(tmp_dir))
+
+
+def test_tui_shell_model_command_too_many_args_rejected() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model a b c", "/quit"]),
+            provider="openai",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == []
+        assert "Usage: /model [model] [effort]" in output.getvalue()
+
+    anyio.run(run)
+
+
+def test_tui_shell_model_command_parses_provider_qualified_selection() -> None:
+    # Regression test: ModelPicker.submit_current_selection sends
+    # "provider::model" (see widgets.ModelPicker), not a bare model id, so a
+    # model shared by multiple providers (e.g. "gpt-5.5" under both openai and
+    # openai-codex) always switches to the exact row picked rather than
+    # depending on ModelRegistry.resolve's ambiguity handling server-side.
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model openai-codex::gpt-5.5", "/quit"]),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [("openai-codex", "gpt-5.5", None, False)]
+        assert shell.current_provider == "openai-codex"
+        assert shell.current_model == "gpt-5.5"
+        rendered = output.getvalue()
+        assert "Provider set to openai-codex" in rendered
+        assert "Model set to gpt-5.5" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_model_command_clear_effort_token_clears_persisted_effort() -> None:
+    # Regression test: ModelPicker sends MODEL_COMMAND_CLEAR_EFFORT_TOKEN ("-")
+    # when the user explicitly cycles effort back to "(default)". This test
+    # only exercises that explicit path; see
+    # test_tui_shell_model_command_without_effort_arg_also_clears_stale_effort
+    # for confirmation that a bare "/model <id>" (no effort arg at all)
+    # produces the exact same clearing outcome, since the RPC side resets
+    # agent.effort unconditionally whenever a configure carries `model` and no
+    # explicit `effort` -- there is no client-only "leave it untouched" case.
+    async def run(tmp_path: Path) -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model claude-opus-4-8 -", "/quit"]),
+            provider="anthropic",
+            effort="high",
+            settings_home_dir=tmp_path,
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [(None, "claude-opus-4-8", None, True)]
+        assert shell.current_model == "claude-opus-4-8"
+        assert shell.current_effort is None
+        settings_path = tmp_path / ".wisp" / "settings.json"
+        if settings_path.exists():
+            assert "effort" not in json.loads(settings_path.read_text(encoding="utf-8"))
+
+    with TemporaryDirectory() as tmp_dir:
+        anyio.run(run, Path(tmp_dir))
 
 
 def test_tui_shell_adopts_server_side_auto_switched_provider() -> None:
@@ -667,7 +1049,7 @@ def test_tui_shell_provider_command_waits_for_configure_success() -> None:
 
         await shell.run()
 
-        assert controller.configurations == [("missing", None)]
+        assert controller.configurations == [("missing", None, None, False)]
         assert shell.current_provider == "fake"
         rendered = output.getvalue()
         assert "Configuring provider: missing" in rendered

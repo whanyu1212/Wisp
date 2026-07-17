@@ -27,6 +27,18 @@ class TuiOptions:
     / ``user_auth_file``) are forwarded, since those are legitimate highest-precedence
     overrides the subprocess cannot re-derive.
 
+    ``config.effort``, unlike ``config.provider``/``config.model``/``config.session_dir``/
+    ``config.auth_path`` above, IS forwarded to the subprocess (as a ``WISP_EFFORT``
+    env var, in ``_rpc_env``) -- effort is never trust-gated (see
+    ``resolve_settings``), so it already resolves identically in both processes
+    regardless of trust, and carries none of the precedence-inversion risk
+    forwarding a trust-gated field would. Without this, a caller that sets
+    ``config.effort`` directly (bypassing ``WISP_EFFORT``/the settings file
+    entirely -- e.g. an embedder constructing
+    ``TuiOptions(config=WispConfig(effort=...))``) would seed the parent
+    shell/model picker with that tier while the subprocess never applied it to
+    any prompt.
+
     ``project_trusted`` carries the parent CLI's already-resolved decision into the
     child process. It remains optional so direct/embedded ``run_tui`` callers can
     retain the RPC trust-request fallback.
@@ -106,6 +118,12 @@ def _rpc_env(options: TuiOptions | None = None) -> dict[str, str]:
     env = dict(os.environ)
     if options is not None and options.project_trusted is not None:
         env["WISP_TRUST"] = "1" if options.project_trusted else "0"
+    if options is not None and options.config.effort is not None:
+        # Safe to forward the resolved value directly, unlike provider/model/
+        # session_dir/auth_file (never sent as CLI args/env here) -- effort is
+        # never trust-gated, so it already resolves identically in both
+        # processes regardless of trust (see TuiOptions's docstring).
+        env["WISP_EFFORT"] = options.config.effort
     return env
 
 
