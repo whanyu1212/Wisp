@@ -594,20 +594,22 @@ def _usage_from_anthropic_start(event: RawMessageStartEvent) -> ProviderUsage:
     value = event.message.usage
     input_tokens = max(0, value.input_tokens)
     output_tokens = max(0, value.output_tokens)
+    cache_read_tokens = (
+        max(0, value.cache_read_input_tokens) if value.cache_read_input_tokens is not None else None
+    )
+    cache_write_tokens = (
+        max(0, value.cache_creation_input_tokens)
+        if value.cache_creation_input_tokens is not None
+        else None
+    )
     return ProviderUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        total_tokens=input_tokens + output_tokens,
-        cache_read_input_tokens=(
-            max(0, value.cache_read_input_tokens)
-            if value.cache_read_input_tokens is not None
-            else None
+        total_tokens=(
+            input_tokens + output_tokens + (cache_read_tokens or 0) + (cache_write_tokens or 0)
         ),
-        cache_write_input_tokens=(
-            max(0, value.cache_creation_input_tokens)
-            if value.cache_creation_input_tokens is not None
-            else None
-        ),
+        cache_read_input_tokens=cache_read_tokens,
+        cache_write_input_tokens=cache_write_tokens,
     )
 
 
@@ -628,16 +630,16 @@ def _usage_from_anthropic_delta(
         cache_write_tokens = current.cache_write_input_tokens
     input_tokens = max(0, input_tokens)
     output_tokens = max(0, output_tokens)
+    cache_read_tokens = max(0, cache_read_tokens) if cache_read_tokens is not None else None
+    cache_write_tokens = max(0, cache_write_tokens) if cache_write_tokens is not None else None
     return ProviderUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        total_tokens=input_tokens + output_tokens,
-        cache_read_input_tokens=(
-            max(0, cache_read_tokens) if cache_read_tokens is not None else None
+        total_tokens=(
+            input_tokens + output_tokens + (cache_read_tokens or 0) + (cache_write_tokens or 0)
         ),
-        cache_write_input_tokens=(
-            max(0, cache_write_tokens) if cache_write_tokens is not None else None
-        ),
+        cache_read_input_tokens=cache_read_tokens,
+        cache_write_input_tokens=cache_write_tokens,
     )
 
 

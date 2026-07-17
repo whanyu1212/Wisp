@@ -91,10 +91,10 @@ def test_anthropic_usage_combines_start_and_terminal_delta() -> None:
             role="assistant",
             type="message",
             usage=Usage(
-                input_tokens=12,
+                input_tokens=50,
                 output_tokens=0,
-                cache_read_input_tokens=4,
-                cache_creation_input_tokens=2,
+                cache_read_input_tokens=100_000,
+                cache_creation_input_tokens=2_000,
             ),
         ),
         type="message_start",
@@ -103,20 +103,21 @@ def test_anthropic_usage_combines_start_and_terminal_delta() -> None:
         delta=Delta.model_construct(stop_reason="end_turn"),
         type="message_delta",
         usage=MessageDeltaUsage(
-            input_tokens=13,
+            input_tokens=50,
             output_tokens=7,
-            cache_read_input_tokens=5,
-            cache_creation_input_tokens=3,
+            cache_read_input_tokens=100_000,
+            cache_creation_input_tokens=2_000,
         ),
     )
 
     initial = _usage_from_anthropic_start(start)
+    assert initial.total_tokens == 102_050
     assert _usage_from_anthropic_delta(delta, initial) == ProviderUsage(
-        input_tokens=13,
+        input_tokens=50,
         output_tokens=7,
-        total_tokens=20,
-        cache_read_input_tokens=5,
-        cache_write_input_tokens=3,
+        total_tokens=102_057,
+        cache_read_input_tokens=100_000,
+        cache_write_input_tokens=2_000,
     )
 
 
