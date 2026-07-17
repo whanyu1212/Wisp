@@ -16,6 +16,7 @@ from wisp.coding import CodingSession
 from wisp.config import WispConfig
 from wisp.events import ErrorEvent, MessageCompleted, MessageDelta
 from wisp.providers.base import ProviderError
+from wisp.providers.catalog import startup_effort
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalDecision as ToolApprovalDecision
@@ -528,7 +529,18 @@ async def _run_print(
         sessions=sessions,
         events=runtime.events,
         model=config.model,
-        effort=config.effort,
+        # Persisted effort (see wisp.settings.persist_user_effort) is a single
+        # global string with no provider/model scope -- a tier chosen for a
+        # different provider/model in an earlier session could otherwise reach
+        # this one as an invalid wire value on the very first prompt. See
+        # startup_effort's docstring.
+        effort=startup_effort(
+            runtime.models,
+            provider_name=provider.name,
+            model=config.model,
+            default_model=provider.default_model,
+            effort=config.effort,
+        ),
         tool_registry=_print_mode_tool_registry(
             runtime.tools,
             all_tools=all_tools,

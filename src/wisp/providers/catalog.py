@@ -264,6 +264,56 @@ class ModelRegistry:
 
         return self._catalog.providers
 
+    def supports_effort(self, provider_name: str, model_id: str, effort: str) -> bool:
+        """Return whether ``effort`` is one of ``model_id``'s catalog-listed tiers.
+
+        Effort tiers are provider-native, non-normalized strings (Anthropic's
+        lowercase ``"high"`` vs. Google's uppercase ``"HIGH"``, for instance) --
+        a tier valid for one provider/model is not just "probably fine" on
+        another, it can be outright rejected by that provider's API. Permissive
+        by design like the rest of this module: an unrecognized provider or
+        model returns ``False`` rather than raising, so callers get a plain
+        yes/no to gate a stored value against, not another error to catch.
+        """
+
+        for entry in self._catalog.providers:
+            if entry.name != provider_name:
+                continue
+            return effort in entry.effort_levels.get(model_id, ())
+        return False
+
+
+def startup_effort(
+    registry: ModelRegistry,
+    *,
+    provider_name: str,
+    model: str | None,
+    default_model: str | None,
+    effort: str | None,
+) -> str | None:
+    """Return ``effort`` if valid for the startup provider/model, else ``None``.
+
+    Persisted effort (see :func:`wisp.settings.persist_user_effort`) is a
+    single global string with no provider/model scope -- a tier chosen for
+    one provider/model (e.g. Google's uppercase ``"HIGH"``) is not just
+    unlikely to suit whatever provider/model a later session actually starts
+    on, it can be an outright invalid wire value there. Called once at
+    session construction, before the first prompt, so a stale persisted tier
+    never reaches a provider it was never chosen for. Permissive by design:
+    ``effort=None`` or an unresolvable model both pass through as ``None``
+    rather than raising -- this is a startup safety net, not a validator that
+    should block launch.
+    """
+
+    if effort is None:
+        return None
+    effective_model = model if model is not None else default_model
+    if effective_model is None:
+        return None
+    if registry.supports_effort(provider_name, effective_model, effort):
+        return effort
+    return None
+
 
 __all__ = [
     "AmbiguousModelError",
@@ -274,5 +324,6 @@ __all__ = [
     "UnknownModelError",
     "builtin_catalog",
     "effective_catalog",
+    "startup_effort",
     "user_catalog_path",
 ]

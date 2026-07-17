@@ -426,3 +426,23 @@ def test_persist_user_effort_tolerates_a_non_object_existing_file(tmp_path: Path
 
 def test_user_settings_path_matches_layout(tmp_path: Path) -> None:
     assert user_settings_path(home_dir=tmp_path) == tmp_path / ".wisp" / "settings.json"
+
+
+def test_persist_user_effort_tolerates_an_unwritable_home_dir(
+    tmp_path: Path, capsys: CaptureFixture[str]
+) -> None:
+    # Regression test (Codex review on #125): persist_user_effort is called
+    # from TuiShell._finish_pending_configure after a /model or /provider
+    # configure has already succeeded -- a best-effort local preference write
+    # failing (unwritable ~/.wisp, read-only home, full disk) must warn, not
+    # raise, or it would crash the whole TUI session over a write it doesn't
+    # actually need to complete.
+    home = tmp_path / "home"
+    home.mkdir()
+    home.chmod(0o500)  # read + execute, no write -- mkdir("~/.wisp") fails inside it
+    try:
+        persist_user_effort("high", home_dir=home)
+    finally:
+        home.chmod(0o700)  # restore so pytest's tmp_path cleanup can remove it
+
+    assert "warning" in capsys.readouterr().err.lower()

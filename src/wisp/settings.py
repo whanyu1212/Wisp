@@ -206,7 +206,12 @@ def persist_user_effort(effort: str | None, *, home_dir: Path | None = None) -> 
     A missing or malformed existing file is tolerated the same way
     :func:`_load_settings_file` tolerates one when reading -- persisting a new
     preference must not fail (or silently discard the rest of the file) just
-    because the file was already broken.
+    because the file was already broken. A write-side failure (unwritable
+    ``~/.wisp``, read-only home, full disk) is tolerated the same way -- this
+    is a best-effort preference write happening mid-session, after the
+    backend configuration it's recording has already taken effect, so it must
+    never crash the caller; it just warns and leaves the on-disk file as it
+    was.
     """
 
     path = user_settings_path(home_dir=home_dir)
@@ -231,10 +236,13 @@ def persist_user_effort(effort: str | None, *, home_dir: Path | None = None) -> 
     else:
         data["effort"] = effort
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp_path.replace(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f".{path.name}.tmp")
+        tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp_path.replace(path)
+    except OSError as exc:
+        _warn(f"could not write settings file {path}: {exc}")
 
 
 def _load_settings_file(

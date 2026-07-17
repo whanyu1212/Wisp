@@ -40,7 +40,7 @@ from wisp.events import (
     WispEvent,
 )
 from wisp.providers.base import ProviderError
-from wisp.providers.catalog import AmbiguousModelError, UnknownModelError
+from wisp.providers.catalog import AmbiguousModelError, UnknownModelError, startup_effort
 from wisp.rpc.commands import ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
@@ -479,7 +479,18 @@ async def _run_rpc(
         sessions=sessions,
         events=runtime.events,
         model=config.model,
-        effort=config.effort,
+        # Persisted effort (see wisp.settings.persist_user_effort) is a single
+        # global string with no provider/model scope -- a tier chosen for a
+        # different provider/model in an earlier session could otherwise reach
+        # this one as an invalid wire value on the very first prompt. See
+        # startup_effort's docstring.
+        effort=startup_effort(
+            runtime.models,
+            provider_name=provider.name,
+            model=config.model,
+            default_model=provider.default_model,
+            effort=config.effort,
+        ),
         tool_registry=_print_mode_tool_registry(
             runtime.tools,
             all_tools=all_tools,
