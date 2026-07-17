@@ -450,3 +450,45 @@ def test_persist_user_effort_tolerates_an_unwritable_home_dir(
     persist_user_effort("high", home_dir=home)
 
     assert "warning" in capsys.readouterr().err.lower()
+
+
+def test_persist_user_effort_does_not_overwrite_settings_it_could_not_read(
+    tmp_path: Path, capsys: CaptureFixture[str], monkeypatch: MonkeyPatch
+) -> None:
+    # Regression test (Codex review on #125): a file that *exists* but can't
+    # be read (permission denied, I/O error -- anything other than simply not
+    # being there) must abort the write entirely rather than proceeding as if
+    # the file were empty. This function's whole contract is preserving every
+    # other key (provider/model/auth_path/protected_paths/retry); writing a
+    # fresh {"effort": ...} over an unread file would silently destroy all of
+    # them, the opposite of "best-effort." Distinct from
+    # test_persist_user_effort_tolerates_a_malformed_existing_file (a
+    # genuinely unreadable/corrupt document with nothing salvageable) --
+    # here the file is fine, just not readable through this path right now.
+    #
+    # A directory-in-place-of-the-file fixture (like the write-side test
+    # above) doesn't isolate this: Path.replace() also fails to overwrite a
+    # directory with a file, so a *correctly* fixed function and an
+    # *incorrectly* reverted one both leave the directory untouched, for
+    # different reasons -- the write-side OSError handler masks the read-side
+    # one. Monkeypatching Path.read_text to fail only for this exact path
+    # keeps every other filesystem operation (including the real write) live,
+    # so the test can assert on the actual persisted content, the real bug
+    # this finding is about.
+    _write_settings(tmp_path, provider="user-provider", model="user-model")
+    path = user_settings_path(home_dir=tmp_path)
+    real_read_text = Path.read_text
+
+    def failing_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == path:
+            raise OSError("simulated read failure")
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+
+    persist_user_effort("high", home_dir=tmp_path)
+
+    assert "warning" in capsys.readouterr().err.lower()
+    data = json.loads(real_read_text(path, encoding="utf-8"))
+    assert data == {"provider": "user-provider", "model": "user-model"}
+    assert "effort" not in data

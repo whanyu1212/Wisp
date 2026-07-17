@@ -212,6 +212,14 @@ def persist_user_effort(effort: str | None, *, home_dir: Path | None = None) -> 
     backend configuration it's recording has already taken effect, so it must
     never crash the caller; it just warns and leaves the on-disk file as it
     was.
+
+    A file that *exists* but can't be read (permission denied, I/O error --
+    anything other than simply not being there yet) aborts the write
+    entirely, rather than proceeding as if the file were empty: this
+    function's whole contract is preserving every other key, and writing a
+    fresh ``{"effort": ...}`` over an unread file would silently destroy
+    provider/model/auth/protected-paths/retry settings this function has no
+    way to recover, the opposite of "best-effort."
     """
 
     path = user_settings_path(home_dir=home_dir)
@@ -221,8 +229,8 @@ def persist_user_effort(effort: str | None, *, home_dir: Path | None = None) -> 
     except FileNotFoundError:
         raw = None
     except OSError as exc:
-        _warn(f"could not read settings file {path} before writing: {exc}")
-        raw = None
+        _warn(f"could not read settings file {path} before writing, effort not persisted: {exc}")
+        return
     if raw is not None:
         try:
             parsed = json.loads(raw)
