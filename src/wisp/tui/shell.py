@@ -357,6 +357,12 @@ class TuiShell:
             command_id=command_id,
             provider=provider,
             reset_model=True,
+            # _handle_rpc_configure_command unconditionally resets agent.effort
+            # to None whenever a configure carries `provider` and no explicit
+            # `effort` (see its has_provider branch) -- mirror that here so
+            # current_effort/the persisted setting don't go stale relative to
+            # what the RPC agent is actually using on the next prompt.
+            has_effort=True,
         )
         self._update_view(status="configuring")
         self.renderer.notice(f"Configuring provider: {provider}")
@@ -397,7 +403,15 @@ class TuiShell:
             provider=provider,
             model=model,
             effort=effort,
-            has_effort=raw_effort is not None,
+            # _handle_rpc_configure_command unconditionally resets agent.effort
+            # to None whenever a configure carries `model` and no explicit
+            # `effort` -- whether via an explicit provider switch, a
+            # model-triggered auto-switch, or a same-provider model change (the
+            # tier may not be valid for the new model). /model always sends
+            # `model` in this branch (bare /model returns via the picker path
+            # above), so has_effort is unconditionally True here too, matching
+            # the server exactly rather than only when an effort arg was given.
+            has_effort=True,
         )
         self._update_view(status="configuring")
         detail = f", effort {effort or 'provider default'}" if raw_effort is not None else ""

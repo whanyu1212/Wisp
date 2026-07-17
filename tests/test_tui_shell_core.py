@@ -606,6 +606,69 @@ def test_tui_shell_model_command_with_effort_configures_and_persists() -> None:
         anyio.run(run, Path(tmp_dir))
 
 
+def test_tui_shell_model_command_without_effort_arg_also_clears_stale_effort() -> None:
+    # Regression test (Codex review on #125): _handle_rpc_configure_command
+    # unconditionally resets agent.effort to None whenever a configure carries
+    # `model` (or `provider`) and no explicit `effort` -- via an explicit
+    # provider switch, a model-triggered auto-switch, or a same-provider model
+    # change (the old tier may not be valid for the new model; see
+    # wisp.cli.rpc's has_model branch). Before this fix, the shell only
+    # cleared current_effort/the persisted setting when the picker's explicit
+    # clear-token was sent, leaving both stale (and the picker seeding a tier
+    # the backend no longer uses) after a plain "/model <id>" with no effort
+    # argument at all.
+    async def run(tmp_path: Path) -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model claude-haiku-4-5", "/quit"]),
+            provider="anthropic",
+            effort="high",
+            settings_home_dir=tmp_path,
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [(None, "claude-haiku-4-5", None, False)]
+        assert shell.current_model == "claude-haiku-4-5"
+        assert shell.current_effort is None
+        settings_path = tmp_path / ".wisp" / "settings.json"
+        if settings_path.exists():
+            assert "effort" not in json.loads(settings_path.read_text(encoding="utf-8"))
+
+    with TemporaryDirectory() as tmp_dir:
+        anyio.run(run, Path(tmp_dir))
+
+
+def test_tui_shell_provider_command_clears_stale_effort() -> None:
+    # Same server-side unconditional-reset rule as the /model regression above
+    # (wisp.cli.rpc's has_provider branch), exercised via /provider instead.
+    async def run(tmp_path: Path) -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/provider openai", "/quit"]),
+            provider="anthropic",
+            effort="high",
+            settings_home_dir=tmp_path,
+        )
+
+        await shell.run()
+
+        assert shell.current_provider == "openai"
+        assert shell.current_effort is None
+        settings_path = tmp_path / ".wisp" / "settings.json"
+        if settings_path.exists():
+            assert "effort" not in json.loads(settings_path.read_text(encoding="utf-8"))
+
+    with TemporaryDirectory() as tmp_dir:
+        anyio.run(run, Path(tmp_dir))
+
+
 def test_tui_shell_model_command_too_many_args_rejected() -> None:
     async def run() -> None:
         controller = ScriptedController()
@@ -655,9 +718,13 @@ def test_tui_shell_model_command_parses_provider_qualified_selection() -> None:
 
 def test_tui_shell_model_command_clear_effort_token_clears_persisted_effort() -> None:
     # Regression test: ModelPicker sends MODEL_COMMAND_CLEAR_EFFORT_TOKEN ("-")
-    # when the user explicitly cycles effort back to "(default)" -- distinct
-    # from a plain "/model <id>" with no effort argument at all, which must
-    # leave any already-configured/persisted effort untouched.
+    # when the user explicitly cycles effort back to "(default)". This test
+    # only exercises that explicit path; see
+    # test_tui_shell_model_command_without_effort_arg_also_clears_stale_effort
+    # for confirmation that a bare "/model <id>" (no effort arg at all)
+    # produces the exact same clearing outcome, since the RPC side resets
+    # agent.effort unconditionally whenever a configure carries `model` and no
+    # explicit `effort` -- there is no client-only "leave it untouched" case.
     async def run(tmp_path: Path) -> None:
         controller = ScriptedController()
         console, output = _console()
