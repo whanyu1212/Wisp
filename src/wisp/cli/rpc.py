@@ -456,27 +456,42 @@ async def _run_rpc(
         effective_model = configure_overrides.effective_model(trusted_config.model)
         agent.provider = trusted_runtime.providers.get(effective_provider)
         agent.model = effective_model
-        # startup_effort's filtering at CodingSession construction only checked
-        # the untrusted-startup provider/model -- this rebuild can swap both to
-        # the trusted project's (possibly different) ones, so a tier that
-        # survived that first filter is not guaranteed valid here. Re-filter
-        # against the effective post-swap provider/model, the same way
-        # TuiShell's ProjectConfigApplied handling does client-side.
-        #
-        # Falls back to `config.effort` (the ORIGINAL, unfiltered value), not
-        # `agent.effort` -- agent.effort was already run through startup_effort
-        # once, against the untrusted-startup provider/model, so a tier that's
-        # invalid there but valid for the trusted project's provider/model
-        # would already be None by now and unrecoverable from agent.effort.
-        # effort is never trust-gated (see resolve_settings), so config.effort
-        # and trusted_config.effort resolve identically regardless of trust.
-        agent.effort = startup_effort(
-            trusted_runtime.models,
-            provider_name=effective_provider,
-            model=effective_model,
-            default_model=agent.provider.default_model,
-            effort=configure_overrides.effective_effort(config.effort),
-        )
+        if configure_overrides.has_effort:
+            # An explicit in-session "/model <id> <effort>" (or effort-only
+            # configure) run before trust resolved -- _handle_rpc_configure_command
+            # already accepts this permissively for a catalog-unknown model (a
+            # brand-new model ahead of a catalog update, or a custom provider),
+            # matching /model's general permissive-for-unknown-models design.
+            # startup_effort would otherwise silently drop it here just because
+            # the model isn't in the catalog, discarding a choice the user made
+            # explicitly and the configure command already accepted.
+            agent.effort = configure_overrides.effort
+        else:
+            # No in-session override -- this is the persisted/default effort
+            # from user settings, which startup_effort's filtering at
+            # CodingSession construction only checked against the
+            # untrusted-startup provider/model. This rebuild can swap both to
+            # the trusted project's (possibly different) ones, so a tier that
+            # survived that first filter is not guaranteed valid here.
+            # Re-filter against the effective post-swap provider/model, the
+            # same way TuiShell's ProjectConfigApplied handling does
+            # client-side.
+            #
+            # Falls back to `config.effort` (the ORIGINAL, unfiltered value),
+            # not `agent.effort` -- agent.effort was already run through
+            # startup_effort once, against the untrusted-startup
+            # provider/model, so a tier that's invalid there but valid for the
+            # trusted project's provider/model would already be None by now
+            # and unrecoverable from agent.effort. effort is never trust-gated
+            # (see resolve_settings), so config.effort and
+            # trusted_config.effort resolve identically regardless of trust.
+            agent.effort = startup_effort(
+                trusted_runtime.models,
+                provider_name=effective_provider,
+                model=effective_model,
+                default_model=agent.provider.default_model,
+                effort=config.effort,
+            )
         agent.tool_context = ToolContext.from_config(trusted_config)
         runtime = replace(runtime, providers=trusted_runtime.providers)
         # Tell an out-of-process front-end (the TUI) the config it displays/mutates

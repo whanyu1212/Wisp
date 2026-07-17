@@ -146,6 +146,78 @@ def test_rpc_trusted_rebuild_preserves_configure_overrides(
     assert applied["auth_path"] == str(project_auth)
 
 
+def test_rpc_trusted_rebuild_preserves_explicit_effort_for_unknown_model(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # Regression test (Codex review on #125): an explicit in-session
+    # "/model <id> <effort>" (or effort-only configure) run before trust
+    # resolves must survive _rebuild_agent_for_trusted_project even when the
+    # model is unknown to the catalog -- _handle_rpc_configure_command already
+    # accepts an explicit configure for an unknown model permissively (a
+    # brand-new model ahead of a catalog update, or a custom provider), and
+    # the rebuild must not silently re-drop it via startup_effort's
+    # catalog-validation filter, which is meant only for the persisted/default
+    # effort, not an explicit override the command layer already accepted.
+    from wisp.cli import rpc
+    from wisp.config import WispConfig
+
+    project = tmp_path / "project"
+    nested = project / "src"
+    nested.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'example'\n", encoding="utf-8")
+    project_auth = project / "project-auth.json"
+    (project / ".wisp").mkdir()
+    (project / ".wisp" / "settings.json").write_text(
+        json.dumps(
+            {
+                "provider": "fake",
+                "model": "project-model",
+                "auth_path": str(project_auth),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(nested)
+    monkeypatch.setenv("WISP_PROVIDER", "fake")
+    monkeypatch.setenv("WISP_MODEL", "")
+    monkeypatch.delenv("WISP_EFFORT", raising=False)
+    monkeypatch.setenv("WISP_TRUST", "1")
+
+    session_dir = project / "sessions"
+    config = WispConfig.from_env(session_dir=session_dir, trusted=False)
+
+    configure_command = {
+        "id": "configure-1",
+        "type": "configure",
+        "model": "configured-model",
+        "effort": "custom-tier",
+    }
+
+    async def fake_read_rpc_stdin(send: Any, _stop_reader: Any) -> None:
+        async with send:
+            await send.send(rpc._RpcInputCommand(configure_command))
+            await send.send(rpc._RpcInputCommand({"id": "p1", "type": "prompt", "prompt": "hello"}))
+            await send.send(rpc._RpcInputClosed())
+
+    monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
+
+    async def scenario() -> list[dict[str, object]]:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            await rpc._run_rpc(
+                config,
+                startup_trusted=False,
+                config_overrides=rpc._ConfigOverrides(session_dir=session_dir),
+            )
+        return _jsonl_records(output.getvalue())
+
+    records = anyio.run(scenario)
+    applied = next(record for record in records if record["type"] == "project.config.applied")
+
+    assert applied["model"] == "configured-model"
+    assert applied["effort"] == "custom-tier"
+
+
 def test_rpc_trust_stored_decision_skips_prompt(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     # Pre-record a trust decision for the cwd; the prompt must not re-prompt.
     trust_file = tmp_path / "trust.json"
