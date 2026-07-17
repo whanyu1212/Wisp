@@ -50,6 +50,7 @@ from wisp.providers.events import (
     ProviderTextDelta,
     ProviderThinkingDelta,
     ProviderToolCallCompleted,
+    ProviderUsage,
     ToolCall,
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
@@ -225,6 +226,7 @@ class AnthropicProvider:
         finish_reason: ProviderFinishReason = "stop"
         stop_reason: str | None = None
         stream_completed = False
+        usage: ProviderUsage | None = None
         failure: ProviderResponseFailed | None = None
 
         yield ProviderResponseStarted(model=selected_model)
@@ -233,6 +235,7 @@ class AnthropicProvider:
             async for event in stream:
                 if isinstance(event, RawMessageStartEvent):
                     response_id = event.message.id
+                    usage = _usage_from_anthropic_start(event)
                 elif isinstance(event, RawContentBlockStartEvent):
                     block = event.content_block
                     if block.type == "tool_use":
@@ -269,6 +272,7 @@ class AnthropicProvider:
                         if block_accumulator is not None:
                             block_accumulator.tool_use_json_chunks.append(delta.partial_json)
                 elif isinstance(event, RawMessageDeltaEvent):
+                    usage = _usage_from_anthropic_delta(event, usage)
                     event_stop_reason = event.delta.stop_reason
                     if event_stop_reason is not None:
                         stop_reason = event_stop_reason
@@ -360,6 +364,7 @@ class AnthropicProvider:
             tool_calls=tuple(tool_calls),
             response_id=response_id,
             finish_reason="tool_calls" if tool_calls else finish_reason,
+            usage=usage,
         )
 
     async def _create_stream(
@@ -582,6 +587,57 @@ def _tool_spec_to_anthropic_tool(tool: ToolSpec) -> ToolParam:
             "description": tool.description,
             "input_schema": deepcopy(dict(tool.input_schema)),
         },
+    )
+
+
+def _usage_from_anthropic_start(event: RawMessageStartEvent) -> ProviderUsage:
+    value = event.message.usage
+    input_tokens = max(0, value.input_tokens)
+    output_tokens = max(0, value.output_tokens)
+    return ProviderUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
+        cache_read_input_tokens=(
+            max(0, value.cache_read_input_tokens)
+            if value.cache_read_input_tokens is not None
+            else None
+        ),
+        cache_write_input_tokens=(
+            max(0, value.cache_creation_input_tokens)
+            if value.cache_creation_input_tokens is not None
+            else None
+        ),
+    )
+
+
+def _usage_from_anthropic_delta(
+    event: RawMessageDeltaEvent, current: ProviderUsage | None
+) -> ProviderUsage | None:
+    if current is None:
+        return None
+    output_tokens = event.usage.output_tokens
+    input_tokens = event.usage.input_tokens
+    if input_tokens is None:
+        input_tokens = current.input_tokens
+    cache_read_tokens = event.usage.cache_read_input_tokens
+    if cache_read_tokens is None:
+        cache_read_tokens = current.cache_read_input_tokens
+    cache_write_tokens = event.usage.cache_creation_input_tokens
+    if cache_write_tokens is None:
+        cache_write_tokens = current.cache_write_input_tokens
+    input_tokens = max(0, input_tokens)
+    output_tokens = max(0, output_tokens)
+    return ProviderUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
+        cache_read_input_tokens=(
+            max(0, cache_read_tokens) if cache_read_tokens is not None else None
+        ),
+        cache_write_input_tokens=(
+            max(0, cache_write_tokens) if cache_write_tokens is not None else None
+        ),
     )
 
 

@@ -67,6 +67,18 @@ class ProviderToolCallCompleted:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderUsage:
+    """Provider-reported token usage for one successful API request."""
+
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cache_read_input_tokens: int | None = None
+    cache_write_input_tokens: int | None = None
+    reasoning_output_tokens: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderResponseCompleted:
     """The terminal successful response, including its complete assistant state."""
 
@@ -74,6 +86,7 @@ class ProviderResponseCompleted:
     tool_calls: tuple[ToolCall, ...] = ()
     response_id: str | None = None
     finish_reason: ProviderFinishReason = "stop"
+    usage: ProviderUsage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +120,7 @@ __all__ = [
     "ProviderTextDelta",
     "ProviderThinkingDelta",
     "ProviderToolCallCompleted",
+    "ProviderUsage",
     "ToolCall",
     "RetryReason",
 ]

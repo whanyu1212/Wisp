@@ -32,6 +32,7 @@ from wisp.providers.events import (
     ProviderTextDelta,
     ProviderThinkingDelta,
     ProviderToolCallCompleted,
+    ProviderUsage,
     ToolCall,
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
@@ -167,12 +168,15 @@ class GoogleProvider:
         finish_reason: ProviderFinishReason = "stop"
         raw_finish_reason: genai_types.FinishReason | None = None
         stream_completed = False
+        usage: ProviderUsage | None = None
         failure: ProviderResponseFailed | None = None
 
         yield ProviderResponseStarted(model=selected_model)
 
         try:
             async for chunk in stream:
+                if chunk.usage_metadata is not None:
+                    usage = _usage_from_google(chunk.usage_metadata)
                 if chunk.response_id is not None:
                     response_id = chunk.response_id
                 for candidate in chunk.candidates or ():
@@ -273,6 +277,7 @@ class GoogleProvider:
             tool_calls=tuple(tool_calls),
             response_id=response_id,
             finish_reason="tool_calls" if tool_calls else finish_reason,
+            usage=usage,
         )
 
     async def _create_stream(
@@ -451,6 +456,35 @@ def _tool_spec_to_google(tool: ToolSpec) -> genai_types.FunctionDeclaration:
         name=tool.name,
         description=tool.description,
         parameters_json_schema=dict(tool.input_schema),
+    )
+
+
+def _usage_from_google(
+    value: genai_types.GenerateContentResponseUsageMetadata,
+) -> ProviderUsage | None:
+    input_tokens = value.prompt_token_count
+    output_tokens = value.candidates_token_count
+    if input_tokens is None or output_tokens is None:
+        return None
+    input_tokens = max(0, input_tokens)
+    output_tokens = max(0, output_tokens)
+    total_tokens = value.total_token_count
+    if total_tokens is None:
+        total_tokens = input_tokens + output_tokens
+    return ProviderUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=max(0, total_tokens),
+        cache_read_input_tokens=(
+            max(0, value.cached_content_token_count)
+            if value.cached_content_token_count is not None
+            else None
+        ),
+        reasoning_output_tokens=(
+            max(0, value.thoughts_token_count)
+            if value.thoughts_token_count is not None
+            else None
+        ),
     )
 
 

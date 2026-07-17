@@ -11,7 +11,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message, SessionEntry
-from wisp.events import ErrorEvent, ToolCallRequested, ToolCallSnapshot
+from wisp.events import ErrorEvent, TokenUsage, ToolCallRequested, ToolCallSnapshot
 from wisp.sessions import jsonl as jsonl_module
 from wisp.sessions.jsonl import (
     AmbiguousSessionError,
@@ -89,6 +89,13 @@ def test_session_round_trips_completed_message_metadata(tmp_path: Path) -> None:
         tool_calls=(),
         response_id="response-2",
         finish_reason="stop",
+        usage=TokenUsage(
+            input_tokens=12,
+            output_tokens=7,
+            total_tokens=19,
+            cache_read_input_tokens=4,
+            reasoning_output_tokens=3,
+        ),
     )
 
     async def write() -> None:
@@ -124,6 +131,7 @@ def test_session_loads_legacy_messages_without_rewriting_them(tmp_path: Path) ->
     assert message.response_id is None
     assert message.finish_reason is None
     assert message.is_error is None
+    assert message.usage is None
     assert path.read_bytes() == original
 
 

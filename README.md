@@ -323,6 +323,8 @@ agent.completed
 calls. A failed provider response or tool loop emits `error`, a failed `turn.completed`, and a
 failed `agent.completed`; it does not emit `message.completed` for an incomplete response.
 
+Schema v6 adds optional provider-reported token usage to `message.completed`. The `usage` object records input, output, and total tokens plus provider-supported cache and reasoning categories. Missing provider categories remain `null`; cost estimation, context-pressure thresholds, and compaction are not part of this schema change.
+
 Schema v5 adds `model.provider_auto_switched`, emitted during an RPC `configure` command
 immediately before its `rpc.command.finished` when a model-only `/model <id>` request resolves
 (via the model registry) to a provider other than the one currently active — it carries the

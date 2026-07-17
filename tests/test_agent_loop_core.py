@@ -9,6 +9,7 @@ from wisp.agent.execution import ToolExecutionEvent, ToolExecutionProtocolError,
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
 from wisp.events import (
+    MessageCompleted,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolExecutionEnded,
@@ -20,6 +21,7 @@ from wisp.providers.events import (
     ProviderResponseStarted,
     ProviderTextDelta,
     ProviderToolCallCompleted,
+    ProviderUsage,
     ToolCall,
 )
 from wisp.providers.fake import ScriptedProvider
@@ -99,7 +101,14 @@ def test_pure_loop_streams_without_application_dependencies() -> None:
             [
                 ProviderResponseStarted(model="test"),
                 ProviderTextDelta(delta="hello"),
-                ProviderResponseCompleted(content="hello"),
+                ProviderResponseCompleted(
+                    content="hello",
+                    usage=ProviderUsage(
+                        input_tokens=12,
+                        output_tokens=7,
+                        total_tokens=19,
+                    ),
+                ),
             ]
         ]
     )
@@ -123,6 +132,9 @@ def test_pure_loop_streams_without_application_dependencies() -> None:
         "message.completed",
         "turn.completed",
     ]
+    completed = next(event for event in events if isinstance(event, MessageCompleted))
+    assert completed.usage is not None
+    assert completed.usage.total_tokens == 19
     assert provider.calls[0].messages == messages
 
 

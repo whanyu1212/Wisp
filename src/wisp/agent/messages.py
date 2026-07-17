@@ -12,6 +12,7 @@ from wisp.events import (
     FinishReason,
     JsonObject,
     MessageCompleted,
+    TokenUsage,
     ToolCallSnapshot,
     ToolExecutionEnded,
     ToolResultReady,
@@ -34,6 +35,7 @@ class Message(BaseModel):
     response_id: str | None = None
     finish_reason: FinishReason | None = None
     is_error: bool | None = None
+    usage: TokenUsage | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -49,6 +51,7 @@ def message_from_completion_event(
             tool_calls=event.tool_calls,
             response_id=event.response_id,
             finish_reason=event.finish_reason,
+            usage=event.usage,
             created_at=event.timestamp,
         )
     return Message(

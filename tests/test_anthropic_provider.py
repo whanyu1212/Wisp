@@ -45,8 +45,11 @@ from wisp.providers.events import (
     ProviderTextDelta,
     ProviderThinkingDelta,
     ProviderToolCallCompleted,
+    ProviderUsage,
 )
 from wisp.retry import RetryPolicy
+
+_EXPECTED_USAGE = ProviderUsage(input_tokens=1, output_tokens=1, total_tokens=2)
 
 
 class StubAnthropicProvider(AnthropicProvider):
@@ -152,7 +155,11 @@ def test_anthropic_provider_streams_text_deltas() -> None:
         ProviderResponseStarted(model="claude-test"),
         ProviderTextDelta(delta="hello"),
         ProviderTextDelta(delta=" world", content_index=1),
-        ProviderResponseCompleted(content="hello world", response_id="response-id"),
+        ProviderResponseCompleted(
+            content="hello world",
+            response_id="response-id",
+            usage=_EXPECTED_USAGE,
+        ),
     ]
     assert provider.seen_model == "claude-test"
     assert provider.seen_messages == messages
@@ -238,6 +245,7 @@ def test_anthropic_provider_streams_tool_calls() -> None:
             tool_calls=(tool_call,),
             response_id="response-id",
             finish_reason="tool_calls",
+            usage=_EXPECTED_USAGE,
         ),
     ]
     assert provider.seen_tools == [tool]
@@ -276,6 +284,7 @@ def test_anthropic_provider_streams_tool_call_parse_errors() -> None:
             tool_calls=(tool_call,),
             response_id="response-id",
             finish_reason="tool_calls",
+            usage=_EXPECTED_USAGE,
         ),
     ]
 
@@ -310,6 +319,7 @@ def test_anthropic_provider_does_not_execute_a_tool_call_truncated_by_max_tokens
             content="",
             response_id="response-id",
             finish_reason="length",
+            usage=_EXPECTED_USAGE,
         ),
     ]
 
