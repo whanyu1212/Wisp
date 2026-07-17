@@ -30,7 +30,13 @@ from wisp.events import (
     ToolApprovalRequested,
     TrustRequested,
 )
-from wisp.providers.catalog import ModelRegistry, effective_catalog, startup_effort
+from wisp.providers.catalog import (
+    AmbiguousModelError,
+    ModelRegistry,
+    UnknownModelError,
+    effective_catalog,
+    startup_effort,
+)
 from wisp.rpc.commands import ApprovalScope
 from wisp.settings import persist_user_effort
 from wisp.tui.auth_commands import AuthCommands
@@ -415,6 +421,8 @@ class TuiShell:
         raw_effort = args[1] if len(args) > 1 else None
         clear_effort = raw_effort == MODEL_COMMAND_CLEAR_EFFORT_TOKEN
         effort = None if clear_effort else raw_effort
+        if effort is not None:
+            effort = self._validated_effort(provider=provider, model=model, effort=effort)
         try:
             command_id = await self.controller.configure(
                 provider=provider, model=model, effort=effort, clear_effort=clear_effort
@@ -440,6 +448,36 @@ class TuiShell:
         self._update_view(status="configuring")
         detail = f", effort {effort or 'provider default'}" if raw_effort is not None else ""
         self.renderer.notice(f"Configuring model: {model}{detail}")
+
+    def _validated_effort(self, *, provider: str | None, model: str, effort: str) -> str | None:
+        """Return ``effort`` if valid for ``model``'s resolved provider, else warn and drop it.
+
+        The picker only ever offers effort tiers a model's catalog entry
+        actually lists (see ``ModelPicker.show``'s seeding filter), but a
+        typed ``/model <id> <effort>`` bypasses the picker entirely -- without
+        this check, an unsupported tier (e.g. a tier valid for one provider's
+        vocabulary but not another's, or a model the catalog deliberately
+        omits from ``effort_levels`` like claude-haiku-4-5) would reach the
+        RPC agent and, eventually, that provider's API unvalidated. Permissive
+        like the rest of ``/model``'s validation -- an unresolvable model
+        (unknown or ambiguous) skips the check entirely rather than blocking
+        the command, since a brand-new model ahead of a catalog update must
+        still work.
+        """
+
+        target_provider = provider
+        if target_provider is None:
+            try:
+                target_provider, _entry = self.models.resolve(model, prefer=self.current_provider)
+            except (UnknownModelError, AmbiguousModelError):
+                return effort
+        if self.models.supports_effort(target_provider, model, effort):
+            return effort
+        self.renderer.command_error(
+            f"Effort {effort!r} is not supported by {model} on {target_provider}; "
+            "configuring model without it."
+        )
+        return None
 
     async def _handle_input_closed(self, signal: _InputClosed) -> bool:
         self.state.input_closed = True

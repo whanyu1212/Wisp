@@ -713,6 +713,76 @@ def test_tui_shell_model_command_with_effort_configures_and_persists() -> None:
         anyio.run(run, Path(tmp_dir))
 
 
+def test_tui_shell_typed_model_command_rejects_effort_the_model_does_not_support() -> None:
+    # Regression test (Codex review on #125): the picker only ever offers
+    # tiers a model's catalog entry lists (see ModelPicker.show's seeding
+    # filter), but a typed "/model <id> <effort>" bypasses the picker
+    # entirely -- claude-haiku-4-5 is deliberately absent from anthropic's
+    # effort_levels, so an unvalidated typed effort would otherwise reach the
+    # RPC agent (and eventually the provider's API) unsupported.
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model claude-haiku-4-5 high", "/quit"]),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [(None, "claude-haiku-4-5", None, False)]
+        assert shell.current_model == "claude-haiku-4-5"
+        assert shell.current_effort is None
+        rendered = output.getvalue()
+        assert "not supported by claude-haiku-4-5 on anthropic" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_typed_model_command_keeps_a_supported_effort() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model claude-opus-4-8 high", "/quit"]),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [(None, "claude-opus-4-8", "high", False)]
+        assert shell.current_effort == "high"
+
+    anyio.run(run)
+
+
+def test_tui_shell_typed_model_command_effort_validation_is_permissive_for_unknown_model() -> None:
+    # A brand-new model ahead of a catalog update must still work -- effort
+    # validation must not hard-block the command just because the model
+    # itself can't be resolved (mirrors /model's existing permissive
+    # fallthrough for unrecognized model ids).
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model brand-new-model high", "/quit"]),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [(None, "brand-new-model", "high", False)]
+        assert shell.current_effort == "high"
+
+    anyio.run(run)
+
+
 def test_tui_shell_model_command_without_effort_arg_also_clears_stale_effort() -> None:
     # Regression test (Codex review on #125): _handle_rpc_configure_command
     # unconditionally resets agent.effort to None whenever a configure carries
