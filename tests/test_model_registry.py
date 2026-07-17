@@ -266,7 +266,12 @@ def test_startup_effort_drops_a_tier_the_model_does_not_support_at_all() -> None
     assert result is None
 
 
-def test_startup_effort_drops_a_tier_for_an_unresolvable_model() -> None:
+def test_startup_effort_keeps_a_tier_for_an_unresolvable_model() -> None:
+    # Regression test (Codex review on #125): explicit WISP_MODEL/WISP_EFFORT
+    # for a catalog-unknown model (a brand-new model ahead of a catalog
+    # update, or a custom provider) must not be silently dropped just because
+    # the model can't be resolved -- matches /model's general
+    # permissive-for-unknown-models design (see TuiShell._validated_effort).
     registry = ModelRegistry(_catalog(_provider("acme", ["acme-1"])))
 
     result = startup_effort(
@@ -275,6 +280,18 @@ def test_startup_effort_drops_a_tier_for_an_unresolvable_model() -> None:
         model="nonexistent-model",
         default_model="acme-1",
         effort="high",
+    )
+
+    assert result == "high"
+
+
+def test_startup_effort_drops_a_tier_for_a_known_model_that_does_not_support_it() -> None:
+    registry = ModelRegistry(
+        _catalog(_provider("acme", ["acme-1"], effort_levels={"acme-1": ["low"]}))
+    )
+
+    result = startup_effort(
+        registry, provider_name="acme", model="acme-1", default_model="acme-1", effort="high"
     )
 
     assert result is None

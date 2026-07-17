@@ -313,17 +313,26 @@ def startup_effort(
     unlikely to suit whatever provider/model a later session actually starts
     on, it can be an outright invalid wire value there. Called once at
     session construction, before the first prompt, so a stale persisted tier
-    never reaches a provider it was never chosen for. Permissive by design:
-    ``effort=None`` or an unresolvable model both pass through as ``None``
-    rather than raising -- this is a startup safety net, not a validator that
-    should block launch.
+    never reaches a provider it was never chosen for.
+
+    Permissive for a catalog-unknown provider/model (e.g. ``WISP_MODEL``/
+    ``WISP_EFFORT`` set explicitly for a brand-new model ahead of a catalog
+    update, or a custom provider) -- ``effort`` passes through unchanged
+    rather than being dropped, the same way ``TuiShell._validated_effort``
+    treats a typed ``/model <id> <effort>`` for an unresolvable model. Only a
+    *known* model whose catalog entry doesn't list ``effort`` among its tiers
+    is actually invalid and gets dropped; ``supports_effort`` alone can't
+    distinguish the two cases (both return ``False``), which is why this
+    checks ``knows_model`` first.
     """
 
     if effort is None:
         return None
     effective_model = model if model is not None else default_model
     if effective_model is None:
-        return None
+        return effort
+    if not registry.knows_model(provider_name, effective_model):
+        return effort
     if registry.supports_effort(provider_name, effective_model, effort):
         return effort
     return None
