@@ -283,15 +283,53 @@ def test_tui_shell_init_keeps_effort_valid_for_the_startup_provider() -> None:
     assert shell.current_effort == "high"
 
 
+def test_tui_shell_project_config_applied_adopts_the_events_own_effort(
+    tmp_path: Path,
+) -> None:
+    # Regression test (Codex review on #125): ProjectConfigApplied.effort
+    # carries the RPC agent's already-filtered, authoritative post-rebuild
+    # value -- the TUI must adopt it directly rather than re-deriving effort
+    # from its own local current_effort. That local copy was itself already
+    # filtered once, against the untrusted-startup provider/model, in
+    # __init__; a tier invalid there but valid for the trusted project's
+    # provider/model would already be gone from it and unrecoverable, so
+    # re-deriving from it (instead of trusting the event) can never recover a
+    # tier that's only valid on the trusted side. Here the startup tier
+    # ("HIGH", invalid for anthropic/claude-opus-4-8's lowercase vocabulary)
+    # is correctly dropped at __init__, and the *event* carries a different,
+    # freshly-valid tier the RPC side determined for the trusted provider --
+    # proving the TUI takes the event's value, not its own stale local one.
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(
+            controller,
+            renderer=LineTuiRenderer(_console()[0]),
+            provider="anthropic",
+            model="claude-opus-4-8",
+            effort="HIGH",
+            auth_path=tmp_path / "startup-auth.json",
+        )
+        assert shell.current_effort is None
+
+        await shell._handle_rpc_event(
+            ProjectConfigApplied(
+                provider="google",
+                model="gemini-flash-latest",
+                effort="HIGH",
+                auth_path=tmp_path / "trusted-auth.json",
+            )
+        )
+
+        assert shell.current_provider == "google"
+        assert shell.current_model == "gemini-flash-latest"
+        assert shell.current_effort == "HIGH"
+
+    anyio.run(run)
+
+
 def test_tui_shell_project_config_applied_drops_effort_invalid_for_new_provider(
     tmp_path: Path,
 ) -> None:
-    # Regression test (Codex review on #125): the first-run trust flow can
-    # swap provider/model to a trusted project's (possibly different) ones --
-    # a tier valid for the untrusted-startup provider/model is not guaranteed
-    # valid for the trusted one, mirroring wisp.cli.rpc's
-    # _rebuild_agent_for_trusted_project re-filtering agent.effort on the RPC
-    # side.
     async def run() -> None:
         controller = ScriptedController()
         shell = TuiShell(

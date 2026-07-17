@@ -776,19 +776,15 @@ class TuiShell:
             # and /provider,/model,/auth,/login stop showing the untrusted-startup ones.
             self.current_provider = event.provider
             self.current_model = event.model
-            # Re-validate effort against the trusted provider/model, the same way
-            # __init__ validates it at initial startup -- a tier valid for the
-            # untrusted-startup provider/model is not guaranteed valid for the
-            # trusted project's (possibly different) provider/model, and the RPC
-            # side performs the equivalent re-validation in
-            # _rebuild_agent_for_trusted_project (see wisp.cli.rpc).
-            self.current_effort = startup_effort(
-                self.models,
-                provider_name=event.provider,
-                model=event.model,
-                default_model=_default_model_for(self.models, event.provider),
-                effort=self.current_effort,
-            )
+            # Adopt the RPC agent's own already-filtered, authoritative effort
+            # (see _rebuild_agent_for_trusted_project in wisp.cli.rpc) rather
+            # than re-deriving it from self.current_effort here -- that local
+            # copy was itself already filtered once, against the
+            # untrusted-startup provider/model, in __init__. A tier invalid
+            # there but valid for the trusted project's provider/model would
+            # already be gone from it and unrecoverable, the same class of bug
+            # ProjectConfigApplied.effort's docstring explains in more detail.
+            self.current_effort = event.effort
             self.auth_store = JsonAuthStore(event.auth_path)
             self.renderer.notice(
                 f"Applied trusted project config: provider {event.provider}"

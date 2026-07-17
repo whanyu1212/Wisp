@@ -462,12 +462,20 @@ async def _run_rpc(
         # survived that first filter is not guaranteed valid here. Re-filter
         # against the effective post-swap provider/model, the same way
         # TuiShell's ProjectConfigApplied handling does client-side.
+        #
+        # Falls back to `config.effort` (the ORIGINAL, unfiltered value), not
+        # `agent.effort` -- agent.effort was already run through startup_effort
+        # once, against the untrusted-startup provider/model, so a tier that's
+        # invalid there but valid for the trusted project's provider/model
+        # would already be None by now and unrecoverable from agent.effort.
+        # effort is never trust-gated (see resolve_settings), so config.effort
+        # and trusted_config.effort resolve identically regardless of trust.
         agent.effort = startup_effort(
             trusted_runtime.models,
             provider_name=effective_provider,
             model=effective_model,
             default_model=agent.provider.default_model,
-            effort=configure_overrides.effective_effort(agent.effort),
+            effort=configure_overrides.effective_effort(config.effort),
         )
         agent.tool_context = ToolContext.from_config(trusted_config)
         runtime = replace(runtime, providers=trusted_runtime.providers)
@@ -478,6 +486,7 @@ async def _run_rpc(
             ProjectConfigApplied(
                 provider=effective_provider,
                 model=effective_model,
+                effort=agent.effort,
                 auth_path=trusted_config.auth_path,
             )
         )

@@ -141,11 +141,20 @@ class ProjectConfigApplied(WispEvent):
     (the TUI) refresh the provider/model/auth it displays and mutates, so its header
     and ``/provider`` / ``/model`` / ``/auth`` / ``/login`` commands match the config
     the agent is actually running with.
+
+    ``effort`` carries the RPC agent's already-filtered, authoritative post-rebuild
+    value (see ``_rebuild_agent_for_trusted_project`` in ``wisp.cli.rpc``) rather than
+    leaving the TUI to re-derive it from its own locally-tracked, already-once-filtered
+    value -- the TUI's own copy was filtered against the untrusted-startup
+    provider/model, so a tier invalid there but valid for the trusted project's
+    provider/model would already be gone and unrecoverable from it. A single
+    authoritative value avoids the two sides' filtering logic silently diverging.
     """
 
     type: Literal["project.config.applied"] = "project.config.applied"
     provider: str
     model: str | None = None
+    effort: str | None = None
     auth_path: Path
 
 
