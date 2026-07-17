@@ -650,7 +650,8 @@ class ModelPicker(Vertical):
         self._effort_touched = set()
         self._options.clear_options()
         self._rows = []
-        default_index = 0
+        default_index: int | None = None
+        first_selectable_index: int | None = None
         row_index = 0
         for entry in entries:
             self._options.add_option(Option(entry.name, disabled=True))
@@ -659,6 +660,8 @@ class ModelPicker(Vertical):
             is_current_provider = entry.name == current_provider
             effective_model = current_model if current_model is not None else entry.default_model
             for model_id in entry.models:
+                if first_selectable_index is None:
+                    first_selectable_index = row_index
                 is_current = is_current_provider and model_id == effective_model
                 if is_current:
                     default_index = row_index
@@ -678,7 +681,15 @@ class ModelPicker(Vertical):
                 self._options.add_option(Option(label, id=f"{entry.name}::{model_id}"))
                 self._rows.append((entry.name, model_id))
                 row_index += 1
-        self._options.highlighted = default_index
+        # A current_provider/current_model not present in the catalog (e.g.
+        # after a permissive /model <unknown-model>) leaves no row matching
+        # `is_current` -- fall back to the first selectable model row rather
+        # than defaulting to index 0, the first (disabled) provider header,
+        # which would leave the picker opened on a non-interactive row where
+        # Enter does nothing until the user manually navigates.
+        self._options.highlighted = (
+            default_index if default_index is not None else first_selectable_index
+        )
         self._update_effort_line()
         self.display = True
         self.focus_options()

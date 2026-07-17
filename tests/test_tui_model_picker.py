@@ -94,6 +94,38 @@ def test_model_picker_marks_provider_default_current_when_model_unset() -> None:
     assert anyio.run(scenario) == 1
 
 
+def test_model_picker_defaults_to_first_selectable_row_when_current_is_uncataloged() -> None:
+    # Regression test (Codex review on #125): a permissive "/model
+    # brand-new-model" (or a custom provider) leaves current_provider/
+    # current_model with no matching row at all -- default_index must not
+    # silently stay on index 0, the first (disabled) provider header, which
+    # would open the picker on a non-interactive row where Enter does nothing
+    # until the user manually navigates.
+    async def scenario() -> tuple[int | None, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            renderer.model_picker_request(
+                _ENTRIES,
+                current_provider="uncataloged-provider",
+                current_model="uncataloged-model",
+                current_effort=None,
+            )
+            await pilot.pause()
+            options = app.query_one("#model-picker-options", OptionList)
+            highlighted = options.highlighted
+            is_disabled = (
+                options.get_option_at_index(highlighted).disabled
+                if highlighted is not None
+                else True
+            )
+            return highlighted, is_disabled
+
+    highlighted, is_disabled = anyio.run(scenario)
+    # index 1 == the first entry's first model row (anthropic::claude-opus-4-8).
+    assert highlighted == 1
+    assert is_disabled is False
+
+
 def test_model_picker_hides_composer_and_focuses_options() -> None:
     async def scenario() -> tuple[bool, bool]:
         app, renderer = create_textual_tui()
