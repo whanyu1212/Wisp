@@ -437,12 +437,16 @@ def test_persist_user_effort_tolerates_an_unwritable_home_dir(
     # failing (unwritable ~/.wisp, read-only home, full disk) must warn, not
     # raise, or it would crash the whole TUI session over a write it doesn't
     # actually need to complete.
+    #
+    # A plain file standing in for "home" (rather than chmod-ing a directory
+    # read-only) makes path.parent.mkdir() raise NotADirectoryError
+    # deterministically -- Unix permission bits don't block root or a
+    # CAP_DAC_OVERRIDE-equipped process (some CI containers run as root), so
+    # a chmod-based test can silently pass production code through
+    # unexercised there.
     home = tmp_path / "home"
-    home.mkdir()
-    home.chmod(0o500)  # read + execute, no write -- mkdir("~/.wisp") fails inside it
-    try:
-        persist_user_effort("high", home_dir=home)
-    finally:
-        home.chmod(0o700)  # restore so pytest's tmp_path cleanup can remove it
+    home.write_text("not a directory", encoding="utf-8")
+
+    persist_user_effort("high", home_dir=home)
 
     assert "warning" in capsys.readouterr().err.lower()
