@@ -73,7 +73,11 @@ def is_context_overflow_message(message: str) -> bool:
     """Return whether a provider error message identifies a context overflow."""
 
     normalized = message.casefold()
-    return any(marker in normalized for marker in _CONTEXT_OVERFLOW_MARKERS)
+    if any(marker in normalized for marker in _CONTEXT_OVERFLOW_MARKERS):
+        return True
+    return "input token count" in normalized and (
+        "exceeds" in normalized or "maximum number of tokens" in normalized
+    )
 
 
 class Provider(Protocol):

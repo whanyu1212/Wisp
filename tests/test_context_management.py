@@ -10,7 +10,7 @@ from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
 from wisp.coding.session import PERSISTED_SESSION_EVENT_TYPES
 from wisp.events import ContextOverflow, ContextPressure, ErrorEvent, wisp_event_from_json
-from wisp.providers.base import ContextOverflowError
+from wisp.providers.base import ContextOverflowError, is_context_overflow_message
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.events import (
     ProviderResponseCompleted,
@@ -57,6 +57,28 @@ class OverflowingProvider:
         yield  # pragma: no cover
 
 
+class SynchronousFailingProvider:
+    name = "sync-test"
+    default_model: str | None = "test-model"
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        self.calls = 0
+
+    def stream(
+        self,
+        messages: object,
+        *,
+        model: str | None = None,
+        tools: object = (),
+        tool_results: object = (),
+        previous_response_id: str | None = None,
+        effort: str | None = None,
+    ) -> AsyncIterator[object]:
+        self.calls += 1
+        raise RuntimeError(self.message)
+
+
 def test_tool_failure_with_overflow_words_is_not_context_overflow() -> None:
     tool_call = ToolCall(call_id="call-1", name="test", arguments={})
     provider = ScriptedProvider(
@@ -83,6 +105,14 @@ def test_tool_failure_with_overflow_words_is_not_context_overflow() -> None:
     assert not any(isinstance(event, ContextOverflow) for event in events)
     assert isinstance(events[-2], ErrorEvent)
     assert events[-1].type == "turn.completed"
+
+
+def test_gemini_overflow_message_with_numeric_count_is_detected() -> None:
+    message = (
+        "The input token count (461428) exceeds the maximum number of tokens allowed (104857)."
+    )
+
+    assert is_context_overflow_message(message)
 
 
 def _run_loop(config: AgentLoopConfig) -> list[object]:
@@ -217,6 +247,64 @@ def test_terminal_context_overflow_emits_structured_event_and_does_not_retry() -
         "turn.completed",
     ]
     assert len(provider.calls) == 1
+
+
+@pytest.mark.parametrize("effort", [None, "high"])
+def test_synchronous_provider_opening_overflow_is_structured(effort: str | None) -> None:
+    provider = SynchronousFailingProvider("context window exceeded")
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(ContextOverflowError):
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=NeverToolExecutor(),
+                    context_window=100,
+                    effort=effort,
+                ),
+                messages=(Message(role="user", content="hello"),),
+            ):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events] == [
+        "turn.started",
+        "context.overflow",
+        "error",
+        "turn.completed",
+    ]
+    overflow = next(event for event in events if isinstance(event, ContextOverflow))
+    assert overflow.provider == "sync-test"
+    assert overflow.model == "test-model"
+    assert overflow.context_window == 100
+    assert provider.calls == 1
+
+
+def test_synchronous_provider_opening_non_overflow_is_not_reclassified() -> None:
+    provider = SynchronousFailingProvider("authentication failed")
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(RuntimeError, match="authentication failed"):
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+                messages=(Message(role="user", content="hello"),),
+            ):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events] == [
+        "turn.started",
+        "error",
+        "turn.completed",
+    ]
+    assert not any(isinstance(event, ContextOverflow) for event in events)
+    assert provider.calls == 1
 
 
 def test_raised_context_overflow_emits_structured_event_before_error() -> None:
