@@ -35,6 +35,7 @@ from wisp.providers.events import (
     ProviderRetrying,
     ProviderTextDelta,
     ProviderToolCallCompleted,
+    ProviderUsage,
     ToolCall,
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
@@ -127,6 +128,7 @@ class OpenAICodexProvider:
         anonymous_output_item = 0
         chunks: list[str] = []
         tool_calls: list[ToolCall] = []
+        usage: ProviderUsage | None = None
         failure: ProviderResponseFailed | None = None
         for retry_number in range(self._retry_policy.max_retries + 1):
             response_started = False
@@ -213,6 +215,7 @@ class OpenAICodexProvider:
                             event_response = event.get("response")
                             if isinstance(event_response, dict):
                                 response_id = _string_value(event_response.get("id")) or response_id
+                                usage = _usage_from_codex(event_response.get("usage"))
                                 response_output = event_response.get("output")
                                 if isinstance(response_output, list):
                                     for item in response_output:
@@ -298,6 +301,7 @@ class OpenAICodexProvider:
             tool_calls=tuple(tool_calls),
             response_id=response_id,
             finish_reason="tool_calls" if tool_calls else "stop",
+            usage=usage,
         )
 
     def _get_continuation(
@@ -584,6 +588,33 @@ def _to_codex_role(role: Role) -> str:
     if role == "assistant":
         return "assistant"
     return "user"
+
+
+def _usage_from_codex(value: object) -> ProviderUsage | None:
+    if not isinstance(value, Mapping):
+        return None
+    input_tokens = value.get("input_tokens")
+    output_tokens = value.get("output_tokens")
+    total_tokens = value.get("total_tokens")
+    if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
+        return None
+    if not isinstance(total_tokens, int):
+        return None
+    return ProviderUsage(
+        input_tokens=max(0, input_tokens),
+        output_tokens=max(0, output_tokens),
+        total_tokens=max(0, total_tokens),
+        cache_read_input_tokens=_nested_int(value, "input_tokens_details", "cached_tokens"),
+        reasoning_output_tokens=_nested_int(value, "output_tokens_details", "reasoning_tokens"),
+    )
+
+
+def _nested_int(value: Mapping[str, object], group: str, field: str) -> int | None:
+    details = value.get(group)
+    if not isinstance(details, Mapping):
+        return None
+    count = details.get(field)
+    return max(0, count) if isinstance(count, int) else None
 
 
 def _string_value(value: object) -> str | None:

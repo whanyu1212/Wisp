@@ -19,6 +19,7 @@ from wisp.events import (
     MessageDelta,
     MessageStarted,
     ProviderRetrying,
+    TokenUsage,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
@@ -287,6 +288,18 @@ async def run_agent_loop(
                 content=response.content,
                 finish_reason=response.finish_reason,
                 response_id=response_id,
+                usage=(
+                    TokenUsage(
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        total_tokens=response.usage.total_tokens,
+                        cache_read_input_tokens=response.usage.cache_read_input_tokens,
+                        cache_write_input_tokens=response.usage.cache_write_input_tokens,
+                        reasoning_output_tokens=response.usage.reasoning_output_tokens,
+                    )
+                    if response.usage is not None
+                    else None
+                ),
                 tool_calls=tuple(
                     ToolCallSnapshot(
                         call_id=tool_call.call_id,

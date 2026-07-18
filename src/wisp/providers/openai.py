@@ -14,6 +14,7 @@ from openai.types.responses import (
     EasyInputMessageParam,
     FunctionToolParam,
     Response,
+    ResponseCompletedEvent,
     ResponseCreatedEvent,
     ResponseErrorEvent,
     ResponseFailedEvent,
@@ -43,6 +44,7 @@ from wisp.providers.events import (
     ProviderRetrying,
     ProviderTextDelta,
     ProviderToolCallCompleted,
+    ProviderUsage,
     ToolCall,
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
@@ -126,6 +128,7 @@ class OpenAIProvider:
         emitted_tool_item_ids: set[str] = set()
         chunks: list[str] = []
         tool_calls: list[ToolCall] = []
+        usage: ProviderUsage | None = None
         failure: ProviderResponseFailed | None = None
 
         yield ProviderResponseStarted(model=selected_model)
@@ -134,6 +137,9 @@ class OpenAIProvider:
             async for event in stream:
                 if isinstance(event, ResponseCreatedEvent):
                     response_id = event.response.id
+                elif isinstance(event, ResponseCompletedEvent):
+                    response_id = event.response.id
+                    usage = _usage_from_openai(event.response)
                 elif isinstance(event, ResponseTextDeltaEvent | ResponseRefusalDeltaEvent):
                     chunks.append(event.delta)
                     yield ProviderTextDelta(
@@ -218,6 +224,7 @@ class OpenAIProvider:
             tool_calls=tuple(tool_calls),
             response_id=response_id,
             finish_reason="tool_calls" if tool_calls else "stop",
+            usage=usage,
         )
 
     async def _create_stream(
@@ -377,6 +384,25 @@ def _to_openai_role(role: Role) -> OpenAIRole:
     if role == "tool":
         return "user"
     return role
+
+
+def _usage_from_openai(response: Response) -> ProviderUsage | None:
+    usage = response.usage
+    if usage is None:
+        return None
+    input_details = usage.input_tokens_details
+    output_details = usage.output_tokens_details
+    return ProviderUsage(
+        input_tokens=max(0, usage.input_tokens),
+        output_tokens=max(0, usage.output_tokens),
+        total_tokens=max(0, usage.total_tokens),
+        cache_read_input_tokens=(
+            max(0, input_details.cached_tokens) if input_details is not None else None
+        ),
+        reasoning_output_tokens=(
+            max(0, output_details.reasoning_tokens) if output_details is not None else None
+        ),
+    )
 
 
 def _normalize_optional(value: str | None) -> str | None:

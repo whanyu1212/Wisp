@@ -26,6 +26,7 @@ from wisp.providers.events import (
     ProviderTextDelta,
     ProviderThinkingDelta,
     ProviderToolCallCompleted,
+    ProviderUsage,
 )
 from wisp.providers.google import GoogleProvider
 from wisp.retry import RetryPolicy
@@ -173,6 +174,43 @@ def test_google_provider_streams_thinking_deltas() -> None:
         ProviderThinkingDelta(delta="let me think", content_index=0),
         ProviderTextDelta(delta="the answer", content_index=1),
         ProviderResponseCompleted(content="the answer"),
+    ]
+
+
+def test_google_provider_preserves_last_non_empty_usage_metadata() -> None:
+    usage_chunk = _text_chunk("answer").model_copy(
+        update={
+            "usage_metadata": genai_types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=12,
+                candidates_token_count=None,
+                thoughts_token_count=3,
+                tool_use_prompt_token_count=5,
+                total_token_count=20,
+            )
+        }
+    )
+    terminal_chunk = _text_chunk("", finish_reason=genai_types.FinishReason.STOP).model_copy(
+        update={"usage_metadata": genai_types.GenerateContentResponseUsageMetadata()}
+    )
+    provider = StubGoogleProvider([usage_chunk, terminal_chunk])
+
+    async def run() -> list[object]:
+        return [
+            event async for event in provider.stream([WispMessage(role="user", content="hello")])
+        ]
+
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderTextDelta(delta="answer"),
+        ProviderResponseCompleted(
+            content="answer",
+            usage=ProviderUsage(
+                input_tokens=17,
+                output_tokens=0,
+                total_tokens=20,
+                reasoning_output_tokens=3,
+            ),
+        ),
     ]
 
 

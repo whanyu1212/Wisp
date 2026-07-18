@@ -1,4 +1,4 @@
-"""Schema-v5 events emitted by the Wisp agent core."""
+"""Versioned events emitted by the Wisp agent core."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-EVENT_SCHEMA_VERSION = 5
+EVENT_SCHEMA_VERSION = 6
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -26,7 +26,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5] = 5
+    schema_version: Literal[5, 6] = 6
     timestamp: datetime = Field(default_factory=utc_now)
 
 
@@ -79,6 +79,19 @@ class MessageDelta(WispEvent):
     content_kind: Literal["text", "thinking"] = "text"
 
 
+class TokenUsage(BaseModel):
+    """Provider-reported token usage for one successful model request."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+    cache_read_input_tokens: int | None = Field(default=None, ge=0)
+    cache_write_input_tokens: int | None = Field(default=None, ge=0)
+    reasoning_output_tokens: int | None = Field(default=None, ge=0)
+
+
 class MessageCompleted(WispEvent):
     type: Literal["message.completed"] = "message.completed"
     turn: int
@@ -87,6 +100,7 @@ class MessageCompleted(WispEvent):
     role: MessageRole = "assistant"
     response_id: str | None = None
     tool_calls: tuple[ToolCallSnapshot, ...] = ()
+    usage: TokenUsage | None = None
 
 
 class ToolCallRequested(WispEvent):
@@ -326,14 +340,15 @@ JsonObjectAdapter: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 def _require_current_schema(data: JsonObject) -> None:
     version = data.get("schema_version")
-    if version != EVENT_SCHEMA_VERSION:
+    if version not in (5, EVENT_SCHEMA_VERSION):
         raise ValueError(
-            f"Unsupported Wisp event schema_version: {version!r}; expected {EVENT_SCHEMA_VERSION}"
+            "Unsupported Wisp event schema_version: "
+            f"{version!r}; expected 5 or {EVENT_SCHEMA_VERSION}"
         )
 
 
 def wisp_event_from_json(line: str) -> KnownWispEvent:
-    """Parse one current-schema JSONL event line into a typed Wisp event."""
+    """Parse one supported-schema JSONL event line into a typed Wisp event."""
 
     data = JsonObjectAdapter.validate_json(line)
     _require_current_schema(data)
@@ -341,7 +356,7 @@ def wisp_event_from_json(line: str) -> KnownWispEvent:
 
 
 def wisp_event_from_dict(data: JsonObject) -> KnownWispEvent:
-    """Parse one current-schema event dictionary into a typed Wisp event."""
+    """Parse one supported-schema event dictionary into a typed Wisp event."""
 
     _require_current_schema(data)
     return KnownWispEventAdapter.validate_python(data)
