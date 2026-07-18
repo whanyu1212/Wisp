@@ -340,7 +340,7 @@ def test_raised_context_overflow_emits_structured_event_before_error() -> None:
     assert provider.calls == 1
 
 
-def test_context_events_round_trip_on_schema_v7() -> None:
+def test_context_events_round_trip_on_schema_v8() -> None:
     pressure = ContextPressure(
         turn=1,
         provider="test",
@@ -358,8 +358,8 @@ def test_context_events_round_trip_on_schema_v7() -> None:
         message="maximum context length exceeded",
     )
 
-    assert pressure.schema_version == 7
-    assert overflow.schema_version == 7
+    assert pressure.schema_version == 8
+    assert overflow.schema_version == 8
     assert wisp_event_from_json(pressure.model_dump_json()) == pressure
     assert wisp_event_from_json(overflow.model_dump_json()) == overflow
 

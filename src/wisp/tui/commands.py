@@ -18,6 +18,7 @@ class TuiSlashCommandName(StrEnum):
     logout = "logout"
     provider = "provider"
     model = "model"
+    compact = "compact"
 
 
 # Sentinel effort token for "/model <id> <token>" meaning "explicitly clear
@@ -54,6 +55,7 @@ _ALIASES: dict[str, TuiSlashCommandName] = {
     "/logout": TuiSlashCommandName.logout,
     "/provider": TuiSlashCommandName.provider,
     "/model": TuiSlashCommandName.model,
+    "/compact": TuiSlashCommandName.compact,
 }
 
 
@@ -86,6 +88,7 @@ class SlashCommandSpec:
 # menu shows one canonical entry per command).
 SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("/help", "Show the TUI commands"),
+    SlashCommandSpec("/compact", "Compact the session context", takes_args=True),
     SlashCommandSpec("/model", "Show or switch the active model", takes_args=True),
     SlashCommandSpec("/provider", "Show or switch the active provider", takes_args=True),
     SlashCommandSpec("/auth", "Show credential status", takes_args=True),

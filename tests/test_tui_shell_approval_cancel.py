@@ -730,3 +730,163 @@ def test_tui_interaction_state_tracks_status() -> None:
     assert state.status is TuiStatus.idle
     state.status = TuiStatus.running
     assert state.status is TuiStatus.running
+
+
+def test_tui_shell_tracks_compacting_until_compact_command_finishes() -> None:
+    async def run() -> None:
+        controller = ScriptedController(compact_events=[[]])
+        shell = TuiShell(controller, console=_console()[0])
+
+        should_exit = await shell._start_compaction(None)
+
+        assert should_exit is False
+        assert shell.state.status is TuiStatus.compacting
+        assert shell.state.current_command_id == "compact-1"
+        assert shell.state.current_command_type == "compact"
+        assert shell.view.status == "compacting"
+        assert shell.view.input_mode == "running"
+        assert shell.view.input_hint == "wisp(compacting)> "
+
+        await shell._handle_rpc_event(
+            RpcCommandFinished(command_id="compact-1", command_type="compact", ok=True)
+        )
+
+        assert shell.state.status is TuiStatus.idle
+        assert shell.state.current_command_id is None
+        assert shell.state.current_command_type is None
+
+    anyio.run(run)
+
+
+def test_tui_shell_rejects_other_slash_commands_during_compaction() -> None:
+    async def run() -> None:
+        controller = ScriptedController(compact_events=[[]])
+        console, output = _console()
+        shell = TuiShell(controller, console=console)
+        await shell._start_compaction(None)
+
+        should_exit = await shell._handle_input_line(
+            _InputLine(text="/model gpt-5.5", mode=_InputMode.running)
+        )
+
+        assert should_exit is False
+        assert controller.configurations == []
+        assert "Cannot run slash commands while compaction is running." in output.getvalue()
+
+    anyio.run(run)
+
+
+def test_tui_shell_trust_resolution_restores_compacting_status() -> None:
+    async def run() -> None:
+        controller = ScriptedController(compact_events=[[]])
+        shell = TuiShell(controller, console=_console()[0])
+        await shell._start_compaction(None)
+        shell.state.pending_trust = TrustRequested(
+            request_id="req-1", project_path=Path("/some/project")
+        )
+        shell.state.status = TuiStatus.waiting_for_trust
+
+        should_exit = await shell._answer_pending_trust("y")
+
+        assert should_exit is False
+        assert controller.trusts == [("req-1", True, None, False)]
+        assert shell.state.status is TuiStatus.compacting
+        assert shell.view.status == "compacting"
+        assert shell.view.input_hint == "wisp(compacting)> "
+
+    anyio.run(run)
+
+
+def test_tui_shell_interrupt_cancels_compaction_and_clears_queue() -> None:
+    async def run() -> None:
+        controller = ScriptedController(compact_events=[[]])
+        console, output = _console()
+        shell = TuiShell(controller, console=console)
+        await shell._start_compaction(None)
+        shell.state.queued_prompts.append("do not run")
+
+        should_exit = await shell._handle_input_interrupted(
+            _InputInterrupted(mode=_InputMode.running)
+        )
+
+        assert should_exit is False
+        assert controller.cancelled == ["compact-1"]
+        assert list(shell.state.queued_prompts) == []
+        assert "Cancelling compaction..." in output.getvalue()
+
+        await shell._handle_rpc_event(
+            CompactionCompleted(
+                session_id="session-1",
+                outcome="cancelled",
+                replaced_entry_count=0,
+                retained_entry_count=0,
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id="compact-1",
+                command_type="compact",
+                ok=False,
+                error="RPC command cancelled: compact-1",
+            )
+        )
+
+        rendered = output.getvalue()
+        assert rendered.count("Compaction cancelled.") == 1
+        assert "command failed" not in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_quit_targets_active_compaction_then_shuts_down() -> None:
+    async def run() -> None:
+        controller = ScriptedController(compact_events=[[]])
+        console, output = _console()
+        shell = TuiShell(controller, console=console)
+        await shell._start_compaction(None)
+
+        should_exit = await shell._handle_quit()
+
+        assert should_exit is False
+        assert controller.cancelled == ["compact-1"]
+        assert "Quit requested; cancelling compaction..." in output.getvalue()
+
+        should_exit = await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id="compact-1",
+                command_type="compact",
+                ok=False,
+                error="RPC command cancelled: compact-1",
+            )
+        )
+
+        assert should_exit is False
+        assert controller.shutdown_count == 1
+
+    anyio.run(run)
+
+
+def test_tui_shell_eof_waits_for_compaction_and_drops_follow_ups() -> None:
+    async def run() -> None:
+        controller = ScriptedController(compact_events=[[]])
+        console, output = _console()
+        shell = TuiShell(controller, console=console)
+        await shell._start_compaction(None)
+        shell.state.queued_prompts.append("do not run")
+
+        should_exit = await shell._handle_input_closed(_InputClosed(mode=_InputMode.running))
+
+        assert should_exit is False
+        assert list(shell.state.queued_prompts) == []
+        assert controller.cancelled == []
+        assert "input closed; finishing compaction" in output.getvalue()
+
+        should_exit = await shell._handle_rpc_event(
+            RpcCommandFinished(command_id="compact-1", command_type="compact", ok=True)
+        )
+
+        assert should_exit is False
+        assert controller.prompts == []
+        assert controller.shutdown_count == 1
+
+    anyio.run(run)

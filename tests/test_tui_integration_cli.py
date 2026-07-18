@@ -2150,6 +2150,40 @@ def test_textual_running_uses_transcript_heartbeat_and_stable_status_bar() -> No
     assert cards == [("message--dim", None)]
 
 
+def test_textual_compaction_notices_and_rpc_completion_stop_progress() -> None:
+    async def scenario() -> tuple[list[str], list[tuple[str | None, object]], bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.event(CompactionStarted(session_id="session-1", source_entry_count=6))
+            renderer.event(
+                CompactionCompleted(
+                    session_id="session-1",
+                    outcome="completed",
+                    replaced_entry_count=5,
+                    retained_entry_count=1,
+                )
+            )
+            await pilot.pause()
+            assert app_instance._working_indicator is not None
+
+            renderer.event(
+                RpcCommandFinished(command_id="compact-1", command_type="compact", ok=True)
+            )
+            await pilot.pause()
+            return (
+                _transcript_texts(app_instance),
+                _transcript_cards(app_instance),
+                app_instance._working_indicator is None,
+            )
+
+    texts, cards, progress_stopped = anyio.run(scenario)
+    assert "Compacting session..." in texts
+    assert "Compacted 5 context entries." in texts
+    assert all(role != "message--assistant" for role, _title in cards)
+    assert progress_stopped
+
+
 def test_textual_status_activity_animates_spinner_and_counts_elapsed() -> None:
     # The heartbeat is a smooth braille spinner + a live elapsed-seconds counter,
     # both driven off one monotonic tick counter (frame = ticks % len, seconds =
@@ -3733,6 +3767,25 @@ def test_textual_tab_completes_highlighted_command() -> None:
     model_value, help_value = anyio.run(scenario)
     assert model_value == "/model "  # arg-taking -> trailing space
     assert help_value == "/help"  # arg-less -> no space
+
+
+def test_textual_menu_completes_compact_with_instruction_space() -> None:
+    async def scenario() -> tuple[str | None, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.press(*"/co")
+            await pilot.pause()
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+            highlighted = suggest.highlighted_spec()
+            await pilot.press("tab")
+            await pilot.pause()
+            return highlighted.command if highlighted else None, input_widget.value
+
+    highlighted, value = anyio.run(scenario)
+    assert highlighted == "/compact"
+    assert value == "/compact "
 
 
 def test_textual_menu_dismisses_on_escape_space_and_backspace() -> None:

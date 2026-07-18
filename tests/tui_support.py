@@ -19,6 +19,8 @@ from wisp import tui as tui_module
 from wisp.cli import app
 from wisp.config import WispConfig
 from wisp.events import (
+    CompactionCompleted,
+    CompactionStarted,
     ErrorEvent,
     KnownWispEvent,
     MessageCompleted,
@@ -51,6 +53,7 @@ from wisp.tui import (
 )
 from wisp.tui.app import (
     _default_prompt_reader,
+    _InputClosed,
     _InputInterrupted,
     _InputLine,
     _InputMode,
@@ -80,6 +83,7 @@ class ScriptedController:
         *,
         approval_events: list[ScriptedBatch] | None = None,
         cancel_events: list[ScriptedBatch] | None = None,
+        compact_events: list[ScriptedBatch] | None = None,
         configure_events: list[ScriptedBatch] | None = None,
         shutdown_events: list[ScriptedBatch] | None = None,
         close_after_prompt: bool = False,
@@ -87,10 +91,12 @@ class ScriptedController:
         self.prompt_events = deque(prompt_events or [])
         self.approval_events = deque(approval_events or [])
         self.cancel_events = deque(cancel_events or [])
+        self.compact_events = deque(compact_events or [])
         self.configure_events = deque(configure_events or [])
         self.shutdown_events = deque(shutdown_events or [])
         self.close_after_prompt = close_after_prompt
         self.prompts: list[str] = []
+        self.compactions: list[str | None] = []
         self.approvals: list[tuple[str, bool, str | None]] = []
         self.approval_scopes: list[ApprovalScope | None] = []
         self.trusts: list[tuple[str, bool, str | None, bool]] = []
@@ -109,6 +115,20 @@ class ScriptedController:
         )
         if self.close_after_prompt:
             await self._send.aclose()
+        return selected_id
+
+    async def compact(
+        self,
+        instructions: str | None = None,
+        *,
+        command_id: str | None = None,
+    ) -> str:
+        self.compactions.append(instructions)
+        selected_id = command_id or f"compact-{len(self.compactions)}"
+        await self._emit_scripted(
+            self.compact_events,
+            default=[RpcCommandFinished(command_id=selected_id, command_type="compact", ok=True)],
+        )
         return selected_id
 
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str:
@@ -232,6 +252,8 @@ __all__ = [
     "AsyncIterator",
     "CliRunner",
     "Console",
+    "CompactionCompleted",
+    "CompactionStarted",
     "ErrorEvent",
     "EventBatch",
     "FullscreenTuiRenderer",
@@ -259,6 +281,7 @@ __all__ = [
     "TuiViewSnapshot",
     "WispConfig",
     "_InputInterrupted",
+    "_InputClosed",
     "_InputLine",
     "_InputMode",
     "_console",

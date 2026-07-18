@@ -17,6 +17,7 @@ from wisp.rpc.commands import (
     ApprovalCommand,
     ApprovalScope,
     CancelCommand,
+    CompactCommand,
     ConfigureCommand,
     PromptCommand,
     RpcCommand,
@@ -39,7 +40,7 @@ class RpcTransport(Protocol):
 
 
 class RpcController:
-    """High-level controller API for prompt, cancel, approval, and shutdown commands."""
+    """High-level controller API for Wisp RPC commands."""
 
     def __init__(
         self,
@@ -57,8 +58,20 @@ class RpcController:
         await self._transport.send(PromptCommand(id=selected_id, prompt=prompt))
         return selected_id
 
+    async def compact(
+        self,
+        instructions: str | None = None,
+        *,
+        command_id: str | None = None,
+    ) -> str:
+        """Compact the active session and return the command id."""
+
+        selected_id = command_id or self._command_id_factory("compact")
+        await self._transport.send(CompactCommand(id=selected_id, instructions=instructions))
+        return selected_id
+
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str:
-        """Request cancellation of a running prompt command."""
+        """Request cancellation of a running prompt or compact command."""
 
         selected_id = command_id or self._command_id_factory("cancel")
         await self._transport.send(CancelCommand(id=selected_id, target_id=target_id))

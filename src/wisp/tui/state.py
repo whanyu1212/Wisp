@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from wisp.events import KnownWispEvent, ToolApprovalRequested, TrustRequested
 from wisp.tui.rendering import TuiViewSnapshot
@@ -16,6 +17,7 @@ class TuiStatus(StrEnum):
 
     idle = "idle"
     running = "running"
+    compacting = "compacting"
     waiting_for_approval = "waiting_for_approval"
     confirming_all_tools = "confirming_all_tools"
     waiting_for_trust = "waiting_for_trust"
@@ -28,6 +30,7 @@ class TuiInteractionState:
 
     status: TuiStatus = TuiStatus.idle
     current_command_id: str | None = None
+    current_command_type: Literal["prompt", "compact"] | None = None
     shutdown_command_id: str | None = None
     pending_approval: ToolApprovalRequested | None = None
     pending_trust: TrustRequested | None = None
@@ -119,7 +122,7 @@ def _input_mode_for_status(status: TuiStatus) -> _InputMode:
         return _InputMode.all_tools_confirmation
     if status is TuiStatus.waiting_for_trust:
         return _InputMode.trust
-    if status is TuiStatus.running:
+    if status in {TuiStatus.running, TuiStatus.compacting}:
         return _InputMode.running
     if status is TuiStatus.exiting:
         return _InputMode.exiting
@@ -148,3 +151,9 @@ def _prompt_for_mode(mode: _InputMode) -> str:
     if mode is _InputMode.exiting:
         return "wisp(exiting)> "
     return "wisp> "
+
+
+def _prompt_for_status(status: TuiStatus) -> str:
+    if status is TuiStatus.compacting:
+        return "wisp(compacting)> "
+    return _prompt_for_mode(_input_mode_for_status(status))

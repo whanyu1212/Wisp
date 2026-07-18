@@ -15,6 +15,8 @@ from rich.panel import Panel
 from rich.text import Text
 
 from wisp.events import (
+    CompactionCompleted,
+    CompactionStarted,
     ErrorEvent,
     KnownWispEvent,
     MessageCompleted,
@@ -247,6 +249,10 @@ class LineTuiRenderer:
                 f"[dim]retrying {event.provider}: {event.reason}{status}; "
                 f"attempt {event.attempt}/{event.max_attempts} in {event.delay_seconds:.1f}s[/dim]"
             )
+        elif isinstance(event, CompactionStarted):
+            self.console.print("[cyan]Compacting session...[/cyan]")
+        elif isinstance(event, CompactionCompleted):
+            self.console.print(_compaction_completed_text(event), markup=False)
         elif isinstance(event, MessageCompleted) and event.content:
             self.console.print(event.content, markup=False, highlight=False)
         elif isinstance(event, ToolCallRequested):
@@ -271,7 +277,11 @@ class LineTuiRenderer:
             self.console.print(
                 f"[dim]session saved: {_markup_escape(_compact_session_path(event.path))}[/dim]"
             )
-        elif isinstance(event, RpcCommandFinished) and not event.ok:
+        elif (
+            isinstance(event, RpcCommandFinished)
+            and not event.ok
+            and event.command_type != "compact"
+        ):
             self.console.print(
                 f"[red]command failed:[/red] {_markup_escape(event.error or event.command_id)}"
             )
@@ -525,7 +535,17 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def event(self, event: KnownWispEvent) -> None:
-        if isinstance(event, MessageCompleted) and event.content:
+        if isinstance(event, CompactionStarted):
+            self._append("system", "Compacting session...", style="cyan")
+        elif isinstance(event, CompactionCompleted):
+            role = "error" if event.outcome == "failed" else "system"
+            style = {
+                "completed": "cyan",
+                "cancelled": "yellow",
+                "failed": "red",
+            }[event.outcome]
+            self._append(role, _compaction_completed_text(event), style=style)
+        elif isinstance(event, MessageCompleted) and event.content:
             self._append("assistant", event.content, style="green")
         elif isinstance(event, ToolCallRequested):
             self._append("tool", f"→ tool {event.name} {event.arguments}", style="blue")
@@ -548,7 +568,11 @@ class FullscreenTuiRenderer:
                 f"session saved: {_compact_session_path(event.path)}",
                 style="dim",
             )
-        elif isinstance(event, RpcCommandFinished) and not event.ok:
+        elif (
+            isinstance(event, RpcCommandFinished)
+            and not event.ok
+            and event.command_type != "compact"
+        ):
             self._append(
                 "error",
                 f"command failed: {event.error or event.command_id}",
@@ -897,13 +921,14 @@ def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? 
     return (
         "Commands:\n"
         "  /help                    show this help\n"
+        "  /compact [instructions]  compact the active session context\n"
         "  /auth [provider]         show credential status\n"
         "  /login [provider] [method]  login to a provider\n"
         "  /logout [provider]       remove stored provider credentials\n"
         "  /provider [provider]     show or switch provider for future prompts\n"
         "  /model [model]           show or switch model for future prompts\n"
         "  /quit, /exit             quit the TUI\n"
-        "While a prompt is running, submitted input is queued as a follow-up.\n"
+        "While a prompt or compaction is running, submitted input is queued as a follow-up.\n"
         f"{approval_hint}"
     )
 
@@ -925,6 +950,14 @@ def _first_line(text: str) -> str:
 
 def _markup_escape(value: object) -> str:
     return escape(str(value))
+
+
+def _compaction_completed_text(event: CompactionCompleted) -> str:
+    if event.outcome == "completed":
+        return f"Compacted {event.replaced_entry_count} context entries."
+    if event.outcome == "cancelled":
+        return "Compaction cancelled."
+    return f"Compaction failed: {event.error or 'unknown error'}"
 
 
 def _render_model_listing_text(

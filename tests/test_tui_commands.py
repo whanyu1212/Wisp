@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from wisp.tui.commands import TuiSlashCommandError, TuiSlashCommandName, parse_tui_slash_command
+from wisp.tui.commands import (
+    SLASH_COMMAND_SPECS,
+    TuiSlashCommandError,
+    TuiSlashCommandName,
+    parse_tui_slash_command,
+)
 
 
 def test_parse_tui_slash_command_returns_none_for_prompt() -> None:
@@ -16,6 +21,7 @@ def test_parse_tui_slash_command_returns_none_for_prompt() -> None:
         "/help\nplease explain this",
         "/model\r\ngpt-test should be discussed",
         "/quit\n",
+        "/compact\npreserve this as prompt text",
     ],
 )
 def test_parse_tui_slash_command_treats_multiline_input_as_prompt(text: str) -> None:
@@ -28,6 +34,29 @@ def test_parse_tui_slash_command_parses_args_and_quotes() -> None:
     assert command is not None
     assert command.name is TuiSlashCommandName.model
     assert command.args == ("gpt test",)
+
+
+@pytest.mark.parametrize(
+    ("text", "args"),
+    [
+        ("/compact", ()),
+        ("/compact preserve implementation details", ("preserve", "implementation", "details")),
+        ('/compact "preserve implementation details"', ("preserve implementation details",)),
+    ],
+)
+def test_parse_tui_compact_command(text: str, args: tuple[str, ...]) -> None:
+    command = parse_tui_slash_command(text)
+
+    assert command is not None
+    assert command.name is TuiSlashCommandName.compact
+    assert command.args == args
+
+
+def test_compact_command_is_available_in_slash_menu() -> None:
+    spec = next(spec for spec in SLASH_COMMAND_SPECS if spec.command == "/compact")
+
+    assert spec.takes_args is True
+    assert "Compact" in spec.description
 
 
 def test_parse_tui_slash_command_aliases_quit() -> None:

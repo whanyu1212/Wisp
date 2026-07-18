@@ -17,7 +17,7 @@ from wisp.events import (
     TrustResolved,
     wisp_event_from_json,
 )
-from wisp.rpc import ConfigureCommand, JsonlSubprocessRpcTransport, RpcController
+from wisp.rpc import CompactCommand, ConfigureCommand, JsonlSubprocessRpcTransport, RpcController
 from wisp.rpc.commands import (
     ApprovalCommand,
     CancelCommand,
@@ -67,6 +67,21 @@ def test_rpc_commands_serialize_as_jsonl_and_parse() -> None:
         "approved": False,
         "reason": "not safe",
     }
+    assert rpc_command_from_json(line) == command
+
+
+@pytest.mark.parametrize("instructions", [None, "Keep exact paths"])
+def test_compact_command_serializes_as_jsonl_and_parses(
+    instructions: str | None,
+) -> None:
+    command = CompactCommand(id="compact-1", instructions=instructions)
+
+    line = command.to_json_line()
+
+    expected: dict[str, object] = {"id": "compact-1", "type": "compact"}
+    if instructions is not None:
+        expected["instructions"] = instructions
+    assert json.loads(line) == expected
     assert rpc_command_from_json(line) == command
 
 
@@ -219,6 +234,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         )
 
         prompt_id = await controller.prompt("hello")
+        compact_id = await controller.compact("Keep paths")
         cancel_id = await controller.cancel(prompt_id)
         approval_id = await controller.approve(
             "call-1",
@@ -229,8 +245,9 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         shutdown_id = await controller.shutdown()
         await controller.close()
 
-        assert [prompt_id, cancel_id, approval_id, configure_id, shutdown_id] == [
+        assert [prompt_id, compact_id, cancel_id, approval_id, configure_id, shutdown_id] == [
             "prompt-id",
+            "compact-id",
             "cancel-id",
             "approval-id",
             "configure-id",
@@ -238,6 +255,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         ]
         assert transport.commands == [
             PromptCommand(id="prompt-id", prompt="hello"),
+            CompactCommand(id="compact-id", instructions="Keep paths"),
             CancelCommand(id="cancel-id", target_id="prompt-id"),
             ApprovalCommand(
                 id="approval-id",
