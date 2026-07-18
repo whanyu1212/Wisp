@@ -919,6 +919,25 @@ def test_tui_shell_model_command_parses_provider_qualified_selection() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_accepts_documented_codex_effort_for_its_default_model() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, _output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model openai-codex::gpt-5.6-sol high", "/quit"]),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [("openai-codex", "gpt-5.6-sol", "high", False)]
+        assert shell.current_effort == "high"
+
+    anyio.run(run)
+
+
 def test_tui_shell_model_command_clear_effort_token_clears_persisted_effort() -> None:
     # Regression test: ModelPicker sends MODEL_COMMAND_CLEAR_EFFORT_TOKEN ("-")
     # when the user explicitly cycles effort back to "(default)". This test

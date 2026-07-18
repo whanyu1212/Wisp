@@ -94,8 +94,9 @@ models = [
 "gpt-5.4-mini" = "legacy"
 
 [providers.effort_levels]
-# The Codex subscription backend's exact effort subsets require account-bound
-# validation. Leave these unset rather than claiming API-key metadata applies.
+# The Codex model guide documents these request-level choices for its default
+# GPT-5.6 Sol model. Ultra is agent orchestration, not a provider effort tier.
+"gpt-5.6-sol" = ["low", "medium", "high", "xhigh", "max"]
 
 [[providers]]
 name = "anthropic"

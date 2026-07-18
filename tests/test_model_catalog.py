@@ -13,6 +13,7 @@ from wisp.providers.catalog import (
     CatalogError,
     ModelCatalog,
     ModelCatalogProviderEntry,
+    ModelRegistry,
     builtin_catalog,
     effective_catalog,
     user_catalog_path,
@@ -366,6 +367,14 @@ def test_builtin_catalog_defaults_match_provider_implementations() -> None:
     for entry in builtin_catalog().providers:
         if entry.name in defaults:
             assert entry.default_model == defaults[entry.name]
+
+
+def test_builtin_codex_default_exposes_documented_reasoning_effort_levels() -> None:
+    registry = ModelRegistry(builtin_catalog())
+
+    assert registry.supports_effort("openai-codex", "gpt-5.6-sol", "high") is True
+    assert registry.supports_effort("openai-codex", "gpt-5.6-sol", "max") is True
+    assert registry.supports_effort("openai-codex", "gpt-5.6-sol", "ultra") is False
 
 
 def test_overlay_adds_a_new_provider(tmp_path: Path) -> None:
