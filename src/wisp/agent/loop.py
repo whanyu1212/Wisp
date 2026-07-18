@@ -120,6 +120,24 @@ def _require_provider_response_started(started: bool) -> None:
         raise ProviderProtocolError("Provider emitted response data before response_started")
 
 
+async def _provider_events(
+    stream: AsyncIterator[provider_events.ProviderEvent],
+) -> AsyncIterator[provider_events.ProviderEvent]:
+    """Normalize context overflows raised while advancing a provider stream."""
+
+    iterator = aiter(stream)
+    while True:
+        try:
+            event = await anext(iterator)
+        except StopAsyncIteration:
+            return
+        except ProviderError as exc:
+            if is_context_overflow_message(str(exc)):
+                raise ContextOverflowError(str(exc)) from exc
+            raise
+        yield event
+
+
 def _validate_execution_event(event: ToolExecutionEvent, tool_call: ToolCall) -> None:
     if event.call_id != tool_call.call_id or event.name != tool_call.name:
         raise ToolExecutionProtocolError(
@@ -213,7 +231,7 @@ async def run_agent_loop(
                     tool_results=pending_tool_results,
                     previous_response_id=previous_response_id,
                 )
-            async for provider_event in provider_stream:
+            async for provider_event in _provider_events(provider_stream):
                 if _is_cancelled(config):
                     for event in _cancelled_turn_events(turn):
                         yield event
@@ -417,8 +435,6 @@ async def run_agent_loop(
         overflow_error: ContextOverflowError | None = None
         if isinstance(exc, ContextOverflowError):
             overflow_error = exc
-        elif is_context_overflow_message(str(exc)):
-            overflow_error = ContextOverflowError(str(exc))
         if overflow_error is not None:
             yield ContextOverflow(
                 turn=turn,

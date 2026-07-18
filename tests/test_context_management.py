@@ -16,6 +16,7 @@ from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseFailed,
     ProviderResponseStarted,
+    ProviderToolCallCompleted,
     ProviderUsage,
     ToolCall,
 )
@@ -25,6 +26,12 @@ from wisp.providers.fake import ScriptedProvider
 class NeverToolExecutor:
     async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
         raise AssertionError(f"Unexpected tool call: {tool_call.name}")
+        yield  # pragma: no cover
+
+
+class OverflowWordToolExecutor:
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        raise RuntimeError("prompt is too long")
         yield  # pragma: no cover
 
 
@@ -48,6 +55,34 @@ class OverflowingProvider:
         self.calls += 1
         raise ContextOverflowError("maximum context length exceeded")
         yield  # pragma: no cover
+
+
+def test_tool_failure_with_overflow_words_is_not_context_overflow() -> None:
+    tool_call = ToolCall(call_id="call-1", name="test", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test-model"),
+                ProviderToolCallCompleted(tool_call=tool_call),
+                ProviderResponseCompleted(content="", tool_calls=(tool_call,)),
+            ]
+        ]
+    )
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(RuntimeError, match="prompt is too long"):
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=OverflowWordToolExecutor()),
+                messages=(Message(role="user", content="hello"),),
+            ):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+    assert not any(isinstance(event, ContextOverflow) for event in events)
+    assert isinstance(events[-2], ErrorEvent)
+    assert events[-1].type == "turn.completed"
 
 
 def _run_loop(config: AgentLoopConfig) -> list[object]:
