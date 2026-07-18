@@ -191,7 +191,7 @@ def test_google_usage_counts_tool_results_as_input() -> None:
     )
 
 
-def test_token_usage_round_trips_on_schema_v6_events() -> None:
+def test_token_usage_round_trips_on_schema_v7_events() -> None:
     event = MessageCompleted(
         turn=1,
         content="done",
@@ -199,7 +199,7 @@ def test_token_usage_round_trips_on_schema_v6_events() -> None:
         usage=TokenUsage(input_tokens=12, output_tokens=7, total_tokens=19),
     )
 
-    assert event.schema_version == 6
+    assert event.schema_version == 7
     assert wisp_event_from_json(event.model_dump_json()) == event
 
 

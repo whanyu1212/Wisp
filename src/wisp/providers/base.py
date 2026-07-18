@@ -52,6 +52,30 @@ class ProviderProtocolError(ProviderError):
     """Raised when a provider emits a malformed response event sequence."""
 
 
+class ContextOverflowError(ProviderError):
+    """Raised when a provider rejects a request that exceeds its context window."""
+
+
+_CONTEXT_OVERFLOW_MARKERS = (
+    "context_length_exceeded",
+    "context length exceeded",
+    "context window exceeded",
+    "maximum context length",
+    "model_context_window_exceeded",
+    "prompt is too long",
+    "input token count exceeds",
+    "input tokens exceed",
+    "too many input tokens",
+)
+
+
+def is_context_overflow_message(message: str) -> bool:
+    """Return whether a provider error message identifies a context overflow."""
+
+    normalized = message.casefold()
+    return any(marker in normalized for marker in _CONTEXT_OVERFLOW_MARKERS)
+
+
 class Provider(Protocol):
     """Minimal streaming provider contract used by the agent core."""
 
