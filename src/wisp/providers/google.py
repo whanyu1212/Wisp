@@ -176,7 +176,9 @@ class GoogleProvider:
         try:
             async for chunk in stream:
                 if chunk.usage_metadata is not None:
-                    usage = _usage_from_google(chunk.usage_metadata)
+                    chunk_usage = _usage_from_google(chunk.usage_metadata)
+                    if chunk_usage is not None:
+                        usage = chunk_usage
                 if chunk.response_id is not None:
                     response_id = chunk.response_id
                 for candidate in chunk.candidates or ():
@@ -462,15 +464,27 @@ def _tool_spec_to_google(tool: ToolSpec) -> genai_types.FunctionDeclaration:
 def _usage_from_google(
     value: genai_types.GenerateContentResponseUsageMetadata,
 ) -> ProviderUsage | None:
-    input_tokens = value.prompt_token_count
-    output_tokens = value.candidates_token_count
-    if input_tokens is None or output_tokens is None:
+    counts = (
+        value.prompt_token_count,
+        value.candidates_token_count,
+        value.total_token_count,
+        value.cached_content_token_count,
+        value.thoughts_token_count,
+        value.tool_use_prompt_token_count,
+    )
+    if all(count is None for count in counts):
         return None
-    input_tokens = max(0, input_tokens)
-    output_tokens = max(0, output_tokens)
+
+    prompt_tokens = max(0, value.prompt_token_count or 0)
+    tool_use_tokens = max(0, value.tool_use_prompt_token_count or 0)
+    input_tokens = prompt_tokens + tool_use_tokens
+    output_tokens = max(0, value.candidates_token_count or 0)
+    reasoning_tokens = (
+        max(0, value.thoughts_token_count) if value.thoughts_token_count is not None else None
+    )
     total_tokens = value.total_token_count
     if total_tokens is None:
-        total_tokens = input_tokens + output_tokens
+        total_tokens = input_tokens + output_tokens + (reasoning_tokens or 0)
     return ProviderUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -480,9 +494,7 @@ def _usage_from_google(
             if value.cached_content_token_count is not None
             else None
         ),
-        reasoning_output_tokens=(
-            max(0, value.thoughts_token_count) if value.thoughts_token_count is not None else None
-        ),
+        reasoning_output_tokens=reasoning_tokens,
     )
 
 

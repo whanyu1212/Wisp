@@ -139,6 +139,39 @@ def test_google_usage_preserves_authoritative_total_and_optional_details() -> No
     )
 
 
+def test_google_usage_preserves_thinking_only_response_without_candidates() -> None:
+    metadata = genai_types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=12,
+        candidates_token_count=None,
+        thoughts_token_count=3,
+        total_token_count=15,
+    )
+
+    assert _usage_from_google(metadata) == ProviderUsage(
+        input_tokens=12,
+        output_tokens=0,
+        total_tokens=15,
+        reasoning_output_tokens=3,
+    )
+
+
+def test_google_usage_counts_tool_results_as_input() -> None:
+    metadata = genai_types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=12,
+        tool_use_prompt_token_count=5,
+        candidates_token_count=7,
+        thoughts_token_count=3,
+        total_token_count=27,
+    )
+
+    assert _usage_from_google(metadata) == ProviderUsage(
+        input_tokens=17,
+        output_tokens=7,
+        total_tokens=27,
+        reasoning_output_tokens=3,
+    )
+
+
 def test_token_usage_round_trips_on_schema_v6_events() -> None:
     event = MessageCompleted(
         turn=1,
