@@ -658,7 +658,11 @@ class ModelPicker(Vertical):
             self._rows.append(None)
             row_index += 1
             is_current_provider = entry.name == current_provider
-            effective_model = current_model if current_model is not None else entry.default_model
+            effective_model = (
+                entry.canonical_model(current_model)
+                if current_model is not None
+                else entry.default_model
+            )
             for model_id in entry.models:
                 if first_selectable_index is None:
                     first_selectable_index = row_index
@@ -677,7 +681,10 @@ class ModelPicker(Vertical):
                     ):
                         seeded_effort = None
                     self._effort_choice[(entry.name, model_id)] = seeded_effort
-                label = f"  {model_id} (current)" if is_current else f"  {model_id}"
+                lifecycle = entry.model_lifecycle.get(model_id)
+                lifecycle_label = f" ({lifecycle})" if lifecycle not in (None, "stable") else ""
+                current_label = " (current)" if is_current else ""
+                label = f"  {model_id}{lifecycle_label}{current_label}"
                 self._options.add_option(Option(label, id=f"{entry.name}::{model_id}"))
                 self._rows.append((entry.name, model_id))
                 row_index += 1

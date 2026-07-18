@@ -602,7 +602,7 @@ def test_tui_shell_bare_model_command_lists_catalog_models_grouped_by_provider()
         assert "openai:" in rendered
         assert "openai-codex:" in rendered
         assert "fake:" in rendered
-        assert "gpt-5.5 (current)" in rendered
+        assert "gpt-5.5 (legacy) (current)" in rendered
         assert "Current model: gpt-5.5" in rendered
         assert "Current provider: openai" in rendered
         # No configure command should be sent for a bare, argument-less /model.
@@ -631,8 +631,8 @@ def test_tui_shell_model_listing_marks_current_only_on_the_active_provider() -> 
 
         rendered = output.getvalue()
         assert rendered.count("(current)") == 1
-        assert "  openai: gpt-5.5 (current)" in rendered
-        assert "  openai-codex: gpt-5.5," in rendered or "  openai-codex: gpt-5.5\n" in rendered
+        assert "gpt-5.5 (legacy) (current)" in rendered
+        assert "gpt-5.5 (legacy)" in rendered
 
     anyio.run(run)
 
@@ -659,7 +659,7 @@ def test_tui_shell_model_listing_marks_provider_default_as_current_when_unset() 
 
         rendered = output.getvalue()
         assert rendered.count("(current)") == 1
-        assert "  openai: gpt-5.5 (current)" in rendered
+        assert "  openai: gpt-5.6-sol (current)" in rendered
         assert "Current model: provider default" in rendered
 
     anyio.run(run)
@@ -756,6 +756,34 @@ def test_tui_shell_typed_model_command_keeps_a_supported_effort() -> None:
 
         assert controller.configurations == [(None, "claude-opus-4-8", "high", False)]
         assert shell.current_effort == "high"
+
+    anyio.run(run)
+
+
+def test_tui_shell_typed_model_command_keeps_new_default_model_efforts() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(
+                [
+                    "/model claude-fable-5 xhigh",
+                    "/model google::gemini-3.5-flash MINIMAL",
+                    "/quit",
+                ]
+            ),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [
+            (None, "claude-fable-5", "xhigh", False),
+            ("google", "gemini-3.5-flash", "MINIMAL", False),
+        ]
+        assert shell.current_effort == "MINIMAL"
 
     anyio.run(run)
 
@@ -915,6 +943,25 @@ def test_tui_shell_model_command_parses_provider_qualified_selection() -> None:
         rendered = output.getvalue()
         assert "Provider set to openai-codex" in rendered
         assert "Model set to gpt-5.5" in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_accepts_documented_codex_effort_for_its_default_model() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, _output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/model openai-codex::gpt-5.6-sol high", "/quit"]),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [("openai-codex", "gpt-5.6-sol", "high", False)]
+        assert shell.current_effort == "high"
 
     anyio.run(run)
 

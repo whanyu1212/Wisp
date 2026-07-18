@@ -54,10 +54,10 @@ Wisp runs the same agent core in four modes:
 Wisp supports five provider modes:
 
 ```bash
-uv run wisp -p "hello" --provider openai-codex --model gpt-5.5
-uv run wisp -p "hello" --provider openai --model gpt-5.5
+uv run wisp -p "hello" --provider openai-codex --model gpt-5.6-sol
+uv run wisp -p "hello" --provider openai --model gpt-5.6-sol
 uv run wisp -p "hello" --provider anthropic --model claude-sonnet-5
-uv run wisp -p "hello" --provider google --model gemini-flash-latest
+uv run wisp -p "hello" --provider google --model gemini-3.5-flash
 uv run wisp -p "hello" --provider fake
 ```
 
@@ -161,7 +161,7 @@ you trust the project.
 ```json
 {
   "provider": "openai",
-  "model": "gpt-5.5",
+  "model": "gpt-5.6-sol",
   "session_dir": "~/.wisp/sessions",
   "retry": { "max_retries": 2, "base_delay_seconds": 0.5, "max_delay_seconds": 30 }
 }
@@ -263,8 +263,20 @@ Available slash commands:
 ```
 
 TUI login currently uses the `openai-codex` device-code flow; browser login is available from the
-CLI (`uv run wisp auth login openai-codex`). `/model` with no arguments lists every catalog model
-grouped by provider; there is no interactive fuzzy-picker yet.
+CLI (`uv run wisp auth login openai-codex`). `/model` with no arguments opens a model picker in
+the Textual TUI and lists every catalog model grouped by provider in line mode.
+
+### Model catalog
+
+The packaged catalog lists current text-generation models that Wisp's streaming, client-tool
+adapters can use. It intentionally excludes embeddings, image/audio/realtime-only models,
+retired models, and access-restricted previews. Canonical models appear once in the picker;
+documented aliases such as `gpt-5.6` and `gemini-flash-latest` remain valid configuration values.
+
+Catalog entries are advisory rather than access control. Model access varies by account and region,
+and explicitly configured unknown models continue to pass through to the selected provider. The
+picker labels supported preview and legacy models. Add account-specific or newly released models
+in the user-only `~/.wisp/catalog.toml` overlay; Wisp never reads a project-local catalog.
 
 Unlike print mode, the interactive TUI exposes the **full tool registry by
 default** — otherwise it would be a chatbot that can't read files or run

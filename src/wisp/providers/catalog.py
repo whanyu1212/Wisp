@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 _CATALOG_RESOURCE_PACKAGE = "wisp.providers.data"
 _CATALOG_RESOURCE_NAME = "catalog.toml"
 _USER_CATALOG_RELATIVE_PATH = Path(".wisp") / "catalog.toml"
+ModelLifecycle = Literal["stable", "preview", "legacy"]
 
 
 class CatalogError(ValueError):
@@ -65,6 +66,13 @@ class ModelCatalogProviderEntry(BaseModel):
     docs_url: str
     models: tuple[str, ...]
     context_windows: dict[str, int] = {}
+    # Aliases stay valid in configuration while ``models`` remains the canonical
+    # picker list. This avoids showing both an alias and its target as choices.
+    model_aliases: dict[str, str] = {}
+    # The lifecycle label is descriptive rather than an availability gate: a
+    # user's account may have different access, and unknown models still pass
+    # through to the provider unchanged.
+    model_lifecycle: dict[str, ModelLifecycle] = {}
     # Per-model reasoning-effort tiers, in the exact wire-format strings each
     # provider's API accepts verbatim (e.g. Anthropic's "low"/"medium"/"high"/
     # "xhigh"/"max", Google's "LOW"/"HIGH", OpenAI's "none"/"minimal"/"low"/
@@ -86,6 +94,18 @@ class ModelCatalogProviderEntry(BaseModel):
                 f"provider {self.name!r} default_model {self.default_model!r} "
                 "is not present in models"
             )
+        for alias, target in self.model_aliases.items():
+            if not alias:
+                raise ValueError(f"provider {self.name!r} has an empty model alias")
+            if alias in model_set:
+                raise ValueError(
+                    f"provider {self.name!r} model alias {alias!r} duplicates a canonical model"
+                )
+            if target not in model_set:
+                raise ValueError(
+                    f"provider {self.name!r} model_aliases[{alias!r}] references "
+                    f"unknown model {target!r}"
+                )
         for model_id, window in self.context_windows.items():
             if model_id not in model_set:
                 raise ValueError(
@@ -95,6 +115,11 @@ class ModelCatalogProviderEntry(BaseModel):
                 raise ValueError(
                     f"provider {self.name!r} context_windows[{model_id!r}] "
                     f"must be positive, got {window}"
+                )
+        for model_id in self.model_lifecycle:
+            if model_id not in model_set:
+                raise ValueError(
+                    f"provider {self.name!r} model_lifecycle references unknown model {model_id!r}"
                 )
         for model_id, levels in self.effort_levels.items():
             if model_id not in model_set:
@@ -110,6 +135,13 @@ class ModelCatalogProviderEntry(BaseModel):
                     f"provider {self.name!r} effort_levels[{model_id!r}] has duplicate entries"
                 )
         return self
+
+    def canonical_model(self, model_id: str) -> str | None:
+        """Return a canonical model id for a listed id or alias."""
+
+        if model_id in self.models:
+            return model_id
+        return self.model_aliases.get(model_id)
 
 
 class ModelCatalog(BaseModel):
@@ -207,11 +239,10 @@ def _warn(message: str) -> None:
 class ModelRegistry:
     """Read-only view over a :class:`ModelCatalog`, resolving model ids to metadata.
 
-    A model id is not guaranteed unique across the whole catalog: the same model
-    name can legitimately be served by more than one provider (for example
-    ``openai`` and ``openai-codex`` both accept the same OpenAI model names,
-    reached through different auth). :meth:`resolve` returns every provider that
-    claims a given id rather than silently picking one.
+    A canonical model id or alias is not guaranteed unique across the whole
+    catalog: the same OpenAI model can legitimately be served by ``openai`` and
+    ``openai-codex`` through different auth. :meth:`resolve` returns every
+    provider that claims a given value rather than silently picking one.
     """
 
     def __init__(self, catalog: ModelCatalog) -> None:
@@ -220,6 +251,8 @@ class ModelRegistry:
         for provider in catalog.providers:
             for model_id in provider.models:
                 self._by_id[model_id] = (*self._by_id.get(model_id, ()), provider)
+            for alias in provider.model_aliases:
+                self._by_id[alias] = (*self._by_id.get(alias, ()), provider)
 
     def resolve(
         self, model_id: str, *, prefer: str | None = None
@@ -249,7 +282,7 @@ class ModelRegistry:
         raise AmbiguousModelError(model_id, tuple(entry.name for entry in candidates))
 
     def list_models(self, *, provider: str | None = None) -> tuple[tuple[str, str], ...]:
-        """Return ``(provider_name, model_id)`` pairs, optionally filtered by provider."""
+        """Return canonical ``(provider_name, model_id)`` pairs, optionally filtered."""
 
         pairs = [
             (entry.name, model_id)
@@ -284,17 +317,32 @@ class ModelRegistry:
         for entry in self._catalog.providers:
             if entry.name != provider_name:
                 continue
-            return effort in entry.effort_levels.get(model_id, ())
+            canonical_model = entry.canonical_model(model_id)
+            return canonical_model is not None and effort in entry.effort_levels.get(
+                canonical_model, ()
+            )
         return False
 
     def knows_model(self, provider_name: str, model_id: str) -> bool:
-        """Return whether ``provider_name``'s catalog entry lists ``model_id`` at all."""
+        """Return whether ``provider_name`` recognizes ``model_id`` or an alias."""
 
         for entry in self._catalog.providers:
             if entry.name != provider_name:
                 continue
-            return model_id in entry.models
+            return entry.canonical_model(model_id) is not None
         return False
+
+    def model_lifecycle(self, provider_name: str, model_id: str) -> ModelLifecycle | None:
+        """Return the lifecycle label for a model or alias, when cataloged."""
+
+        for entry in self._catalog.providers:
+            if entry.name != provider_name:
+                continue
+            canonical_model = entry.canonical_model(model_id)
+            if canonical_model is None:
+                return None
+            return entry.model_lifecycle.get(canonical_model)
+        return None
 
     def context_window(
         self,
@@ -310,7 +358,10 @@ class ModelRegistry:
             return None
         for entry in self._catalog.providers:
             if entry.name == provider_name:
-                return entry.context_windows.get(effective_model)
+                canonical_model = entry.canonical_model(effective_model)
+                if canonical_model is None:
+                    return None
+                return entry.context_windows.get(canonical_model)
         return None
 
 
@@ -360,6 +411,7 @@ __all__ = [
     "CatalogError",
     "ModelCatalog",
     "ModelCatalogProviderEntry",
+    "ModelLifecycle",
     "ModelRegistry",
     "UnknownModelError",
     "builtin_catalog",

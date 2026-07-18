@@ -40,7 +40,7 @@ from wisp.providers.events import (
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
-DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.5"
+DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
 _MAX_PENDING_CONTINUATIONS = 128
 
