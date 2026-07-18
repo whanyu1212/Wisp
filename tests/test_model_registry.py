@@ -23,6 +23,9 @@ def _provider(
     *,
     default_model: str | None = None,
     effort_levels: dict[str, list[str]] | None = None,
+    model_aliases: dict[str, str] | None = None,
+    model_lifecycle: dict[str, str] | None = None,
+    context_windows: dict[str, int] | None = None,
 ) -> dict[str, object]:
     return {
         "name": name,
@@ -31,6 +34,9 @@ def _provider(
         "docs_url": "https://example.com/docs",
         "models": models,
         "effort_levels": effort_levels or {},
+        "model_aliases": model_aliases or {},
+        "model_lifecycle": model_lifecycle or {},
+        "context_windows": context_windows or {},
     }
 
 
@@ -130,6 +136,31 @@ def test_list_models_filter_on_unknown_provider_is_empty() -> None:
     registry = ModelRegistry(_catalog(_provider("acme", ["acme-1"])))
 
     assert registry.list_models(provider="nonexistent") == ()
+
+
+def test_alias_resolves_to_canonical_metadata_without_being_listed() -> None:
+    registry = ModelRegistry(
+        _catalog(
+            _provider(
+                "acme",
+                ["acme-1"],
+                model_aliases={"acme-latest": "acme-1"},
+                model_lifecycle={"acme-1": "preview"},
+                context_windows={"acme-1": 1000},
+                effort_levels={"acme-1": ["low", "high"]},
+            )
+        )
+    )
+
+    provider_name, entry = registry.resolve("acme-latest")
+
+    assert provider_name == "acme"
+    assert entry.canonical_model("acme-latest") == "acme-1"
+    assert registry.list_models() == (("acme", "acme-1"),)
+    assert registry.knows_model("acme", "acme-latest") is True
+    assert registry.context_window("acme", "acme-latest") == 1000
+    assert registry.model_lifecycle("acme", "acme-latest") == "preview"
+    assert registry.supports_effort("acme", "acme-latest", "high") is True
 
 
 def test_providers_returns_every_catalog_entry() -> None:

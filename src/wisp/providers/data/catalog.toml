@@ -13,37 +13,89 @@ schema_version = 1
 [[providers]]
 name = "openai"
 display_name = "OpenAI"
-default_model = "gpt-5.5"
+default_model = "gpt-5.6-sol"
 docs_url = "https://platform.openai.com/docs"
-models = ["gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.4-mini"]
+# Current Responses-API text/tool models verified against OpenAI's model
+# catalog on 2026-07-18. Excludes specialized audio, image, realtime,
+# embeddings, moderation, and deprecated models.
+models = [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.5-pro",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+]
+
+[providers.model_aliases]
+"gpt-5.6" = "gpt-5.6-sol"
 
 [providers.context_windows]
+"gpt-5.6-sol" = 1050000
+"gpt-5.6-terra" = 1050000
+"gpt-5.6-luna" = 1050000
 "gpt-5.5" = 272000
 "gpt-5.5-pro" = 1050000
 "gpt-5.4" = 272000
 "gpt-5.4-mini" = 400000
 
-# Effort tiers sourced from OpenAI's reasoning-effort guide
-# (developers.openai.com/api/docs/guides/reasoning): "Supported values are
-# model-dependent... gpt-5.5 defaults to medium." Only gpt-5.5's full tier
-# set is confirmed against that doc; the other three models' exact subsets
-# are unconfirmed, so left out rather than guessed.
+[providers.model_lifecycle]
+"gpt-5.6-sol" = "stable"
+"gpt-5.6-terra" = "stable"
+"gpt-5.6-luna" = "stable"
+"gpt-5.5" = "legacy"
+"gpt-5.5-pro" = "legacy"
+"gpt-5.4" = "legacy"
+"gpt-5.4-mini" = "legacy"
+
+# Effort tiers sourced from the current model pages and OpenAI's
+# reasoning-effort guide. Older models remain usable but are omitted unless
+# their exact accepted subsets are documented.
 [providers.effort_levels]
+"gpt-5.6-sol" = ["none", "low", "medium", "high", "xhigh", "max"]
+"gpt-5.6-terra" = ["none", "low", "medium", "high", "xhigh", "max"]
+"gpt-5.6-luna" = ["none", "low", "medium", "high", "xhigh", "max"]
 "gpt-5.5" = ["none", "minimal", "low", "medium", "high", "xhigh"]
 
 [[providers]]
 name = "openai-codex"
 display_name = "OpenAI (Codex subscription)"
-default_model = "gpt-5.5"
-docs_url = "https://platform.openai.com/docs"
-models = ["gpt-5.5", "gpt-5.4"]
+default_model = "gpt-5.6-sol"
+docs_url = "https://developers.openai.com/codex/models"
+# Current Codex CLI subscription models verified against the Codex model guide
+# on 2026-07-18. The access-controlled gpt-5.3-codex-spark preview is excluded.
+models = [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+]
+
+[providers.model_aliases]
+"gpt-5.6" = "gpt-5.6-sol"
 
 [providers.context_windows]
+"gpt-5.6-sol" = 1050000
+"gpt-5.6-terra" = 1050000
+"gpt-5.6-luna" = 1050000
 "gpt-5.5" = 272000
 "gpt-5.4" = 272000
+"gpt-5.4-mini" = 400000
+
+[providers.model_lifecycle]
+"gpt-5.6-sol" = "stable"
+"gpt-5.6-terra" = "stable"
+"gpt-5.6-luna" = "stable"
+"gpt-5.5" = "legacy"
+"gpt-5.4" = "legacy"
+"gpt-5.4-mini" = "legacy"
 
 [providers.effort_levels]
-"gpt-5.5" = ["none", "minimal", "low", "medium", "high", "xhigh"]
+# The Codex subscription backend's exact effort subsets require account-bound
+# validation. Leave these unset rather than claiming API-key metadata applies.
 
 [[providers]]
 name = "anthropic"
@@ -51,6 +103,7 @@ display_name = "Anthropic"
 default_model = "claude-sonnet-5"
 docs_url = "https://platform.claude.com/docs"
 models = [
+    "claude-fable-5",
     "claude-sonnet-5",
     "claude-opus-4-8",
     "claude-haiku-4-5",
@@ -60,12 +113,22 @@ models = [
 ]
 
 [providers.context_windows]
+"claude-fable-5" = 1000000
 "claude-sonnet-5" = 1000000
 "claude-opus-4-8" = 1000000
 "claude-haiku-4-5" = 200000
 "claude-opus-4-7" = 1000000
 "claude-opus-4-6" = 1000000
 "claude-sonnet-4-6" = 1000000
+
+[providers.model_lifecycle]
+"claude-fable-5" = "stable"
+"claude-sonnet-5" = "stable"
+"claude-opus-4-8" = "stable"
+"claude-haiku-4-5" = "stable"
+"claude-opus-4-7" = "legacy"
+"claude-opus-4-6" = "legacy"
+"claude-sonnet-4-6" = "legacy"
 
 # Effort tiers confirmed live via client.models.retrieve(id).capabilities.effort
 # against the Anthropic API. claude-haiku-4-5 is deliberately omitted --
@@ -80,25 +143,47 @@ models = [
 [[providers]]
 name = "google"
 display_name = "Google"
-default_model = "gemini-flash-latest"
+default_model = "gemini-3.5-flash"
 docs_url = "https://ai.google.dev/gemini-api/docs"
-models = ["gemini-flash-latest", "gemini-2.5-pro", "gemini-2.5-flash"]
+# The Google provider uses the Gemini Developer API. These IDs are sourced from
+# Google's current model documentation; account availability still varies by API
+# key and should be checked with the Models API before changing this list.
+models = [
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview",
+]
+
+[providers.model_aliases]
+"gemini-flash-latest" = "gemini-3.5-flash"
 
 [providers.context_windows]
-"gemini-flash-latest" = 1048576
+"gemini-3.5-flash" = 1048576
+"gemini-3.1-flash-lite" = 1048576
 "gemini-2.5-pro" = 1048576
 "gemini-2.5-flash" = 1048576
+"gemini-2.5-flash-lite" = 1048576
+"gemini-3.1-pro-preview" = 1048576
+"gemini-3-flash-preview" = 1048576
 
-# Effort tiers confirmed live against the real API: gemini-flash-latest
-# accepts thinking_level with all 4 ThinkingLevel enum tiers (confirmed
-# MINIMAL/LOW/MEDIUM/HIGH all succeed). gemini-2.5-pro and gemini-2.5-flash
-# reject thinking_level outright ("Thinking level is not supported for this
-# model", 400) -- they need thinking_budget (a numeric token count) instead,
-# a different mechanism this provider does not yet translate named tiers
-# into, so they are deliberately omitted here rather than listing tiers
-# GoogleProvider cannot actually apply to them.
+[providers.model_lifecycle]
+"gemini-3.5-flash" = "stable"
+"gemini-3.1-flash-lite" = "stable"
+"gemini-2.5-pro" = "legacy"
+"gemini-2.5-flash" = "legacy"
+"gemini-2.5-flash-lite" = "legacy"
+"gemini-3.1-pro-preview" = "preview"
+"gemini-3-flash-preview" = "preview"
+
+# Gemini 3.1 Flash-Lite supports named thinking levels. Gemini 2.5 models use
+# numeric thinking budgets, which this provider intentionally does not map from
+# named tiers. Other current models stay unset until Developer API validation.
 [providers.effort_levels]
-"gemini-flash-latest" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
+"gemini-3.1-flash-lite" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 
 [[providers]]
 name = "fake"
@@ -109,3 +194,6 @@ models = ["fake"]
 
 [providers.context_windows]
 fake = 1000
+
+[providers.model_lifecycle]
+fake = "stable"

@@ -530,7 +530,7 @@ def test_openai_codex_provider_retries_transient_http_opening_failure(tmp_path: 
     assert events[0].reason == "server_error"
     assert events[0].status_code == 503
     assert events[1:] == [
-        ProviderResponseStarted(model="gpt-5.5"),
+        ProviderResponseStarted(model="gpt-5.6-sol"),
         ProviderTextDelta(delta="recovered"),
         ProviderResponseCompleted(content="recovered"),
     ]
@@ -613,7 +613,7 @@ def test_openai_codex_provider_normalizes_post_start_sse_failure(tmp_path: Path)
             return [event async for event in provider.stream([Message(role="user", content="hi")])]
 
     assert anyio.run(run) == [
-        ProviderResponseStarted(model="gpt-5.5"),
+        ProviderResponseStarted(model="gpt-5.6-sol"),
         ProviderResponseFailed(message="Invalid OpenAI Codex SSE event: Expecting value"),
     ]
 

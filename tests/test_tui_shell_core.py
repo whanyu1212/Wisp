@@ -602,7 +602,7 @@ def test_tui_shell_bare_model_command_lists_catalog_models_grouped_by_provider()
         assert "openai:" in rendered
         assert "openai-codex:" in rendered
         assert "fake:" in rendered
-        assert "gpt-5.5 (current)" in rendered
+        assert "gpt-5.5 (legacy) (current)" in rendered
         assert "Current model: gpt-5.5" in rendered
         assert "Current provider: openai" in rendered
         # No configure command should be sent for a bare, argument-less /model.
@@ -631,8 +631,8 @@ def test_tui_shell_model_listing_marks_current_only_on_the_active_provider() -> 
 
         rendered = output.getvalue()
         assert rendered.count("(current)") == 1
-        assert "  openai: gpt-5.5 (current)" in rendered
-        assert "  openai-codex: gpt-5.5," in rendered or "  openai-codex: gpt-5.5\n" in rendered
+        assert "gpt-5.5 (legacy) (current)" in rendered
+        assert "gpt-5.5 (legacy)" in rendered
 
     anyio.run(run)
 
@@ -659,7 +659,7 @@ def test_tui_shell_model_listing_marks_provider_default_as_current_when_unset() 
 
         rendered = output.getvalue()
         assert rendered.count("(current)") == 1
-        assert "  openai: gpt-5.5 (current)" in rendered
+        assert "  openai: gpt-5.6-sol (current)" in rendered
         assert "Current model: provider default" in rendered
 
     anyio.run(run)

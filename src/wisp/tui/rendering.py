@@ -948,13 +948,19 @@ def _render_model_listing_text(
     lines = ["Available models:"]
     for entry in entries:
         is_current_provider = entry.name == current_provider
-        effective_model = current_model if current_model is not None else entry.default_model
-        names = [
-            f"{model_id} (current)"
-            if is_current_provider and model_id == effective_model
-            else model_id
-            for model_id in entry.models
-        ]
+        effective_model = (
+            entry.canonical_model(current_model)
+            if current_model is not None
+            else entry.default_model
+        )
+        names: list[str] = []
+        for model_id in entry.models:
+            lifecycle = entry.model_lifecycle.get(model_id)
+            lifecycle_label = f" ({lifecycle})" if lifecycle not in (None, "stable") else ""
+            current_label = (
+                " (current)" if is_current_provider and model_id == effective_model else ""
+            )
+            names.append(f"{model_id}{lifecycle_label}{current_label}")
         lines.append(f"  {entry.name}: {', '.join(names)}")
     lines.append(f"Current model: {current_model or 'provider default'}")
     lines.append(f"Current provider: {current_provider}")

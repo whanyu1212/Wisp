@@ -79,6 +79,37 @@ def test_configure_model_auto_switches_provider_when_provider_is_explicit_null(
     )
 
 
+def test_configure_model_alias_auto_switches_to_its_provider(tmp_path: Path) -> None:
+    # Aliases are cataloged for validation and metadata lookup but must preserve
+    # their original request value. This proves the registry's alias index also
+    # reaches the real configure path rather than only unit-level helpers.
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"configure-1","type":"configure","model":"gemini-flash-latest"}\n'
+            '{"id":"cmd-1","type":"prompt","prompt":"hello"}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "GOOGLE_API_KEY": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    auto_switched = [
+        record for record in records if record["type"] == "model.provider_auto_switched"
+    ]
+    assert len(auto_switched) == 1
+    assert auto_switched[0]["provider"] == "google"
+    assert auto_switched[0]["model"] == "gemini-flash-latest"
+    assert any(
+        record.get("message")
+        == "GOOGLE_API_KEY or GEMINI_API_KEY is required when using the google provider"
+        for record in records
+    )
+
+
 def test_configure_model_leaves_provider_alone_when_model_belongs_to_current_provider(
     tmp_path: Path,
 ) -> None:
@@ -133,16 +164,16 @@ def test_configure_unknown_model_falls_through_without_error(tmp_path: Path) -> 
 
 
 def test_configure_ambiguous_model_falls_through_without_error(tmp_path: Path) -> None:
-    # "gpt-5.5" is claimed by both openai and openai-codex in the built-in
-    # catalog, and "fake" (the active provider) doesn't match either -- this
-    # must not raise or silently guess a winner.
+    # ``gpt-5.6`` is an alias claimed by both openai and openai-codex, and
+    # "fake" (the active provider) doesn't match either -- this must not raise
+    # or silently guess a winner.
     runner = CliRunner()
 
     result = runner.invoke(
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
         input=(
-            '{"id":"configure-1","type":"configure","model":"gpt-5.5"}\n'
+            '{"id":"configure-1","type":"configure","model":"gpt-5.6"}\n'
             '{"id":"cmd-1","type":"prompt","prompt":"hello"}\n'
         ),
         env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},

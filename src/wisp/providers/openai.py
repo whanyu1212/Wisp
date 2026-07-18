@@ -49,7 +49,7 @@ from wisp.providers.events import (
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
-DEFAULT_OPENAI_MODEL = "gpt-5.5"
+DEFAULT_OPENAI_MODEL = "gpt-5.6-sol"
 OpenAIRole = Literal["user", "assistant", "system", "developer"]
 
 

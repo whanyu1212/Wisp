@@ -19,6 +19,8 @@ def _entry(
     default_model: str,
     models: tuple[str, ...],
     effort_levels: dict[str, tuple[str, ...]] | None = None,
+    model_aliases: dict[str, str] | None = None,
+    model_lifecycle: dict[str, str] | None = None,
 ) -> ModelCatalogProviderEntry:
     return ModelCatalogProviderEntry(
         name=name,
@@ -27,6 +29,8 @@ def _entry(
         docs_url=f"https://example.test/{name}",
         models=models,
         effort_levels=effort_levels or {},
+        model_aliases=model_aliases or {},
+        model_lifecycle=model_lifecycle or {},
     )
 
 
@@ -124,6 +128,35 @@ def test_model_picker_defaults_to_first_selectable_row_when_current_is_uncatalog
     # index 1 == the first entry's first model row (anthropic::claude-opus-4-8).
     assert highlighted == 1
     assert is_disabled is False
+
+
+def test_model_picker_marks_an_alias_current_and_labels_nonstable_models() -> None:
+    entry = _entry(
+        "acme",
+        default_model="acme-1",
+        models=("acme-1", "acme-preview"),
+        model_aliases={"acme-latest": "acme-1"},
+        model_lifecycle={"acme-1": "stable", "acme-preview": "preview"},
+    )
+
+    async def scenario() -> list[str]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            renderer.model_picker_request(
+                (entry,),
+                current_provider="acme",
+                current_model="acme-latest",
+                current_effort=None,
+            )
+            await pilot.pause()
+            options = app.query_one("#model-picker-options", OptionList)
+            return [str(options.get_option_at_index(i).prompt) for i in range(options.option_count)]
+
+    assert anyio.run(scenario) == [
+        "acme",
+        "  acme-1 (current)",
+        "  acme-preview (preview)",
+    ]
 
 
 def test_model_picker_hides_composer_and_focuses_options() -> None:

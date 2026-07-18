@@ -37,7 +37,7 @@ from wisp.providers.events import (
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
-DEFAULT_GOOGLE_MODEL = "gemini-flash-latest"
+DEFAULT_GOOGLE_MODEL = "gemini-3.5-flash"
 
 # Gemini's API is stateless per call, like Anthropic's -- but unlike Anthropic,
 # a streamed tool call arrives as one fully-formed function_call part (args is
@@ -121,9 +121,8 @@ class GoogleProvider:
         ``previous_response_id`` -- see ``_MAX_PENDING_REPLAYS``.
 
         ``effort`` maps to ``ThinkingConfig.thinking_level`` (Gemini's
-        ``"MINIMAL"``/``"LOW"``/``"MEDIUM"``/``"HIGH"`` tiers, confirmed
-        live only on ``gemini-flash-latest`` -- see ``_create_stream``) --
-        passed through unvalidated.
+        ``"MINIMAL"``/``"LOW"``/``"MEDIUM"``/``"HIGH"`` tiers where the
+        selected model supports them) and is passed through unvalidated.
         """
 
         selected_model = model or self.default_model or DEFAULT_GOOGLE_MODEL
@@ -299,9 +298,7 @@ class GoogleProvider:
             contents.extend(self._get_replay(previous_response_id))
             contents.append(self._tool_results_to_content(tool_results))
 
-        # thinking_level only -- confirmed live that it applies to
-        # gemini-flash-latest but is outright rejected (400) on
-        # gemini-2.5-pro/gemini-2.5-flash, which need thinking_budget (a
+        # thinking_level only -- Gemini 2.5 models need thinking_budget (a
         # numeric token count) instead. This provider does not translate
         # named tiers into a budget number, so effort is a no-op on models
         # that require thinking_budget -- Gemini raises its own 400 for an
