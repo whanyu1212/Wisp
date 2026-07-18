@@ -296,6 +296,23 @@ class ModelRegistry:
             return model_id in entry.models
         return False
 
+    def context_window(
+        self,
+        provider_name: str,
+        model: str | None,
+        *,
+        default_model: str | None = None,
+    ) -> int | None:
+        """Return the catalog context window for the effective provider/model."""
+
+        effective_model = model if model is not None else default_model
+        if effective_model is None:
+            return None
+        for entry in self._catalog.providers:
+            if entry.name == provider_name:
+                return entry.context_windows.get(effective_model)
+        return None
+
 
 def startup_effort(
     registry: ModelRegistry,

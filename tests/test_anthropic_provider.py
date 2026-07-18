@@ -1024,12 +1024,9 @@ def test_anthropic_provider_tool_results_without_a_replay_omit_the_assistant_tur
     ]
 
 
-def test_anthropic_provider_maps_context_window_exceeded_to_length() -> None:
-    # "model_context_window_exceeded" is a beta-only stop reason (Anthropic's
-    # server-side compaction surface, not the GA endpoint this provider
-    # calls) included defensively in the explicit mapping table in case it
-    # ever appears outside beta. It means the response was truncated, so it
-    # must report "length", not a clean "stop".
+def test_anthropic_provider_reports_context_window_exceeded_as_failure() -> None:
+    # This explicit stop reason must remain distinguishable from ordinary output
+    # truncation so the agent loop can emit a structured context.overflow event.
     provider = StubAnthropicProvider(
         [_text_delta("partial answer"), _message_delta("model_context_window_exceeded")]
     )
@@ -1040,9 +1037,11 @@ def test_anthropic_provider_maps_context_window_exceeded_to_length() -> None:
         ]
 
     events = anyio.run(run)
-    completed = events[-1]
-    assert isinstance(completed, ProviderResponseCompleted)
-    assert completed.finish_reason == "length"
+    failure = events[-1]
+    assert failure == ProviderResponseFailed(
+        message="Anthropic model_context_window_exceeded",
+        partial_content="partial answer",
+    )
 
 
 def test_anthropic_provider_defaults_unrecognized_stop_reason_to_length() -> None:

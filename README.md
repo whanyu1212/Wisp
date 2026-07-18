@@ -302,9 +302,9 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 6`; readers also accept legacy schema v5
-events for compatibility. A successful prompt follows this lifecycle (tool events repeat inside a
-turn when the model requests tools):
+Every outbound `WispEvent` includes `"schema_version": 7`; readers also accept legacy schema v5
+and v6 events for compatibility. A successful prompt follows this lifecycle (tool events repeat
+inside a turn when the model requests tools):
 
 ```text
 agent.started
@@ -313,6 +313,7 @@ agent.started
     message.started
     message.delta *
     message.completed
+    context.pressure ?
     tool.call -> tool.execution.started -> approval events -> tool.execution.ended -> tool.result
   turn.completed
 session.saved
@@ -324,7 +325,16 @@ agent.completed
 calls. A failed provider response or tool loop emits `error`, a failed `turn.completed`, and a
 failed `agent.completed`; it does not emit `message.completed` for an incomplete response.
 
-Schema v6 adds optional provider-reported token usage to `message.completed`. The `usage` object records input, output, and total tokens plus provider-supported cache and reasoning categories. Missing provider categories remain `null`; cost estimation, context-pressure thresholds, and compaction are not part of this schema change.
+Schema v7 adds context-window signaling. When catalog metadata is available and a successful
+request reports usage at or above 80% of the model's context window, Wisp emits
+`context.pressure` after `message.completed`. A provider rejection recognized as a context overflow
+emits `context.overflow` before the normal failed-turn events. These events never delete or trim
+history and do not trigger an automatic retry; compaction remains follow-up work.
+
+Schema v6 adds optional provider-reported token usage to `message.completed`. The `usage` object
+records input, output, and total tokens plus provider-supported cache and reasoning categories.
+Missing provider categories remain `null`; cost estimation and compaction are not part of this
+schema change.
 
 Schema v5 adds `model.provider_auto_switched`, emitted during an RPC `configure` command
 immediately before its `rpc.command.finished` when a model-only `/model <id>` request resolves

@@ -515,6 +515,7 @@ async def _run_rpc(
         sessions=sessions,
         events=runtime.events,
         model=config.model,
+        models=runtime.models,
         # Persisted effort (see wisp.settings.persist_user_effort) is a single
         # global string with no provider/model scope -- a tier chosen for a
         # different provider/model in an earlier session could otherwise reach

@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-EVENT_SCHEMA_VERSION = 6
+EVENT_SCHEMA_VERSION = 7
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -26,7 +26,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6] = 6
+    schema_version: Literal[5, 6, 7] = 7
     timestamp: datetime = Field(default_factory=utc_now)
 
 
@@ -101,6 +101,30 @@ class MessageCompleted(WispEvent):
     response_id: str | None = None
     tool_calls: tuple[ToolCallSnapshot, ...] = ()
     usage: TokenUsage | None = None
+
+
+class ContextPressure(WispEvent):
+    """Provider-reported total usage crossed the configured warning threshold."""
+
+    type: Literal["context.pressure"] = "context.pressure"
+    turn: int
+    provider: str
+    model: str | None = None
+    context_window: int = Field(gt=0)
+    observed_tokens: int = Field(ge=0)
+    remaining_tokens: int = Field(ge=0)
+    pressure_ratio: float = Field(ge=0)
+
+
+class ContextOverflow(WispEvent):
+    """A provider rejected a request because its context window was exceeded."""
+
+    type: Literal["context.overflow"] = "context.overflow"
+    turn: int
+    provider: str
+    model: str | None = None
+    context_window: int | None = Field(default=None, gt=0)
+    message: str
 
 
 class ToolCallRequested(WispEvent):
@@ -316,6 +340,8 @@ type KnownWispEvent = Annotated[
     | MessageStarted
     | MessageDelta
     | MessageCompleted
+    | ContextPressure
+    | ContextOverflow
     | ToolCallRequested
     | ToolExecutionStarted
     | ToolApprovalRequested
@@ -340,10 +366,10 @@ JsonObjectAdapter: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 def _require_current_schema(data: JsonObject) -> None:
     version = data.get("schema_version")
-    if version not in (5, EVENT_SCHEMA_VERSION):
+    if version not in (5, 6, EVENT_SCHEMA_VERSION):
         raise ValueError(
             "Unsupported Wisp event schema_version: "
-            f"{version!r}; expected 5 or {EVENT_SCHEMA_VERSION}"
+            f"{version!r}; expected 5, 6, or {EVENT_SCHEMA_VERSION}"
         )
 
 

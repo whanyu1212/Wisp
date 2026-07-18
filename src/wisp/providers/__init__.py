@@ -3,7 +3,7 @@
 from wisp.retry import RetryPolicy, RetrySettings
 
 from .anthropic import AnthropicProvider
-from .base import ToolCallResult, ToolSpec
+from .base import ContextOverflowError, ToolCallResult, ToolSpec
 from .events import (
     ProviderEvent,
     ProviderFinishReason,
@@ -23,6 +23,7 @@ from .openai_codex import OpenAICodexProvider
 
 __all__ = [
     "AnthropicProvider",
+    "ContextOverflowError",
     "FakeProvider",
     "GoogleProvider",
     "OpenAICodexProvider",

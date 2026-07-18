@@ -35,6 +35,8 @@ class AgentHarnessConfig:
     tools: tuple[ToolSpec, ...] = ()
     max_tool_iterations: int | None = None
     effort: str | None = None
+    context_window: int | None = None
+    context_pressure_threshold: float = 0.8
 
 
 class SimpleCancellationToken:
@@ -168,6 +170,8 @@ class AgentHarness:
             max_tool_iterations=self._config.max_tool_iterations,
             cancellation_token=token,
             effort=self._config.effort,
+            context_window=self._config.context_window,
+            context_pressure_threshold=self._config.context_pressure_threshold,
         )
         provider_messages_list: list[Message] = []
         for message in self._messages:

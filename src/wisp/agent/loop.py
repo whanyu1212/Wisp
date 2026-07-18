@@ -14,6 +14,8 @@ from wisp.agent.execution import (
 )
 from wisp.agent.messages import Message
 from wisp.events import (
+    ContextOverflow,
+    ContextPressure,
     ErrorEvent,
     MessageCompleted,
     MessageDelta,
@@ -31,11 +33,13 @@ from wisp.events import (
     TurnStarted,
 )
 from wisp.providers.base import (
+    ContextOverflowError,
     Provider,
     ProviderError,
     ProviderProtocolError,
     ToolCallResult,
     ToolSpec,
+    is_context_overflow_message,
 )
 from wisp.providers.events import (
     ProviderResponseCompleted,
@@ -53,6 +57,8 @@ type AgentLoopEvent = (
     | MessageStarted
     | MessageDelta
     | MessageCompleted
+    | ContextPressure
+    | ContextOverflow
     | ToolCallRequested
     | ToolExecutionStarted
     | ToolApprovalRequested
@@ -87,6 +93,14 @@ class AgentLoopConfig:
     # forwarded to Provider.stream() as-is. None means "use the provider's
     # own default behavior."
     effort: str | None = None
+    context_window: int | None = None
+    context_pressure_threshold: float = 0.8
+
+    def __post_init__(self) -> None:
+        if self.context_window is not None and self.context_window <= 0:
+            raise ValueError("context_window must be positive")
+        if not 0 < self.context_pressure_threshold <= 1:
+            raise ValueError("context_pressure_threshold must be greater than 0 and at most 1")
 
 
 def _is_cancelled(config: AgentLoopConfig) -> bool:
@@ -104,6 +118,24 @@ def _cancelled_turn_events(turn: int) -> tuple[ErrorEvent, TurnCompleted]:
 def _require_provider_response_started(started: bool) -> None:
     if not started:
         raise ProviderProtocolError("Provider emitted response data before response_started")
+
+
+async def _provider_events(
+    stream: AsyncIterator[provider_events.ProviderEvent],
+) -> AsyncIterator[provider_events.ProviderEvent]:
+    """Normalize context overflows raised while advancing a provider stream."""
+
+    iterator = aiter(stream)
+    while True:
+        try:
+            event = await anext(iterator)
+        except StopAsyncIteration:
+            return
+        except Exception as exc:
+            if is_context_overflow_message(str(exc)):
+                raise ContextOverflowError(str(exc)) from exc
+            raise
+        yield event
 
 
 def _validate_execution_event(event: ToolExecutionEvent, tool_call: ToolCall) -> None:
@@ -199,7 +231,7 @@ async def run_agent_loop(
                     tool_results=pending_tool_results,
                     previous_response_id=previous_response_id,
                 )
-            async for provider_event in provider_stream:
+            async for provider_event in _provider_events(provider_stream):
                 if _is_cancelled(config):
                     for event in _cancelled_turn_events(turn):
                         yield event
@@ -264,6 +296,8 @@ async def run_agent_loop(
             if terminal_response is None:
                 raise ProviderProtocolError("Provider stream ended without a terminal response")
             if isinstance(terminal_response, ProviderResponseFailed):
+                if is_context_overflow_message(terminal_response.message):
+                    raise ContextOverflowError(terminal_response.message)
                 raise ProviderError(terminal_response.message)
             if tuple(streamed_tool_calls) != terminal_response.tool_calls:
                 raise ProviderProtocolError(
@@ -283,23 +317,24 @@ async def run_agent_loop(
                     None,
                 )
             previous_response_id = response_id
+            usage = (
+                TokenUsage(
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
+                    total_tokens=response.usage.total_tokens,
+                    cache_read_input_tokens=response.usage.cache_read_input_tokens,
+                    cache_write_input_tokens=response.usage.cache_write_input_tokens,
+                    reasoning_output_tokens=response.usage.reasoning_output_tokens,
+                )
+                if response.usage is not None
+                else None
+            )
             yield MessageCompleted(
                 turn=turn,
                 content=response.content,
                 finish_reason=response.finish_reason,
                 response_id=response_id,
-                usage=(
-                    TokenUsage(
-                        input_tokens=response.usage.input_tokens,
-                        output_tokens=response.usage.output_tokens,
-                        total_tokens=response.usage.total_tokens,
-                        cache_read_input_tokens=response.usage.cache_read_input_tokens,
-                        cache_write_input_tokens=response.usage.cache_write_input_tokens,
-                        reasoning_output_tokens=response.usage.reasoning_output_tokens,
-                    )
-                    if response.usage is not None
-                    else None
-                ),
+                usage=usage,
                 tool_calls=tuple(
                     ToolCallSnapshot(
                         call_id=tool_call.call_id,
@@ -310,6 +345,18 @@ async def run_agent_loop(
                     for tool_call in tool_calls
                 ),
             )
+            if usage is not None and config.context_window is not None:
+                pressure_ratio = usage.total_tokens / config.context_window
+                if pressure_ratio >= config.context_pressure_threshold:
+                    yield ContextPressure(
+                        turn=turn,
+                        provider=config.provider.name,
+                        model=config.model or config.provider.default_model,
+                        context_window=config.context_window,
+                        observed_tokens=usage.total_tokens,
+                        remaining_tokens=max(0, config.context_window - usage.total_tokens),
+                        pressure_ratio=pressure_ratio,
+                    )
 
             if not tool_calls:
                 yield TurnCompleted(
@@ -385,9 +432,22 @@ async def run_agent_loop(
                 finish_reason=response.finish_reason,
             )
     except Exception as exc:
+        overflow_error: ContextOverflowError | None = None
+        if isinstance(exc, ContextOverflowError):
+            overflow_error = exc
+        if overflow_error is not None:
+            yield ContextOverflow(
+                turn=turn,
+                provider=config.provider.name,
+                model=config.model or config.provider.default_model,
+                context_window=config.context_window,
+                message=str(overflow_error),
+            )
         yield ErrorEvent(message=str(exc))
         if turn > 0:
             yield TurnCompleted(turn=turn, outcome="failed", finish_reason="error")
+        if overflow_error is not None and overflow_error is not exc:
+            raise overflow_error from exc
         raise
 
 

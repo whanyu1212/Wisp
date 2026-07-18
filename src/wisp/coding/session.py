@@ -33,6 +33,7 @@ from wisp.events import (
     WispEvent,
 )
 from wisp.providers.base import Provider, ToolSpec
+from wisp.providers.catalog import ModelRegistry
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
@@ -47,6 +48,8 @@ PERSISTED_SESSION_EVENT_TYPES = frozenset(
         "tool.approval.requested",
         "tool.approval.resolved",
         "tool.execution.ended",
+        "context.pressure",
+        "context.overflow",
         "error",
     }
 )
@@ -69,6 +72,7 @@ class CodingSession:
         events: EventBus | None = None,
         model: str | None = None,
         effort: str | None = None,
+        models: ModelRegistry | None = None,
         tools: Sequence[ToolSpec] | None = None,
         tool_registry: ToolRegistry | None = None,
         tool_context: ToolContext | None = None,
@@ -85,6 +89,7 @@ class CodingSession:
         self.events = events
         self.model = model
         self.effort = effort
+        self.models = models
         self.tool_registry = tool_registry
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
@@ -139,6 +144,15 @@ class CodingSession:
                 tools=self.tools,
                 max_tool_iterations=self.max_tool_iterations,
                 effort=self.effort,
+                context_window=(
+                    self.models.context_window(
+                        self.provider.name,
+                        self.model,
+                        default_model=self.provider.default_model,
+                    )
+                    if self.models is not None
+                    else None
+                ),
             ),
             messages=(*prompt_messages, *self._conversation_history(history)),
         )

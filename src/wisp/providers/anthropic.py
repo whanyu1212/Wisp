@@ -293,6 +293,13 @@ class AnthropicProvider:
                 response_id=response_id,
             )
 
+        if failure is None and stop_reason == "model_context_window_exceeded":
+            failure = ProviderResponseFailed(
+                message="Anthropic model_context_window_exceeded",
+                partial_content="".join(chunks),
+                response_id=response_id,
+            )
+
         if failure is None and not stream_completed:
             # Regression guard: the stream ended (cleanly or not) without
             # Anthropic ever reporting a stop_reason. Silently yielding a
