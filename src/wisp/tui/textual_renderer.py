@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 
 from wisp.events import (
     AgentCompleted,
+    CompactionCompleted,
+    CompactionStarted,
     ErrorEvent,
     JsonObject,
     KnownWispEvent,
@@ -31,6 +33,7 @@ from wisp.events import (
 from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tui.rendering import (
     TuiViewSnapshot,
+    _compaction_completed_text,
     _truncate_to_cell_width,
     _tui_help_text,
 )
@@ -307,6 +310,13 @@ class TextualTuiRenderer:
             self._turn_started(event.turn)
         elif isinstance(event, ProviderRetrying):
             self._provider_retrying(event)
+        elif isinstance(event, CompactionStarted):
+            self.app.write_notice("Compacting session...")
+        elif isinstance(event, CompactionCompleted):
+            if event.outcome == "failed":
+                self.app.write_error(_compaction_completed_text(event))
+            else:
+                self.app.write_notice(_compaction_completed_text(event))
         elif isinstance(event, MessageStarted):
             self._message_started(event.turn)
         elif isinstance(event, MessageCompleted):
@@ -371,9 +381,9 @@ class TextualTuiRenderer:
             self._finish_progress()
             self.app.write_error(f"error: {event.message}")
         elif isinstance(event, RpcCommandFinished):
-            if event.command_type == "prompt":
+            if event.command_type in {"prompt", "compact"}:
                 self._finish_progress()
-            if not event.ok:
+            if not event.ok and event.command_type != "compact":
                 self._suspend_progress()
                 self._abort_pending_tools("command failed")
                 self.app.write_error(f"command failed: {event.error or event.command_id}")

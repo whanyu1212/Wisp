@@ -78,6 +78,46 @@ def test_fullscreen_tui_renderer_keeps_retry_progress_out_of_transcript() -> Non
     assert renderer.state.transcript == []
 
 
+def test_line_tui_renderer_renders_compaction_notices() -> None:
+    console, output = _console()
+    renderer = LineTuiRenderer(console)
+
+    renderer.event(CompactionStarted(session_id="session-1", source_entry_count=6))
+    renderer.event(
+        CompactionCompleted(
+            session_id="session-1",
+            outcome="completed",
+            replaced_entry_count=5,
+            retained_entry_count=1,
+        )
+    )
+
+    rendered = output.getvalue()
+    assert "Compacting session..." in rendered
+    assert "Compacted 5 context entries." in rendered
+
+
+def test_fullscreen_tui_renderer_keeps_history_and_adds_compaction_notices() -> None:
+    renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+    renderer.event(completed_message(content="visible answer"))
+
+    renderer.event(CompactionStarted(session_id="session-1", source_entry_count=6))
+    renderer.event(
+        CompactionCompleted(
+            session_id="session-1",
+            outcome="completed",
+            replaced_entry_count=5,
+            retained_entry_count=1,
+        )
+    )
+
+    assert [(entry.role, entry.content) for entry in renderer.state.transcript] == [
+        ("assistant", "visible answer"),
+        ("system", "Compacting session..."),
+        ("system", "Compacted 5 context entries."),
+    ]
+
+
 def test_tui_trust_on_closed_input_sends_transient_denial() -> None:
     # Regression: when input has already closed and a TrustRequested arrives, the shell
     # must answer trusted=False as a transient denial. The RPC gate persists explicit

@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Literal, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from wisp.events import (
     FinishReason,
@@ -37,6 +37,27 @@ class Message(BaseModel):
     is_error: bool | None = None
     usage: TokenUsage | None = None
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class CompactionRecord(BaseModel):
+    """Versioned payload describing an append-only context compaction."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    schema_version: Literal[1] = 1
+    summary: str
+    replaced_entry_ids: tuple[str, ...] = Field(min_length=1)
+    provider: str
+    model: str | None = None
+    instructions: str | None = None
+    usage: TokenUsage | None = None
+
+    @field_validator("summary")
+    @classmethod
+    def _validate_summary(cls, summary: str) -> str:
+        if not summary.strip():
+            raise ValueError("compaction summary must not be blank")
+        return summary
 
 
 def message_from_completion_event(
@@ -99,15 +120,21 @@ class SessionEntry(BaseModel):
 
     id: str = Field(default_factory=lambda: uuid4().hex)
     session_id: str
-    kind: Literal["message", "event"] = "message"
+    kind: Literal["message", "event", "compaction"] = "message"
     message: Message | None = None
     event: JsonObject | None = None
+    compaction: CompactionRecord | None = None
+    operation_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
     @model_validator(mode="after")
     def _validate_payload(self) -> Self:
-        if self.kind == "message" and self.message is None:
-            raise ValueError("message session entries require a message")
-        if self.kind == "event" and self.event is None:
-            raise ValueError("event session entries require an event")
+        payloads = {
+            "message": self.message,
+            "event": self.event,
+            "compaction": self.compaction,
+        }
+        populated = tuple(name for name, payload in payloads.items() if payload is not None)
+        if populated != (self.kind,):
+            raise ValueError(f"{self.kind} session entries require exactly a {self.kind} payload")
         return self

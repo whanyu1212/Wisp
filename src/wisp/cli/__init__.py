@@ -58,9 +58,9 @@ _session_for_print_run = _cli_tools._session_for_print_run
 # existing callers and tests keep importing them from wisp.cli.
 _RpcInputCommand = _cli_rpc._RpcInputCommand
 _RpcInputClosed = _cli_rpc._RpcInputClosed
-_RpcPromptCompleted = _cli_rpc._RpcPromptCompleted
+_RpcCommandCompleted = _cli_rpc._RpcCommandCompleted
 _RpcSessionState = _cli_rpc._RpcSessionState
-_RpcRunningPrompt = _cli_rpc._RpcRunningPrompt
+_RpcRunningCommand = _cli_rpc._RpcRunningCommand
 _RpcPendingApproval = _cli_rpc._RpcPendingApproval
 _RpcToolApprovalPolicy = _cli_rpc._RpcToolApprovalPolicy
 
@@ -82,6 +82,8 @@ _send_rpc_input_line = _cli_rpc._send_rpc_input_line
 _decode_rpc_stdin_line = _cli_rpc._decode_rpc_stdin_line
 _start_rpc_prompt_command = _cli_rpc._start_rpc_prompt_command
 _run_rpc_prompt_command = _cli_rpc._run_rpc_prompt_command
+_start_rpc_compact_command = _cli_rpc._start_rpc_compact_command
+_run_rpc_compact_command = _cli_rpc._run_rpc_compact_command
 _updated_rpc_history = _cli_rpc._updated_rpc_history
 _reject_rpc_command = _cli_rpc._reject_rpc_command
 _handle_rpc_control_command = _cli_rpc._handle_rpc_control_command
@@ -523,7 +525,7 @@ async def _run_print(
     provider = runtime.providers.get(config.provider)
     sessions = JsonlSessionStore(config.session_dir)
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
-    history = session.read_messages() if session is not None else ()
+    history = session.read_context_messages() if session is not None else ()
     agent = CodingSession(
         provider=provider,
         sessions=sessions,

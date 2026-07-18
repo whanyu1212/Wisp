@@ -17,6 +17,7 @@ from wisp.auth.storage import (
 )
 from wisp.config import DEFAULT_PROVIDER, default_auth_path
 from wisp.events import (
+    CompactionCompleted,
     ErrorEvent,
     KnownWispEvent,
     MessageCompleted,
@@ -61,6 +62,7 @@ from wisp.tui.state import (
     _InputLine,
     _InputMode,
     _prompt_for_mode,
+    _prompt_for_status,
     _RpcEvent,
     _RpcEventsClosed,
     _TuiSignal,
@@ -72,6 +74,13 @@ class TuiController(Protocol):
     """Controller surface consumed by the TUI shell."""
 
     async def prompt(self, prompt: str, *, command_id: str | None = None) -> str: ...
+
+    async def compact(
+        self,
+        instructions: str | None = None,
+        *,
+        command_id: str | None = None,
+    ) -> str: ...
 
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str: ...
 
@@ -213,7 +222,7 @@ class TuiShell:
         mode = _input_mode_for_status(self.state.status)
         self._update_view(
             status=_view_status_for_status(self.state.status),
-            input_hint=_prompt_for_mode(mode),
+            input_hint=_prompt_for_status(self.state.status),
             input_mode=mode,
             queued_follow_ups=len(self.state.queued_prompts),
         )
@@ -244,7 +253,7 @@ class TuiShell:
             while True:
                 mode = _input_mode_for_status(self.state.status)
                 try:
-                    text = await self.prompt_reader(_prompt_for_mode(mode))
+                    text = await self.prompt_reader(_prompt_for_status(self.state.status))
                 except EOFError:
                     await send.send(_InputClosed(mode=self._submitted_input_mode(mode)))
                     return
@@ -345,9 +354,19 @@ class TuiShell:
         if self.state.pending_approval is not None:
             self.renderer.command_error("Cannot run slash commands while approval is pending.")
             return False
-        if self.state.current_command_id is not None:
-            self.renderer.command_error("Cannot run slash commands while a prompt is running.")
+        if self.state.pending_trust is not None:
+            self.renderer.command_error("Cannot run slash commands while trust is pending.")
             return False
+        if self.state.current_command_id is not None:
+            operation = self._active_operation()
+            self.renderer.command_error(f"Cannot run slash commands while {operation} is running.")
+            return False
+        if command.name is TuiSlashCommandName.compact:
+            if self.state.status is not TuiStatus.idle:
+                self.renderer.command_error("Cannot compact while another operation is active.")
+                return False
+            instructions = " ".join(command.args).strip() or None
+            return await self._start_compaction(instructions)
         if command.name is TuiSlashCommandName.auth:
             self._auth.status(command.args)
             return False
@@ -511,7 +530,10 @@ class TuiShell:
         if self.state.current_command_id is not None:
             self._clear_queued_prompts()
             self._update_view(queued_follow_ups=0)
-            self.renderer.input_closed_finishing_prompt()
+            if self.state.current_command_type == "compact":
+                self.renderer.notice("input closed; finishing compaction")
+            else:
+                self.renderer.input_closed_finishing_prompt()
             return False
         return await self._request_shutdown()
 
@@ -533,7 +555,12 @@ class TuiShell:
                 exit_after_denial=False,
             )
         if self.state.current_command_id is not None:
-            return await self._cancel_current("Cancelling current prompt...")
+            message = (
+                "Cancelling compaction..."
+                if self.state.current_command_type == "compact"
+                else "Cancelling current prompt..."
+            )
+            return await self._cancel_current(message)
         self.renderer.input_cleared()
         return False
 
@@ -556,11 +583,17 @@ class TuiShell:
                 exit_after_denial=True,
             )
         if self.state.current_command_id is not None:
-            return await self._cancel_current("Quit requested; cancelling current prompt...")
+            message = (
+                "Quit requested; cancelling compaction..."
+                if self.state.current_command_type == "compact"
+                else "Quit requested; cancelling current prompt..."
+            )
+            return await self._cancel_current(message)
         return await self._request_shutdown()
 
     async def _start_prompt(self, prompt: str) -> bool:
         self.state.status = TuiStatus.running
+        self.state.current_command_type = "prompt"
         self.state.pending_approval = None
         self.state.cancel_requested = False
         self.state.token_stream_started = False
@@ -571,9 +604,34 @@ class TuiShell:
         try:
             command_id = await self.controller.prompt(prompt)
         except Exception as exc:
+            self.state.current_command_type = None
             self._update_view(status="error")
             self.renderer.send_failed("prompt", exc)
             return True
+        self.state.current_command_id = command_id
+        return False
+
+    async def _start_compaction(self, instructions: str | None) -> bool:
+        self.state.status = TuiStatus.compacting
+        self.state.current_command_type = "compact"
+        self.state.pending_approval = None
+        self.state.cancel_requested = False
+        self.state.token_stream_started = False
+        self.state.rendered_tokens = False
+        self._sync_view()
+        self.renderer.running()
+        try:
+            command_id = await self.controller.compact(instructions)
+        except Exception as exc:  # noqa: BLE001 - keep the TUI usable after a send failure
+            self.state.status = TuiStatus.idle
+            self.state.current_command_type = None
+            self._update_view(
+                status="error",
+                input_hint=_prompt_for_mode(_InputMode.idle),
+                input_mode=_InputMode.idle,
+            )
+            self.renderer.send_failed("compact", exc)
+            return False
         self.state.current_command_id = command_id
         return False
 
@@ -594,7 +652,7 @@ class TuiShell:
             self._update_view(status="error")
             self.renderer.send_failed("cancel", exc)
             return True
-        self.state.status = TuiStatus.running
+        self.state.status = self._active_status()
         self.state.pending_approval = None
         return False
 
@@ -662,7 +720,7 @@ class TuiShell:
         self.state.pending_approval = None
         if not ok:
             return True
-        self.state.status = TuiStatus.running if self.state.current_command_id else TuiStatus.idle
+        self.state.status = self._active_status()
         if exit_after_denial and not selected_approved:
             self.state.exit_requested = True
         self._sync_view()
@@ -732,7 +790,7 @@ class TuiShell:
         self.state.pending_trust = None
         if not ok:
             return True
-        self.state.status = TuiStatus.running if self.state.current_command_id else TuiStatus.idle
+        self.state.status = self._active_status()
         self._sync_view()
         return False
 
@@ -763,7 +821,7 @@ class TuiShell:
                 status=(
                     f"retrying {event.attempt}/{event.max_attempts} in {event.delay_seconds:.1f}s"
                 ),
-                input_hint=_prompt_for_mode(_InputMode.running),
+                input_hint=_prompt_for_status(self._active_status()),
                 input_mode=_InputMode.running,
                 queued_follow_ups=len(self.state.queued_prompts),
             )
@@ -900,11 +958,13 @@ class TuiShell:
 
     async def _finish_current_prompt(self, event: RpcCommandFinished) -> bool:
         was_cancelled = (not event.ok) and _is_rpc_cancelled_message(event.error)
+        finished_command_type = self.state.current_command_type
         self.state.current_command_id = None
+        self.state.current_command_type = None
         self.state.pending_approval = None
         self.state.token_stream_started = False
         self.state.rendered_tokens = False
-        if self.state.exit_requested or not event.ok:
+        if self.state.exit_requested or (not event.ok and finished_command_type != "compact"):
             self._clear_queued_prompts()
         if self.state.exit_requested:
             self.state.cancel_requested = False
@@ -968,6 +1028,8 @@ class TuiShell:
         if self.state.cancel_requested:
             if isinstance(event, ErrorEvent) and _is_rpc_cancelled_message(event.message):
                 return
+            if isinstance(event, CompactionCompleted) and event.outcome == "cancelled":
+                return
             if (
                 isinstance(event, RpcCommandFinished)
                 and not event.ok
@@ -977,8 +1039,19 @@ class TuiShell:
                 self.state.cancel_requested = False
                 self._clear_queued_prompts()
                 self._sync_view()
-                self.renderer.cancelled()
+                if event.command_type == "compact":
+                    self.renderer.notice("Compaction cancelled.")
+                else:
+                    self.renderer.cancelled()
                 return
+        if (
+            isinstance(event, CompactionCompleted)
+            and event.outcome == "failed"
+            and self.state.current_command_type == "compact"
+        ):
+            # CodingSession emits a detailed ErrorEvent immediately before this
+            # typed terminal event; avoid presenting the same failure twice.
+            return
         if isinstance(event, SessionSaved):
             self._update_view(last_session=_compact_session_path(event.path))
         if isinstance(event, ErrorEvent):
@@ -986,6 +1059,16 @@ class TuiShell:
         if isinstance(event, RpcCommandFinished) and not event.ok:
             self._update_view(status="error")
         self.renderer.event(event)
+
+    def _active_operation(self) -> str:
+        return "compaction" if self.state.current_command_type == "compact" else "a prompt"
+
+    def _active_status(self) -> TuiStatus:
+        if self.state.current_command_id is None and self.state.current_command_type is None:
+            return TuiStatus.idle
+        if self.state.current_command_type == "compact":
+            return TuiStatus.compacting
+        return TuiStatus.running
 
 
 async def _default_prompt_reader(prompt: str) -> str:

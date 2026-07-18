@@ -22,7 +22,7 @@ _FORBIDDEN_IMPORTS = (
     "wisp.trust",
     "wisp.tui",
 )
-_CODING_MODULES = ("session.py", "tool_execution.py")
+_CODING_MODULES = ("compaction.py", "session.py", "tool_execution.py")
 _CODING_FORBIDDEN_IMPORTS = (
     "wisp.agent.compat",
     "wisp.cli",
@@ -100,6 +100,7 @@ def test_coding_package_exports_session_coordinator() -> None:
     "module",
     [
         "wisp.agent.harness",
+        "wisp.coding.compaction",
         "wisp.coding.session",
         "wisp.coding.tool_execution",
         "wisp.providers.base",

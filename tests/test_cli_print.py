@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from tests.cli_support import *
+from wisp.agent.messages import CompactionRecord, SessionEntry
+from wisp.events import MessageCompleted, WispEvent
+from wisp.sessions.replay import HISTORICAL_CONTEXT_SUMMARY_LABEL
 
 
 def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
@@ -192,6 +195,76 @@ def test_print_mode_resume_appends_to_named_session(tmp_path: Path) -> None:
     ] == [
         "first",
         "second",
+    ]
+
+
+def test_print_mode_resume_uses_compaction_replay(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write_session() -> None:
+        first = await session.append_message(Message(role="user", content="raw first"))
+        first_answer = await session.append_message(
+            Message(role="assistant", content="raw answer", finish_reason="stop")
+        )
+        retained = await session.append_message(Message(role="user", content="retained"))
+        retained_answer = await session.append_message(
+            Message(role="assistant", content="retained answer", finish_reason="stop")
+        )
+        await session.append_compaction_entry(
+            SessionEntry(
+                session_id=session.session_id,
+                kind="compaction",
+                compaction=CompactionRecord(
+                    summary="durable summary",
+                    replaced_entry_ids=(first.id, first_answer.id),
+                    provider="fake",
+                ),
+            ),
+            expected_context_entry_ids=(
+                first.id,
+                first_answer.id,
+                retained.id,
+                retained_answer.id,
+            ),
+        )
+
+    anyio.run(write_session)
+    captured_history: tuple[Message, ...] = ()
+
+    async def capture_run(
+        self: CodingSession,
+        prompt: str,
+        *,
+        session: JsonlSession | None = None,
+        history: Sequence[Message] = (),
+    ) -> AsyncIterator[WispEvent]:
+        nonlocal captured_history
+        captured_history = tuple(history)
+        yield MessageCompleted(turn=1, content="replayed", finish_reason="stop")
+
+    monkeypatch.setattr(CodingSession, "run", capture_run)
+    result = CliRunner().invoke(
+        app,
+        [
+            "-p",
+            "next",
+            "--resume",
+            session.path.name,
+            "--session-dir",
+            str(tmp_path),
+        ],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "replayed\n"
+    assert [message.content for message in captured_history] == [
+        f"{HISTORICAL_CONTEXT_SUMMARY_LABEL}\n\ndurable summary",
+        "retained",
+        "retained answer",
     ]
 
 

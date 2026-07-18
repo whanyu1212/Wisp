@@ -1311,3 +1311,177 @@ def test_tui_shell_clears_queued_follow_ups_after_failed_prompt() -> None:
         assert "running queued follow-up" not in rendered
 
     anyio.run(run)
+
+
+def test_tui_shell_compact_calls_controller_without_prompting_and_returns_idle() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            compact_events=[
+                [
+                    CompactionStarted(session_id="session-1", source_entry_count=7),
+                    CompactionCompleted(
+                        session_id="session-1",
+                        outcome="completed",
+                        replaced_entry_count=5,
+                        retained_entry_count=2,
+                    ),
+                    RpcCommandFinished(command_id="compact-1", command_type="compact", ok=True),
+                ]
+            ]
+        )
+        renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from(["/compact preserve tool decisions"]),
+        )
+
+        await shell.run()
+
+        assert controller.compactions == ["preserve tool decisions"]
+        assert controller.prompts == []
+        assert shell.state.current_command_id is None
+        assert shell.state.current_command_type is None
+        assert shell.state.status is TuiStatus.exiting
+        assert not any(entry.role == "user" for entry in renderer.state.transcript)
+        assert any(
+            entry.content == "Compacted 5 context entries." for entry in renderer.state.transcript
+        )
+
+    anyio.run(run)
+
+
+def test_tui_shell_bare_compact_passes_no_instructions_and_shows_help() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/help", "/compact"]),
+        )
+
+        await shell.run()
+
+        assert controller.compactions == [None]
+        assert controller.prompts == []
+        assert "/compact [instructions]" in output.getvalue()
+
+    anyio.run(run)
+
+
+def test_tui_shell_queues_prompt_during_compaction_and_runs_it_after_success() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            compact_events=[
+                (
+                    0.05,
+                    [
+                        CompactionStarted(session_id="session-1", source_entry_count=4),
+                        CompactionCompleted(
+                            session_id="session-1",
+                            outcome="completed",
+                            replaced_entry_count=3,
+                            retained_entry_count=1,
+                        ),
+                        RpcCommandFinished(command_id="compact-1", command_type="compact", ok=True),
+                    ],
+                )
+            ]
+        )
+        inputs = deque(["/compact", "use the compacted context"])
+
+        async def read(_prompt: str) -> str:
+            if inputs:
+                return inputs.popleft()
+            await anyio.sleep(0.15)
+            raise EOFError
+
+        console, output = _console()
+        shell = TuiShell(controller, console=console, prompt_reader=read)
+
+        await shell.run()
+
+        assert controller.compactions == [None]
+        assert controller.prompts == ["use the compacted context"]
+        assert "queued follow-up #1" in output.getvalue()
+        assert "Compacted 3 context entries." in output.getvalue()
+
+    anyio.run(run)
+
+
+def test_tui_shell_failed_compaction_runs_queued_prompt_without_duplicate_error() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            compact_events=[
+                (
+                    0.05,
+                    [
+                        ErrorEvent(message="summary failed"),
+                        CompactionCompleted(
+                            session_id="session-1",
+                            outcome="failed",
+                            replaced_entry_count=3,
+                            retained_entry_count=1,
+                            error="summary failed",
+                        ),
+                        RpcCommandFinished(
+                            command_id="compact-1",
+                            command_type="compact",
+                            ok=False,
+                            error="summary failed",
+                        ),
+                    ],
+                )
+            ]
+        )
+        inputs = deque(["/compact", "run with unchanged context"])
+
+        async def read(_prompt: str) -> str:
+            if inputs:
+                return inputs.popleft()
+            await anyio.sleep(0.1)
+            raise EOFError
+
+        console, output = _console()
+        shell = TuiShell(controller, console=console, prompt_reader=read)
+
+        await shell.run()
+
+        assert controller.prompts == ["run with unchanged context"]
+        assert list(shell.state.queued_prompts) == []
+        rendered = output.getvalue()
+        assert rendered.count("summary failed") == 1
+
+    anyio.run(run)
+
+
+def test_tui_shell_compact_send_failure_remains_usable() -> None:
+    class FailingCompactController(ScriptedController):
+        async def compact(
+            self,
+            instructions: str | None = None,
+            *,
+            command_id: str | None = None,
+        ) -> str:
+            self.compactions.append(instructions)
+            raise RuntimeError("pipe closed")
+
+    async def run() -> None:
+        controller = FailingCompactController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["/compact keep this", "/help", "/quit"]),
+        )
+
+        await shell.run()
+
+        assert controller.compactions == ["keep this"]
+        assert shell.state.current_command_id is None
+        assert shell.state.current_command_type is None
+        assert "failed to send compact: pipe closed" in output.getvalue()
+        assert "Commands:" in output.getvalue()
+
+    anyio.run(run)

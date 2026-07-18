@@ -29,8 +29,15 @@ class PromptCommand(RpcCommandModel):
     prompt: str
 
 
+class CompactCommand(RpcCommandModel):
+    """Compact the active persisted session context."""
+
+    type: Literal["compact"] = "compact"
+    instructions: str | None = None
+
+
 class CancelCommand(RpcCommandModel):
-    """Cancel a running prompt command."""
+    """Cancel a running prompt or compact command."""
 
     type: Literal["cancel"] = "cancel"
     target_id: str
@@ -81,6 +88,7 @@ class ConfigureCommand(RpcCommandModel):
 
 type RpcCommand = Annotated[
     PromptCommand
+    | CompactCommand
     | CancelCommand
     | ApprovalCommand
     | TrustCommand

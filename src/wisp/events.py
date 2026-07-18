@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-EVENT_SCHEMA_VERSION = 7
+EVENT_SCHEMA_VERSION = 8
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -26,7 +26,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7] = 7
+    schema_version: Literal[5, 6, 7, 8] = 8
     timestamp: datetime = Field(default_factory=utc_now)
 
 
@@ -289,6 +289,27 @@ class SessionSaved(WispEvent):
     path: Path
 
 
+class CompactionStarted(WispEvent):
+    type: Literal["compaction.started"] = "compaction.started"
+    session_id: str
+    reason: Literal["manual"] = "manual"
+    source_entry_count: int = Field(ge=0)
+
+
+class CompactionCompleted(WispEvent):
+    type: Literal["compaction.completed"] = "compaction.completed"
+    session_id: str
+    reason: Literal["manual"] = "manual"
+    outcome: RunOutcome
+    compaction_id: str | None = None
+    replaced_entry_count: int = Field(ge=0)
+    retained_entry_count: int = Field(ge=0)
+    provider: str | None = None
+    model: str | None = None
+    usage: TokenUsage | None = None
+    error: str | None = None
+
+
 class AgentCompleted(WispEvent):
     type: Literal["agent.completed"] = "agent.completed"
     session_id: str
@@ -353,6 +374,8 @@ type KnownWispEvent = Annotated[
     | ToolResultReady
     | TurnCompleted
     | SessionSaved
+    | CompactionStarted
+    | CompactionCompleted
     | AgentCompleted
     | RpcCommandStarted
     | RpcCommandFinished
@@ -366,11 +389,13 @@ JsonObjectAdapter: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 def _require_current_schema(data: JsonObject) -> None:
     version = data.get("schema_version")
-    if version not in (5, 6, EVENT_SCHEMA_VERSION):
+    if version not in (5, 6, 7, EVENT_SCHEMA_VERSION):
         raise ValueError(
             "Unsupported Wisp event schema_version: "
-            f"{version!r}; expected 5, 6, or {EVENT_SCHEMA_VERSION}"
+            f"{version!r}; expected 5, 6, 7, or {EVENT_SCHEMA_VERSION}"
         )
+    if data.get("type") in {"compaction.started", "compaction.completed"} and version != 8:
+        raise ValueError(f"Compaction events require schema_version 8, got {version!r}")
 
 
 def wisp_event_from_json(line: str) -> KnownWispEvent:

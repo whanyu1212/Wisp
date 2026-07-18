@@ -5,7 +5,10 @@ from __future__ import annotations
 import os
 import stat
 import threading
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from uuid import uuid4
 from weakref import WeakValueDictionary
@@ -15,10 +18,25 @@ from pydantic import ValidationError
 
 from wisp.agent.messages import Message, SessionEntry
 from wisp.events import JsonObject, WispEvent
+from wisp.sessions.replay import (
+    SessionError,
+    SessionReplay,
+    StaleCompactionError,
+    replay_session_entries,
+)
 
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 _FileSignature = tuple[int, int, int, int]
+
+__all__ = [
+    "AmbiguousSessionError",
+    "JsonlSession",
+    "JsonlSessionStore",
+    "SessionError",
+    "SessionNotFoundError",
+    "StaleCompactionError",
+]
 
 
 class _SessionFileState:
@@ -39,10 +57,6 @@ def _session_file_state(path: Path) -> _SessionFileState:
             state = _SessionFileState()
             _SESSION_FILE_STATES[key] = state
         return state
-
-
-class SessionError(RuntimeError):
-    """Base error for session loading and persistence failures."""
 
 
 class SessionNotFoundError(SessionError):
@@ -119,17 +133,32 @@ class JsonlSession:
         self._entry_index_generation: int | None = None
         self._entry_index_signature: _FileSignature | None = None
 
-    async def append_message(self, message: Message) -> SessionEntry:
-        entry = SessionEntry(session_id=self.session_id, message=message)
+    async def append_message(
+        self,
+        message: Message,
+        *,
+        operation_id: str | None = None,
+    ) -> SessionEntry:
+        entry = SessionEntry(
+            session_id=self.session_id,
+            message=message,
+            operation_id=operation_id,
+        )
         return await self.append_entry(entry)
 
-    async def append_event(self, event: WispEvent) -> SessionEntry:
+    async def append_event(
+        self,
+        event: WispEvent,
+        *,
+        operation_id: str | None = None,
+    ) -> SessionEntry:
         """Persist a structured runtime event for audit/debugging."""
 
         entry = SessionEntry(
             session_id=self.session_id,
             kind="event",
             event=event.model_dump(mode="json"),
+            operation_id=operation_id,
         )
         return await self.append_entry(entry)
 
@@ -144,6 +173,29 @@ class JsonlSession:
             await anyio.to_thread.run_sync(self._append_entry_once, entry)
         return entry
 
+    async def append_compaction_entry(
+        self,
+        entry: SessionEntry,
+        *,
+        expected_context_entry_ids: Sequence[str],
+    ) -> SessionEntry:
+        """Atomically append a compaction if its planned context is still active."""
+
+        if entry.session_id != self.session_id:
+            raise SessionError(
+                f"Session entry belongs to {entry.session_id}, not {self.session_id}"
+            )
+        if entry.kind != "compaction":
+            raise SessionError("Atomic compaction append requires a compaction entry")
+        expected = tuple(expected_context_entry_ids)
+        async with self._append_lock:
+            await anyio.to_thread.run_sync(
+                self._append_compaction_entry_once,
+                entry,
+                expected,
+            )
+        return entry
+
     async def truncate_entries(self, count: int) -> None:
         """Remove entries after count, preserving the first count entries."""
 
@@ -151,6 +203,18 @@ class JsonlSession:
             raise ValueError("Session entry count cannot be negative")
         async with self._append_lock:
             await anyio.to_thread.run_sync(self._truncate_entries_once, count)
+
+    async def truncate_operation_entries(self, count: int, *, operation_id: str) -> bool:
+        """Truncate an owned suffix only if no other writer appended within it."""
+
+        if count < 0:
+            raise ValueError("Session entry count cannot be negative")
+        async with self._append_lock:
+            return await anyio.to_thread.run_sync(
+                self._truncate_operation_entries_once,
+                count,
+                operation_id,
+            )
 
     def read_entries(self) -> tuple[SessionEntry, ...]:
         """Read all persisted entries from the session file."""
@@ -165,6 +229,16 @@ class JsonlSession:
             for entry in self.read_entries()
             if entry.kind == "message" and entry.message is not None
         )
+
+    def read_context(self) -> SessionReplay:
+        """Replay the active provider context while preserving durable entry ids."""
+
+        return replay_session_entries(self.read_entries())
+
+    def read_context_messages(self) -> tuple[Message, ...]:
+        """Read only the messages in the active replay context."""
+
+        return self.read_context().messages
 
     def read_events(self) -> tuple[JsonObject, ...]:
         """Read all persisted structured events from the session file."""
@@ -194,18 +268,35 @@ class JsonlSession:
 
     def _append_entry_once(self, entry: SessionEntry) -> None:
         with self._file_state.lock:
-            self._append_entry_locked(entry)
+            with self._interprocess_lock():
+                self._append_entry_locked(entry)
+
+    def _append_compaction_entry_once(
+        self,
+        entry: SessionEntry,
+        expected_context_entry_ids: tuple[str, ...],
+    ) -> None:
+        with self._file_state.lock:
+            with self._interprocess_lock():
+                self._refresh_entry_index()
+                if self._entry_is_persisted_locked(entry):
+                    return
+                assert self._entry_index is not None
+                entries = tuple(self._entry_index.values())
+                replay = replay_session_entries(entries)
+                if replay.context_entry_ids != expected_context_entry_ids:
+                    raise StaleCompactionError(
+                        "Compaction plan is stale: expected context entry ids "
+                        f"{expected_context_entry_ids}, found {replay.context_entry_ids}"
+                    )
+                replay_session_entries((*entries, entry))
+                self._append_entry_locked(entry)
 
     def _append_entry_locked(self, entry: SessionEntry) -> None:
         _ensure_private_directory(self.path.parent)
         self._refresh_entry_index()
-        assert self._entry_index is not None
-
-        existing = self._entry_index.get(entry.id)
-        if existing is not None:
-            if existing == entry:
-                return
-            raise SessionError(f"Session entry id conflicts with persisted data: {entry.id}")
+        if self._entry_is_persisted_locked(entry):
+            return
 
         try:
             self._append_line(entry.model_dump_json(exclude_none=True))
@@ -217,9 +308,19 @@ class JsonlSession:
             self._invalidate_entry_index()
             raise
         self._file_state.generation += 1
+        assert self._entry_index is not None
         self._entry_index[entry.id] = entry
         self._entry_index_generation = self._file_state.generation
         self._entry_index_signature = _session_file_signature(info)
+
+    def _entry_is_persisted_locked(self, entry: SessionEntry) -> bool:
+        assert self._entry_index is not None
+        existing = self._entry_index.get(entry.id)
+        if existing is None:
+            return False
+        if existing == entry:
+            return True
+        raise SessionError(f"Session entry id conflicts with persisted data: {entry.id}")
 
     def _refresh_entry_index(self) -> None:
         info = self._validate_session_file()
@@ -265,11 +366,69 @@ class JsonlSession:
 
     def _truncate_entries_once(self, count: int) -> None:
         with self._file_state.lock:
-            try:
-                self._truncate_entries(count)
-            finally:
-                self._file_state.generation += 1
-                self._invalidate_entry_index()
+            with self._interprocess_lock():
+                try:
+                    self._truncate_entries(count)
+                finally:
+                    self._file_state.generation += 1
+                    self._invalidate_entry_index()
+
+    def _truncate_operation_entries_once(self, count: int, operation_id: str) -> bool:
+        with self._file_state.lock:
+            with self._interprocess_lock():
+                if not self.path.is_file():
+                    return False
+                entries = self.read_entries()
+                suffix = entries[count:]
+                if not suffix or any(entry.operation_id != operation_id for entry in suffix):
+                    return False
+                try:
+                    self._truncate_entries(count)
+                finally:
+                    self._file_state.generation += 1
+                    self._invalidate_entry_index()
+                return True
+
+    @contextmanager
+    def _interprocess_lock(self) -> Iterator[None]:
+        """Serialize session mutations across cooperating Wisp processes."""
+
+        _ensure_private_directory(self.path.parent)
+        lock_path = self.path.with_suffix(f"{self.path.suffix}.lock")
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(lock_path, flags, PRIVATE_FILE_MODE)
+        unlock: Callable[[], object] | None = None
+        try:
+            if os.name == "posix":
+                os.fchmod(fd, PRIVATE_FILE_MODE)
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise SessionError(f"Session lock is not a regular file: {lock_path}")
+            if os.name == "posix":
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                unlock = partial(fcntl.flock, fd, fcntl.LOCK_UN)
+            elif os.name == "nt":
+                import msvcrt
+
+                if info.st_size == 0:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
+                unlock = partial(
+                    msvcrt.locking,  # type: ignore[attr-defined]
+                    fd,
+                    msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
+                    1,
+                )
+            yield
+        finally:
+            if unlock is not None:
+                unlock()
+            os.close(fd)
 
     def _truncate_entries(self, count: int) -> None:
         if not self.path.is_file():

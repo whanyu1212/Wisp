@@ -237,6 +237,18 @@ Project context is trust-gated. In untrusted projects, Wisp does not read local 
 or project settings. This is stricter than Pi's broader context loading, but keeps project
 guidance inside the same trust boundary as project settings and future project extensions.
 
+### Manual compaction
+
+In the TUI, `/compact [instructions]` replaces older provider-visible turns with a structured
+checkpoint while retaining the latest complete user turn verbatim. The summary request uses the
+active provider, model, and effort without tools; optional instructions focus the checkpoint.
+Compaction fails without changing replay if the model cannot produce a complete summary.
+
+Compaction is append-only and intentionally lossy only at replay time. Original messages remain in
+the session JSONL audit log, while subsequent prompts receive the checkpoint plus retained recent
+context. Wisp never splits a tool call from its result. Automatic threshold compaction and
+compact-and-retry after overflow remain follow-up work.
+
 ## TUI
 
 ```bash
@@ -245,8 +257,8 @@ uv run wisp tui
 
 A fullscreen Textual TUI built on the same RPC controller other integrations use. Its compact
 Pi-style footer shows the current working directory/session plus status, queued follow-ups, and
-provider/model; completed tool cards include bounded multiline output previews. Token/cost/context
-metrics will appear once Wisp exposes usage events. Adjust runtime settings with slash commands
+provider/model; completed tool cards include bounded multiline output previews. Aggregate
+token/cost/context metrics remain future footer work. Adjust runtime settings with slash commands
 instead of up-front flags. The prompt editor accepts multiline text: press Enter to submit, or
 Shift+Enter / Ctrl+J to insert a newline. Pasted newlines are preserved.
 
@@ -259,6 +271,7 @@ Available slash commands:
 /logout [provider]
 /provider [provider]        switch provider for future prompts (resets model to default)
 /model [model]              switch model for future prompts
+/compact [instructions]     summarize older context while preserving the JSONL audit
 /quit, /exit
 ```
 
@@ -314,9 +327,9 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 7`; readers also accept legacy schema v5
-and v6 events for compatibility. A successful prompt follows this lifecycle (tool events repeat
-inside a turn when the model requests tools):
+Every outbound `WispEvent` includes `"schema_version": 8`; readers also accept legacy schema v5,
+v6, and v7 events for compatibility. A successful prompt follows this lifecycle (tool events
+repeat inside a turn when the model requests tools):
 
 ```text
 agent.started
@@ -337,11 +350,16 @@ agent.completed
 calls. A failed provider response or tool loop emits `error`, a failed `turn.completed`, and a
 failed `agent.completed`; it does not emit `message.completed` for an incomplete response.
 
+Schema v8 adds `compaction.started` and `compaction.completed`, plus the typed RPC `compact`
+command. Successful manual compaction appends one durable compaction entry and emits
+`session.saved`; failures and pre-commit cancellation leave active replay unchanged. Lifecycle
+events report counts and summary-request usage without duplicating the summary itself.
+
 Schema v7 adds context-window signaling. When catalog metadata is available and a successful
 request reports usage at or above 80% of the model's context window, Wisp emits
 `context.pressure` after `message.completed`. A provider rejection recognized as a context overflow
 emits `context.overflow` before the normal failed-turn events. These events never delete or trim
-history and do not trigger an automatic retry; compaction remains follow-up work.
+history and do not trigger automatic compaction or retry.
 
 Schema v6 adds optional provider-reported token usage to `message.completed`. The `usage` object
 records input, output, and total tokens plus provider-supported cache and reasoning categories.
@@ -384,13 +402,15 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 | Command | Effect |
 |---------|--------|
 | `{"id":"cmd-1","type":"prompt","prompt":"…"}` | Run one agent turn, streaming `WispEvent` JSONL |
-| `{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}` | Request cancellation of the running prompt |
+| `{"id":"compact-1","type":"compact","instructions":"Focus on unresolved work"}` | Compact older context in the active session |
+| `{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}` | Request cancellation of the running prompt or compaction |
 | `{"id":"approval-1","type":"approval","call_id":"call-1","approved":true,"scope":"tool_session"}` | Approve/deny a pending tool request |
 | `{"id":"trust-1","type":"trust","request_id":"req-1","trusted":true}` | Answer a project-trust request |
 | `{"id":"cmd-2","type":"shutdown"}` | Exit cleanly |
 
 Each command emits `rpc.command.started` / `rpc.command.finished` so clients can group the events
-between them. Prompts run sequentially; `cancel` and `approval` are handled while a prompt runs.
+between them. Prompts and compactions run sequentially; `cancel`, `approval`, and `trust` are
+handled while an operation runs.
 When an allowed mutating/command tool needs approval, Wisp emits `tool.approval.requested` with a
 `call_id`; respond with an `approval` command carrying that `call_id`, a boolean `approved`, and an
 optional approval `scope`: `once` (the default), `tool_session` (the exact tool name for this RPC
@@ -429,8 +449,8 @@ finally:
     await controller.close()
 ```
 
-`RpcController` exposes typed `prompt`, `cancel`, `approve`, `configure`, and `shutdown` methods
-and yields parsed `WispEvent` objects.
+`RpcController` exposes typed `prompt`, `compact`, `cancel`, `approve`, `configure`, and `shutdown`
+methods and yields parsed `WispEvent` objects.
 
 ## Development
 

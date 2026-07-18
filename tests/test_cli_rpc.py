@@ -5,8 +5,471 @@ from __future__ import annotations
 import pytest
 
 from tests.cli_support import *
+from wisp.agent.messages import CompactionRecord, SessionEntry
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import ToolCallSnapshot
+from wisp.providers.base import Provider
+from wisp.providers.catalog import ModelRegistry, effective_catalog
+from wisp.providers.events import ProviderResponseCompleted, ProviderResponseStarted
+from wisp.sessions.replay import HISTORICAL_CONTEXT_SUMMARY_LABEL
+
+VALID_COMPACTION_SUMMARY = """## Goal
+Preserve the active coding objective.
+## Constraints & Preferences
+Keep changes focused.
+## Progress
+### Done
+Reviewed the prior turn.
+### In Progress
+Continue implementation.
+### Blocked
+None.
+## Key Decisions
+Use append-only replay.
+## Next Steps
+Run the tests.
+## Critical Context
+The session audit remains intact."""
+
+
+async def _runtime_with_provider(provider: Provider) -> WispRuntime:
+    providers = ProviderRegistry()
+    tools = ToolRegistry()
+    events = EventBus()
+    api = ExtensionAPI(providers=providers, tools=tools, events=events)
+    providers.register(provider)
+    return WispRuntime(
+        providers=providers,
+        tools=tools,
+        events=events,
+        api=api,
+        models=ModelRegistry(effective_catalog(home_dir=Path("/nonexistent-test-home"))),
+    )
+
+
+def _create_two_turn_session(tmp_path: Path) -> JsonlSession:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        for prompt, answer in (("first", "answer one"), ("second", "answer two")):
+            await session.append_message(Message(role="user", content=prompt))
+            await session.append_message(
+                Message(role="assistant", content=answer, finish_reason="stop")
+            )
+
+    anyio.run(write)
+    return session
+
+
+def _create_compacted_session(tmp_path: Path) -> JsonlSession:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        first = await session.append_message(Message(role="user", content="raw first"))
+        first_answer = await session.append_message(
+            Message(role="assistant", content="raw first answer", finish_reason="stop")
+        )
+        retained = await session.append_message(Message(role="user", content="retained second"))
+        retained_answer = await session.append_message(
+            Message(role="assistant", content="retained answer", finish_reason="stop")
+        )
+        await session.append_compaction_entry(
+            SessionEntry(
+                session_id=session.session_id,
+                kind="compaction",
+                compaction=CompactionRecord(
+                    summary="durable summary",
+                    replaced_entry_ids=(first.id, first_answer.id),
+                    provider="replay-aware-test",
+                ),
+            ),
+            expected_context_entry_ids=(
+                first.id,
+                first_answer.id,
+                retained.id,
+                retained_answer.id,
+            ),
+        )
+
+    anyio.run(write)
+    return session
+
+
+def test_cancelled_prompt_rollback_preserves_concurrent_compaction(tmp_path: Path) -> None:
+    session = _create_two_turn_session(tmp_path)
+    initial_entries = session.read_entries()
+    entry_start = len(initial_entries)
+
+    async def append_prompt_and_compaction() -> None:
+        await session.append_message(
+            Message(role="system", content="current system prompt"),
+            operation_id="prompt-1",
+        )
+        pending_user = await session.append_message(
+            Message(role="user", content="cancel me"),
+            operation_id="prompt-1",
+        )
+        context = session.read_context()
+        await session.append_compaction_entry(
+            SessionEntry(
+                session_id=session.session_id,
+                kind="compaction",
+                compaction=CompactionRecord(
+                    summary="durable summary",
+                    replaced_entry_ids=(initial_entries[0].id, initial_entries[1].id),
+                    provider="test",
+                ),
+            ),
+            expected_context_entry_ids=context.context_entry_ids,
+        )
+        assert pending_user.id in session.read_context().context_entry_ids
+        truncated = await session.truncate_operation_entries(
+            entry_start,
+            operation_id="prompt-1",
+        )
+        assert truncated is False
+
+    anyio.run(append_prompt_and_compaction)
+
+    assert cli_module.rpc._rpc_has_durable_completion(session, entry_start) is False
+    assert any(entry.kind == "compaction" for entry in session.read_entries()[entry_start:])
+
+
+def _is_compaction_request(messages: Sequence[Message]) -> bool:
+    return any(
+        message.role == "system"
+        and "Create a concise, durable coding-session checkpoint" in message.content
+        for message in messages
+    )
+
+
+class ReplayAwareProvider:
+    name = "replay-aware-test"
+    default_model: str | None = "replay-aware-test"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Message, ...]] = []
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+        effort: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        call = tuple(messages)
+        self.calls.append(call)
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        if _is_compaction_request(messages):
+            yield ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY)
+            return
+        prompt = _last_user_prompt(messages)
+        if prompt in {"third", "after repeat", "resume check"}:
+            contents = [message.content for message in messages]
+            replayed = any(
+                content.startswith(HISTORICAL_CONTEXT_SUMMARY_LABEL) for content in contents
+            ) and ("second" in contents or "retained second" in contents)
+            raw_resurrected = "first" in contents or "raw first" in contents
+            content = (
+                "saw replay context" if replayed and not raw_resurrected else "bad raw history"
+            )
+        else:
+            content = f"answer {prompt}"
+        yield ProviderResponseCompleted(content=content)
+
+
+class BlockingOperationProvider:
+    name = "blocking-operation-test"
+    default_model: str | None = "blocking-operation-test"
+
+    def __init__(self, *, block_compaction: bool = False, block_prompt: bool = False) -> None:
+        self.block_compaction = block_compaction
+        self.block_prompt = block_prompt
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+        effort: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        compacting = _is_compaction_request(messages)
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        if (compacting and self.block_compaction) or (not compacting and self.block_prompt):
+            await anyio.sleep_forever()
+        yield ProviderResponseCompleted(
+            content=VALID_COMPACTION_SUMMARY
+            if compacting
+            else f"done {_last_user_prompt(messages)}"
+        )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        {"id": "compact-1", "type": "compact"},
+        {"id": "compact-1", "type": "compact", "instructions": None},
+        {"id": "compact-1", "type": "compact", "instructions": ""},
+        {"id": "compact-1", "type": "compact", "instructions": "   "},
+        {"id": "compact-1", "type": "compact", "instructions": "Keep paths"},
+    ],
+)
+def test_rpc_compact_accepts_optional_string_instructions_but_requires_session(
+    tmp_path: Path,
+    command: dict[str, object],
+) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=f"{json.dumps(command)}\n",
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == [
+        "rpc.command.started",
+        "error",
+        "rpc.command.finished",
+    ]
+    assert records[1]["message"] == ("RPC compact command requires an existing persisted session")
+    assert records[2]["ok"] is False
+    assert not list(tmp_path.glob("*.jsonl"))
+
+
+def test_rpc_compact_rejects_non_string_instructions_and_remains_usable(
+    tmp_path: Path,
+) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"compact-1","type":"compact","instructions":3}\n'
+            '{"id":"prompt-1","type":"prompt","prompt":"hello"}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    compact = next(
+        record
+        for record in records
+        if record["type"] == "rpc.command.finished" and record["command_id"] == "compact-1"
+    )
+    prompt = next(
+        record
+        for record in records
+        if record["type"] == "rpc.command.finished" and record["command_id"] == "prompt-1"
+    )
+    assert compact["ok"] is False
+    assert compact["error"] == "RPC compact command field instructions must be a string"
+    assert prompt["ok"] is True
+
+
+def test_rpc_prompt_compact_prompt_replays_summary_and_retained_history(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    provider = ReplayAwareProvider()
+
+    async def build_runtime() -> WispRuntime:
+        return await _runtime_with_provider(provider)
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"prompt-1","type":"prompt","prompt":"first"}\n'
+            '{"id":"prompt-2","type":"prompt","prompt":"second"}\n'
+            '{"id":"compact-1","type":"compact","instructions":"  Keep paths  "}\n'
+            '{"id":"prompt-3","type":"prompt","prompt":"third"}\n'
+        ),
+        env={"WISP_PROVIDER": provider.name, "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    compact_start = next(
+        index
+        for index, record in enumerate(records)
+        if record["type"] == "rpc.command.started" and record["command_id"] == "compact-1"
+    )
+    compact_finish = next(
+        index
+        for index, record in enumerate(records)
+        if record["type"] == "rpc.command.finished" and record["command_id"] == "compact-1"
+    )
+    assert [record["type"] for record in records[compact_start : compact_finish + 1]] == [
+        "rpc.command.started",
+        "compaction.started",
+        "session.saved",
+        "compaction.completed",
+        "rpc.command.finished",
+    ]
+    assert any(record.get("content") == "saw replay context" for record in records)
+    assert all(
+        record["ok"] is True for record in records if record["type"] == "rpc.command.finished"
+    )
+
+    session = JsonlSessionStore(tmp_path).latest()
+    raw_contents = [message.content for message in session.read_messages()]
+    context_contents = [message.content for message in session.read_context_messages()]
+    assert "first" in raw_contents
+    assert "answer first" in raw_contents
+    assert "first" not in context_contents
+    assert "answer first" not in context_contents
+    assert context_contents[0] == (
+        f"{HISTORICAL_CONTEXT_SUMMARY_LABEL}\n\n{VALID_COMPACTION_SUMMARY}"
+    )
+    compaction = next(entry.compaction for entry in session.read_entries() if entry.compaction)
+    assert compaction.instructions == "Keep paths"
+
+
+def test_rpc_resume_initial_history_uses_compaction_replay(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = _create_compacted_session(tmp_path)
+    provider = ReplayAwareProvider()
+
+    async def build_runtime() -> WispRuntime:
+        return await _runtime_with_provider(provider)
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    result = CliRunner().invoke(
+        app,
+        [
+            "--mode",
+            "rpc",
+            "--resume",
+            session.path.name,
+            "--session-dir",
+            str(tmp_path),
+        ],
+        input='{"id":"prompt-1","type":"prompt","prompt":"resume check"}\n',
+        env={"WISP_PROVIDER": provider.name, "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert any(
+        record.get("content") == "saw replay context" for record in _jsonl_records(result.stdout)
+    )
+
+
+def test_rpc_queues_compact_behind_running_prompt(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = _create_two_turn_session(tmp_path)
+    provider = BlockingOperationProvider(block_prompt=True)
+
+    async def build_runtime() -> WispRuntime:
+        return await _runtime_with_provider(provider)
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--resume", session.path.name, "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"prompt-1","type":"prompt","prompt":"slow"}\n'
+            '{"id":"compact-1","type":"compact"}\n'
+            '{"id":"cancel-1","type":"cancel","target_id":"prompt-1"}\n'
+        ),
+        env={"WISP_PROVIDER": provider.name, "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [(record["command_id"], record["ok"]) for record in finished] == [
+        ("cancel-1", True),
+        ("prompt-1", False),
+        ("compact-1", True),
+    ]
+    assert any(entry.kind == "compaction" for entry in session.read_entries())
+
+
+def test_rpc_cancels_blocked_compact_then_runs_queued_prompt(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = _create_two_turn_session(tmp_path)
+    provider = BlockingOperationProvider(block_compaction=True)
+
+    async def build_runtime() -> WispRuntime:
+        return await _runtime_with_provider(provider)
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--resume", session.path.name, "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"compact-1","type":"compact"}\n'
+            '{"id":"prompt-1","type":"prompt","prompt":"after cancel"}\n'
+            '{"id":"cancel-1","type":"cancel","target_id":"compact-1"}\n'
+        ),
+        env={"WISP_PROVIDER": provider.name, "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [(record["command_id"], record["ok"]) for record in finished] == [
+        ("cancel-1", True),
+        ("compact-1", False),
+        ("prompt-1", True),
+    ]
+    compact_finished = finished[1]
+    assert compact_finished["error"] == "RPC command cancelled: compact-1"
+    cancelled = next(record for record in records if record["type"] == "compaction.completed")
+    assert cancelled["outcome"] == "cancelled"
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
+    assert any(record.get("content") == "done after cancel" for record in records)
+
+
+def test_rpc_repeat_compaction_failure_leaves_process_usable(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = _create_two_turn_session(tmp_path)
+    provider = ReplayAwareProvider()
+
+    async def build_runtime() -> WispRuntime:
+        return await _runtime_with_provider(provider)
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--resume", session.path.name, "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"compact-1","type":"compact"}\n'
+            '{"id":"compact-2","type":"compact"}\n'
+            '{"id":"prompt-1","type":"prompt","prompt":"after repeat"}\n'
+        ),
+        env={"WISP_PROVIDER": provider.name, "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    finished = {
+        record["command_id"]: record
+        for record in records
+        if record["type"] == "rpc.command.finished"
+    }
+    assert finished["compact-1"]["ok"] is True
+    assert finished["compact-2"]["ok"] is False
+    assert "No new complete turn" in str(finished["compact-2"]["error"])
+    assert finished["prompt-1"]["ok"] is True
+    assert any(record.get("content") == "saw replay context" for record in records)
+    assert sum(entry.kind == "compaction" for entry in session.read_entries()) == 1
 
 
 def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
@@ -37,7 +500,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "agent.completed",
         "rpc.command.finished",
     ]
-    assert all(record["schema_version"] == 7 for record in records)
+    assert all(record["schema_version"] == 8 for record in records)
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"
@@ -623,7 +1086,7 @@ def test_rpc_approval_command_resolves_pending_approval(
             "approved": False,
             "reason": "not safe",
         },
-        running_prompt=None,
+        running_command=None,
         approval_policy=approval_policy,
     )
 
@@ -723,7 +1186,7 @@ def test_rpc_approval_command_rejects_invalid_scope(
             "approved": approved,
             "scope": scope,
         },
-        running_prompt=None,
+        running_command=None,
         approval_policy=approval_policy,
     )
 
@@ -835,7 +1298,9 @@ def test_rpc_mode_rejects_commands_beyond_queue_cap_while_prompt_runs(
         if record["type"] == "rpc.command.finished" and record["command_id"] == "cmd-overflow"
     )
     assert overflow_error["ok"] is False
-    assert overflow_error["error"] == "RPC command queue is full while a prompt is running"
+    assert overflow_error["error"] == (
+        "RPC command queue is full while another RPC command is running"
+    )
     finished = [record for record in records if record["type"] == "rpc.command.finished"]
     assert ("cancel-1", True) in [(record["command_id"], record["ok"]) for record in finished]
     assistant_messages = [
@@ -890,7 +1355,10 @@ def test_rpc_mode_finishes_command_when_session_write_fails_before_file_exists(
     async def fail_append_message(
         self: JsonlSession,
         message: Message,
+        *,
+        operation_id: str | None = None,
     ) -> object:
+        del operation_id
         raise RuntimeError("session write failed")
 
     monkeypatch.setattr(JsonlSession, "append_message", fail_append_message)

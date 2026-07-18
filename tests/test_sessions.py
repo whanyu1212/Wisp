@@ -8,9 +8,10 @@ from pathlib import Path
 
 import anyio
 import pytest
+from pydantic import ValidationError
 from pytest import MonkeyPatch
 
-from wisp.agent.messages import Message, SessionEntry
+from wisp.agent.messages import CompactionRecord, Message, SessionEntry
 from wisp.events import ErrorEvent, TokenUsage, ToolCallRequested, ToolCallSnapshot
 from wisp.sessions import jsonl as jsonl_module
 from wisp.sessions.jsonl import (
@@ -133,6 +134,109 @@ def test_session_loads_legacy_messages_without_rewriting_them(tmp_path: Path) ->
     assert message.is_error is None
     assert message.usage is None
     assert path.read_bytes() == original
+
+
+def test_session_loads_legacy_event_entries_without_rewriting_them(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-event.jsonl"
+    legacy_entry = {
+        "id": "legacy-event",
+        "session_id": "legacy-session",
+        "kind": "event",
+        "event": {"type": "legacy.event", "value": 1},
+        "created_at": "2026-07-11T00:00:00Z",
+    }
+    path.write_text(f"{json.dumps(legacy_entry)}\n", encoding="utf-8")
+    original = path.read_bytes()
+
+    entry = JsonlSessionStore(tmp_path).load(path).read_entries()[0]
+
+    assert entry.event == {"type": "legacy.event", "value": 1}
+    assert entry.message is None
+    assert entry.compaction is None
+    assert path.read_bytes() == original
+
+
+def test_compaction_record_is_strict_and_versioned() -> None:
+    record = CompactionRecord(
+        summary="Completed the investigation.",
+        replaced_entry_ids=("entry-1",),
+        provider="openai",
+        model="gpt-5",
+        instructions="Keep decisions.",
+        usage=TokenUsage(input_tokens=8, output_tokens=3, total_tokens=11),
+    )
+
+    assert record.schema_version == 1
+    assert record.replaced_entry_ids == ("entry-1",)
+    with pytest.raises(ValidationError):
+        CompactionRecord(
+            summary="  ",
+            replaced_entry_ids=("entry-1",),
+            provider="openai",
+        )
+    with pytest.raises(ValidationError):
+        CompactionRecord(
+            summary="summary",
+            replaced_entry_ids=(),
+            provider="openai",
+        )
+    with pytest.raises(ValidationError):
+        CompactionRecord.model_validate(
+            {
+                "schema_version": 2,
+                "summary": "summary",
+                "replaced_entry_ids": ("entry-1",),
+                "provider": "openai",
+            }
+        )
+    with pytest.raises(ValidationError):
+        CompactionRecord.model_validate(
+            {
+                "summary": "summary",
+                "replaced_entry_ids": ("entry-1",),
+                "provider": "openai",
+                "unexpected": True,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "payloads"),
+    [
+        ("message", {}),
+        ("message", {"event": {"type": "extra"}}),
+        ("event", {"message": Message(role="user", content="extra")}),
+        (
+            "compaction",
+            {"message": Message(role="user", content="extra")},
+        ),
+    ],
+)
+def test_session_entry_requires_exactly_its_matching_payload(
+    kind: str,
+    payloads: dict[str, object],
+) -> None:
+    matching: dict[str, object] = {
+        "message": Message(role="user", content="hello"),
+        "event": {"type": "event"},
+        "compaction": CompactionRecord(
+            summary="summary",
+            replaced_entry_ids=("entry-1",),
+            provider="openai",
+        ),
+    }
+
+    with pytest.raises(ValidationError, match="require exactly"):
+        SessionEntry.model_validate(
+            {
+                "session_id": "session-id",
+                "kind": kind,
+                kind: matching[kind],
+                **payloads,
+            }
+            if payloads
+            else {"session_id": "session-id", "kind": kind}
+        )
 
 
 def test_append_entry_is_idempotent(tmp_path: Path) -> None:
