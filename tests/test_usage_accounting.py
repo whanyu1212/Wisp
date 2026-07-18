@@ -214,6 +214,17 @@ def test_schema_v5_events_remain_readable() -> None:
     assert wisp_event_from_json(event.model_dump_json()) == event
 
 
+def test_schema_v6_events_remain_readable() -> None:
+    event = MessageCompleted(
+        schema_version=6,
+        turn=1,
+        content="done",
+        finish_reason="stop",
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+
+
 def test_provider_adapters_normalize_negative_counts() -> None:
     assert _usage_from_codex(
         {

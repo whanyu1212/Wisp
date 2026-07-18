@@ -53,7 +53,7 @@ class OverflowingProvider:
         effort: str | None = None,
     ) -> AsyncIterator[object]:
         self.calls += 1
-        raise ContextOverflowError("maximum context length exceeded")
+        raise RuntimeError("maximum context length exceeded")
         yield  # pragma: no cover
 
 

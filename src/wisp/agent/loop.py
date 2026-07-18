@@ -131,7 +131,7 @@ async def _provider_events(
             event = await anext(iterator)
         except StopAsyncIteration:
             return
-        except ProviderError as exc:
+        except Exception as exc:
             if is_context_overflow_message(str(exc)):
                 raise ContextOverflowError(str(exc)) from exc
             raise
