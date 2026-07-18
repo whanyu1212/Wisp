@@ -302,8 +302,9 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 5`. A successful prompt follows this
-lifecycle (tool events repeat inside a turn when the model requests tools):
+Every outbound `WispEvent` includes `"schema_version": 6`; readers also accept legacy schema v5
+events for compatibility. A successful prompt follows this lifecycle (tool events repeat inside a
+turn when the model requests tools):
 
 ```text
 agent.started
