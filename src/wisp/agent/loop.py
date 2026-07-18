@@ -214,23 +214,28 @@ async def run_agent_loop(
             # -- a third-party provider implemented against the pre-effort
             # signature would otherwise get a TypeError on every turn instead
             # of keeping its unchanged default behavior.
-            if config.effort is not None:
-                provider_stream = config.provider.stream(
-                    messages,
-                    model=config.model,
-                    tools=config.tools,
-                    tool_results=pending_tool_results,
-                    previous_response_id=previous_response_id,
-                    effort=config.effort,
-                )
-            else:
-                provider_stream = config.provider.stream(
-                    messages,
-                    model=config.model,
-                    tools=config.tools,
-                    tool_results=pending_tool_results,
-                    previous_response_id=previous_response_id,
-                )
+            try:
+                if config.effort is not None:
+                    provider_stream = config.provider.stream(
+                        messages,
+                        model=config.model,
+                        tools=config.tools,
+                        tool_results=pending_tool_results,
+                        previous_response_id=previous_response_id,
+                        effort=config.effort,
+                    )
+                else:
+                    provider_stream = config.provider.stream(
+                        messages,
+                        model=config.model,
+                        tools=config.tools,
+                        tool_results=pending_tool_results,
+                        previous_response_id=previous_response_id,
+                    )
+            except Exception as exc:
+                if is_context_overflow_message(str(exc)):
+                    raise ContextOverflowError(str(exc)) from exc
+                raise
             async for provider_event in _provider_events(provider_stream):
                 if _is_cancelled(config):
                     for event in _cancelled_turn_events(turn):
