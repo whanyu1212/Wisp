@@ -760,6 +760,34 @@ def test_tui_shell_typed_model_command_keeps_a_supported_effort() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_typed_model_command_keeps_new_default_model_efforts() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(
+                [
+                    "/model claude-fable-5 xhigh",
+                    "/model google::gemini-3.5-flash MINIMAL",
+                    "/quit",
+                ]
+            ),
+            provider="anthropic",
+        )
+
+        await shell.run()
+
+        assert controller.configurations == [
+            (None, "claude-fable-5", "xhigh", False),
+            ("google", "gemini-3.5-flash", "MINIMAL", False),
+        ]
+        assert shell.current_effort == "MINIMAL"
+
+    anyio.run(run)
+
+
 def test_tui_shell_typed_model_command_effort_validation_is_permissive_for_unknown_model() -> None:
     # A brand-new model ahead of a catalog update must still work -- effort
     # validation must not hard-block the command just because the model

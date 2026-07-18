@@ -377,6 +377,15 @@ def test_builtin_codex_default_exposes_documented_reasoning_effort_levels() -> N
     assert registry.supports_effort("openai-codex", "gpt-5.6-sol", "ultra") is False
 
 
+def test_builtin_anthropic_and_google_defaults_expose_documented_effort_levels() -> None:
+    registry = ModelRegistry(builtin_catalog())
+
+    assert registry.supports_effort("anthropic", "claude-fable-5", "xhigh") is True
+    assert registry.supports_effort("anthropic", "claude-fable-5", "max") is True
+    assert registry.supports_effort("google", "gemini-3.5-flash", "MINIMAL") is True
+    assert registry.supports_effort("google", "gemini-3.5-flash", "HIGH") is True
+
+
 def test_overlay_adds_a_new_provider(tmp_path: Path) -> None:
     _write_overlay(tmp_path, _MINIMAL_TOML)
 

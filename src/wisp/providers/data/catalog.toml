@@ -131,10 +131,12 @@ models = [
 "claude-opus-4-6" = "legacy"
 "claude-sonnet-4-6" = "legacy"
 
-# Effort tiers confirmed live via client.models.retrieve(id).capabilities.effort
-# against the Anthropic API. claude-haiku-4-5 is deliberately omitted --
-# capabilities.effort.supported is False for it (no effort control at all).
+# Effort tiers sourced from Anthropic's effort guide and confirmed live via
+# client.models.retrieve(id).capabilities.effort where available.
+# claude-haiku-4-5 is deliberately omitted -- capabilities.effort.supported is
+# False for it (no effort control at all).
 [providers.effort_levels]
+"claude-fable-5" = ["low", "medium", "high", "xhigh", "max"]
 "claude-sonnet-5" = ["low", "medium", "high", "xhigh", "max"]
 "claude-opus-4-8" = ["low", "medium", "high", "xhigh", "max"]
 "claude-opus-4-7" = ["low", "medium", "high", "xhigh", "max"]
@@ -180,10 +182,11 @@ models = [
 "gemini-3.1-pro-preview" = "preview"
 "gemini-3-flash-preview" = "preview"
 
-# Gemini 3.1 Flash-Lite supports named thinking levels. Gemini 2.5 models use
-# numeric thinking budgets, which this provider intentionally does not map from
-# named tiers. Other current models stay unset until Developer API validation.
+# Gemini 3.5 Flash and 3.1 Flash-Lite support named thinking levels. Gemini 2.5
+# models use numeric thinking budgets, which this provider intentionally does
+# not map from named tiers. Other models stay unset until API validation.
 [providers.effort_levels]
+"gemini-3.5-flash" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 "gemini-3.1-flash-lite" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 
 [[providers]]
