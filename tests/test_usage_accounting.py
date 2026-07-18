@@ -4,6 +4,7 @@ import pytest
 from anthropic.types import (
     Message,
     MessageDeltaUsage,
+    OutputTokensDetails,
     RawMessageDeltaEvent,
     RawMessageStartEvent,
     Usage,
@@ -95,6 +96,7 @@ def test_anthropic_usage_combines_start_and_terminal_delta() -> None:
                 output_tokens=0,
                 cache_read_input_tokens=100_000,
                 cache_creation_input_tokens=2_000,
+                output_tokens_details=OutputTokensDetails(thinking_tokens=0),
             ),
         ),
         type="message_start",
@@ -107,17 +109,34 @@ def test_anthropic_usage_combines_start_and_terminal_delta() -> None:
             output_tokens=7,
             cache_read_input_tokens=100_000,
             cache_creation_input_tokens=2_000,
+            output_tokens_details=OutputTokensDetails(thinking_tokens=5),
         ),
     )
 
     initial = _usage_from_anthropic_start(start)
     assert initial.total_tokens == 102_050
-    assert _usage_from_anthropic_delta(delta, initial) == ProviderUsage(
+    completed = _usage_from_anthropic_delta(delta, initial)
+    assert completed == ProviderUsage(
         input_tokens=50,
         output_tokens=7,
         total_tokens=102_057,
         cache_read_input_tokens=100_000,
         cache_write_input_tokens=2_000,
+        reasoning_output_tokens=5,
+    )
+
+    sparse_delta = RawMessageDeltaEvent(
+        delta=Delta.model_construct(stop_reason="end_turn"),
+        type="message_delta",
+        usage=MessageDeltaUsage(output_tokens=9),
+    )
+    assert _usage_from_anthropic_delta(sparse_delta, completed) == ProviderUsage(
+        input_tokens=50,
+        output_tokens=9,
+        total_tokens=102_059,
+        cache_read_input_tokens=100_000,
+        cache_write_input_tokens=2_000,
+        reasoning_output_tokens=5,
     )
 
 

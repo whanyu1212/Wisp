@@ -602,6 +602,10 @@ def _usage_from_anthropic_start(event: RawMessageStartEvent) -> ProviderUsage:
         if value.cache_creation_input_tokens is not None
         else None
     )
+    output_details = value.output_tokens_details
+    reasoning_tokens = (
+        max(0, output_details.thinking_tokens) if output_details is not None else None
+    )
     return ProviderUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -610,6 +614,7 @@ def _usage_from_anthropic_start(event: RawMessageStartEvent) -> ProviderUsage:
         ),
         cache_read_input_tokens=cache_read_tokens,
         cache_write_input_tokens=cache_write_tokens,
+        reasoning_output_tokens=reasoning_tokens,
     )
 
 
@@ -628,6 +633,10 @@ def _usage_from_anthropic_delta(
     cache_write_tokens = event.usage.cache_creation_input_tokens
     if cache_write_tokens is None:
         cache_write_tokens = current.cache_write_input_tokens
+    output_details = event.usage.output_tokens_details
+    reasoning_tokens = current.reasoning_output_tokens
+    if output_details is not None:
+        reasoning_tokens = max(0, output_details.thinking_tokens)
     input_tokens = max(0, input_tokens)
     output_tokens = max(0, output_tokens)
     cache_read_tokens = max(0, cache_read_tokens) if cache_read_tokens is not None else None
@@ -640,6 +649,7 @@ def _usage_from_anthropic_delta(
         ),
         cache_read_input_tokens=cache_read_tokens,
         cache_write_input_tokens=cache_write_tokens,
+        reasoning_output_tokens=reasoning_tokens,
     )
 
 
