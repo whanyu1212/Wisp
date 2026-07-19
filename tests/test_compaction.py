@@ -2169,6 +2169,53 @@ def test_coding_session_summary_failure_emits_failure_and_appends_no_compaction(
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
 
 
+def test_coding_session_summary_tool_call_failure_persists_accounting(tmp_path: Path) -> None:
+    call = ToolCall(call_id="call-1", name="read", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="calling",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                    usage=ProviderUsage(input_tokens=40, output_tokens=10, total_tokens=50),
+                ),
+            ]
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> tuple[list[WispEvent], SessionStats]:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(provider=provider, sessions=store, models=_model_registry())
+        events: list[WispEvent] = []
+        with pytest.raises(CompactionSummaryError, match="forbidden tool call"):
+            async for event in agent.compact(session):
+                events.append(event)
+        return events, await agent.get_session_stats(session)
+
+    events, stats = anyio.run(run)
+
+    failed = events[-1]
+    assert isinstance(failed, CompactionCompleted)
+    assert failed.outcome == "failed"
+    assert failed.usage == TokenUsage(input_tokens=40, output_tokens=10, total_tokens=50)
+    assert failed.cost is not None
+    assert any(
+        event["type"] == "compaction.completed"
+        and event.get("usage") is not None
+        and event.get("cost") is not None
+        for event in session.read_events()
+    )
+    assert stats.cost.unpriced_record_count == 3
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
+
+
 def test_coding_session_summary_cancellation_appends_no_compaction(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     session = store.create()

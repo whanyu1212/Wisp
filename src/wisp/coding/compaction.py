@@ -218,9 +218,11 @@ async def summarize_manual_compaction(
                 completions.append(event)
             elif isinstance(event, TurnCompleted):
                 terminal_turn = event
+    except CompactionSummaryError as exc:
+        if completions and exc.usage is None and exc.cost is None:
+            raise _summary_error(str(exc), completions[-1]) from exc
+        raise
     except Exception as exc:
-        if isinstance(exc, CompactionSummaryError):
-            raise
         raise CompactionSummaryError(f"Compaction summary failed: {exc}") from exc
 
     if len(completions) != 1:
