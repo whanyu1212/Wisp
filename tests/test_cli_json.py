@@ -20,6 +20,7 @@ def test_json_mode_outputs_events_as_jsonl(tmp_path: Path) -> None:
     assert [record["type"] for record in records] == [
         "agent.started",
         "turn.started",
+        "context.estimated",
         "message.started",
         "message.delta",
         "message.delta",
@@ -30,7 +31,7 @@ def test_json_mode_outputs_events_as_jsonl(tmp_path: Path) -> None:
         "session.saved",
         "agent.completed",
     ]
-    assert all(record["schema_version"] == 8 for record in records)
+    assert all(record["schema_version"] == 9 for record in records)
     assert "timestamp" in records[0]
     assert "session_id" in records[0]
     assert "fake response to: hello" == "".join(
@@ -136,6 +137,7 @@ def test_json_mode_emits_error_event_without_stderr_noise(
     assert [record["type"] for record in records] == [
         "agent.started",
         "turn.started",
+        "context.estimated",
         "message.started",
         "message.completed",
         "error",

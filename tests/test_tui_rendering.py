@@ -5,7 +5,27 @@ from __future__ import annotations
 import pytest
 
 from tests.tui_support import *
-from wisp.events import ProviderRetrying
+from wisp.events import ContextBudget, ContextEstimate, ProviderRetrying
+
+
+def _context_budget(
+    *,
+    estimated: int = 11_500,
+    observed: int | None = 12_000,
+    current: bool = True,
+    window: int | None = 128_000,
+    percent: float | None = 9.0,
+) -> ContextBudget:
+    return ContextBudget.model_construct(
+        estimate=ContextEstimate.model_construct(total_tokens=estimated),
+        observed_tokens=observed,
+        observed_is_current=current,
+        context_window=window,
+        reserve_tokens=8_000,
+        remaining_tokens=None,
+        estimated_percent=percent,
+        over_budget=False,
+    )
 
 
 def test_tui_shell_uses_injected_renderer() -> None:
@@ -213,6 +233,7 @@ def test_fullscreen_tui_renderer_coalesces_streaming_token_redraws() -> None:
 
 def test_fullscreen_tui_renderer_applies_view_snapshot() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+    context = _context_budget()
 
     renderer.view_updated(
         TuiViewSnapshot(
@@ -223,6 +244,7 @@ def test_fullscreen_tui_renderer_applies_view_snapshot() -> None:
             cwd="/tmp/project",
             provider="openai",
             model="gpt-test",
+            context=context,
         )
     )
 
@@ -234,6 +256,70 @@ def test_fullscreen_tui_renderer_applies_view_snapshot() -> None:
     assert renderer.state.cwd == "/tmp/project"
     assert renderer.state.provider == "openai"
     assert renderer.state.model == "gpt-test"
+    assert renderer.state.context is context
+
+
+def test_tui_footer_formats_current_stale_and_unknown_context() -> None:
+    current = format_tui_footer_lines(
+        TuiViewSnapshot(
+            status="idle",
+            input_hint="wisp> ",
+            context=_context_budget(),
+        ),
+        width=40,
+    )[1]
+    stale = format_tui_footer_lines(
+        TuiViewSnapshot(
+            status="idle",
+            input_hint="wisp> ",
+            context=_context_budget(estimated=14_000, current=False),
+        ),
+        width=40,
+    )[1]
+    unknown = format_tui_footer_lines(
+        TuiViewSnapshot(
+            status="idle",
+            input_hint="wisp> ",
+            context=_context_budget(observed=None, current=False, window=None, percent=None),
+        ),
+        width=40,
+    )[1]
+
+    assert "ctx 12k/128k" in current
+    assert "ctx ~14k/128k" in stale
+    assert "ctx ~12k" in unknown
+
+
+def test_tui_footer_context_gauge_is_responsive_without_displacing_status() -> None:
+    snapshot = TuiViewSnapshot(
+        status="idle",
+        input_hint="wisp> ",
+        provider="openai",
+        model="gpt",
+        context=_context_budget(),
+    )
+
+    wide = format_tui_footer_lines(snapshot, width=80)[1]
+    compact = format_tui_footer_lines(snapshot, width=34)[1]
+    narrow = format_tui_footer_lines(snapshot, width=20)[1]
+
+    assert "ctx 12k/128k (9%)" in wide
+    assert "ctx 12k/128k" in compact
+    assert "(9%)" not in compact
+    assert "ctx 12k/128k" in narrow
+
+    protected = format_tui_footer_lines(
+        TuiViewSnapshot(
+            status="running",
+            input_hint="wisp(running)> ",
+            queued_follow_ups=12,
+            provider="openai",
+            model="gpt",
+            context=_context_budget(),
+        ),
+        width=24,
+    )[1]
+    assert protected == "running • queued 12"
 
 
 def test_tui_footer_formatter_compacts_and_truncates() -> None:

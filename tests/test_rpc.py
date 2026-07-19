@@ -17,7 +17,13 @@ from wisp.events import (
     TrustResolved,
     wisp_event_from_json,
 )
-from wisp.rpc import CompactCommand, ConfigureCommand, JsonlSubprocessRpcTransport, RpcController
+from wisp.rpc import (
+    CompactCommand,
+    ConfigureCommand,
+    GetSessionStatsCommand,
+    JsonlSubprocessRpcTransport,
+    RpcController,
+)
 from wisp.rpc.commands import (
     ApprovalCommand,
     CancelCommand,
@@ -83,6 +89,16 @@ def test_compact_command_serializes_as_jsonl_and_parses(
         expected["instructions"] = instructions
     assert json.loads(line) == expected
     assert rpc_command_from_json(line) == command
+
+
+def test_get_session_stats_command_serializes_as_jsonl_and_parses() -> None:
+    command = GetSessionStatsCommand(id="stats-1")
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "stats-1",
+        "type": "get_session_stats",
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
 
 
 def test_approval_scope_serializes_only_when_selected() -> None:
@@ -235,6 +251,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
 
         prompt_id = await controller.prompt("hello")
         compact_id = await controller.compact("Keep paths")
+        stats_id = await controller.get_session_stats()
         cancel_id = await controller.cancel(prompt_id)
         approval_id = await controller.approve(
             "call-1",
@@ -245,9 +262,18 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         shutdown_id = await controller.shutdown()
         await controller.close()
 
-        assert [prompt_id, compact_id, cancel_id, approval_id, configure_id, shutdown_id] == [
+        assert [
+            prompt_id,
+            compact_id,
+            stats_id,
+            cancel_id,
+            approval_id,
+            configure_id,
+            shutdown_id,
+        ] == [
             "prompt-id",
             "compact-id",
+            "stats-id",
             "cancel-id",
             "approval-id",
             "configure-id",
@@ -256,6 +282,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         assert transport.commands == [
             PromptCommand(id="prompt-id", prompt="hello"),
             CompactCommand(id="compact-id", instructions="Keep paths"),
+            GetSessionStatsCommand(id="stats-id"),
             CancelCommand(id="cancel-id", target_id="prompt-id"),
             ApprovalCommand(
                 id="approval-id",

@@ -156,6 +156,7 @@ def test_context_pressure_emits_after_completed_message_at_threshold() -> None:
 
     assert [event.type for event in events] == [
         "turn.started",
+        "context.estimated",
         "message.started",
         "message.completed",
         "context.pressure",
@@ -241,6 +242,7 @@ def test_terminal_context_overflow_emits_structured_event_and_does_not_retry() -
 
     assert [event.type for event in events] == [
         "turn.started",
+        "context.estimated",
         "message.started",
         "context.overflow",
         "error",
@@ -272,6 +274,7 @@ def test_synchronous_provider_opening_overflow_is_structured(effort: str | None)
 
     assert [event.type for event in events] == [
         "turn.started",
+        "context.estimated",
         "context.overflow",
         "error",
         "turn.completed",
@@ -300,6 +303,7 @@ def test_synchronous_provider_opening_non_overflow_is_not_reclassified() -> None
 
     assert [event.type for event in events] == [
         "turn.started",
+        "context.estimated",
         "error",
         "turn.completed",
     ]
@@ -328,6 +332,7 @@ def test_raised_context_overflow_emits_structured_event_before_error() -> None:
 
     assert [event.type for event in events] == [
         "turn.started",
+        "context.estimated",
         "context.overflow",
         "error",
         "turn.completed",
@@ -336,11 +341,11 @@ def test_raised_context_overflow_emits_structured_event_before_error() -> None:
     assert overflow.provider == "test"
     assert overflow.model == "test-model"
     assert overflow.context_window == 100
-    assert isinstance(events[2], ErrorEvent)
+    assert isinstance(events[3], ErrorEvent)
     assert provider.calls == 1
 
 
-def test_context_events_round_trip_on_schema_v8() -> None:
+def test_context_events_round_trip_on_current_schema() -> None:
     pressure = ContextPressure(
         turn=1,
         provider="test",
@@ -358,8 +363,8 @@ def test_context_events_round_trip_on_schema_v8() -> None:
         message="maximum context length exceeded",
     )
 
-    assert pressure.schema_version == 8
-    assert overflow.schema_version == 8
+    assert pressure.schema_version == 9
+    assert overflow.schema_version == 9
     assert wisp_event_from_json(pressure.model_dump_json()) == pressure
     assert wisp_event_from_json(overflow.model_dump_json()) == overflow
 

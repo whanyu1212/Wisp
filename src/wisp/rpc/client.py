@@ -19,6 +19,7 @@ from wisp.rpc.commands import (
     CancelCommand,
     CompactCommand,
     ConfigureCommand,
+    GetSessionStatsCommand,
     PromptCommand,
     RpcCommand,
     ShutdownCommand,
@@ -68,6 +69,13 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("compact")
         await self._transport.send(CompactCommand(id=selected_id, instructions=instructions))
+        return selected_id
+
+    async def get_session_stats(self, *, command_id: str | None = None) -> str:
+        """Request a consistent session statistics snapshot."""
+
+        selected_id = command_id or self._command_id_factory("stats")
+        await self._transport.send(GetSessionStatsCommand(id=selected_id))
         return selected_id
 
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str:

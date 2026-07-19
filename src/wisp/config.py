@@ -11,6 +11,7 @@ from wisp.retry import RetryPolicy
 from wisp.settings import DEFAULT_PROTECTED_PATHS, ResolvedSettings, resolve_settings
 
 DEFAULT_PROVIDER = "openai-codex"
+DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
 
@@ -27,6 +28,7 @@ class WispConfig(BaseModel):
     auth_path: Path = Field(default_factory=lambda: default_auth_path())
     protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
+    context_reserve_tokens: int = Field(default=DEFAULT_CONTEXT_RESERVE_TOKENS, ge=0)
 
     @model_validator(mode="after")
     def _always_protect_auth_path(self) -> WispConfig:
@@ -55,6 +57,7 @@ class WispConfig(BaseModel):
         session_dir: Path | None = None,
         auth_path: Path | None = None,
         retry_policy: RetryPolicy | None = None,
+        context_reserve_tokens: int | None = None,
         project_dir: Path | None = None,
         trusted: bool = False,
     ) -> WispConfig:
@@ -100,6 +103,20 @@ class WispConfig(BaseModel):
             auth_path=auth_path or default_auth_path(settings=settings),
             protected_paths=_resolve_protected_paths(settings),
             retry_policy=retry_policy or _resolve_retry_policy(settings),
+            context_reserve_tokens=(
+                context_reserve_tokens
+                if context_reserve_tokens is not None
+                else int(
+                    _first_non_empty(
+                        os.environ.get("WISP_CONTEXT_RESERVE_TOKENS"),
+                        str(settings.context_reserve_tokens)
+                        if settings.context_reserve_tokens is not None
+                        else None,
+                        default=str(DEFAULT_CONTEXT_RESERVE_TOKENS),
+                    )
+                    or DEFAULT_CONTEXT_RESERVE_TOKENS
+                )
+            ),
         )
 
 

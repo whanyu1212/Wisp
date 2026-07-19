@@ -18,6 +18,7 @@ def test_config_defaults_to_default_provider(tmp_path: Path, monkeypatch: Monkey
     assert config.provider == config_module.DEFAULT_PROVIDER
     assert config.model is None
     assert config.effort is None
+    assert config.context_reserve_tokens == 16_384
     assert config.session_dir == tmp_path
     assert config.auth_path == default_auth_path()
 
@@ -122,3 +123,18 @@ def test_config_project_settings_cannot_set_effort(
     config = WispConfig.from_env(session_dir=tmp_path, trusted=True)
 
     assert config.effort is None
+
+
+def test_config_resolves_context_reserve_from_env_and_explicit_override(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WISP_CONTEXT_RESERVE_TOKENS", "8192")
+
+    assert WispConfig.from_env(session_dir=tmp_path).context_reserve_tokens == 8192
+    assert (
+        WispConfig.from_env(
+            session_dir=tmp_path,
+            context_reserve_tokens=4096,
+        ).context_reserve_tokens
+        == 4096
+    )

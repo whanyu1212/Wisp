@@ -36,6 +36,7 @@ class AgentHarnessConfig:
     max_tool_iterations: int | None = None
     effort: str | None = None
     context_window: int | None = None
+    context_reserve_tokens: int = 16_384
     context_pressure_threshold: float = 0.8
 
 
@@ -171,6 +172,7 @@ class AgentHarness:
             cancellation_token=token,
             effort=self._config.effort,
             context_window=self._config.context_window,
+            context_reserve_tokens=self._config.context_reserve_tokens,
             context_pressure_threshold=self._config.context_pressure_threshold,
         )
         provider_messages_list: list[Message] = []

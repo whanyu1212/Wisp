@@ -85,6 +85,7 @@ class ScriptedController:
         cancel_events: list[ScriptedBatch] | None = None,
         compact_events: list[ScriptedBatch] | None = None,
         configure_events: list[ScriptedBatch] | None = None,
+        session_stats_events: list[ScriptedBatch] | None = None,
         shutdown_events: list[ScriptedBatch] | None = None,
         close_after_prompt: bool = False,
     ) -> None:
@@ -93,6 +94,7 @@ class ScriptedController:
         self.cancel_events = deque(cancel_events or [])
         self.compact_events = deque(compact_events or [])
         self.configure_events = deque(configure_events or [])
+        self.session_stats_events = deque(session_stats_events or [])
         self.shutdown_events = deque(shutdown_events or [])
         self.close_after_prompt = close_after_prompt
         self.prompts: list[str] = []
@@ -102,6 +104,7 @@ class ScriptedController:
         self.trusts: list[tuple[str, bool, str | None, bool]] = []
         self.cancelled: list[str] = []
         self.configurations: list[tuple[str | None, str | None, str | None, bool]] = []
+        self.session_stats_requests: list[str] = []
         self.shutdown_count = 0
         self.closed = False
         self._send, self._receive = anyio.create_memory_object_stream[KnownWispEvent](100)
@@ -129,6 +132,12 @@ class ScriptedController:
             self.compact_events,
             default=[RpcCommandFinished(command_id=selected_id, command_type="compact", ok=True)],
         )
+        return selected_id
+
+    async def get_session_stats(self, *, command_id: str | None = None) -> str:
+        selected_id = command_id or f"session-stats-{len(self.session_stats_requests) + 1}"
+        self.session_stats_requests.append(selected_id)
+        await self._emit_scripted(self.session_stats_events, default=[])
         return selected_id
 
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str:

@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-EVENT_SCHEMA_VERSION = 8
+EVENT_SCHEMA_VERSION = 9
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -26,7 +26,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8] = 8
+    schema_version: Literal[5, 6, 7, 8, 9] = 9
     timestamp: datetime = Field(default_factory=utc_now)
 
 
@@ -92,6 +92,47 @@ class TokenUsage(BaseModel):
     reasoning_output_tokens: int | None = Field(default=None, ge=0)
 
 
+class ContextEstimate(BaseModel):
+    """Deterministic approximation of one provider-facing request context."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    method: Literal["chars_div_4_v1"] = "chars_div_4_v1"
+    system_tokens: int = Field(ge=0)
+    message_tokens: int = Field(ge=0)
+    tool_schema_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+
+
+class ContextBudget(BaseModel):
+    """Current estimate, latest observation, and model-window budget."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    estimate: ContextEstimate
+    observed_tokens: int | None = Field(default=None, ge=0)
+    observed_is_current: bool = False
+    context_window: int | None = Field(default=None, gt=0)
+    reserve_tokens: int = Field(ge=0)
+    remaining_tokens: int | None = None
+    estimated_percent: float | None = Field(default=None, ge=0)
+    over_budget: bool | None = None
+
+
+class SessionStats(BaseModel):
+    """Derived lifetime usage and active-context statistics for one session."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    session_id: str | None = None
+    entry_count: int = Field(ge=0)
+    active_message_count: int = Field(ge=0)
+    compaction_count: int = Field(ge=0)
+    usage_record_count: int = Field(ge=0)
+    usage: TokenUsage
+    context: ContextBudget
+
+
 class MessageCompleted(WispEvent):
     type: Literal["message.completed"] = "message.completed"
     turn: int
@@ -114,6 +155,16 @@ class ContextPressure(WispEvent):
     observed_tokens: int = Field(ge=0)
     remaining_tokens: int = Field(ge=0)
     pressure_ratio: float = Field(ge=0)
+
+
+class ContextEstimated(WispEvent):
+    """Approximate context budget immediately before a provider request."""
+
+    type: Literal["context.estimated"] = "context.estimated"
+    turn: int
+    provider: str
+    model: str | None = None
+    budget: ContextBudget
 
 
 class ContextOverflow(WispEvent):
@@ -331,6 +382,14 @@ class RpcCommandFinished(WispEvent):
     error: str | None = None
 
 
+class SessionStatsReported(WispEvent):
+    """On-demand, non-persisted session statistics returned over RPC."""
+
+    type: Literal["session.stats"] = "session.stats"
+    command_id: str
+    stats: SessionStats
+
+
 class ModelProviderAutoSwitched(WispEvent):
     """A model-only ``configure`` command's resolved model belonged to another provider.
 
@@ -361,6 +420,7 @@ type KnownWispEvent = Annotated[
     | MessageStarted
     | MessageDelta
     | MessageCompleted
+    | ContextEstimated
     | ContextPressure
     | ContextOverflow
     | ToolCallRequested
@@ -379,6 +439,7 @@ type KnownWispEvent = Annotated[
     | AgentCompleted
     | RpcCommandStarted
     | RpcCommandFinished
+    | SessionStatsReported
     | ModelProviderAutoSwitched
     | ErrorEvent,
     Field(discriminator="type"),
@@ -389,13 +450,19 @@ JsonObjectAdapter: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 def _require_current_schema(data: JsonObject) -> None:
     version = data.get("schema_version")
-    if version not in (5, 6, 7, EVENT_SCHEMA_VERSION):
+    if version not in (5, 6, 7, 8, EVENT_SCHEMA_VERSION):
         raise ValueError(
             "Unsupported Wisp event schema_version: "
-            f"{version!r}; expected 5, 6, 7, or {EVENT_SCHEMA_VERSION}"
+            f"{version!r}; expected 5, 6, 7, 8, or {EVENT_SCHEMA_VERSION}"
         )
     if data.get("type") in {"compaction.started", "compaction.completed"} and version != 8:
-        raise ValueError(f"Compaction events require schema_version 8, got {version!r}")
+        if version != EVENT_SCHEMA_VERSION:
+            raise ValueError(
+                f"Compaction events require schema_version 8 or {EVENT_SCHEMA_VERSION}, "
+                f"got {version!r}"
+            )
+    if data.get("type") in {"context.estimated", "session.stats"} and version != 9:
+        raise ValueError(f"Context statistics events require schema_version 9, got {version!r}")
 
 
 def wisp_event_from_json(line: str) -> KnownWispEvent:

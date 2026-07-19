@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import deque
+
 import pytest
 
 from tests.cli_support import *
@@ -489,6 +491,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "rpc.command.started",
         "agent.started",
         "turn.started",
+        "context.estimated",
         "message.started",
         "message.delta",
         "message.delta",
@@ -500,7 +503,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "agent.completed",
         "rpc.command.finished",
     ]
-    assert all(record["schema_version"] == 8 for record in records)
+    assert all(record["schema_version"] == 9 for record in records)
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"
@@ -509,6 +512,45 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
     assert records[-1]["command_type"] == "prompt"
     assert records[-1]["ok"] is True
     assert records[-1]["error"] is None
+
+
+def test_rpc_mode_reports_stats_after_queued_prompt(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"prompt-1","type":"prompt","prompt":"hello"}\n'
+            '{"id":"stats-1","type":"get_session_stats"}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    stats = next(record for record in records if record["type"] == "session.stats")
+    assert stats["command_id"] == "stats-1"
+    assert stats["stats"]["session_id"]
+    assert stats["stats"]["entry_count"] == 4
+    assert stats["stats"]["active_message_count"] == 2
+    assert stats["stats"]["context"]["estimate"]["total_tokens"] > 0
+    finished = [
+        record
+        for record in records
+        if record["type"] == "rpc.command.finished" and record["command_id"] == "stats-1"
+    ]
+    assert finished == [
+        {
+            "type": "rpc.command.finished",
+            "schema_version": 9,
+            "timestamp": finished[0]["timestamp"],
+            "command_id": "stats-1",
+            "command_type": "get_session_stats",
+            "ok": True,
+            "error": None,
+        }
+    ]
 
 
 def test_rpc_mode_configures_model_for_future_prompts(tmp_path: Path) -> None:
@@ -982,10 +1024,35 @@ def test_rpc_mode_cancel_reports_unknown_target(tmp_path: Path) -> None:
         "error",
         "rpc.command.finished",
     ]
-    assert records[1]["message"] == "No running RPC command with id: missing"
+    assert records[1]["message"] == "No running or queued RPC command with id: missing"
     assert records[2]["command_id"] == "cancel-1"
     assert records[2]["ok"] is False
-    assert records[2]["error"] == "No running RPC command with id: missing"
+    assert records[2]["error"] == "No running or queued RPC command with id: missing"
+
+
+def test_rpc_cancel_removes_a_queued_command(monkeypatch: MonkeyPatch) -> None:
+    events: list[object] = []
+    queued = deque([{"id": "prompt-1", "type": "prompt", "prompt": "hello"}])
+    monkeypatch.setattr(cli_module.rpc, "_write_json_event", events.append)
+
+    cli_module.rpc._handle_rpc_cancel_command(
+        {"id": "cancel-1", "type": "cancel", "target_id": "prompt-1"},
+        command_id="cancel-1",
+        command_type="cancel",
+        running_command=None,
+        queued_commands=queued,
+    )
+
+    assert not queued
+    assert [event.type for event in events] == [
+        "rpc.command.started",
+        "rpc.command.finished",
+        "rpc.command.finished",
+    ]
+    assert events[1].command_id == "prompt-1"
+    assert events[1].ok is False
+    assert events[2].command_id == "cancel-1"
+    assert events[2].ok is True
 
 
 def test_rpc_mode_cancel_requires_target_id(tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ from wisp.agent.execution import ToolExecutionEvent, ToolExecutionProtocolError,
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
 from wisp.events import (
+    ContextEstimated,
     MessageCompleted,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -20,6 +21,7 @@ from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,
     ProviderTextDelta,
+    ProviderThinkingDelta,
     ProviderToolCallCompleted,
     ProviderUsage,
     ToolCall,
@@ -127,6 +129,7 @@ def test_pure_loop_streams_without_application_dependencies() -> None:
 
     assert [event.type for event in events] == [
         "turn.started",
+        "context.estimated",
         "message.started",
         "message.delta",
         "message.completed",
@@ -186,6 +189,7 @@ def test_pure_loop_does_not_break_a_provider_without_an_effort_parameter() -> No
 
     assert [event.type for event in events] == [
         "turn.started",
+        "context.estimated",
         "message.started",
         "message.delta",
         "message.completed",
@@ -234,6 +238,7 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
         [
             [
                 ProviderResponseStarted(model="test", response_id="response-1"),
+                ProviderThinkingDelta(delta="reasoning" * 100),
                 ProviderToolCallCompleted(tool_call=call),
                 ProviderResponseCompleted(
                     content="",
@@ -265,7 +270,9 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
     assert executor.calls == [call]
     assert [event.type for event in events] == [
         "turn.started",
+        "context.estimated",
         "message.started",
+        "message.delta",
         "message.completed",
         "tool.call",
         "tool.execution.started",
@@ -275,6 +282,7 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
         "tool.result",
         "turn.completed",
         "turn.started",
+        "context.estimated",
         "message.started",
         "message.delta",
         "message.completed",
@@ -284,6 +292,10 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
     assert result.output == "tool output"
     assert provider.calls[1].tool_results[0].output == "tool output"
     assert provider.calls[1].previous_response_id == "response-1"
+    estimates = [event for event in events if isinstance(event, ContextEstimated)]
+    assert len(estimates) == 2
+    assert estimates[1].budget.estimate.total_tokens > estimates[0].budget.estimate.total_tokens
+    assert estimates[1].budget.estimate.message_tokens >= len("reasoning" * 100) // 4
     # The promoted exit_code reaches the event AND crosses the wire: the TUI
     # renderer only sees events after they are serialized (agent subprocess →
     # JSON → client), so the presentation signal must survive round-tripping.

@@ -174,6 +174,17 @@ def test_effort_settings_are_user_only_even_for_trusted_projects(tmp_path: Path)
     assert settings.effort == "high"
 
 
+def test_context_reserve_is_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(home, context_reserve_tokens=8192)
+    _write_settings(project, context_reserve_tokens=1)
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.context_reserve_tokens == 8192
+
+
 def test_project_cannot_introduce_effort(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"

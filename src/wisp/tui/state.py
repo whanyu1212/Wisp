@@ -8,7 +8,15 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
-from wisp.events import KnownWispEvent, ToolApprovalRequested, TrustRequested
+from wisp.events import (
+    ContextBudget,
+    ContextEstimated,
+    KnownWispEvent,
+    MessageCompleted,
+    SessionStatsReported,
+    ToolApprovalRequested,
+    TrustRequested,
+)
 from wisp.tui.rendering import TuiViewSnapshot
 
 
@@ -54,6 +62,7 @@ class TuiViewState:
     cwd: str = field(default_factory=lambda: str(Path.cwd()))
     provider: str | None = None
     model: str | None = None
+    context: ContextBudget | None = None
 
     def snapshot(self) -> TuiViewSnapshot:
         """Return an immutable renderer-facing view snapshot."""
@@ -67,7 +76,48 @@ class TuiViewState:
             cwd=self.cwd,
             provider=self.provider,
             model=self.model,
+            context=self.context,
         )
+
+    def update_context_from_event(self, event: KnownWispEvent) -> bool:
+        """Apply context events and current provider observations to the footer state."""
+
+        if isinstance(event, ContextEstimated):
+            self.context = event.budget
+            return True
+        if isinstance(event, SessionStatsReported):
+            self.context = event.stats.context
+            return True
+        if not isinstance(event, MessageCompleted):
+            return False
+        if event.finish_reason in {"error", "cancelled"} or event.usage is None:
+            return False
+        if event.usage.total_tokens <= 0 or self.context is None:
+            return False
+
+        observed_tokens = event.usage.total_tokens
+        context_window = self.context.context_window
+        remaining_tokens = (
+            context_window - self.context.reserve_tokens - observed_tokens
+            if context_window is not None
+            else None
+        )
+        self.context = self.context.model_copy(
+            update={
+                "observed_tokens": observed_tokens,
+                "observed_is_current": True,
+                "remaining_tokens": remaining_tokens,
+                "estimated_percent": (
+                    observed_tokens / context_window * 100 if context_window is not None else None
+                ),
+                "over_budget": (
+                    observed_tokens >= context_window - self.context.reserve_tokens
+                    if context_window is not None
+                    else None
+                ),
+            }
+        )
+        return True
 
 
 class _InputMode(StrEnum):

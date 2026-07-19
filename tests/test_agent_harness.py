@@ -122,6 +122,7 @@ def test_harness_prompt_owns_transcript_and_returns_immutable_snapshots() -> Non
     ]
     assert [event.type for event in events] == [
         "turn.started",
+        "context.estimated",
         "message.started",
         "message.delta",
         "message.completed",
@@ -375,6 +376,7 @@ def test_harness_cancel_stops_at_event_boundary_and_marks_turn_cancelled() -> No
 
     assert [event.type for event in events] == [
         "turn.started",
+        "context.estimated",
         "message.started",
         "message.delta",
         "error",
@@ -410,6 +412,7 @@ def test_harness_cancel_interrupts_a_blocked_provider_stream() -> None:
 
     assert [event.type for event in events] == [
         "turn.started",
+        "context.estimated",
         "message.started",
         "error",
         "turn.completed",
