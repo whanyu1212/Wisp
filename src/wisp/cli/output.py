@@ -10,6 +10,7 @@ from typing import NoReturn
 import typer
 from rich.console import Console
 
+from wisp.coding.costs import format_usage_cost
 from wisp.events import (
     CompactionCompleted,
     CompactionStarted,
@@ -19,6 +20,7 @@ from wisp.events import (
     ToolApprovalResolved,
     ToolCallRequested,
     ToolResultReady,
+    UsageCost,
     WispEvent,
 )
 
@@ -70,6 +72,8 @@ def _print_event_line(event: WispEvent) -> str | None:
     if isinstance(event, CompactionCompleted) and event.reason == "threshold":
         if event.outcome == "completed":
             line = f"Automatically compacted {event.replaced_entry_count} context entries."
+            if event.cost is not None:
+                line += f" {format_usage_cost(event.cost)}."
             if event.error:
                 line += f" Warning: {event.error}"
             return line
@@ -79,9 +83,12 @@ def _print_event_line(event: WispEvent) -> str | None:
     if isinstance(event, CompactionCompleted) and event.reason == "overflow":
         if event.outcome == "completed":
             if event.will_retry:
-                return (
+                line = (
                     f"Compacted {event.replaced_entry_count} context entries; retrying request..."
                 )
+                if event.cost is not None:
+                    line += f" {format_usage_cost(event.cost)}."
+                return line
             return f"Context overflow recovery failed: {event.error or 'retry was not scheduled'}"
         if event.outcome == "cancelled":
             return "Context overflow recovery cancelled."
@@ -116,6 +123,12 @@ def _format_event_arguments(arguments: dict[str, object]) -> str:
 def _format_event_output(output: str) -> str:
     first_line = next((line.strip() for line in output.splitlines() if line.strip()), "")
     return _truncate_inline(first_line or "(no output)", 240)
+
+
+def _format_usage_cost(event_cost: UsageCost | None) -> str:
+    """Format one optional typed cost snapshot for print-mode stderr."""
+
+    return format_usage_cost(event_cost)
 
 
 def _truncate_inline(text: str, max_chars: int) -> str:

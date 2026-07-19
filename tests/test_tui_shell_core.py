@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from tempfile import TemporaryDirectory
 
 from pytest import MonkeyPatch
@@ -10,6 +11,7 @@ from pytest import MonkeyPatch
 from tests.tui_support import *
 from wisp.auth.storage import OAuthCredential
 from wisp.events import (
+    BillableTokenUsage,
     ContextBudget,
     ContextEstimate,
     ContextEstimated,
@@ -18,6 +20,8 @@ from wisp.events import (
     ProviderRetrying,
     SessionStatsReported,
     TokenUsage,
+    UsageCost,
+    UsageCostRates,
 )
 from wisp.tui import auth_commands as tui_auth_commands_module
 from wisp.tui.state import TuiViewState
@@ -72,6 +76,43 @@ def test_tui_view_state_updates_context_from_estimate_stats_and_usage() -> None:
     assert state.context.observed_is_current is True
     assert state.context.estimated_percent == 9.375
     assert state.snapshot().context is state.context
+
+
+def test_tui_view_state_accumulates_complete_and_unpriced_costs() -> None:
+    state = TuiViewState()
+    priced = UsageCost(
+        provider="openai",
+        model="model",
+        billable=BillableTokenUsage(
+            input_tokens=1,
+            cache_read_input_tokens=0,
+            cache_write_input_tokens=0,
+            output_tokens=1,
+        ),
+        rates=UsageCostRates(
+            input_usd_per_million=Decimal("1"),
+            output_usd_per_million=Decimal("1"),
+        ),
+        estimated_usd=Decimal("0.042"),
+    )
+    unpriced = UsageCost(
+        provider="openai-codex",
+        model="model",
+        unavailable_reason="pricing_unavailable",
+    )
+
+    assert state.update_context_from_event(
+        MessageCompleted(turn=1, content="one", finish_reason="stop", cost=priced)
+    )
+    assert state.cost is not None
+    assert state.cost.known_usd == Decimal("0.042")
+    assert state.cost.complete is True
+    assert state.update_context_from_event(
+        MessageCompleted(turn=2, content="two", finish_reason="stop", cost=unpriced)
+    )
+    assert state.cost.complete is False
+    assert state.cost.unpriced_record_count == 1
+    assert state.snapshot().cost is state.cost
 
 
 def test_tui_view_state_invalidates_context_after_automatic_compaction() -> None:

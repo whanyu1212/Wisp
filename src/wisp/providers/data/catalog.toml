@@ -1,14 +1,15 @@
 # Wisp built-in model catalog.
 #
 # Describes which models each registered provider supports, for validation and
-# `/model` enumeration only -- it does not configure providers (base URLs, auth
-# env vars, and wire formats stay hardcoded in each Provider implementation).
+# `/model` enumeration and optional list-price estimates only -- it does not
+# configure providers (base URLs, auth env vars, and wire formats stay hardcoded
+# in each Provider implementation).
 #
 # A user-only overlay at ~/.wisp/catalog.toml may add or extend provider entries.
 # Project-local catalogs are never read: a cloned repository must not be able to
 # redirect provider metadata.
 
-schema_version = 1
+schema_version = 2
 
 [[providers]]
 name = "openai"
@@ -57,6 +58,86 @@ models = [
 "gpt-5.6-terra" = ["none", "low", "medium", "high", "xhigh", "max"]
 "gpt-5.6-luna" = ["none", "low", "medium", "high", "xhigh", "max"]
 "gpt-5.5" = ["none", "minimal", "low", "medium", "high", "xhigh"]
+
+# OpenAI standard API list prices per million tokens, verified 2026-07-19:
+# https://developers.openai.com/api/docs/pricing
+# GPT-5.6 model pages document the >272K-input long-context threshold. Prices
+# are snapshots used for new requests only; historical sessions retain their
+# selected rate snapshot instead of being repriced after catalog changes.
+[[providers.pricing."gpt-5.6-sol"]]
+input_usd_per_million = "5"
+cache_read_usd_per_million = "0.5"
+cache_write_usd_per_million = "6.25"
+output_usd_per_million = "30"
+
+[[providers.pricing."gpt-5.6-sol"]]
+input_token_threshold = 272001
+input_usd_per_million = "10"
+cache_read_usd_per_million = "1"
+cache_write_usd_per_million = "12.5"
+output_usd_per_million = "45"
+
+[[providers.pricing."gpt-5.6-terra"]]
+input_usd_per_million = "2.5"
+cache_read_usd_per_million = "0.25"
+cache_write_usd_per_million = "3.125"
+output_usd_per_million = "15"
+
+[[providers.pricing."gpt-5.6-terra"]]
+input_token_threshold = 272001
+input_usd_per_million = "5"
+cache_read_usd_per_million = "0.5"
+cache_write_usd_per_million = "6.25"
+output_usd_per_million = "22.5"
+
+[[providers.pricing."gpt-5.6-luna"]]
+input_usd_per_million = "1"
+cache_read_usd_per_million = "0.1"
+cache_write_usd_per_million = "1.25"
+output_usd_per_million = "6"
+
+[[providers.pricing."gpt-5.6-luna"]]
+input_token_threshold = 272001
+input_usd_per_million = "2"
+cache_read_usd_per_million = "0.2"
+cache_write_usd_per_million = "2.5"
+output_usd_per_million = "9"
+
+[[providers.pricing."gpt-5.5"]]
+input_usd_per_million = "5"
+cache_read_usd_per_million = "0.5"
+output_usd_per_million = "30"
+
+[[providers.pricing."gpt-5.5"]]
+input_token_threshold = 272001
+input_usd_per_million = "10"
+cache_read_usd_per_million = "1"
+output_usd_per_million = "45"
+
+[[providers.pricing."gpt-5.5-pro"]]
+input_usd_per_million = "30"
+output_usd_per_million = "180"
+
+[[providers.pricing."gpt-5.5-pro"]]
+input_token_threshold = 272001
+input_usd_per_million = "60"
+output_usd_per_million = "270"
+
+[[providers.pricing."gpt-5.4"]]
+input_usd_per_million = "2.5"
+cache_read_usd_per_million = "0.25"
+output_usd_per_million = "15"
+
+[[providers.pricing."gpt-5.4"]]
+input_token_threshold = 272001
+input_usd_per_million = "5"
+cache_read_usd_per_million = "0.5"
+output_usd_per_million = "22.5"
+
+[[providers.pricing."gpt-5.4-mini"]]
+input_usd_per_million = "0.75"
+cache_read_usd_per_million = "0.075"
+output_usd_per_million = "4.5"
 
 [[providers]]
 name = "openai-codex"
@@ -142,6 +223,60 @@ models = [
 "claude-opus-4-7" = ["low", "medium", "high", "xhigh", "max"]
 "claude-opus-4-6" = ["low", "medium", "high", "max"]
 "claude-sonnet-4-6" = ["low", "medium", "high", "max"]
+
+# Anthropic first-party API standard list prices per million tokens, verified
+# 2026-07-19: https://platform.claude.com/docs/en/about-claude/pricing
+# Cache-write rates are the standard five-minute rate. Wisp does not currently
+# request a one-hour cache policy, so its distinct rate is intentionally absent.
+[[providers.pricing."claude-fable-5"]]
+input_usd_per_million = "10"
+cache_read_usd_per_million = "1"
+cache_write_usd_per_million = "12.5"
+output_usd_per_million = "50"
+
+[[providers.pricing."claude-sonnet-5"]]
+effective_until = 2026-08-31
+input_usd_per_million = "2"
+cache_read_usd_per_million = "0.2"
+cache_write_usd_per_million = "2.5"
+output_usd_per_million = "10"
+
+[[providers.pricing."claude-sonnet-5"]]
+effective_from = 2026-09-01
+input_usd_per_million = "3"
+cache_read_usd_per_million = "0.3"
+cache_write_usd_per_million = "3.75"
+output_usd_per_million = "15"
+
+[[providers.pricing."claude-opus-4-8"]]
+input_usd_per_million = "5"
+cache_read_usd_per_million = "0.5"
+cache_write_usd_per_million = "6.25"
+output_usd_per_million = "25"
+
+[[providers.pricing."claude-haiku-4-5"]]
+input_usd_per_million = "1"
+cache_read_usd_per_million = "0.1"
+cache_write_usd_per_million = "1.25"
+output_usd_per_million = "5"
+
+[[providers.pricing."claude-opus-4-7"]]
+input_usd_per_million = "5"
+cache_read_usd_per_million = "0.5"
+cache_write_usd_per_million = "6.25"
+output_usd_per_million = "25"
+
+[[providers.pricing."claude-opus-4-6"]]
+input_usd_per_million = "5"
+cache_read_usd_per_million = "0.5"
+cache_write_usd_per_million = "6.25"
+output_usd_per_million = "25"
+
+[[providers.pricing."claude-sonnet-4-6"]]
+input_usd_per_million = "3"
+cache_read_usd_per_million = "0.3"
+cache_write_usd_per_million = "3.75"
+output_usd_per_million = "15"
 
 [[providers]]
 name = "google"

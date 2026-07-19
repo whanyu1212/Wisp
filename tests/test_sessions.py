@@ -163,6 +163,25 @@ def test_session_loads_legacy_event_entries_without_rewriting_them(tmp_path: Pat
     assert path.read_bytes() == original
 
 
+def test_session_wraps_non_integer_compaction_schema_versions(tmp_path: Path) -> None:
+    path = tmp_path / "malformed-compaction.jsonl"
+    entry = {
+        "id": "malformed",
+        "session_id": "session",
+        "kind": "compaction",
+        "compaction": {
+            "schema_version": "3",
+            "summary": "summary",
+            "replaced_entry_ids": ["entry-1"],
+            "provider": "openai",
+        },
+    }
+    path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
+
+    with pytest.raises(SessionError, match="Invalid session entry"):
+        JsonlSessionStore(tmp_path).load(path).read_entries()
+
+
 def test_compaction_record_is_strict_and_versioned() -> None:
     record = CompactionRecord(
         summary="Completed the investigation.",
@@ -173,7 +192,7 @@ def test_compaction_record_is_strict_and_versioned() -> None:
         usage=TokenUsage(input_tokens=8, output_tokens=3, total_tokens=11),
     )
 
-    assert record.schema_version == 2
+    assert record.schema_version == 4
     assert record.reason == "manual"
     assert record.replaced_entry_ids == ("entry-1",)
     with pytest.raises(ValidationError):

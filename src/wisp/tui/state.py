@@ -15,9 +15,11 @@ from wisp.events import (
     ContextEstimated,
     KnownWispEvent,
     MessageCompleted,
+    SessionCostSummary,
     SessionStatsReported,
     ToolApprovalRequested,
     TrustRequested,
+    UsageCost,
 )
 from wisp.tui.rendering import TuiViewSnapshot
 
@@ -65,6 +67,7 @@ class TuiViewState:
     provider: str | None = None
     model: str | None = None
     context: ContextBudget | None = None
+    cost: SessionCostSummary | None = None
 
     def snapshot(self) -> TuiViewSnapshot:
         """Return an immutable renderer-facing view snapshot."""
@@ -79,6 +82,7 @@ class TuiViewState:
             provider=self.provider,
             model=self.model,
             context=self.context,
+            cost=self.cost,
         )
 
     def update_context_from_event(self, event: KnownWispEvent) -> bool:
@@ -89,6 +93,7 @@ class TuiViewState:
             return True
         if isinstance(event, SessionStatsReported):
             self.context = event.stats.context
+            self.cost = getattr(event.stats, "cost", None)
             return True
         if (
             isinstance(event, CompactionStarted)
@@ -99,13 +104,19 @@ class TuiViewState:
             return True
         if isinstance(event, CompactionCompleted) and event.outcome == "completed":
             self.context = None
+            self._update_cost(event.cost)
             return True
         if not isinstance(event, MessageCompleted):
             return False
-        if event.finish_reason in {"error", "cancelled"} or event.usage is None:
-            return False
-        if event.usage.total_tokens <= 0 or self.context is None:
-            return False
+        updated = False
+        updated = self._update_cost(event.cost)
+        if (
+            event.finish_reason in {"error", "cancelled"}
+            or event.usage is None
+            or event.usage.total_tokens <= 0
+            or self.context is None
+        ):
+            return updated
 
         observed_tokens = event.usage.total_tokens
         context_window = self.context.context_window
@@ -129,6 +140,26 @@ class TuiViewState:
                 ),
             }
         )
+        return True
+
+    def _update_cost(self, cost: UsageCost | None) -> bool:
+        if cost is None:
+            return False
+        current = self.cost or SessionCostSummary()
+        if cost.estimated_usd is None:
+            self.cost = current.model_copy(
+                update={
+                    "complete": False,
+                    "unpriced_record_count": current.unpriced_record_count + 1,
+                }
+            )
+        else:
+            self.cost = current.model_copy(
+                update={
+                    "known_usd": current.known_usd + cost.estimated_usd,
+                    "priced_record_count": current.priced_record_count + 1,
+                }
+            )
         return True
 
 

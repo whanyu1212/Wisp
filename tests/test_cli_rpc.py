@@ -606,7 +606,7 @@ def test_rpc_prompt_recovers_one_overflow_inside_the_prompt_envelope(
     )
     assert (
         next(entry.compaction for entry in entries if entry.compaction is not None).schema_version
-        == 3
+        == 4
     )
 
 
@@ -778,7 +778,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "agent.completed",
         "rpc.command.finished",
     ]
-    assert all(record["schema_version"] == 11 for record in records)
+    assert all(record["schema_version"] == 12 for record in records)
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"
@@ -818,7 +818,7 @@ def test_rpc_mode_reports_stats_after_queued_prompt(tmp_path: Path) -> None:
     assert finished == [
         {
             "type": "rpc.command.finished",
-            "schema_version": 11,
+            "schema_version": 12,
             "timestamp": finished[0]["timestamp"],
             "command_id": "stats-1",
             "command_type": "get_session_stats",

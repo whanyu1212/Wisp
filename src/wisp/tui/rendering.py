@@ -23,6 +23,7 @@ from wisp.events import (
     MessageCompleted,
     ProviderRetrying,
     RpcCommandFinished,
+    SessionCostSummary,
     SessionSaved,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -54,6 +55,7 @@ class TuiViewSnapshot:
     provider: str | None = None
     model: str | None = None
     context: ContextBudget | None = None
+    cost: SessionCostSummary | None = None
 
 
 class TuiRenderer(Protocol):
@@ -355,6 +357,7 @@ class FullscreenTuiState:
     provider: str | None = None
     model: str | None = None
     context: ContextBudget | None = None
+    cost: SessionCostSummary | None = None
     transcript: list[TuiTranscriptEntry] = field(default_factory=list)
     streaming_text: str = ""
     transcript_scroll_offset: int = 0
@@ -398,6 +401,7 @@ class FullscreenTuiRenderer:
         self.state.provider = snapshot.provider
         self.state.model = snapshot.model
         self.state.context = snapshot.context
+        self.state.cost = snapshot.cost
         self._refresh()
 
     def startup(self) -> None:
@@ -821,6 +825,7 @@ class FullscreenTuiRenderer:
             provider=self.state.provider,
             model=self.state.model,
             context=self.state.context,
+            cost=self.state.cost,
         )
 
     def _input_text(self) -> Text:
@@ -854,6 +859,7 @@ def format_tui_footer_lines(
         status_left,
         model_right,
         snapshot.context,
+        snapshot.cost,
         display_width,
     )
 
@@ -894,20 +900,28 @@ def _footer_status_right(
     status: str,
     model: str,
     context: ContextBudget | None,
+    cost: SessionCostSummary | None,
     width: int | None,
 ) -> str:
     context_text = _footer_context_text(context)
     context_wide = _footer_context_text(context, include_percent=True)
-    if model and context_text:
-        candidates = [
-            " • ".join((model, context_wide)),
-            " • ".join((model, context_text)),
-            context_text,
-        ]
-    elif context_text:
-        candidates = [context_wide, context_text]
-    else:
-        return model
+    cost_text = _footer_cost_text(cost)
+    wide_parts = tuple(part for part in (model, context_wide, cost_text) if part)
+    compact_parts = tuple(part for part in (model, context_text, cost_text) if part)
+    without_model_wide = tuple(part for part in (context_wide, cost_text) if part)
+    without_model_compact = tuple(part for part in (context_text, cost_text) if part)
+    candidates = [
+        " • ".join(wide_parts),
+        " • ".join(compact_parts),
+        " • ".join(without_model_wide),
+        " • ".join(without_model_compact),
+        context_text,
+        cost_text,
+        model,
+    ]
+    candidates = [candidate for candidate in candidates if candidate]
+    if not candidates:
+        return ""
 
     if width is None:
         return candidates[0]
@@ -942,6 +956,14 @@ def _footer_context_text(
         if percent is not None:
             text += f" ({percent:.0f}%)"
     return text
+
+
+def _footer_cost_text(cost: SessionCostSummary | None) -> str:
+    if cost is None:
+        return ""
+    from wisp.coding.costs import format_cost_summary
+
+    return format_cost_summary(cost)
 
 
 def _format_token_count(tokens: int) -> str:

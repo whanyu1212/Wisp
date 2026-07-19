@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from tests.tui_support import *
-from wisp.events import ContextBudget, ContextEstimate, ProviderRetrying
+from wisp.events import ContextBudget, ContextEstimate, ProviderRetrying, SessionCostSummary
 
 
 def _context_budget(
@@ -490,6 +492,44 @@ def test_tui_footer_context_gauge_is_responsive_without_displacing_status() -> N
         width=24,
     )[1]
     assert protected == "running • queued 12"
+
+
+def test_tui_footer_formats_complete_and_partial_costs_responsively() -> None:
+    complete = SessionCostSummary(
+        known_usd=Decimal("0.042"),
+        priced_record_count=1,
+    )
+    partial = SessionCostSummary(
+        known_usd=Decimal("0.042"),
+        complete=False,
+        priced_record_count=1,
+        unpriced_record_count=1,
+    )
+    snapshot = TuiViewSnapshot(
+        status="idle",
+        input_hint="wisp> ",
+        provider="openai",
+        model="gpt",
+        context=_context_budget(),
+        cost=complete,
+    )
+
+    assert "cost $0.042" in format_tui_footer_lines(snapshot, width=100)[1]
+    assert (
+        "cost ≥$0.042"
+        in format_tui_footer_lines(
+            TuiViewSnapshot(
+                status="idle",
+                input_hint="wisp> ",
+                context=_context_budget(),
+                cost=partial,
+            ),
+            width=80,
+        )[1]
+    )
+    narrow = format_tui_footer_lines(snapshot, width=20)[1]
+    assert "ctx 12k/128k" in narrow
+    assert "cost" not in narrow
 
 
 def test_tui_footer_formatter_compacts_and_truncates() -> None:

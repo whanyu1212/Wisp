@@ -26,6 +26,7 @@ from wisp.events import (
     ToolCallSnapshot,
     ToolExecutionEnded,
     ToolResultReady,
+    UsageCost,
     utc_now,
 )
 
@@ -46,6 +47,7 @@ class Message(BaseModel):
     finish_reason: FinishReason | None = None
     is_error: bool | None = None
     usage: TokenUsage | None = None
+    cost: UsageCost | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -54,13 +56,14 @@ class CompactionRecord(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    schema_version: Literal[1, 2, 3] = 2
+    schema_version: Literal[1, 2, 3, 4] = 4
     summary: str
     replaced_entry_ids: tuple[str, ...] = Field(min_length=1)
     provider: str
     model: str | None = None
     instructions: str | None = None
     usage: TokenUsage | None = None
+    cost: UsageCost | None = None
     reason: CompactionReason = "manual"
     trigger_budget: ContextBudget | None = None
 
@@ -75,6 +78,9 @@ class CompactionRecord(BaseModel):
                 "reason" in normalized or "trigger_budget" in normalized
             ):
                 raise ValueError("compaction schema v1 cannot contain v2 metadata")
+            schema_version = normalized.get("schema_version", 4)
+            if type(schema_version) is int and schema_version < 4 and "cost" in normalized:
+                raise ValueError("compaction schemas v1 through v3 cannot contain cost metadata")
             return normalized
         return data
 
@@ -105,6 +111,8 @@ class CompactionRecord(BaseModel):
         if self.schema_version == 1:
             data.pop("reason", None)
             data.pop("trigger_budget", None)
+        if self.schema_version < 4:
+            data.pop("cost", None)
         return data
 
 
@@ -121,6 +129,7 @@ def message_from_completion_event(
             response_id=event.response_id,
             finish_reason=event.finish_reason,
             usage=event.usage,
+            cost=event.cost,
             created_at=event.timestamp,
         )
     return Message(

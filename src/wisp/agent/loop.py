@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 import wisp.providers.events as provider_events
 from wisp.agent.context import build_context_budget, estimate_context
@@ -33,6 +33,7 @@ from wisp.events import (
     ToolResultReady,
     TurnCompleted,
     TurnStarted,
+    UsageCost,
 )
 from wisp.providers.base import (
     ContextOverflowError,
@@ -71,6 +72,7 @@ type AgentLoopEvent = (
     | TurnCompleted
     | ErrorEvent
 )
+type UsageCostEstimator = Callable[[str, str | None, str | None, TokenUsage], UsageCost]
 
 
 class CancellationToken(Protocol):
@@ -101,6 +103,7 @@ class AgentLoopConfig:
     context_pressure_threshold: float = 0.8
     turn_offset: int = 0
     tool_iteration_offset: int = 0
+    cost_estimator: UsageCostEstimator | None = None
     defer_context_overflow_errors: bool = False
 
     def __post_init__(self) -> None:
@@ -125,6 +128,23 @@ def _cancelled_turn_events(turn: int) -> tuple[ErrorEvent, TurnCompleted]:
     return (
         ErrorEvent(message="Agent run cancelled"),
         TurnCompleted(turn=turn, outcome="cancelled", finish_reason="cancelled"),
+    )
+
+
+def _unavailable_cost(
+    provider: str,
+    requested_model: str | None,
+    response_model: str | None,
+    *,
+    reason: Literal["pricing_unavailable", "usage_incomplete", "estimation_failed"],
+) -> UsageCost:
+    """Keep optional accounting failures from discarding a completed provider response."""
+
+    return UsageCost(
+        provider=provider,
+        requested_model=requested_model,
+        model=response_model or requested_model,
+        unavailable_reason=reason,
     )
 
 
@@ -222,6 +242,7 @@ async def run_agent_loop(
             terminal_response: ProviderResponseCompleted | ProviderResponseFailed | None = None
             streamed_tool_calls: list[ToolCall] = []
             streamed_thinking: list[str] = []
+            response_model: str | None = None
 
             estimate = estimate_context((*messages, *continuation_messages), config.tools)
             yield ContextEstimated(
@@ -278,6 +299,7 @@ async def run_agent_loop(
                             "Provider emitted response_started more than once"
                         )
                     response_started = True
+                    response_model = provider_event.model
                     yield MessageStarted(turn=turn)
                 elif isinstance(provider_event, provider_events.ProviderRetrying):
                     if response_started:
@@ -362,12 +384,42 @@ async def run_agent_loop(
                 if response.usage is not None
                 else None
             )
+            if usage is None:
+                cost = _unavailable_cost(
+                    config.provider.name,
+                    config.model,
+                    response_model,
+                    reason="usage_incomplete",
+                )
+            elif config.cost_estimator is None:
+                cost = _unavailable_cost(
+                    config.provider.name,
+                    config.model,
+                    response_model,
+                    reason="pricing_unavailable",
+                )
+            else:
+                try:
+                    cost = config.cost_estimator(
+                        config.provider.name,
+                        config.model,
+                        response_model,
+                        usage,
+                    )
+                except Exception:
+                    cost = _unavailable_cost(
+                        config.provider.name,
+                        config.model,
+                        response_model,
+                        reason="estimation_failed",
+                    )
             yield MessageCompleted(
                 turn=turn,
                 content=response.content,
                 finish_reason=response.finish_reason,
                 response_id=response_id,
                 usage=usage,
+                cost=cost,
                 tool_calls=tuple(
                     ToolCallSnapshot(
                         call_id=tool_call.call_id,
@@ -385,6 +437,7 @@ async def run_agent_loop(
                     response_id=response_id,
                     finish_reason=response.finish_reason,
                     usage=usage,
+                    cost=cost,
                     tool_calls=tuple(
                         ToolCallSnapshot(
                             call_id=tool_call.call_id,

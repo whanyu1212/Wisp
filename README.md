@@ -300,8 +300,11 @@ provider/model. It also shows current context use: `ctx 12k/128k` is a current p
 observation, while `ctx ~12k/128k` is an explicit estimate (for example, immediately after
 compaction). Automatic threshold and overflow summaries use the same progress notices as
 `/compact` without changing the active prompt command. Completed tool cards include bounded
-multiline output previews. Cost metrics remain future work. Adjust runtime settings with slash commands
-instead of up-front flags. The prompt editor accepts multiline text: press Enter to submit, or
+multiline output previews. The footer also shows cumulative catalog-based list-price estimates:
+`cost $0.042` is complete accounting, while `cost ≥$0.042` includes unpriced historical or
+unknown-model requests. Estimates are not invoices: subscription-backed Codex, custom pricing,
+unknown models, and provider charges outside token usage remain unpriced. Adjust runtime settings
+with slash commands instead of up-front flags. The prompt editor accepts multiline text: press Enter to submit, or
 Shift+Enter / Ctrl+J to insert a newline. Pasted newlines are preserved.
 
 Available slash commands:
@@ -330,8 +333,10 @@ documented aliases such as `gpt-5.6` and `gemini-flash-latest` remain valid conf
 
 Catalog entries are advisory rather than access control. Model access varies by account and region,
 and explicitly configured unknown models continue to pass through to the selected provider. The
-picker labels supported preview and legacy models. Add account-specific or newly released models
-in the user-only `~/.wisp/catalog.toml` overlay; Wisp never reads a project-local catalog.
+picker labels supported preview and legacy models. Catalog pricing is optional, effective-dated,
+and provider-scoped; it is used only to estimate new request costs, which then retain their rate
+snapshot in the session. Add account-specific models or negotiated rates in the user-only
+`~/.wisp/catalog.toml` overlay; Wisp never reads a project-local catalog.
 
 Unlike print mode, the interactive TUI exposes the **full tool registry by
 default** — otherwise it would be a chatbot that can't read files or run
@@ -369,8 +374,8 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 11`; readers also accept legacy schema v5
-through v10 events for compatibility. A successful prompt follows this lifecycle (tool events
+Every outbound `WispEvent` includes `"schema_version": 12`; readers also accept legacy schema v5
+through v11 events for compatibility. A successful prompt follows this lifecycle (tool events
 repeat inside a turn when the model requests tools):
 
 ```text
@@ -398,6 +403,13 @@ The exception is successful schema-v11 overflow recovery: after `context.overflo
 overflow compaction lifecycle events, then the failed `turn.completed`, and continues once. Its
 `compaction.completed.will_retry=true` marks that failed turn as nonterminal; no `error` or
 intermediate `agent.completed` is emitted unless compaction or the retry setup fails.
+
+Schema v12 adds optional `cost` snapshots to successful `message.completed` and
+`compaction.completed` events, plus a cumulative `session.stats.cost` summary. Costs are exact
+Decimal calculations from provider/model catalog list prices selected when each request completed;
+they are never reconstructed from newer catalog rates. `estimated_usd=null` marks an unpriced
+request, and a session's `known_usd` is only complete when no usage record is unpriced. New durable
+compaction records use schema v4 to retain that snapshot; v1-v3 records remain readable.
 
 Schema v11 adds overflow compact-and-retry. Overflow lifecycle events use `reason="overflow"`;
 an overflow `compaction.completed` has `will_retry=true` only after a durable replacement commits

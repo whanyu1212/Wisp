@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import anyio
 
 from wisp.agent.execution import ToolExecutor
-from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, run_agent_loop
+from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, UsageCostEstimator, run_agent_loop
 from wisp.agent.messages import (
     Message,
     message_from_completion_event,
@@ -38,6 +38,7 @@ class AgentHarnessConfig:
     context_window: int | None = None
     context_reserve_tokens: int = 16_384
     context_pressure_threshold: float = 0.8
+    cost_estimator: UsageCostEstimator | None = None
 
 
 class SimpleCancellationToken:
@@ -213,6 +214,7 @@ class AgentHarness:
             context_pressure_threshold=self._config.context_pressure_threshold,
             turn_offset=turn_offset,
             tool_iteration_offset=tool_iteration_offset,
+            cost_estimator=self._config.cost_estimator,
             defer_context_overflow_errors=defer_context_overflow_errors,
         )
         provider_messages_list: list[Message] = []

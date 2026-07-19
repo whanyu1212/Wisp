@@ -25,12 +25,15 @@ from wisp.agent.prompt import (
 )
 from wisp.agent.transcript import plan_interrupted_tool_repairs
 from wisp.coding.compaction import (
+    CompactionSummary,
+    CompactionSummaryError,
     ManualCompactionPlan,
     NothingToCompactError,
     plan_manual_compaction,
     should_auto_compact,
     summarize_manual_compaction,
 )
+from wisp.coding.costs import CostEstimator
 from wisp.coding.stats import build_session_stats
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
@@ -126,6 +129,7 @@ class CodingSession:
         self.model = model
         self.effort = effort
         self.models = models
+        self._cost_estimator = CostEstimator(models)
         self.tool_registry = tool_registry
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
@@ -210,6 +214,7 @@ class CodingSession:
                 effort=self.effort,
                 context_window=self._context_window(),
                 context_reserve_tokens=self.context_reserve_tokens,
+                cost_estimator=self._cost_estimator,
             ),
             messages=(*prompt_messages, *self._conversation_history(history)),
         )
@@ -570,6 +575,8 @@ class CodingSession:
         )
         provider_name = self.provider.name
         effective_model = self.model or self.provider.default_model
+        summary_committed = False
+        summary: CompactionSummary | None = None
         try:
             if recover_failure:
                 yield await self._emit_recoverable_event(started, session=session)
@@ -581,6 +588,7 @@ class CodingSession:
                 model=self.model,
                 effort=self.effort,
                 instructions=instructions,
+                cost_estimator=self._cost_estimator,
             )
             normalized_instructions = (
                 instructions.strip() if instructions is not None and instructions.strip() else None
@@ -589,13 +597,14 @@ class CodingSession:
                 session_id=session.session_id,
                 kind="compaction",
                 compaction=CompactionRecord(
-                    schema_version=3 if reason == "overflow" else 2,
+                    schema_version=4,
                     summary=summary.summary,
                     replaced_entry_ids=plan.replaced_entry_ids,
                     provider=provider_name,
                     model=effective_model,
                     instructions=normalized_instructions,
                     usage=summary.usage,
+                    cost=summary.cost,
                     reason=reason,
                     trigger_budget=trigger_budget,
                 ),
@@ -615,6 +624,7 @@ class CodingSession:
                         entry,
                         expected_context_entry_ids=plan.expected_context_entry_ids,
                     )
+                summary_committed = True
                 self._history_refresh_session_ids.add(session.session_id)
                 self._context_observations.pop(session.session_id, None)
                 saved = SessionSaved(session_id=session.session_id, path=session.path)
@@ -639,6 +649,7 @@ class CodingSession:
                 provider=provider_name,
                 model=effective_model,
                 usage=summary.usage,
+                cost=summary.cost,
                 will_retry=will_retry and retry_setup_error is None,
                 error=(
                     retry_setup_error
@@ -671,6 +682,11 @@ class CodingSession:
                 )
         except Exception as exc:
             error = str(exc)
+            summary_usage = exc.usage if isinstance(exc, CompactionSummaryError) else None
+            summary_cost = exc.cost if isinstance(exc, CompactionSummaryError) else None
+            if summary is not None:
+                summary_usage = summary_usage if summary_usage is not None else summary.usage
+                summary_cost = summary_cost if summary_cost is not None else summary.cost
             if not recover_failure:
                 yield await self._emit(ErrorEvent(message=error), session=session)
             failed = CompactionCompleted(
@@ -681,8 +697,16 @@ class CodingSession:
                 retained_entry_count=len(plan.retained_rows),
                 provider=provider_name,
                 model=effective_model,
+                usage=summary_usage,
+                cost=summary_cost,
                 error=error,
             )
+            if not summary_committed and (summary_usage is not None or summary_cost is not None):
+                try:
+                    await session.append_event(failed, operation_id=operation_id)
+                except Exception:
+                    if not recover_failure:
+                        raise
             if recover_failure:
                 yield await self._emit_recoverable_event(failed, session=session)
             else:
