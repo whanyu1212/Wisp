@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import sys
 import tomllib
+from datetime import date
+from decimal import Decimal
 from importlib.resources import files
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 _CATALOG_RESOURCE_PACKAGE = "wisp.providers.data"
 _CATALOG_RESOURCE_NAME = "catalog.toml"
@@ -55,6 +57,27 @@ class AmbiguousModelError(KeyError):
         return f"Model {self.model_id!r} is available from multiple providers: {providers}"
 
 
+class ModelPricing(BaseModel):
+    """One effective-dated list-price band for a canonical model."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input_token_threshold: int = Field(default=0, ge=0)
+    effective_from: date | None = None
+    effective_until: date | None = None
+    input_usd_per_million: Decimal = Field(ge=0)
+    output_usd_per_million: Decimal = Field(ge=0)
+    cache_read_usd_per_million: Decimal | None = Field(default=None, ge=0)
+    cache_write_usd_per_million: Decimal | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_dates(self) -> ModelPricing:
+        if self.effective_from is not None and self.effective_until is not None:
+            if self.effective_until < self.effective_from:
+                raise ValueError("pricing effective_until must not precede effective_from")
+        return self
+
+
 class ModelCatalogProviderEntry(BaseModel):
     """Catalog metadata for one provider's models."""
 
@@ -81,6 +104,10 @@ class ModelCatalogProviderEntry(BaseModel):
     # provider (e.g. Claude Haiku supports none at all). A model absent from
     # this table has no settable effort level.
     effort_levels: dict[str, tuple[str, ...]] = {}
+    # One model can have both time-based and long-context price bands. Rates are
+    # immutable snapshots for calculating new requests, never a source for
+    # repricing historical session entries.
+    pricing: dict[str, tuple[ModelPricing, ...]] = {}
 
     @model_validator(mode="after")
     def _validate_cross_references(self) -> ModelCatalogProviderEntry:
@@ -134,6 +161,44 @@ class ModelCatalogProviderEntry(BaseModel):
                 raise ValueError(
                     f"provider {self.name!r} effort_levels[{model_id!r}] has duplicate entries"
                 )
+        for model_id, bands in self.pricing.items():
+            if model_id not in model_set:
+                raise ValueError(
+                    f"provider {self.name!r} pricing references unknown model {model_id!r}"
+                )
+            if not bands:
+                raise ValueError(f"provider {self.name!r} pricing[{model_id!r}] must not be empty")
+            if not any(band.input_token_threshold == 0 for band in bands):
+                raise ValueError(
+                    f"provider {self.name!r} pricing[{model_id!r}] must include a base price band"
+                )
+            keys = {
+                (band.effective_from, band.effective_until, band.input_token_threshold)
+                for band in bands
+            }
+            if len(keys) != len(bands):
+                raise ValueError(
+                    f"provider {self.name!r} pricing[{model_id!r}] has duplicate price bands"
+                )
+            for index, band in enumerate(bands):
+                for other in bands[index + 1 :]:
+                    if band.input_token_threshold != other.input_token_threshold:
+                        continue
+                    starts_before_end = (
+                        band.effective_from is None
+                        or other.effective_until is None
+                        or band.effective_from <= other.effective_until
+                    )
+                    other_starts_before_end = (
+                        other.effective_from is None
+                        or band.effective_until is None
+                        or other.effective_from <= band.effective_until
+                    )
+                    if starts_before_end and other_starts_before_end:
+                        raise ValueError(
+                            f"provider {self.name!r} pricing[{model_id!r}] has overlapping "
+                            "price bands"
+                        )
         return self
 
     def canonical_model(self, model_id: str) -> str | None:
@@ -143,13 +208,36 @@ class ModelCatalogProviderEntry(BaseModel):
             return model_id
         return self.model_aliases.get(model_id)
 
+    def pricing_for(
+        self,
+        model_id: str,
+        *,
+        input_tokens: int,
+        at: date,
+    ) -> tuple[str, ModelPricing] | None:
+        """Return the most specific effective price band for a model or alias."""
+
+        canonical = self.canonical_model(model_id)
+        if canonical is None:
+            return None
+        candidates = [
+            band
+            for band in self.pricing.get(canonical, ())
+            if band.input_token_threshold <= input_tokens
+            and (band.effective_from is None or band.effective_from <= at)
+            and (band.effective_until is None or at <= band.effective_until)
+        ]
+        if not candidates:
+            return None
+        return canonical, max(candidates, key=lambda band: band.input_token_threshold)
+
 
 class ModelCatalog(BaseModel):
     """A validated set of provider model catalogs."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     providers: tuple[ModelCatalogProviderEntry, ...]
 
     @model_validator(mode="after")
@@ -332,6 +420,35 @@ class ModelRegistry:
             return entry.canonical_model(model_id) is not None
         return False
 
+    def canonical_model(self, provider_name: str, model_id: str) -> str | None:
+        """Return a provider-scoped canonical model id, including aliases."""
+
+        for entry in self._catalog.providers:
+            if entry.name == provider_name:
+                return entry.canonical_model(model_id)
+        return None
+
+    def pricing(
+        self,
+        provider_name: str,
+        model_id: str,
+        *,
+        input_tokens: int,
+        at: date | None = None,
+    ) -> tuple[str, ModelPricing] | None:
+        """Look up a provider-scoped price band without guessing unknown models."""
+
+        if input_tokens < 0:
+            raise ValueError("input_tokens must be non-negative")
+        for entry in self._catalog.providers:
+            if entry.name == provider_name:
+                return entry.pricing_for(
+                    model_id,
+                    input_tokens=input_tokens,
+                    at=at or date.today(),
+                )
+        return None
+
     def model_lifecycle(self, provider_name: str, model_id: str) -> ModelLifecycle | None:
         """Return the lifecycle label for a model or alias, when cataloged."""
 
@@ -411,6 +528,7 @@ __all__ = [
     "CatalogError",
     "ModelCatalog",
     "ModelCatalogProviderEntry",
+    "ModelPricing",
     "ModelLifecycle",
     "ModelRegistry",
     "UnknownModelError",

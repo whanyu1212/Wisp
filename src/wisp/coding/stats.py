@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from pydantic import ValidationError
+
 from wisp.agent.context import build_context_budget, context_fingerprint, estimate_context
 from wisp.agent.messages import Message, SessionEntry
-from wisp.events import SessionStats, TokenUsage
+from wisp.coding.costs import aggregate_session_cost
+from wisp.events import SessionStats, TokenUsage, UsageCost
 from wisp.providers.base import ToolSpec
 from wisp.sessions.replay import SessionReplay
 
@@ -50,6 +53,7 @@ def build_session_stats(
         compaction_count=sum(entry.kind == "compaction" for entry in entries),
         usage_record_count=len(usage_records),
         usage=_sum_usage(usage_records),
+        cost=aggregate_session_cost(_cost_records(entries)),
         context=build_context_budget(
             estimate,
             context_window=context_window,
@@ -67,6 +71,25 @@ def _usage_records(entries: Sequence[SessionEntry]) -> list[TokenUsage]:
             records.append(entry.message.usage)
         if entry.compaction is not None and entry.compaction.usage is not None:
             records.append(entry.compaction.usage)
+    return records
+
+
+def _cost_records(entries: Sequence[SessionEntry]) -> list[UsageCost | None]:
+    records: list[UsageCost | None] = []
+    for entry in entries:
+        if entry.message is not None and entry.message.role == "assistant":
+            records.append(entry.message.cost)
+        if entry.compaction is not None:
+            records.append(entry.compaction.cost)
+        if entry.event is not None and entry.event.get("type") == "compaction.completed":
+            raw_cost = entry.event.get("cost")
+            if isinstance(raw_cost, dict):
+                try:
+                    records.append(UsageCost.model_validate(raw_cost))
+                except ValidationError:
+                    records.append(None)
+            elif entry.event.get("usage") is not None:
+                records.append(None)
     return records
 
 

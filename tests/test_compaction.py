@@ -30,6 +30,7 @@ from wisp.events import (
     KnownWispEventAdapter,
     MessageCompleted,
     SessionSaved,
+    SessionStats,
     TokenUsage,
     ToolCallSnapshot,
     ToolExecutionEnded,
@@ -552,8 +553,8 @@ def test_compaction_events_round_trip_on_current_schema_without_summary() -> Non
         usage=TokenUsage(input_tokens=3, output_tokens=2, total_tokens=5),
     )
 
-    assert started.schema_version == 11
-    assert completed.schema_version == 11
+    assert started.schema_version == 12
+    assert completed.schema_version == 12
     assert "summary" not in completed.model_dump(mode="json")
     assert wisp_event_from_json(started.model_dump_json()) == started
     assert wisp_event_from_json(completed.model_dump_json()) == completed
@@ -612,7 +613,7 @@ def test_compaction_events_require_schema_v8(version: int) -> None:
         source_entry_count=1,
     ).model_dump_json()
 
-    with pytest.raises(ValueError, match="require schema_version 8 through 11"):
+    with pytest.raises(ValueError, match="require schema_version 8 through 12"):
         wisp_event_from_json(payload)
 
 
@@ -831,7 +832,7 @@ def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> No
     assert len(provider.calls) == 2
     entries = session.read_entries()
     record = next(entry.compaction for entry in entries if entry.compaction is not None)
-    assert record.schema_version == 2
+    assert record.schema_version == 4
     assert record.reason == "threshold"
     assert record.trigger_budget == started.trigger_budget
     assert [message.content for message in session.read_context_messages()] == [
@@ -918,7 +919,7 @@ def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Pa
         if entry.compaction is not None and entry.compaction.reason == "overflow"
     )
     assert overflow_record is not None
-    assert overflow_record.schema_version == 3
+    assert overflow_record.schema_version == 4
     user_messages = [
         entry.message.content
         for entry in entries
@@ -1035,7 +1036,13 @@ def test_coding_session_overflow_summary_failure_is_terminal(tmp_path: Path) -> 
                 ProviderResponseStarted(model="model"),
                 ProviderResponseFailed(message="maximum context length exceeded"),
             ],
-            [ProviderResponseStarted(model="model"), ProviderResponseCompleted(content=" ")],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content=" ",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ],
         ],
         default_model="model",
     )
@@ -1152,7 +1159,7 @@ def test_coding_session_overflow_recovery_allows_unknown_context_window(tmp_path
     store = JsonlSessionStore(tmp_path)
     session = store.create()
 
-    async def run() -> list[WispEvent]:
+    async def run() -> tuple[list[WispEvent], SessionStats]:
         await _append_turn(session, "one")
         await _append_turn(session, "two")
         agent = CodingSession(
@@ -1414,14 +1421,20 @@ def test_coding_session_auto_compaction_failure_preserves_prompt_success(
                     usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
                 ),
             ],
-            [ProviderResponseStarted(model="model"), ProviderResponseCompleted(content=" ")],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content=" ",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ],
         ],
         default_model="model",
     )
     store = JsonlSessionStore(tmp_path)
     session = store.create()
 
-    async def run() -> list[WispEvent]:
+    async def run() -> tuple[list[WispEvent], SessionStats]:
         await _append_turn(session, "one")
         agent = CodingSession(
             provider=provider,
@@ -1432,15 +1445,25 @@ def test_coding_session_auto_compaction_failure_preserves_prompt_success(
             context_reserve_tokens=20,
         )
         with anyio.fail_after(2):
-            return [event async for event in agent.run("question two", session=session)]
+            events = [event async for event in agent.run("question two", session=session)]
+        return events, await agent.get_session_stats(session)
 
-    events = anyio.run(run)
+    events, stats = anyio.run(run)
 
     assert not any(isinstance(event, ErrorEvent) for event in events)
     completed = next(event for event in events if isinstance(event, CompactionCompleted))
     assert completed.reason == "threshold"
     assert completed.outcome == "failed"
     assert "blank" in (completed.error or "")
+    assert completed.usage is not None
+    assert completed.usage.total_tokens == 81
+    assert completed.cost is not None
+    assert any(
+        event["type"] == "compaction.completed" and event.get("cost") is not None
+        for event in session.read_events()
+    )
+    assert stats.cost.complete is False
+    assert stats.cost.unpriced_record_count == 3
     assert events[-1].type == "agent.completed"
     assert events[-1].outcome == "completed"
     assert not any(entry.kind == "compaction" for entry in session.read_entries())

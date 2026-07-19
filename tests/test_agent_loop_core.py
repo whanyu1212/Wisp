@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from decimal import Decimal
 
 import anyio
 import pytest
@@ -9,12 +10,15 @@ from wisp.agent.execution import ToolExecutionEvent, ToolExecutionProtocolError,
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
 from wisp.events import (
+    BillableTokenUsage,
     ContextEstimated,
     MessageCompleted,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolExecutionEnded,
     ToolResultReady,
+    UsageCost,
+    UsageCostRates,
     wisp_event_from_json,
 )
 from wisp.providers.events import (
@@ -139,6 +143,129 @@ def test_pure_loop_streams_without_application_dependencies() -> None:
     assert completed.usage is not None
     assert completed.usage.total_tokens == 19
     assert provider.calls[0].messages == messages
+
+
+def test_pure_loop_passes_the_provider_response_model_to_cost_estimator() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="resolved-model"),
+                ProviderResponseCompleted(
+                    content="done",
+                    usage=ProviderUsage(input_tokens=10, output_tokens=5, total_tokens=15),
+                ),
+            ]
+        ]
+    )
+    calls: list[tuple[str, str | None, str | None]] = []
+
+    def estimate(
+        provider_name: str,
+        requested_model: str | None,
+        response_model: str | None,
+        usage: object,
+    ) -> UsageCost:
+        del usage
+        calls.append((provider_name, requested_model, response_model))
+        return UsageCost(
+            provider=provider_name,
+            requested_model=requested_model,
+            model=response_model,
+            billable=BillableTokenUsage(
+                input_tokens=10,
+                cache_read_input_tokens=0,
+                cache_write_input_tokens=0,
+                output_tokens=5,
+            ),
+            rates=UsageCostRates(
+                input_usd_per_million=Decimal("1"),
+                output_usd_per_million=Decimal("2"),
+            ),
+            estimated_usd=Decimal("0.00002"),
+        )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=NeverToolExecutor(),
+                    model="requested-model",
+                    cost_estimator=estimate,
+                ),
+                messages=(Message(role="user", content="hello"),),
+            )
+        ]
+
+    events = anyio.run(run)
+
+    completed = next(event for event in events if isinstance(event, MessageCompleted))
+    assert calls == [("scripted", "requested-model", "resolved-model")]
+    assert completed.cost is not None
+    assert completed.cost.estimated_usd == Decimal("0.00002")
+
+
+def test_pure_loop_marks_missing_usage_unpriced_without_losing_the_response() -> None:
+    provider = ScriptedProvider(
+        [[ProviderResponseStarted(model="model"), ProviderResponseCompleted(content="done")]]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+                messages=(Message(role="user", content="hello"),),
+            )
+        ]
+
+    events = anyio.run(run)
+
+    completed = next(event for event in events if isinstance(event, MessageCompleted))
+    assert completed.usage is None
+    assert completed.cost is not None
+    assert completed.cost.unavailable_reason == "usage_incomplete"
+    assert events[-1].type == "turn.completed"
+
+
+def test_pure_loop_contains_cost_estimator_failures() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="done",
+                    usage=ProviderUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                ),
+            ]
+        ]
+    )
+
+    def fail_estimate(*args: object) -> UsageCost:
+        del args
+        raise RuntimeError("pricing lookup failed")
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=NeverToolExecutor(),
+                    cost_estimator=fail_estimate,
+                ),
+                messages=(Message(role="user", content="hello"),),
+            )
+        ]
+
+    events = anyio.run(run)
+
+    completed = next(event for event in events if isinstance(event, MessageCompleted))
+    assert completed.content == "done"
+    assert completed.cost is not None
+    assert completed.cost.unavailable_reason == "estimation_failed"
+    assert not any(event.type == "error" for event in events)
 
 
 class _LegacyProviderWithoutEffortParameter:

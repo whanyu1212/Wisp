@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from tests.cli_support import *
 from wisp.agent.messages import CompactionRecord, SessionEntry
 from wisp.cli.output import _print_event_line
 from wisp.events import (
+    BillableTokenUsage,
     CompactionCompleted,
     CompactionStarted,
     ContextBudget,
     ContextEstimate,
     ErrorEvent,
     MessageCompleted,
+    UsageCost,
+    UsageCostRates,
     WispEvent,
 )
 from wisp.providers.base import ContextOverflowError
@@ -175,6 +180,49 @@ def test_print_mode_does_not_duplicate_rendered_overflow_recovery_failure(
 
     assert result.exit_code == 1, result.output
     assert result.stderr.count("Context overflow recovery failed: summary failed") == 1
+
+
+def test_print_mode_reports_completed_request_cost_on_stderr(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def priced_run(
+        self: CodingSession,
+        *args: object,
+        **kwargs: object,
+    ) -> AsyncIterator[WispEvent]:
+        del self, args, kwargs
+        yield MessageCompleted(
+            turn=1,
+            content="answer",
+            finish_reason="stop",
+            cost=UsageCost(
+                provider="openai",
+                model="model",
+                billable=BillableTokenUsage(
+                    input_tokens=1,
+                    cache_read_input_tokens=0,
+                    cache_write_input_tokens=0,
+                    output_tokens=1,
+                ),
+                rates=UsageCostRates(
+                    input_usd_per_million=Decimal("1"),
+                    output_usd_per_million=Decimal("1"),
+                ),
+                estimated_usd=Decimal("0.042"),
+            ),
+        )
+
+    monkeypatch.setattr(CodingSession, "run", priced_run)
+    result = CliRunner().invoke(
+        app,
+        ["-p", "hello", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "answer\n"
+    assert "cost $0.042" in result.stderr
 
 
 def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:

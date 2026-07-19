@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 
 from wisp.agent.execution import ToolExecutionEvent
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
-from wisp.events import ContextBudget, MessageCompleted, TokenUsage, TurnCompleted
+from wisp.events import ContextBudget, MessageCompleted, TokenUsage, TurnCompleted, UsageCost
 from wisp.providers.base import Provider
 from wisp.providers.events import ToolCall
 from wisp.sessions.replay import SessionContextRow, SessionReplay
@@ -38,6 +38,17 @@ class AlreadyCompactedError(NothingToCompactError):
 
 class CompactionSummaryError(RuntimeError):
     """Raised when the provider does not produce one valid checkpoint summary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        usage: TokenUsage | None = None,
+        cost: UsageCost | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.usage = usage
+        self.cost = cost
 
 
 def should_auto_compact(budget: ContextBudget, *, enabled: bool) -> bool:
@@ -77,6 +88,7 @@ class CompactionSummary:
 
     summary: str
     usage: TokenUsage | None = None
+    cost: UsageCost | None = None
 
 
 class _NoToolExecutor:
@@ -177,6 +189,7 @@ async def summarize_manual_compaction(
     model: str | None = None,
     effort: str | None = None,
     instructions: str | None = None,
+    cost_estimator: Callable[[str, str | None, str | None, TokenUsage], UsageCost] | None = None,
 ) -> CompactionSummary:
     """Generate one checkpoint without exposing internal agent-loop lifecycle events."""
 
@@ -197,6 +210,7 @@ async def summarize_manual_compaction(
                 model=model,
                 tools=(),
                 effort=effort,
+                cost_estimator=cost_estimator,
             ),
             messages=messages,
         ):
@@ -215,18 +229,25 @@ async def summarize_manual_compaction(
         )
     completion = completions[0]
     if not completion.content.strip():
-        raise CompactionSummaryError("Compaction summary was blank")
+        raise _summary_error("Compaction summary was blank", completion)
     if completion.finish_reason != "stop":
-        raise CompactionSummaryError(
-            f"Compaction summary ended with finish reason {completion.finish_reason!r}"
+        raise _summary_error(
+            f"Compaction summary ended with finish reason {completion.finish_reason!r}", completion
         )
     if completion.tool_calls:
-        raise CompactionSummaryError("Compaction summary attempted a tool call")
+        raise _summary_error("Compaction summary attempted a tool call", completion)
     if terminal_turn is None or terminal_turn.outcome != "completed":
-        raise CompactionSummaryError("Compaction summary turn did not complete successfully")
+        raise _summary_error("Compaction summary turn did not complete successfully", completion)
     summary = completion.content.strip()
-    _validate_checkpoint_structure(summary)
-    return CompactionSummary(summary=summary, usage=completion.usage)
+    try:
+        _validate_checkpoint_structure(summary)
+    except CompactionSummaryError as exc:
+        raise _summary_error(str(exc), completion) from exc
+    return CompactionSummary(summary=summary, usage=completion.usage, cost=completion.cost)
+
+
+def _summary_error(message: str, completion: MessageCompleted) -> CompactionSummaryError:
+    return CompactionSummaryError(message, usage=completion.usage, cost=completion.cost)
 
 
 def _complete_user_turn_starts(rows: Sequence[SessionContextRow]) -> tuple[int, ...]:

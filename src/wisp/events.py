@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, Self, cast
 
 from pydantic import (
     BaseModel,
@@ -17,9 +18,10 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 11
+EVENT_SCHEMA_VERSION = 12
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
+COST_ACCOUNTING_SCHEMA_VERSION = 12
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -38,7 +40,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9, 10, 11] = 11
+    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12] = 12
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -111,6 +113,71 @@ class TokenUsage(BaseModel):
     reasoning_output_tokens: int | None = Field(default=None, ge=0)
 
 
+class BillableTokenUsage(BaseModel):
+    """Provider-normalized token buckets used only for list-price estimates."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input_tokens: int = Field(ge=0)
+    cache_read_input_tokens: int = Field(ge=0)
+    cache_write_input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+
+
+class UsageCostRates(BaseModel):
+    """Exact USD-per-million rates selected when one request completed."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input_usd_per_million: Decimal = Field(ge=0)
+    output_usd_per_million: Decimal = Field(ge=0)
+    cache_read_usd_per_million: Decimal | None = Field(default=None, ge=0)
+    cache_write_usd_per_million: Decimal | None = Field(default=None, ge=0)
+
+
+CostUnavailableReason = Literal["pricing_unavailable", "usage_incomplete", "estimation_failed"]
+
+
+class UsageCost(BaseModel):
+    """Immutable list-price estimate captured with one successful response."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    currency: Literal["USD"] = "USD"
+    provider: str
+    requested_model: str | None = None
+    model: str | None = None
+    billable: BillableTokenUsage | None = None
+    rates: UsageCostRates | None = None
+    estimated_usd: Decimal | None = Field(default=None, ge=0)
+    unavailable_reason: CostUnavailableReason | None = None
+
+    @model_validator(mode="after")
+    def _validate_estimate(self) -> Self:
+        if self.estimated_usd is None:
+            if self.unavailable_reason is None:
+                raise ValueError("unpriced usage cost requires an unavailable_reason")
+            return self
+        if self.unavailable_reason is not None:
+            raise ValueError("priced usage cost cannot include an unavailable_reason")
+        if self.billable is None or self.rates is None:
+            raise ValueError("priced usage cost requires billable usage and rates")
+        return self
+
+
+class SessionCostSummary(BaseModel):
+    """Cumulative persisted list-price accounting for a session."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    currency: Literal["USD"] = "USD"
+    known_usd: Decimal = Field(default=Decimal(), ge=0)
+    complete: bool = True
+    priced_record_count: int = Field(default=0, ge=0)
+    unpriced_record_count: int = Field(default=0, ge=0)
+
+
 class ContextEstimate(BaseModel):
     """Deterministic approximation of one provider-facing request context."""
 
@@ -150,6 +217,21 @@ class SessionStats(BaseModel):
     usage_record_count: int = Field(ge=0)
     usage: TokenUsage
     context: ContextBudget
+    cost: SessionCostSummary = Field(default_factory=SessionCostSummary)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _mark_legacy_usage_unpriced(cls, data: object) -> object:
+        if isinstance(data, dict) and "cost" not in data:
+            normalized = dict(data)
+            usage_record_count = normalized.get("usage_record_count", 0)
+            if isinstance(usage_record_count, int) and usage_record_count > 0:
+                normalized["cost"] = {
+                    "complete": False,
+                    "unpriced_record_count": usage_record_count,
+                }
+            return normalized
+        return data
 
 
 class MessageCompleted(WispEvent):
@@ -161,6 +243,22 @@ class MessageCompleted(WispEvent):
     response_id: str | None = None
     tool_calls: tuple[ToolCallSnapshot, ...] = ()
     usage: TokenUsage | None = None
+    cost: UsageCost | None = None
+
+    @model_validator(mode="after")
+    def _validate_cost_schema(self) -> Self:
+        if self.cost is not None and self.schema_version < COST_ACCOUNTING_SCHEMA_VERSION:
+            raise ValueError(
+                f"usage cost requires schema_version {COST_ACCOUNTING_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < COST_ACCOUNTING_SCHEMA_VERSION:
+            data.pop("cost", None)
+        return data
 
 
 class ContextPressure(WispEvent):
@@ -407,6 +505,7 @@ class CompactionCompleted(WispEvent):
     provider: str | None = None
     model: str | None = None
     usage: TokenUsage | None = None
+    cost: UsageCost | None = None
     error: str | None = None
     will_retry: bool = False
 
@@ -433,6 +532,10 @@ class CompactionCompleted(WispEvent):
                 raise ValueError("completed overflow compaction without retry must explain why")
         elif self.will_retry:
             raise ValueError("only overflow compaction may retry")
+        if self.cost is not None and self.schema_version < COST_ACCOUNTING_SCHEMA_VERSION:
+            raise ValueError(
+                f"usage cost requires schema_version {COST_ACCOUNTING_SCHEMA_VERSION} or newer"
+            )
         return self
 
     @model_serializer(mode="wrap")
@@ -440,6 +543,8 @@ class CompactionCompleted(WispEvent):
         data = cast(dict[str, object], handler(self))
         if self.schema_version < OVERFLOW_COMPACTION_SCHEMA_VERSION:
             data.pop("will_retry", None)
+        if self.schema_version < COST_ACCOUNTING_SCHEMA_VERSION:
+            data.pop("cost", None)
         return data
 
 
@@ -470,6 +575,14 @@ class SessionStatsReported(WispEvent):
     type: Literal["session.stats"] = "session.stats"
     command_id: str
     stats: SessionStats
+
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < COST_ACCOUNTING_SCHEMA_VERSION:
+            stats = cast(dict[str, object], data["stats"])
+            stats.pop("cost", None)
+        return data
 
 
 class ModelProviderAutoSwitched(WispEvent):
@@ -532,13 +645,13 @@ JsonObjectAdapter: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 def _require_current_schema(data: JsonObject) -> None:
     version = data.get("schema_version")
-    if type(version) is not int or version not in (5, 6, 7, 8, 9, 10, EVENT_SCHEMA_VERSION):
+    if type(version) is not int or version not in (5, 6, 7, 8, 9, 10, 11, EVENT_SCHEMA_VERSION):
         raise ValueError(
             "Unsupported Wisp event schema_version: "
             f"{version!r}; expected 5 through {EVENT_SCHEMA_VERSION}"
         )
     if data.get("type") in {"compaction.started", "compaction.completed"}:
-        if version not in {8, 9, 10, EVENT_SCHEMA_VERSION}:
+        if version not in {8, 9, 10, 11, EVENT_SCHEMA_VERSION}:
             raise ValueError(
                 f"Compaction events require schema_version 8 through {EVENT_SCHEMA_VERSION}, "
                 f"got {version!r}"
@@ -570,9 +683,31 @@ def _require_current_schema(data: JsonObject) -> None:
                 "Compaction retry metadata requires schema_version "
                 f"{OVERFLOW_COMPACTION_SCHEMA_VERSION} or newer"
             )
+        if "cost" in data and version < COST_ACCOUNTING_SCHEMA_VERSION:
+            raise ValueError(
+                "Compaction cost metadata requires schema_version "
+                f"{COST_ACCOUNTING_SCHEMA_VERSION} or newer"
+            )
+    if (
+        data.get("type") == "message.completed"
+        and "cost" in data
+        and (version < COST_ACCOUNTING_SCHEMA_VERSION)
+    ):
+        raise ValueError(
+            "Message cost metadata requires schema_version "
+            f"{COST_ACCOUNTING_SCHEMA_VERSION} or newer"
+        )
+    if data.get("type") == "session.stats":
+        stats = data.get("stats")
+        if isinstance(stats, dict) and "cost" in stats and version < COST_ACCOUNTING_SCHEMA_VERSION:
+            raise ValueError(
+                "Session cost metadata requires schema_version "
+                f"{COST_ACCOUNTING_SCHEMA_VERSION} or newer"
+            )
     if data.get("type") in {"context.estimated", "session.stats"} and version not in {
         9,
         10,
+        11,
         EVENT_SCHEMA_VERSION,
     }:
         raise ValueError(

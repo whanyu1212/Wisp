@@ -48,7 +48,7 @@ def _write_overlay(home: Path, text: str) -> Path:
 def test_builtin_catalog_loads_and_validates() -> None:
     catalog = builtin_catalog()
 
-    assert catalog.schema_version == 1
+    assert catalog.schema_version == 2
     names = {provider.name for provider in catalog.providers}
     assert {"openai", "openai-codex", "fake"} <= names
 

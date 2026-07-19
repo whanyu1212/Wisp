@@ -49,6 +49,7 @@ _tui_renderer_from_env = _cli_options._tui_renderer_from_env
 _exit_with_error = _cli_output._exit_with_error
 _format_event_arguments = _cli_output._format_event_arguments
 _format_event_output = _cli_output._format_event_output
+_format_usage_cost = _cli_output._format_usage_cost
 _print_event_line = _cli_output._print_event_line
 _render_json_events = _cli_output._render_json_events
 _render_print_event = _cli_output._render_print_event
@@ -601,6 +602,11 @@ async def _run_print(
                     stdout_line_terminated = False
                     stderr_needs_separator = True
                 streamed_text_for_message = False
+                if event.cost is not None:
+                    if stderr_needs_separator:
+                        event_console.print()
+                        stderr_needs_separator = False
+                    event_console.print(_format_usage_cost(event.cost), markup=False)
             elif isinstance(event, ErrorEvent):
                 failure_message = event.message
                 failure_was_rendered = event.message in rendered_overflow_failures
