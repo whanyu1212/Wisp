@@ -25,6 +25,7 @@ from wisp.agent.prompt import (
 )
 from wisp.agent.transcript import plan_interrupted_tool_repairs
 from wisp.coding.compaction import (
+    CompactionSummary,
     CompactionSummaryError,
     ManualCompactionPlan,
     NothingToCompactError,
@@ -575,6 +576,7 @@ class CodingSession:
         provider_name = self.provider.name
         effective_model = self.model or self.provider.default_model
         summary_committed = False
+        summary: CompactionSummary | None = None
         try:
             if recover_failure:
                 yield await self._emit_recoverable_event(started, session=session)
@@ -682,6 +684,9 @@ class CodingSession:
             error = str(exc)
             summary_usage = exc.usage if isinstance(exc, CompactionSummaryError) else None
             summary_cost = exc.cost if isinstance(exc, CompactionSummaryError) else None
+            if summary is not None:
+                summary_usage = summary_usage if summary_usage is not None else summary.usage
+                summary_cost = summary_cost if summary_cost is not None else summary.cost
             if not recover_failure:
                 yield await self._emit(ErrorEvent(message=error), session=session)
             failed = CompactionCompleted(

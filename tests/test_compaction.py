@@ -59,6 +59,7 @@ from wisp.sessions.replay import (
     HISTORICAL_CONTEXT_SUMMARY_LABEL,
     SessionContextRow,
     SessionReplay,
+    StaleCompactionError,
 )
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.builtin import ReadTool
@@ -2212,6 +2213,60 @@ def test_coding_session_summary_tool_call_failure_persists_accounting(tmp_path: 
         and event.get("cost") is not None
         for event in session.read_events()
     )
+    assert stats.cost.unpriced_record_count == 3
+    assert stats.usage_record_count == 1
+    assert stats.usage == TokenUsage(input_tokens=40, output_tokens=10, total_tokens=50)
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
+
+
+def test_coding_session_summary_commit_failure_persists_accounting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content=VALID_COMPACTION_SUMMARY,
+                    usage=ProviderUsage(input_tokens=40, output_tokens=10, total_tokens=50),
+                ),
+            ]
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> tuple[list[WispEvent], SessionStats]:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+
+        async def stale_append(
+            _entry: SessionEntry,
+            *,
+            expected_context_entry_ids: Sequence[str],
+        ) -> SessionEntry:
+            del expected_context_entry_ids
+            raise StaleCompactionError("Compaction plan is stale")
+
+        monkeypatch.setattr(session, "append_compaction_entry", stale_append)
+        agent = CodingSession(provider=provider, sessions=store, models=_model_registry())
+        events: list[WispEvent] = []
+        with pytest.raises(StaleCompactionError, match="stale"):
+            async for event in agent.compact(session):
+                events.append(event)
+        return events, await agent.get_session_stats(session)
+
+    events, stats = anyio.run(run)
+
+    failed = events[-1]
+    assert isinstance(failed, CompactionCompleted)
+    assert failed.outcome == "failed"
+    assert failed.usage == TokenUsage(input_tokens=40, output_tokens=10, total_tokens=50)
+    assert failed.cost is not None
+    assert stats.usage_record_count == 1
+    assert stats.usage == TokenUsage(input_tokens=40, output_tokens=10, total_tokens=50)
     assert stats.cost.unpriced_record_count == 3
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
 

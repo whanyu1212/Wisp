@@ -71,6 +71,17 @@ def _usage_records(entries: Sequence[SessionEntry]) -> list[TokenUsage]:
             records.append(entry.message.usage)
         if entry.compaction is not None and entry.compaction.usage is not None:
             records.append(entry.compaction.usage)
+        if (
+            entry.event is not None
+            and entry.event.get("type") == "compaction.completed"
+            and entry.event.get("outcome") == "failed"
+        ):
+            raw_usage = entry.event.get("usage")
+            if isinstance(raw_usage, dict):
+                try:
+                    records.append(TokenUsage.model_validate(raw_usage))
+                except ValidationError:
+                    pass
     return records
 
 
