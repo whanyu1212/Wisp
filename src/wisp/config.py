@@ -12,6 +12,7 @@ from wisp.settings import DEFAULT_PROTECTED_PATHS, ResolvedSettings, resolve_set
 
 DEFAULT_PROVIDER = "openai-codex"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
+DEFAULT_AUTO_COMPACTION_ENABLED = True
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
 
@@ -29,6 +30,7 @@ class WispConfig(BaseModel):
     protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
     context_reserve_tokens: int = Field(default=DEFAULT_CONTEXT_RESERVE_TOKENS, ge=0)
+    auto_compaction_enabled: bool = DEFAULT_AUTO_COMPACTION_ENABLED
 
     @model_validator(mode="after")
     def _always_protect_auth_path(self) -> WispConfig:
@@ -58,6 +60,7 @@ class WispConfig(BaseModel):
         auth_path: Path | None = None,
         retry_policy: RetryPolicy | None = None,
         context_reserve_tokens: int | None = None,
+        auto_compaction_enabled: bool | None = None,
         project_dir: Path | None = None,
         trusted: bool = False,
     ) -> WispConfig:
@@ -115,6 +118,16 @@ class WispConfig(BaseModel):
                         default=str(DEFAULT_CONTEXT_RESERVE_TOKENS),
                     )
                     or DEFAULT_CONTEXT_RESERVE_TOKENS
+                )
+            ),
+            auto_compaction_enabled=(
+                auto_compaction_enabled
+                if auto_compaction_enabled is not None
+                else _resolve_bool(
+                    os.environ.get("WISP_AUTO_COMPACTION"),
+                    settings.auto_compaction_enabled,
+                    default=DEFAULT_AUTO_COMPACTION_ENABLED,
+                    name="WISP_AUTO_COMPACTION",
                 )
             ),
         )
@@ -176,6 +189,23 @@ def _first_non_empty(*values: str | None, default: str | None = None) -> str | N
             if stripped:
                 return stripped
     return default
+
+
+def _resolve_bool(
+    env_value: str | None,
+    saved_value: bool | None,
+    *,
+    default: bool,
+    name: str,
+) -> bool:
+    if env_value is None:
+        return saved_value if saved_value is not None else default
+    normalized = env_value.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be one of: 1, 0, true, false, yes, no, on, off")
 
 
 def _resolve_retry_policy(settings: ResolvedSettings) -> RetryPolicy:

@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Literal
 
 from wisp.events import (
+    CompactionCompleted,
+    CompactionStarted,
     ContextBudget,
     ContextEstimated,
     KnownWispEvent,
@@ -87,6 +89,16 @@ class TuiViewState:
             return True
         if isinstance(event, SessionStatsReported):
             self.context = event.stats.context
+            return True
+        if (
+            isinstance(event, CompactionStarted)
+            and event.reason == "threshold"
+            and event.trigger_budget is not None
+        ):
+            self.context = event.trigger_budget
+            return True
+        if isinstance(event, CompactionCompleted) and event.outcome == "completed":
+            self.context = None
             return True
         if not isinstance(event, MessageCompleted):
             return False

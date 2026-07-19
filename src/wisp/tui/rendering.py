@@ -252,9 +252,13 @@ class LineTuiRenderer:
                 f"attempt {event.attempt}/{event.max_attempts} in {event.delay_seconds:.1f}s[/dim]"
             )
         elif isinstance(event, CompactionStarted):
-            self.console.print("[cyan]Compacting session...[/cyan]")
+            self.console.print(f"[cyan]{_compaction_started_text(event)}[/cyan]")
         elif isinstance(event, CompactionCompleted):
-            self.console.print(_compaction_completed_text(event), markup=False)
+            text = _compaction_completed_text(event)
+            if event.reason == "threshold" and event.outcome == "failed":
+                self.console.print(f"[yellow]{_markup_escape(text)}[/yellow]")
+            else:
+                self.console.print(text, markup=False)
         elif isinstance(event, MessageCompleted) and event.content:
             self.console.print(event.content, markup=False, highlight=False)
         elif isinstance(event, ToolCallRequested):
@@ -540,14 +544,23 @@ class FullscreenTuiRenderer:
 
     def event(self, event: KnownWispEvent) -> None:
         if isinstance(event, CompactionStarted):
-            self._append("system", "Compacting session...", style="cyan")
+            self._append("system", _compaction_started_text(event), style="cyan")
         elif isinstance(event, CompactionCompleted):
-            role = "error" if event.outcome == "failed" else "system"
-            style = {
-                "completed": "cyan",
-                "cancelled": "yellow",
-                "failed": "red",
-            }[event.outcome]
+            is_threshold_failure = event.reason == "threshold" and event.outcome == "failed"
+            role = (
+                "system"
+                if is_threshold_failure
+                else ("error" if event.outcome == "failed" else "system")
+            )
+            style = (
+                "yellow"
+                if is_threshold_failure
+                else {
+                    "completed": "cyan",
+                    "cancelled": "yellow",
+                    "failed": "red",
+                }[event.outcome]
+            )
             self._append(role, _compaction_completed_text(event), style=style)
         elif isinstance(event, MessageCompleted) and event.content:
             self._append("assistant", event.content, style="green")
@@ -1028,11 +1041,27 @@ def _markup_escape(value: object) -> str:
     return escape(str(value))
 
 
+def _compaction_started_text(event: CompactionStarted) -> str:
+    if event.reason == "threshold":
+        return "Context threshold reached; compacting automatically..."
+    return "Compacting session..."
+
+
 def _compaction_completed_text(event: CompactionCompleted) -> str:
     if event.outcome == "completed":
-        return f"Compacted {event.replaced_entry_count} context entries."
+        if event.reason == "threshold":
+            text = f"Automatically compacted {event.replaced_entry_count} context entries."
+        else:
+            text = f"Compacted {event.replaced_entry_count} context entries."
+        if event.error:
+            text += f" Warning: {event.error}"
+        return text
     if event.outcome == "cancelled":
+        if event.reason == "threshold":
+            return "Automatic compaction cancelled."
         return "Compaction cancelled."
+    if event.reason == "threshold":
+        return f"Automatic compaction failed: {event.error or 'unknown error'}"
     return f"Compaction failed: {event.error or 'unknown error'}"
 
 

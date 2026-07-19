@@ -11,8 +11,17 @@ from wisp.agent.messages import CompactionRecord, SessionEntry
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import ToolCallSnapshot
 from wisp.providers.base import Provider
-from wisp.providers.catalog import ModelRegistry, effective_catalog
-from wisp.providers.events import ProviderResponseCompleted, ProviderResponseStarted
+from wisp.providers.catalog import (
+    ModelCatalog,
+    ModelCatalogProviderEntry,
+    ModelRegistry,
+    effective_catalog,
+)
+from wisp.providers.events import (
+    ProviderResponseCompleted,
+    ProviderResponseStarted,
+    ProviderUsage,
+)
 from wisp.sessions.replay import HISTORICAL_CONTEXT_SUMMARY_LABEL
 
 VALID_COMPACTION_SUMMARY = """## Goal
@@ -34,18 +43,38 @@ Run the tests.
 The session audit remains intact."""
 
 
-async def _runtime_with_provider(provider: Provider) -> WispRuntime:
+async def _runtime_with_provider(
+    provider: Provider, *, context_window: int | None = None
+) -> WispRuntime:
     providers = ProviderRegistry()
     tools = ToolRegistry()
     events = EventBus()
     api = ExtensionAPI(providers=providers, tools=tools, events=events)
     providers.register(provider)
+    models = ModelRegistry(effective_catalog(home_dir=Path("/nonexistent-test-home")))
+    if context_window is not None:
+        assert provider.default_model is not None
+        models = ModelRegistry(
+            ModelCatalog(
+                schema_version=1,
+                providers=(
+                    ModelCatalogProviderEntry(
+                        name=provider.name,
+                        display_name=provider.name,
+                        default_model=provider.default_model,
+                        docs_url="https://example.com",
+                        models=(provider.default_model,),
+                        context_windows={provider.default_model: context_window},
+                    ),
+                ),
+            )
+        )
     return WispRuntime(
         providers=providers,
         tools=tools,
         events=events,
         api=api,
-        models=ModelRegistry(effective_catalog(home_dir=Path("/nonexistent-test-home"))),
+        models=models,
     )
 
 
@@ -212,6 +241,29 @@ class BlockingOperationProvider:
         )
 
 
+class AutoCompactionProvider(ReplayAwareProvider):
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+        effort: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        del tools, tool_results, previous_response_id, effort
+        self.calls.append(tuple(messages))
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        if _is_compaction_request(messages):
+            yield ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY)
+            return
+        yield ProviderResponseCompleted(
+            content=f"answer {_last_user_prompt(messages)}",
+            usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+        )
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -333,6 +385,74 @@ def test_rpc_prompt_compact_prompt_replays_summary_and_retained_history(
     )
     compaction = next(entry.compaction for entry in session.read_entries() if entry.compaction)
     assert compaction.instructions == "Keep paths"
+
+
+def test_rpc_prompt_contains_automatic_threshold_compaction(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def seed() -> None:
+        await session.append_message(Message(role="user", content="first"))
+        await session.append_message(
+            Message(role="assistant", content="answer first", finish_reason="stop")
+        )
+
+    anyio.run(seed)
+    provider = AutoCompactionProvider()
+
+    async def build_runtime() -> WispRuntime:
+        return await _runtime_with_provider(provider, context_window=100)
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    result = CliRunner().invoke(
+        app,
+        [
+            "--mode",
+            "rpc",
+            "--resume",
+            session.path.name,
+            "--session-dir",
+            str(tmp_path),
+        ],
+        input='{"id":"prompt-1","type":"prompt","prompt":"second"}\n',
+        env={
+            "WISP_PROVIDER": provider.name,
+            "WISP_MODEL": "",
+            "WISP_CONTEXT_RESERVE_TOKENS": "20",
+            "WISP_TRUST": "1",
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == [
+        "rpc.command.started",
+        "agent.started",
+        "turn.started",
+        "context.estimated",
+        "message.started",
+        "message.completed",
+        "context.pressure",
+        "turn.completed",
+        "compaction.started",
+        "session.saved",
+        "compaction.completed",
+        "agent.completed",
+        "rpc.command.finished",
+    ]
+    started = next(record for record in records if record["type"] == "compaction.started")
+    completed = next(record for record in records if record["type"] == "compaction.completed")
+    assert started["reason"] == "threshold"
+    assert completed["reason"] == "threshold"
+    assert records[-1]["command_type"] == "prompt"
+    assert records[-1]["ok"] is True
+    assert not any(
+        record.get("command_type") == "compact"
+        for record in records
+        if record["type"].startswith("rpc.command.")
+    )
 
 
 def test_rpc_resume_initial_history_uses_compaction_replay(
@@ -503,7 +623,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "agent.completed",
         "rpc.command.finished",
     ]
-    assert all(record["schema_version"] == 9 for record in records)
+    assert all(record["schema_version"] == 10 for record in records)
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"
@@ -543,7 +663,7 @@ def test_rpc_mode_reports_stats_after_queued_prompt(tmp_path: Path) -> None:
     assert finished == [
         {
             "type": "rpc.command.finished",
-            "schema_version": 9,
+            "schema_version": 10,
             "timestamp": finished[0]["timestamp"],
             "command_id": "stats-1",
             "command_type": "get_session_stats",

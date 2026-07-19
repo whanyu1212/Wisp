@@ -542,6 +542,7 @@ async def _run_rpc(
         max_tool_iterations=max_tool_iterations,
         project_context_root=selected_project_context_root,
         context_reserve_tokens=config.context_reserve_tokens,
+        auto_compaction_enabled=config.auto_compaction_enabled,
     )
 
     queued_commands: deque[dict[str, object]] = deque()

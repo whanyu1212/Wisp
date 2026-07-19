@@ -34,6 +34,7 @@ from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tui.rendering import (
     TuiViewSnapshot,
     _compaction_completed_text,
+    _compaction_started_text,
     _truncate_to_cell_width,
     _tui_help_text,
 )
@@ -311,9 +312,13 @@ class TextualTuiRenderer:
         elif isinstance(event, ProviderRetrying):
             self._provider_retrying(event)
         elif isinstance(event, CompactionStarted):
-            self.app.write_notice("Compacting session...")
+            self.app.write_notice(_compaction_started_text(event))
+            if event.reason == "threshold":
+                self.app.show_working_indicator()
         elif isinstance(event, CompactionCompleted):
-            if event.outcome == "failed":
+            if event.reason == "threshold":
+                self._suspend_progress()
+            if event.outcome == "failed" and event.reason == "manual":
                 self.app.write_error(_compaction_completed_text(event))
             else:
                 self.app.write_notice(_compaction_completed_text(event))

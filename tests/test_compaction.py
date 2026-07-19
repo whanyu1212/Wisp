@@ -8,6 +8,7 @@ import anyio
 import pytest
 from pydantic import ValidationError
 
+from wisp.agent.context import build_context_budget, estimate_context
 from wisp.agent.messages import Message, SessionEntry
 from wisp.coding.compaction import (
     MAX_COMPACTION_TOOL_RESULT_CHARS,
@@ -33,6 +34,7 @@ from wisp.events import (
     wisp_event_from_json,
 )
 from wisp.providers.base import ToolCallResult, ToolSpec
+from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
@@ -43,12 +45,15 @@ from wisp.providers.events import (
 )
 from wisp.providers.fake import ScriptedProvider
 from wisp.runtime.event_bus import EventBus
+from wisp.runtime.registry import ToolRegistry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import (
     HISTORICAL_CONTEXT_SUMMARY_LABEL,
     SessionContextRow,
     SessionReplay,
 )
+from wisp.tools.builtin import ReadTool
+from wisp.tools.context import ToolContext
 
 VALID_COMPACTION_SUMMARY = """## Goal
 Preserve the active coding objective.
@@ -98,6 +103,24 @@ def _two_turn_replay() -> SessionReplay:
     return SessionReplay(rows=(*_turn("one"), *_turn("two")))
 
 
+def _model_registry(*, context_window: int = 100) -> ModelRegistry:
+    return ModelRegistry(
+        ModelCatalog(
+            schema_version=1,
+            providers=(
+                ModelCatalogProviderEntry(
+                    name="scripted",
+                    display_name="Scripted",
+                    default_model="model",
+                    docs_url="https://example.com",
+                    models=("model",),
+                    context_windows={"model": context_window},
+                ),
+            ),
+        )
+    )
+
+
 class BlockingSummaryProvider:
     name = "blocking-summary"
     default_model: str | None = "blocking-model"
@@ -118,6 +141,37 @@ class BlockingSummaryProvider:
         del messages, tools, tool_results, previous_response_id, effort
         yield ProviderResponseStarted(model=model or self.default_model or self.name)
         self.started.set()
+        await anyio.sleep_forever()
+
+
+class BlockingAutoCompactionProvider:
+    name = "scripted"
+    default_model: str | None = "model"
+
+    def __init__(self, summary_started: anyio.Event) -> None:
+        self.summary_started = summary_started
+        self.calls = 0
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+        effort: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        del messages, tools, tool_results, previous_response_id, effort
+        self.calls += 1
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        if self.calls == 1:
+            yield ProviderResponseCompleted(
+                content="answer two",
+                usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+            )
+            return
+        self.summary_started.set()
         await anyio.sleep_forever()
 
 
@@ -433,7 +487,7 @@ def test_provider_summary_rejects_heading_tokens_without_real_sections() -> None
     anyio.run(run)
 
 
-def test_compaction_events_round_trip_on_schema_v8_without_summary() -> None:
+def test_compaction_events_round_trip_on_current_schema_without_summary() -> None:
     started = CompactionStarted(session_id="session", source_entry_count=4)
     completed = CompactionCompleted(
         session_id="session",
@@ -446,8 +500,8 @@ def test_compaction_events_round_trip_on_schema_v8_without_summary() -> None:
         usage=TokenUsage(input_tokens=3, output_tokens=2, total_tokens=5),
     )
 
-    assert started.schema_version == 9
-    assert completed.schema_version == 9
+    assert started.schema_version == 10
+    assert completed.schema_version == 10
     assert "summary" not in completed.model_dump(mode="json")
     assert wisp_event_from_json(started.model_dump_json()) == started
     assert wisp_event_from_json(completed.model_dump_json()) == completed
@@ -460,8 +514,8 @@ def test_compaction_events_round_trip_on_schema_v8_without_summary() -> None:
         )
 
 
-@pytest.mark.parametrize("version", [5, 6, 7, 8])
-def test_event_parser_accepts_v5_through_v8(version: int) -> None:
+@pytest.mark.parametrize("version", [5, 6, 7, 8, 9])
+def test_event_parser_accepts_legacy_schemas(version: int) -> None:
     payload = {
         "schema_version": version,
         "type": "session.saved",
@@ -480,8 +534,81 @@ def test_compaction_events_require_schema_v8(version: int) -> None:
         source_entry_count=1,
     ).model_dump_json()
 
-    with pytest.raises(ValueError, match="require schema_version 8 or 9"):
+    with pytest.raises(ValueError, match="require schema_version 8, 9, or 10"):
         wisp_event_from_json(payload)
+
+
+def test_threshold_compaction_events_require_schema_v10() -> None:
+    estimate = estimate_context((Message(role="user", content="hello"),))
+    budget = build_context_budget(estimate, context_window=100, reserve_tokens=20)
+    event = CompactionStarted(
+        session_id="session",
+        reason="threshold",
+        source_entry_count=4,
+        trigger_budget=budget,
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    for version in (8, 9):
+        with pytest.raises(
+            ValueError, match="Threshold compaction events require schema_version 10"
+        ):
+            payload = event.model_copy(update={"schema_version": version}).model_dump_json()
+            wisp_event_from_json(payload)
+
+    with pytest.raises(ValidationError, match="requires schema_version 10"):
+        CompactionCompleted(
+            schema_version=9,
+            session_id="session",
+            reason="threshold",
+            outcome="completed",
+            replaced_entry_count=2,
+            retained_entry_count=2,
+        )
+
+
+@pytest.mark.parametrize("version", [8, 9])
+def test_legacy_compaction_started_events_round_trip(version: int) -> None:
+    payload = json.dumps(
+        {
+            "type": "compaction.started",
+            "schema_version": version,
+            "timestamp": "2026-07-19T00:00:00Z",
+            "session_id": "session",
+            "source_entry_count": 4,
+        }
+    )
+
+    event = wisp_event_from_json(payload)
+
+    assert "trigger_budget" not in event.model_dump(mode="json")
+    assert wisp_event_from_json(event.model_dump_json()) == event
+
+
+def test_compaction_started_validates_reason_metadata() -> None:
+    estimate = estimate_context((Message(role="user", content="hello"),))
+    budget = build_context_budget(estimate, context_window=100, reserve_tokens=20)
+
+    with pytest.raises(ValidationError, match="requires a trigger budget"):
+        CompactionStarted(
+            session_id="session",
+            reason="threshold",
+            source_entry_count=4,
+        )
+    with pytest.raises(ValidationError, match="manual compaction must not include"):
+        CompactionStarted(
+            session_id="session",
+            source_entry_count=4,
+            trigger_budget=budget,
+        )
+    with pytest.raises(ValidationError, match="requires schema_version 10"):
+        CompactionStarted(
+            schema_version=9,
+            session_id="session",
+            reason="threshold",
+            source_entry_count=4,
+            trigger_budget=budget,
+        )
 
 
 async def _append_turn(session: JsonlSession, prefix: str) -> tuple[str, str]:
@@ -490,6 +617,613 @@ async def _append_turn(session: JsonlSession, prefix: str) -> tuple[str, str]:
         Message(role="assistant", content=f"answer {prefix}", finish_reason="stop")
     )
     return user.id, assistant.id
+
+
+def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer two",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        first_ids = await _append_turn(session, "one")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        events = [event async for event in agent.run("question two", session=session)]
+        record = next(
+            entry.compaction for entry in session.read_entries() if entry.compaction is not None
+        )
+        assert record.replaced_entry_ids == first_ids
+        return events
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events] == [
+        "agent.started",
+        "turn.started",
+        "context.estimated",
+        "message.started",
+        "message.completed",
+        "context.pressure",
+        "turn.completed",
+        "compaction.started",
+        "session.saved",
+        "compaction.completed",
+        "agent.completed",
+    ]
+    started = next(event for event in events if isinstance(event, CompactionStarted))
+    assert started.reason == "threshold"
+    assert started.trigger_budget is not None
+    assert started.trigger_budget.observed_tokens == 81
+    completed = next(event for event in events if isinstance(event, CompactionCompleted))
+    assert completed.reason == "threshold"
+    assert completed.outcome == "completed"
+    assert sum(isinstance(event, SessionSaved) for event in events) == 1
+    assert len(provider.calls) == 2
+    entries = session.read_entries()
+    record = next(entry.compaction for entry in entries if entry.compaction is not None)
+    assert record.schema_version == 2
+    assert record.reason == "threshold"
+    assert record.trigger_budget == started.trigger_budget
+    assert [message.content for message in session.read_context_messages()] == [
+        f"{HISTORICAL_CONTEXT_SUMMARY_LABEL}\n\n{VALID_COMPACTION_SUMMARY}",
+        "question two",
+        "answer two",
+    ]
+
+
+def test_coding_session_auto_compaction_failure_preserves_prompt_success(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer two",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ],
+            [ProviderResponseStarted(model="model"), ProviderResponseCompleted(content=" ")],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        with anyio.fail_after(2):
+            return [event async for event in agent.run("question two", session=session)]
+
+    events = anyio.run(run)
+
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+    completed = next(event for event in events if isinstance(event, CompactionCompleted))
+    assert completed.reason == "threshold"
+    assert completed.outcome == "failed"
+    assert "blank" in (completed.error or "")
+    assert events[-1].type == "agent.completed"
+    assert events[-1].outcome == "completed"
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
+    assert [message.content for message in session.read_context_messages()] == [
+        "question one",
+        "answer one",
+        "question two",
+        "answer two",
+    ]
+
+
+def test_coding_session_auto_compaction_failure_ignores_listener_failure(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer two",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ],
+            [ProviderResponseStarted(model="model"), ProviderResponseCompleted(content=" ")],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    bus = EventBus()
+
+    def fail_completion_publication(_event: WispEvent) -> None:
+        raise RuntimeError("listener failed")
+
+    bus.on("compaction.completed", fail_completion_publication)
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            events=bus,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        return [event async for event in agent.run("question two", session=session)]
+
+    events = anyio.run(run)
+
+    completed = next(event for event in events if isinstance(event, CompactionCompleted))
+    assert completed.outcome == "failed"
+    assert "blank" in (completed.error or "")
+    assert events[-1].type == "agent.completed"
+    assert events[-1].outcome == "completed"
+
+
+def test_coding_session_auto_compaction_prepare_failure_preserves_prompt_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer two",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ]
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> tuple[list[WispEvent], int]:
+        await _append_turn(session, "one")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+
+        async def fail_prepare(_session: JsonlSession) -> SessionReplay:
+            agent._queue_message(
+                session,
+                Message(role="tool", content="interrupted", tool_call_id="call-1"),
+            )
+
+            async def fail_pending_flush() -> None:
+                raise OSError("pending repair flush failed")
+
+            monkeypatch.setattr(agent, "_flush_pending_entries", fail_pending_flush)
+            raise OSError("pending repair flush failed")
+
+        monkeypatch.setattr(agent, "_prepare_compaction_replay", fail_prepare)
+        events = [event async for event in agent.run("question two", session=session)]
+        return events, len(agent._pending_entries)
+
+    events, pending_count = anyio.run(run)
+
+    completed = next(event for event in events if isinstance(event, CompactionCompleted))
+    assert completed.reason == "threshold"
+    assert completed.outcome == "failed"
+    assert completed.error == "pending repair flush failed"
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+    assert not any(isinstance(event, SessionSaved) for event in events)
+    assert pending_count == 1
+    assert events[-1].type == "agent.completed"
+    assert events[-1].outcome == "completed"
+
+
+def test_coding_session_auto_compaction_read_failure_keeps_final_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer two",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ]
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+
+        async def fail_prepare(_session: JsonlSession) -> SessionReplay:
+            raise OSError("context replay failed")
+
+        monkeypatch.setattr(agent, "_prepare_compaction_replay", fail_prepare)
+        return [event async for event in agent.run("question two", session=session)]
+
+    events = anyio.run(run)
+
+    failed_index = next(
+        index
+        for index, event in enumerate(events)
+        if isinstance(event, CompactionCompleted) and event.outcome == "failed"
+    )
+    saved_indexes = [index for index, event in enumerate(events) if isinstance(event, SessionSaved)]
+    assert saved_indexes == [failed_index + 1]
+    assert events[-1].type == "agent.completed"
+    assert events[-1].outcome == "completed"
+
+
+def test_coding_session_auto_compaction_reports_post_commit_publication_failure(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer two",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    bus = EventBus()
+    published: list[WispEvent] = []
+
+    def fail_saved_publication(event: WispEvent) -> None:
+        published.append(event)
+        if isinstance(event, SessionSaved):
+            raise RuntimeError("listener failed")
+
+    bus.on("*", fail_saved_publication)
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            events=bus,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        return [event async for event in agent.run("question two", session=session)]
+
+    events = anyio.run(run)
+
+    completed = next(event for event in events if isinstance(event, CompactionCompleted))
+    assert completed.outcome == "completed"
+    assert completed.error == "Event publication failed: listener failed"
+    published_completion = next(
+        event for event in published if isinstance(event, CompactionCompleted)
+    )
+    assert published_completion == completed
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+    assert sum(entry.kind == "compaction" for entry in session.read_entries()) == 1
+    assert events[-1].type == "agent.completed"
+    assert events[-1].outcome == "completed"
+
+
+@pytest.mark.parametrize(
+    ("enabled", "context_window", "reserve_tokens"),
+    [(False, 100, 20), (True, None, 20), (True, 1_000, 16_384)],
+)
+def test_coding_session_auto_compaction_skips_unusable_policy(
+    tmp_path: Path,
+    enabled: bool,
+    context_window: int | None,
+    reserve_tokens: int,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer two",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ]
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(context_window=context_window) if context_window else None,
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=reserve_tokens,
+            auto_compaction_enabled=enabled,
+        )
+        return [event async for event in agent.run("question two", session=session)]
+
+    events = anyio.run(run)
+
+    assert not any(isinstance(event, CompactionStarted | CompactionCompleted) for event in events)
+    assert len(provider.calls) == 1
+
+
+def test_coding_session_auto_compaction_skips_without_compactable_prefix(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer one",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ]
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        model="model",
+        models=_model_registry(),
+        prompt_messages=(Message(role="system", content="system"),),
+        context_reserve_tokens=20,
+    )
+
+    async def run() -> list[WispEvent]:
+        return [event async for event in agent.run("question one")]
+
+    events = anyio.run(run)
+
+    assert not any(isinstance(event, CompactionStarted | CompactionCompleted) for event in events)
+    assert len(provider.calls) == 1
+
+
+def test_coding_session_auto_compaction_falls_back_to_estimate(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer two " + "y" * 200),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        await session.append_message(Message(role="user", content="question one " + "x" * 200))
+        await session.append_message(
+            Message(role="assistant", content="answer one " + "x" * 200, finish_reason="stop")
+        )
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        return [event async for event in agent.run("question two " + "y" * 200, session=session)]
+
+    events = anyio.run(run)
+
+    started = next(event for event in events if isinstance(event, CompactionStarted))
+    assert started.trigger_budget is not None
+    assert started.trigger_budget.observed_tokens is None
+    assert started.trigger_budget.estimate.total_tokens > 80
+
+
+def test_coding_session_auto_compaction_uses_estimate_after_tool_round(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "input.txt"
+    source.write_text("tool output", encoding="utf-8")
+    call = ToolCall(call_id="call-1", name="read", arguments={"path": source.name})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer two",
+                    usage=ProviderUsage(input_tokens=890, output_tokens=11, total_tokens=901),
+                ),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    registry = ToolRegistry()
+    registry.register(ReadTool())
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(context_window=1_000),
+            tool_registry=registry,
+            tool_context=ToolContext(cwd=tmp_path),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=100,
+        )
+        return [event async for event in agent.run("question two", session=session)]
+
+    events = anyio.run(run)
+
+    assert not any(isinstance(event, CompactionStarted | CompactionCompleted) for event in events)
+    assert len(provider.calls) == 2
+
+
+def test_coding_session_auto_compaction_cancellation_preserves_completed_turn(
+    tmp_path: Path,
+) -> None:
+    summary_started = anyio.Event()
+    provider = BlockingAutoCompactionProvider(summary_started)
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        emitted: list[WispEvent] = []
+        bus = EventBus()
+        bus.on("*", emitted.append)
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            events=bus,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        scope = anyio.CancelScope()
+
+        async def consume() -> None:
+            with scope:
+                _events = [event async for event in agent.run("question two", session=session)]
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(consume)
+            await summary_started.wait()
+            scope.cancel()
+        return emitted
+
+    emitted = anyio.run(run)
+
+    terminal = next(
+        event
+        for event in emitted
+        if isinstance(event, CompactionCompleted) and event.reason == "threshold"
+    )
+    assert terminal.outcome == "cancelled"
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
+    assert [message.content for message in session.read_context_messages()] == [
+        "question one",
+        "answer one",
+        "question two",
+        "answer two",
+    ]
+
+
+def test_coding_session_reconciles_append_that_commits_then_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ]
+        ]
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        original_append = session.append_compaction_entry
+        calls = 0
+
+        async def uncertain_append(
+            entry: SessionEntry,
+            *,
+            expected_context_entry_ids: Sequence[str],
+        ) -> SessionEntry:
+            nonlocal calls
+            calls += 1
+            result = await original_append(
+                entry,
+                expected_context_entry_ids=expected_context_entry_ids,
+            )
+            if calls == 1:
+                raise OSError("post-append validation failed")
+            return result
+
+        monkeypatch.setattr(session, "append_compaction_entry", uncertain_append)
+        agent = CodingSession(provider=provider, sessions=store)
+        events = [event async for event in agent.compact(session)]
+        assert calls == 2
+        return events
+
+    events = anyio.run(run)
+
+    completed = next(event for event in events if isinstance(event, CompactionCompleted))
+    assert completed.outcome == "completed"
+    assert sum(entry.kind == "compaction" for entry in session.read_entries()) == 1
 
 
 def test_coding_session_compaction_is_durable_and_next_run_uses_active_context(

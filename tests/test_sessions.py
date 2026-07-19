@@ -166,7 +166,8 @@ def test_compaction_record_is_strict_and_versioned() -> None:
         usage=TokenUsage(input_tokens=8, output_tokens=3, total_tokens=11),
     )
 
-    assert record.schema_version == 1
+    assert record.schema_version == 2
+    assert record.reason == "manual"
     assert record.replaced_entry_ids == ("entry-1",)
     with pytest.raises(ValidationError):
         CompactionRecord(
@@ -180,13 +181,27 @@ def test_compaction_record_is_strict_and_versioned() -> None:
             replaced_entry_ids=(),
             provider="openai",
         )
-    with pytest.raises(ValidationError):
+    legacy = CompactionRecord.model_validate(
+        {
+            "schema_version": 1,
+            "summary": "summary",
+            "replaced_entry_ids": ("entry-1",),
+            "provider": "openai",
+        }
+    )
+    assert legacy.reason == "manual"
+    assert legacy.trigger_budget is None
+    serialized_legacy = legacy.model_dump(mode="json")
+    assert "reason" not in serialized_legacy
+    assert "trigger_budget" not in serialized_legacy
+    with pytest.raises(ValidationError, match="v1 cannot contain v2 metadata"):
         CompactionRecord.model_validate(
             {
-                "schema_version": 2,
+                "schema_version": 1,
                 "summary": "summary",
                 "replaced_entry_ids": ("entry-1",),
                 "provider": "openai",
+                "reason": "manual",
             }
         )
     with pytest.raises(ValidationError):

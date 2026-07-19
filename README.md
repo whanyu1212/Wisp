@@ -149,6 +149,7 @@ Wisp reads configuration from CLI flags, environment variables, and JSON setting
 | `WISP_RETRY_BASE_DELAY_SECONDS` | Initial retry delay; defaults to `0.5` |
 | `WISP_RETRY_MAX_DELAY_SECONDS` | Maximum retry delay; defaults to `30` |
 | `WISP_CONTEXT_RESERVE_TOKENS` | Tokens reserved outside the estimated input context; defaults to `16384` |
+| `WISP_AUTO_COMPACTION` | Enable automatic threshold compaction; defaults to `true` |
 | `OPENAI_API_KEY` | Required only for the `openai` provider |
 | `ANTHROPIC_API_KEY` | Required only for the `anthropic` provider |
 | `GOOGLE_API_KEY` | Required only for the `google` provider |
@@ -165,6 +166,7 @@ you trust the project.
   "model": "gpt-5.6-sol",
   "session_dir": "~/.wisp/sessions",
   "context_reserve_tokens": 16384,
+  "auto_compaction_enabled": true,
   "retry": { "max_retries": 2, "base_delay_seconds": 0.5, "max_delay_seconds": 30 }
 }
 ```
@@ -249,11 +251,18 @@ whether the estimate has crossed that budget. Unknown models remain permissive a
 window-dependent fields.
 
 Provider-reported `usage.total_tokens` is kept separately as the authoritative observation for a
-completed request. Session statistics sum provider totals exactly as reported, including manual
+completed request. Session statistics sum provider totals exactly as reported, including
 compaction summary requests; they never reconstruct `total_tokens` from input/output categories.
 `context_reserve_tokens` is user-only, so a project settings file cannot reduce this safety margin.
 
-### Manual compaction
+After a completed prompt, automatic compaction uses a current provider `usage.total_tokens` when
+available and otherwise falls back to the deterministic estimate. It triggers only when usage is
+strictly greater than `context_window - context_reserve_tokens`; equality does not trigger.
+Unknown model windows remain permissive, and automatic compaction stays disabled when the reserve
+equals or exceeds the model window because no usable input budget remains. `auto_compaction_enabled`
+is also user-only because automatic summaries make an additional provider request.
+
+### Compaction
 
 In the TUI, `/compact [instructions]` replaces older provider-visible turns with a structured
 checkpoint while retaining the latest complete user turn verbatim. The summary request uses the
@@ -262,8 +271,14 @@ Compaction fails without changing replay if the model cannot produce a complete 
 
 Compaction is append-only and intentionally lossy only at replay time. Original messages remain in
 the session JSONL audit log, while subsequent prompts receive the checkpoint plus retained recent
-context. Wisp never splits a tool call from its result. Automatic threshold compaction and
-compact-and-retry after overflow remain follow-up work.
+context. Wisp never splits a tool call from its result.
+
+Automatic threshold compaction is enabled by default and runs after a completed prompt when the
+active context exceeds the reserved input budget. It uses the same validated summary and retains
+the latest complete turn. If an automatic summary fails, Wisp preserves the completed prompt,
+reports a failed threshold-compaction event, and leaves replay unchanged. Disable it with
+`WISP_AUTO_COMPACTION=0` or `"auto_compaction_enabled": false` in user settings. Compact-and-retry
+after provider overflow remains follow-up work.
 
 ## TUI
 
@@ -275,8 +290,9 @@ A fullscreen Textual TUI built on the same RPC controller other integrations use
 Pi-style footer shows the current working directory/session plus status, queued follow-ups, and
 provider/model. It also shows current context use: `ctx 12k/128k` is a current provider
 observation, while `ctx ~12k/128k` is an explicit estimate (for example, immediately after
-compaction). Completed tool cards include bounded multiline output previews. Cost metrics remain
-future work. Adjust runtime settings with slash commands
+compaction). Automatic threshold summaries use the same progress notices as `/compact` without
+changing the active prompt command. Completed tool cards include bounded multiline output
+previews. Cost metrics remain future work. Adjust runtime settings with slash commands
 instead of up-front flags. The prompt editor accepts multiline text: press Enter to submit, or
 Shift+Enter / Ctrl+J to insert a newline. Pasted newlines are preserved.
 
@@ -345,8 +361,8 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 9`; readers also accept legacy schema v5
-through v8 events for compatibility. A successful prompt follows this lifecycle (tool events
+Every outbound `WispEvent` includes `"schema_version": 10`; readers also accept legacy schema v5
+through v9 events for compatibility. A successful prompt follows this lifecycle (tool events
 repeat inside a turn when the model requests tools):
 
 ```text
@@ -360,7 +376,9 @@ agent.started
     context.pressure ?
     tool.call -> tool.execution.started -> approval events -> tool.execution.ended -> tool.result
   turn.completed
+compaction.started ?
 session.saved
+compaction.completed ?
 agent.completed
 ```
 
@@ -368,6 +386,14 @@ agent.completed
 `message.completed` carries the assembled content, finish reason, response id, and completed tool
 calls. A failed provider response or tool loop emits `error`, a failed `turn.completed`, and a
 failed `agent.completed`; it does not emit `message.completed` for an incomplete response.
+
+Schema v10 adds automatic threshold compaction. `compaction.started` and `compaction.completed`
+carry `reason="manual" | "threshold"`; threshold starts include the triggering context budget.
+Automatic compaction events stay inside the originating prompt RPC envelope and automatic summary
+failure does not change an already completed prompt into a failed command. Durable threshold
+records use compaction schema v2 while existing v1 manual records remain readable.
+On successful automatic compaction, `session.saved` precedes `compaction.completed`; on a failed
+automatic summary, the failed completion precedes the prompt's normal `session.saved` event.
 
 Schema v9 adds `context.estimated` and `session.stats`. Estimates are derived, non-persisted request
 snapshots. `session.stats` is returned by the RPC `get_session_stats` command and separates
@@ -435,6 +461,8 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 Each command emits `rpc.command.started` / `rpc.command.finished` so clients can group the events
 between them. Prompts, compactions, and statistics reads run sequentially; `cancel`, `approval`,
 and `trust` are handled while an operation runs.
+A prompt may emit threshold compaction events before its `rpc.command.finished`; this does not
+create a nested `compact` RPC command.
 When an allowed mutating/command tool needs approval, Wisp emits `tool.approval.requested` with a
 `call_id`; respond with an `approval` command carrying that `call_id`, a boolean `approved`, and an
 optional approval `scope`: `once` (the default), `tool_session` (the exact tool name for this RPC

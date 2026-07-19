@@ -124,6 +124,9 @@ def _rpc_env(options: TuiOptions | None = None) -> dict[str, str]:
         # never trust-gated, so it already resolves identically in both
         # processes regardless of trust (see TuiOptions's docstring).
         env["WISP_EFFORT"] = options.config.effort
+    if options is not None:
+        env["WISP_CONTEXT_RESERVE_TOKENS"] = str(options.config.context_reserve_tokens)
+        env["WISP_AUTO_COMPACTION"] = "1" if options.config.auto_compaction_enabled else "0"
     return env
 
 

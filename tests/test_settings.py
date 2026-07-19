@@ -185,6 +185,17 @@ def test_context_reserve_is_user_only_even_for_trusted_projects(tmp_path: Path) 
     assert settings.context_reserve_tokens == 8192
 
 
+def test_auto_compaction_is_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(home, auto_compaction_enabled=False)
+    _write_settings(project, auto_compaction_enabled=True)
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.auto_compaction_enabled is False
+
+
 def test_project_cannot_introduce_effort(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"

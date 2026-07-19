@@ -21,6 +21,8 @@ from wisp.config import WispConfig
 from wisp.events import (
     CompactionCompleted,
     CompactionStarted,
+    ContextBudget,
+    ContextEstimate,
     ErrorEvent,
     KnownWispEvent,
     MessageCompleted,
@@ -59,6 +61,23 @@ from wisp.tui.app import (
     _InputMode,
     _rpc_command,
 )
+
+
+def threshold_budget() -> ContextBudget:
+    return ContextBudget(
+        estimate=ContextEstimate(
+            system_tokens=10,
+            message_tokens=70,
+            tool_schema_tokens=1,
+            total_tokens=81,
+        ),
+        context_window=100,
+        reserve_tokens=20,
+        remaining_tokens=-1,
+        estimated_percent=81,
+        over_budget=True,
+    )
+
 
 type EventBatch = list[KnownWispEvent]
 type ScriptedBatch = EventBatch | tuple[float, EventBatch]
@@ -308,6 +327,7 @@ __all__ = [
     "io",
     "completed_message",
     "message_delta",
+    "threshold_budget",
     "sys",
     "tui_app_module",
     "tui_module",

@@ -74,6 +74,31 @@ def test_tui_view_state_updates_context_from_estimate_stats_and_usage() -> None:
     assert state.snapshot().context is state.context
 
 
+def test_tui_view_state_invalidates_context_after_automatic_compaction() -> None:
+    state = TuiViewState(context=_context_budget(estimated=81))
+    trigger = _context_budget(estimated=90)
+
+    assert state.update_context_from_event(
+        CompactionStarted(
+            session_id="session",
+            reason="threshold",
+            source_entry_count=4,
+            trigger_budget=trigger,
+        )
+    )
+    assert state.context is trigger
+    assert state.update_context_from_event(
+        CompactionCompleted(
+            session_id="session",
+            reason="threshold",
+            outcome="completed",
+            replaced_entry_count=2,
+            retained_entry_count=2,
+        )
+    )
+    assert state.context is None
+
+
 def test_tui_view_state_ignores_zero_or_failed_message_usage() -> None:
     state = TuiViewState(context=_context_budget(estimated=10_000))
     original = state.context
@@ -1470,6 +1495,50 @@ def test_tui_shell_compact_calls_controller_without_prompting_and_returns_idle()
         assert any(
             entry.content == "Compacted 5 context entries." for entry in renderer.state.transcript
         )
+
+    anyio.run(run)
+
+
+def test_tui_shell_keeps_threshold_compaction_inside_prompt_state() -> None:
+    async def run() -> None:
+        renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.current_command_type = "prompt"
+        shell.state.status = TuiStatus.running
+        shell._sync_view()
+
+        await shell._handle_rpc_event(
+            CompactionStarted(
+                session_id="session-1",
+                reason="threshold",
+                source_entry_count=6,
+                trigger_budget=_context_budget(estimated=81),
+            )
+        )
+        await shell._handle_rpc_event(
+            CompactionCompleted(
+                session_id="session-1",
+                reason="threshold",
+                outcome="failed",
+                replaced_entry_count=5,
+                retained_entry_count=1,
+                error="summary failed",
+            )
+        )
+
+        assert shell.state.current_command_type == "prompt"
+        assert shell.state.status is TuiStatus.running
+        assert shell.view.status == "running"
+        assert renderer.state.transcript[-1].role == "system"
+        assert renderer.state.transcript[-1].style == "yellow"
+
+        await shell._handle_rpc_event(
+            RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True)
+        )
+        assert shell.state.current_command_type is None
+        assert shell.state.status is TuiStatus.idle
+        assert shell.view.status == "idle"
 
     anyio.run(run)
 

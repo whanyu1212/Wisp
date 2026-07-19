@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from pytest import MonkeyPatch
 
 from wisp import config as config_module
@@ -19,6 +20,7 @@ def test_config_defaults_to_default_provider(tmp_path: Path, monkeypatch: Monkey
     assert config.model is None
     assert config.effort is None
     assert config.context_reserve_tokens == 16_384
+    assert config.auto_compaction_enabled is True
     assert config.session_dir == tmp_path
     assert config.auth_path == default_auth_path()
 
@@ -138,3 +140,27 @@ def test_config_resolves_context_reserve_from_env_and_explicit_override(
         ).context_reserve_tokens
         == 4096
     )
+
+
+def test_config_resolves_auto_compaction_from_env_and_explicit_override(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WISP_AUTO_COMPACTION", "off")
+
+    assert WispConfig.from_env(session_dir=tmp_path).auto_compaction_enabled is False
+    assert (
+        WispConfig.from_env(
+            session_dir=tmp_path,
+            auto_compaction_enabled=True,
+        ).auto_compaction_enabled
+        is True
+    )
+
+
+def test_config_rejects_invalid_auto_compaction_env(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WISP_AUTO_COMPACTION", "sometimes")
+
+    with pytest.raises(ValueError, match="WISP_AUTO_COMPACTION must be one of"):
+        WispConfig.from_env(session_dir=tmp_path)

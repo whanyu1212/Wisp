@@ -34,7 +34,13 @@ GLOBAL_SETTINGS_PATH = Path("~/.wisp/settings.json")
 PROJECT_SETTINGS_DIRNAME = ".wisp"
 PROJECT_SETTINGS_FILENAME = "settings.json"
 _USER_ONLY_SETTINGS_FIELDS = frozenset(
-    {"protected_paths", "retry", "effort", "context_reserve_tokens"}
+    {
+        "protected_paths",
+        "retry",
+        "effort",
+        "context_reserve_tokens",
+        "auto_compaction_enabled",
+    }
 )
 
 # Default glob patterns whose contents tools refuse to read. These guard secrets
@@ -94,6 +100,7 @@ class WispSettings(BaseModel):
     retry: RetrySettings | None = None
     effort: str | None = None
     context_reserve_tokens: int | None = Field(default=None, ge=0)
+    auto_compaction_enabled: bool | None = None
 
 
 class ResolvedSettings(BaseModel):
@@ -115,6 +122,7 @@ class ResolvedSettings(BaseModel):
     retry: RetrySettings | None = None
     effort: str | None = None
     context_reserve_tokens: int | None = Field(default=None, ge=0)
+    auto_compaction_enabled: bool | None = None
 
 
 def resolve_settings(
@@ -186,6 +194,7 @@ def resolve_settings(
         retry=user_settings.retry,
         effort=user_settings.effort,
         context_reserve_tokens=user_settings.context_reserve_tokens,
+        auto_compaction_enabled=user_settings.auto_compaction_enabled,
     )
 
 

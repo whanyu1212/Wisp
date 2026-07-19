@@ -9,7 +9,7 @@ from pathlib import Path
 
 import anyio
 
-from wisp.agent.context import context_fingerprint
+from wisp.agent.context import build_context_budget, context_fingerprint, estimate_context
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.messages import (
     CompactionRecord,
@@ -24,14 +24,22 @@ from wisp.agent.prompt import (
     resolve_project_context_root,
 )
 from wisp.agent.transcript import plan_interrupted_tool_repairs
-from wisp.coding.compaction import plan_manual_compaction, summarize_manual_compaction
+from wisp.coding.compaction import (
+    ManualCompactionPlan,
+    NothingToCompactError,
+    plan_manual_compaction,
+    should_auto_compact,
+    summarize_manual_compaction,
+)
 from wisp.coding.stats import build_session_stats
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
     AgentCompleted,
     AgentStarted,
     CompactionCompleted,
+    CompactionReason,
     CompactionStarted,
+    ContextBudget,
     ErrorEvent,
     MessageCompleted,
     SessionSaved,
@@ -80,6 +88,11 @@ class _ContextObservation:
     context_fingerprint: str
 
 
+@dataclass(slots=True)
+class _AutoCompactionStatus:
+    skip_final_save: bool = False
+
+
 class CodingSession:
     """Coordinate coding policy, persistence, and events around `AgentHarness`."""
 
@@ -103,6 +116,7 @@ class CodingSession:
         max_tool_iterations: int | None = None,
         trusted: bool = False,
         context_reserve_tokens: int = 16_384,
+        auto_compaction_enabled: bool = True,
     ) -> None:
         self.provider = provider
         self.sessions = sessions
@@ -118,6 +132,7 @@ class CodingSession:
         if context_reserve_tokens < 0:
             raise ValueError("context_reserve_tokens must be non-negative")
         self.context_reserve_tokens = context_reserve_tokens
+        self.auto_compaction_enabled = auto_compaction_enabled
         self.tools = (
             tuple(tools)
             if tools is not None
@@ -207,6 +222,7 @@ class CodingSession:
         await session.append_message(user_message, operation_id=operation_id)
         turns = 0
         saw_loop_error = False
+        had_tool_round = False
         harness_events = harness.prompt_message(user_message)
 
         try:
@@ -215,6 +231,10 @@ class CodingSession:
                     turns = event.turn
                 elif isinstance(event, ErrorEvent):
                     saw_loop_error = True
+                elif isinstance(event, MessageCompleted) and (
+                    event.tool_calls or event.finish_reason == "tool_calls"
+                ):
+                    had_tool_round = True
                 completion_entry_id: str | None = None
                 if isinstance(event, MessageCompleted | ToolExecutionEnded):
                     completion_entry_id = self._queue_completion(
@@ -226,6 +246,7 @@ class CodingSession:
                     and event.usage is not None
                     and event.usage.total_tokens > 0
                     and not event.tool_calls
+                    and not had_tool_round
                     and completion_entry_id is not None
                 ):
                     current_messages = self._normalize_provider_messages(harness.messages)
@@ -260,10 +281,27 @@ class CodingSession:
                         operation_id=operation_id,
                     )
 
-        yield await emit(SessionSaved(session_id=session.session_id, path=session.path))
-        yield await emit(
-            AgentCompleted(session_id=session.session_id, turns=turns, outcome="completed")
+        auto_compaction_saved = False
+        auto_compaction_status = _AutoCompactionStatus()
+        async for compaction_event in self._maybe_auto_compact(
+            session,
+            harness,
+            status=auto_compaction_status,
+        ):
+            if isinstance(compaction_event, SessionSaved):
+                auto_compaction_saved = True
+            yield compaction_event
+        if not auto_compaction_saved and not auto_compaction_status.skip_final_save:
+            yield await emit(SessionSaved(session_id=session.session_id, path=session.path))
+        completed = AgentCompleted(
+            session_id=session.session_id,
+            turns=turns,
+            outcome="completed",
         )
+        if auto_compaction_status.skip_final_save:
+            yield await self._emit_recoverable_event(completed, session=session)
+        else:
+            yield await emit(completed)
 
     async def compact(
         self,
@@ -273,119 +311,259 @@ class CodingSession:
         """Summarize an active context prefix and append one durable compaction."""
 
         async with self._operation_lock:
-            await self._flush_pending_entries()
-            replay = await self._read_context(session)
-            repair_plan = plan_interrupted_tool_repairs(replay.messages)
-            if repair_plan.repairs:
-                for repair in repair_plan.repairs:
-                    self._queue_message(session, repair)
-                await self._flush_pending_entries()
-                self._history_refresh_session_ids.add(session.session_id)
-                replay = await self._read_context(session)
-
+            replay = await self._prepare_compaction_replay(session)
             plan = plan_manual_compaction(replay)
-            started = CompactionStarted(
-                session_id=session.session_id,
-                source_entry_count=len(plan.expected_context_entry_ids),
+            async for event in self._compact_locked(
+                session,
+                plan,
+                reason="manual",
+                instructions=instructions,
+                trigger_budget=None,
+                recover_failure=False,
+            ):
+                yield event
+
+    async def _maybe_auto_compact(
+        self,
+        session: JsonlSession,
+        harness: AgentHarness,
+        *,
+        status: _AutoCompactionStatus,
+    ) -> AsyncIterator[WispEvent]:
+        provider_messages = self._normalize_provider_messages(harness.messages)
+        estimate = estimate_context(provider_messages, self.tools)
+        observation = self._context_observations.get(session.session_id)
+        current_fingerprint = context_fingerprint(provider_messages, self.tools)
+        observed_tokens = None
+        observed_is_current = False
+        if observation is not None:
+            observed_tokens = observation.tokens
+            observed_is_current = (
+                observation.provider == self.provider.name
+                and observation.model == (self.model or self.provider.default_model)
+                and observation.context_fingerprint == current_fingerprint
             )
-            provider_name = self.provider.name
-            effective_model = self.model or self.provider.default_model
-            try:
-                yield await self._emit(started, session=session)
-                summary = await summarize_manual_compaction(
-                    plan,
-                    provider=self.provider,
-                    model=self.model,
-                    effort=self.effort,
-                    instructions=instructions,
-                )
-                normalized_instructions = (
-                    instructions.strip()
-                    if instructions is not None and instructions.strip()
-                    else None
-                )
-                entry = SessionEntry(
+        budget = build_context_budget(
+            estimate,
+            context_window=self._context_window(),
+            reserve_tokens=self.context_reserve_tokens,
+            observed_tokens=observed_tokens,
+            observed_is_current=observed_is_current,
+        )
+        if not should_auto_compact(budget, enabled=self.auto_compaction_enabled):
+            return
+
+        replay: SessionReplay | None = None
+        try:
+            replay = await self._prepare_compaction_replay(session)
+            plan = plan_manual_compaction(replay)
+        except NothingToCompactError:
+            return
+        except Exception as exc:
+            status.skip_final_save = any(
+                pending.entry.session_id == session.session_id for pending in self._pending_entries
+            )
+            source_entry_count = len(replay.context_entry_ids) if replay is not None else 0
+            yield await self._emit_recoverable_event(
+                CompactionStarted(
                     session_id=session.session_id,
-                    kind="compaction",
-                    compaction=CompactionRecord(
-                        summary=summary.summary,
-                        replaced_entry_ids=plan.replaced_entry_ids,
-                        provider=provider_name,
-                        model=effective_model,
-                        instructions=normalized_instructions,
-                        usage=summary.usage,
-                    ),
-                )
-                with anyio.CancelScope(shield=True):
+                    reason="threshold",
+                    source_entry_count=source_entry_count,
+                    trigger_budget=budget,
+                ),
+                session=session,
+            )
+            yield await self._emit_recoverable_event(
+                CompactionCompleted(
+                    session_id=session.session_id,
+                    reason="threshold",
+                    outcome="failed",
+                    replaced_entry_count=0,
+                    retained_entry_count=source_entry_count,
+                    provider=self.provider.name,
+                    model=self.model or self.provider.default_model,
+                    error=str(exc),
+                ),
+                session=session,
+            )
+            return
+        async for event in self._compact_locked(
+            session,
+            plan,
+            reason="threshold",
+            instructions=None,
+            trigger_budget=budget,
+            recover_failure=True,
+        ):
+            yield event
+
+    async def _prepare_compaction_replay(self, session: JsonlSession) -> SessionReplay:
+        await self._flush_pending_entries()
+        replay = await self._read_context(session)
+        repair_plan = plan_interrupted_tool_repairs(replay.messages)
+        if repair_plan.repairs:
+            for repair in repair_plan.repairs:
+                self._queue_message(session, repair)
+            await self._flush_pending_entries()
+            self._history_refresh_session_ids.add(session.session_id)
+            replay = await self._read_context(session)
+        return replay
+
+    async def _compact_locked(
+        self,
+        session: JsonlSession,
+        plan: ManualCompactionPlan,
+        *,
+        reason: CompactionReason,
+        instructions: str | None,
+        trigger_budget: ContextBudget | None,
+        recover_failure: bool,
+    ) -> AsyncIterator[WispEvent]:
+        started = CompactionStarted(
+            session_id=session.session_id,
+            reason=reason,
+            source_entry_count=len(plan.expected_context_entry_ids),
+            trigger_budget=trigger_budget,
+        )
+        provider_name = self.provider.name
+        effective_model = self.model or self.provider.default_model
+        try:
+            if recover_failure:
+                yield await self._emit_recoverable_event(started, session=session)
+            else:
+                yield await self._emit(started, session=session)
+            summary = await summarize_manual_compaction(
+                plan,
+                provider=self.provider,
+                model=self.model,
+                effort=self.effort,
+                instructions=instructions,
+            )
+            normalized_instructions = (
+                instructions.strip() if instructions is not None and instructions.strip() else None
+            )
+            entry = SessionEntry(
+                session_id=session.session_id,
+                kind="compaction",
+                compaction=CompactionRecord(
+                    summary=summary.summary,
+                    replaced_entry_ids=plan.replaced_entry_ids,
+                    provider=provider_name,
+                    model=effective_model,
+                    instructions=normalized_instructions,
+                    usage=summary.usage,
+                    reason=reason,
+                    trigger_budget=trigger_budget,
+                ),
+            )
+            with anyio.CancelScope(shield=True):
+                try:
                     await session.append_compaction_entry(
                         entry,
                         expected_context_entry_ids=plan.expected_context_entry_ids,
                     )
-                    self._history_refresh_session_ids.add(session.session_id)
-                    self._context_observations.pop(session.session_id, None)
-                    saved = SessionSaved(session_id=session.session_id, path=session.path)
-                    publication_errors: list[str] = []
-                    try:
-                        await self._emit(saved, session=session)
-                    except Exception as exc:
-                        publication_errors.append(str(exc))
-                    completed = CompactionCompleted(
-                        session_id=session.session_id,
-                        outcome="completed",
-                        compaction_id=entry.id,
-                        replaced_entry_count=len(plan.replaced_entry_ids),
-                        retained_entry_count=len(plan.retained_rows),
-                        provider=provider_name,
-                        model=effective_model,
-                        usage=summary.usage,
+                except Exception:
+                    # A write can commit and then fail during post-append validation.
+                    # Retrying the stable entry id reconciles that uncertain outcome.
+                    await session.append_compaction_entry(
+                        entry,
+                        expected_context_entry_ids=plan.expected_context_entry_ids,
                     )
-                    try:
-                        await self._emit(completed, session=session)
-                    except Exception as exc:
-                        publication_errors.append(str(exc))
-                yield saved
-                yield completed
-                if publication_errors:
-                    yield ErrorEvent(
-                        message=(
-                            "Compaction committed, but event publication failed: "
-                            + "; ".join(publication_errors)
-                        )
-                    )
-            except Exception as exc:
-                error = str(exc)
-                yield await self._emit(ErrorEvent(message=error), session=session)
-                yield await self._emit(
-                    CompactionCompleted(
-                        session_id=session.session_id,
-                        outcome="failed",
-                        replaced_entry_count=len(plan.replaced_entry_ids),
-                        retained_entry_count=len(plan.retained_rows),
-                        provider=provider_name,
-                        model=effective_model,
-                        error=error,
+                self._history_refresh_session_ids.add(session.session_id)
+                self._context_observations.pop(session.session_id, None)
+                saved = SessionSaved(session_id=session.session_id, path=session.path)
+                publication_errors: list[str] = []
+                try:
+                    await self._emit(saved, session=session)
+                except Exception as exc:
+                    publication_errors.append(str(exc))
+                completed = CompactionCompleted(
+                    session_id=session.session_id,
+                    reason=reason,
+                    outcome="completed",
+                    compaction_id=entry.id,
+                    replaced_entry_count=len(plan.replaced_entry_ids),
+                    retained_entry_count=len(plan.retained_rows),
+                    provider=provider_name,
+                    model=effective_model,
+                    usage=summary.usage,
+                    error=(
+                        "Event publication failed: " + "; ".join(publication_errors)
+                        if publication_errors and recover_failure
+                        else None
                     ),
-                    session=session,
                 )
-                raise
-            except BaseException as exc:
-                if not isinstance(exc, anyio.get_cancelled_exc_class()):
-                    raise
-                with anyio.CancelScope(shield=True):
-                    cancelled = await self._emit(
-                        CompactionCompleted(
-                            session_id=session.session_id,
-                            outcome="cancelled",
-                            replaced_entry_count=len(plan.replaced_entry_ids),
-                            retained_entry_count=len(plan.retained_rows),
-                            provider=provider_name,
-                            model=effective_model,
-                            error=str(exc) or "Compaction cancelled",
-                        ),
-                        session=session,
+                try:
+                    await self._emit(completed, session=session)
+                except Exception as exc:
+                    publication_errors.append(str(exc))
+                if publication_errors and recover_failure:
+                    completed = completed.model_copy(
+                        update={
+                            "error": "Event publication failed: " + "; ".join(publication_errors)
+                        }
                     )
-                yield cancelled
+            yield saved
+            yield completed
+            if publication_errors and not recover_failure:
+                yield ErrorEvent(
+                    message=(
+                        "Compaction committed, but event publication failed: "
+                        + "; ".join(publication_errors)
+                    )
+                )
+        except Exception as exc:
+            error = str(exc)
+            if not recover_failure:
+                yield await self._emit(ErrorEvent(message=error), session=session)
+            failed = CompactionCompleted(
+                session_id=session.session_id,
+                reason=reason,
+                outcome="failed",
+                replaced_entry_count=len(plan.replaced_entry_ids),
+                retained_entry_count=len(plan.retained_rows),
+                provider=provider_name,
+                model=effective_model,
+                error=error,
+            )
+            if recover_failure:
+                yield await self._emit_recoverable_event(failed, session=session)
+            else:
+                yield await self._emit(failed, session=session)
+            if not recover_failure:
                 raise
+        except BaseException as exc:
+            if not isinstance(exc, anyio.get_cancelled_exc_class()):
+                raise
+            with anyio.CancelScope(shield=True):
+                cancelled_event = CompactionCompleted(
+                    session_id=session.session_id,
+                    reason=reason,
+                    outcome="cancelled",
+                    replaced_entry_count=len(plan.replaced_entry_ids),
+                    retained_entry_count=len(plan.retained_rows),
+                    provider=provider_name,
+                    model=effective_model,
+                    error=str(exc) or "Compaction cancelled",
+                )
+                cancelled: WispEvent
+                if recover_failure:
+                    cancelled = await self._emit_recoverable_event(cancelled_event, session=session)
+                else:
+                    cancelled = await self._emit(cancelled_event, session=session)
+            yield cancelled
+            raise
+
+    async def _emit_recoverable_event(
+        self,
+        event: WispEvent,
+        *,
+        session: JsonlSession,
+    ) -> WispEvent:
+        try:
+            return await self._emit(event, session=session)
+        except Exception:
+            return event
 
     async def get_session_stats(self, session: JsonlSession | None = None) -> SessionStats:
         """Return a consistent, non-persisted statistics snapshot."""

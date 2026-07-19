@@ -4,8 +4,91 @@ from __future__ import annotations
 
 from tests.cli_support import *
 from wisp.agent.messages import CompactionRecord, SessionEntry
-from wisp.events import MessageCompleted, WispEvent
+from wisp.cli.output import _print_event_line
+from wisp.events import (
+    CompactionCompleted,
+    CompactionStarted,
+    ContextBudget,
+    ContextEstimate,
+    MessageCompleted,
+    WispEvent,
+)
 from wisp.sessions.replay import HISTORICAL_CONTEXT_SUMMARY_LABEL
+
+
+def _trigger_budget() -> ContextBudget:
+    return ContextBudget(
+        estimate=ContextEstimate(
+            system_tokens=10,
+            message_tokens=70,
+            tool_schema_tokens=1,
+            total_tokens=81,
+        ),
+        context_window=100,
+        reserve_tokens=20,
+        remaining_tokens=-1,
+        estimated_percent=81,
+        over_budget=True,
+    )
+
+
+def test_print_output_renders_threshold_compaction_as_automatic_notices() -> None:
+    assert (
+        _print_event_line(
+            CompactionStarted(
+                session_id="session-1",
+                reason="threshold",
+                source_entry_count=6,
+                trigger_budget=_trigger_budget(),
+            )
+        )
+        == "Context threshold reached; compacting automatically..."
+    )
+    assert (
+        _print_event_line(
+            CompactionCompleted(
+                session_id="session-1",
+                reason="threshold",
+                outcome="completed",
+                replaced_entry_count=5,
+                retained_entry_count=1,
+            )
+        )
+        == "Automatically compacted 5 context entries."
+    )
+    assert (
+        _print_event_line(
+            CompactionCompleted(
+                session_id="session-1",
+                reason="threshold",
+                outcome="completed",
+                replaced_entry_count=5,
+                retained_entry_count=1,
+                error="Event publication failed: listener failed",
+            )
+        )
+        == "Automatically compacted 5 context entries. Warning: Event publication failed: "
+        "listener failed"
+    )
+    assert (
+        _print_event_line(
+            CompactionCompleted(
+                session_id="session-1",
+                reason="threshold",
+                outcome="failed",
+                replaced_entry_count=5,
+                retained_entry_count=1,
+                error="summary failed",
+            )
+        )
+        == "Automatic compaction failed: summary failed"
+    )
+
+
+def test_print_output_leaves_manual_compaction_unrendered() -> None:
+    assert (
+        _print_event_line(CompactionStarted(session_id="session-1", source_entry_count=6)) is None
+    )
 
 
 def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:

@@ -4,16 +4,25 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    TypeAdapter,
+    model_serializer,
+    model_validator,
+)
 
-EVENT_SCHEMA_VERSION = 9
+EVENT_SCHEMA_VERSION = 10
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
 FinishReason = Literal["stop", "tool_calls", "length", "error", "cancelled"]
 RetryReason = Literal["network", "timeout", "rate_limit", "server_error", "transient_http"]
+CompactionReason = Literal["manual", "threshold"]
 
 
 def utc_now() -> datetime:
@@ -26,7 +35,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9] = 9
+    schema_version: Literal[5, 6, 7, 8, 9, 10] = 10
     timestamp: datetime = Field(default_factory=utc_now)
 
 
@@ -343,14 +352,35 @@ class SessionSaved(WispEvent):
 class CompactionStarted(WispEvent):
     type: Literal["compaction.started"] = "compaction.started"
     session_id: str
-    reason: Literal["manual"] = "manual"
+    reason: CompactionReason = "manual"
     source_entry_count: int = Field(ge=0)
+    trigger_budget: ContextBudget | None = None
+
+    @model_validator(mode="after")
+    def _validate_trigger(self) -> CompactionStarted:
+        if self.reason == "threshold":
+            if self.schema_version != EVENT_SCHEMA_VERSION:
+                raise ValueError(
+                    f"threshold compaction requires schema_version {EVENT_SCHEMA_VERSION}"
+                )
+            if self.trigger_budget is None:
+                raise ValueError("threshold compaction requires a trigger budget")
+        elif self.trigger_budget is not None:
+            raise ValueError("manual compaction must not include a trigger budget")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version in {8, 9}:
+            data.pop("trigger_budget", None)
+        return data
 
 
 class CompactionCompleted(WispEvent):
     type: Literal["compaction.completed"] = "compaction.completed"
     session_id: str
-    reason: Literal["manual"] = "manual"
+    reason: CompactionReason = "manual"
     outcome: RunOutcome
     compaction_id: str | None = None
     replaced_entry_count: int = Field(ge=0)
@@ -359,6 +389,12 @@ class CompactionCompleted(WispEvent):
     model: str | None = None
     usage: TokenUsage | None = None
     error: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_reason(self) -> CompactionCompleted:
+        if self.reason == "threshold" and self.schema_version != EVENT_SCHEMA_VERSION:
+            raise ValueError(f"threshold compaction requires schema_version {EVENT_SCHEMA_VERSION}")
+        return self
 
 
 class AgentCompleted(WispEvent):
@@ -450,19 +486,34 @@ JsonObjectAdapter: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 def _require_current_schema(data: JsonObject) -> None:
     version = data.get("schema_version")
-    if version not in (5, 6, 7, 8, EVENT_SCHEMA_VERSION):
+    if version not in (5, 6, 7, 8, 9, EVENT_SCHEMA_VERSION):
         raise ValueError(
             "Unsupported Wisp event schema_version: "
-            f"{version!r}; expected 5, 6, 7, 8, or {EVENT_SCHEMA_VERSION}"
+            f"{version!r}; expected 5, 6, 7, 8, 9, or {EVENT_SCHEMA_VERSION}"
         )
-    if data.get("type") in {"compaction.started", "compaction.completed"} and version != 8:
-        if version != EVENT_SCHEMA_VERSION:
+    if data.get("type") in {"compaction.started", "compaction.completed"}:
+        if version not in {8, 9, EVENT_SCHEMA_VERSION}:
             raise ValueError(
-                f"Compaction events require schema_version 8 or {EVENT_SCHEMA_VERSION}, "
+                f"Compaction events require schema_version 8, 9, or {EVENT_SCHEMA_VERSION}, "
                 f"got {version!r}"
             )
-    if data.get("type") in {"context.estimated", "session.stats"} and version != 9:
-        raise ValueError(f"Context statistics events require schema_version 9, got {version!r}")
+        if data.get("reason", "manual") == "threshold" and version != EVENT_SCHEMA_VERSION:
+            raise ValueError(
+                f"Threshold compaction events require schema_version {EVENT_SCHEMA_VERSION}, "
+                f"got {version!r}"
+            )
+        if version in {8, 9} and data.get("trigger_budget") is not None:
+            raise ValueError(
+                f"Compaction trigger budgets require schema_version {EVENT_SCHEMA_VERSION}"
+            )
+    if data.get("type") in {"context.estimated", "session.stats"} and version not in {
+        9,
+        EVENT_SCHEMA_VERSION,
+    }:
+        raise ValueError(
+            f"Context statistics events require schema_version 9 or {EVENT_SCHEMA_VERSION}, "
+            f"got {version!r}"
+        )
 
 
 def wisp_event_from_json(line: str) -> KnownWispEvent:
