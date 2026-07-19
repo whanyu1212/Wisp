@@ -31,7 +31,7 @@ def test_json_mode_outputs_events_as_jsonl(tmp_path: Path) -> None:
         "session.saved",
         "agent.completed",
     ]
-    assert all(record["schema_version"] == 9 for record in records)
+    assert all(record["schema_version"] == 10 for record in records)
     assert "timestamp" in records[0]
     assert "session_id" in records[0]
     assert "fake response to: hello" == "".join(
@@ -104,6 +104,25 @@ def test_json_mode_validation_errors_are_jsonl(tmp_path: Path) -> None:
     records = _jsonl_records(result.stdout)
     assert [record["type"] for record in records] == ["error"]
     assert records[0]["message"] == "--max-tool-iterations must be non-negative"
+
+
+def test_json_mode_invalid_auto_compaction_env_is_structured(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["-p", "hello", "--mode", "json", "--session-dir", str(tmp_path)],
+        env={
+            "WISP_PROVIDER": "fake",
+            "WISP_AUTO_COMPACTION": "sometimes",
+            "WISP_TRUST": "1",
+        },
+    )
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.stdout
+    records = _jsonl_records(result.stdout)
+    assert len(records) == 1
+    assert records[0]["type"] == "error"
+    assert "WISP_AUTO_COMPACTION must be one of" in records[0]["message"]
 
 
 def test_json_mode_emits_error_event_without_stderr_noise(

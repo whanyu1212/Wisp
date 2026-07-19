@@ -14,7 +14,7 @@ from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.auth import auth_app
 from wisp.coding import CodingSession
 from wisp.config import WispConfig
-from wisp.events import ErrorEvent, MessageCompleted, MessageDelta
+from wisp.events import CompactionStarted, ErrorEvent, MessageCompleted, MessageDelta
 from wisp.providers.base import ProviderError
 from wisp.providers.catalog import startup_effort
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
@@ -267,10 +267,13 @@ def cli_callback(
         session_dir=session_dir,
         auth_path=auth_file,
     )
-    config = config_overrides.build(
-        trusted=trusted,
-        project_dir=project_context_root,
-    )
+    try:
+        config = config_overrides.build(
+            trusted=trusted,
+            project_dir=project_context_root,
+        )
+    except ValueError as exc:
+        _exit_with_error(str(exc), mode=resolved_mode, console=console)
     try:
         if resolved_mode is OutputMode.rpc:
             anyio.run(
@@ -407,14 +410,14 @@ def tui_command(
         mode=OutputMode.text,
         console=console,
     )
-    config = WispConfig.from_env(
-        session_dir=session_dir,
-        auth_path=auth_file,
-        project_dir=project_context_root,
-        trusted=trusted,
-    )
     renderer = TuiRendererKind.line if line else TuiRendererKind.textual
     try:
+        config = WispConfig.from_env(
+            session_dir=session_dir,
+            auth_path=auth_file,
+            project_dir=project_context_root,
+            trusted=trusted,
+        )
         _run_tui_from_cli_options(
             config=config,
             all_tools=all_tools,
@@ -432,7 +435,7 @@ def tui_command(
             user_session_dir=session_dir,
             user_auth_file=auth_file,
         )
-    except (ProviderError, SessionError, UnknownProviderError, UnknownToolError) as exc:
+    except (ProviderError, SessionError, UnknownProviderError, UnknownToolError, ValueError) as exc:
         console.print(f"[red]error:[/red] {exc}")
         raise typer.Exit(1) from exc
 
@@ -556,6 +559,7 @@ async def _run_print(
         trusted=trusted,
         project_context_root=project_context_root,
         context_reserve_tokens=config.context_reserve_tokens,
+        auto_compaction_enabled=config.auto_compaction_enabled,
     )
 
     events = agent.run(prompt, session=session, history=history)
@@ -565,6 +569,7 @@ async def _run_print(
 
     event_console = Console(stderr=True, soft_wrap=True)
     wrote_tokens = False
+    stdout_line_terminated = False
     streamed_text_for_message = False
     stderr_needs_separator = False
     failure_message: str | None = None
@@ -575,6 +580,7 @@ async def _run_print(
                     sys.stdout.write(event.delta)
                     sys.stdout.flush()
                     wrote_tokens = True
+                    stdout_line_terminated = False
                     streamed_text_for_message = True
                     stderr_needs_separator = True
             elif isinstance(event, MessageCompleted):
@@ -582,20 +588,26 @@ async def _run_print(
                     sys.stdout.write(event.content)
                     sys.stdout.flush()
                     wrote_tokens = True
+                    stdout_line_terminated = False
                     stderr_needs_separator = True
                 streamed_text_for_message = False
             elif isinstance(event, ErrorEvent):
                 failure_message = event.message
             else:
                 if stderr_needs_separator and _print_event_line(event) is not None:
-                    event_console.print()
+                    if isinstance(event, CompactionStarted) and event.reason == "threshold":
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                        stdout_line_terminated = True
+                    else:
+                        event_console.print()
                     stderr_needs_separator = False
                 _render_print_event(event, event_console)
     except Exception:
         if failure_message is None:
             raise
 
-    if wrote_tokens:
+    if wrote_tokens and not stdout_line_terminated:
         sys.stdout.write("\n")
     if failure_message is not None:
         raise ProviderError(failure_message)

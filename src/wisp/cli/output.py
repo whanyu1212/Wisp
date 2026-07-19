@@ -11,6 +11,8 @@ import typer
 from rich.console import Console
 
 from wisp.events import (
+    CompactionCompleted,
+    CompactionStarted,
     ErrorEvent,
     SessionSaved,
     ToolApprovalRequested,
@@ -61,6 +63,17 @@ def _render_print_event(event: WispEvent, console: Console) -> None:
 
 
 def _print_event_line(event: WispEvent) -> str | None:
+    if isinstance(event, CompactionStarted) and event.reason == "threshold":
+        return "Context threshold reached; compacting automatically..."
+    if isinstance(event, CompactionCompleted) and event.reason == "threshold":
+        if event.outcome == "completed":
+            line = f"Automatically compacted {event.replaced_entry_count} context entries."
+            if event.error:
+                line += f" Warning: {event.error}"
+            return line
+        if event.outcome == "cancelled":
+            return "Automatic compaction cancelled."
+        return f"Automatic compaction failed: {event.error or 'unknown error'}"
     if isinstance(event, ToolCallRequested):
         return f"→ tool {event.name} {_format_event_arguments(event.arguments)}"
     if isinstance(event, ToolApprovalRequested):

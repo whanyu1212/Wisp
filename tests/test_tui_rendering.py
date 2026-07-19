@@ -117,6 +117,55 @@ def test_line_tui_renderer_renders_compaction_notices() -> None:
     assert "Compacted 5 context entries." in rendered
 
 
+def test_line_tui_renderer_renders_threshold_compaction_as_automatic_notices() -> None:
+    console, output = _console()
+    renderer = LineTuiRenderer(console)
+
+    renderer.event(
+        CompactionStarted(
+            session_id="session-1",
+            reason="threshold",
+            source_entry_count=6,
+            trigger_budget=_context_budget(),
+        )
+    )
+    renderer.event(
+        CompactionCompleted(
+            session_id="session-1",
+            reason="threshold",
+            outcome="completed",
+            replaced_entry_count=5,
+            retained_entry_count=1,
+        )
+    )
+    renderer.event(
+        CompactionCompleted(
+            session_id="session-1",
+            reason="threshold",
+            outcome="failed",
+            replaced_entry_count=5,
+            retained_entry_count=1,
+            error="summary failed",
+        )
+    )
+    renderer.event(
+        CompactionCompleted(
+            session_id="session-1",
+            reason="threshold",
+            outcome="completed",
+            replaced_entry_count=5,
+            retained_entry_count=1,
+            error="Event publication failed: listener failed",
+        )
+    )
+
+    rendered = output.getvalue()
+    assert "Context threshold reached; compacting automatically..." in rendered
+    assert "Automatically compacted 5 context entries." in rendered
+    assert "Automatic compaction failed: summary failed" in rendered
+    assert "Warning: Event publication failed: listener failed" in rendered
+
+
 def test_fullscreen_tui_renderer_keeps_history_and_adds_compaction_notices() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
     renderer.event(completed_message(content="visible answer"))
@@ -135,6 +184,44 @@ def test_fullscreen_tui_renderer_keeps_history_and_adds_compaction_notices() -> 
         ("assistant", "visible answer"),
         ("system", "Compacting session..."),
         ("system", "Compacted 5 context entries."),
+    ]
+
+
+def test_fullscreen_tui_renderer_renders_threshold_failure_as_notice() -> None:
+    renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+
+    renderer.event(
+        CompactionStarted(
+            session_id="session-1",
+            reason="threshold",
+            source_entry_count=6,
+            trigger_budget=_context_budget(),
+        )
+    )
+    renderer.event(
+        CompactionCompleted(
+            session_id="session-1",
+            reason="threshold",
+            outcome="completed",
+            replaced_entry_count=5,
+            retained_entry_count=1,
+        )
+    )
+    renderer.event(
+        CompactionCompleted(
+            session_id="session-1",
+            reason="threshold",
+            outcome="failed",
+            replaced_entry_count=5,
+            retained_entry_count=1,
+            error="summary failed",
+        )
+    )
+
+    assert [(entry.role, entry.content, entry.style) for entry in renderer.state.transcript] == [
+        ("system", "Context threshold reached; compacting automatically...", "cyan"),
+        ("system", "Automatically compacted 5 context entries.", "cyan"),
+        ("system", "Automatic compaction failed: summary failed", "yellow"),
     ]
 
 

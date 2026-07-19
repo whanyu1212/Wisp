@@ -4,6 +4,7 @@ import pytest
 
 from wisp.agent.context import build_context_budget, context_fingerprint, estimate_context
 from wisp.agent.messages import CompactionRecord, Message, SessionEntry
+from wisp.coding.compaction import should_auto_compact
 from wisp.coding.stats import build_session_stats
 from wisp.events import (
     ContextEstimated,
@@ -66,7 +67,40 @@ def test_context_budget_is_permissive_for_unknown_models_and_tracks_reserve() ->
     assert constrained.over_budget is (constrained.remaining_tokens <= 0)
 
 
-def test_context_statistics_events_round_trip_only_on_schema_v9() -> None:
+@pytest.mark.parametrize(
+    ("enabled", "window", "observed", "current", "estimated", "expected"),
+    [
+        (True, 100, 79, True, 1_000, False),
+        (True, 100, 80, True, 1_000, False),
+        (True, 100, 81, True, 1, True),
+        (False, 100, 81, True, 1_000, False),
+        (True, None, None, False, 1_000_000, False),
+        (True, 100, None, False, 81, True),
+        (True, 100, 79, False, 81, True),
+    ],
+)
+def test_auto_compaction_uses_strict_threshold_and_current_observation(
+    enabled: bool,
+    window: int | None,
+    observed: int | None,
+    current: bool,
+    estimated: int,
+    expected: bool,
+) -> None:
+    estimate = estimate_context((Message(role="user", content="x" * (estimated * 4)),))
+    estimate = estimate.model_copy(update={"total_tokens": estimated})
+    budget = build_context_budget(
+        estimate,
+        context_window=window,
+        reserve_tokens=20,
+        observed_tokens=observed,
+        observed_is_current=current,
+    )
+
+    assert should_auto_compact(budget, enabled=enabled) is expected
+
+
+def test_context_statistics_events_accept_schema_v9_and_current() -> None:
     estimate = estimate_context((Message(role="user", content="hello"),))
     budget = build_context_budget(estimate, context_window=1_000, reserve_tokens=100)
     estimated = ContextEstimated(turn=1, provider="test", model="model", budget=budget)
@@ -83,7 +117,13 @@ def test_context_statistics_events_round_trip_only_on_schema_v9() -> None:
 
     assert wisp_event_from_json(estimated.model_dump_json()) == estimated
     assert wisp_event_from_json(reported.model_dump_json()) == reported
-    with pytest.raises(ValueError, match="require schema_version 9"):
+    assert (
+        wisp_event_from_json(
+            estimated.model_copy(update={"schema_version": 9}).model_dump_json()
+        ).schema_version
+        == 9
+    )
+    with pytest.raises(ValueError, match="require schema_version 9 or 10"):
         wisp_event_from_json(estimated.model_copy(update={"schema_version": 8}).model_dump_json())
 
 

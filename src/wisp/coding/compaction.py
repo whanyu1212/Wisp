@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from wisp.agent.execution import ToolExecutionEvent
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
-from wisp.events import MessageCompleted, TokenUsage, TurnCompleted
+from wisp.events import ContextBudget, MessageCompleted, TokenUsage, TurnCompleted
 from wisp.providers.base import Provider
 from wisp.providers.events import ToolCall
 from wisp.sessions.replay import SessionContextRow, SessionReplay
@@ -38,6 +38,19 @@ class AlreadyCompactedError(NothingToCompactError):
 
 class CompactionSummaryError(RuntimeError):
     """Raised when the provider does not produce one valid checkpoint summary."""
+
+
+def should_auto_compact(budget: ContextBudget, *, enabled: bool) -> bool:
+    """Return whether current context strictly exceeds the reserved input budget."""
+
+    if not enabled or budget.context_window is None:
+        return False
+    tokens = (
+        budget.observed_tokens
+        if budget.observed_is_current and budget.observed_tokens is not None
+        else budget.estimate.total_tokens
+    )
+    return tokens > budget.context_window - budget.reserve_tokens
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,5 +302,6 @@ __all__ = [
     "build_compaction_checkpoint_prompt",
     "plan_manual_compaction",
     "serialize_compaction_transcript",
+    "should_auto_compact",
     "summarize_manual_compaction",
 ]

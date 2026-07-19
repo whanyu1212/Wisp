@@ -301,6 +301,29 @@ def test_tui_rpc_env_omits_effort_when_config_effort_is_unset(
     assert "WISP_EFFORT" not in child_env
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_tui_rpc_env_forwards_context_policy(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    enabled: bool,
+) -> None:
+    monkeypatch.delenv("WISP_AUTO_COMPACTION", raising=False)
+    monkeypatch.delenv("WISP_CONTEXT_RESERVE_TOKENS", raising=False)
+    options = TuiOptions(
+        config=WispConfig(
+            provider="fake",
+            session_dir=tmp_path,
+            auto_compaction_enabled=enabled,
+            context_reserve_tokens=4096,
+        )
+    )
+
+    child_env = tui_app_module._rpc_env(options)
+
+    assert child_env["WISP_AUTO_COMPACTION"] == ("1" if enabled else "0")
+    assert child_env["WISP_CONTEXT_RESERVE_TOKENS"] == "4096"
+
+
 def test_run_tui_uses_live_fullscreen_when_interactive(
     tmp_path: Path,
     monkeypatch: object,
@@ -538,6 +561,32 @@ def test_cli_tui_command_resolves_trust_before_starting_ui(
 
     assert result.exit_code == 0, result.output
     assert order == ["trust", "tui"]
+
+
+def test_cli_tui_command_rejects_invalid_auto_compaction_env(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_resolve_cli_trust",
+        lambda path: TrustDecision(project_path=path, trusted=True),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["tui"],
+        env={
+            "WISP_AUTO_COMPACTION": "sometimes",
+            "WISP_PROVIDER": "fake",
+            "WISP_MODEL": "",
+        },
+    )
+
+    assert result.exit_code == 1
+    assert "WISP_AUTO_COMPACTION must be one of" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_cli_tui_mode_uses_env_renderer_default(monkeypatch: object) -> None:
@@ -2182,6 +2231,51 @@ def test_textual_compaction_notices_and_rpc_completion_stop_progress() -> None:
     assert "Compacted 5 context entries." in texts
     assert all(role != "message--assistant" for role, _title in cards)
     assert progress_stopped
+
+
+def test_textual_threshold_compaction_failure_is_a_notice() -> None:
+    async def scenario() -> tuple[list[str], list[tuple[str | None, object]]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                CompactionStarted(
+                    session_id="session-1",
+                    reason="threshold",
+                    source_entry_count=6,
+                    trigger_budget=threshold_budget(),
+                )
+            )
+            renderer.event(
+                CompactionCompleted(
+                    session_id="session-1",
+                    reason="threshold",
+                    outcome="completed",
+                    replaced_entry_count=5,
+                    retained_entry_count=1,
+                )
+            )
+            renderer.event(
+                CompactionCompleted(
+                    session_id="session-1",
+                    reason="threshold",
+                    outcome="failed",
+                    replaced_entry_count=5,
+                    retained_entry_count=1,
+                    error="summary failed",
+                )
+            )
+            await pilot.pause()
+            return _transcript_texts(app_instance), _transcript_cards(app_instance)
+
+    texts, cards = anyio.run(scenario)
+    assert "Context threshold reached; compacting automatically..." in texts
+    assert "Automatically compacted 5 context entries." in texts
+    assert "Automatic compaction failed: summary failed" in texts
+    assert [role for role, _title in cards] == [
+        "message--notice",
+        "message--notice",
+        "message--notice",
+    ]
 
 
 def test_textual_status_activity_animates_spinner_and_counts_elapsed() -> None:
