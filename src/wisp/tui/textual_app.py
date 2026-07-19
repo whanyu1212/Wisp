@@ -409,7 +409,7 @@ class TextualTui(App[None]):
         # Enter on a highlighted menu item accepts THAT command (Claude-Code/Codex/
         # Pi model), not the raw buffer — so `/`↓↓ Enter runs the highlighted
         # command even though only `/` was typed.
-        if self._accept_menu_highlight_on_enter():
+        if self._accept_menu_highlight_on_enter(event.value):
             return
         # No live menu: run the line as-is through the typed path.
         if self._suggest is not None:
@@ -421,14 +421,15 @@ class TextualTui(App[None]):
             self._register_compact_echo(event.value, event.display)
         self.submit_command_line(event.value)
 
-    def _accept_menu_highlight_on_enter(self) -> bool:
+    def _accept_menu_highlight_on_enter(self, typed: str) -> bool:
         """Accept the highlighted slash command on Enter; return whether it handled.
 
         Returns False (Enter falls through to submitting the raw line) unless the
         menu is open on a highlighted command. Enter executes the highlighted
         command, including when the input is only a prefix (`/mo` -> `/model`).
         Tab remains the completion path for adding arguments and appends a space
-        for commands that accept them.
+        for commands that accept them. Destructive commands may require a fully
+        typed name before Enter dispatches them.
         """
 
         suggest = self._suggest
@@ -438,7 +439,11 @@ class TextualTui(App[None]):
         if spec is None:
             return False
         suggest.hide()
-        self.submit_command_line(spec.command)
+        is_partial = typed.lower() != spec.command.lower()
+        if spec.prefill_on_partial_enter and is_partial:
+            self.prefill_command(f"{spec.command} ")
+        else:
+            self.submit_command_line(spec.command)
         return True
 
     def _register_compact_echo(self, prompt: str, display: str) -> None:

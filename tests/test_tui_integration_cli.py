@@ -3986,30 +3986,51 @@ def test_textual_enter_accepts_fully_typed_command_case_insensitively() -> None:
 def test_textual_enter_executes_highlighted_optional_arg_command() -> None:
     # Enter consistently executes the highlighted command. Users who want to add
     # an optional argument use Tab, which preserves the trailing-space behavior.
-    async def scenario() -> dict[str, tuple[str, str]]:
-        results: dict[str, tuple[str, str]] = {}
+    async def scenario() -> tuple[str, str]:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
             input_widget = app_instance.query_one("#input", Input)
             suggest = app_instance.query_one("#suggest", SlashSuggest)
-            for command in ("/auth", "/logout"):
-                input_widget.value = ""
-                suggest.hide()
-                await pilot.pause()
-                input_widget.focus()
-                await pilot.pause()
-                await pilot.press("/")  # bare prefix; nothing else typed
-                await pilot.pause()
-                await _navigate_menu_to(pilot, suggest, command)
-                await pilot.press("enter")
-                await pilot.pause()
-                queued = await app_instance._prompt_receive.receive()
-                results[command] = (input_widget.value, queued)
-        return results
+            input_widget.focus()
+            await pilot.pause()
+            await pilot.press("/")  # bare prefix; nothing else typed
+            await pilot.pause()
+            await _navigate_menu_to(pilot, suggest, "/auth")
+            await pilot.press("enter")
+            await pilot.pause()
+            queued = await app_instance._prompt_receive.receive()
+            return input_widget.value, queued
 
-    results = anyio.run(scenario)
-    assert results["/auth"] == ("", "/auth")
-    assert results["/logout"] == ("", "/logout")
+    assert anyio.run(scenario) == ("", "/auth")
+
+
+def test_textual_partial_logout_selection_waits_for_provider() -> None:
+    # Bare /logout deletes the default provider credential immediately. Selecting
+    # it from a partial palette query must therefore prefill its provider argument
+    # instead of dispatching the destructive command.
+    async def scenario() -> tuple[str, bool]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+            input_widget.focus()
+            await pilot.pause()
+            await pilot.press("/")
+            await pilot.pause()
+            await _navigate_menu_to(pilot, suggest, "/logout")
+            await pilot.press("enter")
+            await pilot.pause()
+            try:
+                app_instance._prompt_receive.receive_nowait()
+            except anyio.WouldBlock:
+                submitted = False
+            else:
+                submitted = True
+            return input_widget.value, submitted
+
+    value, submitted = anyio.run(scenario)
+    assert value == "/logout "
+    assert submitted is False
 
 
 def test_textual_enter_on_fully_typed_command_runs_it_once() -> None:
