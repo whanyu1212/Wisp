@@ -70,12 +70,8 @@ class SlashCommandSpec:
 
     ``takes_args`` means the command *accepts* an argument (required or optional),
     not that one is mandatory: ``/model``/``/auth`` run bare (show current /
-    default) yet still take a value. It drives two behaviors, so it must match the
-    shell handlers: Tab-completion leaves a trailing space for the value, and
-    accepting the highlight from a still-being-typed prefix (e.g. ``/`` → ``/auth``)
-    fills ``/cmd `` for the value instead of running immediately — important for
-    destructive commands like ``/logout`` where the bare default differs from the
-    intended target.
+    default) yet still take a value. Tab-completion uses it to leave a trailing
+    space for the value; Enter executes the highlighted command without one.
     """
 
     command: str  # canonical spelling, e.g. "/model"

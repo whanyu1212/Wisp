@@ -3912,36 +3912,28 @@ def test_textual_enter_runs_highlighted_argless_command_without_typing_it() -> N
     assert menu_open is False  # accepting the highlight closes the menu
 
 
-def test_textual_enter_on_arg_taking_highlight_fills_then_waits_for_value() -> None:
-    # Enter on a highlighted arg-taking command (/model) must NOT submit a bare
-    # "/model" — it fills "/model " and waits for the value, then a second Enter
-    # runs the completed line. This mirrors how Tab-completion primes arg-taking
-    # commands, so Enter and Tab agree.
-    async def scenario() -> tuple[str, bool, str]:
+def test_textual_enter_on_partial_model_command_opens_model_picker() -> None:
+    # REGRESSION: Enter executes the highlighted command, while Tab is reserved for
+    # completing an argument-taking command with a trailing space. In particular,
+    # `/mo` + Enter must submit bare `/model` so the shell opens the model picker.
+    async def scenario() -> tuple[str, str, bool]:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
             input_widget = app_instance.query_one("#input", Input)
             input_widget.focus()
             await pilot.pause()
             suggest = app_instance.query_one("#suggest", SlashSuggest)
-            await pilot.press("/")
+            await pilot.press(*"/mo")
             await pilot.pause()
-            await _navigate_menu_to(pilot, suggest, "/model")
-            await pilot.press("enter")  # accept -> fill, don't submit
-            await pilot.pause()
-            filled = input_widget.value
-            open_after_fill = suggest.is_open
-            await pilot.press(*"gpt-5")  # type the value
-            await pilot.pause()
-            await pilot.press("enter")  # now run it
+            await pilot.press("enter")
             await pilot.pause()
             queued = await app_instance._prompt_receive.receive()
-            return filled, open_after_fill, queued
+            return queued, input_widget.value, suggest.is_open
 
-    filled, open_after_fill, queued = anyio.run(scenario)
-    assert filled == "/model "  # arg-taking -> filled with a trailing space
-    assert open_after_fill is False  # menu closed while the user types the value
-    assert queued == "/model gpt-5"  # second Enter runs the completed line
+    queued, buffer_after, menu_open = anyio.run(scenario)
+    assert queued == "/model"
+    assert buffer_after == ""
+    assert menu_open is False
 
 
 def test_textual_enter_runs_fully_typed_optional_arg_command_bare() -> None:
@@ -3991,13 +3983,9 @@ def test_textual_enter_accepts_fully_typed_command_case_insensitively() -> None:
     assert buffer_after == ""  # not left as "/model " awaiting a second Enter
 
 
-def test_textual_selecting_optional_arg_command_from_prefix_waits_for_value() -> None:
-    # SAFETY: /auth and /logout take an optional [provider] (see the shell's
-    # `/auth [provider]` / `/logout [provider]` handlers), so their specs are
-    # takes_args=True. Selecting one from a bare "/" prefix must fill "/logout "
-    # and wait for the provider — NOT submit "/logout" immediately, which would act
-    # on the default provider (e.g. delete its credentials) instead of the intended
-    # one. Checks both an idempotent (/auth) and a destructive (/logout) command.
+def test_textual_enter_executes_highlighted_optional_arg_command() -> None:
+    # Enter consistently executes the highlighted command. Users who want to add
+    # an optional argument use Tab, which preserves the trailing-space behavior.
     async def scenario() -> dict[str, tuple[str, str]]:
         results: dict[str, tuple[str, str]] = {}
         app_instance = TextualTui()
@@ -4015,17 +4003,13 @@ def test_textual_selecting_optional_arg_command_from_prefix_waits_for_value() ->
                 await _navigate_menu_to(pilot, suggest, command)
                 await pilot.press("enter")
                 await pilot.pause()
-                try:
-                    with anyio.fail_after(0.2):
-                        queued = await app_instance._prompt_receive.receive()
-                except TimeoutError:
-                    queued = "<none>"
+                queued = await app_instance._prompt_receive.receive()
                 results[command] = (input_widget.value, queued)
         return results
 
     results = anyio.run(scenario)
-    assert results["/auth"] == ("/auth ", "<none>")  # filled, awaiting provider
-    assert results["/logout"] == ("/logout ", "<none>")  # no destructive auto-run
+    assert results["/auth"] == ("", "/auth")
+    assert results["/logout"] == ("", "/logout")
 
 
 def test_textual_enter_on_fully_typed_command_runs_it_once() -> None:
