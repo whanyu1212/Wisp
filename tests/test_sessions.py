@@ -12,7 +12,14 @@ from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 from wisp.agent.messages import CompactionRecord, Message, SessionEntry
-from wisp.events import ErrorEvent, TokenUsage, ToolCallRequested, ToolCallSnapshot
+from wisp.events import (
+    ContextBudget,
+    ContextEstimate,
+    ErrorEvent,
+    TokenUsage,
+    ToolCallRequested,
+    ToolCallSnapshot,
+)
 from wisp.sessions import jsonl as jsonl_module
 from wisp.sessions.jsonl import (
     AmbiguousSessionError,
@@ -203,6 +210,38 @@ def test_compaction_record_is_strict_and_versioned() -> None:
                 "provider": "openai",
                 "reason": "manual",
             }
+        )
+    budget = ContextBudget(
+        estimate=ContextEstimate(
+            system_tokens=1,
+            message_tokens=2,
+            tool_schema_tokens=0,
+            total_tokens=3,
+        ),
+        context_window=100,
+        reserve_tokens=20,
+        remaining_tokens=77,
+        estimated_percent=3,
+        over_budget=False,
+    )
+    overflow = CompactionRecord(
+        schema_version=3,
+        summary="summary",
+        replaced_entry_ids=("entry-1",),
+        provider="openai",
+        reason="overflow",
+        trigger_budget=budget,
+    )
+    assert overflow.schema_version == 3
+    assert overflow.reason == "overflow"
+    with pytest.raises(ValidationError, match="v2 does not support overflow"):
+        CompactionRecord(
+            schema_version=2,
+            summary="summary",
+            replaced_entry_ids=("entry-1",),
+            provider="openai",
+            reason="overflow",
+            trigger_budget=budget,
         )
     with pytest.raises(ValidationError):
         CompactionRecord.model_validate(

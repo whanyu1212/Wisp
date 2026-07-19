@@ -99,6 +99,32 @@ def test_tui_view_state_invalidates_context_after_automatic_compaction() -> None
     assert state.context is None
 
 
+def test_tui_view_state_tracks_overflow_compaction_budget() -> None:
+    state = TuiViewState(context=_context_budget(estimated=81))
+    trigger = _context_budget(estimated=90)
+
+    assert state.update_context_from_event(
+        CompactionStarted(
+            session_id="session",
+            reason="overflow",
+            source_entry_count=4,
+            trigger_budget=trigger,
+        )
+    )
+    assert state.context is trigger
+    assert state.update_context_from_event(
+        CompactionCompleted(
+            session_id="session",
+            reason="overflow",
+            outcome="completed",
+            replaced_entry_count=2,
+            retained_entry_count=2,
+            will_retry=True,
+        )
+    )
+    assert state.context is None
+
+
 def test_tui_view_state_ignores_zero_or_failed_message_usage() -> None:
     state = TuiViewState(context=_context_budget(estimated=10_000))
     original = state.context

@@ -54,7 +54,7 @@ class CompactionRecord(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    schema_version: Literal[1, 2] = 2
+    schema_version: Literal[1, 2, 3] = 2
     summary: str
     replaced_entry_ids: tuple[str, ...] = Field(min_length=1)
     provider: str
@@ -91,8 +91,10 @@ class CompactionRecord(BaseModel):
             if self.reason != "manual" or self.trigger_budget is not None:
                 raise ValueError("compaction schema v1 only supports manual records")
             return self
-        if self.reason == "threshold" and self.trigger_budget is None:
-            raise ValueError("threshold compaction records require a trigger budget")
+        if self.schema_version == 2 and self.reason == "overflow":
+            raise ValueError("compaction schema v2 does not support overflow records")
+        if self.reason in {"threshold", "overflow"} and self.trigger_budget is None:
+            raise ValueError(f"{self.reason} compaction records require a trigger budget")
         if self.reason == "manual" and self.trigger_budget is not None:
             raise ValueError("manual compaction records must not include a trigger budget")
         return self

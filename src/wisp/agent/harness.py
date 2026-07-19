@@ -134,24 +134,61 @@ class AgentHarness:
             self._current_scope.cancel()
         return True
 
-    def prompt(self, content: str) -> AsyncGenerator[AgentLoopEvent, None]:
+    def prompt(
+        self,
+        content: str,
+        *,
+        turn_offset: int = 0,
+        tool_iteration_offset: int = 0,
+        defer_context_overflow_errors: bool = False,
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
         """Append a user message and start a run."""
-        return self.prompt_message(Message(role="user", content=content))
+        return self.prompt_message(
+            Message(role="user", content=content),
+            turn_offset=turn_offset,
+            tool_iteration_offset=tool_iteration_offset,
+            defer_context_overflow_errors=defer_context_overflow_errors,
+        )
 
-    def prompt_message(self, message: Message) -> AsyncGenerator[AgentLoopEvent, None]:
+    def prompt_message(
+        self,
+        message: Message,
+        *,
+        turn_offset: int = 0,
+        tool_iteration_offset: int = 0,
+        defer_context_overflow_errors: bool = False,
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
         """Append an existing user message and start a run."""
         if message.role != "user":
             raise ValueError("AgentHarness prompts require a user message")
-        return self._run(prompt_message=message)
+        return self._run(
+            prompt_message=message,
+            turn_offset=turn_offset,
+            tool_iteration_offset=tool_iteration_offset,
+            defer_context_overflow_errors=defer_context_overflow_errors,
+        )
 
-    def continue_(self) -> AsyncGenerator[AgentLoopEvent, None]:
+    def continue_(
+        self,
+        *,
+        turn_offset: int = 0,
+        tool_iteration_offset: int = 0,
+        defer_context_overflow_errors: bool = False,
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
         """Continue from the current transcript without adding a user message."""
-        return self._run()
+        return self._run(
+            turn_offset=turn_offset,
+            tool_iteration_offset=tool_iteration_offset,
+            defer_context_overflow_errors=defer_context_overflow_errors,
+        )
 
     async def _run(
         self,
         *,
         prompt_message: Message | None = None,
+        turn_offset: int = 0,
+        tool_iteration_offset: int = 0,
+        defer_context_overflow_errors: bool = False,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         self.repair_interrupted_tool_calls()
         self._running = True
@@ -174,6 +211,9 @@ class AgentHarness:
             context_window=self._config.context_window,
             context_reserve_tokens=self._config.context_reserve_tokens,
             context_pressure_threshold=self._config.context_pressure_threshold,
+            turn_offset=turn_offset,
+            tool_iteration_offset=tool_iteration_offset,
+            defer_context_overflow_errors=defer_context_overflow_errors,
         )
         provider_messages_list: list[Message] = []
         for message in self._messages:

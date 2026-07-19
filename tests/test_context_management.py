@@ -251,6 +251,41 @@ def test_terminal_context_overflow_emits_structured_event_and_does_not_retry() -
     assert len(provider.calls) == 1
 
 
+def test_deferred_context_overflow_leaves_terminal_events_to_the_session() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test-model"),
+                ProviderResponseFailed(message="context_length_exceeded"),
+            ]
+        ]
+    )
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(ContextOverflowError):
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=NeverToolExecutor(),
+                    context_window=100,
+                    defer_context_overflow_errors=True,
+                ),
+                messages=(Message(role="user", content="hello"),),
+            ):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events] == [
+        "turn.started",
+        "context.estimated",
+        "message.started",
+        "context.overflow",
+    ]
+
+
 @pytest.mark.parametrize("effort", [None, "high"])
 def test_synchronous_provider_opening_overflow_is_structured(effort: str | None) -> None:
     provider = SynchronousFailingProvider("context window exceeded")
@@ -363,8 +398,8 @@ def test_context_events_round_trip_on_current_schema() -> None:
         message="maximum context length exceeded",
     )
 
-    assert pressure.schema_version == 10
-    assert overflow.schema_version == 10
+    assert pressure.schema_version == 11
+    assert overflow.schema_version == 11
     assert wisp_event_from_json(pressure.model_dump_json()) == pressure
     assert wisp_event_from_json(overflow.model_dump_json()) == overflow
 

@@ -149,7 +149,7 @@ Wisp reads configuration from CLI flags, environment variables, and JSON setting
 | `WISP_RETRY_BASE_DELAY_SECONDS` | Initial retry delay; defaults to `0.5` |
 | `WISP_RETRY_MAX_DELAY_SECONDS` | Maximum retry delay; defaults to `30` |
 | `WISP_CONTEXT_RESERVE_TOKENS` | Tokens reserved outside the estimated input context; defaults to `16384` |
-| `WISP_AUTO_COMPACTION` | Enable automatic threshold compaction; defaults to `true` |
+| `WISP_AUTO_COMPACTION` | Enable automatic threshold compaction and overflow recovery; defaults to `true` |
 | `OPENAI_API_KEY` | Required only for the `openai` provider |
 | `ANTHROPIC_API_KEY` | Required only for the `anthropic` provider |
 | `GOOGLE_API_KEY` | Required only for the `google` provider |
@@ -277,8 +277,16 @@ Automatic threshold compaction is enabled by default and runs after a completed 
 active context exceeds the reserved input budget. It uses the same validated summary and retains
 the latest complete turn. If an automatic summary fails, Wisp preserves the completed prompt,
 reports a failed threshold-compaction event, and leaves replay unchanged. Disable it with
-`WISP_AUTO_COMPACTION=0` or `"auto_compaction_enabled": false` in user settings. Compact-and-retry
-after provider overflow remains follow-up work.
+`WISP_AUTO_COMPACTION=0` or `"auto_compaction_enabled": false` in user settings.
+
+When a provider explicitly rejects an input for context overflow, Wisp can compact and retry the
+same prompt once. It preserves the append-only audit log, keeps completed read-tool results in
+replay, and never appends the user prompt twice. Recovery is skipped after mutating or command
+tools, or after text/thinking deltas have already reached an interface, because side effects and
+partial responses cannot be safely repeated or retracted. A second overflow, unavailable
+compactable prefix, cancelled summary, or failed summary follows the normal terminal error path
+without another retry. Recovery also skips the normal threshold-compaction pass for that prompt to
+avoid chaining automatic summaries; the next completed prompt resumes threshold evaluation.
 
 ## TUI
 
@@ -290,9 +298,9 @@ A fullscreen Textual TUI built on the same RPC controller other integrations use
 Pi-style footer shows the current working directory/session plus status, queued follow-ups, and
 provider/model. It also shows current context use: `ctx 12k/128k` is a current provider
 observation, while `ctx ~12k/128k` is an explicit estimate (for example, immediately after
-compaction). Automatic threshold summaries use the same progress notices as `/compact` without
-changing the active prompt command. Completed tool cards include bounded multiline output
-previews. Cost metrics remain future work. Adjust runtime settings with slash commands
+compaction). Automatic threshold and overflow summaries use the same progress notices as
+`/compact` without changing the active prompt command. Completed tool cards include bounded
+multiline output previews. Cost metrics remain future work. Adjust runtime settings with slash commands
 instead of up-front flags. The prompt editor accepts multiline text: press Enter to submit, or
 Shift+Enter / Ctrl+J to insert a newline. Pasted newlines are preserved.
 
@@ -361,8 +369,8 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 10`; readers also accept legacy schema v5
-through v9 events for compatibility. A successful prompt follows this lifecycle (tool events
+Every outbound `WispEvent` includes `"schema_version": 11`; readers also accept legacy schema v5
+through v10 events for compatibility. A successful prompt follows this lifecycle (tool events
 repeat inside a turn when the model requests tools):
 
 ```text
@@ -386,6 +394,16 @@ agent.completed
 `message.completed` carries the assembled content, finish reason, response id, and completed tool
 calls. A failed provider response or tool loop emits `error`, a failed `turn.completed`, and a
 failed `agent.completed`; it does not emit `message.completed` for an incomplete response.
+The exception is successful schema-v11 overflow recovery: after `context.overflow`, Wisp emits
+overflow compaction lifecycle events, then the failed `turn.completed`, and continues once. Its
+`compaction.completed.will_retry=true` marks that failed turn as nonterminal; no `error` or
+intermediate `agent.completed` is emitted unless compaction or the retry setup fails.
+
+Schema v11 adds overflow compact-and-retry. Overflow lifecycle events use `reason="overflow"`;
+an overflow `compaction.completed` has `will_retry=true` only after a durable replacement commits
+and one continuation is scheduled. Recovery stays inside the originating prompt RPC envelope and
+does not emit an intermediate `error` or `agent.completed` when the retry succeeds. Overflow
+records use compaction schema v3, while v1/v2 records remain readable.
 
 Schema v10 adds automatic threshold compaction. `compaction.started` and `compaction.completed`
 carry `reason="manual" | "threshold"`; threshold starts include the triggering context budget.
@@ -407,8 +425,8 @@ events report counts and summary-request usage without duplicating the summary i
 Schema v7 adds context-window signaling. When catalog metadata is available and a successful
 request reports usage at or above 80% of the model's context window, Wisp emits
 `context.pressure` after `message.completed`. A provider rejection recognized as a context overflow
-emits `context.overflow` before the normal failed-turn events. These events never delete or trim
-history and do not trigger automatic compaction or retry.
+emits `context.overflow`; schema v11 can then compact and retry once when the automatic recovery
+preconditions are met. Original messages remain append-only in the session audit log.
 
 Schema v6 adds optional provider-reported token usage to `message.completed`. The `usage` object
 records input, output, and total tokens plus provider-supported cache and reasoning categories.

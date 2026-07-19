@@ -92,7 +92,7 @@ class TuiViewState:
             return True
         if (
             isinstance(event, CompactionStarted)
-            and event.reason == "threshold"
+            and event.reason in {"threshold", "overflow"}
             and event.trigger_budget is not None
         ):
             self.context = event.trigger_budget

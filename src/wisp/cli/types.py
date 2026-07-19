@@ -18,3 +18,7 @@ class OutputMode(StrEnum):
 
 class _JsonOutputModeError(ProviderError):
     """Raised after JSONL output has already emitted a model-visible error event."""
+
+
+class _RenderedPrintError(ProviderError):
+    """Raised after print mode has already rendered the terminal failure."""

@@ -9,7 +9,7 @@ import pytest
 from tests.cli_support import *
 from wisp.agent.messages import CompactionRecord, SessionEntry
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
-from wisp.events import ToolCallSnapshot
+from wisp.events import ContextBudget, ContextEstimate, ToolCallSnapshot
 from wisp.providers.base import Provider
 from wisp.providers.catalog import (
     ModelCatalog,
@@ -19,6 +19,7 @@ from wisp.providers.catalog import (
 )
 from wisp.providers.events import (
     ProviderResponseCompleted,
+    ProviderResponseFailed,
     ProviderResponseStarted,
     ProviderUsage,
 )
@@ -162,8 +163,56 @@ def test_cancelled_prompt_rollback_preserves_concurrent_compaction(tmp_path: Pat
 
     anyio.run(append_prompt_and_compaction)
 
-    assert cli_module.rpc._rpc_has_durable_completion(session, entry_start) is False
+    assert cli_module.rpc._rpc_has_durable_completion(session, entry_start, "prompt-1") is False
     assert any(entry.kind == "compaction" for entry in session.read_entries()[entry_start:])
+
+
+def test_rpc_cancellation_rolls_back_unanswered_overflow_compaction(
+    tmp_path: Path,
+) -> None:
+    session = _create_two_turn_session(tmp_path)
+    entry_start = len(session.read_entries())
+
+    async def append_overflow_compaction() -> None:
+        context = session.read_context()
+        await session.append_compaction_entry(
+            SessionEntry(
+                session_id=session.session_id,
+                kind="compaction",
+                operation_id="prompt-1",
+                compaction=CompactionRecord(
+                    schema_version=3,
+                    summary="durable overflow summary",
+                    replaced_entry_ids=context.context_entry_ids[:2],
+                    provider="test",
+                    reason="overflow",
+                    trigger_budget=ContextBudget(
+                        estimate=ContextEstimate(
+                            system_tokens=1,
+                            message_tokens=2,
+                            tool_schema_tokens=0,
+                            total_tokens=3,
+                        ),
+                        context_window=100,
+                        reserve_tokens=20,
+                        remaining_tokens=77,
+                        estimated_percent=3,
+                        over_budget=False,
+                    ),
+                ),
+            ),
+            expected_context_entry_ids=context.context_entry_ids,
+        )
+
+    anyio.run(append_overflow_compaction)
+
+    assert cli_module.rpc._rpc_has_durable_completion(session, entry_start, "prompt-1") is False
+
+    async def rollback() -> bool:
+        return await session.truncate_operation_entries(entry_start, operation_id="prompt-1")
+
+    assert anyio.run(rollback) is True
+    assert not any(entry.kind == "compaction" for entry in session.read_entries()[entry_start:])
 
 
 def _is_compaction_request(messages: Sequence[Message]) -> bool:
@@ -262,6 +311,34 @@ class AutoCompactionProvider(ReplayAwareProvider):
             content=f"answer {_last_user_prompt(messages)}",
             usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
         )
+
+
+class OverflowRecoveryProvider(ReplayAwareProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self._overflowed = False
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+        effort: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        del tools, tool_results, previous_response_id, effort
+        self.calls.append(tuple(messages))
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        if _is_compaction_request(messages):
+            yield ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY)
+            return
+        if not self._overflowed:
+            self._overflowed = True
+            yield ProviderResponseFailed(message="maximum context length exceeded")
+            return
+        yield ProviderResponseCompleted(content="answer after recovery")
 
 
 @pytest.mark.parametrize(
@@ -455,6 +532,84 @@ def test_rpc_prompt_contains_automatic_threshold_compaction(
     )
 
 
+def test_rpc_prompt_recovers_one_overflow_inside_the_prompt_envelope(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = _create_two_turn_session(tmp_path)
+    provider = OverflowRecoveryProvider()
+
+    async def build_runtime() -> WispRuntime:
+        return await _runtime_with_provider(provider, context_window=100)
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    result = CliRunner().invoke(
+        app,
+        [
+            "--mode",
+            "rpc",
+            "--resume",
+            session.path.name,
+            "--session-dir",
+            str(tmp_path),
+        ],
+        input='{"id":"prompt-1","type":"prompt","prompt":"third"}\n',
+        env={
+            "WISP_PROVIDER": provider.name,
+            "WISP_MODEL": "",
+            "WISP_CONTEXT_RESERVE_TOKENS": "20",
+            "WISP_TRUST": "1",
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == [
+        "rpc.command.started",
+        "agent.started",
+        "turn.started",
+        "context.estimated",
+        "message.started",
+        "context.overflow",
+        "compaction.started",
+        "session.saved",
+        "compaction.completed",
+        "turn.completed",
+        "turn.started",
+        "context.estimated",
+        "message.started",
+        "message.completed",
+        "turn.completed",
+        "session.saved",
+        "agent.completed",
+        "rpc.command.finished",
+    ]
+    overflow_compaction = next(
+        record
+        for record in records
+        if record["type"] == "compaction.completed" and record["reason"] == "overflow"
+    )
+    assert overflow_compaction["will_retry"] is True
+    assert records[-1]["ok"] is True
+    assert not any(record["type"] == "error" for record in records)
+    assert sum(record["type"] == "rpc.command.started" for record in records) == 1
+    assert [record["turn"] for record in records if record["type"] == "turn.started"] == [1, 2]
+    entries = session.read_entries()
+    assert (
+        sum(
+            entry.message is not None
+            and entry.message.role == "user"
+            and entry.message.content == "third"
+            for entry in entries
+        )
+        == 1
+    )
+    assert (
+        next(entry.compaction for entry in entries if entry.compaction is not None).schema_version
+        == 3
+    )
+
+
 def test_rpc_resume_initial_history_uses_compaction_replay(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -623,7 +778,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "agent.completed",
         "rpc.command.finished",
     ]
-    assert all(record["schema_version"] == 10 for record in records)
+    assert all(record["schema_version"] == 11 for record in records)
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"
@@ -663,7 +818,7 @@ def test_rpc_mode_reports_stats_after_queued_prompt(tmp_path: Path) -> None:
     assert finished == [
         {
             "type": "rpc.command.finished",
-            "schema_version": 10,
+            "schema_version": 11,
             "timestamp": finished[0]["timestamp"],
             "command_id": "stats-1",
             "command_type": "get_session_stats",

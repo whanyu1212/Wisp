@@ -14,7 +14,13 @@ from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.auth import auth_app
 from wisp.coding import CodingSession
 from wisp.config import WispConfig
-from wisp.events import CompactionStarted, ErrorEvent, MessageCompleted, MessageDelta
+from wisp.events import (
+    CompactionCompleted,
+    CompactionStarted,
+    ErrorEvent,
+    MessageCompleted,
+    MessageDelta,
+)
 from wisp.providers.base import ProviderError
 from wisp.providers.catalog import startup_effort
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
@@ -28,7 +34,7 @@ from . import output as _cli_output
 from . import rpc as _cli_rpc
 from . import tools as _cli_tools
 from . import trust as _cli_trust
-from .types import OutputMode, _JsonOutputModeError
+from .types import OutputMode, _JsonOutputModeError, _RenderedPrintError
 
 # Compatibility aliases for callers/tests that import private helpers from wisp.cli.
 _resolve_cli_trust = _cli_trust.resolve_cli_trust
@@ -330,7 +336,9 @@ def cli_callback(
     except _JsonOutputModeError as exc:
         raise typer.Exit(1) from exc
     except (ProviderError, SessionError, UnknownProviderError, UnknownToolError) as exc:
-        if _writes_json_events(resolved_mode):
+        if isinstance(exc, _RenderedPrintError):
+            pass
+        elif _writes_json_events(resolved_mode):
             _write_json_event(ErrorEvent(message=str(exc)))
         else:
             console.print(f"[red]error:[/red] {exc}")
@@ -573,6 +581,8 @@ async def _run_print(
     streamed_text_for_message = False
     stderr_needs_separator = False
     failure_message: str | None = None
+    failure_was_rendered = False
+    rendered_overflow_failures: set[str] = set()
     try:
         async for event in events:
             if isinstance(event, MessageDelta) and event.content_kind == "text":
@@ -593,9 +603,14 @@ async def _run_print(
                 streamed_text_for_message = False
             elif isinstance(event, ErrorEvent):
                 failure_message = event.message
+                failure_was_rendered = event.message in rendered_overflow_failures
             else:
-                if stderr_needs_separator and _print_event_line(event) is not None:
-                    if isinstance(event, CompactionStarted) and event.reason == "threshold":
+                line = _print_event_line(event)
+                if stderr_needs_separator and line is not None:
+                    if isinstance(event, CompactionStarted) and event.reason in {
+                        "threshold",
+                        "overflow",
+                    }:
                         sys.stdout.write("\n")
                         sys.stdout.flush()
                         stdout_line_terminated = True
@@ -603,6 +618,13 @@ async def _run_print(
                         event_console.print()
                     stderr_needs_separator = False
                 _render_print_event(event, event_console)
+                if (
+                    isinstance(event, CompactionCompleted)
+                    and event.reason == "overflow"
+                    and not event.will_retry
+                    and line is not None
+                ):
+                    rendered_overflow_failures.add(line)
     except Exception:
         if failure_message is None:
             raise
@@ -610,4 +632,6 @@ async def _run_print(
     if wrote_tokens and not stdout_line_terminated:
         sys.stdout.write("\n")
     if failure_message is not None:
+        if failure_was_rendered:
+            raise _RenderedPrintError(failure_message)
         raise ProviderError(failure_message)

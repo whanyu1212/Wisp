@@ -2278,6 +2278,45 @@ def test_textual_threshold_compaction_failure_is_a_notice() -> None:
     ]
 
 
+def test_textual_overflow_compaction_restarts_progress_for_retry() -> None:
+    async def scenario() -> tuple[list[str], bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.event(
+                CompactionStarted(
+                    session_id="session-1",
+                    reason="overflow",
+                    source_entry_count=6,
+                    trigger_budget=threshold_budget(),
+                )
+            )
+            await pilot.pause()
+            started = app_instance._working_indicator is not None
+            renderer.event(
+                CompactionCompleted(
+                    session_id="session-1",
+                    reason="overflow",
+                    outcome="completed",
+                    replaced_entry_count=5,
+                    retained_entry_count=1,
+                    will_retry=True,
+                )
+            )
+            await pilot.pause()
+            stopped = app_instance._working_indicator is None
+            renderer.event(TurnStarted(turn=2))
+            await pilot.pause()
+            restarted = app_instance._working_indicator is not None
+            return _transcript_texts(app_instance), started and stopped, restarted
+
+    texts, stopped_after_compaction, restarted_for_retry = anyio.run(scenario)
+    assert "Context overflow detected; compacting before one retry..." in texts
+    assert "Compacted 5 context entries; retrying request..." in texts
+    assert stopped_after_compaction
+    assert restarted_for_retry
+
+
 def test_textual_status_activity_animates_spinner_and_counts_elapsed() -> None:
     # The heartbeat is a smooth braille spinner + a live elapsed-seconds counter,
     # both driven off one monotonic tick counter (frame = ticks % len, seconds =
