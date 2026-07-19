@@ -65,6 +65,8 @@ def _render_print_event(event: WispEvent, console: Console) -> None:
 def _print_event_line(event: WispEvent) -> str | None:
     if isinstance(event, CompactionStarted) and event.reason == "threshold":
         return "Context threshold reached; compacting automatically..."
+    if isinstance(event, CompactionStarted) and event.reason == "overflow":
+        return "Context overflow detected; compacting before one retry..."
     if isinstance(event, CompactionCompleted) and event.reason == "threshold":
         if event.outcome == "completed":
             line = f"Automatically compacted {event.replaced_entry_count} context entries."
@@ -74,6 +76,16 @@ def _print_event_line(event: WispEvent) -> str | None:
         if event.outcome == "cancelled":
             return "Automatic compaction cancelled."
         return f"Automatic compaction failed: {event.error or 'unknown error'}"
+    if isinstance(event, CompactionCompleted) and event.reason == "overflow":
+        if event.outcome == "completed":
+            if event.will_retry:
+                return (
+                    f"Compacted {event.replaced_entry_count} context entries; retrying request..."
+                )
+            return f"Context overflow recovery failed: {event.error or 'retry was not scheduled'}"
+        if event.outcome == "cancelled":
+            return "Context overflow recovery cancelled."
+        return f"Context overflow recovery failed: {event.error or 'unknown error'}"
     if isinstance(event, ToolCallRequested):
         return f"→ tool {event.name} {_format_event_arguments(event.arguments)}"
     if isinstance(event, ToolApprovalRequested):

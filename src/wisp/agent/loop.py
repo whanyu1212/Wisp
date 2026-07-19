@@ -99,6 +99,9 @@ class AgentLoopConfig:
     context_window: int | None = None
     context_reserve_tokens: int = 16_384
     context_pressure_threshold: float = 0.8
+    turn_offset: int = 0
+    tool_iteration_offset: int = 0
+    defer_context_overflow_errors: bool = False
 
     def __post_init__(self) -> None:
         if self.context_window is not None and self.context_window <= 0:
@@ -107,6 +110,10 @@ class AgentLoopConfig:
             raise ValueError("context_reserve_tokens must be non-negative")
         if not 0 < self.context_pressure_threshold <= 1:
             raise ValueError("context_pressure_threshold must be greater than 0 and at most 1")
+        if self.turn_offset < 0:
+            raise ValueError("turn_offset must be non-negative")
+        if self.tool_iteration_offset < 0:
+            raise ValueError("tool_iteration_offset must be non-negative")
 
 
 def _is_cancelled(config: AgentLoopConfig) -> bool:
@@ -196,8 +203,8 @@ async def run_agent_loop(
 
     pending_tool_results: tuple[ToolCallResult, ...] = ()
     previous_response_id: str | None = None
-    tool_iterations = 0
-    turn = 0
+    tool_iterations = config.tool_iteration_offset
+    turn = config.turn_offset
     continuation_messages: list[Message] = []
 
     try:
@@ -496,6 +503,10 @@ async def run_agent_loop(
                 context_window=config.context_window,
                 message=str(overflow_error),
             )
+            if config.defer_context_overflow_errors:
+                if overflow_error is not exc:
+                    raise overflow_error from exc
+                raise
         yield ErrorEvent(message=str(exc))
         if turn > 0:
             yield TurnCompleted(turn=turn, outcome="failed", finish_reason="error")

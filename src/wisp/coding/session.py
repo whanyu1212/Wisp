@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,8 +40,10 @@ from wisp.events import (
     CompactionReason,
     CompactionStarted,
     ContextBudget,
+    ContextEstimated,
     ErrorEvent,
     MessageCompleted,
+    MessageDelta,
     SessionSaved,
     SessionStats,
     ToolExecutionEnded,
@@ -49,10 +51,10 @@ from wisp.events import (
     TurnStarted,
     WispEvent,
 )
-from wisp.providers.base import Provider, ToolSpec
+from wisp.providers.base import ContextOverflowError, Provider, ToolSpec
 from wisp.providers.catalog import ModelRegistry
 from wisp.runtime.event_bus import EventBus
-from wisp.runtime.registry import ToolRegistry
+from wisp.runtime.registry import ToolRegistry, UnknownToolError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import SessionReplay, replay_session_entries
 from wisp.tools.approval import ToolApprovalPolicy
@@ -221,76 +223,214 @@ class CodingSession:
         user_message = Message(role="user", content=prompt)
         await session.append_message(user_message, operation_id=operation_id)
         turns = 0
-        saw_loop_error = False
         had_tool_round = False
-        harness_events = harness.prompt_message(user_message)
+        tool_iterations = 0
+        had_unsafe_tool_round = False
+        overflow_recovery_attempted = False
+        recovered_from_overflow = False
+        harness_events = harness.prompt_message(
+            user_message,
+            defer_context_overflow_errors=True,
+        )
 
-        try:
-            async for event in harness_events:
-                if isinstance(event, TurnStarted):
-                    turns = event.turn
-                elif isinstance(event, ErrorEvent):
-                    saw_loop_error = True
-                elif isinstance(event, MessageCompleted) and (
-                    event.tool_calls or event.finish_reason == "tool_calls"
-                ):
-                    had_tool_round = True
-                completion_entry_id: str | None = None
-                if isinstance(event, MessageCompleted | ToolExecutionEnded):
-                    completion_entry_id = self._queue_completion(
-                        session, event, operation_id=operation_id
-                    )
-                if (
-                    isinstance(event, MessageCompleted)
-                    and event.finish_reason not in {"error", "cancelled"}
-                    and event.usage is not None
-                    and event.usage.total_tokens > 0
-                    and not event.tool_calls
-                    and not had_tool_round
-                    and completion_entry_id is not None
-                ):
-                    current_messages = self._normalize_provider_messages(harness.messages)
-                    self._context_observations[session.session_id] = _ContextObservation(
+        while True:
+            saw_loop_error = False
+            overflow_error: ContextOverflowError | None = None
+            overflow_budget: ContextBudget | None = None
+            attempt_had_delta = False
+            try:
+                async for event in harness_events:
+                    if isinstance(event, TurnStarted):
+                        turns = event.turn
+                        attempt_had_delta = False
+                    elif isinstance(event, ContextEstimated):
+                        overflow_budget = event.budget
+                    elif isinstance(event, MessageDelta):
+                        # Print and line-oriented UIs cannot retract streamed output.
+                        attempt_had_delta = True
+                    elif isinstance(event, ErrorEvent):
+                        saw_loop_error = True
+                    elif isinstance(event, MessageCompleted) and (
+                        event.tool_calls or event.finish_reason == "tool_calls"
+                    ):
+                        had_tool_round = True
+                        tool_iterations += 1
+                    elif isinstance(event, ToolExecutionEnded) and self._tool_is_unsafe(event.name):
+                        had_unsafe_tool_round = True
+                    completion_entry_id: str | None = None
+                    if isinstance(event, MessageCompleted | ToolExecutionEnded):
+                        completion_entry_id = self._queue_completion(
+                            session, event, operation_id=operation_id
+                        )
+                    if (
+                        isinstance(event, MessageCompleted)
+                        and event.finish_reason not in {"error", "cancelled"}
+                        and event.usage is not None
+                        and event.usage.total_tokens > 0
+                        and not event.tool_calls
+                        and not had_tool_round
+                        and completion_entry_id is not None
+                    ):
+                        current_messages = self._normalize_provider_messages(harness.messages)
+                        self._context_observations[session.session_id] = _ContextObservation(
+                            provider=self.provider.name,
+                            model=self.model or self.provider.default_model,
+                            tokens=event.usage.total_tokens,
+                            entry_id=completion_entry_id,
+                            context_fingerprint=context_fingerprint(current_messages, self.tools),
+                        )
+
+                    yield await emit(event)
+            except ContextOverflowError as exc:
+                overflow_error = exc
+            except Exception as exc:
+                if not saw_loop_error:
+                    yield await emit(ErrorEvent(message=str(exc)))
+                    if turns > 0:
+                        yield await emit(
+                            TurnCompleted(turn=turns, outcome="failed", finish_reason="error")
+                        )
+                yield await emit(
+                    AgentCompleted(session_id=session.session_id, turns=turns, outcome="failed")
+                )
+                raise
+            finally:
+                with anyio.CancelScope(shield=True):
+                    try:
+                        await harness_events.aclose()
+                    finally:
+                        await self._repair_and_flush(
+                            session,
+                            harness,
+                            operation_id=operation_id,
+                        )
+
+            if overflow_error is None:
+                break
+
+            can_retry_overflow = (
+                not overflow_recovery_attempted
+                and self.auto_compaction_enabled
+                and not attempt_had_delta
+                and not had_unsafe_tool_round
+                and overflow_budget is not None
+                and (
+                    overflow_budget.context_window is None
+                    or overflow_budget.reserve_tokens < overflow_budget.context_window
+                )
+            )
+            if not can_retry_overflow:
+                yield await emit(ErrorEvent(message=str(overflow_error)))
+                yield await emit(TurnCompleted(turn=turns, outcome="failed", finish_reason="error"))
+                yield await emit(
+                    AgentCompleted(session_id=session.session_id, turns=turns, outcome="failed")
+                )
+                raise overflow_error from None
+
+            replay: SessionReplay | None = None
+            try:
+                replay = await self._prepare_compaction_replay(session)
+                plan = plan_manual_compaction(replay)
+            except NothingToCompactError:
+                yield await emit(ErrorEvent(message=str(overflow_error)))
+                yield await emit(TurnCompleted(turn=turns, outcome="failed", finish_reason="error"))
+                yield await emit(
+                    AgentCompleted(session_id=session.session_id, turns=turns, outcome="failed")
+                )
+                raise overflow_error from None
+            except Exception as exc:
+                source_entry_count = len(replay.context_entry_ids) if replay is not None else 0
+                yield await self._emit_recoverable_event(
+                    CompactionStarted(
+                        session_id=session.session_id,
+                        reason="overflow",
+                        source_entry_count=source_entry_count,
+                        trigger_budget=overflow_budget,
+                    ),
+                    session=session,
+                )
+                yield await self._emit_recoverable_event(
+                    CompactionCompleted(
+                        session_id=session.session_id,
+                        reason="overflow",
+                        outcome="failed",
+                        replaced_entry_count=0,
+                        retained_entry_count=source_entry_count,
                         provider=self.provider.name,
                         model=self.model or self.provider.default_model,
-                        tokens=event.usage.total_tokens,
-                        entry_id=completion_entry_id,
-                        context_fingerprint=context_fingerprint(current_messages, self.tools),
-                    )
+                        error=str(exc),
+                    ),
+                    session=session,
+                )
+                recovery_error = f"Context overflow recovery failed: {exc}"
+                yield await emit(ErrorEvent(message=recovery_error))
+                yield await emit(TurnCompleted(turn=turns, outcome="failed", finish_reason="error"))
+                yield await emit(
+                    AgentCompleted(session_id=session.session_id, turns=turns, outcome="failed")
+                )
+                raise ContextOverflowError(recovery_error) from overflow_error
 
-                yield await emit(event)
-        except Exception as exc:
-            if not saw_loop_error:
-                yield await emit(ErrorEvent(message=str(exc)))
-                if turns > 0:
-                    yield await emit(
-                        TurnCompleted(turn=turns, outcome="failed", finish_reason="error")
-                    )
-            yield await emit(
-                AgentCompleted(session_id=session.session_id, turns=turns, outcome="failed")
+            overflow_compaction: CompactionCompleted | None = None
+
+            async def prepare_retry() -> None:
+                active_history = await anyio.to_thread.run_sync(session.read_context_messages)
+                harness.replace_messages(
+                    (*prompt_messages, *self._conversation_history(active_history))
+                )
+
+            async for compaction_event in self._compact_locked(
+                session,
+                plan,
+                reason="overflow",
+                instructions=None,
+                trigger_budget=overflow_budget,
+                recover_failure=True,
+                will_retry=True,
+                operation_id=operation_id,
+                retry_setup=prepare_retry,
+            ):
+                if isinstance(compaction_event, CompactionCompleted):
+                    overflow_compaction = compaction_event
+                yield compaction_event
+
+            if (
+                overflow_compaction is None
+                or overflow_compaction.outcome != "completed"
+                or not overflow_compaction.will_retry
+            ):
+                detail = (
+                    overflow_compaction.error
+                    if overflow_compaction is not None and overflow_compaction.error
+                    else "compaction did not complete"
+                )
+                recovery_error = f"Context overflow recovery failed: {detail}"
+                yield await emit(ErrorEvent(message=recovery_error))
+                yield await emit(TurnCompleted(turn=turns, outcome="failed", finish_reason="error"))
+                yield await emit(
+                    AgentCompleted(session_id=session.session_id, turns=turns, outcome="failed")
+                )
+                raise ContextOverflowError(recovery_error) from overflow_error
+
+            overflow_recovery_attempted = True
+            recovered_from_overflow = True
+            yield await emit(TurnCompleted(turn=turns, outcome="failed", finish_reason="error"))
+            harness_events = harness.continue_(
+                turn_offset=turns,
+                tool_iteration_offset=tool_iterations,
+                defer_context_overflow_errors=True,
             )
-            raise
-        finally:
-            with anyio.CancelScope(shield=True):
-                try:
-                    await harness_events.aclose()
-                finally:
-                    await self._repair_and_flush(
-                        session,
-                        harness,
-                        operation_id=operation_id,
-                    )
 
         auto_compaction_saved = False
         auto_compaction_status = _AutoCompactionStatus()
-        async for compaction_event in self._maybe_auto_compact(
-            session,
-            harness,
-            status=auto_compaction_status,
-        ):
-            if isinstance(compaction_event, SessionSaved):
-                auto_compaction_saved = True
-            yield compaction_event
+        if not recovered_from_overflow:
+            async for compaction_event in self._maybe_auto_compact(
+                session,
+                harness,
+                status=auto_compaction_status,
+            ):
+                if isinstance(compaction_event, SessionSaved):
+                    auto_compaction_saved = True
+                yield compaction_event
         if not auto_compaction_saved and not auto_compaction_status.skip_final_save:
             yield await emit(SessionSaved(session_id=session.session_id, path=session.path))
         completed = AgentCompleted(
@@ -418,6 +558,9 @@ class CodingSession:
         instructions: str | None,
         trigger_budget: ContextBudget | None,
         recover_failure: bool,
+        will_retry: bool = False,
+        operation_id: str | None = None,
+        retry_setup: Callable[[], Awaitable[None]] | None = None,
     ) -> AsyncIterator[WispEvent]:
         started = CompactionStarted(
             session_id=session.session_id,
@@ -446,6 +589,7 @@ class CodingSession:
                 session_id=session.session_id,
                 kind="compaction",
                 compaction=CompactionRecord(
+                    schema_version=3 if reason == "overflow" else 2,
                     summary=summary.summary,
                     replaced_entry_ids=plan.replaced_entry_ids,
                     provider=provider_name,
@@ -455,7 +599,9 @@ class CodingSession:
                     reason=reason,
                     trigger_budget=trigger_budget,
                 ),
+                operation_id=operation_id,
             )
+            publication_errors: list[str] = []
             with anyio.CancelScope(shield=True):
                 try:
                     await session.append_compaction_entry(
@@ -472,27 +618,38 @@ class CodingSession:
                 self._history_refresh_session_ids.add(session.session_id)
                 self._context_observations.pop(session.session_id, None)
                 saved = SessionSaved(session_id=session.session_id, path=session.path)
-                publication_errors: list[str] = []
                 try:
                     await self._emit(saved, session=session)
                 except Exception as exc:
                     publication_errors.append(str(exc))
-                completed = CompactionCompleted(
-                    session_id=session.session_id,
-                    reason=reason,
-                    outcome="completed",
-                    compaction_id=entry.id,
-                    replaced_entry_count=len(plan.replaced_entry_ids),
-                    retained_entry_count=len(plan.retained_rows),
-                    provider=provider_name,
-                    model=effective_model,
-                    usage=summary.usage,
-                    error=(
+
+            retry_setup_error: str | None = None
+            if retry_setup is not None:
+                try:
+                    await retry_setup()
+                except Exception as exc:
+                    retry_setup_error = str(exc) or type(exc).__name__
+            completed = CompactionCompleted(
+                session_id=session.session_id,
+                reason=reason,
+                outcome="completed",
+                compaction_id=entry.id,
+                replaced_entry_count=len(plan.replaced_entry_ids),
+                retained_entry_count=len(plan.retained_rows),
+                provider=provider_name,
+                model=effective_model,
+                usage=summary.usage,
+                will_retry=will_retry and retry_setup_error is None,
+                error=(
+                    retry_setup_error
+                    or (
                         "Event publication failed: " + "; ".join(publication_errors)
                         if publication_errors and recover_failure
                         else None
-                    ),
-                )
+                    )
+                ),
+            )
+            with anyio.CancelScope(shield=True):
                 try:
                     await self._emit(completed, session=session)
                 except Exception as exc:
@@ -612,6 +769,16 @@ class CodingSession:
             for tool in tool_registry.all()
             if self.tool_policy.allows(tool)
         )
+
+    def _tool_is_unsafe(self, name: str) -> bool:
+        """Return whether a replayed tool turn could repeat side effects on recovery."""
+
+        if self.tool_registry is None:
+            return True
+        try:
+            return self.tool_registry.get(name).safety != "read"
+        except UnknownToolError:
+            return True
 
     def _prompt_messages(self) -> tuple[Message, ...]:
         if self.prompt_messages is not None:

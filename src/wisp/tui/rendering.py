@@ -134,6 +134,7 @@ class LineTuiRenderer:
 
     def __init__(self, console: Console | None = None) -> None:
         self.console = console or Console()
+        self._overflow_recovery_failed = False
 
     def view_updated(self, snapshot: TuiViewSnapshot) -> None:
         pass
@@ -255,8 +256,17 @@ class LineTuiRenderer:
             self.console.print(f"[cyan]{_compaction_started_text(event)}[/cyan]")
         elif isinstance(event, CompactionCompleted):
             text = _compaction_completed_text(event)
+            overflow_recovery_failed = event.reason == "overflow" and (
+                event.outcome != "completed" or not event.will_retry
+            )
+            if overflow_recovery_failed:
+                self._overflow_recovery_failed = True
             if event.reason == "threshold" and event.outcome == "failed":
                 self.console.print(f"[yellow]{_markup_escape(text)}[/yellow]")
+            elif event.reason == "overflow" and (
+                event.outcome != "completed" or not event.will_retry
+            ):
+                self.console.print(f"[red]{_markup_escape(text)}[/red]")
             else:
                 self.console.print(text, markup=False)
         elif isinstance(event, MessageCompleted) and event.content:
@@ -278,6 +288,10 @@ class LineTuiRenderer:
             output = _markup_escape(_first_line(event.output))
             self.console.print(f"{status} tool {tool_name}: {output}")
         elif isinstance(event, ErrorEvent):
+            if self._overflow_recovery_failed and event.message.startswith(
+                "Context overflow recovery failed:"
+            ):
+                return
             self.console.print(f"[red]error:[/red] {_markup_escape(event.message)}")
         elif isinstance(event, SessionSaved):
             self.console.print(
@@ -288,6 +302,9 @@ class LineTuiRenderer:
             and not event.ok
             and event.command_type != "compact"
         ):
+            if self._overflow_recovery_failed:
+                self._overflow_recovery_failed = False
+                return
             self.console.print(
                 f"[red]command failed:[/red] {_markup_escape(event.error or event.command_id)}"
             )
@@ -364,6 +381,7 @@ class FullscreenTuiRenderer:
             transcript_view_entries=max(1, transcript_view_entries),
         )
         self.max_transcript_entries = max_transcript_entries
+        self._overflow_recovery_failed = False
         # Input is still line-oriented via input(), so clearing a real terminal
         # during background RPC refreshes would erase the active input line and
         # any partially typed follow-up. Keep clearing opt-in until input is
@@ -547,10 +565,15 @@ class FullscreenTuiRenderer:
             self._append("system", _compaction_started_text(event), style="cyan")
         elif isinstance(event, CompactionCompleted):
             is_threshold_failure = event.reason == "threshold" and event.outcome == "failed"
+            is_overflow_failure = event.reason == "overflow" and (
+                event.outcome != "completed" or not event.will_retry
+            )
+            if is_overflow_failure:
+                self._overflow_recovery_failed = True
             role = (
                 "system"
                 if is_threshold_failure
-                else ("error" if event.outcome == "failed" else "system")
+                else ("error" if event.outcome == "failed" or is_overflow_failure else "system")
             )
             style = (
                 "yellow"
@@ -559,7 +582,7 @@ class FullscreenTuiRenderer:
                     "completed": "cyan",
                     "cancelled": "yellow",
                     "failed": "red",
-                }[event.outcome]
+                }["failed" if is_overflow_failure else event.outcome]
             )
             self._append(role, _compaction_completed_text(event), style=style)
         elif isinstance(event, MessageCompleted) and event.content:
@@ -578,7 +601,11 @@ class FullscreenTuiRenderer:
                 "tool", f"{status} tool {event.name}: {_first_line(event.output)}", style="blue"
             )
         elif isinstance(event, ErrorEvent):
-            self._append("error", f"error: {event.message}", style="red")
+            if not (
+                self._overflow_recovery_failed
+                and event.message.startswith("Context overflow recovery failed:")
+            ):
+                self._append("error", f"error: {event.message}", style="red")
         elif isinstance(event, SessionSaved):
             self._append(
                 "session",
@@ -590,11 +617,14 @@ class FullscreenTuiRenderer:
             and not event.ok
             and event.command_type != "compact"
         ):
-            self._append(
-                "error",
-                f"command failed: {event.error or event.command_id}",
-                style="red",
-            )
+            if self._overflow_recovery_failed:
+                self._overflow_recovery_failed = False
+            else:
+                self._append(
+                    "error",
+                    f"command failed: {event.error or event.command_id}",
+                    style="red",
+                )
         self._refresh()
 
     def rpc_event_reader_failed(self, error: str) -> None:
@@ -1044,6 +1074,8 @@ def _markup_escape(value: object) -> str:
 def _compaction_started_text(event: CompactionStarted) -> str:
     if event.reason == "threshold":
         return "Context threshold reached; compacting automatically..."
+    if event.reason == "overflow":
+        return "Context overflow detected; compacting before one retry..."
     return "Compacting session..."
 
 
@@ -1051,6 +1083,14 @@ def _compaction_completed_text(event: CompactionCompleted) -> str:
     if event.outcome == "completed":
         if event.reason == "threshold":
             text = f"Automatically compacted {event.replaced_entry_count} context entries."
+        elif event.reason == "overflow":
+            if event.will_retry:
+                text = (
+                    f"Compacted {event.replaced_entry_count} context entries; retrying request..."
+                )
+            else:
+                detail = event.error or "retry was not scheduled"
+                return f"Context overflow recovery failed: {detail}"
         else:
             text = f"Compacted {event.replaced_entry_count} context entries."
         if event.error:
@@ -1059,9 +1099,13 @@ def _compaction_completed_text(event: CompactionCompleted) -> str:
     if event.outcome == "cancelled":
         if event.reason == "threshold":
             return "Automatic compaction cancelled."
+        if event.reason == "overflow":
+            return "Context overflow recovery cancelled."
         return "Compaction cancelled."
     if event.reason == "threshold":
         return f"Automatic compaction failed: {event.error or 'unknown error'}"
+    if event.reason == "overflow":
+        return f"Context overflow recovery failed: {event.error or 'unknown error'}"
     return f"Compaction failed: {event.error or 'unknown error'}"
 
 

@@ -1092,12 +1092,20 @@ async def _run_rpc_prompt_command(
                 _rpc_has_durable_completion,
                 session,
                 run_entry_start,
+                command_id,
             )
             if not crossed_completion_boundary:
-                await session.truncate_operation_entries(
+                rolled_back = await session.truncate_operation_entries(
                     run_entry_start,
                     operation_id=command_id,
                 )
+                if not rolled_back and session.path.is_file():
+                    entries = await anyio.to_thread.run_sync(session.read_entries)
+                    if any(entry.operation_id == command_id for entry in entries[run_entry_start:]):
+                        error = (
+                            f"RPC command cancelled: {command_id}; prompt entries were retained "
+                            "because another writer appended to the session"
+                        )
         entry_count, updated_history = await anyio.to_thread.run_sync(
             _updated_rpc_session_state,
             session,
@@ -1214,10 +1222,16 @@ def _rpc_session_entry_count(
     return len(session.read_entries())
 
 
-def _rpc_has_durable_completion(session: JsonlSession, entry_start: int) -> bool:
+def _rpc_has_durable_completion(
+    session: JsonlSession,
+    entry_start: int,
+    operation_id: str,
+) -> bool:
     if not session.path.is_file():
         return False
     for entry in session.read_entries()[entry_start:]:
+        if entry.operation_id != operation_id:
+            continue
         message = entry.message
         if message is None:
             continue

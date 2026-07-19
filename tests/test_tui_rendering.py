@@ -166,6 +166,89 @@ def test_line_tui_renderer_renders_threshold_compaction_as_automatic_notices() -
     assert "Warning: Event publication failed: listener failed" in rendered
 
 
+def test_tui_renderers_distinguish_overflow_recovery() -> None:
+    console, output = _console()
+    line = LineTuiRenderer(console)
+    fullscreen = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+    started = CompactionStarted(
+        session_id="session-1",
+        reason="overflow",
+        source_entry_count=6,
+        trigger_budget=_context_budget(),
+    )
+    completed = CompactionCompleted(
+        session_id="session-1",
+        reason="overflow",
+        outcome="completed",
+        replaced_entry_count=5,
+        retained_entry_count=1,
+        will_retry=True,
+    )
+
+    for renderer in (line, fullscreen):
+        renderer.event(started)
+        renderer.event(completed)
+
+    rendered = output.getvalue()
+    assert "Context overflow detected; compacting before one retry..." in rendered
+    assert "Compacted 5 context entries; retrying request..." in rendered
+    assert [(entry.role, entry.content, entry.style) for entry in fullscreen.state.transcript] == [
+        ("system", "Context overflow detected; compacting before one retry...", "cyan"),
+        ("system", "Compacted 5 context entries; retrying request...", "cyan"),
+    ]
+
+
+def test_tui_renderers_show_unstarted_overflow_retry_as_an_error() -> None:
+    console, output = _console()
+    line = LineTuiRenderer(console)
+    fullscreen = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+    event = CompactionCompleted(
+        session_id="session-1",
+        reason="overflow",
+        outcome="completed",
+        replaced_entry_count=5,
+        retained_entry_count=1,
+        error="replay reload failed",
+    )
+
+    line.event(event)
+    fullscreen.event(event)
+
+    assert "Context overflow recovery failed: replay reload failed" in output.getvalue()
+    assert [(entry.role, entry.style) for entry in fullscreen.state.transcript] == [
+        ("error", "red")
+    ]
+
+
+def test_tui_renderers_deduplicate_terminal_overflow_recovery_errors() -> None:
+    console, output = _console()
+    line = LineTuiRenderer(console)
+    fullscreen = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+    failure = CompactionCompleted(
+        session_id="session-1",
+        reason="overflow",
+        outcome="completed",
+        replaced_entry_count=5,
+        retained_entry_count=1,
+        error="replay reload failed",
+    )
+    error = ErrorEvent(message="Context overflow recovery failed: replay reload failed")
+    finished = RpcCommandFinished(
+        command_id="prompt-1",
+        command_type="prompt",
+        ok=False,
+        error=error.message,
+    )
+
+    for renderer in (line, fullscreen):
+        renderer.event(failure)
+        renderer.event(error)
+        renderer.event(finished)
+
+    assert output.getvalue().count("Context overflow recovery failed") == 1
+    assert len(fullscreen.state.transcript) == 1
+
+
 def test_fullscreen_tui_renderer_keeps_history_and_adds_compaction_notices() -> None:
     renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
     renderer.event(completed_message(content="visible answer"))

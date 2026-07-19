@@ -93,6 +93,7 @@ class TextualTuiRenderer:
         self._progress_turn: int | None = None
         self._response_started = False
         self._retry_attempt = 0
+        self._overflow_recovery_failed = False
 
     def view_updated(self, snapshot: TuiViewSnapshot) -> None:
         self._visible_input_mode = snapshot.input_mode
@@ -313,12 +314,17 @@ class TextualTuiRenderer:
             self._provider_retrying(event)
         elif isinstance(event, CompactionStarted):
             self.app.write_notice(_compaction_started_text(event))
-            if event.reason == "threshold":
+            if event.reason in {"threshold", "overflow"}:
                 self.app.show_working_indicator()
         elif isinstance(event, CompactionCompleted):
-            if event.reason == "threshold":
+            if event.reason in {"threshold", "overflow"}:
                 self._suspend_progress()
-            if event.outcome == "failed" and event.reason == "manual":
+            overflow_retry_failed = event.reason == "overflow" and not event.will_retry
+            if (event.outcome == "failed" and event.reason in {"manual", "overflow"}) or (
+                event.outcome == "completed" and overflow_retry_failed
+            ):
+                if event.reason == "overflow":
+                    self._overflow_recovery_failed = True
                 self.app.write_error(_compaction_completed_text(event))
             else:
                 self.app.write_notice(_compaction_completed_text(event))
@@ -384,14 +390,21 @@ class TextualTuiRenderer:
             self._finish_progress()
         elif isinstance(event, ErrorEvent):
             self._finish_progress()
-            self.app.write_error(f"error: {event.message}")
+            if not (
+                self._overflow_recovery_failed
+                and event.message.startswith("Context overflow recovery failed:")
+            ):
+                self.app.write_error(f"error: {event.message}")
         elif isinstance(event, RpcCommandFinished):
             if event.command_type in {"prompt", "compact"}:
                 self._finish_progress()
             if not event.ok and event.command_type != "compact":
                 self._suspend_progress()
                 self._abort_pending_tools("command failed")
-                self.app.write_error(f"command failed: {event.error or event.command_id}")
+                if self._overflow_recovery_failed:
+                    self._overflow_recovery_failed = False
+                else:
+                    self.app.write_error(f"command failed: {event.error or event.command_id}")
         # Framing/plumbing events (RpcCommandStarted, a successful RpcCommandFinished,
         # AgentStarted, ToolExecutionStarted/Ended, SessionSaved) are intentionally
         # not rendered. They are session/RPC audit, not conversation — and the active

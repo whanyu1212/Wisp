@@ -27,18 +27,25 @@ from wisp.events import (
     CompactionCompleted,
     CompactionStarted,
     ErrorEvent,
+    KnownWispEventAdapter,
+    MessageCompleted,
     SessionSaved,
     TokenUsage,
     ToolCallSnapshot,
+    ToolExecutionEnded,
+    TurnCompleted,
     WispEvent,
+    wisp_event_from_dict,
     wisp_event_from_json,
 )
-from wisp.providers.base import ToolCallResult, ToolSpec
+from wisp.providers.base import ContextOverflowError, ToolCallResult, ToolSpec
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
+    ProviderResponseFailed,
     ProviderResponseStarted,
+    ProviderTextDelta,
     ProviderToolCallCompleted,
     ProviderUsage,
     ToolCall,
@@ -52,8 +59,10 @@ from wisp.sessions.replay import (
     SessionContextRow,
     SessionReplay,
 )
+from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.builtin import ReadTool
 from wisp.tools.context import ToolContext
+from wisp.tools.result import ToolResult
 
 VALID_COMPACTION_SUMMARY = """## Goal
 Preserve the active coding objective.
@@ -173,6 +182,49 @@ class BlockingAutoCompactionProvider:
             return
         self.summary_started.set()
         await anyio.sleep_forever()
+
+
+class BlockingOverflowRecoveryProvider:
+    name = "scripted"
+    default_model: str | None = "model"
+
+    def __init__(self, summary_started: anyio.Event) -> None:
+        self.summary_started = summary_started
+        self.calls = 0
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+        effort: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        del messages, tools, tool_results, previous_response_id, effort
+        self.calls += 1
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        if self.calls == 1:
+            yield ProviderResponseFailed(message="maximum context length exceeded")
+            return
+        self.summary_started.set()
+        await anyio.sleep_forever()
+
+
+class MutatingRecoveryTool:
+    name = "mutate"
+    safety = "mutating"
+    description = "Record a mutable side effect."
+    input_schema = {"type": "object", "properties": {}}
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, arguments: object, context: ToolContext) -> ToolResult:
+        del arguments, context
+        self.calls += 1
+        return ToolResult(text="mutated")
 
 
 def test_manual_compaction_plan_replaces_prefix_and_retains_latest_complete_turn() -> None:
@@ -500,8 +552,8 @@ def test_compaction_events_round_trip_on_current_schema_without_summary() -> Non
         usage=TokenUsage(input_tokens=3, output_tokens=2, total_tokens=5),
     )
 
-    assert started.schema_version == 10
-    assert completed.schema_version == 10
+    assert started.schema_version == 11
+    assert completed.schema_version == 11
     assert "summary" not in completed.model_dump(mode="json")
     assert wisp_event_from_json(started.model_dump_json()) == started
     assert wisp_event_from_json(completed.model_dump_json()) == completed
@@ -514,7 +566,7 @@ def test_compaction_events_round_trip_on_current_schema_without_summary() -> Non
         )
 
 
-@pytest.mark.parametrize("version", [5, 6, 7, 8, 9])
+@pytest.mark.parametrize("version", [5, 6, 7, 8, 9, 10])
 def test_event_parser_accepts_legacy_schemas(version: int) -> None:
     payload = {
         "schema_version": version,
@@ -526,6 +578,32 @@ def test_event_parser_accepts_legacy_schemas(version: int) -> None:
     assert wisp_event_from_json(json.dumps(payload)).schema_version == version
 
 
+def test_event_parser_rejects_non_integer_schema_versions() -> None:
+    with pytest.raises(ValueError, match="Unsupported Wisp event schema_version"):
+        wisp_event_from_dict(
+            {
+                "schema_version": 11.0,
+                "type": "session.saved",
+                "session_id": "session",
+                "path": "/tmp/session.jsonl",
+            }
+        )
+
+
+def test_typed_events_reject_non_integer_schema_versions() -> None:
+    payload = {
+        "schema_version": 11.0,
+        "type": "session.saved",
+        "session_id": "session",
+        "path": "/tmp/session.jsonl",
+    }
+
+    with pytest.raises(ValidationError, match="schema_version must be an integer"):
+        SessionSaved(**payload)
+    with pytest.raises(ValidationError, match="schema_version must be an integer"):
+        KnownWispEventAdapter.validate_python(payload)
+
+
 @pytest.mark.parametrize("version", [5, 6, 7])
 def test_compaction_events_require_schema_v8(version: int) -> None:
     payload = CompactionStarted(
@@ -534,7 +612,7 @@ def test_compaction_events_require_schema_v8(version: int) -> None:
         source_entry_count=1,
     ).model_dump_json()
 
-    with pytest.raises(ValueError, match="require schema_version 8, 9, or 10"):
+    with pytest.raises(ValueError, match="require schema_version 8 through 11"):
         wisp_event_from_json(payload)
 
 
@@ -542,6 +620,7 @@ def test_threshold_compaction_events_require_schema_v10() -> None:
     estimate = estimate_context((Message(role="user", content="hello"),))
     budget = build_context_budget(estimate, context_window=100, reserve_tokens=20)
     event = CompactionStarted(
+        schema_version=10,
         session_id="session",
         reason="threshold",
         source_entry_count=4,
@@ -565,6 +644,76 @@ def test_threshold_compaction_events_require_schema_v10() -> None:
             replaced_entry_count=2,
             retained_entry_count=2,
         )
+
+
+def test_overflow_compaction_events_require_schema_v11() -> None:
+    estimate = estimate_context((Message(role="user", content="hello"),))
+    budget = build_context_budget(estimate, context_window=100, reserve_tokens=20)
+    started = CompactionStarted(
+        session_id="session",
+        reason="overflow",
+        source_entry_count=4,
+        trigger_budget=budget,
+    )
+    completed = CompactionCompleted(
+        session_id="session",
+        reason="overflow",
+        outcome="completed",
+        replaced_entry_count=2,
+        retained_entry_count=2,
+        will_retry=True,
+    )
+
+    assert wisp_event_from_json(started.model_dump_json()) == started
+    assert wisp_event_from_json(completed.model_dump_json()) == completed
+    with pytest.raises(ValidationError, match="requires schema_version 11"):
+        CompactionStarted(
+            schema_version=10,
+            session_id="session",
+            reason="overflow",
+            source_entry_count=4,
+            trigger_budget=budget,
+        )
+    with pytest.raises(ValidationError, match="without retry must explain"):
+        CompactionCompleted(
+            session_id="session",
+            reason="overflow",
+            outcome="completed",
+            replaced_entry_count=2,
+            retained_entry_count=2,
+        )
+    assert (
+        CompactionCompleted(
+            session_id="session",
+            reason="overflow",
+            outcome="completed",
+            replaced_entry_count=2,
+            retained_entry_count=2,
+            error="retry setup failed",
+        ).will_retry
+        is False
+    )
+    with pytest.raises(ValidationError, match="without retry must explain"):
+        CompactionCompleted(
+            session_id="session",
+            reason="overflow",
+            outcome="completed",
+            replaced_entry_count=2,
+            retained_entry_count=2,
+            error="",
+        )
+
+    legacy = CompactionCompleted(
+        schema_version=10,
+        session_id="session",
+        outcome="completed",
+        replaced_entry_count=2,
+        retained_entry_count=2,
+    )
+    assert "will_retry" not in legacy.model_dump(mode="json")
+    payload = legacy.model_dump(mode="json") | {"will_retry": False}
+    with pytest.raises(ValueError, match="retry metadata requires schema_version 11"):
+        wisp_event_from_dict(payload)
 
 
 @pytest.mark.parametrize("version", [8, 9])
@@ -690,6 +839,567 @@ def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> No
         "question two",
         "answer two",
     ]
+
+
+def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(message="maximum context length exceeded"),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer three"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        return [
+            event
+            async for event in agent.run(
+                "question three",
+                session=session,
+                operation_id="prompt-1",
+            )
+        ]
+
+    events = anyio.run(run)
+
+    overflow = next(event for event in events if event.type == "context.overflow")
+    failed_turn = next(event for event in events if isinstance(event, TurnCompleted))
+    completed = next(
+        event
+        for event in events
+        if isinstance(event, CompactionCompleted) and event.reason == "overflow"
+    )
+    retry_turn = next(
+        event
+        for event in events
+        if isinstance(event, MessageCompleted) and event.content == "answer three"
+    )
+    assert overflow.turn == 1
+    assert failed_turn.turn == 1
+    assert failed_turn.outcome == "failed"
+    assert completed.outcome == "completed"
+    assert completed.will_retry is True
+    assert completed.compaction_id is not None
+    assert retry_turn.turn == 2
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+    assert not any(
+        isinstance(event, CompactionStarted) and event.reason == "threshold" for event in events
+    )
+    assert events[-1].type == "agent.completed"
+    assert events[-1].turns == 2
+    assert events[-1].outcome == "completed"
+    assert len(provider.calls) == 3
+    entries = session.read_entries()
+    overflow_record = next(
+        entry.compaction
+        for entry in entries
+        if entry.compaction is not None and entry.compaction.reason == "overflow"
+    )
+    assert overflow_record is not None
+    assert overflow_record.schema_version == 3
+    user_messages = [
+        entry.message.content
+        for entry in entries
+        if entry.message is not None and entry.message.role == "user"
+    ]
+    assert user_messages == [
+        "question one",
+        "question two",
+        "question three",
+    ]
+    assert all(entry.operation_id == "prompt-1" for entry in entries[-3:])
+
+
+def test_coding_session_does_not_retry_a_second_overflow(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(message="maximum context length exceeded"),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(message="maximum context length exceeded"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    emitted: list[WispEvent] = []
+    bus = EventBus()
+    bus.on("*", emitted.append)
+
+    async def run() -> None:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            events=bus,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        with pytest.raises(ContextOverflowError, match="maximum context length exceeded"):
+            _events = [event async for event in agent.run("question three", session=session)]
+
+    anyio.run(run)
+
+    assert sum(event.type == "context.overflow" for event in emitted) == 2
+    assert (
+        sum(
+            isinstance(event, CompactionStarted) and event.reason == "overflow" for event in emitted
+        )
+        == 1
+    )
+    assert (
+        sum(
+            isinstance(event, CompactionCompleted) and event.reason == "overflow"
+            for event in emitted
+        )
+        == 1
+    )
+    assert emitted[-3].type == "error"
+    assert emitted[-1].type == "agent.completed"
+    assert emitted[-1].outcome == "failed"
+
+
+def test_coding_session_overflow_without_compactable_prefix_is_terminal(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(message="maximum context length exceeded"),
+            ]
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    emitted: list[WispEvent] = []
+    bus = EventBus()
+    bus.on("*", emitted.append)
+
+    async def run() -> None:
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            events=bus,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        with pytest.raises(ContextOverflowError):
+            _events = [event async for event in agent.run("question one")]
+
+    anyio.run(run)
+
+    assert any(event.type == "context.overflow" for event in emitted)
+    assert not any(isinstance(event, CompactionStarted | CompactionCompleted) for event in emitted)
+    assert emitted[-3].type == "error"
+    assert emitted[-1].type == "agent.completed"
+
+
+def test_coding_session_overflow_summary_failure_is_terminal(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(message="maximum context length exceeded"),
+            ],
+            [ProviderResponseStarted(model="model"), ProviderResponseCompleted(content=" ")],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    emitted: list[WispEvent] = []
+    bus = EventBus()
+    bus.on("*", emitted.append)
+
+    async def run() -> None:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            events=bus,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        with pytest.raises(ContextOverflowError, match="Context overflow recovery failed"):
+            _events = [event async for event in agent.run("question three", session=session)]
+
+    anyio.run(run)
+
+    completed = next(
+        event
+        for event in emitted
+        if isinstance(event, CompactionCompleted) and event.reason == "overflow"
+    )
+    assert completed.outcome == "failed"
+    assert completed.will_retry is False
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
+    assert len(provider.calls) == 2
+
+
+def test_coding_session_overflow_retry_setup_failure_does_not_claim_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(message="maximum context length exceeded"),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    emitted: list[WispEvent] = []
+    bus = EventBus()
+    bus.on("*", emitted.append)
+
+    async def run() -> None:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            events=bus,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+
+        def fail_rehydrate() -> tuple[Message, ...]:
+            raise OSError()
+
+        monkeypatch.setattr(session, "read_context_messages", fail_rehydrate)
+        with pytest.raises(ContextOverflowError, match="Context overflow recovery failed"):
+            _events = [event async for event in agent.run("question three", session=session)]
+
+    anyio.run(run)
+
+    completed = next(
+        event
+        for event in emitted
+        if isinstance(event, CompactionCompleted) and event.reason == "overflow"
+    )
+    assert completed.outcome == "completed"
+    assert completed.will_retry is False
+    assert completed.error == "OSError"
+    types = [event.type for event in emitted]
+    assert types[-3:] == ["error", "turn.completed", "agent.completed"]
+    assert any(entry.kind == "compaction" for entry in session.read_entries())
+
+
+def test_coding_session_overflow_recovery_allows_unknown_context_window(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(message="maximum context length exceeded"),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="recovered"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            prompt_messages=(Message(role="system", content="system"),),
+        )
+        return [event async for event in agent.run("question three", session=session)]
+
+    events = anyio.run(run)
+
+    completed = next(
+        event
+        for event in events
+        if isinstance(event, CompactionCompleted) and event.reason == "overflow"
+    )
+    assert completed.outcome == "completed"
+    assert completed.will_retry is True
+    assert len(provider.calls) == 3
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_coding_session_skips_overflow_retry_when_ineligible(
+    tmp_path: Path,
+    enabled: bool,
+) -> None:
+    overflow_stream: list[ProviderEvent] = [ProviderResponseStarted(model="model")]
+    if enabled:
+        overflow_stream.append(ProviderTextDelta(delta="partial"))
+    overflow_stream.append(ProviderResponseFailed(message="maximum context length exceeded"))
+    provider = ScriptedProvider(
+        [overflow_stream],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> None:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+            auto_compaction_enabled=enabled,
+        )
+        _events = [event async for event in agent.run("question three", session=session)]
+
+    with pytest.raises(ContextOverflowError):
+        anyio.run(run)
+
+    assert len(provider.calls) == 1
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
+
+
+def test_coding_session_overflow_retry_reuses_completed_tool_round(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "input.txt"
+    source.write_text("tool output", encoding="utf-8")
+    call = ToolCall(call_id="call-1", name="read", arguments={"path": source.name})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderTextDelta(delta="checking"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(message="maximum context length exceeded"),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer after tool"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    registry = ToolRegistry()
+    registry.register(ReadTool())
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(),
+            tool_registry=registry,
+            tool_context=ToolContext(cwd=tmp_path),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        return [event async for event in agent.run("question three", session=session)]
+
+    events = anyio.run(run)
+
+    assert len(provider.calls) == 4
+    assert sum(isinstance(event, ToolExecutionEnded) for event in events) == 1
+    assert (
+        sum(
+            isinstance(event, CompactionCompleted)
+            and event.reason == "overflow"
+            and event.outcome == "completed"
+            for event in events
+        )
+        == 1
+    )
+    assert [
+        message.content
+        for message in session.read_context_messages()
+        if message.role == "tool" and message.tool_call_id == "call-1"
+    ] == ["tool output"]
+
+
+def test_overflow_retry_preserves_the_prompt_tool_iteration_limit(tmp_path: Path) -> None:
+    source = tmp_path / "input.txt"
+    source.write_text("tool output", encoding="utf-8")
+    read_call = ToolCall(call_id="call-1", name="read", arguments={"path": source.name})
+    mutate_call = ToolCall(call_id="call-2", name="mutate", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderToolCallCompleted(tool_call=read_call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(read_call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(message="maximum context length exceeded"),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderToolCallCompleted(tool_call=mutate_call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(mutate_call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    registry = ToolRegistry()
+    registry.register(ReadTool())
+    mutating_tool = MutatingRecoveryTool()
+    registry.register(mutating_tool)
+
+    async def run() -> None:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(),
+            tool_registry=registry,
+            tool_context=ToolContext(cwd=tmp_path),
+            tool_approval_policy=ToolApprovalPolicy.approve_all(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+            max_tool_iterations=1,
+        )
+        with pytest.raises(RuntimeError, match="Maximum tool iterations exceeded: 1"):
+            _events = [event async for event in agent.run("question three", session=session)]
+
+    anyio.run(run)
+
+    assert len(provider.calls) == 4
+    assert mutating_tool.calls == 0
+
+
+def test_coding_session_overflow_does_not_retry_after_mutating_tool(tmp_path: Path) -> None:
+    call = ToolCall(call_id="call-1", name="mutate", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(message="maximum context length exceeded"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    registry = ToolRegistry()
+    tool = MutatingRecoveryTool()
+    registry.register(tool)
+
+    async def run() -> None:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(),
+            tool_registry=registry,
+            tool_context=ToolContext(cwd=tmp_path),
+            tool_approval_policy=ToolApprovalPolicy.approve_all(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        with pytest.raises(ContextOverflowError):
+            _events = [event async for event in agent.run("question three", session=session)]
+
+    anyio.run(run)
+
+    assert tool.calls == 1
+    assert len(provider.calls) == 2
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
 
 
 def test_coding_session_auto_compaction_failure_preserves_prompt_success(
@@ -1175,6 +1885,52 @@ def test_coding_session_auto_compaction_cancellation_preserves_completed_turn(
         "question two",
         "answer two",
     ]
+
+
+def test_coding_session_overflow_recovery_cancellation_does_not_retry(tmp_path: Path) -> None:
+    summary_started = anyio.Event()
+    provider = BlockingOverflowRecoveryProvider(summary_started)
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        emitted: list[WispEvent] = []
+        bus = EventBus()
+        bus.on("*", emitted.append)
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            events=bus,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        scope = anyio.CancelScope()
+
+        async def consume() -> None:
+            with scope:
+                _events = [event async for event in agent.run("question three", session=session)]
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(consume)
+            await summary_started.wait()
+            scope.cancel()
+        return emitted
+
+    emitted = anyio.run(run)
+
+    terminal = next(
+        event
+        for event in emitted
+        if isinstance(event, CompactionCompleted) and event.reason == "overflow"
+    )
+    assert terminal.outcome == "cancelled"
+    assert terminal.will_retry is False
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
+    assert provider.calls == 2
 
 
 def test_coding_session_reconciles_append_that_commits_then_raises(

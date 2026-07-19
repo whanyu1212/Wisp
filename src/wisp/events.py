@@ -12,17 +12,20 @@ from pydantic import (
     Field,
     SerializerFunctionWrapHandler,
     TypeAdapter,
+    field_validator,
     model_serializer,
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 10
+EVENT_SCHEMA_VERSION = 11
+THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
+OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
 FinishReason = Literal["stop", "tool_calls", "length", "error", "cancelled"]
 RetryReason = Literal["network", "timeout", "rate_limit", "server_error", "transient_http"]
-CompactionReason = Literal["manual", "threshold"]
+CompactionReason = Literal["manual", "threshold", "overflow"]
 
 
 def utc_now() -> datetime:
@@ -35,8 +38,15 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9, 10] = 10
+    schema_version: Literal[5, 6, 7, 8, 9, 10, 11] = 11
     timestamp: datetime = Field(default_factory=utc_now)
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _require_integer_schema_version(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("Wisp event schema_version must be an integer")
+        return value
 
 
 class ToolCallSnapshot(BaseModel):
@@ -359,12 +369,21 @@ class CompactionStarted(WispEvent):
     @model_validator(mode="after")
     def _validate_trigger(self) -> CompactionStarted:
         if self.reason == "threshold":
-            if self.schema_version != EVENT_SCHEMA_VERSION:
+            if self.schema_version < THRESHOLD_COMPACTION_SCHEMA_VERSION:
                 raise ValueError(
-                    f"threshold compaction requires schema_version {EVENT_SCHEMA_VERSION}"
+                    "threshold compaction requires schema_version "
+                    f"{THRESHOLD_COMPACTION_SCHEMA_VERSION} or newer"
                 )
             if self.trigger_budget is None:
                 raise ValueError("threshold compaction requires a trigger budget")
+        elif self.reason == "overflow":
+            if self.schema_version < OVERFLOW_COMPACTION_SCHEMA_VERSION:
+                raise ValueError(
+                    "overflow compaction requires schema_version "
+                    f"{OVERFLOW_COMPACTION_SCHEMA_VERSION} or newer"
+                )
+            if self.trigger_budget is None:
+                raise ValueError("overflow compaction requires a trigger budget")
         elif self.trigger_budget is not None:
             raise ValueError("manual compaction must not include a trigger budget")
         return self
@@ -389,12 +408,39 @@ class CompactionCompleted(WispEvent):
     model: str | None = None
     usage: TokenUsage | None = None
     error: str | None = None
+    will_retry: bool = False
 
     @model_validator(mode="after")
     def _validate_reason(self) -> CompactionCompleted:
-        if self.reason == "threshold" and self.schema_version != EVENT_SCHEMA_VERSION:
-            raise ValueError(f"threshold compaction requires schema_version {EVENT_SCHEMA_VERSION}")
+        if self.reason == "threshold" and self.schema_version < THRESHOLD_COMPACTION_SCHEMA_VERSION:
+            raise ValueError(
+                "threshold compaction requires schema_version "
+                f"{THRESHOLD_COMPACTION_SCHEMA_VERSION} or newer"
+            )
+        if self.reason == "overflow":
+            if self.schema_version < OVERFLOW_COMPACTION_SCHEMA_VERSION:
+                raise ValueError(
+                    "overflow compaction requires schema_version "
+                    f"{OVERFLOW_COMPACTION_SCHEMA_VERSION} or newer"
+                )
+            if self.outcome != "completed" and self.will_retry:
+                raise ValueError("failed overflow compaction must not retry")
+            if (
+                self.outcome == "completed"
+                and not self.will_retry
+                and not (self.error or "").strip()
+            ):
+                raise ValueError("completed overflow compaction without retry must explain why")
+        elif self.will_retry:
+            raise ValueError("only overflow compaction may retry")
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < OVERFLOW_COMPACTION_SCHEMA_VERSION:
+            data.pop("will_retry", None)
+        return data
 
 
 class AgentCompleted(WispEvent):
@@ -486,32 +532,51 @@ JsonObjectAdapter: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 def _require_current_schema(data: JsonObject) -> None:
     version = data.get("schema_version")
-    if version not in (5, 6, 7, 8, 9, EVENT_SCHEMA_VERSION):
+    if type(version) is not int or version not in (5, 6, 7, 8, 9, 10, EVENT_SCHEMA_VERSION):
         raise ValueError(
             "Unsupported Wisp event schema_version: "
-            f"{version!r}; expected 5, 6, 7, 8, 9, or {EVENT_SCHEMA_VERSION}"
+            f"{version!r}; expected 5 through {EVENT_SCHEMA_VERSION}"
         )
     if data.get("type") in {"compaction.started", "compaction.completed"}:
-        if version not in {8, 9, EVENT_SCHEMA_VERSION}:
+        if version not in {8, 9, 10, EVENT_SCHEMA_VERSION}:
             raise ValueError(
-                f"Compaction events require schema_version 8, 9, or {EVENT_SCHEMA_VERSION}, "
+                f"Compaction events require schema_version 8 through {EVENT_SCHEMA_VERSION}, "
                 f"got {version!r}"
             )
-        if data.get("reason", "manual") == "threshold" and version != EVENT_SCHEMA_VERSION:
+        if data.get("reason", "manual") == "threshold" and (
+            not isinstance(version, int) or version < THRESHOLD_COMPACTION_SCHEMA_VERSION
+        ):
             raise ValueError(
-                f"Threshold compaction events require schema_version {EVENT_SCHEMA_VERSION}, "
+                "Threshold compaction events require schema_version "
+                f"{THRESHOLD_COMPACTION_SCHEMA_VERSION} or newer, "
                 f"got {version!r}"
+            )
+        if data.get("reason", "manual") == "overflow" and (
+            not isinstance(version, int) or version < OVERFLOW_COMPACTION_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "Overflow compaction events require schema_version "
+                f"{OVERFLOW_COMPACTION_SCHEMA_VERSION} or newer, got {version!r}"
             )
         if version in {8, 9} and data.get("trigger_budget") is not None:
             raise ValueError(
-                f"Compaction trigger budgets require schema_version {EVENT_SCHEMA_VERSION}"
+                "Compaction trigger budgets require schema_version "
+                f"{THRESHOLD_COMPACTION_SCHEMA_VERSION} or newer"
+            )
+        if "will_retry" in data and (
+            not isinstance(version, int) or version < OVERFLOW_COMPACTION_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "Compaction retry metadata requires schema_version "
+                f"{OVERFLOW_COMPACTION_SCHEMA_VERSION} or newer"
             )
     if data.get("type") in {"context.estimated", "session.stats"} and version not in {
         9,
+        10,
         EVENT_SCHEMA_VERSION,
     }:
         raise ValueError(
-            f"Context statistics events require schema_version 9 or {EVENT_SCHEMA_VERSION}, "
+            f"Context statistics events require schema_version 9 through {EVENT_SCHEMA_VERSION}, "
             f"got {version!r}"
         )
 

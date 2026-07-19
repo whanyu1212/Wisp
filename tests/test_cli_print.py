@@ -10,9 +10,11 @@ from wisp.events import (
     CompactionStarted,
     ContextBudget,
     ContextEstimate,
+    ErrorEvent,
     MessageCompleted,
     WispEvent,
 )
+from wisp.providers.base import ContextOverflowError
 from wisp.sessions.replay import HISTORICAL_CONTEXT_SUMMARY_LABEL
 
 
@@ -89,6 +91,90 @@ def test_print_output_leaves_manual_compaction_unrendered() -> None:
     assert (
         _print_event_line(CompactionStarted(session_id="session-1", source_entry_count=6)) is None
     )
+
+
+def test_print_output_renders_overflow_recovery_notices() -> None:
+    assert (
+        _print_event_line(
+            CompactionStarted(
+                session_id="session-1",
+                reason="overflow",
+                source_entry_count=6,
+                trigger_budget=_trigger_budget(),
+            )
+        )
+        == "Context overflow detected; compacting before one retry..."
+    )
+    assert (
+        _print_event_line(
+            CompactionCompleted(
+                session_id="session-1",
+                reason="overflow",
+                outcome="completed",
+                replaced_entry_count=5,
+                retained_entry_count=1,
+                will_retry=True,
+            )
+        )
+        == "Compacted 5 context entries; retrying request..."
+    )
+    assert (
+        _print_event_line(
+            CompactionCompleted(
+                session_id="session-1",
+                reason="overflow",
+                outcome="failed",
+                replaced_entry_count=5,
+                retained_entry_count=1,
+                error="summary failed",
+            )
+        )
+        == "Context overflow recovery failed: summary failed"
+    )
+    assert (
+        _print_event_line(
+            CompactionCompleted(
+                session_id="session-1",
+                reason="overflow",
+                outcome="completed",
+                replaced_entry_count=5,
+                retained_entry_count=1,
+                error="replay reload failed",
+            )
+        )
+        == "Context overflow recovery failed: replay reload failed"
+    )
+
+
+def test_print_mode_does_not_duplicate_rendered_overflow_recovery_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def failed_run(
+        self: CodingSession, *args: object, **kwargs: object
+    ) -> AsyncIterator[WispEvent]:
+        del self, args, kwargs
+        message = "Context overflow recovery failed: summary failed"
+        yield CompactionCompleted(
+            session_id="session-1",
+            reason="overflow",
+            outcome="failed",
+            replaced_entry_count=1,
+            retained_entry_count=2,
+            error="summary failed",
+        )
+        yield ErrorEvent(message=message)
+        raise ContextOverflowError(message)
+
+    monkeypatch.setattr(CodingSession, "run", failed_run)
+    result = CliRunner().invoke(
+        app,
+        ["-p", "hello", "--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert result.stderr.count("Context overflow recovery failed: summary failed") == 1
 
 
 def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
