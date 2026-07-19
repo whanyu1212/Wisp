@@ -702,7 +702,11 @@ class CodingSession:
                 error=error,
             )
             if not summary_committed and (summary_usage is not None or summary_cost is not None):
-                await session.append_event(failed, operation_id=operation_id)
+                try:
+                    await session.append_event(failed, operation_id=operation_id)
+                except Exception:
+                    if not recover_failure:
+                        raise
             if recover_failure:
                 yield await self._emit_recoverable_event(failed, session=session)
             else:

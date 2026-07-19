@@ -1523,6 +1523,78 @@ def test_coding_session_auto_compaction_failure_ignores_listener_failure(
     assert events[-1].outcome == "completed"
 
 
+def test_coding_session_auto_compaction_failure_ignores_accounting_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer two",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content=VALID_COMPACTION_SUMMARY,
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        original_append_event = session.append_event
+
+        async def fail_compaction_append(
+            _entry: SessionEntry,
+            *,
+            expected_context_entry_ids: Sequence[str],
+        ) -> SessionEntry:
+            del expected_context_entry_ids
+            raise OSError("compaction storage unavailable")
+
+        async def fail_accounting_append(
+            event: WispEvent,
+            *,
+            operation_id: str | None = None,
+        ) -> SessionEntry:
+            if isinstance(event, CompactionCompleted):
+                raise OSError("accounting storage unavailable")
+            return await original_append_event(event, operation_id=operation_id)
+
+        monkeypatch.setattr(session, "append_compaction_entry", fail_compaction_append)
+        monkeypatch.setattr(session, "append_event", fail_accounting_append)
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        return [event async for event in agent.run("question two", session=session)]
+
+    events = anyio.run(run)
+
+    completed = next(event for event in events if isinstance(event, CompactionCompleted))
+    assert completed.reason == "threshold"
+    assert completed.outcome == "failed"
+    assert completed.error == "compaction storage unavailable"
+    assert completed.usage == TokenUsage(input_tokens=70, output_tokens=11, total_tokens=81)
+    assert completed.cost is not None
+    assert events[-1].type == "agent.completed"
+    assert events[-1].outcome == "completed"
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
+
+
 def test_coding_session_auto_compaction_prepare_failure_preserves_prompt_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
