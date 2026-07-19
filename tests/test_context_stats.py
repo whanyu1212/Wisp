@@ -100,6 +100,18 @@ def test_auto_compaction_uses_strict_threshold_and_current_observation(
     assert should_auto_compact(budget, enabled=enabled) is expected
 
 
+@pytest.mark.parametrize("reserve", [100, 101, 16_384])
+def test_auto_compaction_skips_when_reserve_consumes_context_window(reserve: int) -> None:
+    estimate = estimate_context((Message(role="user", content="hello"),))
+    budget = build_context_budget(
+        estimate,
+        context_window=100,
+        reserve_tokens=reserve,
+    )
+
+    assert should_auto_compact(budget, enabled=True) is False
+
+
 def test_context_statistics_events_accept_schema_v9_and_current() -> None:
     estimate = estimate_context((Message(role="user", content="hello"),))
     budget = build_context_budget(estimate, context_window=1_000, reserve_tokens=100)

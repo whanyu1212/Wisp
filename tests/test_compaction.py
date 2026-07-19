@@ -905,13 +905,14 @@ def test_coding_session_auto_compaction_reports_post_commit_publication_failure(
 
 
 @pytest.mark.parametrize(
-    ("enabled", "known_window"),
-    [(False, True), (True, False)],
+    ("enabled", "context_window", "reserve_tokens"),
+    [(False, 100, 20), (True, None, 20), (True, 1_000, 16_384)],
 )
-def test_coding_session_auto_compaction_skips_disabled_or_unknown_window(
+def test_coding_session_auto_compaction_skips_unusable_policy(
     tmp_path: Path,
     enabled: bool,
-    known_window: bool,
+    context_window: int | None,
+    reserve_tokens: int,
 ) -> None:
     provider = ScriptedProvider(
         [
@@ -934,9 +935,9 @@ def test_coding_session_auto_compaction_skips_disabled_or_unknown_window(
             provider=provider,
             sessions=store,
             model="model",
-            models=_model_registry() if known_window else None,
+            models=_model_registry(context_window=context_window) if context_window else None,
             prompt_messages=(Message(role="system", content="system"),),
-            context_reserve_tokens=20,
+            context_reserve_tokens=reserve_tokens,
             auto_compaction_enabled=enabled,
         )
         return [event async for event in agent.run("question two", session=session)]

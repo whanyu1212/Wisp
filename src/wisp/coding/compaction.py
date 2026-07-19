@@ -43,7 +43,11 @@ class CompactionSummaryError(RuntimeError):
 def should_auto_compact(budget: ContextBudget, *, enabled: bool) -> bool:
     """Return whether current context strictly exceeds the reserved input budget."""
 
-    if not enabled or budget.context_window is None:
+    if (
+        not enabled
+        or budget.context_window is None
+        or budget.reserve_tokens >= budget.context_window
+    ):
         return False
     tokens = (
         budget.observed_tokens

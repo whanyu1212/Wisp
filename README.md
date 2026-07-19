@@ -258,8 +258,9 @@ compaction summary requests; they never reconstruct `total_tokens` from input/ou
 After a completed prompt, automatic compaction uses a current provider `usage.total_tokens` when
 available and otherwise falls back to the deterministic estimate. It triggers only when usage is
 strictly greater than `context_window - context_reserve_tokens`; equality does not trigger.
-Unknown model windows remain permissive. `auto_compaction_enabled` is also user-only because
-automatic summaries make an additional provider request.
+Unknown model windows remain permissive, and automatic compaction stays disabled when the reserve
+equals or exceeds the model window because no usable input budget remains. `auto_compaction_enabled`
+is also user-only because automatic summaries make an additional provider request.
 
 ### Compaction
 
