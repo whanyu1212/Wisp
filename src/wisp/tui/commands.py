@@ -70,17 +70,15 @@ class SlashCommandSpec:
 
     ``takes_args`` means the command *accepts* an argument (required or optional),
     not that one is mandatory: ``/model``/``/auth`` run bare (show current /
-    default) yet still take a value. It drives two behaviors, so it must match the
-    shell handlers: Tab-completion leaves a trailing space for the value, and
-    accepting the highlight from a still-being-typed prefix (e.g. ``/`` → ``/auth``)
-    fills ``/cmd `` for the value instead of running immediately — important for
-    destructive commands like ``/logout`` where the bare default differs from the
-    intended target.
+    default) yet still take a value. Tab-completion uses it to leave a trailing
+    space for the value. ``prefill_on_partial_enter`` keeps destructive commands
+    in argument-completion mode unless the user explicitly types the full name.
     """
 
     command: str  # canonical spelling, e.g. "/model"
     description: str
     takes_args: bool = False
+    prefill_on_partial_enter: bool = False
 
 
 # Ordered for display: the everyday commands first, session/auth after. Only
@@ -93,7 +91,12 @@ SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("/provider", "Show or switch the active provider", takes_args=True),
     SlashCommandSpec("/auth", "Show credential status", takes_args=True),
     SlashCommandSpec("/login", "Log in to a provider", takes_args=True),
-    SlashCommandSpec("/logout", "Remove stored credentials", takes_args=True),
+    SlashCommandSpec(
+        "/logout",
+        "Remove stored credentials",
+        takes_args=True,
+        prefill_on_partial_enter=True,
+    ),
     SlashCommandSpec("/quit", "Quit the TUI"),
 )
 
