@@ -35,6 +35,7 @@ from wisp.events import (
     ProjectConfigApplied,
     RpcCommandFinished,
     RpcCommandStarted,
+    SessionStatsReported,
     TrustRequested,
     TrustResolved,
     WispEvent,
@@ -94,7 +95,7 @@ class _RpcInputClosed:
 @dataclass(frozen=True)
 class _RpcCommandCompleted:
     command_id: str
-    command_type: Literal["prompt", "compact"]
+    command_type: Literal["prompt", "compact", "get_session_stats"]
     ok: bool
     history: tuple[Message, ...] | None
     entry_count: int
@@ -110,7 +111,7 @@ class _RpcSessionState:
 @dataclass(frozen=True)
 class _RpcRunningCommand:
     command_id: str
-    command_type: Literal["prompt", "compact"]
+    command_type: Literal["prompt", "compact", "get_session_stats"]
     cancel_scope: anyio.CancelScope
 
 
@@ -540,6 +541,7 @@ async def _run_rpc(
         tool_approval_policy=approval_policy,
         max_tool_iterations=max_tool_iterations,
         project_context_root=selected_project_context_root,
+        context_reserve_tokens=config.context_reserve_tokens,
     )
 
     queued_commands: deque[dict[str, object]] = deque()
@@ -566,6 +568,7 @@ async def _run_rpc(
                         approval_policy=approval_policy,
                         trust_gate=trust_gate,
                         configure_overrides=configure_overrides,
+                        queued_commands=queued_commands,
                     )
                     if should_shutdown:
                         stop_reader.set()
@@ -624,6 +627,7 @@ async def _run_rpc(
                     approval_policy=approval_policy,
                     trust_gate=trust_gate,
                     configure_overrides=configure_overrides,
+                    queued_commands=queued_commands,
                 )
                 if should_shutdown:
                     stop_reader.set()
@@ -644,6 +648,7 @@ def _dispatch_rpc_command(
     approval_policy: _RpcToolApprovalPolicy,
     trust_gate: _RpcTrustGate,
     configure_overrides: _RpcConfigureOverrides,
+    queued_commands: deque[dict[str, object]],
 ) -> tuple[_RpcRunningCommand | None, bool]:
     command_type = _rpc_command_type(command)
     if command_type == "prompt":
@@ -671,6 +676,17 @@ def _dispatch_rpc_command(
             ),
             False,
         )
+    if command_type == "get_session_stats":
+        return (
+            _start_rpc_session_stats_command(
+                command,
+                agent=agent,
+                session_state=session_state,
+                task_group=task_group,
+                send=send,
+            ),
+            False,
+        )
     should_shutdown = _handle_rpc_control_command(
         command,
         agent=agent,
@@ -679,6 +695,7 @@ def _dispatch_rpc_command(
         approval_policy=approval_policy,
         trust_gate=trust_gate,
         configure_overrides=configure_overrides,
+        queued_commands=queued_commands,
     )
     return running_command, should_shutdown
 
@@ -920,6 +937,93 @@ def _start_rpc_compact_command(
     )
 
 
+def _start_rpc_session_stats_command(
+    command: dict[str, object],
+    *,
+    agent: CodingSession,
+    session_state: _RpcSessionState,
+    task_group: TaskGroup,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+) -> _RpcRunningCommand | None:
+    command_type, command_id, id_error = _rpc_command_identity(command)
+    _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        _write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+        )
+        return None
+
+    cancel_scope = anyio.CancelScope()
+    task_group.start_soon(
+        _run_rpc_session_stats_command,
+        agent,
+        session_state.session,
+        session_state.entry_count,
+        command_id,
+        cancel_scope,
+        send.clone(),
+    )
+    return _RpcRunningCommand(
+        command_id=command_id,
+        command_type="get_session_stats",
+        cancel_scope=cancel_scope,
+    )
+
+
+async def _run_rpc_session_stats_command(
+    agent: CodingSession,
+    session: JsonlSession | None,
+    entry_count: int,
+    command_id: str,
+    cancel_scope: anyio.CancelScope,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+) -> None:
+    ok = False
+    error: str | None = None
+    refreshed_history: tuple[Message, ...] | None = None
+    refreshed_entry_count = entry_count
+    try:
+        with cancel_scope:
+            stats = await agent.get_session_stats(session)
+            if session is not None:
+                refreshed_entry_count, refreshed_history = await anyio.to_thread.run_sync(
+                    _updated_rpc_session_state,
+                    session,
+                    (),
+                    entry_count,
+                )
+            _write_json_event(SessionStatsReported(command_id=command_id, stats=stats))
+            ok = True
+        if cancel_scope.cancel_called:
+            error = "RPC get_session_stats command cancelled"
+    except BaseException as exc:
+        if isinstance(exc, anyio.get_cancelled_exc_class()):
+            error = "RPC get_session_stats command cancelled"
+        else:
+            error = str(exc)
+    finally:
+        _write_json_event(
+            RpcCommandFinished(
+                command_id=command_id,
+                command_type="get_session_stats",
+                ok=ok,
+                error=error,
+            )
+        )
+        await send.send(
+            _RpcCommandCompleted(
+                command_id=command_id,
+                command_type="get_session_stats",
+                ok=ok,
+                history=refreshed_history,
+                entry_count=refreshed_entry_count,
+            )
+        )
+        await send.aclose()
+
+
 async def _run_rpc_prompt_command(
     agent: CodingSession,
     session: JsonlSession,
@@ -1153,6 +1257,7 @@ def _handle_rpc_control_command(
     runtime: WispRuntime | None = None,
     trust_gate: _RpcTrustGate | None = None,
     configure_overrides: _RpcConfigureOverrides | None = None,
+    queued_commands: deque[dict[str, object]] | None = None,
 ) -> bool:
     command_type, command_id, id_error = _rpc_command_identity(command)
     _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
@@ -1174,6 +1279,7 @@ def _handle_rpc_control_command(
             command_id=command_id,
             command_type=command_type,
             running_command=running_command,
+            queued_commands=queued_commands,
         )
         return False
     if command_type == "approval":
@@ -1514,6 +1620,7 @@ def _handle_rpc_cancel_command(
     command_id: str,
     command_type: str,
     running_command: _RpcRunningCommand | None,
+    queued_commands: deque[dict[str, object]] | None = None,
 ) -> None:
     target_id = command.get("target_id")
     if not isinstance(target_id, str) or not target_id:
@@ -1523,14 +1630,36 @@ def _handle_rpc_cancel_command(
             message="RPC cancel command requires string field: target_id",
         )
         return
-    if running_command is None or running_command.command_id != target_id:
+    if running_command is not None and running_command.command_id == target_id:
+        running_command.cancel_scope.cancel()
+        _write_json_event(
+            RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True)
+        )
+        return
+
+    queued_target = next(
+        (queued for queued in queued_commands or () if queued.get("id") == target_id),
+        None,
+    )
+    if queued_target is None:
         _write_rpc_command_error(
             command_id=command_id,
             command_type=command_type,
-            message=f"No running RPC command with id: {target_id}",
+            message=f"No running or queued RPC command with id: {target_id}",
         )
         return
-    running_command.cancel_scope.cancel()
+    assert queued_commands is not None
+    queued_commands.remove(queued_target)
+    target_type = _rpc_command_type(queued_target)
+    _write_json_event(RpcCommandStarted(command_id=target_id, command_type=target_type))
+    _write_json_event(
+        RpcCommandFinished(
+            command_id=target_id,
+            command_type=target_type,
+            ok=False,
+            error=f"RPC command cancelled: {target_id}",
+        )
+    )
     _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 

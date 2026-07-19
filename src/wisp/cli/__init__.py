@@ -555,6 +555,7 @@ async def _run_print(
         max_tool_iterations=max_tool_iterations,
         trusted=trusted,
         project_context_root=project_context_root,
+        context_reserve_tokens=config.context_reserve_tokens,
     )
 
     events = agent.run(prompt, session=session, history=history)

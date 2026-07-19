@@ -18,6 +18,7 @@ from wisp.auth.storage import (
 from wisp.config import DEFAULT_PROVIDER, default_auth_path
 from wisp.events import (
     CompactionCompleted,
+    ContextEstimated,
     ErrorEvent,
     KnownWispEvent,
     MessageCompleted,
@@ -28,6 +29,7 @@ from wisp.events import (
     ProviderRetrying,
     RpcCommandFinished,
     SessionSaved,
+    SessionStatsReported,
     ToolApprovalRequested,
     TrustRequested,
 )
@@ -81,6 +83,8 @@ class TuiController(Protocol):
         *,
         command_id: str | None = None,
     ) -> str: ...
+
+    async def get_session_stats(self, *, command_id: str | None = None) -> str: ...
 
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str: ...
 
@@ -205,6 +209,7 @@ class TuiShell:
 
         self.renderer.startup()
         self._sync_view()
+        await self._request_session_stats()
         send, receive = anyio.create_memory_object_stream[_TuiSignal](100)
         async with anyio.create_task_group() as task_group, send, receive:
             task_group.start_soon(self._read_inputs, send.clone())
@@ -816,6 +821,11 @@ class TuiShell:
         return True
 
     async def _handle_rpc_event(self, event: KnownWispEvent) -> bool:
+        context_updated = self.view.update_context_from_event(event)
+        if context_updated:
+            self._update_view()
+        if isinstance(event, (ContextEstimated, SessionStatsReported)):
+            return False
         if isinstance(event, ProviderRetrying):
             self._update_view(
                 status=(
@@ -911,7 +921,7 @@ class TuiShell:
 
         if isinstance(event, RpcCommandFinished):
             if event.command_id in self.pending_configures:
-                self._finish_pending_configure(event)
+                await self._finish_pending_configure(event)
                 return False
             if event.command_id == self.state.shutdown_command_id:
                 self._render_event(event)
@@ -922,7 +932,7 @@ class TuiShell:
         self._render_event(event)
         return False
 
-    def _finish_pending_configure(self, event: RpcCommandFinished) -> None:
+    async def _finish_pending_configure(self, event: RpcCommandFinished) -> None:
         pending = self.pending_configures.pop(event.command_id)
         if event.ok:
             if pending.provider is not None:
@@ -940,7 +950,9 @@ class TuiShell:
             if pending.has_effort:
                 self.current_effort = pending.effort
                 persist_user_effort(pending.effort, home_dir=self._settings_home_dir)
+            self.view.context = None
             self._sync_view()
+            await self._request_session_stats()
             return
         message = event.error or "configure failed"
         if pending.provider is not None:
@@ -964,6 +976,8 @@ class TuiShell:
         self.state.pending_approval = None
         self.state.token_stream_started = False
         self.state.rendered_tokens = False
+        if finished_command_type in {"prompt", "compact"}:
+            await self._request_session_stats()
         if self.state.exit_requested or (not event.ok and finished_command_type != "compact"):
             self._clear_queued_prompts()
         if self.state.exit_requested:
@@ -993,6 +1007,12 @@ class TuiShell:
                 queued_follow_ups=0,
             )
         return False
+
+    async def _request_session_stats(self) -> None:
+        try:
+            await self.controller.get_session_stats()
+        except Exception as exc:  # noqa: BLE001 - stats are optional TUI chrome
+            self.renderer.send_failed("session stats", exc)
 
     def _handle_rpc_closed(self, signal: _RpcEventsClosed) -> bool:
         self._update_view(status="error")

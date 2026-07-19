@@ -17,6 +17,7 @@ from rich.text import Text
 from wisp.events import (
     CompactionCompleted,
     CompactionStarted,
+    ContextBudget,
     ErrorEvent,
     KnownWispEvent,
     MessageCompleted,
@@ -52,6 +53,7 @@ class TuiViewSnapshot:
     cwd: str = ""
     provider: str | None = None
     model: str | None = None
+    context: ContextBudget | None = None
 
 
 class TuiRenderer(Protocol):
@@ -331,6 +333,7 @@ class FullscreenTuiState:
     cwd: str = ""
     provider: str | None = None
     model: str | None = None
+    context: ContextBudget | None = None
     transcript: list[TuiTranscriptEntry] = field(default_factory=list)
     streaming_text: str = ""
     transcript_scroll_offset: int = 0
@@ -372,6 +375,7 @@ class FullscreenTuiRenderer:
         self.state.cwd = snapshot.cwd
         self.state.provider = snapshot.provider
         self.state.model = snapshot.model
+        self.state.context = snapshot.context
         self._refresh()
 
     def startup(self) -> None:
@@ -773,6 +777,7 @@ class FullscreenTuiRenderer:
             cwd=self.state.cwd,
             provider=self.state.provider,
             model=self.state.model,
+            context=self.state.context,
         )
 
     def _input_text(self) -> Text:
@@ -784,11 +789,11 @@ def format_tui_footer_lines(
 ) -> tuple[str, str]:
     """Return Pi-style compact footer lines for a renderer snapshot.
 
-    Field priority (highest to lowest, protected in that order under width
-    pressure): status+queued, cwd, provider/model, session id. Both lines
-    truncate with ``priority="left"``: line 1's left field is cwd (session
-    drops entirely before cwd is ever clipped), line 2's left field is status
-    (model clips, or drops entirely, before status is ever clipped).
+    Field priority is status+queued, cwd, context gauge, provider/model, then
+    session id. The model drops before the context budget under width pressure.
+    Both lines truncate with ``priority="left"``: line 1's left field is cwd
+    (session drops entirely before cwd is ever clipped), line 2's left field is
+    status (model clips, or drops entirely, before status is ever clipped).
     """
 
     display_width = max(1, width) if width is not None else None
@@ -802,10 +807,16 @@ def format_tui_footer_lines(
         status_parts.append(f"queued {snapshot.queued_follow_ups}")
     status_left = _sanitize_footer_text(" • ".join(status_parts))
     model_right = _sanitize_footer_text(_footer_model_text(snapshot.provider, snapshot.model))
+    status_right = _footer_status_right(
+        status_left,
+        model_right,
+        snapshot.context,
+        display_width,
+    )
 
     return (
         _align_footer_line(context_left, context_right, display_width, priority="left"),
-        _align_footer_line(status_left, model_right, display_width, priority="left"),
+        _align_footer_line(status_left, status_right, display_width, priority="left"),
     )
 
 
@@ -834,6 +845,71 @@ def _footer_model_text(provider: str | None, model: str | None) -> str:
     if provider:
         return f"{provider}/default"
     return model or ""
+
+
+def _footer_status_right(
+    status: str,
+    model: str,
+    context: ContextBudget | None,
+    width: int | None,
+) -> str:
+    context_text = _footer_context_text(context)
+    context_wide = _footer_context_text(context, include_percent=True)
+    if model and context_text:
+        candidates = [
+            " • ".join((model, context_wide)),
+            " • ".join((model, context_text)),
+            context_text,
+        ]
+    elif context_text:
+        candidates = [context_wide, context_text]
+    else:
+        return model
+
+    if width is None:
+        return candidates[0]
+    for candidate in candidates:
+        if cell_len(status) + 2 + cell_len(candidate) <= width:
+            return candidate
+    return candidates[-1]
+
+
+def _footer_context_text(
+    context: ContextBudget | None,
+    *,
+    include_percent: bool = False,
+) -> str:
+    if context is None:
+        return ""
+    observed = context.observed_tokens
+    use_observed = context.observed_is_current and observed is not None
+    total_tokens = context.estimate.total_tokens
+    if use_observed:
+        assert observed is not None
+        total_tokens = observed
+    approximate = not use_observed or context.context_window is None
+    marker = "~" if approximate else ""
+    text = f"ctx {marker}{_format_token_count(total_tokens)}"
+    if context.context_window is not None:
+        text += f"/{_format_token_count(context.context_window)}"
+    if include_percent:
+        percent = context.estimated_percent
+        if use_observed and context.context_window:
+            percent = total_tokens / context.context_window * 100
+        if percent is not None:
+            text += f" ({percent:.0f}%)"
+    return text
+
+
+def _format_token_count(tokens: int) -> str:
+    if tokens >= 1_000_000:
+        value = tokens / 1_000_000
+        return f"{value:.1f}".rstrip("0").rstrip(".") + "m"
+    if tokens >= 10_000:
+        return f"{tokens / 1_000:.0f}k"
+    if tokens >= 1_000:
+        return f"{tokens / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
+    return str(tokens)
 
 
 def _align_footer_line(

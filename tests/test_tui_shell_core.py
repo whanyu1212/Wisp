@@ -9,8 +9,130 @@ from pytest import MonkeyPatch
 
 from tests.tui_support import *
 from wisp.auth.storage import OAuthCredential
-from wisp.events import MessageStarted, ProviderRetrying
+from wisp.events import (
+    ContextBudget,
+    ContextEstimate,
+    ContextEstimated,
+    MessageCompleted,
+    MessageStarted,
+    ProviderRetrying,
+    SessionStatsReported,
+    TokenUsage,
+)
 from wisp.tui import auth_commands as tui_auth_commands_module
+from wisp.tui.state import TuiViewState
+
+
+def _context_budget(
+    *,
+    estimated: int,
+    observed: int | None = None,
+    current: bool = False,
+    window: int | None = 128_000,
+) -> ContextBudget:
+    return ContextBudget.model_construct(
+        estimate=ContextEstimate.model_construct(total_tokens=estimated),
+        observed_tokens=observed,
+        observed_is_current=current,
+        context_window=window,
+        reserve_tokens=8_000,
+        remaining_tokens=None,
+        estimated_percent=estimated / window * 100 if window else None,
+        over_budget=False,
+    )
+
+
+def test_tui_view_state_updates_context_from_estimate_stats_and_usage() -> None:
+    state = TuiViewState()
+    estimate = _context_budget(estimated=10_000)
+    stats_context = _context_budget(estimated=11_000, observed=10_500)
+
+    assert state.update_context_from_event(
+        ContextEstimated(turn=1, provider="test", budget=estimate)
+    )
+    assert state.context is estimate
+
+    stats_event = SessionStatsReported.model_construct(
+        command_id="stats-1",
+        stats=type("Stats", (), {"context": stats_context})(),
+    )
+    assert state.update_context_from_event(stats_event)
+    assert state.context is stats_context
+
+    assert state.update_context_from_event(
+        MessageCompleted(
+            turn=1,
+            content="answer",
+            finish_reason="stop",
+            usage=TokenUsage(input_tokens=11_500, output_tokens=500, total_tokens=12_000),
+        )
+    )
+    assert state.context is not None
+    assert state.context.observed_tokens == 12_000
+    assert state.context.observed_is_current is True
+    assert state.context.estimated_percent == 9.375
+    assert state.snapshot().context is state.context
+
+
+def test_tui_view_state_ignores_zero_or_failed_message_usage() -> None:
+    state = TuiViewState(context=_context_budget(estimated=10_000))
+    original = state.context
+
+    messages = (
+        MessageCompleted(
+            turn=1,
+            content="",
+            finish_reason="stop",
+            usage=TokenUsage(input_tokens=0, output_tokens=0, total_tokens=0),
+        ),
+        MessageCompleted(
+            turn=1,
+            content="",
+            finish_reason="error",
+            usage=TokenUsage(input_tokens=12_000, output_tokens=0, total_tokens=12_000),
+        ),
+        MessageCompleted(
+            turn=1,
+            content="",
+            finish_reason="cancelled",
+            usage=TokenUsage(input_tokens=12_000, output_tokens=0, total_tokens=12_000),
+        ),
+    )
+    for message in messages:
+        assert not state.update_context_from_event(message)
+        assert state.context is original
+
+
+def test_tui_shell_updates_context_before_suppressing_streamed_completion() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.snapshots: list[TuiViewSnapshot] = []
+
+        def view_updated(self, snapshot: TuiViewSnapshot) -> None:
+            self.snapshots.append(snapshot)
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        estimate = _context_budget(estimated=10_000)
+
+        await shell._handle_rpc_event(ContextEstimated(turn=1, provider="test", budget=estimate))
+        shell.state.rendered_tokens = True
+        await shell._handle_rpc_event(
+            MessageCompleted(
+                turn=1,
+                content="streamed answer",
+                finish_reason="stop",
+                usage=TokenUsage(input_tokens=11_500, output_tokens=500, total_tokens=12_000),
+            )
+        )
+
+        assert renderer.snapshots[-1].context is not None
+        assert renderer.snapshots[-1].context.observed_tokens == 12_000
+        assert renderer.snapshots[-1].context.observed_is_current is True
+
+    anyio.run(run)
 
 
 def test_tui_shell_records_submitted_prompt_for_fullscreen_renderer() -> None:
@@ -1339,6 +1461,7 @@ def test_tui_shell_compact_calls_controller_without_prompting_and_returns_idle()
         await shell.run()
 
         assert controller.compactions == ["preserve tool decisions"]
+        assert controller.session_stats_requests == ["session-stats-1", "session-stats-2"]
         assert controller.prompts == []
         assert shell.state.current_command_id is None
         assert shell.state.current_command_type is None

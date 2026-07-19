@@ -36,6 +36,12 @@ class CompactCommand(RpcCommandModel):
     instructions: str | None = None
 
 
+class GetSessionStatsCommand(RpcCommandModel):
+    """Return lifetime usage and current context-budget statistics."""
+
+    type: Literal["get_session_stats"] = "get_session_stats"
+
+
 class CancelCommand(RpcCommandModel):
     """Cancel a running prompt or compact command."""
 
@@ -89,6 +95,7 @@ class ConfigureCommand(RpcCommandModel):
 type RpcCommand = Annotated[
     PromptCommand
     | CompactCommand
+    | GetSessionStatsCommand
     | CancelCommand
     | ApprovalCommand
     | TrustCommand

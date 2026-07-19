@@ -26,14 +26,16 @@ import json
 import sys
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from wisp.retry import RetrySettings
 
 GLOBAL_SETTINGS_PATH = Path("~/.wisp/settings.json")
 PROJECT_SETTINGS_DIRNAME = ".wisp"
 PROJECT_SETTINGS_FILENAME = "settings.json"
-_USER_ONLY_SETTINGS_FIELDS = frozenset({"protected_paths", "retry", "effort"})
+_USER_ONLY_SETTINGS_FIELDS = frozenset(
+    {"protected_paths", "retry", "effort", "context_reserve_tokens"}
+)
 
 # Default glob patterns whose contents tools refuse to read. These guard secrets
 # from being pulled into model context by an over-eager read/grep. Bare patterns
@@ -91,6 +93,7 @@ class WispSettings(BaseModel):
     protected_paths: list[str] | None = None
     retry: RetrySettings | None = None
     effort: str | None = None
+    context_reserve_tokens: int | None = Field(default=None, ge=0)
 
 
 class ResolvedSettings(BaseModel):
@@ -111,6 +114,7 @@ class ResolvedSettings(BaseModel):
     protected_paths: tuple[str, ...] | None = None
     retry: RetrySettings | None = None
     effort: str | None = None
+    context_reserve_tokens: int | None = Field(default=None, ge=0)
 
 
 def resolve_settings(
@@ -181,6 +185,7 @@ def resolve_settings(
         protected_paths=_coalesce_paths(user_settings.protected_paths),
         retry=user_settings.retry,
         effort=user_settings.effort,
+        context_reserve_tokens=user_settings.context_reserve_tokens,
     )
 
 

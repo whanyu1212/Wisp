@@ -9,12 +9,14 @@ from pathlib import Path
 
 import anyio
 
+from wisp.agent.context import context_fingerprint
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.messages import (
     CompactionRecord,
     Message,
     SessionEntry,
     message_from_completion_event,
+    provider_history_message,
 )
 from wisp.agent.prompt import (
     DEFAULT_CONTEXT_MAX_CHARS,
@@ -23,6 +25,7 @@ from wisp.agent.prompt import (
 )
 from wisp.agent.transcript import plan_interrupted_tool_repairs
 from wisp.coding.compaction import plan_manual_compaction, summarize_manual_compaction
+from wisp.coding.stats import build_session_stats
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
     AgentCompleted,
@@ -32,6 +35,7 @@ from wisp.events import (
     ErrorEvent,
     MessageCompleted,
     SessionSaved,
+    SessionStats,
     ToolExecutionEnded,
     TurnCompleted,
     TurnStarted,
@@ -42,7 +46,7 @@ from wisp.providers.catalog import ModelRegistry
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
-from wisp.sessions.replay import SessionReplay
+from wisp.sessions.replay import SessionReplay, replay_session_entries
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
@@ -67,6 +71,15 @@ class _PendingSessionEntry:
     entry: SessionEntry
 
 
+@dataclass(frozen=True, slots=True)
+class _ContextObservation:
+    provider: str
+    model: str | None
+    tokens: int
+    entry_id: str
+    context_fingerprint: str
+
+
 class CodingSession:
     """Coordinate coding policy, persistence, and events around `AgentHarness`."""
 
@@ -89,6 +102,7 @@ class CodingSession:
         project_context_root: Path | None = None,
         max_tool_iterations: int | None = None,
         trusted: bool = False,
+        context_reserve_tokens: int = 16_384,
     ) -> None:
         self.provider = provider
         self.sessions = sessions
@@ -101,6 +115,9 @@ class CodingSession:
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
         self.tool_context = tool_context or ToolContext.default()
         self.trusted = trusted
+        if context_reserve_tokens < 0:
+            raise ValueError("context_reserve_tokens must be non-negative")
+        self.context_reserve_tokens = context_reserve_tokens
         self.tools = (
             tuple(tools)
             if tools is not None
@@ -116,6 +133,7 @@ class CodingSession:
         self._pending_flush_lock = anyio.Lock()
         self._operation_lock = anyio.Semaphore(1)
         self._history_refresh_session_ids: set[str] = set()
+        self._context_observations: dict[str, _ContextObservation] = {}
 
     async def run(
         self,
@@ -173,15 +191,8 @@ class CodingSession:
                 tools=self.tools,
                 max_tool_iterations=self.max_tool_iterations,
                 effort=self.effort,
-                context_window=(
-                    self.models.context_window(
-                        self.provider.name,
-                        self.model,
-                        default_model=self.provider.default_model,
-                    )
-                    if self.models is not None
-                    else None
-                ),
+                context_window=self._context_window(),
+                context_reserve_tokens=self.context_reserve_tokens,
             ),
             messages=(*prompt_messages, *self._conversation_history(history)),
         )
@@ -204,8 +215,27 @@ class CodingSession:
                     turns = event.turn
                 elif isinstance(event, ErrorEvent):
                     saw_loop_error = True
+                completion_entry_id: str | None = None
                 if isinstance(event, MessageCompleted | ToolExecutionEnded):
-                    self._queue_completion(session, event, operation_id=operation_id)
+                    completion_entry_id = self._queue_completion(
+                        session, event, operation_id=operation_id
+                    )
+                if (
+                    isinstance(event, MessageCompleted)
+                    and event.finish_reason not in {"error", "cancelled"}
+                    and event.usage is not None
+                    and event.usage.total_tokens > 0
+                    and not event.tool_calls
+                    and completion_entry_id is not None
+                ):
+                    current_messages = self._normalize_provider_messages(harness.messages)
+                    self._context_observations[session.session_id] = _ContextObservation(
+                        provider=self.provider.name,
+                        model=self.model or self.provider.default_model,
+                        tokens=event.usage.total_tokens,
+                        entry_id=completion_entry_id,
+                        context_fingerprint=context_fingerprint(current_messages, self.tools),
+                    )
 
                 yield await emit(event)
         except Exception as exc:
@@ -292,6 +322,7 @@ class CodingSession:
                         expected_context_entry_ids=plan.expected_context_entry_ids,
                     )
                     self._history_refresh_session_ids.add(session.session_id)
+                    self._context_observations.pop(session.session_id, None)
                     saved = SessionSaved(session_id=session.session_id, path=session.path)
                     publication_errors: list[str] = []
                     try:
@@ -356,6 +387,47 @@ class CodingSession:
                 yield cancelled
                 raise
 
+    async def get_session_stats(self, session: JsonlSession | None = None) -> SessionStats:
+        """Return a consistent, non-persisted statistics snapshot."""
+
+        async with self._operation_lock:
+            await self._flush_pending_entries()
+            if session is None or not session.path.exists():
+                entries: tuple[SessionEntry, ...] = ()
+            else:
+                entries = await anyio.to_thread.run_sync(session.read_entries)
+            replay = replay_session_entries(entries)
+            history = self._conversation_history(replay.messages)
+            provider_messages = self._provider_messages(history)
+            observation = self._context_observations.get(
+                session.session_id if session is not None else ""
+            )
+            observed_tokens = None
+            observed_is_current = False
+            observed_entry_id = None
+            observed_context_fingerprint = None
+            if observation is not None:
+                observed_tokens = observation.tokens
+                observed_entry_id = observation.entry_id
+                observed_context_fingerprint = observation.context_fingerprint
+                observed_is_current = (
+                    observation.provider == self.provider.name
+                    and observation.model == (self.model or self.provider.default_model)
+                )
+            return build_session_stats(
+                session_id=session.session_id if session is not None else None,
+                entries=entries,
+                replay=replay,
+                provider_messages=provider_messages,
+                tools=self.tools,
+                context_window=self._context_window(),
+                reserve_tokens=self.context_reserve_tokens,
+                observed_tokens=observed_tokens,
+                observed_is_current=observed_is_current,
+                observed_entry_id=observed_entry_id,
+                observed_context_fingerprint=observed_context_fingerprint,
+            )
+
     def _allowed_tool_specs(self, tool_registry: ToolRegistry) -> tuple[ToolSpec, ...]:
         return tuple(
             ToolSpec.from_tool(tool)
@@ -381,6 +453,25 @@ class CodingSession:
 
         return tuple(message for message in history if message.role != "system")
 
+    def _provider_messages(self, history: Sequence[Message]) -> tuple[Message, ...]:
+        return (*self._prompt_messages(), *self._normalize_provider_messages(history))
+
+    def _normalize_provider_messages(self, messages: Sequence[Message]) -> tuple[Message, ...]:
+        return tuple(
+            normalized
+            for message in messages
+            if (normalized := provider_history_message(message)) is not None
+        )
+
+    def _context_window(self) -> int | None:
+        if self.models is None:
+            return None
+        return self.models.context_window(
+            self.provider.name,
+            self.model,
+            default_model=self.provider.default_model,
+        )
+
     async def _emit(
         self,
         event: WispEvent,
@@ -401,8 +492,8 @@ class CodingSession:
         event: MessageCompleted | ToolExecutionEnded,
         *,
         operation_id: str | None = None,
-    ) -> None:
-        self._queue_message(
+    ) -> str:
+        return self._queue_message(
             session,
             message_from_completion_event(event),
             operation_id=operation_id,
@@ -414,7 +505,7 @@ class CodingSession:
         message: Message,
         *,
         operation_id: str | None = None,
-    ) -> None:
+    ) -> str:
         entry = SessionEntry(
             session_id=session.session_id,
             message=message,
@@ -422,6 +513,7 @@ class CodingSession:
             created_at=message.created_at,
         )
         self._pending_entries.append(_PendingSessionEntry(session=session, entry=entry))
+        return entry.id
 
     async def _repair_and_flush(
         self,

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import wisp.providers.events as provider_events
+from wisp.agent.context import build_context_budget, estimate_context
 from wisp.agent.execution import (
     ToolExecutionEvent,
     ToolExecutionProtocolError,
@@ -14,6 +15,7 @@ from wisp.agent.execution import (
 )
 from wisp.agent.messages import Message
 from wisp.events import (
+    ContextEstimated,
     ContextOverflow,
     ContextPressure,
     ErrorEvent,
@@ -53,6 +55,7 @@ from wisp.providers.events import (
 
 type AgentLoopEvent = (
     TurnStarted
+    | ContextEstimated
     | ProviderRetrying
     | MessageStarted
     | MessageDelta
@@ -94,11 +97,14 @@ class AgentLoopConfig:
     # own default behavior."
     effort: str | None = None
     context_window: int | None = None
+    context_reserve_tokens: int = 16_384
     context_pressure_threshold: float = 0.8
 
     def __post_init__(self) -> None:
         if self.context_window is not None and self.context_window <= 0:
             raise ValueError("context_window must be positive")
+        if self.context_reserve_tokens < 0:
+            raise ValueError("context_reserve_tokens must be non-negative")
         if not 0 < self.context_pressure_threshold <= 1:
             raise ValueError("context_pressure_threshold must be greater than 0 and at most 1")
 
@@ -192,6 +198,7 @@ async def run_agent_loop(
     previous_response_id: str | None = None
     tool_iterations = 0
     turn = 0
+    continuation_messages: list[Message] = []
 
     try:
         while True:
@@ -207,6 +214,19 @@ async def run_agent_loop(
             response_started = False
             terminal_response: ProviderResponseCompleted | ProviderResponseFailed | None = None
             streamed_tool_calls: list[ToolCall] = []
+            streamed_thinking: list[str] = []
+
+            estimate = estimate_context((*messages, *continuation_messages), config.tools)
+            yield ContextEstimated(
+                turn=turn,
+                provider=config.provider.name,
+                model=config.model or config.provider.default_model,
+                budget=build_context_budget(
+                    estimate,
+                    context_window=config.context_window,
+                    reserve_tokens=config.context_reserve_tokens,
+                ),
+            )
 
             # `effort` is only passed when actually set, not unconditionally
             # as None: it is a newer, optional Provider.stream() keyword, and
@@ -275,6 +295,7 @@ async def run_agent_loop(
                     )
                 elif isinstance(provider_event, ProviderThinkingDelta):
                     _require_provider_response_started(response_started)
+                    streamed_thinking.append(provider_event.delta)
                     yield MessageDelta(
                         turn=turn,
                         delta=provider_event.delta,
@@ -349,6 +370,24 @@ async def run_agent_loop(
                     )
                     for tool_call in tool_calls
                 ),
+            )
+            continuation_messages.append(
+                Message(
+                    role="assistant",
+                    content=response.content + "".join(streamed_thinking),
+                    response_id=response_id,
+                    finish_reason=response.finish_reason,
+                    usage=usage,
+                    tool_calls=tuple(
+                        ToolCallSnapshot(
+                            call_id=tool_call.call_id,
+                            name=tool_call.name,
+                            arguments=dict(tool_call.arguments),
+                            parse_error=tool_call.parse_error,
+                        )
+                        for tool_call in tool_calls
+                    ),
+                )
             )
             if usage is not None and config.context_window is not None:
                 pressure_ratio = usage.total_tokens / config.context_window
@@ -427,6 +466,15 @@ async def run_agent_loop(
                     ToolCallResult(
                         call_id=result_event.call_id,
                         output=result_event.output,
+                        is_error=result_event.is_error,
+                    )
+                )
+                continuation_messages.append(
+                    Message(
+                        role="tool",
+                        content=result_event.output,
+                        tool_call_id=result_event.call_id,
+                        tool_name=result_event.name,
                         is_error=result_event.is_error,
                     )
                 )

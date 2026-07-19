@@ -148,6 +148,7 @@ Wisp reads configuration from CLI flags, environment variables, and JSON setting
 | `WISP_RETRY_MAX_RETRIES` | Provider retry count; defaults to `2`, set `0` to disable |
 | `WISP_RETRY_BASE_DELAY_SECONDS` | Initial retry delay; defaults to `0.5` |
 | `WISP_RETRY_MAX_DELAY_SECONDS` | Maximum retry delay; defaults to `30` |
+| `WISP_CONTEXT_RESERVE_TOKENS` | Tokens reserved outside the estimated input context; defaults to `16384` |
 | `OPENAI_API_KEY` | Required only for the `openai` provider |
 | `ANTHROPIC_API_KEY` | Required only for the `anthropic` provider |
 | `GOOGLE_API_KEY` | Required only for the `google` provider |
@@ -163,6 +164,7 @@ you trust the project.
   "provider": "openai",
   "model": "gpt-5.6-sol",
   "session_dir": "~/.wisp/sessions",
+  "context_reserve_tokens": 16384,
   "retry": { "max_retries": 2, "base_delay_seconds": 0.5, "max_delay_seconds": 30 }
 }
 ```
@@ -237,6 +239,20 @@ Project context is trust-gated. In untrusted projects, Wisp does not read local 
 or project settings. This is stricter than Pi's broader context loading, but keeps project
 guidance inside the same trust boundary as project settings and future project extensions.
 
+### Context accounting
+
+Before each provider request, Wisp emits `context.estimated` with a deterministic approximation of
+the system prompt, active messages, pending tool results, and tool schemas. The v1 estimator uses a
+conservative `ceil(chars / 4)` heuristic. When the model catalog provides a context window, the
+event also reports the configured reserve, estimated percentage, remaining input budget, and
+whether the estimate has crossed that budget. Unknown models remain permissive and omit
+window-dependent fields.
+
+Provider-reported `usage.total_tokens` is kept separately as the authoritative observation for a
+completed request. Session statistics sum provider totals exactly as reported, including manual
+compaction summary requests; they never reconstruct `total_tokens` from input/output categories.
+`context_reserve_tokens` is user-only, so a project settings file cannot reduce this safety margin.
+
 ### Manual compaction
 
 In the TUI, `/compact [instructions]` replaces older provider-visible turns with a structured
@@ -257,8 +273,10 @@ uv run wisp tui
 
 A fullscreen Textual TUI built on the same RPC controller other integrations use. Its compact
 Pi-style footer shows the current working directory/session plus status, queued follow-ups, and
-provider/model; completed tool cards include bounded multiline output previews. Aggregate
-token/cost/context metrics remain future footer work. Adjust runtime settings with slash commands
+provider/model. It also shows current context use: `ctx 12k/128k` is a current provider
+observation, while `ctx ~12k/128k` is an explicit estimate (for example, immediately after
+compaction). Completed tool cards include bounded multiline output previews. Cost metrics remain
+future work. Adjust runtime settings with slash commands
 instead of up-front flags. The prompt editor accepts multiline text: press Enter to submit, or
 Shift+Enter / Ctrl+J to insert a newline. Pasted newlines are preserved.
 
@@ -327,13 +345,14 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 8`; readers also accept legacy schema v5,
-v6, and v7 events for compatibility. A successful prompt follows this lifecycle (tool events
+Every outbound `WispEvent` includes `"schema_version": 9`; readers also accept legacy schema v5
+through v8 events for compatibility. A successful prompt follows this lifecycle (tool events
 repeat inside a turn when the model requests tools):
 
 ```text
 agent.started
   turn.started
+    context.estimated
     provider.retrying *
     message.started
     message.delta *
@@ -349,6 +368,10 @@ agent.completed
 `message.completed` carries the assembled content, finish reason, response id, and completed tool
 calls. A failed provider response or tool loop emits `error`, a failed `turn.completed`, and a
 failed `agent.completed`; it does not emit `message.completed` for an incomplete response.
+
+Schema v9 adds `context.estimated` and `session.stats`. Estimates are derived, non-persisted request
+snapshots. `session.stats` is returned by the RPC `get_session_stats` command and separates
+lifetime provider usage from the current active-context budget.
 
 Schema v8 adds `compaction.started` and `compaction.completed`, plus the typed RPC `compact`
 command. Successful manual compaction appends one durable compaction entry and emits
@@ -403,14 +426,15 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 |---------|--------|
 | `{"id":"cmd-1","type":"prompt","prompt":"…"}` | Run one agent turn, streaming `WispEvent` JSONL |
 | `{"id":"compact-1","type":"compact","instructions":"Focus on unresolved work"}` | Compact older context in the active session |
-| `{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}` | Request cancellation of the running prompt or compaction |
+| `{"id":"stats-1","type":"get_session_stats"}` | Emit a derived `session.stats` snapshot |
+| `{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}` | Request cancellation of a running or queued operation |
 | `{"id":"approval-1","type":"approval","call_id":"call-1","approved":true,"scope":"tool_session"}` | Approve/deny a pending tool request |
 | `{"id":"trust-1","type":"trust","request_id":"req-1","trusted":true}` | Answer a project-trust request |
 | `{"id":"cmd-2","type":"shutdown"}` | Exit cleanly |
 
 Each command emits `rpc.command.started` / `rpc.command.finished` so clients can group the events
-between them. Prompts and compactions run sequentially; `cancel`, `approval`, and `trust` are
-handled while an operation runs.
+between them. Prompts, compactions, and statistics reads run sequentially; `cancel`, `approval`,
+and `trust` are handled while an operation runs.
 When an allowed mutating/command tool needs approval, Wisp emits `tool.approval.requested` with a
 `call_id`; respond with an `approval` command carrying that `call_id`, a boolean `approved`, and an
 optional approval `scope`: `once` (the default), `tool_session` (the exact tool name for this RPC
@@ -449,8 +473,8 @@ finally:
     await controller.close()
 ```
 
-`RpcController` exposes typed `prompt`, `compact`, `cancel`, `approve`, `configure`, and `shutdown`
-methods and yields parsed `WispEvent` objects.
+`RpcController` exposes typed `prompt`, `compact`, `get_session_stats`, `cancel`, `approve`,
+`configure`, and `shutdown` methods and yields parsed `WispEvent` objects.
 
 ## Development
 

@@ -229,6 +229,7 @@ def test_coding_session_streams_fake_response_and_saves_session(tmp_path: Path) 
     assert emitted_event_types == [
         "agent.started",
         "turn.started",
+        "context.estimated",
         "message.started",
         "message.delta",
         "message.delta",
@@ -1153,6 +1154,7 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
     assert emitted_event_types == [
         "agent.started",
         "turn.started",
+        "context.estimated",
         "message.started",
         "message.delta",
         "message.completed",
@@ -1162,6 +1164,7 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
         "tool.result",
         "turn.completed",
         "turn.started",
+        "context.estimated",
         "message.started",
         "message.delta",
         "message.completed",
@@ -1330,9 +1333,10 @@ def test_coding_session_blocks_approval_required_tool_without_override(tmp_path:
     assert approval_requested.safety == "mutating"
     assert approval_resolved.approved is False
     assert approval_resolved.reason is not None
-    assert [event.type for event in emitted_events[:6]] == [
+    assert [event.type for event in emitted_events[:7]] == [
         "agent.started",
         "turn.started",
+        "context.estimated",
         "message.started",
         "message.completed",
         "tool.call",
@@ -1491,6 +1495,7 @@ def test_coding_session_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -
         first_event = await anext(events)
         assert first_event.type == "agent.started"
         assert (await anext(events)).type == "turn.started"
+        assert (await anext(events)).type == "context.estimated"
         assert (await anext(events)).type == "message.started"
         assert (await anext(events)).type == "message.completed"
         call_event = await anext(events)
