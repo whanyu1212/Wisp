@@ -45,12 +45,15 @@ from wisp.providers.events import (
 )
 from wisp.providers.fake import ScriptedProvider
 from wisp.runtime.event_bus import EventBus
+from wisp.runtime.registry import ToolRegistry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import (
     HISTORICAL_CONTEXT_SUMMARY_LABEL,
     SessionContextRow,
     SessionReplay,
 )
+from wisp.tools.builtin import ReadTool
+from wisp.tools.context import ToolContext
 
 VALID_COMPACTION_SUMMARY = """## Goal
 Preserve the active coding objective.
@@ -845,6 +848,55 @@ def test_coding_session_auto_compaction_prepare_failure_preserves_prompt_success
     assert events[-1].outcome == "completed"
 
 
+def test_coding_session_auto_compaction_read_failure_keeps_final_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer two",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ]
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+
+        async def fail_prepare(_session: JsonlSession) -> SessionReplay:
+            raise OSError("context replay failed")
+
+        monkeypatch.setattr(agent, "_prepare_compaction_replay", fail_prepare)
+        return [event async for event in agent.run("question two", session=session)]
+
+    events = anyio.run(run)
+
+    failed_index = next(
+        index
+        for index, event in enumerate(events)
+        if isinstance(event, CompactionCompleted) and event.outcome == "failed"
+    )
+    saved_indexes = [index for index, event in enumerate(events) if isinstance(event, SessionSaved)]
+    assert saved_indexes == [failed_index + 1]
+    assert events[-1].type == "agent.completed"
+    assert events[-1].outcome == "completed"
+
+
 def test_coding_session_auto_compaction_reports_post_commit_publication_failure(
     tmp_path: Path,
 ) -> None:
@@ -1020,6 +1072,58 @@ def test_coding_session_auto_compaction_falls_back_to_estimate(tmp_path: Path) -
     assert started.trigger_budget is not None
     assert started.trigger_budget.observed_tokens is None
     assert started.trigger_budget.estimate.total_tokens > 80
+
+
+def test_coding_session_auto_compaction_uses_estimate_after_tool_round(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "input.txt"
+    source.write_text("tool output", encoding="utf-8")
+    call = ToolCall(call_id="call-1", name="read", arguments={"path": source.name})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer two",
+                    usage=ProviderUsage(input_tokens=890, output_tokens=11, total_tokens=901),
+                ),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    registry = ToolRegistry()
+    registry.register(ReadTool())
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(context_window=1_000),
+            tool_registry=registry,
+            tool_context=ToolContext(cwd=tmp_path),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=100,
+        )
+        return [event async for event in agent.run("question two", session=session)]
+
+    events = anyio.run(run)
+
+    assert not any(isinstance(event, CompactionStarted | CompactionCompleted) for event in events)
+    assert len(provider.calls) == 2
 
 
 def test_coding_session_auto_compaction_cancellation_preserves_completed_turn(

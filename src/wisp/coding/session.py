@@ -222,6 +222,7 @@ class CodingSession:
         await session.append_message(user_message, operation_id=operation_id)
         turns = 0
         saw_loop_error = False
+        had_tool_round = False
         harness_events = harness.prompt_message(user_message)
 
         try:
@@ -230,6 +231,10 @@ class CodingSession:
                     turns = event.turn
                 elif isinstance(event, ErrorEvent):
                     saw_loop_error = True
+                elif isinstance(event, MessageCompleted) and (
+                    event.tool_calls or event.finish_reason == "tool_calls"
+                ):
+                    had_tool_round = True
                 completion_entry_id: str | None = None
                 if isinstance(event, MessageCompleted | ToolExecutionEnded):
                     completion_entry_id = self._queue_completion(
@@ -241,6 +246,7 @@ class CodingSession:
                     and event.usage is not None
                     and event.usage.total_tokens > 0
                     and not event.tool_calls
+                    and not had_tool_round
                     and completion_entry_id is not None
                 ):
                     current_messages = self._normalize_provider_messages(harness.messages)
@@ -354,7 +360,9 @@ class CodingSession:
         except NothingToCompactError:
             return
         except Exception as exc:
-            status.skip_final_save = True
+            status.skip_final_save = any(
+                pending.entry.session_id == session.session_id for pending in self._pending_entries
+            )
             source_entry_count = len(replay.context_entry_ids) if replay is not None else 0
             yield await self._emit_recoverable_event(
                 CompactionStarted(
