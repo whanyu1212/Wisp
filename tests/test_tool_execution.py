@@ -243,6 +243,36 @@ def test_executor_hides_malformed_result_detail_from_model() -> None:
     assert "secret" not in ended.output
 
 
+def test_executor_treats_unencodable_result_text_as_malformed() -> None:
+    ended = _run_executor(_ResultTool(name="custom", result=ToolResult(text="\ud800")))
+
+    assert ended.is_error is True
+    assert ended.output == "Tool returned an invalid result"
+
+
+@pytest.mark.parametrize(
+    ("name", "data"),
+    [
+        ("write", {"before_text": "\ud800"}),
+        ("read", {"line_count": 1, "path": "\ud800"}),
+    ],
+)
+def test_executor_treats_unencodable_result_metadata_as_malformed(
+    name: str, data: Mapping[str, object]
+) -> None:
+    ended = _run_executor(_ResultTool(name=name, result=ToolResult(text="result", data=data)))
+
+    assert ended.is_error is True
+    assert ended.output == "Tool returned an invalid result"
+
+
+def test_executor_hides_unencodable_tool_error_message() -> None:
+    ended = _run_executor(_RaisingTool(ToolError("\ud800")))
+
+    assert ended.is_error is True
+    assert ended.output == "Tool execution failed"
+
+
 def test_executor_bounds_successful_extension_output() -> None:
     ended = _run_executor(_ResultTool(name="custom", result=ToolResult(text="x" * 60_000)))
 

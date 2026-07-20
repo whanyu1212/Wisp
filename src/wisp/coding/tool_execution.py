@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
+from typing import cast
 
 from wisp.agent.execution import ToolExecutionEvent, ToolResultProcessingError
 from wisp.events import ToolApprovalRequested, ToolApprovalResolved, ToolExecutionEnded
@@ -247,6 +248,7 @@ def _normalize_tool_result(
     text = result.text
     if type(text) is not str:
         raise _MalformedToolResultError("ToolResult.text must be a string")
+    _require_utf8(text, field="ToolResult.text")
     truncated = result.truncated
     bounded_text = truncate_text(
         text,
@@ -280,6 +282,7 @@ def _snapshot_result_data(
     elif tool_name == "write":
         before_text = data.get("before_text")
         if type(before_text) is str:
+            _require_utf8(before_text, field="ToolResult.data['before_text']")
             bounded_before = truncate_text(
                 before_text,
                 max_bytes=max(0, context.max_output_bytes),
@@ -312,7 +315,16 @@ def _copy_exact(
 ) -> None:
     value = source.get(key)
     if type(value) is expected_type:
+        if expected_type is str:
+            _require_utf8(cast(str, value), field=f"ToolResult.data[{key!r}]")
         target[key] = value
+
+
+def _require_utf8(value: str, *, field: str) -> None:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise _MalformedToolResultError(f"{field} must be valid UTF-8 text") from exc
 
 
 def _copy_result_count(source: Mapping[str, object], target: dict[str, object], key: str) -> None:
@@ -342,6 +354,10 @@ def _model_visible_tool_error(exc: Exception) -> str:
     except Exception:  # pragma: no cover - defensive against hostile subclasses
         return "Tool execution failed"
     if not message:
+        return "Tool execution failed"
+    try:
+        message.encode("utf-8")
+    except UnicodeEncodeError:
         return "Tool execution failed"
     if len(message) <= _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS:
         return message
