@@ -8,10 +8,14 @@ unrelated ``exit_code`` from being styled as a failure.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import anyio
+import pytest
 
+import wisp.coding.tool_execution as tool_execution
+from wisp.agent.execution import ToolResultProcessingError
 from wisp.coding.tool_execution import (
     ConfiguredToolExecutor,
     _promote_before_text,
@@ -25,7 +29,7 @@ from wisp.runtime.registry import ToolRegistry
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
-from wisp.tools.result import ToolResult
+from wisp.tools.result import ToolError, ToolResult
 
 
 def test_promote_exit_code_extracts_for_recognized_shell_tool() -> None:
@@ -103,6 +107,67 @@ class _TruncatingTool:
         return result
 
 
+class _RaisingTool:
+    name = "raising"
+    safety = "read"
+    description = "Raises an unexpected exception."
+    input_schema: dict[str, object] = {"type": "object", "properties": {}}
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def run(self, arguments: object, context: object) -> ToolResult:
+        raise self._exc
+
+
+class _MalformedTextResult:
+    @property
+    def text(self) -> str:
+        raise ValueError("secret result detail")
+
+
+class _MalformedResultTool:
+    name = "malformed"
+    safety = "read"
+    description = "Returns a malformed result."
+    input_schema: dict[str, object] = {"type": "object", "properties": {}}
+
+    async def run(self, arguments: object, context: object) -> object:
+        return _MalformedTextResult()
+
+
+class _ResultTool:
+    safety = "read"
+    description = "Returns a configurable result."
+    input_schema: dict[str, object] = {"type": "object", "properties": {}}
+
+    def __init__(self, *, name: str, result: ToolResult) -> None:
+        self.name = name
+        self._result = result
+
+    async def run(self, arguments: object, context: object) -> ToolResult:
+        return self._result
+
+
+class _NoIterMapping(Mapping[str, object]):
+    def __init__(self, values: Mapping[str, object]) -> None:
+        self._values = values
+
+    def __getitem__(self, key: str) -> object:
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        raise AssertionError("result metadata must not be iterated")
+
+    def __len__(self) -> int:
+        raise AssertionError("result metadata size must not be requested")
+
+
+class _RaisingList(list[object]):
+    def __len__(self) -> int:
+        raise AssertionError("extension list subclass must not be inspected")
+
+
 def _run_executor(tool: object) -> ToolExecutionEnded:
     registry = ToolRegistry()
     registry.register(tool)  # type: ignore[arg-type]
@@ -150,3 +215,156 @@ def test_executor_degrades_non_bool_truncated_instead_of_crashing() -> None:
         ended = _run_executor(_TruncatingTool(truncated=bad))
         assert ended.truncated is False
         assert ended.is_error is False
+
+
+def test_executor_keeps_explicit_tool_errors_model_visible_and_bounded() -> None:
+    detail = "x" * 2_100
+
+    ended = _run_executor(_RaisingTool(ToolError(detail)))
+
+    assert ended.is_error is True
+    assert ended.output.endswith("...")
+    assert len(ended.output) == 2_000
+
+
+def test_executor_hides_unexpected_tool_exception_detail_from_model() -> None:
+    ended = _run_executor(_RaisingTool(RuntimeError("api-key=secret")))
+
+    assert ended.is_error is True
+    assert ended.output == "Tool execution failed"
+    assert "secret" not in ended.output
+
+
+def test_executor_hides_malformed_result_detail_from_model() -> None:
+    ended = _run_executor(_MalformedResultTool())
+
+    assert ended.is_error is True
+    assert ended.output == "Tool returned an invalid result"
+    assert "secret" not in ended.output
+
+
+def test_executor_treats_unencodable_result_text_as_malformed() -> None:
+    ended = _run_executor(_ResultTool(name="custom", result=ToolResult(text="\ud800")))
+
+    assert ended.is_error is True
+    assert ended.output == "Tool returned an invalid result"
+
+
+@pytest.mark.parametrize(
+    ("name", "data"),
+    [
+        ("write", {"before_text": "\ud800"}),
+        ("read", {"line_count": 1, "path": "\ud800"}),
+    ],
+)
+def test_executor_treats_unencodable_result_metadata_as_malformed(
+    name: str, data: Mapping[str, object]
+) -> None:
+    ended = _run_executor(_ResultTool(name=name, result=ToolResult(text="result", data=data)))
+
+    assert ended.is_error is True
+    assert ended.output == "Tool returned an invalid result"
+
+
+def test_executor_hides_unencodable_tool_error_message() -> None:
+    ended = _run_executor(_RaisingTool(ToolError("\ud800")))
+
+    assert ended.is_error is True
+    assert ended.output == "Tool execution failed"
+
+
+def test_executor_bounds_successful_extension_output() -> None:
+    ended = _run_executor(_ResultTool(name="custom", result=ToolResult(text="x" * 60_000)))
+
+    assert ended.is_error is False
+    assert ended.truncated is True
+    assert len(ended.output.encode()) <= 50_000
+    assert ended.output.endswith("[truncated]")
+
+
+def test_executor_reads_only_recognized_result_metadata() -> None:
+    data = _NoIterMapping({"line_count": 2, "selected_count": 1, "path": "file.py"})
+
+    ended = _run_executor(_ResultTool(name="read", result=ToolResult(text="line", data=data)))
+
+    assert ended.is_error is False
+    assert ended.summary == "read 1 line of 2 from file.py"
+
+
+def test_executor_rejects_hostile_metadata_subclasses_inside_extension_boundary() -> None:
+    ended = _run_executor(
+        _ResultTool(
+            name="ls",
+            result=ToolResult(text="entry", data={"entries": _RaisingList(["secret"])}),
+        )
+    )
+
+    assert ended.is_error is False
+    assert ended.summary is None
+
+
+@pytest.mark.parametrize(
+    ("name", "data"),
+    [
+        ("read", {"line_count": 10**5_000}),
+        ("grep", {"count": 10**5_000}),
+        ("find", {"count": -1}),
+    ],
+)
+def test_executor_omits_out_of_range_summary_counts(name: str, data: Mapping[str, object]) -> None:
+    ended = _run_executor(_ResultTool(name=name, result=ToolResult(text="result", data=data)))
+
+    assert ended.is_error is False
+    assert ended.summary is None
+
+
+def test_executor_omits_out_of_range_exit_code() -> None:
+    ended = _run_executor(
+        _ResultTool(
+            name="bash",
+            result=ToolResult(text="result", data={"exit_code": 10**5_000}),
+        )
+    )
+
+    assert ended.is_error is False
+    assert ended.exit_code is None
+
+
+def test_executor_propagates_wisp_result_processing_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_summary(
+        name: str,
+        data: Mapping[str, object],
+        *,
+        truncated: bool = False,
+    ) -> str | None:
+        del name, data, truncated
+        raise RuntimeError("internal secret detail")
+
+    monkeypatch.setattr(tool_execution, "summarize_tool_result", fail_summary)
+
+    with pytest.raises(ToolResultProcessingError) as raised:
+        _run_executor(_TruncatingTool(truncated=False))
+
+    assert raised.value.call_id == "c1"
+    assert raised.value.tool_name == "capped"
+    assert str(raised.value) == "Internal error while processing a tool result"
+    assert "secret" not in str(raised.value)
+    assert isinstance(raised.value.__cause__, RuntimeError)
+
+
+def test_executor_propagates_wisp_output_normalization_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_truncation(text: str, *, max_bytes: int, max_lines: int) -> object:
+        del text, max_bytes, max_lines
+        raise RuntimeError("internal truncation failure")
+
+    monkeypatch.setattr(tool_execution, "truncate_text", fail_truncation)
+
+    with pytest.raises(ToolResultProcessingError) as raised:
+        _run_executor(_TruncatingTool(truncated=False))
+
+    assert str(raised.value) == "Internal error while processing a tool result"
+    assert isinstance(raised.value.__cause__, RuntimeError)

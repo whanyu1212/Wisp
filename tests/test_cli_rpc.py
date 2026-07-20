@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Mapping
 
 import pytest
 
+import wisp.coding.tool_execution as tool_execution
 from tests.cli_support import *
 from wisp.agent.messages import CompactionRecord, SessionEntry
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
@@ -972,6 +974,60 @@ def test_rpc_mode_reports_bad_commands_and_continues(tmp_path: Path) -> None:
     )
     assert finished[-1]["command_id"] == "ok"
     assert finished[-1]["ok"] is True
+
+
+def test_rpc_mode_reports_internal_tool_result_failure_and_continues(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    original_summary = tool_execution.summarize_tool_result
+    summary_calls = 0
+
+    def fail_first_summary(
+        name: str,
+        data: Mapping[str, object],
+        *,
+        truncated: bool = False,
+    ) -> str | None:
+        nonlocal summary_calls
+        summary_calls += 1
+        if summary_calls == 1:
+            raise RuntimeError("internal api-key=secret")
+        return original_summary(name, data, truncated=truncated)
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_tool_runtime)
+    monkeypatch.setattr(tool_execution, "summarize_tool_result", fail_first_summary)
+
+    result = runner.invoke(
+        app,
+        [
+            "--mode",
+            "rpc",
+            "--yes",
+            "--allow-tool",
+            "danger",
+            "--session-dir",
+            str(tmp_path),
+        ],
+        input=(
+            '{"id":"cmd-1","type":"prompt","prompt":"first"}\n'
+            '{"id":"cmd-2","type":"prompt","prompt":"second"}\n'
+        ),
+        env={"WISP_PROVIDER": "tool-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "internal api-key=secret" not in result.stdout
+    records = _jsonl_records(result.stdout)
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [(record["command_id"], record["ok"], record["error"]) for record in finished] == [
+        ("cmd-1", False, "Internal error while processing a tool result"),
+        ("cmd-2", True, None),
+    ]
+    assert any(
+        record["type"] == "message.completed" and record["content"] == "done" for record in records
+    )
 
 
 def test_rpc_mode_rejects_cli_prompt(tmp_path: Path) -> None:

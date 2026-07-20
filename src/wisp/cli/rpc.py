@@ -24,6 +24,7 @@ import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
+from wisp.agent.execution import ToolResultProcessingError
 from wisp.agent.messages import Message
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.coding import CodingSession
@@ -1073,13 +1074,16 @@ async def _run_rpc_prompt_command(
                 )
             except _JsonOutputModeError as exc:
                 error = str(exc)
-            except (ProviderError, SessionError, UnknownProviderError, UnknownToolError) as exc:
-                # A first-run approval can rebuild the agent from a trusted project's
-                # settings.json that names an unknown provider (or an otherwise bad
-                # runtime); resolve() raises here, before agent.run(). Report it as a
-                # normal command failure — matching startup and print modes — instead of
-                # letting it escape and tear down the RPC process with a silent stream
-                # end and no rpc.command.finished error.
+            except (
+                ProviderError,
+                SessionError,
+                ToolResultProcessingError,
+                UnknownProviderError,
+                UnknownToolError,
+            ) as exc:
+                # Runtime/configuration failures and internal result-processing errors
+                # fail this command without tearing down the RPC process. The agent loop
+                # already emitted the safe ErrorEvent for failures raised during a run.
                 error = str(exc)
             except anyio.get_cancelled_exc_class():
                 error = f"RPC command cancelled: {command_id}"
