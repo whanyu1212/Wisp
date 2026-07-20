@@ -322,3 +322,19 @@ def test_executor_propagates_wisp_result_processing_failures(
     assert str(raised.value) == "Internal error while processing a tool result"
     assert "secret" not in str(raised.value)
     assert isinstance(raised.value.__cause__, RuntimeError)
+
+
+def test_executor_propagates_wisp_output_normalization_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_truncation(text: str, *, max_bytes: int, max_lines: int) -> object:
+        del text, max_bytes, max_lines
+        raise RuntimeError("internal truncation failure")
+
+    monkeypatch.setattr(tool_execution, "truncate_text", fail_truncation)
+
+    with pytest.raises(ToolResultProcessingError) as raised:
+        _run_executor(_TruncatingTool(truncated=False))
+
+    assert str(raised.value) == "Internal error while processing a tool result"
+    assert isinstance(raised.value.__cause__, RuntimeError)

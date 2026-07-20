@@ -33,6 +33,14 @@ _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS = 2_000
 _MAX_RESULT_COUNT = (1 << 63) - 1
 _MIN_EXIT_CODE = -(1 << 31)
 _MAX_EXIT_CODE = (1 << 31) - 1
+_RESULT_DATA_KEYS = {
+    "bash": ("exit_code",),
+    "write": ("before_text", "created"),
+    "read": ("line_count", "selected_count", "path"),
+    "grep": ("count",),
+    "find": ("count",),
+    "ls": ("entries", "path"),
+}
 
 
 @dataclass(frozen=True)
@@ -57,12 +65,25 @@ class _ToolRunOutcome:
 
 
 @dataclass(frozen=True)
+class _RawToolResultSnapshot:
+    """Extension-owned result fields copied without Wisp normalization."""
+
+    text: object
+    data: dict[str, object]
+    truncated: object
+
+
+@dataclass(frozen=True)
 class _ToolResultSnapshot:
-    """Trusted copy of extension-owned result fields used by Wisp normalization."""
+    """Validated and bounded tool result used by Wisp normalization."""
 
     text: str
     data: dict[str, object]
     truncated: bool
+
+
+class _MalformedToolResultError(TypeError):
+    """Raised when copied extension result fields violate the ToolResult contract."""
 
 
 class ConfiguredToolExecutor:
@@ -170,14 +191,17 @@ class ConfiguredToolExecutor:
         except Exception as exc:  # noqa: BLE001 - tool failures are recoverable results
             return _ToolRunOutcome(_model_visible_tool_error(exc), is_error=True)
 
-        # Access and copy extension-owned fields before entering Wisp's normalization
-        # boundary. A malformed result must remain an ordinary recoverable tool error.
+        # Access and copy extension-owned fields in isolation. A malformed result must
+        # remain an ordinary recoverable tool error.
         try:
-            snapshot = _snapshot_tool_result(result, tool_name=tool_name, context=self._context)
+            raw_snapshot = _read_tool_result(result, tool_name=tool_name)
         except Exception:  # noqa: BLE001 - malformed extension result
             return _ToolRunOutcome("Tool returned an invalid result", is_error=True)
 
         try:
+            snapshot = _normalize_tool_result(
+                raw_snapshot, tool_name=tool_name, context=self._context
+            )
             return _ToolRunOutcome(
                 output=snapshot.text,
                 exit_code=_promote_exit_code(tool_name, snapshot.data),
@@ -194,24 +218,35 @@ class ConfiguredToolExecutor:
                 # it False.
                 truncated=_promote_truncated(snapshot.truncated),
             )
+        except _MalformedToolResultError:
+            return _ToolRunOutcome("Tool returned an invalid result", is_error=True)
         except Exception as exc:
             raise ToolResultProcessingError(call_id=call_id, tool_name=tool_name) from exc
 
 
-def _snapshot_tool_result(
-    result: ToolResult,
+def _read_tool_result(result: ToolResult, *, tool_name: str) -> _RawToolResultSnapshot:
+    """Read only extension-owned fields and recognized metadata keys."""
+
+    text = result.text
+    data = result.data
+    truncated = result.truncated
+    if not isinstance(data, Mapping):
+        raise TypeError("ToolResult.data must be a mapping")
+    raw_data = {key: data.get(key) for key in _RESULT_DATA_KEYS.get(tool_name, ())}
+    return _RawToolResultSnapshot(text=text, data=raw_data, truncated=truncated)
+
+
+def _normalize_tool_result(
+    result: _RawToolResultSnapshot,
     *,
     tool_name: str,
     context: ToolContext,
 ) -> _ToolResultSnapshot:
-    """Copy only bounded, recognized extension fields into built-in types."""
+    """Validate and bound copied fields using only Wisp-owned operations."""
 
     text = result.text
     if type(text) is not str:
-        raise TypeError("ToolResult.text must be a string")
-    data = result.data
-    if not isinstance(data, Mapping):
-        raise TypeError("ToolResult.data must be a mapping")
+        raise _MalformedToolResultError("ToolResult.text must be a string")
     truncated = result.truncated
     bounded_text = truncate_text(
         text,
@@ -220,7 +255,7 @@ def _snapshot_tool_result(
     )
     return _ToolResultSnapshot(
         text=bounded_text.text,
-        data=_snapshot_result_data(tool_name, data, context=context),
+        data=_snapshot_result_data(tool_name, result.data, context=context),
         truncated=(truncated if type(truncated) is bool else False) or bounded_text.truncated,
     )
 
