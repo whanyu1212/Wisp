@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
 import anyio
 import pytest
 
+import wisp.coding.tool_execution as tool_execution
+from wisp.agent.execution import ToolResultProcessingError
 from wisp.agent.messages import Message, SessionEntry
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.coding.session import CodingSession
 from wisp.events import (
     AgentCompleted,
+    ErrorEvent,
     MessageCompleted,
     MessageDelta,
     SessionSaved,
@@ -1237,7 +1240,7 @@ def test_coding_session_returns_error_result_when_tool_result_text_raises(tmp_pa
     events = anyio.run(run_agent)
 
     result = next(event for event in events if isinstance(event, ToolResultReady))
-    assert result.output == "could not read tool result text"
+    assert result.output == "Tool returned an invalid result"
     assert result.is_error is True
     assert any(
         isinstance(event, MessageCompleted) and event.content == "recovered" for event in events
@@ -1248,6 +1251,57 @@ def test_coding_session_returns_error_result_when_tool_result_text_raises(tmp_pa
         if message.role == "tool"
     )
     assert tool_message.is_error is True
+
+
+def test_coding_session_does_not_turn_internal_result_failure_into_tool_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "internal api-key=secret"
+
+    def fail_summary(
+        name: str,
+        data: Mapping[str, object],
+        *,
+        truncated: bool = False,
+    ) -> str | None:
+        del name, data, truncated
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(tool_execution, "summarize_tool_result", fail_summary)
+    provider = ToolLoopProvider(
+        [
+            [ToolCall(call_id="call-1", name="echo", arguments={"text": "hello"})],
+            ["must not run"],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+
+    async def run_agent() -> tuple[list[object], ToolResultProcessingError]:
+        agent = CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+        )
+        events: list[object] = []
+        with pytest.raises(ToolResultProcessingError) as raised:
+            async for event in agent.run("hello"):
+                events.append(event)
+        return events, raised.value
+
+    events, error = anyio.run(run_agent)
+
+    assert error.call_id == "call-1"
+    assert error.tool_name == "echo"
+    assert len(provider.calls) == 1
+    assert not any(isinstance(event, ToolExecutionEnded | ToolResultReady) for event in events)
+    assert [type(event) for event in events[-3:]] == [ErrorEvent, TurnCompleted, AgentCompleted]
+    assert cast(ErrorEvent, events[-3]).message == "Internal error while processing a tool result"
+    assert cast(TurnCompleted, events[-2]).outcome == "failed"
+    assert cast(AgentCompleted, events[-1]).outcome == "failed"
+    messages = JsonlSessionStore(tmp_path).latest().read_messages()
+    assert all(secret not in message.content for message in messages)
 
 
 def test_coding_session_filters_provider_tool_specs_by_policy(tmp_path: Path) -> None:

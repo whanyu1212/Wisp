@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 
-from wisp.agent.execution import ToolExecutionEvent
+from wisp.agent.execution import ToolExecutionEvent, ToolResultProcessingError
 from wisp.events import ToolApprovalRequested, ToolApprovalResolved, ToolExecutionEnded
 from wisp.providers.events import ToolCall
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
@@ -13,7 +13,9 @@ from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import Tool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
+from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.summary import summarize_tool_result
+from wisp.tools.truncation import truncate_text
 
 # Tools whose ``ToolResult.data["exit_code"]`` carries genuine process
 # exit-status semantics. Gating promotion by name keeps a custom tool that
@@ -26,6 +28,11 @@ _EXIT_CODE_TOOLS = frozenset({"bash"})
 # extension tool that stashes an unrelated ``before_text`` can't inject content into
 # the diff renderer — only these tools' snapshots reach the event.
 _BEFORE_TEXT_TOOLS = frozenset({"write"})
+
+_MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS = 2_000
+_MAX_RESULT_COUNT = (1 << 63) - 1
+_MIN_EXIT_CODE = -(1 << 31)
+_MAX_EXIT_CODE = (1 << 31) - 1
 
 
 @dataclass(frozen=True)
@@ -47,6 +54,15 @@ class _ToolRunOutcome:
     created: bool = False
     summary: str | None = None
     truncated: bool = False
+
+
+@dataclass(frozen=True)
+class _ToolResultSnapshot:
+    """Trusted copy of extension-owned result fields used by Wisp normalization."""
+
+    text: str
+    data: dict[str, object]
+    truncated: bool
 
 
 class ConfiguredToolExecutor:
@@ -110,14 +126,24 @@ class ConfiguredToolExecutor:
                         reason=decision.reason,
                     )
                     if decision.approved:
-                        outcome = await self._run_tool(tool, arguments)
+                        outcome = await self._run_tool(
+                            tool,
+                            arguments,
+                            call_id=tool_call.call_id,
+                            tool_name=tool_call.name,
+                        )
                     else:
                         outcome = _ToolRunOutcome(
                             decision.reason or "Tool execution was not approved",
                             is_error=True,
                         )
                 else:
-                    outcome = await self._run_tool(tool, arguments)
+                    outcome = await self._run_tool(
+                        tool,
+                        arguments,
+                        call_id=tool_call.call_id,
+                        tool_name=tool_call.name,
+                    )
 
         yield ToolExecutionEnded(
             call_id=tool_call.call_id,
@@ -131,29 +157,160 @@ class ConfiguredToolExecutor:
             truncated=outcome.truncated,
         )
 
-    async def _run_tool(self, tool: Tool, arguments: dict[str, object]) -> _ToolRunOutcome:
-        # Reading result.text/result.data stays inside the try: a tool may return a
-        # result object whose fields raise on access (a malformed extension tool), and
-        # that must degrade to a model-visible error like any other tool failure, not
-        # crash the loop.
+    async def _run_tool(
+        self,
+        tool: Tool,
+        arguments: dict[str, object],
+        *,
+        call_id: str,
+        tool_name: str,
+    ) -> _ToolRunOutcome:
         try:
             result = await tool.run(arguments, self._context)
+        except Exception as exc:  # noqa: BLE001 - tool failures are recoverable results
+            return _ToolRunOutcome(_model_visible_tool_error(exc), is_error=True)
+
+        # Access and copy extension-owned fields before entering Wisp's normalization
+        # boundary. A malformed result must remain an ordinary recoverable tool error.
+        try:
+            snapshot = _snapshot_tool_result(result, tool_name=tool_name, context=self._context)
+        except Exception:  # noqa: BLE001 - malformed extension result
+            return _ToolRunOutcome("Tool returned an invalid result", is_error=True)
+
+        try:
             return _ToolRunOutcome(
-                output=result.text,
-                exit_code=_promote_exit_code(tool.name, result.data),
-                before_text=_promote_before_text(tool.name, result.data),
-                created=_promote_created(tool.name, result.data),
+                output=snapshot.text,
+                exit_code=_promote_exit_code(tool_name, snapshot.data),
+                before_text=_promote_before_text(tool_name, snapshot.data),
+                created=_promote_created(tool_name, snapshot.data),
                 summary=summarize_tool_result(
-                    tool.name, result.data, truncated=_promote_truncated(result.truncated)
+                    tool_name,
+                    snapshot.data,
+                    truncated=_promote_truncated(snapshot.truncated),
                 ),
                 # The tool's own authoritative "I capped my output" flag, so the card
                 # can be honest that an expanded view may still not be the whole story.
                 # Only a real ToolResult sets this; every synthetic/error path defaults
                 # it False.
-                truncated=_promote_truncated(result.truncated),
+                truncated=_promote_truncated(snapshot.truncated),
             )
-        except Exception as exc:  # noqa: BLE001 - tool failures are model-visible results
-            return _ToolRunOutcome(str(exc), is_error=True)
+        except Exception as exc:
+            raise ToolResultProcessingError(call_id=call_id, tool_name=tool_name) from exc
+
+
+def _snapshot_tool_result(
+    result: ToolResult,
+    *,
+    tool_name: str,
+    context: ToolContext,
+) -> _ToolResultSnapshot:
+    """Copy only bounded, recognized extension fields into built-in types."""
+
+    text = result.text
+    if type(text) is not str:
+        raise TypeError("ToolResult.text must be a string")
+    data = result.data
+    if not isinstance(data, Mapping):
+        raise TypeError("ToolResult.data must be a mapping")
+    truncated = result.truncated
+    bounded_text = truncate_text(
+        text,
+        max_bytes=max(0, context.max_output_bytes),
+        max_lines=max(0, context.max_output_lines),
+    )
+    return _ToolResultSnapshot(
+        text=bounded_text.text,
+        data=_snapshot_result_data(tool_name, data, context=context),
+        truncated=(truncated if type(truncated) is bool else False) or bounded_text.truncated,
+    )
+
+
+def _snapshot_result_data(
+    tool_name: str,
+    data: Mapping[str, object],
+    *,
+    context: ToolContext,
+) -> dict[str, object]:
+    """Extract the small primitive metadata surface Wisp currently consumes."""
+
+    snapshot: dict[str, object] = {}
+    if tool_name == "bash":
+        _copy_bounded_int(
+            data,
+            snapshot,
+            "exit_code",
+            minimum=_MIN_EXIT_CODE,
+            maximum=_MAX_EXIT_CODE,
+        )
+    elif tool_name == "write":
+        before_text = data.get("before_text")
+        if type(before_text) is str:
+            bounded_before = truncate_text(
+                before_text,
+                max_bytes=max(0, context.max_output_bytes),
+                max_lines=max(0, context.max_output_lines),
+            )
+            if not bounded_before.truncated:
+                snapshot["before_text"] = bounded_before.text
+        _copy_exact(data, snapshot, "created", bool)
+    elif tool_name == "read":
+        _copy_result_count(data, snapshot, "line_count")
+        _copy_result_count(data, snapshot, "selected_count")
+        _copy_exact(data, snapshot, "path", str)
+    elif tool_name in {"grep", "find"}:
+        _copy_result_count(data, snapshot, "count")
+    elif tool_name == "ls":
+        entries = data.get("entries")
+        if type(entries) is list:
+            entry_count = len(entries)
+            if entry_count <= _MAX_RESULT_COUNT:
+                snapshot["entry_count"] = entry_count
+        _copy_exact(data, snapshot, "path", str)
+    return snapshot
+
+
+def _copy_exact(
+    source: Mapping[str, object],
+    target: dict[str, object],
+    key: str,
+    expected_type: type[object],
+) -> None:
+    value = source.get(key)
+    if type(value) is expected_type:
+        target[key] = value
+
+
+def _copy_result_count(source: Mapping[str, object], target: dict[str, object], key: str) -> None:
+    _copy_bounded_int(source, target, key, minimum=0, maximum=_MAX_RESULT_COUNT)
+
+
+def _copy_bounded_int(
+    source: Mapping[str, object],
+    target: dict[str, object],
+    key: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> None:
+    value = source.get(key)
+    if type(value) is int and minimum <= value <= maximum:
+        target[key] = value
+
+
+def _model_visible_tool_error(exc: Exception) -> str:
+    """Return bounded tool-facing detail only for explicitly model-safe errors."""
+
+    if not isinstance(exc, ToolError):
+        return "Tool execution failed"
+    try:
+        message = str(exc)
+    except Exception:  # pragma: no cover - defensive against hostile subclasses
+        return "Tool execution failed"
+    if not message:
+        return "Tool execution failed"
+    if len(message) <= _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS:
+        return message
+    return message[: _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS - 3] + "..."
 
 
 def _promote_exit_code(name: str, data: Mapping[str, object]) -> int | None:

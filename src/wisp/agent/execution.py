@@ -15,6 +15,15 @@ class ToolExecutionProtocolError(RuntimeError):
     """Raised when an executor emits an invalid event sequence."""
 
 
+class ToolResultProcessingError(RuntimeError):
+    """Raised when Wisp cannot normalize an otherwise returned tool result."""
+
+    def __init__(self, *, call_id: str, tool_name: str) -> None:
+        self.call_id = call_id
+        self.tool_name = tool_name
+        super().__init__("Internal error while processing a tool result")
+
+
 class ToolExecutor(Protocol):
     """Execute one provider-neutral tool call as a typed event stream."""
 
@@ -27,4 +36,5 @@ __all__ = [
     "ToolExecutionEvent",
     "ToolExecutionProtocolError",
     "ToolExecutor",
+    "ToolResultProcessingError",
 ]

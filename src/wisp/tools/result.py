@@ -16,4 +16,4 @@ class ToolResult:
 
 
 class ToolError(RuntimeError):
-    """Raised when a tool invocation cannot be completed."""
+    """Raised with a message intended to be safe to return to the model."""

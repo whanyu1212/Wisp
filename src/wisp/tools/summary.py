@@ -100,10 +100,14 @@ def _summarize_find(data: Mapping[str, object], truncated: bool) -> str | None:
 
 
 def _summarize_ls(data: Mapping[str, object], truncated: bool) -> str | None:
-    entries = data.get("entries")
-    if not isinstance(entries, list):
-        return None
-    count = len(entries)
+    entry_count = data.get("entry_count")
+    if type(entry_count) is int:
+        count = entry_count
+    else:
+        entries = data.get("entries")
+        if not isinstance(entries, list):
+            return None
+        count = len(entries)
     path = _path(data)
     if count == 0:
         return f"ls: empty ({path})" if path else "ls: empty"
