@@ -12,7 +12,7 @@ from rich.console import Console
 
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.auth import auth_app
-from wisp.coding import CodingSession
+from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.config import WispConfig
 from wisp.events import (
     CompactionCompleted,
@@ -22,11 +22,9 @@ from wisp.events import (
     MessageDelta,
 )
 from wisp.providers.base import ProviderError
-from wisp.providers.catalog import startup_effort
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalDecision as ToolApprovalDecision
-from wisp.tools.context import ToolContext
 from wisp.tui.rendering import TuiRendererKind
 
 from . import options as _cli_options
@@ -534,41 +532,28 @@ async def _run_print(
     project_context_root: Path | None = None,
 ) -> None:
     runtime = await _build_runtime_for_config(config)
-    provider = runtime.providers.get(config.provider)
     sessions = JsonlSessionStore(config.session_dir)
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     history = session.read_context_messages() if session is not None else ()
-    agent = CodingSession(
-        provider=provider,
+    initial_configuration = resolve_coding_session_configuration(
+        config,
+        providers=runtime.providers,
+        models=runtime.models,
+        trusted=trusted,
+    )
+    agent = CodingSession.from_configuration(
+        initial_configuration,
         sessions=sessions,
         events=runtime.events,
-        model=config.model,
-        models=runtime.models,
-        # Persisted effort (see wisp.settings.persist_user_effort) is a single
-        # global string with no provider/model scope -- a tier chosen for a
-        # different provider/model in an earlier session could otherwise reach
-        # this one as an invalid wire value on the very first prompt. See
-        # startup_effort's docstring.
-        effort=startup_effort(
-            runtime.models,
-            provider_name=provider.name,
-            model=config.model,
-            default_model=provider.default_model,
-            effort=config.effort,
-        ),
         tool_registry=_print_mode_tool_registry(
             runtime.tools,
             all_tools=all_tools,
             allow_read_tools=allow_read_tools,
             allowed_tools=allowed_tools,
         ),
-        tool_context=ToolContext.from_config(config),
         tool_approval_policy=_print_mode_tool_approval_policy(approve_unsafe_tools),
         max_tool_iterations=max_tool_iterations,
-        trusted=trusted,
         project_context_root=project_context_root,
-        context_reserve_tokens=config.context_reserve_tokens,
-        auto_compaction_enabled=config.auto_compaction_enabled,
     )
 
     events = agent.run(prompt, session=session, history=history)

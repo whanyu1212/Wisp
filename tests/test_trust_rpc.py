@@ -10,6 +10,9 @@ from typing import Any, cast
 import pytest
 
 from tests.cli_support import *
+from tests.cli_support import _test_model_registry
+from wisp.providers.events import ProviderResponseCompleted, ProviderResponseStarted
+from wisp.providers.fake import ScriptedProvider
 
 
 def test_rpc_prompt_in_undecided_project_emits_trust_request(tmp_path: Path) -> None:
@@ -56,6 +59,72 @@ def test_rpc_trust_env_override_skips_prompt(tmp_path: Path) -> None:
     types = [r["type"] for r in _jsonl_records(result.stdout)]
     assert "trust.requested" not in types
     assert "trust.resolved" not in types
+
+
+def test_rpc_first_trust_applies_project_context_without_setting_changes(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # Trust changes more than settings loading: it permits project instructions.
+    # The config is otherwise identical before/after approval, so this guards the
+    # no-settings transition path from returning before CodingSession.trusted flips.
+    from wisp.cli import rpc
+    from wisp.config import WispConfig
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "AGENTS.md").write_text("trusted instruction", encoding="utf-8")
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("WISP_PROVIDER", "scripted")
+    monkeypatch.setenv("WISP_MODEL", "")
+    monkeypatch.setenv("WISP_TRUST", "1")
+    session_dir = project / "sessions"
+    config = WispConfig.from_env(
+        provider="scripted",
+        session_dir=session_dir,
+        project_dir=project,
+        trusted=False,
+    )
+    provider = ScriptedProvider(
+        [[ProviderResponseStarted(model="scripted"), ProviderResponseCompleted(content="done")]]
+    )
+    providers = ProviderRegistry()
+    providers.register(provider)
+    tools = ToolRegistry()
+    events = EventBus()
+    runtime = WispRuntime(
+        providers=providers,
+        tools=tools,
+        events=events,
+        api=ExtensionAPI(providers=providers, tools=tools, events=events),
+        models=_test_model_registry(),
+    )
+
+    async def build_runtime_for_config(_config: WispConfig) -> WispRuntime:
+        return runtime
+
+    async def fake_read_rpc_stdin(send: Any, _stop_reader: Any) -> None:
+        async with send:
+            await send.send(rpc._RpcInputCommand({"id": "p1", "type": "prompt", "prompt": "hello"}))
+            await send.send(rpc._RpcInputClosed())
+
+    monkeypatch.setattr(rpc, "_build_runtime_for_config", build_runtime_for_config)
+    monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
+
+    async def scenario() -> None:
+        with redirect_stdout(io.StringIO()):
+            await rpc._run_rpc(
+                config,
+                startup_trusted=False,
+                config_overrides=rpc._ConfigOverrides(provider="scripted", session_dir=session_dir),
+                project_context_root=project,
+            )
+
+    anyio.run(scenario)
+    assert provider.calls
+    system_content = "\n".join(
+        message.content for message in provider.calls[0].messages if message.role == "system"
+    )
+    assert "trusted instruction" in system_content
 
 
 @pytest.mark.parametrize(
@@ -434,15 +503,11 @@ def test_rpc_gate_does_not_cache_after_failed_rebuild(
     anyio.run(scenario)
 
 
-def test_trusted_rebuild_preserves_event_bus_identity() -> None:
-    # Regression: the first-run rebuild adopts the trusted runtime's PROVIDERS only
-    # (via dataclasses.replace), NOT the whole runtime. A rebuilt runtime has its own
-    # fresh EventBus/ExtensionAPI; wholesale reassignment would leave the RPC loop's
-    # runtime on a different bus than the one the already-built agent emits on,
-    # splitting the event stream. This asserts the swap the rebuild performs keeps
-    # events/api/tools shared while switching providers.
-    from dataclasses import replace
-
+def test_trusted_provider_refresh_preserves_runtime_identities() -> None:
+    # A trusted rebuild must refresh provider adapters without replacing the live
+    # registry that ExtensionAPI owns. Replacing only WispRuntime.providers leaves
+    # API registrations pointed at a stale registry; replacing the whole runtime
+    # splits its event bus from the existing CodingSession.
     from wisp.runtime.extensions import build_runtime
 
     async def scenario() -> None:
@@ -450,28 +515,33 @@ def test_trusted_rebuild_preserves_event_bus_identity() -> None:
         trusted = await build_runtime()
         assert original.events is not trusted.events  # premise: distinct buses
 
-        rebuilt = replace(original, providers=trusted.providers)
+        providers = original.providers
+        events = original.events
+        api = original.api
+        tools = original.tools
+        extension_provider = ScriptedProvider([])
+        extension_provider.name = "extension-provider"
+        original.api.register_provider(extension_provider)
+        openai_override = ScriptedProvider([])
+        openai_override.name = "openai"
+        original.api.register_provider(openai_override)
+        staged = ProviderRegistry()
+        staged.replace_all(original.providers_for_configuration(trusted))
 
-        assert rebuilt.events is original.events  # agent's bus preserved
-        assert rebuilt.api is original.api
-        assert rebuilt.tools is original.tools
-        assert rebuilt.providers is trusted.providers  # trusted providers adopted
+        assert staged.get("extension-provider") is extension_provider
+        assert staged.get("openai") is openai_override
+        original.adopt_provider_configuration(trusted)
+
+        assert original.providers is providers
+        assert original.events is events
+        assert original.api is api
+        assert original.tools is tools
+        assert original.providers.get("openai-codex") is trusted.providers.get("openai-codex")
+        assert original.providers.get("extension-provider") is extension_provider
+        assert original.providers.get("openai") is openai_override
+        assert original.api._providers is original.providers  # noqa: SLF001
 
     anyio.run(scenario)
-
-
-def test_rpc_run_uses_replace_for_trusted_runtime_swap() -> None:
-    # Guard against a regression back to wholesale `runtime = trusted_runtime`, which
-    # would reintroduce the event-bus split. The rebuild must swap providers via
-    # replace(...) and must not reassign the whole runtime.
-    import inspect
-
-    from wisp.cli import rpc
-
-    src = inspect.getsource(rpc._run_rpc)
-    assert "replace(runtime, providers=trusted_runtime.providers)" in src
-    assert "runtime = trusted_runtime" not in src  # no wholesale swap
-
 
 def test_rpc_prompt_command_reports_rebuild_provider_error(
     tmp_path: Path, monkeypatch: MonkeyPatch

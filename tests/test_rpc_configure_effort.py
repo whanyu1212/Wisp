@@ -174,6 +174,27 @@ def test_configure_overrides_effective_effort_falls_back_to_default_when_unset()
     assert overrides.effective_effort("fallback") == "fallback"
 
 
+def test_model_only_configure_pins_current_provider_for_later_rebuild(tmp_path: Path) -> None:
+    from wisp.cli.rpc import _RpcConfigureOverrides
+
+    provider = CapturingProvider()
+    runtime = _runtime_with_capturing_provider(provider)
+    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
+    overrides = _RpcConfigureOverrides()
+
+    _handle_rpc_configure_command(
+        {"model": "custom-model"},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+        configure_overrides=overrides,
+    )
+
+    assert overrides.provider == "capturing"
+    assert overrides.model == "custom-model"
+
+
 def test_configure_clear_effort_resets_agent_effort_to_none(tmp_path: Path) -> None:
     # Regression test: effort=None is indistinguishable on the wire from
     # never having set effort at all, so clear_effort is the only way a

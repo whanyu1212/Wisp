@@ -33,6 +33,7 @@ from wisp.coding.compaction import (
     should_auto_compact,
     summarize_manual_compaction,
 )
+from wisp.coding.configuration import CodingSessionConfiguration
 from wisp.coding.costs import CostEstimator
 from wisp.coding.stats import build_session_stats
 from wisp.coding.tool_execution import ConfiguredToolExecutor
@@ -123,22 +124,11 @@ class CodingSession:
         context_reserve_tokens: int = 16_384,
         auto_compaction_enabled: bool = True,
     ) -> None:
-        self.provider = provider
         self.sessions = sessions
         self.events = events
-        self.model = model
-        self.effort = effort
-        self.models = models
-        self._cost_estimator = CostEstimator(models)
         self.tool_registry = tool_registry
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
-        self.tool_context = tool_context or ToolContext.default()
-        self.trusted = trusted
-        if context_reserve_tokens < 0:
-            raise ValueError("context_reserve_tokens must be non-negative")
-        self.context_reserve_tokens = context_reserve_tokens
-        self.auto_compaction_enabled = auto_compaction_enabled
         self.tools = (
             tuple(tools)
             if tools is not None
@@ -155,6 +145,94 @@ class CodingSession:
         self._operation_lock = anyio.Semaphore(1)
         self._history_refresh_session_ids: set[str] = set()
         self._context_observations: dict[str, _ContextObservation] = {}
+        self._operation_active = False
+        self._apply_configuration(
+            CodingSessionConfiguration(
+                provider=provider,
+                model=model,
+                effort=effort,
+                models=models,
+                tool_context=tool_context or ToolContext.default(),
+                trusted=trusted,
+                context_reserve_tokens=context_reserve_tokens,
+                auto_compaction_enabled=auto_compaction_enabled,
+            )
+        )
+
+    @classmethod
+    def from_configuration(
+        cls,
+        configuration: CodingSessionConfiguration,
+        *,
+        sessions: JsonlSessionStore,
+        events: EventBus | None = None,
+        tools: Sequence[ToolSpec] | None = None,
+        tool_registry: ToolRegistry | None = None,
+        tool_policy: ToolPolicy | None = None,
+        tool_approval_policy: ToolApprovalPolicy | None = None,
+        prompt_messages: Sequence[Message] | None = None,
+        project_context_max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
+        project_context_root: Path | None = None,
+        max_tool_iterations: int | None = None,
+    ) -> CodingSession:
+        """Create a session from one resolved dynamic configuration snapshot."""
+
+        return cls(
+            provider=configuration.provider,
+            sessions=sessions,
+            events=events,
+            model=configuration.model,
+            effort=configuration.effort,
+            models=configuration.models,
+            tools=tools,
+            tool_registry=tool_registry,
+            tool_context=configuration.tool_context,
+            tool_policy=tool_policy,
+            tool_approval_policy=tool_approval_policy,
+            prompt_messages=prompt_messages,
+            project_context_max_chars=project_context_max_chars,
+            project_context_root=project_context_root,
+            max_tool_iterations=max_tool_iterations,
+            trusted=configuration.trusted,
+            context_reserve_tokens=configuration.context_reserve_tokens,
+            auto_compaction_enabled=configuration.auto_compaction_enabled,
+        )
+
+    @property
+    def configuration(self) -> CodingSessionConfiguration:
+        """Return the configuration applied to subsequent operations."""
+
+        return CodingSessionConfiguration(
+            provider=self.provider,
+            model=self.model,
+            effort=self.effort,
+            models=self.models,
+            tool_context=self.tool_context,
+            trusted=self.trusted,
+            context_reserve_tokens=self.context_reserve_tokens,
+            auto_compaction_enabled=self.auto_compaction_enabled,
+        )
+
+    def reconfigure(self, configuration: CodingSessionConfiguration) -> None:
+        """Apply a complete configuration between prompt or compaction operations."""
+
+        if self._operation_active:
+            raise RuntimeError("CodingSession is busy")
+        self._apply_configuration(configuration)
+        self._context_observations.clear()
+
+    def _apply_configuration(self, configuration: CodingSessionConfiguration) -> None:
+        if configuration.context_reserve_tokens < 0:
+            raise ValueError("context_reserve_tokens must be non-negative")
+        self.provider = configuration.provider
+        self.model = configuration.model
+        self.effort = configuration.effort
+        self.models = configuration.models
+        self._cost_estimator = CostEstimator(configuration.models)
+        self.tool_context = configuration.tool_context
+        self.trusted = configuration.trusted
+        self.context_reserve_tokens = configuration.context_reserve_tokens
+        self.auto_compaction_enabled = configuration.auto_compaction_enabled
 
     async def run(
         self,
@@ -165,6 +243,7 @@ class CodingSession:
         operation_id: str | None = None,
     ) -> AsyncIterator[WispEvent]:
         async with self._operation_lock:
+            self._operation_active = True
             events = self._run(
                 prompt,
                 session=session,
@@ -175,7 +254,10 @@ class CodingSession:
                 async for event in events:
                     yield event
             finally:
-                await events.aclose()
+                try:
+                    await events.aclose()
+                finally:
+                    self._operation_active = False
 
     async def _run(
         self,
@@ -456,17 +538,21 @@ class CodingSession:
         """Summarize an active context prefix and append one durable compaction."""
 
         async with self._operation_lock:
-            replay = await self._prepare_compaction_replay(session)
-            plan = plan_manual_compaction(replay)
-            async for event in self._compact_locked(
-                session,
-                plan,
-                reason="manual",
-                instructions=instructions,
-                trigger_budget=None,
-                recover_failure=False,
-            ):
-                yield event
+            self._operation_active = True
+            try:
+                replay = await self._prepare_compaction_replay(session)
+                plan = plan_manual_compaction(replay)
+                async for event in self._compact_locked(
+                    session,
+                    plan,
+                    reason="manual",
+                    instructions=instructions,
+                    trigger_budget=None,
+                    recover_failure=False,
+                ):
+                    yield event
+            finally:
+                self._operation_active = False
 
     async def _maybe_auto_compact(
         self,

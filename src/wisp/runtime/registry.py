@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from wisp.providers.base import Provider, ToolSpec
 from wisp.tools.base import Tool
 
@@ -54,6 +56,22 @@ class ProviderRegistry:
         """Return registered provider names in registration order."""
 
         return tuple(self._providers.keys())
+
+    def all(self) -> tuple[Provider, ...]:
+        """Return registered providers in registration order."""
+
+        return tuple(self._providers.values())
+
+    def replace_all(self, providers: Iterable[Provider]) -> None:
+        """Atomically replace provider instances while preserving this registry.
+
+        Runtime extension APIs retain a reference to this registry. Replacing its
+        contents, rather than replacing the registry object, keeps that API and
+        the runtime's event bus connected during credential/config refreshes.
+        """
+
+        replacements = {provider.name: provider for provider in providers}
+        self._providers = replacements
 
 
 class ToolRegistry:
