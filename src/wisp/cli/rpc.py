@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
-from typing import Literal, cast
+from typing import cast
 from uuid import uuid4
 
 import anyio
@@ -33,7 +33,6 @@ from wisp.events import (
     AgentStarted,
     ErrorEvent,
     ModelProviderAutoSwitched,
-    ProjectConfigApplied,
     RpcCommandFinished,
     RpcCommandStarted,
     SessionStatsReported,
@@ -46,7 +45,7 @@ from wisp.providers.catalog import AmbiguousModelError, UnknownModelError
 from wisp.rpc.commands import ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
-from wisp.runtime.registry import ProviderRegistry, UnknownProviderError, UnknownToolError
+from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.base import Tool, ToolSafety
@@ -55,6 +54,42 @@ from wisp.trust import is_trusted, record_trust
 from . import output as _cli_output
 from . import tools as _cli_tools
 from . import trust as _cli_trust
+from .rpc_configuration import (
+    RpcProjectConfiguration,
+)
+from .rpc_configuration import (
+    _ConfigOverrides as _ConfigOverrides,
+)
+from .rpc_configuration import (
+    _RpcConfigureOverrides as _RpcConfigureOverrides,
+)
+from .rpc_coordinator import (
+    _MAX_QUEUED_RPC_COMMANDS as _MAX_QUEUED_RPC_COMMANDS,
+)
+from .rpc_coordinator import (
+    RpcCoordinator,
+)
+from .rpc_coordinator import (
+    _RpcCommandCompleted as _RpcCommandCompleted,
+)
+from .rpc_coordinator import (
+    _RpcControlEvent as _RpcControlEvent,
+)
+from .rpc_coordinator import (
+    _RpcDispatchResult as _RpcDispatchResult,
+)
+from .rpc_coordinator import (
+    _RpcInputClosed as _RpcInputClosed,
+)
+from .rpc_coordinator import (
+    _RpcInputCommand as _RpcInputCommand,
+)
+from .rpc_coordinator import (
+    _RpcRunningCommand as _RpcRunningCommand,
+)
+from .rpc_coordinator import (
+    _RpcSessionState as _RpcSessionState,
+)
 from .types import _JsonOutputModeError
 
 _render_json_events = _cli_output._render_json_events
@@ -82,39 +117,6 @@ async def _build_runtime_for_config(config: WispConfig) -> WispRuntime:
     raise AssertionError("runtime factory compatibility loop exhausted")
 
 
-@dataclass(frozen=True)
-class _RpcInputCommand:
-    command: dict[str, object]
-
-
-@dataclass(frozen=True)
-class _RpcInputClosed:
-    pass
-
-
-@dataclass(frozen=True)
-class _RpcCommandCompleted:
-    command_id: str
-    command_type: Literal["prompt", "compact", "get_session_stats"]
-    ok: bool
-    history: tuple[Message, ...] | None
-    entry_count: int
-
-
-@dataclass
-class _RpcSessionState:
-    session: JsonlSession | None
-    history: tuple[Message, ...]
-    entry_count: int
-
-
-@dataclass(frozen=True)
-class _RpcRunningCommand:
-    command_id: str
-    command_type: Literal["prompt", "compact", "get_session_stats"]
-    cancel_scope: anyio.CancelScope
-
-
 @dataclass
 class _RpcPendingApproval:
     call_id: str
@@ -126,13 +128,9 @@ class _RpcPendingApproval:
     resolved: bool = False
 
 
-type _RpcControlEvent = _RpcInputCommand | _RpcInputClosed | _RpcCommandCompleted
-
-
 _STDIN_READ_CHUNK_SIZE = 64 * 1024
 _STDIN_THREAD_POLL_INTERVAL = 0.01
 _STDIN_THREAD_QUEUE_SIZE = 100
-_MAX_QUEUED_RPC_COMMANDS = 100
 
 
 class _RpcToolApprovalPolicy(ToolApprovalPolicy):
@@ -353,51 +351,6 @@ class _RpcTrustGate:
         return trusted
 
 
-@dataclass(frozen=True)
-class _ConfigOverrides:
-    """The explicit CLI overrides used to build the RPC config.
-
-    Retained so a first-run session that approves trust can rebuild the config from the
-    *same* inputs with the project ``.wisp/settings.json`` layer applied, rather than
-    trying to reconstruct the original arguments from the already-merged config.
-    """
-
-    provider: str | None = None
-    model: str | None = None
-    session_dir: Path | None = None
-    auth_path: Path | None = None
-
-    def build(self, *, trusted: bool, project_dir: Path | None = None) -> WispConfig:
-        return WispConfig.from_env(
-            provider=self.provider,
-            model=self.model,
-            session_dir=self.session_dir,
-            auth_path=self.auth_path,
-            project_dir=project_dir,
-            trusted=trusted,
-        )
-
-
-@dataclass
-class _RpcConfigureOverrides:
-    """Successful in-session RPC configure choices that outrank project settings."""
-
-    provider: str | None = None
-    model: str | None = None
-    has_model: bool = False
-    effort: str | None = None
-    has_effort: bool = False
-
-    def effective_provider(self, default: str) -> str:
-        return self.provider or default
-
-    def effective_model(self, default: str | None) -> str | None:
-        return self.model if self.has_model else default
-
-    def effective_effort(self, default: str | None) -> str | None:
-        return self.effort if self.has_effort else default
-
-
 async def _run_rpc(
     config: WispConfig,
     all_tools: bool = False,
@@ -416,72 +369,21 @@ async def _run_rpc(
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     session_state = _rpc_session_state(session)
     approval_policy = _RpcToolApprovalPolicy(_print_mode_tool_approval_policy(approve_unsafe_tools))
-    configure_overrides = _RpcConfigureOverrides()
     selected_project_context_root = project_context_root or resolve_project_context_root(Path.cwd())
+    configure_overrides = _RpcConfigureOverrides()
+    project_configuration = RpcProjectConfiguration(
+        startup_config=config,
+        startup_trusted=startup_trusted,
+        config_overrides=config_overrides,
+        project_context_root=selected_project_context_root,
+        runtime_builder=_build_runtime_for_config,
+        configure_overrides=configure_overrides,
+    )
 
     async def _rebuild_agent_for_trusted_project() -> None:
-        # First-run RPC/TUI: trust was undecided at startup, so ``config`` was built
-        # untrusted and the project's ``.wisp/settings.json`` was skipped. Now that the
-        # client has approved trust — and we are still before the first turn — re-derive
-        # config from the *same* explicit overrides with the project layer applied.
-        # Refresh only provider instances from a rebuilt runtime; its event bus,
-        # extension API, and tools must not replace the ones connected to this session.
-        #
-        # ``session_dir`` is intentionally NOT relocated here: the session store is owned
-        # by the RPC loop (which already created the first prompt's session before trust
-        # resolved), so a mid-run swap would be both incomplete and racy. A trusted
-        # project's ``session_dir`` takes effect on the next launch — the trust decision
-        # persists, so this is a one-time lag.
-        if startup_trusted or config_overrides is None:
-            return  # config already reflects the trusted project; nothing to rebuild.
-        trusted_config = config_overrides.build(
-            trusted=True,
-            project_dir=selected_project_context_root,
-        )
-        effective_provider = configure_overrides.effective_provider(trusted_config.provider)
-        effective_model = configure_overrides.effective_model(trusted_config.model)
-        if trusted_config == config:
-            configuration = resolve_coding_session_configuration(
-                trusted_config,
-                providers=runtime.providers,
-                models=runtime.models,
-                trusted=True,
-                provider_name=effective_provider,
-                model=effective_model,
-                has_model=configure_overrides.has_model,
-                effort=configure_overrides.effort,
-                has_effort=configure_overrides.has_effort,
-            )
-        else:
-            trusted_runtime = await _build_runtime_for_config(trusted_config)
-            staged_providers = ProviderRegistry()
-            staged_providers.replace_all(runtime.providers_for_configuration(trusted_runtime))
-            configuration = resolve_coding_session_configuration(
-                trusted_config,
-                providers=staged_providers,
-                models=runtime.models,
-                trusted=True,
-                provider_name=effective_provider,
-                model=effective_model,
-                has_model=configure_overrides.has_model,
-                effort=configure_overrides.effort,
-                has_effort=configure_overrides.has_effort,
-            )
-            runtime.adopt_provider_configuration(trusted_runtime)
-        agent.reconfigure(configuration)
-        if trusted_config == config:
-            return
-        # Tell an out-of-process front-end (the TUI) the config it displays/mutates
-        # changed, so its header and /provider,/model,/auth,/login stop showing the
-        # untrusted-startup values.
-        _write_json_event(
-            ProjectConfigApplied(
-                provider=effective_provider,
-                model=effective_model,
-                effort=agent.effort,
-                auth_path=trusted_config.auth_path,
-            )
-        )
+        event = await project_configuration.apply_trusted_project(runtime=runtime, agent=agent)
+        if event is not None:
+            _write_json_event(event)
 
     trust_gate = _RpcTrustGate(
         selected_project_context_root,
@@ -508,78 +410,28 @@ async def _run_rpc(
         project_context_root=selected_project_context_root,
     )
 
-    queued_commands: deque[dict[str, object]] = deque()
-    running_command: _RpcRunningCommand | None = None
-    stdin_closed = False
+    coordinator = RpcCoordinator(
+        session_state,
+        input_closed_handlers=(
+            approval_policy.deny_pending_on_input_closed,
+            trust_gate.deny_pending_on_input_closed,
+        ),
+        max_queued_commands=_MAX_QUEUED_RPC_COMMANDS,
+        input_closed_type=_RpcInputClosed,
+        command_completed_type=_RpcCommandCompleted,
+    )
     send, receive = anyio.create_memory_object_stream[_RpcControlEvent](100)
     stop_reader = anyio.Event()
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_read_rpc_stdin, send.clone(), stop_reader)
         async with send, receive:
-            while True:
-                if running_command is None and queued_commands:
-                    command = queued_commands.popleft()
-                    running_command, should_shutdown = _dispatch_rpc_command(
-                        command,
-                        agent=agent,
-                        runtime=runtime,
-                        sessions=sessions,
-                        session_state=session_state,
-                        task_group=task_group,
-                        send=send,
-                        running_command=running_command,
-                        approval_policy=approval_policy,
-                        trust_gate=trust_gate,
-                        configure_overrides=configure_overrides,
-                        queued_commands=queued_commands,
-                    )
-                    if should_shutdown:
-                        stop_reader.set()
-                        task_group.cancel_scope.cancel()
-                        return
-                    continue
-                if stdin_closed and running_command is None and not queued_commands:
-                    stop_reader.set()
-                    task_group.cancel_scope.cancel()
-                    return
 
-                control_event = await receive.receive()
-                if isinstance(control_event, _RpcInputClosed):
-                    stdin_closed = True
-                    approval_policy.deny_pending_on_input_closed()
-                    trust_gate.deny_pending_on_input_closed()
-                    continue
-                if isinstance(control_event, _RpcCommandCompleted):
-                    if (
-                        running_command is not None
-                        and control_event.command_id == running_command.command_id
-                        and control_event.command_type == running_command.command_type
-                    ):
-                        running_command = None
-                        session_state.entry_count = control_event.entry_count
-                        if control_event.history is not None:
-                            session_state.history = control_event.history
-                    continue
-
-                command = control_event.command
-                command_type = _rpc_command_type(command)
-                if running_command is not None and command_type not in {
-                    "approval",
-                    "cancel",
-                    "trust",
-                }:
-                    if len(queued_commands) >= _MAX_QUEUED_RPC_COMMANDS:
-                        _reject_rpc_command(
-                            command,
-                            message=(
-                                "RPC command queue is full while another RPC command is running"
-                            ),
-                        )
-                        continue
-                    queued_commands.append(command)
-                    continue
-                running_command, should_shutdown = _dispatch_rpc_command(
+            def dispatch(
+                command: dict[str, object],
+                running_command: _RpcRunningCommand | None,
+            ) -> _RpcDispatchResult:
+                return _dispatch_rpc_command(
                     command,
                     agent=agent,
                     runtime=runtime,
@@ -591,12 +443,21 @@ async def _run_rpc(
                     approval_policy=approval_policy,
                     trust_gate=trust_gate,
                     configure_overrides=configure_overrides,
-                    queued_commands=queued_commands,
+                    queued_commands=coordinator.queued_commands,
                 )
-                if should_shutdown:
-                    stop_reader.set()
-                    task_group.cancel_scope.cancel()
-                    return
+
+            await coordinator.run(
+                receive,
+                dispatch=dispatch,
+                reject=lambda command, message: _reject_rpc_command(
+                    command,
+                    message=message,
+                ),
+                command_type=_rpc_command_type,
+            )
+            stop_reader.set()
+            task_group.cancel_scope.cancel()
+            return
 
 
 def _dispatch_rpc_command(
@@ -613,7 +474,7 @@ def _dispatch_rpc_command(
     trust_gate: _RpcTrustGate,
     configure_overrides: _RpcConfigureOverrides,
     queued_commands: deque[dict[str, object]],
-) -> tuple[_RpcRunningCommand | None, bool]:
+) -> _RpcDispatchResult:
     command_type = _rpc_command_type(command)
     if command_type == "prompt":
         new_running_command, new_session = _start_rpc_prompt_command(
@@ -625,31 +486,30 @@ def _dispatch_rpc_command(
             send=send,
             trust_gate=trust_gate,
         )
-        if new_session is not None:
-            session_state.session = new_session
-        return new_running_command, False
+        return _RpcDispatchResult(
+            running_command=new_running_command,
+            selected_session=new_session,
+        )
     if command_type == "compact":
-        return (
-            _start_rpc_compact_command(
+        return _RpcDispatchResult(
+            running_command=_start_rpc_compact_command(
                 command,
                 agent=agent,
                 session_state=session_state,
                 task_group=task_group,
                 send=send,
                 trust_gate=trust_gate,
-            ),
-            False,
+            )
         )
     if command_type == "get_session_stats":
-        return (
-            _start_rpc_session_stats_command(
+        return _RpcDispatchResult(
+            running_command=_start_rpc_session_stats_command(
                 command,
                 agent=agent,
                 session_state=session_state,
                 task_group=task_group,
                 send=send,
-            ),
-            False,
+            )
         )
     should_shutdown = _handle_rpc_control_command(
         command,
@@ -661,7 +521,10 @@ def _dispatch_rpc_command(
         configure_overrides=configure_overrides,
         queued_commands=queued_commands,
     )
-    return running_command, should_shutdown
+    return _RpcDispatchResult(
+        running_command=running_command,
+        should_shutdown=should_shutdown,
+    )
 
 
 def _rpc_session_state(session: JsonlSession | None) -> _RpcSessionState:
