@@ -56,9 +56,7 @@ def test_coordinator_runs_queued_commands_in_fifo_order() -> None:
         ) -> _RpcDispatchResult:
             command_id = str(command["id"])
             dispatched.append(command_id)
-            return _RpcDispatchResult(
-                _RpcRunningCommand(command_id, "prompt", anyio.CancelScope())
-            )
+            return _RpcDispatchResult(_RpcRunningCommand(command_id, "prompt", anyio.CancelScope()))
 
         should_shutdown = await coordinator.run(
             receiver,
@@ -98,9 +96,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
             dispatched.append(command_id)
             if command["type"] == "approval":
                 return _RpcDispatchResult(running)
-            return _RpcDispatchResult(
-                _RpcRunningCommand(command_id, "prompt", anyio.CancelScope())
-            )
+            return _RpcDispatchResult(_RpcRunningCommand(command_id, "prompt", anyio.CancelScope()))
 
         await coordinator.run(
             receiver,
@@ -137,9 +133,7 @@ def test_coordinator_rejects_commands_beyond_its_queue_bound() -> None:
             _running: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
             command_id = str(command["id"])
-            return _RpcDispatchResult(
-                _RpcRunningCommand(command_id, "prompt", anyio.CancelScope())
-            )
+            return _RpcDispatchResult(_RpcRunningCommand(command_id, "prompt", anyio.CancelScope()))
 
         await coordinator.run(
             receiver,
