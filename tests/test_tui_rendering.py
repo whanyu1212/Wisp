@@ -685,6 +685,123 @@ def test_light_theme_foreground_meets_normal_text_contrast_target() -> None:
     assert contrast_ratio(WISP_THEME_LIGHT.foreground, WISP_THEME_LIGHT.background) >= 4.5
 
 
+@pytest.mark.parametrize(
+    ("color_attr", "background_attr"),
+    [
+        ("primary", "background"),  # user transcript text
+        ("primary", "panel"),  # jump-to-latest badge text
+        ("success", "background"),  # assistant transcript text
+        ("accent", "background"),  # empty-state wordmark
+        ("accent", "surface"),  # model-picker title
+        ("warning", "background"),  # notice transcript text
+        ("warning", "surface"),  # decision-panel title
+        ("error", "background"),  # error transcript text
+    ],
+)
+def test_light_theme_semantic_text_colors_meet_contrast_target(
+    color_attr: str, background_attr: str
+) -> None:
+    from wisp.tui.theme import WISP_THEME_LIGHT, contrast_ratio
+
+    color = getattr(WISP_THEME_LIGHT, color_attr)
+    background = getattr(WISP_THEME_LIGHT, background_attr)
+
+    assert contrast_ratio(color, background) >= 4.5
+
+
+@pytest.mark.parametrize(
+    ("color_attr", "background_attr"),
+    [
+        ("primary", "background"),
+        ("success", "background"),
+        ("accent", "background"),
+        ("accent", "surface"),
+        ("accent", "panel"),
+        ("warning", "background"),
+        ("warning", "surface"),
+        ("error", "background"),
+    ],
+)
+def test_light_theme_semantic_borders_meet_non_text_contrast_target(
+    color_attr: str, background_attr: str
+) -> None:
+    from wisp.tui.theme import WISP_THEME_LIGHT, contrast_ratio
+
+    color = getattr(WISP_THEME_LIGHT, color_attr)
+    background = getattr(WISP_THEME_LIGHT, background_attr)
+
+    assert contrast_ratio(color, background) >= 3.0
+
+
+def test_light_theme_secondary_remains_legible() -> None:
+    from wisp.tui.theme import WISP_THEME_LIGHT, contrast_ratio
+
+    assert contrast_ratio(WISP_THEME_LIGHT.secondary, WISP_THEME_LIGHT.background) >= 4.5
+
+
+@pytest.mark.parametrize("color_attr", ["primary", "success", "accent", "warning", "error"])
+def test_dark_theme_semantic_colors_meet_normal_text_contrast_target(color_attr: str) -> None:
+    from wisp.tui.theme import WISP_THEME_DARK, contrast_ratio
+
+    assert contrast_ratio(getattr(WISP_THEME_DARK, color_attr), WISP_THEME_DARK.background) >= 4.5
+
+
+def test_light_theme_derived_diff_colors_meet_normal_text_contrast_target() -> None:
+    from wisp.tui.textual_app import TextualTui
+    from wisp.tui.theme import contrast_ratio
+
+    async def scenario() -> dict[str, str]:
+        app = TextualTui()
+        async with app.run_test() as pilot:
+            app.theme = "wisp-light"
+            await pilot.pause()
+            variables = app.get_css_variables()
+            return {
+                key: variables[key]
+                for key in ("text-success", "success-muted", "text-error", "error-muted")
+            }
+
+    variables = anyio.run(scenario)
+
+    assert contrast_ratio(variables["text-success"], variables["success-muted"]) >= 4.5
+    assert contrast_ratio(variables["text-error"], variables["error-muted"]) >= 4.5
+
+
+def test_issue_118_does_not_change_dark_or_neutral_palette_values() -> None:
+    from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT
+
+    assert (
+        WISP_THEME_DARK.primary,
+        WISP_THEME_DARK.secondary,
+        WISP_THEME_DARK.accent,
+        WISP_THEME_DARK.warning,
+        WISP_THEME_DARK.error,
+        WISP_THEME_DARK.success,
+        WISP_THEME_DARK.foreground,
+        WISP_THEME_DARK.background,
+        WISP_THEME_DARK.surface,
+        WISP_THEME_DARK.panel,
+    ) == (
+        "#4aa3c7",
+        "#7c8b99",
+        "#3fb8b8",
+        "#d3a25a",
+        "#d16a7c",
+        "#5cc9a7",
+        "#dfe6ec",
+        "#0e1216",
+        "#151b21",
+        "#1b232b",
+    )
+    assert (
+        WISP_THEME_LIGHT.secondary,
+        WISP_THEME_LIGHT.foreground,
+        WISP_THEME_LIGHT.background,
+        WISP_THEME_LIGHT.surface,
+        WISP_THEME_LIGHT.panel,
+    ) == ("#55636d", "#12171c", "#fbfcfd", "#ffffff", "#eef3f5")
+
+
 def test_muted_text_role_meets_contrast_target() -> None:
     # Issue #76: dim/session previously stacked Rich's undefined "dim"
     # attribute on top of the already-muted secondary color (raw ANSI SGR-2,
@@ -716,6 +833,35 @@ def _monochrome_gray(hex_color: str) -> int:
     from textual.color import Color
 
     return Color.parse(hex_color).monochrome.r  # r == g == b once converted
+
+
+def _monochrome_hex(hex_color: str) -> str:
+    gray = _monochrome_gray(hex_color)
+    return f"#{gray:02x}{gray:02x}{gray:02x}"
+
+
+@pytest.mark.parametrize(
+    ("color_attr", "background_attr"),
+    [
+        ("primary", "background"),
+        ("primary", "panel"),
+        ("success", "background"),
+        ("accent", "background"),
+        ("accent", "surface"),
+        ("warning", "background"),
+        ("warning", "surface"),
+        ("error", "background"),
+    ],
+)
+def test_light_theme_semantic_text_colors_keep_contrast_under_no_color(
+    color_attr: str, background_attr: str
+) -> None:
+    from wisp.tui.theme import WISP_THEME_LIGHT, contrast_ratio
+
+    color = _monochrome_hex(getattr(WISP_THEME_LIGHT, color_attr))
+    background = _monochrome_hex(getattr(WISP_THEME_LIGHT, background_attr))
+
+    assert contrast_ratio(color, background) >= 4.5
 
 
 def test_monochrome_role_color_collisions_still_have_distinct_non_color_cues() -> None:

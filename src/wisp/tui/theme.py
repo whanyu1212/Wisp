@@ -32,12 +32,12 @@ WISP_THEME_DARK = Theme(
 
 WISP_THEME_LIGHT = Theme(
     name="wisp-light",
-    primary="#2f8fb3",
+    primary="#277795",
     secondary="#55636d",
-    accent="#2f8f8f",
-    warning="#a9701c",
+    accent="#2e7676",
+    warning="#9c671a",
     error="#b64a5e",
-    success="#2f9d78",
+    success="#2b8164",
     foreground="#12171c",
     background="#fbfcfd",
     surface="#ffffff",
