@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import anyio
@@ -12,7 +13,8 @@ from wisp.coding import (
 )
 from wisp.config import WispConfig
 from wisp.providers.catalog import ModelRegistry, effective_catalog
-from wisp.providers.fake import FakeProvider
+from wisp.providers.events import ProviderResponseCompleted, ProviderResponseStarted, ProviderUsage
+from wisp.providers.fake import FakeProvider, ScriptedProvider
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 from wisp.sessions.jsonl import JsonlSessionStore
@@ -159,3 +161,30 @@ def test_reconfigure_rejects_changes_while_an_operation_is_active(tmp_path: Path
         agent.reconfigure(replacement)
 
     anyio.run(scenario)
+
+
+def test_effort_reconfigure_preserves_valid_context_observation(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="scripted"),
+                ProviderResponseCompleted(
+                    content="done",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=11, total_tokens=81),
+                ),
+            ]
+        ]
+    )
+    sessions = JsonlSessionStore(tmp_path)
+    session = sessions.create()
+    agent = CodingSession(provider=provider, sessions=sessions)
+
+    async def scenario() -> None:
+        _events = [event async for event in agent.run("hello", session=session)]
+
+    anyio.run(scenario)
+    observation = agent._context_observations[session.session_id]  # noqa: SLF001
+
+    agent.reconfigure(replace(agent.configuration, effort="high"))
+
+    assert agent._context_observations[session.session_id] is observation  # noqa: SLF001

@@ -219,7 +219,6 @@ class CodingSession:
         if self._operation_active:
             raise RuntimeError("CodingSession is busy")
         self._apply_configuration(configuration)
-        self._context_observations.clear()
 
     def _apply_configuration(self, configuration: CodingSessionConfiguration) -> None:
         if configuration.context_reserve_tokens < 0:
