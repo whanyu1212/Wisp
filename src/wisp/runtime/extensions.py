@@ -43,6 +43,7 @@ async def build_runtime(
         auth_store=JsonAuthStore(auth_path or default_auth_path()),
         retry_policy=retry_policy,
     )
+    runtime.capture_provider_configuration()
     return runtime
 
 

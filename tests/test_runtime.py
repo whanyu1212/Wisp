@@ -14,6 +14,7 @@ from wisp.runtime import (
     ToolRegistry,
     UnknownProviderError,
     UnknownToolError,
+    WispRuntime,
 )
 from wisp.runtime.extensions import activate_extensions, build_runtime
 from wisp.tools.builtin import ReadTool
@@ -116,6 +117,49 @@ def test_build_runtime_passes_retry_policy_to_builtin_providers() -> None:
         return provider._retry_policy  # noqa: SLF001
 
     assert anyio.run(run) == policy
+
+
+def test_direct_runtime_construction_captures_configured_providers() -> None:
+    async def run() -> None:
+        template = await build_runtime()
+        current_providers = ProviderRegistry()
+        current_provider = FakeProvider()
+        current_providers.register(current_provider)
+        current_tools = ToolRegistry()
+        current_events = EventBus()
+        current = WispRuntime(
+            providers=current_providers,
+            tools=current_tools,
+            events=current_events,
+            api=ExtensionAPI(
+                providers=current_providers,
+                tools=current_tools,
+                events=current_events,
+            ),
+            models=template.models,
+        )
+        candidate_providers = ProviderRegistry()
+        candidate_provider = FakeProvider()
+        candidate_providers.register(candidate_provider)
+        candidate_tools = ToolRegistry()
+        candidate_events = EventBus()
+        candidate = WispRuntime(
+            providers=candidate_providers,
+            tools=candidate_tools,
+            events=candidate_events,
+            api=ExtensionAPI(
+                providers=candidate_providers,
+                tools=candidate_tools,
+                events=candidate_events,
+            ),
+            models=template.models,
+        )
+
+        current.adopt_provider_configuration(candidate)
+
+        assert current.providers.get("fake") is candidate_provider
+
+    anyio.run(run)
 
 
 def test_event_bus_emits_to_named_and_wildcard_handlers() -> None:

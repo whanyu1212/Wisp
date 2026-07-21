@@ -27,7 +27,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 from wisp.agent.execution import ToolResultProcessingError
 from wisp.agent.messages import Message
 from wisp.agent.prompt import resolve_project_context_root
-from wisp.coding import CodingSession
+from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.config import WispConfig
 from wisp.events import (
     AgentStarted,
@@ -41,16 +41,15 @@ from wisp.events import (
     TrustResolved,
     WispEvent,
 )
-from wisp.providers.base import ProviderError
-from wisp.providers.catalog import AmbiguousModelError, UnknownModelError, startup_effort
+from wisp.providers.base import Provider, ProviderError
+from wisp.providers.catalog import AmbiguousModelError, UnknownModelError
 from wisp.rpc.commands import ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
-from wisp.runtime.registry import UnknownProviderError, UnknownToolError
+from wisp.runtime.registry import ProviderRegistry, UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.base import Tool, ToolSafety
-from wisp.tools.context import ToolContext
 from wisp.trust import is_trusted, record_trust
 
 from . import output as _cli_output
@@ -413,7 +412,6 @@ async def _run_rpc(
     project_context_root: Path | None = None,
 ) -> None:
     runtime = await _build_runtime_for_config(config)
-    provider = runtime.providers.get(config.provider)
     sessions = JsonlSessionStore(config.session_dir)
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     session_state = _rpc_session_state(session)
@@ -425,79 +423,54 @@ async def _run_rpc(
         # First-run RPC/TUI: trust was undecided at startup, so ``config`` was built
         # untrusted and the project's ``.wisp/settings.json`` was skipped. Now that the
         # client has approved trust — and we are still before the first turn — re-derive
-        # config from the *same* explicit overrides with the project layer applied and
-        # swap the pieces the agent reads fresh each turn (provider, model, tool policy)
-        # so this session honors the trusted settings instead of running with defaults.
-        #
-        # The enclosing ``runtime`` also adopts the trusted provider registry (built
-        # from the trusted ``auth_path``) that the RPC loop passes to later
-        # ``configure`` / ``/provider`` switches. Without this, a subsequent provider
-        # switch would resolve against the untrusted-startup credential store and could
-        # silently drop the trusted project's auth file.
-        #
-        # Only ``providers`` is swapped, via ``replace`` — NOT the whole runtime. A
-        # rebuilt runtime has its own fresh ``EventBus``/``ExtensionAPI``; wholesale
-        # reassignment would leave the loop's runtime pointing at a different bus than
-        # the one the already-built agent emits on, splitting the event stream. Keeping
-        # the original ``events``/``api``/``tools`` preserves a single shared bus.
+        # config from the *same* explicit overrides with the project layer applied.
+        # Refresh only provider instances from a rebuilt runtime; its event bus,
+        # extension API, and tools must not replace the ones connected to this session.
         #
         # ``session_dir`` is intentionally NOT relocated here: the session store is owned
         # by the RPC loop (which already created the first prompt's session before trust
         # resolved), so a mid-run swap would be both incomplete and racy. A trusted
         # project's ``session_dir`` takes effect on the next launch — the trust decision
         # persists, so this is a one-time lag.
-        nonlocal runtime
         if startup_trusted or config_overrides is None:
             return  # config already reflects the trusted project; nothing to rebuild.
         trusted_config = config_overrides.build(
             trusted=True,
             project_dir=selected_project_context_root,
         )
-        if trusted_config == config:
-            return  # the project has no settings.json; the trusted build is identical.
-        trusted_runtime = await _build_runtime_for_config(trusted_config)
         effective_provider = configure_overrides.effective_provider(trusted_config.provider)
         effective_model = configure_overrides.effective_model(trusted_config.model)
-        agent.provider = trusted_runtime.providers.get(effective_provider)
-        agent.model = effective_model
-        if configure_overrides.has_effort:
-            # An explicit in-session "/model <id> <effort>" (or effort-only
-            # configure) run before trust resolved -- _handle_rpc_configure_command
-            # already accepts this permissively for a catalog-unknown model (a
-            # brand-new model ahead of a catalog update, or a custom provider),
-            # matching /model's general permissive-for-unknown-models design.
-            # startup_effort would otherwise silently drop it here just because
-            # the model isn't in the catalog, discarding a choice the user made
-            # explicitly and the configure command already accepted.
-            agent.effort = configure_overrides.effort
-        else:
-            # No in-session override -- this is the persisted/default effort
-            # from user settings, which startup_effort's filtering at
-            # CodingSession construction only checked against the
-            # untrusted-startup provider/model. This rebuild can swap both to
-            # the trusted project's (possibly different) ones, so a tier that
-            # survived that first filter is not guaranteed valid here.
-            # Re-filter against the effective post-swap provider/model, the
-            # same way TuiShell's ProjectConfigApplied handling does
-            # client-side.
-            #
-            # Falls back to `config.effort` (the ORIGINAL, unfiltered value),
-            # not `agent.effort` -- agent.effort was already run through
-            # startup_effort once, against the untrusted-startup
-            # provider/model, so a tier that's invalid there but valid for the
-            # trusted project's provider/model would already be None by now
-            # and unrecoverable from agent.effort. effort is never trust-gated
-            # (see resolve_settings), so config.effort and
-            # trusted_config.effort resolve identically regardless of trust.
-            agent.effort = startup_effort(
-                trusted_runtime.models,
+        if trusted_config == config:
+            configuration = resolve_coding_session_configuration(
+                trusted_config,
+                providers=runtime.providers,
+                models=runtime.models,
+                trusted=True,
                 provider_name=effective_provider,
                 model=effective_model,
-                default_model=agent.provider.default_model,
-                effort=config.effort,
+                has_model=configure_overrides.has_model,
+                effort=configure_overrides.effort,
+                has_effort=configure_overrides.has_effort,
             )
-        agent.tool_context = ToolContext.from_config(trusted_config)
-        runtime = replace(runtime, providers=trusted_runtime.providers)
+        else:
+            trusted_runtime = await _build_runtime_for_config(trusted_config)
+            staged_providers = ProviderRegistry()
+            staged_providers.replace_all(runtime.providers_for_configuration(trusted_runtime))
+            configuration = resolve_coding_session_configuration(
+                trusted_config,
+                providers=staged_providers,
+                models=runtime.models,
+                trusted=True,
+                provider_name=effective_provider,
+                model=effective_model,
+                has_model=configure_overrides.has_model,
+                effort=configure_overrides.effort,
+                has_effort=configure_overrides.has_effort,
+            )
+            runtime.adopt_provider_configuration(trusted_runtime)
+        agent.reconfigure(configuration)
+        if trusted_config == config:
+            return
         # Tell an out-of-process front-end (the TUI) the config it displays/mutates
         # changed, so its header and /provider,/model,/auth,/login stop showing the
         # untrusted-startup values.
@@ -514,36 +487,25 @@ async def _run_rpc(
         selected_project_context_root,
         on_first_trusted=_rebuild_agent_for_trusted_project,
     )
-    agent = CodingSession(
-        provider=provider,
+    initial_configuration = resolve_coding_session_configuration(
+        config,
+        providers=runtime.providers,
+        models=runtime.models,
+        trusted=startup_trusted,
+    )
+    agent = CodingSession.from_configuration(
+        initial_configuration,
         sessions=sessions,
         events=runtime.events,
-        model=config.model,
-        models=runtime.models,
-        # Persisted effort (see wisp.settings.persist_user_effort) is a single
-        # global string with no provider/model scope -- a tier chosen for a
-        # different provider/model in an earlier session could otherwise reach
-        # this one as an invalid wire value on the very first prompt. See
-        # startup_effort's docstring.
-        effort=startup_effort(
-            runtime.models,
-            provider_name=provider.name,
-            model=config.model,
-            default_model=provider.default_model,
-            effort=config.effort,
-        ),
         tool_registry=_print_mode_tool_registry(
             runtime.tools,
             all_tools=all_tools,
             allow_read_tools=allow_read_tools,
             allowed_tools=allowed_tools,
         ),
-        tool_context=ToolContext.from_config(config),
         tool_approval_policy=approval_policy,
         max_tool_iterations=max_tool_iterations,
         project_context_root=selected_project_context_root,
-        context_reserve_tokens=config.context_reserve_tokens,
-        auto_compaction_enabled=config.auto_compaction_enabled,
     )
 
     queued_commands: deque[dict[str, object]] = deque()
@@ -1390,9 +1352,13 @@ def _handle_rpc_configure_command(
             message="RPC configure command field effort must be a string",
         )
         return
+    configuration = agent.configuration
+    selected_provider = configuration.provider
+    selected_model = configuration.model
+    selected_effort = configuration.effort
     if isinstance(provider, str):
         try:
-            agent.provider = runtime.providers.get(provider)
+            selected_provider = runtime.providers.get(provider)
         except UnknownProviderError as exc:
             _write_rpc_command_error(
                 command_id=command_id,
@@ -1403,7 +1369,7 @@ def _handle_rpc_configure_command(
         if configure_overrides is not None:
             configure_overrides.provider = provider
         if not has_model:
-            agent.model = None
+            selected_model = None
             if configure_overrides is not None:
                 configure_overrides.model = None
                 configure_overrides.has_model = True
@@ -1414,21 +1380,19 @@ def _handle_rpc_configure_command(
             # switch would reach the new provider's API unvalidated on the
             # next prompt, matching the same staleness model already gets
             # reset for above.
-            agent.effort = None
+            selected_effort = None
             if configure_overrides is not None:
                 configure_overrides.effort = None
                 configure_overrides.has_effort = True
     if has_model and provider is None and isinstance(model, str):
-        provider_before_auto_switch = agent.provider.name
-        _auto_switch_provider_for_model(
+        selected_provider = _auto_switch_provider_for_model(
             model,
             command_id=command_id,
-            agent=agent,
+            current_provider=selected_provider,
             runtime=runtime,
             configure_overrides=configure_overrides,
-            has_effort=has_effort,
         )
-        if not has_effort and agent.provider.name == provider_before_auto_switch:
+        if not has_effort:
             # Effort support is per-model, not just per-provider --
             # catalog.toml deliberately omits some models (e.g.
             # claude-haiku-4-5) from effort_levels entirely. A model change
@@ -1438,20 +1402,29 @@ def _handle_rpc_configure_command(
             # tier valid for the old model could be unsupported by the new
             # one -- reset rather than risk sending an incompatible
             # output_config.effort (or equivalent) on the next prompt.
-            agent.effort = None
+            selected_effort = None
             if configure_overrides is not None:
                 configure_overrides.effort = None
                 configure_overrides.has_effort = True
     if has_model:
-        agent.model = model
+        selected_model = model
         if configure_overrides is not None:
             configure_overrides.model = model
             configure_overrides.has_model = True
     if has_effort:
-        agent.effort = None if clear_effort else effort
+        selected_effort = None if clear_effort else effort
         if configure_overrides is not None:
             configure_overrides.effort = None if clear_effort else effort
             configure_overrides.has_effort = True
+    agent.reconfigure(
+        replace(
+            configuration,
+            provider=selected_provider,
+            model=selected_model,
+            effort=selected_effort,
+            models=runtime.models,
+        )
+    )
     _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 
@@ -1459,12 +1432,11 @@ def _auto_switch_provider_for_model(
     model: str,
     *,
     command_id: str,
-    agent: CodingSession,
+    current_provider: Provider,
     runtime: WispRuntime,
     configure_overrides: _RpcConfigureOverrides | None,
-    has_effort: bool,
-) -> None:
-    """Switch ``agent.provider`` if ``model`` unambiguously belongs elsewhere.
+) -> Provider:
+    """Return the provider selected for ``model`` when it is unambiguous.
 
     Advisory, never blocking: an unknown or ambiguous model id is left entirely
     to the existing free-text ``agent.model = model`` assignment -- this must
@@ -1479,32 +1451,21 @@ def _auto_switch_provider_for_model(
     """
 
     try:
-        resolved_provider, _entry = runtime.models.resolve(model, prefer=agent.provider.name)
+        resolved_provider, _entry = runtime.models.resolve(model, prefer=current_provider.name)
     except (UnknownModelError, AmbiguousModelError):
-        return
-    if resolved_provider == agent.provider.name:
-        return
+        return current_provider
+    if resolved_provider == current_provider.name:
+        return current_provider
     try:
         new_provider = runtime.providers.get(resolved_provider)
     except UnknownProviderError:
-        return
+        return current_provider
     _write_json_event(
         ModelProviderAutoSwitched(command_id=command_id, provider=resolved_provider, model=model)
     )
-    agent.provider = new_provider
     if configure_overrides is not None:
         configure_overrides.provider = resolved_provider
-    if not has_effort:
-        # Same staleness the explicit-provider path already guards against
-        # (see _handle_rpc_configure_command): effort tiers are
-        # provider-native, non-normalized strings, so a tier chosen for the
-        # old provider must not survive an auto-switch to a new one -- the
-        # caller's own `has_effort` block (run after this returns) still
-        # wins when the same command also supplies a new effort explicitly.
-        agent.effort = None
-        if configure_overrides is not None:
-            configure_overrides.effort = None
-            configure_overrides.has_effort = True
+    return new_provider
 
 
 def _handle_rpc_approval_command(

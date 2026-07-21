@@ -174,6 +174,29 @@ def test_configure_overrides_effective_effort_falls_back_to_default_when_unset()
     assert overrides.effective_effort("fallback") == "fallback"
 
 
+def test_model_only_configure_does_not_override_provider_without_auto_switch(
+    tmp_path: Path,
+) -> None:
+    from wisp.cli.rpc import _RpcConfigureOverrides
+
+    provider = CapturingProvider()
+    runtime = _runtime_with_capturing_provider(provider)
+    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
+    overrides = _RpcConfigureOverrides()
+
+    _handle_rpc_configure_command(
+        {"model": "custom-model"},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+        configure_overrides=overrides,
+    )
+
+    assert overrides.provider is None
+    assert overrides.model == "custom-model"
+
+
 def test_configure_clear_effort_resets_agent_effort_to_none(tmp_path: Path) -> None:
     # Regression test: effort=None is indistinguishable on the wire from
     # never having set effort at all, so clear_effort is the only way a
@@ -309,6 +332,8 @@ class _OpenAINamedProvider(CapturingProvider):
 
 
 def test_configure_model_only_auto_switch_resets_stale_effort(tmp_path: Path) -> None:
+    from wisp.cli.rpc import _RpcConfigureOverrides
+
     # Regression test: _auto_switch_provider_for_model changes agent.provider
     # via a separate code path from the explicit-provider branch above --
     # a configure command carrying only `model` (no `provider` field) can
@@ -331,6 +356,7 @@ def test_configure_model_only_auto_switch_resets_stale_effort(tmp_path: Path) ->
     agent = CodingSession(
         provider=fake_provider, sessions=JsonlSessionStore(tmp_path), effort="MEDIUM"
     )
+    overrides = _RpcConfigureOverrides()
 
     # "gpt-5.5-pro" unambiguously belongs to openai in the built-in catalog
     # (confirmed in tests/test_rpc_configure.py's auto-switch tests) -- no
@@ -341,10 +367,12 @@ def test_configure_model_only_auto_switch_resets_stale_effort(tmp_path: Path) ->
         command_type="configure",
         agent=agent,
         runtime=runtime,
+        configure_overrides=overrides,
     )
 
     assert agent.provider is openai_provider
     assert agent.effort is None
+    assert overrides.provider == "openai"
 
 
 def test_configure_model_only_auto_switch_with_explicit_effort_keeps_the_new_value(
