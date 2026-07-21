@@ -53,6 +53,12 @@ class _RpcDispatchResult:
     should_shutdown: bool = False
 
 
+@dataclass(frozen=True)
+class _RpcCancelResult:
+    outcome: Literal["running", "queued", "missing"]
+    command: dict[str, object] | None = None
+
+
 type _RpcControlEvent = _RpcInputCommand | _RpcInputClosed | _RpcCommandCompleted
 type RpcDispatch = Callable[
     [dict[str, object], _RpcRunningCommand | None],
@@ -157,6 +163,21 @@ class RpcCoordinator:
                 self.queued_commands.append(command)
             return False
         return self._dispatch(command, dispatch=dispatch)
+
+    def cancel(self, target_id: str) -> _RpcCancelResult:
+        """Cancel an active command or remove the first queued command with this id."""
+
+        if self.running_command is not None and self.running_command.command_id == target_id:
+            self.running_command.cancel_scope.cancel()
+            return _RpcCancelResult("running")
+        queued_target = next(
+            (queued for queued in self.queued_commands if queued.get("id") == target_id),
+            None,
+        )
+        if queued_target is None:
+            return _RpcCancelResult("missing")
+        self.queued_commands.remove(queued_target)
+        return _RpcCancelResult("queued", command=queued_target)
 
     def _dispatch(self, command: dict[str, object], *, dispatch: RpcDispatch) -> bool:
         result = dispatch(command, self.running_command)
