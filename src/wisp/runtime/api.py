@@ -48,6 +48,12 @@ class WispRuntime:
     models: ModelRegistry
     _configured_providers: dict[str, Provider] = field(default_factory=dict, repr=False)
 
+    def __post_init__(self) -> None:
+        """Treat providers present at direct construction as runtime-configured."""
+
+        if not self._configured_providers:
+            self.capture_provider_configuration()
+
     def capture_provider_configuration(self) -> None:
         """Record the provider instances owned by runtime configuration.
 

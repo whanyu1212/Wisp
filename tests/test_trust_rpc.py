@@ -543,6 +543,7 @@ def test_trusted_provider_refresh_preserves_runtime_identities() -> None:
 
     anyio.run(scenario)
 
+
 def test_rpc_prompt_command_reports_rebuild_provider_error(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

@@ -58,8 +58,7 @@ def test_resolver_validates_default_effort_but_preserves_explicit_override(tmp_p
     assert explicit_configuration.effort == "custom-tier"
     assert explicit_configuration.trusted is True
     assert (
-        config.auth_path.resolve().as_posix()
-        in explicit_configuration.tool_context.protected_paths
+        config.auth_path.resolve().as_posix() in explicit_configuration.tool_context.protected_paths
     )
 
 

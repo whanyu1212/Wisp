@@ -1409,7 +1409,6 @@ def _handle_rpc_configure_command(
     if has_model:
         selected_model = model
         if configure_overrides is not None:
-            configure_overrides.provider = selected_provider.name
             configure_overrides.model = model
             configure_overrides.has_model = True
     if has_effort:
