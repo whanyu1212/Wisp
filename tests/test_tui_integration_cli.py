@@ -1903,7 +1903,7 @@ def test_textual_theme_switch_rederives_transcript_styles() -> None:
 
     rendered = anyio.run(scenario)
     # The post-switch line uses the light theme's success color, not dark's.
-    assert "#2f9d78" in rendered  # light wisp assistant/success
+    assert "#2b8164" in rendered  # light wisp assistant/success
     assert "#5cc9a7" not in rendered  # dark wisp success must be gone
 
 
@@ -2676,8 +2676,8 @@ def test_textual_card_css_resolves_under_the_light_theme() -> None:
             return color
 
     border_color = anyio.run(scenario)
-    # tool messages use a $accent left rule; light wisp accent is #2f8f8f, dark #3fb8b8.
-    assert border_color.hex.lower() == "#2f8f8f"
+    # tool messages use a $accent left rule; light wisp accent is #2e7676, dark #3fb8b8.
+    assert border_color.hex.lower() == "#2e7676"
 
 
 def _status_after_snapshots(snapshots: list[TuiViewSnapshot]) -> tuple[str, bool]:
@@ -4296,7 +4296,7 @@ def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
     styles = anyio.run(scenario)
     expected = {
         "wisp": ("#0E1216", "#151B21", "#3FB8B8"),
-        "wisp-light": ("#FBFCFD", "#FFFFFF", "#2F8F8F"),
+        "wisp-light": ("#FBFCFD", "#FFFFFF", "#2E7676"),
     }
     for theme, (
         idle_background,
@@ -4333,7 +4333,7 @@ def test_textual_scrollbar_colors_resolve_for_both_themes() -> None:
     colors = anyio.run(scenario)
     assert colors == {
         "wisp": ("#7C8B99", "#4AA3C7", "#3FB8B8", 1),
-        "wisp-light": ("#55636D", "#2F8FB3", "#2F8F8F", 1),
+        "wisp-light": ("#55636D", "#277795", "#2E7676", 1),
     }
 
 
