@@ -33,6 +33,17 @@ _CODING_FORBIDDEN_IMPORTS = (
     "wisp.tui",
 )
 _FRONTEND_MODULES = (Path("cli/__init__.py"), Path("cli/rpc.py"))
+_RPC_COORDINATOR_FORBIDDEN_IMPORTS = (
+    "os",
+    "stat",
+    "sys",
+    "threading",
+    "wisp.coding",
+    "wisp.config",
+    "wisp.runtime",
+    "wisp.trust",
+    "wisp.tui",
+)
 
 
 def _module_imports(path: Path) -> set[str]:
@@ -77,6 +88,18 @@ def test_frontends_import_coding_session_directly() -> None:
         imports = _module_imports(wisp_dir / module)
         assert "wisp.coding" in imports
         assert "wisp.agent.compat" not in imports
+
+
+def test_rpc_coordinator_does_not_own_transport_or_runtime_policy() -> None:
+    path = Path(__file__).parents[1] / "src" / "wisp" / "cli" / "rpc_coordinator.py"
+
+    violations = [
+        imported
+        for imported in sorted(_module_imports(path))
+        if imported.startswith(_RPC_COORDINATOR_FORBIDDEN_IMPORTS)
+    ]
+
+    assert violations == []
 
 
 def test_legacy_agent_compatibility_exports_are_removed() -> None:
