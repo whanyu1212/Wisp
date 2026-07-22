@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import warnings
 from datetime import datetime
-from typing import Literal, Self, cast
-from uuid import uuid4
+from typing import TYPE_CHECKING, Literal, Self, cast
 
 from pydantic import (
     BaseModel,
@@ -29,6 +29,11 @@ from wisp.events import (
     UsageCost,
     utc_now,
 )
+
+if TYPE_CHECKING:
+    from wisp.sessions.entries import SessionEntry as PersistedSessionEntry
+else:
+    PersistedSessionEntry = object
 
 Role = Literal["system", "user", "assistant", "tool"]
 
@@ -170,28 +175,56 @@ def provider_history_message(message: Message) -> Message | None:
     return message
 
 
-class SessionEntry(BaseModel):
-    """One append-only JSONL record in a Wisp session."""
+def SessionEntry(  # noqa: N802
+    *,
+    session_id: str,
+    kind: Literal["message", "event", "compaction"] = "message",
+    message: Message | None = None,
+    event: JsonObject | None = None,
+    compaction: CompactionRecord | None = None,
+    id: str | None = None,
+    operation_id: str | None = None,
+    created_at: datetime | None = None,
+) -> PersistedSessionEntry:
+    """Build a concrete session entry through the deprecated flat-model API."""
 
-    model_config = ConfigDict(frozen=True)
+    from wisp.sessions.entries import (
+        CompactionSessionEntry,
+        EventSessionEntry,
+        MessageSessionEntry,
+        PersistedEventEnvelope,
+    )
 
-    id: str = Field(default_factory=lambda: uuid4().hex)
-    session_id: str
-    kind: Literal["message", "event", "compaction"] = "message"
-    message: Message | None = None
-    event: JsonObject | None = None
-    compaction: CompactionRecord | None = None
-    operation_id: str | None = None
-    created_at: datetime = Field(default_factory=utc_now)
+    warnings.warn(
+        "wisp.agent.messages.SessionEntry is deprecated; import a concrete entry "
+        "model from wisp.sessions instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    payloads = {
+        "message": message,
+        "event": event,
+        "compaction": compaction,
+    }
+    populated = tuple(name for name, payload in payloads.items() if payload is not None)
+    if populated != (kind,):
+        raise ValueError(f"{kind} session entries require exactly a {kind} payload")
 
-    @model_validator(mode="after")
-    def _validate_payload(self) -> Self:
-        payloads = {
-            "message": self.message,
-            "event": self.event,
-            "compaction": self.compaction,
-        }
-        populated = tuple(name for name, payload in payloads.items() if payload is not None)
-        if populated != (self.kind,):
-            raise ValueError(f"{self.kind} session entries require exactly a {self.kind} payload")
-        return self
+    common: dict[str, object] = {
+        "session_id": session_id,
+        "operation_id": operation_id,
+    }
+    if id is not None:
+        common["id"] = id
+    if created_at is not None:
+        common["created_at"] = created_at
+    if kind == "message":
+        assert message is not None
+        return MessageSessionEntry.model_validate({**common, "message": message})
+    if kind == "event":
+        assert event is not None
+        return EventSessionEntry.model_validate(
+            {**common, "event": PersistedEventEnvelope(payload=event)}
+        )
+    assert compaction is not None
+    return CompactionSessionEntry.model_validate({**common, "compaction": compaction})

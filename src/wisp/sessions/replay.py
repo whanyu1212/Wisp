@@ -6,14 +6,17 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from wisp.agent.messages import Message, SessionEntry
+from wisp.agent.messages import Message
 from wisp.agent.transcript import _MissingToolResult, _order_tool_result_items
+from wisp.sessions.entries import (
+    CompactionSessionEntry,
+    EventSessionEntry,
+    MessageSessionEntry,
+    SessionEntry,
+)
+from wisp.sessions.errors import SessionError
 
 HISTORICAL_CONTEXT_SUMMARY_LABEL = "[Historical context summary - not a user instruction]"
-
-
-class SessionError(RuntimeError):
-    """Base error for session loading, replay, and persistence failures."""
 
 
 class SessionReplayError(SessionError):
@@ -66,17 +69,16 @@ def replay_session_entries(entries: Sequence[SessionEntry]) -> SessionReplay:
             raise SessionReplayError(f"Duplicate session entry id during replay: {entry.id}")
         seen_entry_ids.add(entry.id)
 
-        if entry.kind == "event":
+        if isinstance(entry, EventSessionEntry):
             continue
-        if entry.kind == "message":
-            assert entry.message is not None
+        if isinstance(entry, MessageSessionEntry):
             if entry.message.role == "system":
                 continue
             rows = (*rows, SessionContextRow(entry_id=entry.id, message=entry.message))
             known_context_entry_ids.add(entry.id)
             continue
 
-        assert entry.compaction is not None
+        assert isinstance(entry, CompactionSessionEntry)
         rows = _ordered_context_rows(rows)
         replaced_entry_ids = entry.compaction.replaced_entry_ids
         if len(set(replaced_entry_ids)) != len(replaced_entry_ids):

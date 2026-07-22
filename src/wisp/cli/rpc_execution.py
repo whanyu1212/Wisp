@@ -29,6 +29,7 @@ from wisp.providers.catalog import AmbiguousModelError, UnknownModelError
 from wisp.rpc.commands import ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
+from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
 
 from .rpc_configuration import _RpcConfigureOverrides
@@ -618,9 +619,9 @@ def rpc_has_durable_completion(
     for entry in session.read_entries()[entry_start:]:
         if entry.operation_id != operation_id:
             continue
-        message = entry.message
-        if message is None:
+        if not isinstance(entry, MessageSessionEntry):
             continue
+        message = entry.message
         if message.role == "assistant" and message.finish_reason is not None:
             return True
         if message.role == "tool" and message.tool_call_id is not None:

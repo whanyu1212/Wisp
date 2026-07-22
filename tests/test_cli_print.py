@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from tests.cli_support import *
-from wisp.agent.messages import CompactionRecord, SessionEntry
+from wisp.agent.messages import CompactionRecord
 from wisp.cli.output import _print_event_line
 from wisp.events import (
     BillableTokenUsage,
@@ -20,6 +20,7 @@ from wisp.events import (
     WispEvent,
 )
 from wisp.providers.base import ContextOverflowError
+from wisp.sessions.entries import CompactionSessionEntry
 from wisp.sessions.replay import HISTORICAL_CONTEXT_SUMMARY_LABEL
 
 
@@ -431,7 +432,7 @@ def test_print_mode_resume_uses_compaction_replay(
             Message(role="assistant", content="retained answer", finish_reason="stop")
         )
         await session.append_compaction_entry(
-            SessionEntry(
+            CompactionSessionEntry(
                 session_id=session.session_id,
                 kind="compaction",
                 compaction=CompactionRecord(

@@ -7,10 +7,16 @@ from collections.abc import Sequence
 from pydantic import ValidationError
 
 from wisp.agent.context import build_context_budget, context_fingerprint, estimate_context
-from wisp.agent.messages import Message, SessionEntry
+from wisp.agent.messages import Message
 from wisp.coding.costs import aggregate_session_cost
 from wisp.events import SessionStats, TokenUsage, UsageCost
 from wisp.providers.base import ToolSpec
+from wisp.sessions.entries import (
+    CompactionSessionEntry,
+    EventSessionEntry,
+    MessageSessionEntry,
+    SessionEntry,
+)
 from wisp.sessions.replay import SessionReplay
 
 
@@ -67,16 +73,16 @@ def build_session_stats(
 def _usage_records(entries: Sequence[SessionEntry]) -> list[TokenUsage]:
     records: list[TokenUsage] = []
     for entry in entries:
-        if entry.message is not None and entry.message.usage is not None:
+        if isinstance(entry, MessageSessionEntry) and entry.message.usage is not None:
             records.append(entry.message.usage)
-        if entry.compaction is not None and entry.compaction.usage is not None:
+        if isinstance(entry, CompactionSessionEntry) and entry.compaction.usage is not None:
             records.append(entry.compaction.usage)
         if (
-            entry.event is not None
-            and entry.event.get("type") == "compaction.completed"
-            and entry.event.get("outcome") == "failed"
+            isinstance(entry, EventSessionEntry)
+            and entry.event.payload.get("type") == "compaction.completed"
+            and entry.event.payload.get("outcome") == "failed"
         ):
-            raw_usage = entry.event.get("usage")
+            raw_usage = entry.event.payload.get("usage")
             if isinstance(raw_usage, dict):
                 try:
                     records.append(TokenUsage.model_validate(raw_usage))
@@ -88,18 +94,21 @@ def _usage_records(entries: Sequence[SessionEntry]) -> list[TokenUsage]:
 def _cost_records(entries: Sequence[SessionEntry]) -> list[UsageCost | None]:
     records: list[UsageCost | None] = []
     for entry in entries:
-        if entry.message is not None and entry.message.role == "assistant":
+        if isinstance(entry, MessageSessionEntry) and entry.message.role == "assistant":
             records.append(entry.message.cost)
-        if entry.compaction is not None:
+        if isinstance(entry, CompactionSessionEntry):
             records.append(entry.compaction.cost)
-        if entry.event is not None and entry.event.get("type") == "compaction.completed":
-            raw_cost = entry.event.get("cost")
+        if (
+            isinstance(entry, EventSessionEntry)
+            and entry.event.payload.get("type") == "compaction.completed"
+        ):
+            raw_cost = entry.event.payload.get("cost")
             if isinstance(raw_cost, dict):
                 try:
                     records.append(UsageCost.model_validate(raw_cost))
                 except ValidationError:
                     records.append(None)
-            elif entry.event.get("usage") is not None:
+            elif entry.event.payload.get("usage") is not None:
                 records.append(None)
     return records
 
@@ -131,7 +140,7 @@ def _latest_observation(
     context_messages = [
         (entry.id, entry.message)
         for entry in entries[boundary + 1 :]
-        if entry.kind == "message" and entry.message is not None and entry.message.role != "system"
+        if isinstance(entry, MessageSessionEntry) and entry.message.role != "system"
     ]
     latest_usage: int | None = None
     latest_usage_index: int | None = None

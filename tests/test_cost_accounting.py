@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from wisp.agent.messages import CompactionRecord, Message, SessionEntry
+from wisp.agent.messages import CompactionRecord, Message
 from wisp.coding.costs import CostEstimator, aggregate_session_cost, format_cost_summary, format_usd
 from wisp.coding.stats import build_session_stats
 from wisp.events import MessageCompleted, TokenUsage, wisp_event_from_json
@@ -15,6 +15,11 @@ from wisp.providers.catalog import (
     ModelCatalogProviderEntry,
     ModelPricing,
     ModelRegistry,
+)
+from wisp.sessions.entries import (
+    CompactionSessionEntry,
+    MessageSessionEntry,
+    SessionEntryAdapter,
 )
 from wisp.sessions.replay import replay_session_entries
 
@@ -202,12 +207,12 @@ def test_session_stats_uses_persisted_cost_snapshots_for_messages_and_compaction
         TokenUsage(input_tokens=100, output_tokens=100, total_tokens=200),
     )
     entries = (
-        SessionEntry(
+        MessageSessionEntry(
             id="user",
             session_id="session",
             message=Message(role="user", content="question"),
         ),
-        SessionEntry(
+        MessageSessionEntry(
             id="answer",
             session_id="session",
             message=Message(
@@ -217,12 +222,12 @@ def test_session_stats_uses_persisted_cost_snapshots_for_messages_and_compaction
                 cost=cost,
             ),
         ),
-        SessionEntry(
+        MessageSessionEntry(
             id="next-user",
             session_id="session",
             message=Message(role="user", content="next question"),
         ),
-        SessionEntry(
+        MessageSessionEntry(
             id="next-answer",
             session_id="session",
             message=Message(
@@ -232,10 +237,9 @@ def test_session_stats_uses_persisted_cost_snapshots_for_messages_and_compaction
                 cost=cost,
             ),
         ),
-        SessionEntry(
+        CompactionSessionEntry(
             id="compact",
             session_id="session",
-            kind="compaction",
             compaction=CompactionRecord(
                 summary="summary",
                 replaced_entry_ids=("user", "answer"),
@@ -259,19 +263,19 @@ def test_session_stats_uses_persisted_cost_snapshots_for_messages_and_compaction
     assert stats.cost.known_usd == Decimal("0.003")
     assert stats.cost.complete is True
     assert stats.cost.priced_record_count == 3
-    reloaded = SessionEntry.model_validate_json(entries[4].model_dump_json())
-    assert reloaded.compaction is not None
+    reloaded = SessionEntryAdapter.validate_json(entries[4].model_dump_json())
+    assert isinstance(reloaded, CompactionSessionEntry)
     assert reloaded.compaction.cost == cost
 
 
 def test_session_stats_marks_legacy_successful_messages_unpriced() -> None:
     entries = (
-        SessionEntry(
+        MessageSessionEntry(
             id="user",
             session_id="session",
             message=Message(role="user", content="question"),
         ),
-        SessionEntry(
+        MessageSessionEntry(
             id="answer",
             session_id="session",
             message=Message(role="assistant", content="answer", finish_reason="stop"),

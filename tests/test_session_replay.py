@@ -7,9 +7,17 @@ from typing import Any
 import anyio
 import pytest
 
-from wisp.agent.messages import CompactionRecord, Message, SessionEntry
+from wisp.agent.messages import CompactionRecord, Message
 from wisp.agent.transcript import plan_interrupted_tool_repairs
 from wisp.events import ToolCallSnapshot
+from wisp.sessions.entries import (
+    CompactionSessionEntry,
+    EventSessionEntry,
+    MessageSessionEntry,
+    PersistedEventEnvelope,
+    SessionEntry,
+    SessionEntryAdapter,
+)
 from wisp.sessions.jsonl import JsonlSessionStore, SessionError
 from wisp.sessions.replay import (
     HISTORICAL_CONTEXT_SUMMARY_LABEL,
@@ -29,7 +37,7 @@ def _append_compaction_in_process(
 ) -> None:
     start_event.wait()
     session = JsonlSessionStore(Path(session_path).parent).load(Path(session_path))
-    entry = SessionEntry.model_validate_json(entry_json)
+    entry = SessionEntryAdapter.validate_json(entry_json)
 
     async def append() -> None:
         await session.append_compaction_entry(
@@ -49,10 +57,11 @@ def _message_entry(
     content: str,
     **message_fields: object,
 ) -> SessionEntry:
-    return SessionEntry.model_validate(
+    return SessionEntryAdapter.validate_python(
         {
             "id": entry_id,
             "session_id": SESSION_ID,
+            "kind": "message",
             "message": {"role": role, "content": content, **message_fields},
         }
     )
@@ -63,10 +72,9 @@ def _compaction_entry(
     *replaced_entry_ids: str,
     summary: str = "Earlier work was summarized.",
 ) -> SessionEntry:
-    return SessionEntry(
+    return CompactionSessionEntry(
         id=entry_id,
         session_id=SESSION_ID,
-        kind="compaction",
         compaction=CompactionRecord(
             summary=summary,
             replaced_entry_ids=replaced_entry_ids,
@@ -79,37 +87,36 @@ def test_jsonl_raw_messages_remain_audit_while_context_uses_summary_and_suffix(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
-    system = SessionEntry(
+    system = MessageSessionEntry(
         id="system",
         session_id=session.session_id,
         message=Message(role="system", content="system prompt"),
     )
-    first = SessionEntry(
+    first = MessageSessionEntry(
         id="first",
         session_id=session.session_id,
         message=Message(role="user", content="old question"),
     )
-    answer = SessionEntry(
+    answer = MessageSessionEntry(
         id="answer",
         session_id=session.session_id,
         message=Message(role="assistant", content="old answer"),
     )
-    compaction = SessionEntry(
+    compaction = CompactionSessionEntry(
         id="compact",
         session_id=session.session_id,
-        kind="compaction",
         compaction=CompactionRecord(
             summary="The old question was answered.",
             replaced_entry_ids=("first", "answer"),
             provider="openai",
         ),
     )
-    suffix = SessionEntry(
+    suffix = MessageSessionEntry(
         id="suffix",
         session_id=session.session_id,
         message=Message(role="user", content="new question"),
     )
-    suffix_answer = SessionEntry(
+    suffix_answer = MessageSessionEntry(
         id="suffix-answer",
         session_id=session.session_id,
         message=Message(role="assistant", content="new answer"),
@@ -120,11 +127,10 @@ def test_jsonl_raw_messages_remain_audit_while_context_uses_summary_and_suffix(
         await session.append_entry(first)
         await session.append_entry(answer)
         await session.append_entry(
-            SessionEntry(
+            EventSessionEntry(
                 id="event",
                 session_id=session.session_id,
-                kind="event",
-                event={"type": "audit.event"},
+                event=PersistedEventEnvelope(payload={"type": "audit.event"}),
             )
         )
         await session.append_entry(suffix)
@@ -244,30 +250,29 @@ def test_atomic_compaction_append_rejects_stale_plan_and_remains_idempotent(
 ) -> None:
     store = JsonlSessionStore(tmp_path)
     session = store.create()
-    first = SessionEntry(
+    first = MessageSessionEntry(
         id="first",
         session_id=session.session_id,
         message=Message(role="user", content="one"),
     )
-    second = SessionEntry(
+    second = MessageSessionEntry(
         id="second",
         session_id=session.session_id,
         message=Message(role="assistant", content="two"),
     )
-    retained = SessionEntry(
+    retained = MessageSessionEntry(
         id="retained",
         session_id=session.session_id,
         message=Message(role="user", content="three"),
     )
-    retained_answer = SessionEntry(
+    retained_answer = MessageSessionEntry(
         id="retained-answer",
         session_id=session.session_id,
         message=Message(role="assistant", content="four"),
     )
-    compaction = SessionEntry(
+    compaction = CompactionSessionEntry(
         id="compact",
         session_id=session.session_id,
-        kind="compaction",
         compaction=CompactionRecord(
             summary="First turn.",
             replaced_entry_ids=("first", "second"),

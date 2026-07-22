@@ -10,7 +10,7 @@ import pytest
 
 import wisp.coding.tool_execution as tool_execution
 from wisp.agent.execution import ToolResultProcessingError
-from wisp.agent.messages import Message, SessionEntry
+from wisp.agent.messages import Message
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.coding.session import CodingSession
 from wisp.events import (
@@ -47,6 +47,7 @@ from wisp.providers.events import (
 from wisp.providers.fake import FakeProvider, ScriptedProvider
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry
+from wisp.sessions.entries import MessageSessionEntry, SessionEntry
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import ToolArguments, ToolInputSchema
@@ -583,7 +584,11 @@ def test_coding_session_retries_uncertain_completion_write_without_duplicate(
     async def append_then_fail(entry: SessionEntry) -> SessionEntry:
         nonlocal failed
         persisted = await append_entry(entry)
-        if not failed and entry.message is not None and entry.message.role == "assistant":
+        if (
+            not failed
+            and isinstance(entry, MessageSessionEntry)
+            and entry.message.role == "assistant"
+        ):
             failed = True
             raise OSError("uncertain completion write")
         return persisted
@@ -604,7 +609,7 @@ def test_coding_session_retries_uncertain_completion_write_without_duplicate(
     assistant_entries = [
         entry
         for entry in session.read_entries()
-        if entry.message is not None and entry.message.role == "assistant"
+        if isinstance(entry, MessageSessionEntry) and entry.message.role == "assistant"
     ]
     assert len(assistant_entries) == 2
     assert assistant_entries[0].message is not None
@@ -642,7 +647,7 @@ def test_coding_session_flushes_prior_completion_before_next_provider_request(
     async def fail_first_completion(entry: SessionEntry) -> SessionEntry:
         if (
             fail_completion_writes
-            and entry.message is not None
+            and isinstance(entry, MessageSessionEntry)
             and entry.message.role == "assistant"
             and entry.message.content == "first answer"
         ):
@@ -800,7 +805,7 @@ def test_coding_session_retries_uncertain_repair_write_without_duplicate(
         persisted = await append_entry(entry)
         if (
             not failed
-            and entry.message is not None
+            and isinstance(entry, MessageSessionEntry)
             and entry.message.content == INTERRUPTED_TOOL_RESULT_TEXT
         ):
             failed = True
@@ -828,7 +833,7 @@ def test_coding_session_retries_uncertain_repair_write_without_duplicate(
     repairs = [
         entry
         for entry in session.read_entries()
-        if entry.message is not None
+        if isinstance(entry, MessageSessionEntry)
         and entry.message.role == "tool"
         and entry.message.tool_call_id == "call-1"
     ]
@@ -881,7 +886,7 @@ def test_coding_session_retries_uncertain_finalizer_repair_without_duplicate(
         persisted = await append_entry(entry)
         if (
             not failed
-            and entry.message is not None
+            and isinstance(entry, MessageSessionEntry)
             and entry.message.content == INTERRUPTED_TOOL_RESULT_TEXT
         ):
             failed = True
@@ -906,7 +911,7 @@ def test_coding_session_retries_uncertain_finalizer_repair_without_duplicate(
     repair_entries = [
         entry
         for entry in session.read_entries()
-        if entry.message is not None
+        if isinstance(entry, MessageSessionEntry)
         and entry.message.role == "tool"
         and entry.message.tool_call_id == "call-1"
     ]
@@ -1188,15 +1193,15 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
         "tool",
         "assistant",
     ]
-    assert [record["event"]["type"] for record in event_records] == [
+    assert [record["event"]["payload"]["type"] for record in event_records] == [
         "tool.call",
         "tool.execution.started",
         "tool.execution.ended",
     ]
-    assert event_records[1]["event"]["call_id"] == "call-1"
-    assert event_records[1]["event"]["arguments"] == {"text": "hello"}
-    assert event_records[2]["event"]["output"] == "echo: hello"
-    assert event_records[2]["event"]["is_error"] is False
+    assert event_records[1]["event"]["payload"]["call_id"] == "call-1"
+    assert event_records[1]["event"]["payload"]["arguments"] == {"text": "hello"}
+    assert event_records[2]["event"]["payload"]["output"] == "echo: hello"
+    assert event_records[2]["event"]["payload"]["is_error"] is False
     tool_call_message = message_records[3]["message"]
     assert tool_call_message["content"] == "checking "
     assert tool_call_message["response_id"] == "response-1"
@@ -1402,15 +1407,15 @@ def test_coding_session_blocks_approval_required_tool_without_override(tmp_path:
     saved = next(event for event in events if isinstance(event, SessionSaved))
     records = [json.loads(line) for line in saved.path.read_text(encoding="utf-8").splitlines()]
     event_records = [record for record in records if record["kind"] == "event"]
-    assert [record["event"]["type"] for record in event_records] == [
+    assert [record["event"]["payload"]["type"] for record in event_records] == [
         "tool.call",
         "tool.execution.started",
         "tool.approval.requested",
         "tool.approval.resolved",
         "tool.execution.ended",
     ]
-    assert event_records[3]["event"]["approved"] is False
-    assert "requires approval" in event_records[3]["event"]["reason"]
+    assert event_records[3]["event"]["payload"]["approved"] is False
+    assert "requires approval" in event_records[3]["event"]["payload"]["reason"]
 
 
 def test_coding_session_approves_required_tool_with_override(tmp_path: Path) -> None:

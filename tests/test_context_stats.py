@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from wisp.agent.context import build_context_budget, context_fingerprint, estimate_context
-from wisp.agent.messages import CompactionRecord, Message, SessionEntry
+from wisp.agent.messages import CompactionRecord, Message
 from wisp.coding.compaction import should_auto_compact
 from wisp.coding.stats import build_session_stats
 from wisp.events import (
@@ -13,6 +13,7 @@ from wisp.events import (
     wisp_event_from_json,
 )
 from wisp.providers.base import ToolCallResult, ToolSpec
+from wisp.sessions.entries import CompactionSessionEntry, MessageSessionEntry
 from wisp.sessions.replay import replay_session_entries
 
 
@@ -140,10 +141,10 @@ def test_context_statistics_events_accept_schema_v9_and_current() -> None:
 
 
 def test_session_stats_sum_authoritative_usage_and_invalidate_pre_compaction_observation() -> None:
-    old_user = SessionEntry(
+    old_user = MessageSessionEntry(
         id="old-user", session_id="s", message=Message(role="user", content="a")
     )
-    old_assistant = SessionEntry(
+    old_assistant = MessageSessionEntry(
         id="old-assistant",
         session_id="s",
         message=Message(
@@ -153,10 +154,10 @@ def test_session_stats_sum_authoritative_usage_and_invalidate_pre_compaction_obs
             usage=_usage(40, 10, 75),
         ),
     )
-    retained_user = SessionEntry(
+    retained_user = MessageSessionEntry(
         id="retained-user", session_id="s", message=Message(role="user", content="c")
     )
-    retained_assistant = SessionEntry(
+    retained_assistant = MessageSessionEntry(
         id="retained-assistant",
         session_id="s",
         message=Message(
@@ -166,10 +167,9 @@ def test_session_stats_sum_authoritative_usage_and_invalidate_pre_compaction_obs
             usage=_usage(20, 5, 40),
         ),
     )
-    compaction = SessionEntry(
+    compaction = CompactionSessionEntry(
         id="compact",
         session_id="s",
-        kind="compaction",
         compaction=CompactionRecord(
             summary="Earlier work",
             replaced_entry_ids=("old-user", "old-assistant"),
@@ -201,16 +201,15 @@ def test_session_stats_sum_authoritative_usage_and_invalidate_pre_compaction_obs
 
 
 def test_session_stats_use_latest_post_compaction_assistant_observation() -> None:
-    user = SessionEntry(id="user", session_id="s", message=Message(role="user", content="a"))
-    assistant = SessionEntry(
+    user = MessageSessionEntry(id="user", session_id="s", message=Message(role="user", content="a"))
+    assistant = MessageSessionEntry(
         id="assistant",
         session_id="s",
         message=Message(role="assistant", content="b", finish_reason="stop"),
     )
-    compaction = SessionEntry(
+    compaction = CompactionSessionEntry(
         id="compact",
         session_id="s",
-        kind="compaction",
         compaction=CompactionRecord(
             summary="Earlier work",
             replaced_entry_ids=("user",),
@@ -218,10 +217,10 @@ def test_session_stats_use_latest_post_compaction_assistant_observation() -> Non
         ),
     )
     # The retained assistant alone is invalid replay, so retain a complete second turn.
-    retained_user = SessionEntry(
+    retained_user = MessageSessionEntry(
         id="retained-user", session_id="s", message=Message(role="user", content="c")
     )
-    retained_assistant = SessionEntry(
+    retained_assistant = MessageSessionEntry(
         id="retained-assistant",
         session_id="s",
         message=Message(role="assistant", content="d", finish_reason="stop"),
@@ -233,10 +232,10 @@ def test_session_stats_use_latest_post_compaction_assistant_observation() -> Non
             )
         }
     )
-    post_user = SessionEntry(
+    post_user = MessageSessionEntry(
         id="post-user", session_id="s", message=Message(role="user", content="e")
     )
-    post_assistant = SessionEntry(
+    post_assistant = MessageSessionEntry(
         id="post-assistant",
         session_id="s",
         message=Message(

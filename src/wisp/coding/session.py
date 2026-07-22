@@ -14,7 +14,6 @@ from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.messages import (
     CompactionRecord,
     Message,
-    SessionEntry,
     message_from_completion_event,
     provider_history_message,
 )
@@ -59,6 +58,7 @@ from wisp.providers.base import ContextOverflowError, Provider, ToolSpec
 from wisp.providers.catalog import ModelRegistry
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
+from wisp.sessions.entries import CompactionSessionEntry, MessageSessionEntry, SessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import SessionReplay, replay_session_entries
 from wisp.tools.approval import ToolApprovalPolicy
@@ -678,9 +678,8 @@ class CodingSession:
             normalized_instructions = (
                 instructions.strip() if instructions is not None and instructions.strip() else None
             )
-            entry = SessionEntry(
+            entry = CompactionSessionEntry(
                 session_id=session.session_id,
-                kind="compaction",
                 compaction=CompactionRecord(
                     schema_version=4,
                     summary=summary.summary,
@@ -960,7 +959,7 @@ class CodingSession:
         *,
         operation_id: str | None = None,
     ) -> str:
-        entry = SessionEntry(
+        entry = MessageSessionEntry(
             session_id=session.session_id,
             message=message,
             operation_id=operation_id,
