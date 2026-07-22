@@ -14,12 +14,20 @@ from uuid import uuid4
 from weakref import WeakValueDictionary
 
 import anyio
-from pydantic import ValidationError
 
-from wisp.agent.messages import Message, SessionEntry
-from wisp.events import JsonObject, WispEvent
+from wisp.agent.messages import Message
+from wisp.events import JsonObject, KnownWispEvent, WispEvent
+from wisp.sessions.entries import (
+    CompactionSessionEntry,
+    EventSessionEntry,
+    MessageSessionEntry,
+    PersistedEventEnvelope,
+    SessionEntry,
+    session_entry_from_json,
+    typed_event_from_envelope,
+)
+from wisp.sessions.errors import MalformedSessionEntryError, SessionError
 from wisp.sessions.replay import (
-    SessionError,
     SessionReplay,
     StaleCompactionError,
     replay_session_entries,
@@ -139,7 +147,7 @@ class JsonlSession:
         *,
         operation_id: str | None = None,
     ) -> SessionEntry:
-        entry = SessionEntry(
+        entry = MessageSessionEntry(
             session_id=self.session_id,
             message=message,
             operation_id=operation_id,
@@ -154,10 +162,9 @@ class JsonlSession:
     ) -> SessionEntry:
         """Persist a structured runtime event for audit/debugging."""
 
-        entry = SessionEntry(
+        entry = EventSessionEntry(
             session_id=self.session_id,
-            kind="event",
-            event=event.model_dump(mode="json"),
+            event=PersistedEventEnvelope(payload=event.model_dump(mode="json")),
             operation_id=operation_id,
         )
         return await self.append_entry(entry)
@@ -185,7 +192,7 @@ class JsonlSession:
             raise SessionError(
                 f"Session entry belongs to {entry.session_id}, not {self.session_id}"
             )
-        if entry.kind != "compaction":
+        if not isinstance(entry, CompactionSessionEntry):
             raise SessionError("Atomic compaction append requires a compaction entry")
         expected = tuple(expected_context_entry_ids)
         async with self._append_lock:
@@ -225,9 +232,7 @@ class JsonlSession:
         """Read all persisted messages from the session file."""
 
         return tuple(
-            entry.message
-            for entry in self.read_entries()
-            if entry.kind == "message" and entry.message is not None
+            entry.message for entry in self.read_entries() if isinstance(entry, MessageSessionEntry)
         )
 
     def read_context(self) -> SessionReplay:
@@ -244,9 +249,21 @@ class JsonlSession:
         """Read all persisted structured events from the session file."""
 
         return tuple(
-            entry.event
+            entry.event.payload
             for entry in self.read_entries()
-            if entry.kind == "event" and entry.event is not None
+            if isinstance(entry, EventSessionEntry)
+        )
+
+    def read_typed_events(self) -> tuple[KnownWispEvent, ...]:
+        """Validate retained raw events through the supported event schemas."""
+
+        return tuple(
+            typed_event_from_envelope(
+                entry.event,
+                source=f"{self.path} entry {entry.id}",
+            )
+            for entry in self.read_entries()
+            if isinstance(entry, EventSessionEntry)
         )
 
     def _append_line(self, line: str) -> None:
@@ -519,15 +536,28 @@ def _read_entries(path: Path, *, limit: int | None = None) -> list[SessionEntry]
         raise SessionNotFoundError(f"Session file does not exist: {path}")
 
     entries: list[SessionEntry] = []
+    session_id: str | None = None
+    seen_entry_ids: set[str] = set()
     try:
         with path.open("r", encoding="utf-8") as session_file:
             for line_number, line in enumerate(session_file, start=1):
                 if not line.strip():
                     continue
-                try:
-                    entries.append(SessionEntry.model_validate_json(line))
-                except ValidationError as exc:
-                    raise SessionError(f"Invalid session entry at {path}:{line_number}") from exc
+                source = f"{path}:{line_number}"
+                entry = session_entry_from_json(line, source=source)
+                if session_id is None:
+                    session_id = entry.session_id
+                elif entry.session_id != session_id:
+                    raise MalformedSessionEntryError(
+                        f"Session entry at {source} belongs to {entry.session_id}, "
+                        f"expected {session_id}"
+                    )
+                if entry.id in seen_entry_ids:
+                    raise MalformedSessionEntryError(
+                        f"Duplicate session entry id {entry.id} at {source}"
+                    )
+                seen_entry_ids.add(entry.id)
+                entries.append(entry)
                 if limit is not None and len(entries) >= limit:
                     break
     except UnicodeDecodeError as exc:

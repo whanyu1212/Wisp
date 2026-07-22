@@ -129,7 +129,9 @@ Session files contain provider-facing `message` entries plus selected structured
 (tool calls, approvals, tool start/end, errors) for audit. They do **not** persist
 `message.delta` events. Continuation reads only message entries, so audit events never become
 model-visible history, and stale project context from earlier turns is not replayed as
-instructions.
+instructions. New records use a versioned, discriminated entry schema; existing unversioned
+session files remain readable through a compatibility decoder. Persisted events retain their raw
+payload and original event schema version, and are validated as typed events only when requested.
 
 ## Configuration
 

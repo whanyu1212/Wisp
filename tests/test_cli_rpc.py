@@ -9,7 +9,7 @@ import pytest
 
 import wisp.coding.tool_execution as tool_execution
 from tests.cli_support import *
-from wisp.agent.messages import CompactionRecord, SessionEntry
+from wisp.agent.messages import CompactionRecord
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import ContextBudget, ContextEstimate, ToolCallSnapshot
 from wisp.providers.base import Provider
@@ -25,6 +25,7 @@ from wisp.providers.events import (
     ProviderResponseStarted,
     ProviderUsage,
 )
+from wisp.sessions.entries import CompactionSessionEntry, MessageSessionEntry
 from wisp.sessions.replay import HISTORICAL_CONTEXT_SUMMARY_LABEL
 
 VALID_COMPACTION_SUMMARY = """## Goal
@@ -108,7 +109,7 @@ def _create_compacted_session(tmp_path: Path) -> JsonlSession:
             Message(role="assistant", content="retained answer", finish_reason="stop")
         )
         await session.append_compaction_entry(
-            SessionEntry(
+            CompactionSessionEntry(
                 session_id=session.session_id,
                 kind="compaction",
                 compaction=CompactionRecord(
@@ -145,7 +146,7 @@ def test_cancelled_prompt_rollback_preserves_concurrent_compaction(tmp_path: Pat
         )
         context = session.read_context()
         await session.append_compaction_entry(
-            SessionEntry(
+            CompactionSessionEntry(
                 session_id=session.session_id,
                 kind="compaction",
                 compaction=CompactionRecord(
@@ -178,7 +179,7 @@ def test_rpc_cancellation_rolls_back_unanswered_overflow_compaction(
     async def append_overflow_compaction() -> None:
         context = session.read_context()
         await session.append_compaction_entry(
-            SessionEntry(
+            CompactionSessionEntry(
                 session_id=session.session_id,
                 kind="compaction",
                 operation_id="prompt-1",
@@ -462,7 +463,11 @@ def test_rpc_prompt_compact_prompt_replays_summary_and_retained_history(
     assert context_contents[0] == (
         f"{HISTORICAL_CONTEXT_SUMMARY_LABEL}\n\n{VALID_COMPACTION_SUMMARY}"
     )
-    compaction = next(entry.compaction for entry in session.read_entries() if entry.compaction)
+    compaction = next(
+        entry.compaction
+        for entry in session.read_entries()
+        if isinstance(entry, CompactionSessionEntry)
+    )
     assert compaction.instructions == "Keep paths"
 
 
@@ -599,7 +604,7 @@ def test_rpc_prompt_recovers_one_overflow_inside_the_prompt_envelope(
     entries = session.read_entries()
     assert (
         sum(
-            entry.message is not None
+            isinstance(entry, MessageSessionEntry)
             and entry.message.role == "user"
             and entry.message.content == "third"
             for entry in entries
@@ -607,7 +612,9 @@ def test_rpc_prompt_recovers_one_overflow_inside_the_prompt_envelope(
         == 1
     )
     assert (
-        next(entry.compaction for entry in entries if entry.compaction is not None).schema_version
+        next(
+            entry.compaction for entry in entries if isinstance(entry, CompactionSessionEntry)
+        ).schema_version
         == 4
     )
 

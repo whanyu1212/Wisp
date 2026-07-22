@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal, Self, cast
-from uuid import uuid4
 
 from pydantic import (
     BaseModel,
@@ -20,7 +19,6 @@ from wisp.events import (
     CompactionReason,
     ContextBudget,
     FinishReason,
-    JsonObject,
     MessageCompleted,
     TokenUsage,
     ToolCallSnapshot,
@@ -168,30 +166,3 @@ def provider_history_message(message: Message) -> Message | None:
     if message.role == "assistant" and message.tool_calls and not message.content.strip():
         return None
     return message
-
-
-class SessionEntry(BaseModel):
-    """One append-only JSONL record in a Wisp session."""
-
-    model_config = ConfigDict(frozen=True)
-
-    id: str = Field(default_factory=lambda: uuid4().hex)
-    session_id: str
-    kind: Literal["message", "event", "compaction"] = "message"
-    message: Message | None = None
-    event: JsonObject | None = None
-    compaction: CompactionRecord | None = None
-    operation_id: str | None = None
-    created_at: datetime = Field(default_factory=utc_now)
-
-    @model_validator(mode="after")
-    def _validate_payload(self) -> Self:
-        payloads = {
-            "message": self.message,
-            "event": self.event,
-            "compaction": self.compaction,
-        }
-        populated = tuple(name for name, payload in payloads.items() if payload is not None)
-        if populated != (self.kind,):
-            raise ValueError(f"{self.kind} session entries require exactly a {self.kind} payload")
-        return self

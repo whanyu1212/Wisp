@@ -1,0 +1,23 @@
+"""Session persistence and replay errors."""
+
+from __future__ import annotations
+
+
+class SessionError(RuntimeError):
+    """Base error for session loading, replay, and persistence failures."""
+
+
+class MalformedSessionEntryError(SessionError):
+    """Raised when a persisted session entry is structurally invalid."""
+
+
+class UnsupportedSessionEntryVersionError(SessionError):
+    """Raised when a session entry uses an unsupported schema version."""
+
+
+class MalformedPersistedEventError(SessionError):
+    """Raised when a raw persisted event cannot be decoded as a Wisp event."""
+
+
+class UnsupportedPersistedEventVersionError(SessionError):
+    """Raised when a raw persisted event uses an unsupported schema version."""

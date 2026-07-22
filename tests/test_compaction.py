@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from wisp.agent.context import build_context_budget, estimate_context
-from wisp.agent.messages import Message, SessionEntry
+from wisp.agent.messages import Message
 from wisp.coding.compaction import (
     MAX_COMPACTION_TOOL_RESULT_CHARS,
     REQUIRED_COMPACTION_HEADINGS,
@@ -54,6 +54,7 @@ from wisp.providers.events import (
 from wisp.providers.fake import ScriptedProvider
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry
+from wisp.sessions.entries import CompactionSessionEntry, MessageSessionEntry, SessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import (
     HISTORICAL_CONTEXT_SUMMARY_LABEL,
@@ -802,7 +803,9 @@ def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> No
         )
         events = [event async for event in agent.run("question two", session=session)]
         record = next(
-            entry.compaction for entry in session.read_entries() if entry.compaction is not None
+            entry.compaction
+            for entry in session.read_entries()
+            if isinstance(entry, CompactionSessionEntry)
         )
         assert record.replaced_entry_ids == first_ids
         return events
@@ -832,7 +835,9 @@ def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> No
     assert sum(isinstance(event, SessionSaved) for event in events) == 1
     assert len(provider.calls) == 2
     entries = session.read_entries()
-    record = next(entry.compaction for entry in entries if entry.compaction is not None)
+    record = next(
+        entry.compaction for entry in entries if isinstance(entry, CompactionSessionEntry)
+    )
     assert record.schema_version == 4
     assert record.reason == "threshold"
     assert record.trigger_budget == started.trigger_budget
@@ -917,14 +922,14 @@ def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Pa
     overflow_record = next(
         entry.compaction
         for entry in entries
-        if entry.compaction is not None and entry.compaction.reason == "overflow"
+        if isinstance(entry, CompactionSessionEntry) and entry.compaction.reason == "overflow"
     )
     assert overflow_record is not None
     assert overflow_record.schema_version == 4
     user_messages = [
         entry.message.content
         for entry in entries
-        if entry.message is not None and entry.message.role == "user"
+        if isinstance(entry, MessageSessionEntry) and entry.message.role == "user"
     ]
     assert user_messages == [
         "question one",
@@ -2153,7 +2158,7 @@ def test_coding_session_compaction_is_durable_and_next_run_uses_active_context(
         "question three",
     ]
     compaction_entry = persisted_compaction
-    assert compaction_entry.compaction is not None
+    assert isinstance(compaction_entry, CompactionSessionEntry)
     assert compaction_entry.compaction.instructions == "Keep exact paths"
     assert compaction_entry.compaction.usage == completed.usage
 
@@ -2193,13 +2198,12 @@ def test_coding_session_repairs_interrupted_tools_before_compaction(tmp_path: Pa
     repair = next(
         entry
         for entry in entries
-        if entry.message is not None
+        if isinstance(entry, MessageSessionEntry)
         and entry.message.role == "tool"
         and entry.message.tool_call_id == "call-1"
     )
-    compaction = next(entry for entry in entries if entry.kind == "compaction")
+    compaction = next(entry for entry in entries if isinstance(entry, CompactionSessionEntry))
     assert entries.index(repair) < entries.index(compaction)
-    assert compaction.compaction is not None
     assert repair.id in compaction.compaction.replaced_entry_ids
     assert [message.content for message in session.read_context_messages()[-2:]] == [
         "question three",
