@@ -171,8 +171,10 @@ def session_entry_from_dict(
                 f"expected {SESSION_ENTRY_SCHEMA_VERSION}"
             )
         else:
-            _require_v2_structural_fields(raw, location=location)
-            normalized = raw
+            normalized = _normalize_v2_structural_fields(
+                raw,
+                parent_id=legacy_parent_id,
+            )
     _require_persisted_base_fields(normalized, location=location)
     _require_supported_event_envelope(normalized, location=location)
     try:
@@ -194,23 +196,21 @@ def _require_persisted_base_fields(raw: JsonObject, *, location: str) -> None:
         )
 
 
-def _require_v2_structural_fields(raw: JsonObject, *, location: str) -> None:
-    """Require explicit nulls for references that define v2 tree state."""
+def _normalize_v2_structural_fields(
+    raw: JsonObject,
+    *,
+    parent_id: str | None,
+) -> JsonObject:
+    """Restore null references omitted by public exclude-none serialization."""
 
+    normalized = dict(raw)
     kind = raw.get("kind")
-    required = (
-        ("previous_leaf_id", "active_leaf_id")
-        if kind == "active_leaf"
-        else ("parent_id",)
-        if kind in {"message", "event", "compaction"}
-        else ()
-    )
-    missing = tuple(field for field in required if field not in raw)
-    if missing:
-        fields = ", ".join(missing)
-        raise MalformedSessionEntryError(
-            f"Persisted v2 {kind!r} entry is missing structural field(s) {fields}{location}"
-        )
+    if kind in {"message", "event", "compaction"}:
+        normalized.setdefault("parent_id", parent_id)
+    elif kind == "active_leaf":
+        normalized.setdefault("previous_leaf_id", parent_id)
+        normalized.setdefault("active_leaf_id", None)
+    return normalized
 
 
 def _require_supported_event_envelope(raw: JsonObject, *, location: str) -> None:

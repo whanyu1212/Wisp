@@ -23,6 +23,7 @@ from wisp.events import (
 )
 from wisp.sessions import jsonl as jsonl_module
 from wisp.sessions.entries import (
+    ActiveLeafSessionEntry,
     CompactionSessionEntry,
     EventSessionEntry,
     MessageSessionEntry,
@@ -333,15 +334,55 @@ def test_session_upgrades_v1_entries_to_a_parent_chain_without_rewriting(tmp_pat
         },
     ],
 )
-def test_session_rejects_v2_entries_with_omitted_structural_references(
+def test_session_accepts_v2_entries_with_omitted_null_structural_references(
     tmp_path: Path,
     entry: dict[str, object],
 ) -> None:
     path = tmp_path / "missing-v2-reference.jsonl"
     path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
 
-    with pytest.raises(MalformedSessionEntryError, match="missing structural field"):
-        JsonlSessionStore(tmp_path).load(path)
+    loaded = JsonlSessionStore(tmp_path).load(path).read_entries()[0]
+
+    if isinstance(loaded, MessageSessionEntry):
+        assert loaded.parent_id is None
+    else:
+        assert isinstance(loaded, ActiveLeafSessionEntry)
+        assert loaded.previous_leaf_id is None
+        assert loaded.active_leaf_id is None
+
+
+def test_session_reads_public_exclude_none_serialization_as_linear_chain(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "public-serialization.jsonl"
+    with pytest.warns(DeprecationWarning, match="SessionEntry is deprecated"):
+        entries = (
+            LegacySessionEntry(
+                id="first",
+                session_id="session",
+                message=Message(role="user", content="one"),
+            ),
+            LegacySessionEntry(
+                id="second",
+                session_id="session",
+                message=Message(role="assistant", content="two"),
+            ),
+        )
+    path.write_text(
+        "".join(f"{entry.model_dump_json(exclude_none=True)}\n" for entry in entries),
+        encoding="utf-8",
+    )
+    original = path.read_bytes()
+
+    session = JsonlSessionStore(tmp_path).load(path)
+    loaded = session.read_entries()
+
+    assert [entry.parent_id for entry in loaded if isinstance(entry, MessageSessionEntry)] == [
+        None,
+        "first",
+    ]
+    assert [message.content for message in session.read_context_messages()] == ["one", "two"]
+    assert path.read_bytes() == original
 
 
 @pytest.mark.parametrize("version", [5, 6])
