@@ -463,10 +463,10 @@ preconditions are met. Original messages remain append-only in the session audit
 
 Schema v6 adds optional provider-reported token usage to `message.completed`. The `usage` object
 records input, output, and total tokens plus provider-supported cache and reasoning categories.
-Schema v14 adds `queue.message.injected`, emitted when a queued user follow-up crosses into the
-active transcript. Its original timestamp is retained so session persistence and every frontend
-observe the same durable boundary. Schema v13 added `queue.updated`, which reports immutable
-steering/follow-up snapshots and their independent drain modes.
+Schema v14 adds `queue.message.injected`, emitted when queued steering or follow-up text crosses
+into the active transcript. Its original timestamp is retained so session persistence and every
+frontend observe the same durable boundary. Schema v13 added `queue.updated`, which reports
+immutable steering/follow-up snapshots and their independent drain modes.
 
 Schema v5 adds `model.provider_auto_switched`, emitted during an RPC `configure` command
 immediately before its `rpc.command.finished` when a model-only `/model <id>` request resolves

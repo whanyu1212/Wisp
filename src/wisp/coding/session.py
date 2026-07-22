@@ -10,7 +10,7 @@ from pathlib import Path
 import anyio
 
 from wisp.agent.context import build_context_budget, context_fingerprint, estimate_context
-from wisp.agent.harness import AgentHarness, AgentHarnessConfig
+from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages
 from wisp.agent.messages import (
     CompactionRecord,
     Message,
@@ -149,7 +149,9 @@ class CodingSession:
         self._context_observations: dict[str, _ContextObservation] = {}
         self._operation_active = False
         self._active_harness: AgentHarness | None = None
-        self._accepting_follow_ups = False
+        self._active_session_id: str | None = None
+        self._accepting_queued_messages = False
+        self._retained_queues: dict[str, QueuedMessages] = {}
         self._apply_configuration(
             CodingSessionConfiguration(
                 provider=provider,
@@ -228,9 +230,17 @@ class CodingSession:
         """Queue user text for the active run's next completed-turn boundary."""
 
         harness = self._active_harness
-        if harness is None or not self._accepting_follow_ups:
+        if harness is None or not self._accepting_queued_messages:
             raise RuntimeError("CodingSession has no active agent run")
         return harness.follow_up(content)
+
+    def steer(self, content: str) -> QueueUpdated:
+        """Queue user text after the active run's current assistant/tool batch."""
+
+        harness = self._active_harness
+        if harness is None or not self._accepting_queued_messages:
+            raise RuntimeError("CodingSession has no active agent run")
+        return harness.steer(content)
 
     def _apply_configuration(self, configuration: CodingSessionConfiguration) -> None:
         if configuration.context_reserve_tokens < 0:
@@ -268,8 +278,15 @@ class CodingSession:
                 try:
                     await events.aclose()
                 finally:
-                    self._accepting_follow_ups = False
+                    self._accepting_queued_messages = False
+                    if self._active_harness is not None and self._active_session_id is not None:
+                        queued = self._active_harness.queued_messages
+                        if queued.count:
+                            self._retained_queues[self._active_session_id] = queued
+                        else:
+                            self._retained_queues.pop(self._active_session_id, None)
                     self._active_harness = None
+                    self._active_session_id = None
                     self._operation_active = False
 
     async def _run(
@@ -281,6 +298,7 @@ class CodingSession:
         operation_id: str | None = None,
     ) -> AsyncGenerator[WispEvent, None]:
         session = session or self.sessions.create()
+        self._active_session_id = session.session_id
         recover_history = session.session_id in self._history_refresh_session_ids or any(
             pending.entry.session_id == session.session_id for pending in self._pending_entries
         )
@@ -313,8 +331,13 @@ class CodingSession:
             ),
             messages=(*prompt_messages, *self._conversation_history(history)),
         )
+        retained = self._retained_queues.pop(session.session_id, QueuedMessages())
+        for message in retained.steering:
+            harness.steer_message(message)
+        for message in retained.follow_up:
+            harness.follow_up_message(message)
         self._active_harness = harness
-        self._accepting_follow_ups = True
+        self._accepting_queued_messages = True
         await self._repair_and_flush(session, harness)
 
         yield await emit(AgentStarted(session_id=session.session_id))
@@ -532,7 +555,7 @@ class CodingSession:
                 defer_context_overflow_errors=True,
             )
 
-        self._accepting_follow_ups = False
+        self._accepting_queued_messages = False
         auto_compaction_saved = False
         auto_compaction_status = _AutoCompactionStatus()
         if not recovered_from_overflow:

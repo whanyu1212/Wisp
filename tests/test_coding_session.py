@@ -319,6 +319,136 @@ def test_coding_session_persists_follow_up_at_injection_boundary(tmp_path: Path)
         agent.follow_up("too late")
 
 
+def test_coding_session_accepts_and_persists_steering_from_agent_start(tmp_path: Path) -> None:
+    async def run_agent() -> tuple[list[WispEvent], tuple[Message, ...], CodingSession]:
+        provider = ScriptedProvider(
+            [
+                [
+                    ProviderResponseStarted(model="test"),
+                    ProviderResponseCompleted(content="first answer"),
+                ],
+                [
+                    ProviderResponseStarted(model="test"),
+                    ProviderResponseCompleted(content="steered answer"),
+                ],
+            ]
+        )
+        store = JsonlSessionStore(tmp_path)
+        session = store.create()
+        event_bus = EventBus()
+        agent = CodingSession(provider=provider, sessions=store, events=event_bus)
+
+        def queue_at_start(event: WispEvent) -> None:
+            assert event.type == "agent.started"
+            update = agent.steer("change direction")
+            assert update.steering == ("change direction",)
+
+        event_bus.on("agent.started", queue_at_start)
+        events = [event async for event in agent.run("initial", session=session)]
+        return events, session.read_context_messages(), agent
+
+    events, messages, agent = anyio.run(run_agent)
+
+    assert [
+        (message.role, message.content) for message in messages if message.role != "system"
+    ] == [
+        ("user", "initial"),
+        ("assistant", "first answer"),
+        ("user", "change direction"),
+        ("assistant", "steered answer"),
+    ]
+    assert any(
+        isinstance(event, QueueMessageInjected)
+        and event.kind == "steering"
+        and event.content == "change direction"
+        for event in events
+    )
+    with pytest.raises(RuntimeError, match="no active agent run"):
+        agent.steer("too late")
+
+
+def test_coding_session_retains_unconsumed_queues_for_same_session_retry(
+    tmp_path: Path,
+) -> None:
+    async def run_agent() -> tuple[list[WispEvent], tuple[Message, ...]]:
+        provider = ScriptedProvider(
+            [
+                [ProviderResponseStarted(model="test"), RuntimeError("provider failed")],
+                [
+                    ProviderResponseStarted(model="test"),
+                    ProviderResponseCompleted(content="other session answer"),
+                ],
+                [
+                    ProviderResponseStarted(model="test"),
+                    ProviderResponseCompleted(content="retry answer"),
+                ],
+                [
+                    ProviderResponseStarted(model="test"),
+                    ProviderResponseCompleted(content="steered answer"),
+                ],
+                [
+                    ProviderResponseStarted(model="test"),
+                    ProviderResponseCompleted(content="follow-up answer"),
+                ],
+            ]
+        )
+        store = JsonlSessionStore(tmp_path)
+        session = store.create()
+        event_bus = EventBus()
+        agent = CodingSession(provider=provider, sessions=store, events=event_bus)
+        queued = False
+
+        def queue_once(event: WispEvent) -> None:
+            nonlocal queued
+            if not queued:
+                queued = True
+                agent.steer("retained steering")
+                agent.follow_up("retained follow-up")
+
+        event_bus.on("agent.started", queue_once)
+        with pytest.raises(RuntimeError, match="provider failed"):
+            _failed_events = [event async for event in agent.run("first", session=session)]
+
+        assert all(
+            message.content not in {"retained steering", "retained follow-up"}
+            for message in session.read_context_messages()
+        )
+
+        other_session = store.create()
+        other_events = [event async for event in agent.run("other", session=other_session)]
+        assert not any(isinstance(event, QueueMessageInjected) for event in other_events)
+
+        events = [
+            event
+            async for event in agent.run(
+                "retry",
+                session=session,
+                history=session.read_context_messages(),
+            )
+        ]
+        return events, session.read_context_messages()
+
+    events, messages = anyio.run(run_agent)
+
+    assert [
+        (event.kind, event.content) for event in events if isinstance(event, QueueMessageInjected)
+    ] == [
+        ("steering", "retained steering"),
+        ("follow_up", "retained follow-up"),
+    ]
+    conversation = [
+        (message.role, message.content) for message in messages if message.role != "system"
+    ]
+    assert conversation[-6:] == [
+        ("user", "retry"),
+        ("assistant", "retry answer"),
+        ("user", "retained steering"),
+        ("assistant", "steered answer"),
+        ("user", "retained follow-up"),
+        ("assistant", "follow-up answer"),
+    ]
+
+
 def test_coding_session_persists_completion_before_exposing_it(
     tmp_path: Path,
 ) -> None:
