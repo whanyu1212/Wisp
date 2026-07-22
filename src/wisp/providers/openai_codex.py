@@ -26,6 +26,7 @@ from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,
 )
+from wisp.providers.continuations import ContinuationStore
 from wisp.providers.events import (
     JsonObject,
     ProviderEvent,
@@ -42,7 +43,6 @@ from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_de
 
 DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
-_MAX_PENDING_CONTINUATIONS = 128
 
 
 class _CodexHTTPError(ProviderError):
@@ -78,7 +78,7 @@ class OpenAICodexProvider:
         self._base_url = base_url
         self._client = client
         self._retry_policy = retry_policy or RetryPolicy()
-        self._continuations: OrderedDict[str, tuple[dict[str, object], ...]] = OrderedDict()
+        self._continuations = ContinuationStore[tuple[dict[str, object], ...]]()
 
     async def stream(
         self,
@@ -278,6 +278,7 @@ class OpenAICodexProvider:
             break
 
         if failure is not None:
+            self._continuations.discard(previous_response_id)
             yield failure
             return
 
@@ -288,13 +289,13 @@ class OpenAICodexProvider:
                 )
             replay_items = _codex_replay_items(output_items.values(), tool_calls=tool_calls)
             if previous_response_id is not None and previous_response_id != response_id:
-                self._continuations.pop(previous_response_id, None)
-            self._store_continuation(
+                self._continuations.consume(previous_response_id)
+            self._continuations.remember(
                 response_id,
                 (*continuation_input, *replay_items),
             )
         elif previous_response_id is not None:
-            self._continuations.pop(previous_response_id, None)
+            self._continuations.consume(previous_response_id)
 
         yield ProviderResponseCompleted(
             content="".join(chunks),
@@ -310,24 +311,12 @@ class OpenAICodexProvider:
     ) -> tuple[dict[str, object], ...]:
         if previous_response_id is None:
             return ()
-        try:
-            continuation = self._continuations[previous_response_id]
-        except KeyError as exc:
+        continuation = self._continuations.get(previous_response_id, refresh=True)
+        if continuation is None:
             raise ProviderProtocolError(
                 f"OpenAI Codex continuation state is unavailable for {previous_response_id}"
-            ) from exc
-        self._continuations.move_to_end(previous_response_id)
+            )
         return continuation
-
-    def _store_continuation(
-        self,
-        response_id: str,
-        items: tuple[dict[str, object], ...],
-    ) -> None:
-        self._continuations.pop(response_id, None)
-        self._continuations[response_id] = items
-        while len(self._continuations) > _MAX_PENDING_CONTINUATIONS:
-            self._continuations.popitem(last=False)
 
     @asynccontextmanager
     async def _create_stream(

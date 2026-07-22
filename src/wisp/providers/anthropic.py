@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -39,6 +38,7 @@ from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,
 )
+from wisp.providers.continuations import ContinuationStore
 from wisp.providers.events import (
     JsonObject,
     ProviderEvent,
@@ -104,8 +104,8 @@ _DEFAULT_FINISH_REASON_FOR_UNKNOWN_STOP_REASON: ProviderFinishReason = "length"
 # Wisp bridges this the same way OpenAICodexProvider bridges its own
 # non-conversational backend: cache the whole accumulated tail keyed by
 # response_id, and grow it by one (assistant tool_use, user tool_result) pair
-# per round. Bounded and LRU-evicted so a long session can't leak memory.
-_MAX_PENDING_REPLAYS = 128
+# per round. The shared continuation store bounds pending state so a long
+# session cannot grow memory without limit.
 
 
 @dataclass
@@ -150,7 +150,7 @@ class AnthropicProvider:
         self._api_key = _normalize_optional(api_key)
         self._client = client
         self._retry_policy = retry_policy or RetryPolicy()
-        self._replays: OrderedDict[str, tuple[MessageParam, ...]] = OrderedDict()
+        self._replays = ContinuationStore[tuple[MessageParam, ...]]()
 
     async def stream(
         self,
@@ -170,8 +170,7 @@ class AnthropicProvider:
         ``AgentHarness``'s ``messages`` never grows across tool rounds (it
         assumes a Responses-API-style backend that remembers everything
         server-side), so this provider reconstructs the accumulated tail
-        from its own ``_replays`` cache keyed by ``previous_response_id`` --
-        see ``_MAX_PENDING_REPLAYS``.
+        from its own replay state keyed by ``previous_response_id``.
 
         ``effort`` maps directly to ``output_config.effort`` on the Messages
         API (``"low"``/``"medium"``/``"high"``/``"xhigh"``/``"max"``,
@@ -312,6 +311,7 @@ class AnthropicProvider:
             )
 
         if failure is not None:
+            self._replays.discard(previous_response_id)
             yield failure
             return
 
@@ -345,6 +345,7 @@ class AnthropicProvider:
                     partial_content="".join(chunks),
                     response_id=None,
                 )
+                self._replays.discard(previous_response_id)
                 yield failure
                 return
             # The accumulated tail carried into *this* call (everything up to
@@ -361,10 +362,10 @@ class AnthropicProvider:
                 new_turn,
             )
             if previous_response_id is not None and previous_response_id != response_id:
-                self._replays.pop(previous_response_id, None)
-            self._store_replay(response_id, replay_tail)
+                self._replays.consume(previous_response_id)
+            self._replays.remember(response_id, replay_tail)
         elif previous_response_id is not None:
-            self._replays.pop(previous_response_id, None)
+            self._replays.consume(previous_response_id)
 
         yield ProviderResponseCompleted(
             content="".join(chunks),
@@ -444,13 +445,7 @@ class AnthropicProvider:
         # A peek, not a pop: _create_stream can be re-invoked by the retry loop
         # in `stream()` before a response ever completes, so the replay must
         # survive a failed attempt to be available to the next one.
-        return self._replays.get(previous_response_id, ())
-
-    def _store_replay(self, response_id: str, replay_tail: tuple[MessageParam, ...]) -> None:
-        self._replays.pop(response_id, None)
-        self._replays[response_id] = replay_tail
-        while len(self._replays) > _MAX_PENDING_REPLAYS:
-            self._replays.popitem(last=False)
+        return self._replays.get(previous_response_id) or ()
 
 
 _ReplayBlockParam = (

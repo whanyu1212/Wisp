@@ -352,10 +352,15 @@ def test_anthropic_provider_maps_stop_reasons_to_finish_reasons(
 
 def test_anthropic_provider_emits_failed_terminal_on_stream_error() -> None:
     provider = FailingAnthropicProvider()
+    provider._replays.remember("previous-response", ())  # noqa: SLF001
 
     async def run() -> list[object]:
         return [
-            event async for event in provider.stream([WispMessage(role="user", content="hello")])
+            event
+            async for event in provider.stream(
+                [WispMessage(role="user", content="hello")],
+                previous_response_id="previous-response",
+            )
         ]
 
     events = anyio.run(run)
@@ -368,6 +373,7 @@ def test_anthropic_provider_emits_failed_terminal_on_stream_error() -> None:
         message="Anthropic stream error: Connection error.",
         partial_content="partial",
     )
+    assert provider._replays.get("previous-response") is None  # noqa: SLF001
 
 
 def test_anthropic_provider_emits_failed_terminal_when_stream_ends_without_stop_reason() -> None:
