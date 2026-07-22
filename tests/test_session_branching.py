@@ -373,6 +373,66 @@ def test_clone_publishes_only_a_complete_validated_file(
     assert not tuple(tmp_path.glob(".*.tmp"))
 
 
+def test_clone_blocks_destination_append_until_cache_initialization(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    store = JsonlSessionStore(tmp_path)
+    source = store.create()
+
+    async def seed() -> str:
+        entry = await source.append_message(Message(role="user", content="source"))
+        return entry.id
+
+    leaf_id = anyio.run(seed)
+    target = JsonlSession(session_id="target-session", path=tmp_path / "target.jsonl")
+    monkeypatch.setattr(store, "create", lambda: target)
+    link = os.link
+    published = threading.Event()
+    append_started = threading.Event()
+    append_finished = threading.Event()
+
+    def pause_after_publish(source_path: Path, destination_path: Path) -> None:
+        link(source_path, destination_path)
+        published.set()
+        assert append_started.wait(timeout=5)
+        assert not append_finished.wait(timeout=0.1)
+
+    monkeypatch.setattr(os, "link", pause_after_publish)
+    cloned: JsonlSession | None = None
+
+    async def run_clone() -> None:
+        nonlocal cloned
+        cloned = await store.clone(source, expected_active_leaf_id=leaf_id)
+
+    async def append_during_publication() -> None:
+        assert await anyio.to_thread.run_sync(published.wait, 5)
+        reopened = store.load(target.path)
+        append_started.set()
+        await reopened.append_message(Message(role="assistant", content="concurrent"))
+        append_finished.set()
+
+    async def race() -> None:
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(run_clone)
+            task_group.start_soon(append_during_publication)
+
+    anyio.run(race)
+    assert cloned is not None
+    assert append_finished.is_set()
+
+    async def append_from_creator() -> None:
+        assert cloned is not None
+        await cloned.append_message(Message(role="user", content="creator"))
+
+    anyio.run(append_from_creator)
+    assert [message.content for message in cloned.read_context_messages()] == [
+        "source",
+        "concurrent",
+        "creator",
+    ]
+
+
 def test_clone_never_overwrites_an_existing_destination(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

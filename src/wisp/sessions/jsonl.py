@@ -455,6 +455,13 @@ class JsonlSession:
     def _create_with_entries_once(self, entries: tuple[SessionTreeEntry, ...]) -> None:
         """Exclusively publish a complete projected session file."""
 
+        with self._file_state.lock:
+            with self._interprocess_lock():
+                self._create_with_entries_locked(entries)
+
+    def _create_with_entries_locked(self, entries: tuple[SessionTreeEntry, ...]) -> None:
+        """Publish projected entries while holding the destination mutation locks."""
+
         if not entries:
             raise ValueError("Projected session entries cannot be empty")
         if any(entry.session_id != self.session_id for entry in entries):
