@@ -132,6 +132,8 @@ model-visible history, and stale project context from earlier turns is not repla
 instructions. New records use a versioned, discriminated entry schema; existing unversioned
 session files remain readable through a compatibility decoder. Persisted events retain their raw
 payload and original event schema version, and are validated as typed events only when requested.
+The former `wisp.agent.messages.SessionEntry(...)` constructor remains available as a deprecated
+factory; new integrations should import the concrete entry models from `wisp.sessions`.
 
 ## Configuration
 

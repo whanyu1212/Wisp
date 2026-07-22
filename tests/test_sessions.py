@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 from wisp.agent.messages import CompactionRecord, Message
+from wisp.agent.messages import SessionEntry as LegacySessionEntry
 from wisp.events import (
     ContextBudget,
     ContextEstimate,
@@ -202,6 +203,43 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
     assert isinstance(session.read_entries()[0], MessageSessionEntry)
     assert isinstance(session.read_entries()[1], EventSessionEntry)
     assert isinstance(session.read_entries()[2], CompactionSessionEntry)
+
+
+def test_legacy_session_entry_constructor_returns_concrete_variants() -> None:
+    message = Message(role="user", content="hello")
+    compaction = CompactionRecord(
+        summary="Earlier context.",
+        replaced_entry_ids=("message",),
+        provider="openai",
+    )
+
+    with pytest.warns(DeprecationWarning, match="SessionEntry is deprecated"):
+        message_entry = LegacySessionEntry(
+            id="message",
+            session_id="session",
+            message=message,
+        )
+    with pytest.warns(DeprecationWarning, match="SessionEntry is deprecated"):
+        event_entry = LegacySessionEntry(
+            id="event",
+            session_id="session",
+            kind="event",
+            event={"type": "error", "schema_version": 12, "message": "boom"},
+        )
+    with pytest.warns(DeprecationWarning, match="SessionEntry is deprecated"):
+        compaction_entry = LegacySessionEntry(
+            id="compaction",
+            session_id="session",
+            kind="compaction",
+            compaction=compaction,
+        )
+
+    assert isinstance(message_entry, MessageSessionEntry)
+    assert message_entry.message == message
+    assert isinstance(event_entry, EventSessionEntry)
+    assert event_entry.event.payload["type"] == "error"
+    assert isinstance(compaction_entry, CompactionSessionEntry)
+    assert compaction_entry.compaction == compaction
 
 
 def test_session_reads_mixed_legacy_and_v1_entries_without_rewriting(tmp_path: Path) -> None:
