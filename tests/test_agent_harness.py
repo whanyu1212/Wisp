@@ -11,6 +11,7 @@ from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueueKind
 from wisp.agent.messages import Message
 from wisp.events import (
     MessageDelta,
+    QueueMessageInjected,
     QueueMode,
     QueueUpdated,
     ToolCallSnapshot,
@@ -568,10 +569,212 @@ def test_queue_updated_event_is_versioned_and_round_trips() -> None:
         steering_mode="all",
     )
 
-    assert event.schema_version == 13
+    assert event.schema_version == 14
     assert wisp_event_from_json(event.model_dump_json()) == event
     with pytest.raises(ValueError, match="require schema_version 13"):
         wisp_event_from_json(event.model_copy(update={"schema_version": 12}).model_dump_json())
+
+
+def test_harness_drains_follow_ups_one_at_a_time_across_completed_turns() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="first answer"),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="second answer"),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="third answer"),
+            ],
+        ]
+    )
+    harness = _harness(provider)
+    harness.follow_up("first follow-up")
+    harness.follow_up("second follow-up")
+
+    async def run() -> list[object]:
+        return [event async for event in harness.prompt("initial")]
+
+    events = anyio.run(run)
+
+    assert [(message.role, message.content) for message in harness.messages] == [
+        ("user", "initial"),
+        ("assistant", "first answer"),
+        ("user", "first follow-up"),
+        ("assistant", "second answer"),
+        ("user", "second follow-up"),
+        ("assistant", "third answer"),
+    ]
+    assert [event.content for event in events if isinstance(event, QueueMessageInjected)] == [
+        "first follow-up",
+        "second follow-up",
+    ]
+    assert [event.follow_up for event in events if isinstance(event, QueueUpdated)] == [
+        ("second follow-up",),
+        (),
+    ]
+    assert [call.messages[-1].content for call in provider.calls] == [
+        "initial",
+        "first follow-up",
+        "second follow-up",
+    ]
+    assert [event.turn for event in events if event.type == "turn.started"] == [1, 2, 3]
+
+
+def test_harness_all_mode_drains_one_follow_up_batch() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="first answer"),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="second answer"),
+            ],
+        ]
+    )
+    harness = AgentHarness(
+        AgentHarnessConfig(
+            provider=provider,
+            tool_executor=RecordingToolExecutor(),
+            follow_up_mode="all",
+        )
+    )
+    harness.follow_up("one")
+    harness.follow_up("two")
+
+    async def run() -> list[object]:
+        return [event async for event in harness.prompt("initial")]
+
+    events = anyio.run(run)
+
+    assert [event.content for event in events if isinstance(event, QueueMessageInjected)] == [
+        "one",
+        "two",
+    ]
+    assert [event.follow_up for event in events if isinstance(event, QueueUpdated)] == [()]
+    assert [(message.role, message.content) for message in provider.calls[1].messages[-2:]] == [
+        ("user", "one"),
+        ("user", "two"),
+    ]
+
+
+def test_harness_closing_before_completion_preserves_follow_up_queue() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="answer"),
+            ]
+        ]
+    )
+    harness = _harness(provider)
+    harness.follow_up("later")
+
+    async def run() -> None:
+        events = harness.prompt("initial")
+        assert (await anext(events)).type == "turn.started"
+        await events.aclose()
+
+    anyio.run(run)
+
+    assert [message.content for message in harness.queued_messages.follow_up] == ["later"]
+    assert [(message.role, message.content) for message in harness.messages] == [
+        ("user", "initial")
+    ]
+
+
+def test_harness_failure_preserves_follow_up_queue_without_injection() -> None:
+    provider = ScriptedProvider(
+        [[ProviderResponseStarted(model="test"), RuntimeError("provider failed")]]
+    )
+    harness = _harness(provider)
+    harness.follow_up("retry later")
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(RuntimeError, match="provider failed"):
+            async for event in harness.prompt("initial"):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+
+    assert not any(isinstance(event, QueueMessageInjected) for event in events)
+    assert [message.content for message in harness.queued_messages.follow_up] == ["retry later"]
+    assert [(message.role, message.content) for message in harness.messages] == [
+        ("user", "initial")
+    ]
+
+
+def test_harness_follow_up_preserves_tool_iteration_limit_across_segments() -> None:
+    first_call = ToolCall(call_id="call-1", name="lookup", arguments={})
+    second_call = ToolCall(call_id="call-2", name="lookup", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=first_call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(first_call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="first answer"),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=second_call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(second_call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+        ]
+    )
+    executor = RecordingToolExecutor()
+    harness = AgentHarness(
+        AgentHarnessConfig(
+            provider=provider,
+            tool_executor=executor,
+            tools=(
+                ToolSpec(name="lookup", description="Look up", input_schema={"type": "object"}),
+            ),
+            max_tool_iterations=1,
+        )
+    )
+    harness.follow_up("use another tool")
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(RuntimeError, match="Maximum tool iterations exceeded: 1"):
+            async for event in harness.prompt("initial"):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+
+    assert executor.calls == [first_call]
+    assert isinstance(events[-1], TurnCompleted)
+    assert events[-1].outcome == "failed"
+
+
+def test_queue_message_injected_event_requires_schema_14_and_round_trips() -> None:
+    event = QueueMessageInjected(kind="follow_up", content="continue")
+
+    assert event.schema_version == 14
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    with pytest.raises(ValueError, match="require schema_version 14"):
+        wisp_event_from_json(event.model_copy(update={"schema_version": 13}).model_dump_json())
 
 
 def test_harness_rejects_non_user_prompt_messages() -> None:

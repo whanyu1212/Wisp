@@ -390,8 +390,8 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 13`; readers also accept legacy schema v5
-through v12 events for compatibility. A successful prompt follows this lifecycle (tool events
+Every outbound `WispEvent` includes `"schema_version": 14`; readers also accept legacy schema v5
+through v13 events for compatibility. A successful prompt follows this lifecycle (tool events
 repeat inside a turn when the model requests tools):
 
 ```text
@@ -405,6 +405,7 @@ agent.started
     context.pressure ?
     tool.call -> tool.execution.started -> approval events -> tool.execution.ended -> tool.result
   turn.completed
+queue.message.injected -> queue.updated ?
 compaction.started ?
 session.saved
 compaction.completed ?
@@ -462,8 +463,10 @@ preconditions are met. Original messages remain append-only in the session audit
 
 Schema v6 adds optional provider-reported token usage to `message.completed`. The `usage` object
 records input, output, and total tokens plus provider-supported cache and reasoning categories.
-Missing provider categories remain `null`; cost estimation and compaction are not part of this
-schema change.
+Schema v14 adds `queue.message.injected`, emitted when a queued user follow-up crosses into the
+active transcript. Its original timestamp is retained so session persistence and every frontend
+observe the same durable boundary. Schema v13 added `queue.updated`, which reports immutable
+steering/follow-up snapshots and their independent drain modes.
 
 Schema v5 adds `model.provider_auto_switched`, emitted during an RPC `configure` command
 immediately before its `rpc.command.finished` when a model-only `/model <id>` request resolves

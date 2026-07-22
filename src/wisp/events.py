@@ -18,11 +18,12 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 13
+EVENT_SCHEMA_VERSION = 14
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
 QUEUE_UPDATE_SCHEMA_VERSION = 13
+QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION = 14
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -30,6 +31,7 @@ FinishReason = Literal["stop", "tool_calls", "length", "error", "cancelled"]
 RetryReason = Literal["network", "timeout", "rate_limit", "server_error", "transient_http"]
 CompactionReason = Literal["manual", "threshold", "overflow"]
 QueueMode = Literal["one_at_a_time", "all"]
+QueueKind = Literal["steering", "follow_up"]
 
 
 def utc_now() -> datetime:
@@ -42,7 +44,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13] = 13
+    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14] = 14
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -605,6 +607,23 @@ class QueueUpdated(WispEvent):
         return self
 
 
+class QueueMessageInjected(WispEvent):
+    """A queued user message crossed into the active transcript."""
+
+    type: Literal["queue.message.injected"] = "queue.message.injected"
+    kind: QueueKind
+    content: str
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION:
+            raise ValueError(
+                "queue message injection requires schema_version "
+                f"{QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+
 class ModelProviderAutoSwitched(WispEvent):
     """A model-only ``configure`` command's resolved model belonged to another provider.
 
@@ -656,6 +675,7 @@ type KnownWispEvent = Annotated[
     | RpcCommandFinished
     | SessionStatsReported
     | QueueUpdated
+    | QueueMessageInjected
     | ModelProviderAutoSwitched
     | ErrorEvent,
     Field(discriminator="type"),
@@ -728,6 +748,14 @@ def _require_current_schema(data: JsonObject) -> None:
     if data.get("type") == "queue.updated" and version < QUEUE_UPDATE_SCHEMA_VERSION:
         raise ValueError(
             f"Queue update events require schema_version {QUEUE_UPDATE_SCHEMA_VERSION} or newer"
+        )
+    if (
+        data.get("type") == "queue.message.injected"
+        and version < QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "Queue message injection events require schema_version "
+            f"{QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION} or newer"
         )
     if data.get("type") in {"context.estimated", "session.stats"} and not (
         9 <= version <= EVENT_SCHEMA_VERSION
