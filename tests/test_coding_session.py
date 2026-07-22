@@ -18,6 +18,8 @@ from wisp.events import (
     ErrorEvent,
     MessageCompleted,
     MessageDelta,
+    QueueMessageInjected,
+    QueueUpdated,
     SessionSaved,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -27,6 +29,7 @@ from wisp.events import (
     ToolExecutionStarted,
     ToolResultReady,
     TurnCompleted,
+    WispEvent,
 )
 from wisp.providers.base import (
     ProviderError,
@@ -244,6 +247,71 @@ def test_coding_session_streams_fake_response_and_saves_session(tmp_path: Path) 
         "session.saved",
         "agent.completed",
     ]
+
+
+def test_coding_session_persists_follow_up_at_injection_boundary(tmp_path: Path) -> None:
+    async def run_agent() -> tuple[list[WispEvent], tuple[Message, ...], CodingSession]:
+        provider = ScriptedProvider(
+            [
+                [
+                    ProviderResponseStarted(model="test"),
+                    ProviderResponseCompleted(content="first answer"),
+                ],
+                [
+                    ProviderResponseStarted(model="test"),
+                    ProviderResponseCompleted(content="second answer"),
+                ],
+            ]
+        )
+        store = JsonlSessionStore(tmp_path)
+        session = store.create()
+        event_bus = EventBus()
+        agent = CodingSession(provider=provider, sessions=store, events=event_bus)
+        queued = False
+        persisted_at_injection = False
+
+        def queue_once(event: WispEvent) -> None:
+            nonlocal queued
+            if isinstance(event, MessageCompleted) and not queued:
+                queued = True
+                assert all(
+                    message.content != "continue" for message in session.read_context_messages()
+                )
+                update = agent.follow_up("continue")
+                assert update.follow_up == ("continue",)
+
+        def observe_injection(event: WispEvent) -> None:
+            nonlocal persisted_at_injection
+            assert isinstance(event, QueueMessageInjected)
+            persisted_at_injection = any(
+                message.role == "user" and message.content == "continue"
+                for message in session.read_context_messages()
+            )
+
+        event_bus.on("message.completed", queue_once)
+        event_bus.on("queue.message.injected", observe_injection)
+        events = [event async for event in agent.run("initial", session=session)]
+        assert persisted_at_injection
+        return events, session.read_context_messages(), agent
+
+    events, messages, agent = anyio.run(run_agent)
+
+    conversation = [
+        (message.role, message.content) for message in messages if message.role != "system"
+    ]
+    assert conversation == [
+        ("user", "initial"),
+        ("assistant", "first answer"),
+        ("user", "continue"),
+        ("assistant", "second answer"),
+    ]
+    injected = next(event for event in events if isinstance(event, QueueMessageInjected))
+    assert injected.kind == "follow_up"
+    assert injected.content == "continue"
+    assert any(isinstance(event, QueueUpdated) and event.follow_up == () for event in events)
+    assert messages[-2].created_at == injected.timestamp
+    with pytest.raises(RuntimeError, match="no active agent run"):
+        agent.follow_up("too late")
 
 
 def test_coding_session_persists_completion_before_exposing_it(

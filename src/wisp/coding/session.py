@@ -47,6 +47,8 @@ from wisp.events import (
     ErrorEvent,
     MessageCompleted,
     MessageDelta,
+    QueueMessageInjected,
+    QueueUpdated,
     SessionSaved,
     SessionStats,
     ToolExecutionEnded,
@@ -146,6 +148,7 @@ class CodingSession:
         self._history_refresh_session_ids: set[str] = set()
         self._context_observations: dict[str, _ContextObservation] = {}
         self._operation_active = False
+        self._active_harness: AgentHarness | None = None
         self._apply_configuration(
             CodingSessionConfiguration(
                 provider=provider,
@@ -220,6 +223,14 @@ class CodingSession:
             raise RuntimeError("CodingSession is busy")
         self._apply_configuration(configuration)
 
+    def follow_up(self, content: str) -> QueueUpdated:
+        """Queue user text for the active run's next completed-turn boundary."""
+
+        harness = self._active_harness
+        if harness is None or not harness.is_running:
+            raise RuntimeError("CodingSession has no active agent run")
+        return harness.follow_up(content)
+
     def _apply_configuration(self, configuration: CodingSessionConfiguration) -> None:
         if configuration.context_reserve_tokens < 0:
             raise ValueError("context_reserve_tokens must be non-negative")
@@ -256,6 +267,7 @@ class CodingSession:
                 try:
                     await events.aclose()
                 finally:
+                    self._active_harness = None
                     self._operation_active = False
 
     async def _run(
@@ -299,6 +311,7 @@ class CodingSession:
             ),
             messages=(*prompt_messages, *self._conversation_history(history)),
         )
+        self._active_harness = harness
         await self._repair_and_flush(session, harness)
 
         yield await emit(AgentStarted(session_id=session.session_id))
@@ -344,6 +357,16 @@ class CodingSession:
                     elif isinstance(event, ToolExecutionEnded) and self._tool_is_unsafe(event.name):
                         had_unsafe_tool_round = True
                     completion_entry_id: str | None = None
+                    if isinstance(event, QueueMessageInjected):
+                        self._queue_message(
+                            session,
+                            Message(
+                                role="user",
+                                content=event.content,
+                                created_at=event.timestamp,
+                            ),
+                            operation_id=operation_id,
+                        )
                     if isinstance(event, MessageCompleted | ToolExecutionEnded):
                         completion_entry_id = self._queue_completion(
                             session, event, operation_id=operation_id

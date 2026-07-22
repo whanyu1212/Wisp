@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, replace
-from typing import Literal
 
 import anyio
 
@@ -20,6 +19,8 @@ from wisp.agent.transcript import plan_interrupted_tool_repairs
 from wisp.events import (
     ErrorEvent,
     MessageCompleted,
+    QueueKind,
+    QueueMessageInjected,
     QueueMode,
     QueueUpdated,
     ToolExecutionEnded,
@@ -52,7 +53,7 @@ class AgentHarnessConfig:
         _require_queue_mode(self.follow_up_mode)
 
 
-QueueKind = Literal["steering", "follow_up"]
+type AgentHarnessEvent = AgentLoopEvent | QueueMessageInjected | QueueUpdated
 
 
 def _require_queue_mode(mode: object) -> None:
@@ -258,7 +259,7 @@ class AgentHarness:
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
         defer_context_overflow_errors: bool = False,
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
+    ) -> AsyncGenerator[AgentHarnessEvent, None]:
         """Append a user message and start a run."""
         return self.prompt_message(
             Message(role="user", content=content),
@@ -274,7 +275,7 @@ class AgentHarness:
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
         defer_context_overflow_errors: bool = False,
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
+    ) -> AsyncGenerator[AgentHarnessEvent, None]:
         """Append an existing user message and start a run."""
         if message.role != "user":
             raise ValueError("AgentHarness prompts require a user message")
@@ -291,7 +292,7 @@ class AgentHarness:
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
         defer_context_overflow_errors: bool = False,
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
+    ) -> AsyncGenerator[AgentHarnessEvent, None]:
         """Continue from the current transcript without adding a user message."""
         return self._run(
             turn_offset=turn_offset,
@@ -306,7 +307,7 @@ class AgentHarness:
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
         defer_context_overflow_errors: bool = False,
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
+    ) -> AsyncGenerator[AgentHarnessEvent, None]:
         self.repair_interrupted_tool_calls()
         self._running = True
         token = SimpleCancellationToken()
@@ -316,83 +317,126 @@ class AgentHarness:
 
         active_turn: int | None = None
         active_turn_completed = False
-        run_finished = False
-        config = AgentLoopConfig(
-            provider=self._config.provider,
-            tool_executor=self._config.tool_executor,
-            model=self._config.model,
-            tools=self._config.tools,
-            max_tool_iterations=self._config.max_tool_iterations,
-            cancellation_token=token,
-            effort=self._config.effort,
-            context_window=self._config.context_window,
-            context_reserve_tokens=self._config.context_reserve_tokens,
-            context_pressure_threshold=self._config.context_pressure_threshold,
-            turn_offset=turn_offset,
-            tool_iteration_offset=tool_iteration_offset,
-            cost_estimator=self._config.cost_estimator,
-            defer_context_overflow_errors=defer_context_overflow_errors,
-        )
-        provider_messages_list: list[Message] = []
-        for message in self._messages:
-            provider_message = provider_history_message(message)
-            if provider_message is not None:
-                provider_messages_list.append(provider_message)
-        provider_messages = tuple(provider_messages_list)
-        loop_events = run_agent_loop(config, messages=provider_messages)
+        next_turn_offset = turn_offset
+        next_tool_iteration_offset = tool_iteration_offset
         try:
             while True:
-                if token.is_cancelled() and not run_finished:
-                    for cancellation_event in _cancelled_events(
-                        active_turn,
-                        active_turn_completed=active_turn_completed,
-                    ):
-                        yield cancellation_event
+                run_finished = False
+                segment_outcome: str | None = None
+                stream_ended = False
+                config = AgentLoopConfig(
+                    provider=self._config.provider,
+                    tool_executor=self._config.tool_executor,
+                    model=self._config.model,
+                    tools=self._config.tools,
+                    max_tool_iterations=self._config.max_tool_iterations,
+                    cancellation_token=token,
+                    effort=self._config.effort,
+                    context_window=self._config.context_window,
+                    context_reserve_tokens=self._config.context_reserve_tokens,
+                    context_pressure_threshold=self._config.context_pressure_threshold,
+                    turn_offset=next_turn_offset,
+                    tool_iteration_offset=next_tool_iteration_offset,
+                    cost_estimator=self._config.cost_estimator,
+                    defer_context_overflow_errors=defer_context_overflow_errors,
+                )
+                provider_messages = tuple(
+                    provider_message
+                    for message in self._messages
+                    if (provider_message := provider_history_message(message)) is not None
+                )
+                loop_events = run_agent_loop(config, messages=provider_messages)
+                try:
+                    while True:
+                        if token.is_cancelled() and not run_finished:
+                            for cancellation_event in _cancelled_events(
+                                active_turn,
+                                active_turn_completed=active_turn_completed,
+                            ):
+                                yield cancellation_event
+                            return
+
+                        scope = anyio.CancelScope()
+                        self._current_scope = scope
+                        event: AgentLoopEvent | None = None
+                        with scope:
+                            try:
+                                event = await anext(loop_events)
+                            except StopAsyncIteration:
+                                stream_ended = True
+                        if self._current_scope is scope:
+                            self._current_scope = None
+
+                        if scope.cancel_called:
+                            if not run_finished:
+                                for cancellation_event in _cancelled_events(
+                                    active_turn,
+                                    active_turn_completed=active_turn_completed,
+                                ):
+                                    yield cancellation_event
+                            return
+                        if stream_ended:
+                            break
+                        assert event is not None
+
+                        if isinstance(event, TurnStarted):
+                            active_turn = event.turn
+                            active_turn_completed = False
+                            next_turn_offset = event.turn
+                            run_finished = False
+                        if isinstance(event, MessageCompleted):
+                            self._messages.append(message_from_completion_event(event))
+                            run_finished = not event.tool_calls
+                            if event.tool_calls:
+                                next_tool_iteration_offset += 1
+                        elif isinstance(event, ToolExecutionEnded):
+                            # ToolResultReady copies this terminal payload; retain it now so
+                            # closing the stream at this visible boundary cannot lose output.
+                            self._messages.append(message_from_completion_event(event))
+                        elif isinstance(event, TurnCompleted):
+                            active_turn_completed = True
+                            segment_outcome = event.outcome
+                            run_finished = run_finished or event.outcome != "completed"
+                        yield event
+                finally:
+                    self._current_scope = None
+                    with anyio.CancelScope(shield=True):
+                        await loop_events.aclose()
+
+                if (
+                    not stream_ended
+                    or token.is_cancelled()
+                    or segment_outcome != "completed"
+                    or not run_finished
+                ):
                     break
 
-                scope = anyio.CancelScope()
-                self._current_scope = scope
-                event: AgentLoopEvent | None = None
-                stream_ended = False
-                with scope:
-                    try:
-                        event = await anext(loop_events)
-                    except StopAsyncIteration:
-                        stream_ended = True
-                if self._current_scope is scope:
-                    self._current_scope = None
+                drain_count = (
+                    min(1, len(self._follow_up_queue))
+                    if self._config.follow_up_mode == "one_at_a_time"
+                    else len(self._follow_up_queue)
+                )
+                if drain_count == 0:
+                    break
 
-                if scope.cancel_called:
-                    if not run_finished:
+                for _ in range(drain_count):
+                    if token.is_cancelled():
                         for cancellation_event in _cancelled_events(
                             active_turn,
                             active_turn_completed=active_turn_completed,
                         ):
                             yield cancellation_event
-                    break
-                if stream_ended:
-                    break
-                assert event is not None
-
-                if isinstance(event, TurnStarted):
-                    active_turn = event.turn
-                    active_turn_completed = False
-                    run_finished = False
-                if isinstance(event, MessageCompleted):
-                    self._messages.append(message_from_completion_event(event))
-                    run_finished = not event.tool_calls
-                elif isinstance(event, ToolExecutionEnded):
-                    # ToolResultReady copies this terminal payload; retain it now so
-                    # closing the stream at this visible boundary cannot lose output.
-                    self._messages.append(message_from_completion_event(event))
-                elif isinstance(event, TurnCompleted):
-                    active_turn_completed = True
-                    run_finished = run_finished or event.outcome != "completed"
-                yield event
+                        return
+                    message = self._follow_up_queue.popleft()
+                    self._messages.append(message)
+                    yield QueueMessageInjected(
+                        kind="follow_up",
+                        content=message.content,
+                        timestamp=message.created_at,
+                    )
+                yield self.queue_updated_event()
         finally:
             self._current_scope = None
-            with anyio.CancelScope(shield=True):
-                await loop_events.aclose()
             if self._current_token is token:
                 self._current_token = None
             self._running = False
@@ -419,6 +463,7 @@ class AgentHarness:
 __all__ = [
     "AgentHarness",
     "AgentHarnessConfig",
+    "AgentHarnessEvent",
     "QueuedMessages",
     "QueueKind",
     "SimpleCancellationToken",
