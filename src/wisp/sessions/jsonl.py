@@ -18,19 +18,24 @@ import anyio
 from wisp.agent.messages import Message
 from wisp.events import JsonObject, KnownWispEvent, WispEvent
 from wisp.sessions.entries import (
+    ActiveLeafSessionEntry,
     CompactionSessionEntry,
     EventSessionEntry,
     MessageSessionEntry,
     PersistedEventEnvelope,
     SessionEntry,
+    is_session_tree_entry,
     session_entry_from_json,
+    session_entry_to_json,
     typed_event_from_envelope,
 )
 from wisp.sessions.errors import MalformedSessionEntryError, SessionError
 from wisp.sessions.replay import (
     SessionReplay,
+    SessionReplayError,
     StaleCompactionError,
     replay_session_entries,
+    resolve_session_tree,
 )
 
 PRIVATE_DIR_MODE = 0o700
@@ -177,8 +182,7 @@ class JsonlSession:
                 f"Session entry belongs to {entry.session_id}, not {self.session_id}"
             )
         async with self._append_lock:
-            await anyio.to_thread.run_sync(self._append_entry_once, entry)
-        return entry
+            return await anyio.to_thread.run_sync(self._append_entry_once, entry)
 
     async def append_compaction_entry(
         self,
@@ -196,12 +200,30 @@ class JsonlSession:
             raise SessionError("Atomic compaction append requires a compaction entry")
         expected = tuple(expected_context_entry_ids)
         async with self._append_lock:
-            await anyio.to_thread.run_sync(
+            return await anyio.to_thread.run_sync(
                 self._append_compaction_entry_once,
                 entry,
                 expected,
             )
-        return entry
+
+    async def select_active_leaf(
+        self,
+        active_leaf_id: str | None,
+        *,
+        expected_active_leaf_id: str | None,
+        operation_id: str | None = None,
+    ) -> ActiveLeafSessionEntry:
+        """Atomically select an existing tree node through append-only state."""
+
+        entry = ActiveLeafSessionEntry(
+            session_id=self.session_id,
+            previous_leaf_id=expected_active_leaf_id,
+            active_leaf_id=active_leaf_id,
+            operation_id=operation_id,
+        )
+        persisted = await self.append_entry(entry)
+        assert isinstance(persisted, ActiveLeafSessionEntry)
+        return persisted
 
     async def truncate_entries(self, count: int) -> None:
         """Remove entries after count, preserving the first count entries."""
@@ -223,6 +245,25 @@ class JsonlSession:
                 operation_id,
             )
 
+    async def restore_active_leaf_for_operation(
+        self,
+        count: int,
+        active_leaf_id: str | None,
+        *,
+        operation_id: str,
+    ) -> bool:
+        """Restore a run's starting leaf if its complete suffix is still owned."""
+
+        if count < 0:
+            raise ValueError("Session entry count cannot be negative")
+        async with self._append_lock:
+            return await anyio.to_thread.run_sync(
+                self._restore_active_leaf_for_operation_once,
+                count,
+                active_leaf_id,
+                operation_id,
+            )
+
     def read_entries(self) -> tuple[SessionEntry, ...]:
         """Read all persisted entries from the session file."""
 
@@ -239,6 +280,16 @@ class JsonlSession:
         """Replay the active provider context while preserving durable entry ids."""
 
         return replay_session_entries(self.read_entries())
+
+    def read_active_leaf_id(self) -> str | None:
+        """Read the append-only selected leaf for subsequent replay and appends."""
+
+        return resolve_session_tree(self.read_entries()).active_leaf_id
+
+    def read_active_path(self) -> tuple[SessionEntry, ...]:
+        """Read the selected root-to-leaf tree path, excluding state records."""
+
+        return tuple(resolve_session_tree(self.read_entries()).active_path)
 
     def read_context_messages(self) -> tuple[Message, ...]:
         """Read only the messages in the active replay context."""
@@ -283,21 +334,22 @@ class JsonlSession:
             if fd != -1:
                 os.close(fd)
 
-    def _append_entry_once(self, entry: SessionEntry) -> None:
+    def _append_entry_once(self, entry: SessionEntry) -> SessionEntry:
         with self._file_state.lock:
             with self._interprocess_lock():
-                self._append_entry_locked(entry)
+                return self._append_entry_locked(entry)
 
     def _append_compaction_entry_once(
         self,
         entry: SessionEntry,
         expected_context_entry_ids: tuple[str, ...],
-    ) -> None:
+    ) -> SessionEntry:
         with self._file_state.lock:
             with self._interprocess_lock():
                 self._refresh_entry_index()
-                if self._entry_is_persisted_locked(entry):
-                    return
+                existing = self._persisted_entry_locked(entry)
+                if existing is not None:
+                    return existing
                 assert self._entry_index is not None
                 entries = tuple(self._entry_index.values())
                 replay = replay_session_entries(entries)
@@ -306,17 +358,41 @@ class JsonlSession:
                         "Compaction plan is stale: expected context entry ids "
                         f"{expected_context_entry_ids}, found {replay.context_entry_ids}"
                     )
-                replay_session_entries((*entries, entry))
-                self._append_entry_locked(entry)
+                return self._append_entry_locked(entry)
 
-    def _append_entry_locked(self, entry: SessionEntry) -> None:
+    def _append_entry_locked(self, entry: SessionEntry) -> SessionEntry:
         _ensure_private_directory(self.path.parent)
         self._refresh_entry_index()
-        if self._entry_is_persisted_locked(entry):
-            return
+        existing = self._persisted_entry_locked(entry)
+        if existing is not None:
+            return existing
+
+        assert self._entry_index is not None
+        active_leaf_id = _active_leaf_id(self._entry_index)
+        if (
+            is_session_tree_entry(entry)
+            and entry.parent_id is not None
+            and entry.parent_id != active_leaf_id
+        ):
+            raise SessionError(
+                f"Session entry {entry.id} specifies parent {entry.parent_id!r}, "
+                f"but the active leaf is {active_leaf_id!r}"
+            )
+        persisted = (
+            entry.model_copy(update={"parent_id": active_leaf_id})
+            if is_session_tree_entry(entry)
+            else entry
+        )
+        _validate_append_transition(
+            persisted,
+            entry_index=self._entry_index,
+            active_leaf_id=active_leaf_id,
+        )
+        if isinstance(persisted, CompactionSessionEntry):
+            replay_session_entries((*self._entry_index.values(), persisted))
 
         try:
-            self._append_line(entry.model_dump_json(exclude_none=True))
+            self._append_line(session_entry_to_json(persisted))
             info = self._validate_session_file()
             if info is None:
                 raise SessionError(f"Session file disappeared after append: {self.path}")
@@ -325,18 +401,18 @@ class JsonlSession:
             self._invalidate_entry_index()
             raise
         self._file_state.generation += 1
-        assert self._entry_index is not None
-        self._entry_index[entry.id] = entry
+        self._entry_index[persisted.id] = persisted
         self._entry_index_generation = self._file_state.generation
         self._entry_index_signature = _session_file_signature(info)
+        return persisted
 
-    def _entry_is_persisted_locked(self, entry: SessionEntry) -> bool:
+    def _persisted_entry_locked(self, entry: SessionEntry) -> SessionEntry | None:
         assert self._entry_index is not None
         existing = self._entry_index.get(entry.id)
         if existing is None:
-            return False
-        if existing == entry:
-            return True
+            return None
+        if existing == entry or _matches_detached_entry(existing, entry):
+            return existing
         raise SessionError(f"Session entry id conflicts with persisted data: {entry.id}")
 
     def _refresh_entry_index(self) -> None:
@@ -406,6 +482,39 @@ class JsonlSession:
                     self._invalidate_entry_index()
                 return True
 
+    def _restore_active_leaf_for_operation_once(
+        self,
+        count: int,
+        active_leaf_id: str | None,
+        operation_id: str,
+    ) -> bool:
+        with self._file_state.lock:
+            with self._interprocess_lock():
+                if not self.path.is_file():
+                    return False
+                self._refresh_entry_index()
+                assert self._entry_index is not None
+                entries = tuple(self._entry_index.values())
+                suffix = entries[count:]
+                if not suffix or any(entry.operation_id != operation_id for entry in suffix):
+                    return False
+                tree = resolve_session_tree(entries)
+                if active_leaf_id is not None and all(
+                    entry.id != active_leaf_id for entry in tree.nodes
+                ):
+                    return False
+                if tree.active_leaf_id == active_leaf_id:
+                    return True
+                self._append_entry_locked(
+                    ActiveLeafSessionEntry(
+                        session_id=self.session_id,
+                        operation_id=operation_id,
+                        previous_leaf_id=tree.active_leaf_id,
+                        active_leaf_id=active_leaf_id,
+                    )
+                )
+                return True
+
     @contextmanager
     def _interprocess_lock(self) -> Iterator[None]:
         """Serialize session mutations across cooperating Wisp processes."""
@@ -454,7 +563,7 @@ class JsonlSession:
         if not entries:
             self.path.unlink(missing_ok=True)
             return
-        self._replace_lines([entry.model_dump_json(exclude_none=True) for entry in entries])
+        self._replace_lines([session_entry_to_json(entry) for entry in entries])
 
     def _replace_lines(self, lines: list[str]) -> None:
         _ensure_private_directory(self.path.parent)
@@ -513,6 +622,59 @@ def _session_file_signature(info: os.stat_result) -> _FileSignature:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 
+def _active_leaf_id(entry_index: dict[str, SessionEntry]) -> str | None:
+    """Read current leaf state from the last validated transition in constant time."""
+
+    if not entry_index:
+        return None
+    last_entry = entry_index[next(reversed(entry_index))]
+    if is_session_tree_entry(last_entry):
+        return last_entry.id
+    assert isinstance(last_entry, ActiveLeafSessionEntry)
+    return last_entry.active_leaf_id
+
+
+def _validate_append_transition(
+    entry: SessionEntry,
+    *,
+    entry_index: dict[str, SessionEntry],
+    active_leaf_id: str | None,
+) -> None:
+    """Validate one proposed transition against an already validated entry index."""
+
+    if is_session_tree_entry(entry):
+        if entry.parent_id != active_leaf_id:
+            raise SessionReplayError(
+                f"Session entry {entry.id} has parent {entry.parent_id!r}, "
+                f"expected active leaf {active_leaf_id!r}"
+            )
+        return
+
+    assert isinstance(entry, ActiveLeafSessionEntry)
+    if entry.previous_leaf_id != active_leaf_id:
+        raise SessionReplayError(
+            f"Active-leaf entry {entry.id} expected previous leaf "
+            f"{entry.previous_leaf_id!r}, found {active_leaf_id!r}"
+        )
+    if entry.active_leaf_id is None:
+        return
+    target = entry_index.get(entry.active_leaf_id)
+    if target is None or not is_session_tree_entry(target):
+        raise SessionReplayError(
+            f"Active-leaf entry {entry.id} references unknown leaf {entry.active_leaf_id}"
+        )
+
+
+def _matches_detached_entry(existing: SessionEntry, candidate: SessionEntry) -> bool:
+    """Compare retry payloads while ignoring the parent assigned during persistence."""
+
+    if not is_session_tree_entry(existing) or not is_session_tree_entry(candidate):
+        return False
+    if candidate.parent_id is not None:
+        return False
+    return candidate.model_copy(update={"parent_id": existing.parent_id}) == existing
+
+
 def _matches_reference(path: Path, reference: str) -> bool:
     if path.name == reference or path.stem == reference:
         return True
@@ -537,6 +699,7 @@ def _read_entries(path: Path, *, limit: int | None = None) -> list[SessionEntry]
 
     entries: list[SessionEntry] = []
     session_id: str | None = None
+    active_leaf_id: str | None = None
     seen_entry_ids: set[str] = set()
     try:
         with path.open("r", encoding="utf-8") as session_file:
@@ -544,7 +707,11 @@ def _read_entries(path: Path, *, limit: int | None = None) -> list[SessionEntry]
                 if not line.strip():
                     continue
                 source = f"{path}:{line_number}"
-                entry = session_entry_from_json(line, source=source)
+                entry = session_entry_from_json(
+                    line,
+                    source=source,
+                    legacy_parent_id=active_leaf_id,
+                )
                 if session_id is None:
                     session_id = entry.session_id
                 elif entry.session_id != session_id:
@@ -558,10 +725,15 @@ def _read_entries(path: Path, *, limit: int | None = None) -> list[SessionEntry]
                     )
                 seen_entry_ids.add(entry.id)
                 entries.append(entry)
+                if is_session_tree_entry(entry):
+                    active_leaf_id = entry.id
+                elif isinstance(entry, ActiveLeafSessionEntry):
+                    active_leaf_id = entry.active_leaf_id
                 if limit is not None and len(entries) >= limit:
                     break
     except UnicodeDecodeError as exc:
         raise SessionError(f"Session file is not valid UTF-8: {path}") from exc
     except OSError as exc:
         raise SessionError(f"Could not read session file: {path}") from exc
+    resolve_session_tree(entries)
     return entries

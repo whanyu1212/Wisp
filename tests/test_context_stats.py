@@ -13,7 +13,12 @@ from wisp.events import (
     wisp_event_from_json,
 )
 from wisp.providers.base import ToolCallResult, ToolSpec
-from wisp.sessions.entries import CompactionSessionEntry, MessageSessionEntry
+from wisp.sessions.entries import (
+    ActiveLeafSessionEntry,
+    CompactionSessionEntry,
+    MessageSessionEntry,
+    SessionEntry,
+)
 from wisp.sessions.replay import replay_session_entries
 
 
@@ -288,3 +293,60 @@ def test_session_stats_use_latest_post_compaction_assistant_observation() -> Non
         observed_context_fingerprint=fingerprint,
     )
     assert changed.context.observed_is_current is False
+
+
+def test_session_stats_use_active_branch_observation_but_lifetime_usage() -> None:
+    root = MessageSessionEntry(
+        id="root",
+        session_id="s",
+        parent_id=None,
+        message=Message(role="user", content="question"),
+    )
+    abandoned = MessageSessionEntry(
+        id="abandoned",
+        session_id="s",
+        parent_id="root",
+        message=Message(
+            role="assistant",
+            content="old answer",
+            finish_reason="stop",
+            usage=_usage(40, 10, 75),
+        ),
+    )
+    selection = ActiveLeafSessionEntry(
+        id="selection",
+        session_id="s",
+        previous_leaf_id="abandoned",
+        active_leaf_id="root",
+    )
+    current = MessageSessionEntry(
+        id="current",
+        session_id="s",
+        parent_id="root",
+        message=Message(
+            role="assistant",
+            content="new answer",
+            finish_reason="stop",
+            usage=_usage(12, 3, 21),
+        ),
+    )
+    entries: tuple[SessionEntry, ...] = (root, abandoned, selection, current)
+    replay = replay_session_entries(entries)
+
+    stats = build_session_stats(
+        session_id="s",
+        entries=entries,
+        replay=replay,
+        provider_messages=replay.messages,
+        tools=(),
+        context_window=None,
+        reserve_tokens=16,
+        observed_tokens=21,
+        observed_is_current=True,
+        observed_entry_id="current",
+        observed_context_fingerprint=context_fingerprint(replay.messages),
+    )
+
+    assert stats.usage.total_tokens == 96
+    assert stats.context.observed_tokens == 21
+    assert stats.context.observed_is_current is True

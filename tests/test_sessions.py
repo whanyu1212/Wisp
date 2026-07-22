@@ -23,11 +23,13 @@ from wisp.events import (
 )
 from wisp.sessions import jsonl as jsonl_module
 from wisp.sessions.entries import (
+    ActiveLeafSessionEntry,
     CompactionSessionEntry,
     EventSessionEntry,
     MessageSessionEntry,
     SessionEntry,
     SessionEntryAdapter,
+    session_entry_to_json,
 )
 from wisp.sessions.errors import (
     MalformedPersistedEventError,
@@ -181,6 +183,8 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
 
     async def write() -> None:
         message = await session.append_message(Message(role="user", content="hello"))
+        await session.append_message(Message(role="user", content="retained"))
+        await session.append_message(Message(role="assistant", content="answer"))
         await session.append_event(ErrorEvent(message="boom"))
         await session.append_entry(
             CompactionSessionEntry(
@@ -196,13 +200,26 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
     anyio.run(write)
 
     records = [json.loads(line) for line in session.path.read_text().splitlines()]
-    assert [record["kind"] for record in records] == ["message", "event", "compaction"]
-    assert [record["schema_version"] for record in records] == [1, 1, 1]
-    assert records[1]["event"]["schema_version"] == 1
-    assert records[1]["event"]["payload"]["schema_version"] == 12
+    assert [record["kind"] for record in records] == [
+        "message",
+        "message",
+        "message",
+        "event",
+        "compaction",
+    ]
+    assert [record["schema_version"] for record in records] == [2, 2, 2, 2, 2]
+    assert [record["parent_id"] for record in records] == [
+        None,
+        records[0]["id"],
+        records[1]["id"],
+        records[2]["id"],
+        records[3]["id"],
+    ]
+    assert records[3]["event"]["schema_version"] == 1
+    assert records[3]["event"]["payload"]["schema_version"] == 12
     assert isinstance(session.read_entries()[0], MessageSessionEntry)
-    assert isinstance(session.read_entries()[1], EventSessionEntry)
-    assert isinstance(session.read_entries()[2], CompactionSessionEntry)
+    assert isinstance(session.read_entries()[3], EventSessionEntry)
+    assert isinstance(session.read_entries()[4], CompactionSessionEntry)
 
 
 def test_legacy_session_entry_constructor_returns_concrete_variants() -> None:
@@ -242,7 +259,7 @@ def test_legacy_session_entry_constructor_returns_concrete_variants() -> None:
     assert compaction_entry.compaction == compaction
 
 
-def test_session_reads_mixed_legacy_and_v1_entries_without_rewriting(tmp_path: Path) -> None:
+def test_session_reads_mixed_legacy_and_v2_entries_without_rewriting(tmp_path: Path) -> None:
     path = tmp_path / "mixed.jsonl"
     legacy = {
         "id": "legacy-entry",
@@ -254,6 +271,7 @@ def test_session_reads_mixed_legacy_and_v1_entries_without_rewriting(tmp_path: P
     current = MessageSessionEntry(
         id="current-entry",
         session_id="mixed-session",
+        parent_id="legacy-entry",
         message=Message(role="assistant", content="new"),
     )
     path.write_text(
@@ -270,6 +288,110 @@ def test_session_reads_mixed_legacy_and_v1_entries_without_rewriting(tmp_path: P
         "old",
         "new",
     ]
+    assert path.read_bytes() == original
+
+
+def test_session_upgrades_v1_entries_to_a_parent_chain_without_rewriting(tmp_path: Path) -> None:
+    path = tmp_path / "v1.jsonl"
+    records = (
+        {
+            "schema_version": 1,
+            "id": "first",
+            "session_id": "session",
+            "kind": "message",
+            "message": {"role": "user", "content": "one"},
+            "created_at": "2026-07-11T00:00:00Z",
+        },
+        {
+            "schema_version": 1,
+            "id": "second",
+            "session_id": "session",
+            "kind": "message",
+            "message": {"role": "assistant", "content": "two"},
+            "created_at": "2026-07-11T00:00:01Z",
+        },
+    )
+    path.write_text("".join(f"{json.dumps(record)}\n" for record in records), encoding="utf-8")
+    original = path.read_bytes()
+
+    entries = JsonlSessionStore(tmp_path).load(path).read_entries()
+
+    assert [entry.schema_version for entry in entries] == [2, 2]
+    assert [entry.parent_id for entry in entries if isinstance(entry, MessageSessionEntry)] == [
+        None,
+        "first",
+    ]
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {
+            "schema_version": 2,
+            "id": "message",
+            "session_id": "session",
+            "kind": "message",
+            "message": {"role": "user", "content": "hello"},
+            "created_at": "2026-07-11T00:00:00Z",
+        },
+        {
+            "schema_version": 2,
+            "id": "leaf",
+            "session_id": "session",
+            "kind": "active_leaf",
+            "created_at": "2026-07-11T00:00:00Z",
+        },
+    ],
+)
+def test_session_accepts_v2_entries_with_omitted_null_structural_references(
+    tmp_path: Path,
+    entry: dict[str, object],
+) -> None:
+    path = tmp_path / "missing-v2-reference.jsonl"
+    path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
+
+    loaded = JsonlSessionStore(tmp_path).load(path).read_entries()[0]
+
+    if isinstance(loaded, MessageSessionEntry):
+        assert loaded.parent_id is None
+    else:
+        assert isinstance(loaded, ActiveLeafSessionEntry)
+        assert loaded.previous_leaf_id is None
+        assert loaded.active_leaf_id is None
+
+
+def test_session_reads_public_exclude_none_serialization_as_linear_chain(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "public-serialization.jsonl"
+    with pytest.warns(DeprecationWarning, match="SessionEntry is deprecated"):
+        entries = (
+            LegacySessionEntry(
+                id="first",
+                session_id="session",
+                message=Message(role="user", content="one"),
+            ),
+            LegacySessionEntry(
+                id="second",
+                session_id="session",
+                message=Message(role="assistant", content="two"),
+            ),
+        )
+    path.write_text(
+        "".join(f"{entry.model_dump_json(exclude_none=True)}\n" for entry in entries),
+        encoding="utf-8",
+    )
+    original = path.read_bytes()
+
+    session = JsonlSessionStore(tmp_path).load(path)
+    loaded = session.read_entries()
+
+    assert [entry.parent_id for entry in loaded if isinstance(entry, MessageSessionEntry)] == [
+        None,
+        "first",
+    ]
+    assert [message.content for message in session.read_context_messages()] == ["one", "two"]
     assert path.read_bytes() == original
 
 
@@ -338,7 +460,7 @@ def test_session_rejects_malformed_event_only_on_typed_access(tmp_path: Path) ->
     ("schema_version", "error_type", "match"),
     [
         ("1", MalformedSessionEntryError, "must be an integer"),
-        (2, UnsupportedSessionEntryVersionError, "schema_version 2"),
+        (3, UnsupportedSessionEntryVersionError, "schema_version 3"),
     ],
 )
 def test_session_distinguishes_malformed_and_future_entry_versions(
@@ -467,6 +589,23 @@ def test_session_rejects_extra_fields_in_v1_entries(tmp_path: Path) -> None:
         JsonlSessionStore(tmp_path).load(path)
 
 
+def test_session_rejects_v2_tree_metadata_claimed_by_v1_entry(tmp_path: Path) -> None:
+    path = tmp_path / "v1-with-parent.jsonl"
+    entry = {
+        "schema_version": 1,
+        "id": "entry",
+        "session_id": "session",
+        "kind": "message",
+        "parent_id": None,
+        "message": {"role": "user", "content": "hello"},
+        "created_at": "2026-07-11T00:00:00Z",
+    }
+    path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
+
+    with pytest.raises(MalformedSessionEntryError, match="v2 structural field"):
+        JsonlSessionStore(tmp_path).load(path)
+
+
 def test_session_wraps_invalid_json_as_malformed_entry(tmp_path: Path) -> None:
     path = tmp_path / "invalid.jsonl"
     path.write_text('{"kind":"message"\n', encoding="utf-8")
@@ -510,7 +649,10 @@ def test_session_rejects_mixed_session_ids_in_one_file(tmp_path: Path) -> None:
         ),
     )
     path.write_text(
-        "".join(f"{entry.model_dump_json(exclude_none=True)}\n" for entry in entries),
+        "".join(
+            f"{session_entry_to_json(entry.model_copy(update={'parent_id': parent_id}))}\n"
+            for entry, parent_id in zip(entries, (None, "first"), strict=True)
+        ),
         encoding="utf-8",
     )
     session = JsonlSessionStore(tmp_path).load(path)
@@ -534,7 +676,10 @@ def test_session_rejects_duplicate_entry_ids_in_one_file(tmp_path: Path) -> None
         ),
     )
     path.write_text(
-        "".join(f"{entry.model_dump_json(exclude_none=True)}\n" for entry in entries),
+        "".join(
+            f"{session_entry_to_json(entry.model_copy(update={'parent_id': parent_id}))}\n"
+            for entry, parent_id in zip(entries, (None, "duplicate"), strict=True)
+        ),
         encoding="utf-8",
     )
     session = JsonlSessionStore(tmp_path).load(path)
@@ -737,7 +882,56 @@ def test_append_entry_rechecks_identity_after_another_handle_appends(tmp_path: P
 
     anyio.run(write)
 
-    assert session.read_entries() == (seed, entry)
+    assert session.read_entries() == (
+        seed,
+        entry.model_copy(update={"parent_id": seed.id}),
+    )
+
+
+def test_append_entry_rejects_conflicting_explicit_parent(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    seed = MessageSessionEntry(
+        id="seed",
+        session_id=session.session_id,
+        message=Message(role="user", content="start"),
+    )
+    conflict = MessageSessionEntry(
+        id="conflict",
+        session_id=session.session_id,
+        parent_id="other",
+        message=Message(role="assistant", content="done"),
+    )
+
+    async def write() -> None:
+        await session.append_entry(seed)
+        with pytest.raises(SessionError, match="specifies parent 'other'"):
+            await session.append_entry(conflict)
+
+    anyio.run(write)
+
+    assert session.read_entries() == (seed,)
+
+
+def test_append_retry_rejects_same_id_with_conflicting_parent(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    seed = MessageSessionEntry(
+        id="seed",
+        session_id=session.session_id,
+        message=Message(role="user", content="start"),
+    )
+    entry = MessageSessionEntry(
+        id="entry",
+        session_id=session.session_id,
+        message=Message(role="assistant", content="done"),
+    )
+
+    async def write() -> None:
+        await session.append_entry(seed)
+        await session.append_entry(entry)
+        with pytest.raises(SessionError, match="conflicts with persisted data"):
+            await session.append_entry(entry.model_copy(update={"parent_id": "other"}))
+
+    anyio.run(write)
 
 
 def test_concurrent_append_entry_writes_one_record(tmp_path: Path) -> None:
@@ -792,7 +986,36 @@ def test_concurrent_session_handles_append_one_record(
 
     anyio.run(write)
 
-    assert session.read_entries() == (seed, entry)
+    assert session.read_entries() == (
+        seed,
+        entry.model_copy(update={"parent_id": seed.id}),
+    )
+
+
+def test_repeated_append_does_not_rescan_full_session_tree(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    resolve_session_tree = jsonl_module.resolve_session_tree
+    resolver_calls = 0
+
+    def counted_resolver(entries: tuple[SessionEntry, ...]) -> object:
+        nonlocal resolver_calls
+        resolver_calls += 1
+        return resolve_session_tree(entries)
+
+    monkeypatch.setattr(jsonl_module, "resolve_session_tree", counted_resolver)
+
+    async def write() -> None:
+        for index in range(50):
+            await session.append_message(Message(role="user", content=str(index)))
+
+    anyio.run(write)
+
+    assert resolver_calls == 0
+    assert len(session.read_entries()) == 50
+    assert resolver_calls == 1
 
 
 def test_append_entry_reloads_identity_after_uncertain_write_failure(
@@ -890,7 +1113,10 @@ def test_truncate_invalidates_append_identity_index(tmp_path: Path) -> None:
 
     anyio.run(write)
 
-    assert session.read_entries() == (first, second)
+    assert session.read_entries() == (
+        first,
+        second.model_copy(update={"parent_id": first.id}),
+    )
 
 
 def test_session_store_creates_private_directories_and_files(tmp_path: Path) -> None:

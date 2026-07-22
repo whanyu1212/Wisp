@@ -31,6 +31,7 @@ from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
+from wisp.sessions.replay import resolve_session_tree
 
 from .rpc_configuration import _RpcConfigureOverrides
 from .rpc_coordinator import (
@@ -436,16 +437,20 @@ async def run_rpc_prompt_command(
 ) -> None:
     error: str | None = None
     run_entry_start = entry_start
+    run_active_leaf_id: str | None = None
+    run_start_captured = False
 
     async def track_run_start(events: AsyncIterator[WispEvent]) -> AsyncIterator[WispEvent]:
-        nonlocal run_entry_start
+        nonlocal run_active_leaf_id, run_entry_start, run_start_captured
         async for event in events:
             if isinstance(event, AgentStarted):
-                run_entry_start = await anyio.to_thread.run_sync(
-                    rpc_session_entry_count,
-                    session,
-                    entry_start,
-                )
+                with anyio.CancelScope(shield=True):
+                    run_entry_start, run_active_leaf_id = await anyio.to_thread.run_sync(
+                        rpc_session_run_start,
+                        session,
+                        entry_start,
+                    )
+                    run_start_captured = True
             yield event
 
     try:
@@ -483,9 +488,10 @@ async def run_rpc_prompt_command(
                 run_entry_start,
                 command_id,
             )
-            if not crossed_completion_boundary:
-                rolled_back = await session.truncate_operation_entries(
+            if not crossed_completion_boundary and run_start_captured:
+                rolled_back = await session.restore_active_leaf_for_operation(
                     run_entry_start,
+                    run_active_leaf_id,
                     operation_id=command_id,
                 )
                 if not rolled_back and session.path.is_file():
@@ -607,6 +613,18 @@ def rpc_session_entry_count(session: JsonlSession, fallback: int) -> int:
     if not session.path.is_file():
         return fallback
     return len(session.read_entries())
+
+
+def rpc_session_run_start(
+    session: JsonlSession,
+    fallback: int,
+) -> tuple[int, str | None]:
+    """Snapshot the audit offset and active leaf before a prompt starts writing."""
+
+    if not session.path.is_file():
+        return fallback, None
+    entries = session.read_entries()
+    return len(entries), resolve_session_tree(entries).active_leaf_id
 
 
 def rpc_has_durable_completion(

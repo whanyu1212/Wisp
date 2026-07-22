@@ -3,11 +3,13 @@
 from .entries import (
     PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION,
     SESSION_ENTRY_SCHEMA_VERSION,
+    ActiveLeafSessionEntry,
     CompactionSessionEntry,
     EventSessionEntry,
     MessageSessionEntry,
     PersistedEventEnvelope,
     SessionEntry,
+    SessionTreeEntry,
 )
 from .errors import (
     MalformedPersistedEventError,
@@ -21,8 +23,10 @@ from .replay import (
     SessionContextRow,
     SessionReplay,
     SessionReplayError,
+    SessionTreeState,
     StaleCompactionError,
     replay_session_entries,
+    resolve_session_tree,
 )
 
 __all__ = [
@@ -30,6 +34,7 @@ __all__ = [
     "JsonlSessionStore",
     "PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION",
     "SESSION_ENTRY_SCHEMA_VERSION",
+    "ActiveLeafSessionEntry",
     "CompactionSessionEntry",
     "EventSessionEntry",
     "MalformedPersistedEventError",
@@ -41,8 +46,11 @@ __all__ = [
     "SessionError",
     "SessionReplay",
     "SessionReplayError",
+    "SessionTreeEntry",
+    "SessionTreeState",
     "StaleCompactionError",
     "UnsupportedPersistedEventVersionError",
     "UnsupportedSessionEntryVersionError",
     "replay_session_entries",
+    "resolve_session_tree",
 ]

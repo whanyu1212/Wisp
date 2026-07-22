@@ -25,7 +25,11 @@ from wisp.providers.events import (
     ProviderResponseStarted,
     ProviderUsage,
 )
-from wisp.sessions.entries import CompactionSessionEntry, MessageSessionEntry
+from wisp.sessions.entries import (
+    ActiveLeafSessionEntry,
+    CompactionSessionEntry,
+    MessageSessionEntry,
+)
 from wisp.sessions.replay import HISTORICAL_CONTEXT_SUMMARY_LABEL
 
 VALID_COMPACTION_SUMMARY = """## Goal
@@ -130,10 +134,11 @@ def _create_compacted_session(tmp_path: Path) -> JsonlSession:
     return session
 
 
-def test_cancelled_prompt_rollback_preserves_concurrent_compaction(tmp_path: Path) -> None:
+def test_cancelled_prompt_leaf_restore_preserves_concurrent_compaction(tmp_path: Path) -> None:
     session = _create_two_turn_session(tmp_path)
     initial_entries = session.read_entries()
     entry_start = len(initial_entries)
+    initial_leaf_id = session.read_active_leaf_id()
 
     async def append_prompt_and_compaction() -> None:
         await session.append_message(
@@ -158,11 +163,12 @@ def test_cancelled_prompt_rollback_preserves_concurrent_compaction(tmp_path: Pat
             expected_context_entry_ids=context.context_entry_ids,
         )
         assert pending_user.id in session.read_context().context_entry_ids
-        truncated = await session.truncate_operation_entries(
+        restored = await session.restore_active_leaf_for_operation(
             entry_start,
+            initial_leaf_id,
             operation_id="prompt-1",
         )
-        assert truncated is False
+        assert restored is False
 
     anyio.run(append_prompt_and_compaction)
 
@@ -170,11 +176,13 @@ def test_cancelled_prompt_rollback_preserves_concurrent_compaction(tmp_path: Pat
     assert any(entry.kind == "compaction" for entry in session.read_entries()[entry_start:])
 
 
-def test_rpc_cancellation_rolls_back_unanswered_overflow_compaction(
+def test_rpc_cancellation_restores_leaf_before_unanswered_overflow_compaction(
     tmp_path: Path,
 ) -> None:
     session = _create_two_turn_session(tmp_path)
     entry_start = len(session.read_entries())
+    initial_context_ids = session.read_context().context_entry_ids
+    initial_leaf_id = session.read_active_leaf_id()
 
     async def append_overflow_compaction() -> None:
         context = session.read_context()
@@ -211,11 +219,45 @@ def test_rpc_cancellation_rolls_back_unanswered_overflow_compaction(
 
     assert cli_module.rpc._rpc_has_durable_completion(session, entry_start, "prompt-1") is False
 
-    async def rollback() -> bool:
-        return await session.truncate_operation_entries(entry_start, operation_id="prompt-1")
+    async def restore() -> bool:
+        return await session.restore_active_leaf_for_operation(
+            entry_start,
+            initial_leaf_id,
+            operation_id="prompt-1",
+        )
 
-    assert anyio.run(rollback) is True
-    assert not any(entry.kind == "compaction" for entry in session.read_entries()[entry_start:])
+    assert anyio.run(restore) is True
+    suffix = session.read_entries()[entry_start:]
+    assert any(entry.kind == "compaction" for entry in suffix)
+    assert isinstance(suffix[-1], ActiveLeafSessionEntry)
+    assert session.read_context().context_entry_ids == initial_context_ids
+
+
+def test_operation_leaf_restore_fails_cleanly_if_starting_leaf_was_removed(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def mutate() -> bool:
+        await session.append_message(Message(role="user", content="first"))
+        starting_leaf = await session.append_message(Message(role="assistant", content="second"))
+        starting_count = len(session.read_entries())
+        await session.truncate_entries(1)
+        await session.append_message(
+            Message(role="user", content="replacement"),
+            operation_id="prompt-1",
+        )
+        await session.append_message(
+            Message(role="assistant", content="replacement answer"),
+            operation_id="prompt-1",
+        )
+        return await session.restore_active_leaf_for_operation(
+            starting_count,
+            starting_leaf.id,
+            operation_id="prompt-1",
+        )
+
+    assert anyio.run(mutate) is False
 
 
 def _is_compaction_request(messages: Sequence[Message]) -> bool:
@@ -1114,7 +1156,9 @@ class _TrustedGate:
         return True
 
 
-def test_rpc_prompt_cancellation_rolls_back_before_completion_boundary(tmp_path: Path) -> None:
+def test_rpc_prompt_cancellation_restores_active_leaf_before_completion_boundary(
+    tmp_path: Path,
+) -> None:
     class PreResponseCancellableProvider(CancellableProvider):
         def __init__(self, started: anyio.Event) -> None:
             self.started = started
@@ -1169,16 +1213,81 @@ def test_rpc_prompt_cancellation_rolls_back_before_completion_boundary(tmp_path:
                 cancel_scope.cancel()
                 completed = await receive.receive()
 
-        assert not session.path.exists()
-        return completed
+        entries = session.read_entries()
+        assert session.read_context_messages() == ()
+        assert session.read_active_leaf_id() is None
+        assert isinstance(entries[-1], ActiveLeafSessionEntry)
+        assert entries[-1].active_leaf_id is None
+        return completed, len(entries)
 
-    completed = anyio.run(run_prompt)
+    completed, audit_entry_count = anyio.run(run_prompt)
 
     assert completed.ok is False
     assert completed.command_id == "cmd-1"
     assert completed.history is not None
     assert completed.history == ()
-    assert completed.entry_count == 0
+    assert completed.entry_count == audit_entry_count
+
+
+def test_rpc_cancellation_during_run_snapshot_preserves_existing_context(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def run_prompt() -> object:
+        session = JsonlSessionStore(tmp_path).create()
+        await session.append_message(Message(role="user", content="existing prompt"))
+        committed_history = session.read_context_messages()
+        entry_start = len(session.read_entries())
+        agent = CodingSession(
+            provider=CancellableProvider(),
+            sessions=JsonlSessionStore(tmp_path),
+        )
+        snapshot_started = anyio.Event()
+        release_snapshot = anyio.Event()
+        execution = cli_module.rpc._rpc_execution
+        original_run_sync = execution.anyio.to_thread.run_sync
+
+        async def delayed_run_sync(func: object, *args: object, **kwargs: object) -> object:
+            if func is execution.rpc_session_run_start:
+                snapshot_started.set()
+                await release_snapshot.wait()
+            return await original_run_sync(func, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(execution.anyio.to_thread, "run_sync", delayed_run_sync)
+        cancel_scope = anyio.CancelScope()
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(
+                    cli_module.rpc._run_rpc_prompt_command,
+                    agent,
+                    session,
+                    committed_history,
+                    entry_start,
+                    "slow",
+                    "cmd-1",
+                    "prompt",
+                    cancel_scope,
+                    send.clone(),
+                    _TrustedGate(),
+                )
+                await snapshot_started.wait()
+                cancel_scope.cancel()
+                release_snapshot.set()
+                completed = await receive.receive()
+
+        assert session.read_context_messages() == committed_history
+        assert not any(
+            isinstance(entry, ActiveLeafSessionEntry) and entry.active_leaf_id is None
+            for entry in session.read_entries()
+        )
+        return completed
+
+    completed = anyio.run(run_prompt)
+
+    assert completed.ok is False
+    assert completed.history is not None
+    assert [message.content for message in completed.history] == ["existing prompt"]
 
 
 def test_rpc_prestart_cancellation_preserves_loaded_tool_repair(tmp_path: Path) -> None:
@@ -1253,17 +1362,20 @@ def test_rpc_prestart_cancellation_preserves_loaded_tool_repair(tmp_path: Path) 
                 cancel_scope.cancel()
                 completed = await receive.receive()
 
-        messages = session.read_messages()
-        assert [message.role for message in messages] == ["user", "assistant", "tool"]
-        assert messages[-1].content == INTERRUPTED_TOOL_RESULT_TEXT
-        return completed
+        audit_messages = session.read_messages()
+        assert [message.role for message in audit_messages[:3]] == ["user", "assistant", "tool"]
+        assert len(audit_messages) > 3
+        context_messages = session.read_context_messages()
+        assert [message.role for message in context_messages] == ["user", "assistant", "tool"]
+        assert context_messages[-1].content == INTERRUPTED_TOOL_RESULT_TEXT
+        return completed, len(session.read_entries())
 
-    completed = anyio.run(run_prompt)
+    completed, audit_entry_count = anyio.run(run_prompt)
 
     assert completed.ok is False
     assert completed.history is not None
     assert [message.role for message in completed.history] == ["user", "assistant", "tool"]
-    assert completed.entry_count == 3
+    assert completed.entry_count == audit_entry_count
 
 
 def test_rpc_prompt_cancellation_retains_entries_after_completion_boundary(

@@ -127,11 +127,14 @@ uv run wisp -p "continue the work" --resume <session-id-prefix>
 
 Session files contain provider-facing `message` entries plus selected structured `event` entries
 (tool calls, approvals, tool start/end, errors) for audit. They do **not** persist
-`message.delta` events. Continuation reads only message entries, so audit events never become
-model-visible history, and stale project context from earlier turns is not replayed as
-instructions. New records use a versioned, discriminated entry schema; existing unversioned
-session files remain readable through a compatibility decoder. Persisted events retain their raw
-payload and original event schema version, and are validated as typed events only when requested.
+`message.delta` events. Continuation replays only the selected path's messages and compactions, so
+audit events never become model-visible history, and stale project context from earlier turns is
+not replayed as instructions. New v2 records form a parent-linked tree. An append-only active-leaf record selects
+the root-to-leaf path used by continuation, so abandoned or cancelled work remains available in the
+audit log without entering model context. Existing unversioned and v1 linear session files remain
+readable through an in-memory compatibility decoder and are never rewritten during load. Persisted
+events retain their raw payload and original event schema version, and are validated as typed events
+only when requested.
 The former `wisp.agent.messages.SessionEntry(...)` constructor remains available as a deprecated
 factory; new integrations should import the concrete entry models from `wisp.sessions`.
 
