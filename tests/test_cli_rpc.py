@@ -1229,6 +1229,67 @@ def test_rpc_prompt_cancellation_restores_active_leaf_before_completion_boundary
     assert completed.entry_count == audit_entry_count
 
 
+def test_rpc_cancellation_during_run_snapshot_preserves_existing_context(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def run_prompt() -> object:
+        session = JsonlSessionStore(tmp_path).create()
+        await session.append_message(Message(role="user", content="existing prompt"))
+        committed_history = session.read_context_messages()
+        entry_start = len(session.read_entries())
+        agent = CodingSession(
+            provider=CancellableProvider(),
+            sessions=JsonlSessionStore(tmp_path),
+        )
+        snapshot_started = anyio.Event()
+        release_snapshot = anyio.Event()
+        execution = cli_module.rpc._rpc_execution
+        original_run_sync = execution.anyio.to_thread.run_sync
+
+        async def delayed_run_sync(func: object, *args: object, **kwargs: object) -> object:
+            if func is execution.rpc_session_run_start:
+                snapshot_started.set()
+                await release_snapshot.wait()
+            return await original_run_sync(func, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(execution.anyio.to_thread, "run_sync", delayed_run_sync)
+        cancel_scope = anyio.CancelScope()
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(
+                    cli_module.rpc._run_rpc_prompt_command,
+                    agent,
+                    session,
+                    committed_history,
+                    entry_start,
+                    "slow",
+                    "cmd-1",
+                    "prompt",
+                    cancel_scope,
+                    send.clone(),
+                    _TrustedGate(),
+                )
+                await snapshot_started.wait()
+                cancel_scope.cancel()
+                release_snapshot.set()
+                completed = await receive.receive()
+
+        assert session.read_context_messages() == committed_history
+        assert not any(
+            isinstance(entry, ActiveLeafSessionEntry) and entry.active_leaf_id is None
+            for entry in session.read_entries()
+        )
+        return completed
+
+    completed = anyio.run(run_prompt)
+
+    assert completed.ok is False
+    assert completed.history is not None
+    assert [message.content for message in completed.history] == ["existing prompt"]
+
+
 def test_rpc_prestart_cancellation_preserves_loaded_tool_repair(tmp_path: Path) -> None:
     class PreResponseCancellableProvider(CancellableProvider):
         def __init__(self, started: anyio.Event) -> None:

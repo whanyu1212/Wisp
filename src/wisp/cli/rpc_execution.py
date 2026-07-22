@@ -438,16 +438,19 @@ async def run_rpc_prompt_command(
     error: str | None = None
     run_entry_start = entry_start
     run_active_leaf_id: str | None = None
+    run_start_captured = False
 
     async def track_run_start(events: AsyncIterator[WispEvent]) -> AsyncIterator[WispEvent]:
-        nonlocal run_active_leaf_id, run_entry_start
+        nonlocal run_active_leaf_id, run_entry_start, run_start_captured
         async for event in events:
             if isinstance(event, AgentStarted):
-                run_entry_start, run_active_leaf_id = await anyio.to_thread.run_sync(
-                    rpc_session_run_start,
-                    session,
-                    entry_start,
-                )
+                with anyio.CancelScope(shield=True):
+                    run_entry_start, run_active_leaf_id = await anyio.to_thread.run_sync(
+                        rpc_session_run_start,
+                        session,
+                        entry_start,
+                    )
+                    run_start_captured = True
             yield event
 
     try:
@@ -485,7 +488,7 @@ async def run_rpc_prompt_command(
                 run_entry_start,
                 command_id,
             )
-            if not crossed_completion_boundary:
+            if not crossed_completion_boundary and run_start_captured:
                 rolled_back = await session.restore_active_leaf_for_operation(
                     run_entry_start,
                     run_active_leaf_id,
