@@ -324,6 +324,7 @@ class AgentHarness:
                 run_finished = False
                 segment_outcome: str | None = None
                 stream_ended = False
+                restart_for_steering = False
                 config = AgentLoopConfig(
                     provider=self._config.provider,
                     tool_executor=self._config.tool_executor,
@@ -398,10 +399,48 @@ class AgentHarness:
                             segment_outcome = event.outcome
                             run_finished = run_finished or event.outcome != "completed"
                         yield event
+                        if (
+                            isinstance(event, TurnCompleted)
+                            and event.outcome == "completed"
+                            and self._steering_queue
+                        ):
+                            restart_for_steering = True
+                            break
                 finally:
                     self._current_scope = None
                     with anyio.CancelScope(shield=True):
                         await loop_events.aclose()
+
+                if restart_for_steering:
+                    if token.is_cancelled():
+                        for cancellation_event in _cancelled_events(
+                            active_turn,
+                            active_turn_completed=active_turn_completed,
+                        ):
+                            yield cancellation_event
+                        return
+                    drain_count = (
+                        min(1, len(self._steering_queue))
+                        if self._config.steering_mode == "one_at_a_time"
+                        else len(self._steering_queue)
+                    )
+                    for _ in range(drain_count):
+                        if token.is_cancelled():
+                            for cancellation_event in _cancelled_events(
+                                active_turn,
+                                active_turn_completed=active_turn_completed,
+                            ):
+                                yield cancellation_event
+                            return
+                        message = self._steering_queue.popleft()
+                        self._messages.append(message)
+                        yield QueueMessageInjected(
+                            kind="steering",
+                            content=message.content,
+                            timestamp=message.created_at,
+                        )
+                    yield self.queue_updated_event()
+                    continue
 
                 if (
                     not stream_ended

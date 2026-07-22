@@ -319,6 +319,54 @@ def test_coding_session_persists_follow_up_at_injection_boundary(tmp_path: Path)
         agent.follow_up("too late")
 
 
+def test_coding_session_accepts_and_persists_steering_from_agent_start(tmp_path: Path) -> None:
+    async def run_agent() -> tuple[list[WispEvent], tuple[Message, ...], CodingSession]:
+        provider = ScriptedProvider(
+            [
+                [
+                    ProviderResponseStarted(model="test"),
+                    ProviderResponseCompleted(content="first answer"),
+                ],
+                [
+                    ProviderResponseStarted(model="test"),
+                    ProviderResponseCompleted(content="steered answer"),
+                ],
+            ]
+        )
+        store = JsonlSessionStore(tmp_path)
+        session = store.create()
+        event_bus = EventBus()
+        agent = CodingSession(provider=provider, sessions=store, events=event_bus)
+
+        def queue_at_start(event: WispEvent) -> None:
+            assert event.type == "agent.started"
+            update = agent.steer("change direction")
+            assert update.steering == ("change direction",)
+
+        event_bus.on("agent.started", queue_at_start)
+        events = [event async for event in agent.run("initial", session=session)]
+        return events, session.read_context_messages(), agent
+
+    events, messages, agent = anyio.run(run_agent)
+
+    assert [
+        (message.role, message.content) for message in messages if message.role != "system"
+    ] == [
+        ("user", "initial"),
+        ("assistant", "first answer"),
+        ("user", "change direction"),
+        ("assistant", "steered answer"),
+    ]
+    assert any(
+        isinstance(event, QueueMessageInjected)
+        and event.kind == "steering"
+        and event.content == "change direction"
+        for event in events
+    )
+    with pytest.raises(RuntimeError, match="no active agent run"):
+        agent.steer("too late")
+
+
 def test_coding_session_persists_completion_before_exposing_it(
     tmp_path: Path,
 ) -> None:
