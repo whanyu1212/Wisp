@@ -390,8 +390,8 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 12`; readers also accept legacy schema v5
-through v11 events for compatibility. A successful prompt follows this lifecycle (tool events
+Every outbound `WispEvent` includes `"schema_version": 13`; readers also accept legacy schema v5
+through v12 events for compatibility. A successful prompt follows this lifecycle (tool events
 repeat inside a turn when the model requests tools):
 
 ```text
@@ -419,6 +419,10 @@ The exception is successful schema-v11 overflow recovery: after `context.overflo
 overflow compaction lifecycle events, then the failed `turn.completed`, and continues once. Its
 `compaction.completed.will_retry=true` marks that failed turn as nonterminal; no `error` or
 intermediate `agent.completed` is emitted unless compaction or the retry setup fails.
+
+Schema v13 adds `queue.updated`, a typed snapshot of harness-owned steering and follow-up queues
+and their independent drain modes. Queue text remains outside the durable transcript until the
+harness injects it as an ordinary user message.
 
 Schema v12 adds optional `cost` snapshots to successful `message.completed` and
 `compaction.completed` events, plus a cumulative `session.stats.cost` summary. Costs are exact
