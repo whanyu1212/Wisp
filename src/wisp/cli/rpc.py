@@ -7,51 +7,40 @@ aliases so callers and tests keep importing them from ``wisp.cli``.
 
 from __future__ import annotations
 
-import json
 import os
-import stat
 import sys
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Queue
 from threading import Thread
-from typing import cast
 from uuid import uuid4
 
 import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
-from wisp.agent.execution import ToolResultProcessingError
 from wisp.agent.messages import Message
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.config import WispConfig
 from wisp.events import (
-    AgentStarted,
-    ErrorEvent,
-    ModelProviderAutoSwitched,
-    RpcCommandFinished,
-    RpcCommandStarted,
-    SessionStatsReported,
     TrustRequested,
     TrustResolved,
-    WispEvent,
 )
-from wisp.providers.base import Provider, ProviderError
-from wisp.providers.catalog import AmbiguousModelError, UnknownModelError
+from wisp.providers.base import Provider
 from wisp.rpc.commands import ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
-from wisp.runtime.registry import UnknownProviderError, UnknownToolError
-from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.base import Tool, ToolSafety
 from wisp.trust import is_trusted, record_trust
 
 from . import output as _cli_output
+from . import rpc_execution as _rpc_execution
+from . import rpc_transport as _rpc_transport
 from . import tools as _cli_tools
 from . import trust as _cli_trust
 from .rpc_configuration import (
@@ -90,7 +79,6 @@ from .rpc_coordinator import (
 from .rpc_coordinator import (
     _RpcSessionState as _RpcSessionState,
 )
-from .types import _JsonOutputModeError
 
 _render_json_events = _cli_output._render_json_events
 _write_json_event = _cli_output._write_json_event
@@ -128,9 +116,9 @@ class _RpcPendingApproval:
     resolved: bool = False
 
 
-_STDIN_READ_CHUNK_SIZE = 64 * 1024
-_STDIN_THREAD_POLL_INTERVAL = 0.01
-_STDIN_THREAD_QUEUE_SIZE = 100
+_STDIN_READ_CHUNK_SIZE = _rpc_transport._STDIN_READ_CHUNK_SIZE
+_STDIN_THREAD_POLL_INTERVAL = _rpc_transport._STDIN_THREAD_POLL_INTERVAL
+_STDIN_THREAD_QUEUE_SIZE = _rpc_transport._STDIN_THREAD_QUEUE_SIZE
 
 
 class _RpcToolApprovalPolicy(ToolApprovalPolicy):
@@ -443,7 +431,7 @@ async def _run_rpc(
                     approval_policy=approval_policy,
                     trust_gate=trust_gate,
                     configure_overrides=configure_overrides,
-                    queued_commands=coordinator.queued_commands,
+                    coordinator=coordinator,
                 )
 
             await coordinator.run(
@@ -473,138 +461,60 @@ def _dispatch_rpc_command(
     approval_policy: _RpcToolApprovalPolicy,
     trust_gate: _RpcTrustGate,
     configure_overrides: _RpcConfigureOverrides,
-    queued_commands: deque[dict[str, object]],
+    coordinator: RpcCoordinator | None = None,
+    queued_commands: deque[dict[str, object]] | None = None,
 ) -> _RpcDispatchResult:
-    command_type = _rpc_command_type(command)
-    if command_type == "prompt":
-        new_running_command, new_session = _start_rpc_prompt_command(
-            command,
-            agent=agent,
-            sessions=sessions,
-            session_state=session_state,
-            task_group=task_group,
-            send=send,
-            trust_gate=trust_gate,
-        )
-        return _RpcDispatchResult(
-            running_command=new_running_command,
-            selected_session=new_session,
-        )
-    if command_type == "compact":
-        return _RpcDispatchResult(
-            running_command=_start_rpc_compact_command(
-                command,
-                agent=agent,
-                session_state=session_state,
-                task_group=task_group,
-                send=send,
-                trust_gate=trust_gate,
-            )
-        )
-    if command_type == "get_session_stats":
-        return _RpcDispatchResult(
-            running_command=_start_rpc_session_stats_command(
-                command,
-                agent=agent,
-                session_state=session_state,
-                task_group=task_group,
-                send=send,
-            )
-        )
-    should_shutdown = _handle_rpc_control_command(
-        command,
+    if coordinator is None:
+        coordinator = RpcCoordinator(session_state)
+        coordinator.running_command = running_command
+        if queued_commands is not None:
+            coordinator.queued_commands = queued_commands
+    executor = _rpc_execution.RpcCommandExecutor(
         agent=agent,
         runtime=runtime,
-        running_command=running_command,
+        sessions=sessions,
+        session_state=session_state,
+        task_group=task_group,
+        send=send,
         approval_policy=approval_policy,
         trust_gate=trust_gate,
         configure_overrides=configure_overrides,
-        queued_commands=queued_commands,
+        coordinator=coordinator,
+        write_event=_write_json_event,
+        render_events=_render_json_events,
+        running_command_factory=_RpcRunningCommand,
+        command_completed_factory=_RpcCommandCompleted,
     )
-    return _RpcDispatchResult(
-        running_command=running_command,
-        should_shutdown=should_shutdown,
-    )
+    return executor.dispatch(command, running_command)
 
 
 def _rpc_session_state(session: JsonlSession | None) -> _RpcSessionState:
-    if session is None or not session.path.is_file():
-        return _RpcSessionState(session=session, history=(), entry_count=0)
-    return _RpcSessionState(
-        session=session,
-        history=session.read_context_messages(),
-        entry_count=len(session.read_entries()),
-    )
+    return _rpc_execution.rpc_session_state(session)
 
 
 async def _read_rpc_stdin(
     send: MemoryObjectSendStream[_RpcControlEvent],
     stop_reader: anyio.Event,
 ) -> None:
-    async with send:
-        try:
-            fd = sys.stdin.fileno()
-            stdin_mode = os.fstat(fd).st_mode
-        except (AttributeError, OSError, ValueError):
-            await _read_rpc_text_stdin(send, stop_reader)
-            return
-        if stat.S_ISREG(stdin_mode):
-            await _read_rpc_text_stdin(send, stop_reader)
-            return
-        if _rpc_stdin_needs_thread_reader(stdin_mode):
-            await _read_rpc_thread_stdin(send, stop_reader)
-            return
-        await _read_rpc_fd_stdin(send, stop_reader, fd)
+    await _rpc_stdin_transport().read(send, stop_reader)
 
 
 def _rpc_stdin_needs_thread_reader(stdin_mode: int) -> bool:
-    return os.name != "posix" and not stat.S_ISREG(stdin_mode)
+    return _rpc_transport.rpc_stdin_needs_thread_reader(stdin_mode)
 
 
 async def _read_rpc_text_stdin(
     send: MemoryObjectSendStream[_RpcControlEvent],
     stop_reader: anyio.Event,
 ) -> None:
-    while not stop_reader.is_set():
-        raw_line = await anyio.to_thread.run_sync(sys.stdin.readline)
-        if raw_line == "":
-            await send.send(_RpcInputClosed())
-            return
-        await _send_rpc_input_line(send, raw_line)
+    await _rpc_stdin_transport().read_text(send, stop_reader)
 
 
 async def _read_rpc_thread_stdin(
     send: MemoryObjectSendStream[_RpcControlEvent],
     stop_reader: anyio.Event,
 ) -> None:
-    lines: Queue[str | Exception] = Queue(maxsize=_STDIN_THREAD_QUEUE_SIZE)
-    stdin = sys.stdin
-
-    def read_lines() -> None:
-        try:
-            while True:
-                raw_line = stdin.readline()
-                lines.put(raw_line)
-                if raw_line == "":
-                    return
-        except Exception as exc:  # noqa: BLE001 - surface stdin reader failures as RPC errors
-            lines.put(exc)
-
-    Thread(target=read_lines, name="wisp-rpc-stdin-reader", daemon=True).start()
-    while not stop_reader.is_set():
-        try:
-            item = lines.get_nowait()
-        except Empty:
-            await anyio.sleep(_STDIN_THREAD_POLL_INTERVAL)
-            continue
-        if isinstance(item, Exception):
-            _write_json_event(ErrorEvent(message=f"Failed to read RPC stdin: {item}"))
-            await send.send(_RpcInputClosed())
-            return
-        if item == "":
-            await send.send(_RpcInputClosed())
-            return
-        await _send_rpc_input_line(send, item)
+    await _rpc_stdin_transport().read_thread(send, stop_reader)
 
 
 async def _read_rpc_fd_stdin(
@@ -612,44 +522,35 @@ async def _read_rpc_fd_stdin(
     stop_reader: anyio.Event,
     fd: int,
 ) -> None:
-    buffer = bytearray()
-    while not stop_reader.is_set():
-        await anyio.wait_readable(fd)
-        if stop_reader.is_set():
-            return
-        try:
-            chunk = os.read(fd, _STDIN_READ_CHUNK_SIZE)
-        except BlockingIOError:
-            continue
-        if chunk == b"":
-            if buffer:
-                await _send_rpc_input_line(send, _decode_rpc_stdin_line(buffer))
-            await send.send(_RpcInputClosed())
-            return
-        buffer.extend(chunk)
-        while True:
-            newline_index = buffer.find(b"\n")
-            if newline_index < 0:
-                break
-            line = _decode_rpc_stdin_line(buffer[:newline_index])
-            del buffer[: newline_index + 1]
-            await _send_rpc_input_line(send, line)
+    await _rpc_stdin_transport().read_fd(send, stop_reader, fd)
 
 
 async def _send_rpc_input_line(
     send: MemoryObjectSendStream[_RpcControlEvent],
     raw_line: str,
 ) -> None:
-    line = raw_line.strip()
-    if not line:
-        return
-    command = _parse_rpc_command(line)
-    if command is not None:
-        await send.send(_RpcInputCommand(command=command))
+    await _rpc_stdin_transport().send_line(send, raw_line)
 
 
 def _decode_rpc_stdin_line(raw_line: bytes | bytearray) -> str:
-    return bytes(raw_line).decode("utf-8", errors="replace")
+    return _rpc_transport.decode_rpc_stdin_line(raw_line)
+
+
+def _rpc_stdin_transport() -> _rpc_transport.RpcStdinTransport[_RpcControlEvent]:
+    return _rpc_transport.RpcStdinTransport(
+        stdin=sys.stdin,
+        write_event=_write_json_event,
+        input_command_factory=lambda command: _RpcInputCommand(command=command),
+        input_closed_factory=_RpcInputClosed,
+        queue_factory=lambda maxsize: Queue(maxsize=maxsize),
+        thread_factory=Thread,
+        wait_readable=anyio.wait_readable,
+        read_fd=os.read,
+        needs_thread_reader=_rpc_stdin_needs_thread_reader,
+        read_chunk_size=_STDIN_READ_CHUNK_SIZE,
+        thread_poll_interval=_STDIN_THREAD_POLL_INTERVAL,
+        thread_queue_size=_STDIN_THREAD_QUEUE_SIZE,
+    )
 
 
 def _start_rpc_prompt_command(
@@ -662,47 +563,18 @@ def _start_rpc_prompt_command(
     send: MemoryObjectSendStream[_RpcControlEvent],
     trust_gate: _RpcTrustGate,
 ) -> tuple[_RpcRunningCommand | None, JsonlSession | None]:
-    command_type, command_id, id_error = _rpc_command_identity(command)
-    _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-        )
-        return None, session_state.session
-
-    prompt = command.get("prompt")
-    if not isinstance(prompt, str):
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC prompt command requires string field: prompt",
-        )
-        return None, session_state.session
-
-    selected_session = session_state.session or sessions.create()
-    cancel_scope = anyio.CancelScope()
-    task_group.start_soon(
-        _run_rpc_prompt_command,
-        agent,
-        selected_session,
-        session_state.history,
-        session_state.entry_count,
-        prompt,
-        command_id,
-        command_type,
-        cancel_scope,
-        send.clone(),
-        trust_gate,
-    )
-    return (
-        _RpcRunningCommand(
-            command_id=command_id,
-            command_type="prompt",
-            cancel_scope=cancel_scope,
-        ),
-        selected_session,
+    return _rpc_execution.start_rpc_prompt_command(
+        command,
+        agent=agent,
+        sessions=sessions,
+        session_state=session_state,
+        task_group=task_group,
+        send=send,
+        trust_gate=trust_gate,
+        write_event=_write_json_event,
+        render_events=_render_json_events,
+        running_command_factory=_RpcRunningCommand,
+        command_completed_factory=_RpcCommandCompleted,
     )
 
 
@@ -715,52 +587,17 @@ def _start_rpc_compact_command(
     send: MemoryObjectSendStream[_RpcControlEvent],
     trust_gate: _RpcTrustGate,
 ) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = _rpc_command_identity(command)
-    _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-        )
-        return None
-
-    raw_instructions = command.get("instructions")
-    if raw_instructions is not None and not isinstance(raw_instructions, str):
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC compact command field instructions must be a string",
-        )
-        return None
-    instructions = raw_instructions.strip() or None if isinstance(raw_instructions, str) else None
-
-    session = session_state.session
-    if session is None or not session.path.is_file():
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC compact command requires an existing persisted session",
-        )
-        return None
-
-    cancel_scope = anyio.CancelScope()
-    task_group.start_soon(
-        _run_rpc_compact_command,
-        agent,
-        session,
-        session_state.history,
-        session_state.entry_count,
-        instructions,
-        command_id,
-        cancel_scope,
-        send.clone(),
-        trust_gate,
-    )
-    return _RpcRunningCommand(
-        command_id=command_id,
-        command_type="compact",
-        cancel_scope=cancel_scope,
+    return _rpc_execution.start_rpc_compact_command(
+        command,
+        agent=agent,
+        session_state=session_state,
+        task_group=task_group,
+        send=send,
+        trust_gate=trust_gate,
+        write_event=_write_json_event,
+        render_events=_render_json_events,
+        running_command_factory=_RpcRunningCommand,
+        command_completed_factory=_RpcCommandCompleted,
     )
 
 
@@ -772,30 +609,15 @@ def _start_rpc_session_stats_command(
     task_group: TaskGroup,
     send: MemoryObjectSendStream[_RpcControlEvent],
 ) -> _RpcRunningCommand | None:
-    command_type, command_id, id_error = _rpc_command_identity(command)
-    _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-        )
-        return None
-
-    cancel_scope = anyio.CancelScope()
-    task_group.start_soon(
-        _run_rpc_session_stats_command,
-        agent,
-        session_state.session,
-        session_state.entry_count,
-        command_id,
-        cancel_scope,
-        send.clone(),
-    )
-    return _RpcRunningCommand(
-        command_id=command_id,
-        command_type="get_session_stats",
-        cancel_scope=cancel_scope,
+    return _rpc_execution.start_rpc_session_stats_command(
+        command,
+        agent=agent,
+        session_state=session_state,
+        task_group=task_group,
+        send=send,
+        write_event=_write_json_event,
+        running_command_factory=_RpcRunningCommand,
+        command_completed_factory=_RpcCommandCompleted,
     )
 
 
@@ -807,48 +629,16 @@ async def _run_rpc_session_stats_command(
     cancel_scope: anyio.CancelScope,
     send: MemoryObjectSendStream[_RpcControlEvent],
 ) -> None:
-    ok = False
-    error: str | None = None
-    refreshed_history: tuple[Message, ...] | None = None
-    refreshed_entry_count = entry_count
-    try:
-        with cancel_scope:
-            stats = await agent.get_session_stats(session)
-            if session is not None:
-                refreshed_entry_count, refreshed_history = await anyio.to_thread.run_sync(
-                    _updated_rpc_session_state,
-                    session,
-                    (),
-                    entry_count,
-                )
-            _write_json_event(SessionStatsReported(command_id=command_id, stats=stats))
-            ok = True
-        if cancel_scope.cancel_called:
-            error = "RPC get_session_stats command cancelled"
-    except BaseException as exc:
-        if isinstance(exc, anyio.get_cancelled_exc_class()):
-            error = "RPC get_session_stats command cancelled"
-        else:
-            error = str(exc)
-    finally:
-        _write_json_event(
-            RpcCommandFinished(
-                command_id=command_id,
-                command_type="get_session_stats",
-                ok=ok,
-                error=error,
-            )
-        )
-        await send.send(
-            _RpcCommandCompleted(
-                command_id=command_id,
-                command_type="get_session_stats",
-                ok=ok,
-                history=refreshed_history,
-                entry_count=refreshed_entry_count,
-            )
-        )
-        await send.aclose()
+    await _rpc_execution.run_rpc_session_stats_command(
+        agent,
+        session,
+        entry_count,
+        command_id,
+        cancel_scope,
+        send,
+        _write_json_event,
+        _RpcCommandCompleted,
+    )
 
 
 async def _run_rpc_prompt_command(
@@ -863,105 +653,21 @@ async def _run_rpc_prompt_command(
     send: MemoryObjectSendStream[_RpcControlEvent],
     trust_gate: _RpcTrustGate,
 ) -> None:
-    error: str | None = None
-    run_entry_start = entry_start
-
-    async def track_run_start(events: AsyncIterator[WispEvent]) -> AsyncIterator[WispEvent]:
-        nonlocal run_entry_start
-        async for event in events:
-            if isinstance(event, AgentStarted):
-                # AgentStarted follows recovery of prior pending entries and precedes
-                # persistence of this run's prompt messages.
-                run_entry_start = await anyio.to_thread.run_sync(
-                    _rpc_session_entry_count,
-                    session,
-                    entry_start,
-                )
-            yield event
-
-    try:
-        with cancel_scope:
-            try:
-                # Resolve project trust before the first turn runs; the decision is
-                # cached so subsequent prompts don't re-prompt. Trust commands are
-                # processed by the main loop while this awaits, so this cannot
-                # deadlock the reader.
-                agent.trusted = await trust_gate.resolve()
-                await _render_json_events(
-                    track_run_start(
-                        agent.run(
-                            prompt,
-                            session=session,
-                            history=committed_history,
-                            operation_id=command_id,
-                        )
-                    )
-                )
-            except _JsonOutputModeError as exc:
-                error = str(exc)
-            except (
-                ProviderError,
-                SessionError,
-                ToolResultProcessingError,
-                UnknownProviderError,
-                UnknownToolError,
-            ) as exc:
-                # Runtime/configuration failures and internal result-processing errors
-                # fail this command without tearing down the RPC process. The agent loop
-                # already emitted the safe ErrorEvent for failures raised during a run.
-                error = str(exc)
-            except anyio.get_cancelled_exc_class():
-                error = f"RPC command cancelled: {command_id}"
-    finally:
-        cancelled = error is not None and error.startswith("RPC command cancelled:")
-        if cancelled:
-            # Keep recovered prior entries, but discard this prompt unless the run
-            # produced provider output that CodingSession durably persisted.
-            crossed_completion_boundary = await anyio.to_thread.run_sync(
-                _rpc_has_durable_completion,
-                session,
-                run_entry_start,
-                command_id,
-            )
-            if not crossed_completion_boundary:
-                rolled_back = await session.truncate_operation_entries(
-                    run_entry_start,
-                    operation_id=command_id,
-                )
-                if not rolled_back and session.path.is_file():
-                    entries = await anyio.to_thread.run_sync(session.read_entries)
-                    if any(entry.operation_id == command_id for entry in entries[run_entry_start:]):
-                        error = (
-                            f"RPC command cancelled: {command_id}; prompt entries were retained "
-                            "because another writer appended to the session"
-                        )
-        entry_count, updated_history = await anyio.to_thread.run_sync(
-            _updated_rpc_session_state,
-            session,
-            committed_history,
-            entry_start,
-        )
-        async with send:
-            if cancelled:
-                assert error is not None
-                _write_json_event(ErrorEvent(message=error))
-            _write_json_event(
-                RpcCommandFinished(
-                    command_id=command_id,
-                    command_type=command_type,
-                    ok=error is None,
-                    error=error,
-                )
-            )
-            await send.send(
-                _RpcCommandCompleted(
-                    command_id=command_id,
-                    command_type="prompt",
-                    ok=error is None,
-                    history=updated_history,
-                    entry_count=entry_count,
-                )
-            )
+    await _rpc_execution.run_rpc_prompt_command(
+        agent,
+        session,
+        committed_history,
+        entry_start,
+        prompt,
+        command_id,
+        command_type,
+        cancel_scope,
+        send,
+        trust_gate,
+        _write_json_event,
+        _render_json_events,
+        _RpcCommandCompleted,
+    )
 
 
 async def _run_rpc_compact_command(
@@ -975,63 +681,20 @@ async def _run_rpc_compact_command(
     send: MemoryObjectSendStream[_RpcControlEvent],
     trust_gate: _RpcTrustGate,
 ) -> None:
-    error: str | None = None
-    error_rendered = False
-
-    async def track_errors(events: AsyncIterator[WispEvent]) -> AsyncIterator[WispEvent]:
-        nonlocal error_rendered
-        async for event in events:
-            if isinstance(event, ErrorEvent):
-                error_rendered = True
-            yield event
-
-    try:
-        with cancel_scope:
-            try:
-                agent.trusted = await trust_gate.resolve()
-                await _render_json_events(
-                    track_errors(agent.compact(session, instructions=instructions))
-                )
-            except _JsonOutputModeError as exc:
-                error = str(exc)
-                error_rendered = True
-            except anyio.get_cancelled_exc_class():
-                error = f"RPC command cancelled: {command_id}"
-            except Exception as exc:  # noqa: BLE001 - command failures must not stop RPC
-                error = str(exc)
-    finally:
-        try:
-            entry_count, updated_history = await anyio.to_thread.run_sync(
-                _updated_rpc_session_state,
-                session,
-                committed_history,
-                entry_start,
-            )
-        except Exception as exc:  # noqa: BLE001 - preserve a usable RPC coordinator
-            entry_count = entry_start
-            updated_history = committed_history
-            if error is None:
-                error = str(exc)
-        async with send:
-            if error is not None and not error_rendered:
-                _write_json_event(ErrorEvent(message=error))
-            _write_json_event(
-                RpcCommandFinished(
-                    command_id=command_id,
-                    command_type="compact",
-                    ok=error is None,
-                    error=error,
-                )
-            )
-            await send.send(
-                _RpcCommandCompleted(
-                    command_id=command_id,
-                    command_type="compact",
-                    ok=error is None,
-                    history=updated_history,
-                    entry_count=entry_count,
-                )
-            )
+    await _rpc_execution.run_rpc_compact_command(
+        agent,
+        session,
+        committed_history,
+        entry_start,
+        instructions,
+        command_id,
+        cancel_scope,
+        send,
+        trust_gate,
+        _write_json_event,
+        _render_json_events,
+        _RpcCommandCompleted,
+    )
 
 
 def _updated_rpc_history(
@@ -1039,16 +702,14 @@ def _updated_rpc_history(
     committed_history: tuple[Message, ...],
     entry_start: int,
 ) -> tuple[Message, ...]:
-    return _updated_rpc_session_state(session, committed_history, entry_start)[1]
+    return _rpc_execution.updated_rpc_history(session, committed_history, entry_start)
 
 
 def _rpc_session_entry_count(
     session: JsonlSession,
     fallback: int,
 ) -> int:
-    if not session.path.is_file():
-        return fallback
-    return len(session.read_entries())
+    return _rpc_execution.rpc_session_entry_count(session, fallback)
 
 
 def _rpc_has_durable_completion(
@@ -1056,19 +717,7 @@ def _rpc_has_durable_completion(
     entry_start: int,
     operation_id: str,
 ) -> bool:
-    if not session.path.is_file():
-        return False
-    for entry in session.read_entries()[entry_start:]:
-        if entry.operation_id != operation_id:
-            continue
-        message = entry.message
-        if message is None:
-            continue
-        if message.role == "assistant" and message.finish_reason is not None:
-            return True
-        if message.role == "tool" and message.tool_call_id is not None:
-            return True
-    return False
+    return _rpc_execution.rpc_has_durable_completion(session, entry_start, operation_id)
 
 
 def _updated_rpc_session_state(
@@ -1076,19 +725,14 @@ def _updated_rpc_session_state(
     committed_history: tuple[Message, ...],
     entry_start: int,
 ) -> tuple[int, tuple[Message, ...]]:
-    if not session.path.is_file():
-        return entry_start, committed_history
-    entries = session.read_entries()
-    return len(entries), session.read_context_messages()
+    return _rpc_execution.updated_rpc_session_state(session, committed_history, entry_start)
 
 
 def _reject_rpc_command(command: dict[str, object], *, message: str) -> None:
-    command_type, command_id, id_error = _rpc_command_identity(command)
-    _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    _write_rpc_command_error(
-        command_id=command_id,
-        command_type=command_type,
-        message=id_error or message,
+    _rpc_execution.reject_rpc_command(
+        command,
+        message=message,
+        write_event=_write_json_event,
     )
 
 
@@ -1101,74 +745,21 @@ def _handle_rpc_control_command(
     runtime: WispRuntime | None = None,
     trust_gate: _RpcTrustGate | None = None,
     configure_overrides: _RpcConfigureOverrides | None = None,
+    coordinator: RpcCoordinator | None = None,
     queued_commands: deque[dict[str, object]] | None = None,
 ) -> bool:
-    command_type, command_id, id_error = _rpc_command_identity(command)
-    _write_json_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
-    if id_error is not None:
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=id_error,
-        )
-        return False
-    if command_type == "shutdown":
-        _write_json_event(
-            RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True)
-        )
-        return True
-    if command_type == "cancel":
-        _handle_rpc_cancel_command(
-            command,
-            command_id=command_id,
-            command_type=command_type,
-            running_command=running_command,
-            queued_commands=queued_commands,
-        )
-        return False
-    if command_type == "approval":
-        _handle_rpc_approval_command(
-            command,
-            command_id=command_id,
-            command_type=command_type,
-            approval_policy=approval_policy,
-        )
-        return False
-    if command_type == "trust":
-        if trust_gate is None:
-            _write_rpc_command_error(
-                command_id=command_id,
-                command_type=command_type,
-                message="RPC trust command requires an active trust gate",
-            )
-            return False
-        _handle_rpc_trust_command(
-            command,
-            command_id=command_id,
-            command_type=command_type,
-            trust_gate=trust_gate,
-        )
-        return False
-    if command_type == "configure":
-        if agent is None or runtime is None:
-            _write_rpc_command_error(
-                command_id=command_id,
-                command_type=command_type,
-                message="RPC configure command requires an active agent runtime",
-            )
-            return False
-        _handle_rpc_configure_command(
-            command,
-            command_id=command_id,
-            command_type=command_type,
-            agent=agent,
-            runtime=runtime,
-            configure_overrides=configure_overrides,
-        )
-        return False
-    message = f"Unknown RPC command: {command_type}"
-    _write_rpc_command_error(command_id=command_id, command_type=command_type, message=message)
-    return False
+    return _rpc_execution.handle_rpc_control_command(
+        command,
+        running_command=running_command,
+        approval_policy=approval_policy,
+        write_event=_write_json_event,
+        agent=agent,
+        runtime=runtime,
+        trust_gate=trust_gate,
+        configure_overrides=configure_overrides,
+        coordinator=coordinator,
+        queued_commands=queued_commands,
+    )
 
 
 def _handle_rpc_configure_command(
@@ -1180,115 +771,15 @@ def _handle_rpc_configure_command(
     runtime: WispRuntime,
     configure_overrides: _RpcConfigureOverrides | None = None,
 ) -> None:
-    provider = command.get("provider")
-    model = command.get("model")
-    effort = command.get("effort")
-    clear_effort = command.get("clear_effort") is True
-    has_provider = "provider" in command
-    has_model = "model" in command
-    has_effort = "effort" in command or clear_effort
-    if not has_provider and not has_model and not has_effort:
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC configure command requires provider, model, or effort",
-        )
-        return
-    if provider is not None and not isinstance(provider, str):
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC configure command field provider must be a string",
-        )
-        return
-    if model is not None and not isinstance(model, str):
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC configure command field model must be a string",
-        )
-        return
-    if effort is not None and not isinstance(effort, str):
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC configure command field effort must be a string",
-        )
-        return
-    configuration = agent.configuration
-    selected_provider = configuration.provider
-    selected_model = configuration.model
-    selected_effort = configuration.effort
-    if isinstance(provider, str):
-        try:
-            selected_provider = runtime.providers.get(provider)
-        except UnknownProviderError as exc:
-            _write_rpc_command_error(
-                command_id=command_id,
-                command_type=command_type,
-                message=str(exc),
-            )
-            return
-        if configure_overrides is not None:
-            configure_overrides.provider = provider
-        if not has_model:
-            selected_model = None
-            if configure_overrides is not None:
-                configure_overrides.model = None
-                configure_overrides.has_model = True
-        if not has_effort:
-            # Effort tiers are provider-native, non-normalized strings (e.g.
-            # Google's "MEDIUM" vs OpenAI's lowercase "medium") -- a tier
-            # chosen for the old provider left in place across a provider
-            # switch would reach the new provider's API unvalidated on the
-            # next prompt, matching the same staleness model already gets
-            # reset for above.
-            selected_effort = None
-            if configure_overrides is not None:
-                configure_overrides.effort = None
-                configure_overrides.has_effort = True
-    if has_model and provider is None and isinstance(model, str):
-        selected_provider = _auto_switch_provider_for_model(
-            model,
-            command_id=command_id,
-            current_provider=selected_provider,
-            runtime=runtime,
-            configure_overrides=configure_overrides,
-        )
-        if not has_effort:
-            # Effort support is per-model, not just per-provider --
-            # catalog.toml deliberately omits some models (e.g.
-            # claude-haiku-4-5) from effort_levels entirely. A model change
-            # that stays on the same provider skips both the explicit-
-            # provider reset above and _auto_switch_provider_for_model's own
-            # reset (it only fires when the provider actually changes), so a
-            # tier valid for the old model could be unsupported by the new
-            # one -- reset rather than risk sending an incompatible
-            # output_config.effort (or equivalent) on the next prompt.
-            selected_effort = None
-            if configure_overrides is not None:
-                configure_overrides.effort = None
-                configure_overrides.has_effort = True
-    if has_model:
-        selected_model = model
-        if configure_overrides is not None:
-            configure_overrides.model = model
-            configure_overrides.has_model = True
-    if has_effort:
-        selected_effort = None if clear_effort else effort
-        if configure_overrides is not None:
-            configure_overrides.effort = None if clear_effort else effort
-            configure_overrides.has_effort = True
-    agent.reconfigure(
-        replace(
-            configuration,
-            provider=selected_provider,
-            model=selected_model,
-            effort=selected_effort,
-            models=runtime.models,
-        )
+    _rpc_execution.handle_rpc_configure_command(
+        command,
+        command_id=command_id,
+        command_type=command_type,
+        agent=agent,
+        runtime=runtime,
+        configure_overrides=configure_overrides,
+        write_event=_write_json_event,
     )
-    _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 
 def _auto_switch_provider_for_model(
@@ -1299,36 +790,14 @@ def _auto_switch_provider_for_model(
     runtime: WispRuntime,
     configure_overrides: _RpcConfigureOverrides | None,
 ) -> Provider:
-    """Return the provider selected for ``model`` when it is unambiguous.
-
-    Advisory, never blocking: an unknown or ambiguous model id is left entirely
-    to the existing free-text ``agent.model = model`` assignment -- this must
-    never reject a model string that would have worked before the registry
-    existed (a brand-new model ahead of a catalog update, a custom provider, or
-    a model shared by two providers while already on one of them).
-
-    Emits :class:`ModelProviderAutoSwitched` before the switch is applied so an
-    out-of-process front-end (the TUI) that only tracks provider changes it
-    explicitly requested can resync -- otherwise it would keep displaying and
-    using its old provider while the RPC agent has actually moved on.
-    """
-
-    try:
-        resolved_provider, _entry = runtime.models.resolve(model, prefer=current_provider.name)
-    except (UnknownModelError, AmbiguousModelError):
-        return current_provider
-    if resolved_provider == current_provider.name:
-        return current_provider
-    try:
-        new_provider = runtime.providers.get(resolved_provider)
-    except UnknownProviderError:
-        return current_provider
-    _write_json_event(
-        ModelProviderAutoSwitched(command_id=command_id, provider=resolved_provider, model=model)
+    return _rpc_execution.auto_switch_provider_for_model(
+        model,
+        command_id=command_id,
+        current_provider=current_provider,
+        runtime=runtime,
+        configure_overrides=configure_overrides,
+        write_event=_write_json_event,
     )
-    if configure_overrides is not None:
-        configure_overrides.provider = resolved_provider
-    return new_provider
 
 
 def _handle_rpc_approval_command(
@@ -1338,69 +807,13 @@ def _handle_rpc_approval_command(
     command_type: str,
     approval_policy: _RpcToolApprovalPolicy,
 ) -> None:
-    call_id = command.get("call_id")
-    if not isinstance(call_id, str) or not call_id:
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC approval command requires string field: call_id",
-        )
-        return
-    approved = command.get("approved")
-    if not isinstance(approved, bool):
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC approval command requires boolean field: approved",
-        )
-        return
-    reason = command.get("reason")
-    if reason is not None and not isinstance(reason, str):
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC approval command field reason must be a string",
-        )
-        return
-    raw_scope = command.get("scope")
-    scope: ApprovalScope
-    if raw_scope is None:
-        scope = "once"
-    elif isinstance(raw_scope, str) and raw_scope in {
-        "once",
-        "tool_session",
-        "all_session",
-    }:
-        scope = cast(ApprovalScope, raw_scope)
-    else:
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=(
-                "RPC approval command field scope must be one of: once, tool_session, all_session"
-            ),
-        )
-        return
-    if not approved and scope != "once":
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC approval scope is only valid for approved requests",
-        )
-        return
-    if not approval_policy.resolve_approval(
-        call_id=call_id,
-        approved=approved,
-        reason=reason,
-        scope=scope,
-    ):
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=f"No pending tool approval with call_id: {call_id}",
-        )
-        return
-    _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    _rpc_execution.handle_rpc_approval_command(
+        command,
+        command_id=command_id,
+        command_type=command_type,
+        approval_policy=approval_policy,
+        write_event=_write_json_event,
+    )
 
 
 def _handle_rpc_trust_command(
@@ -1410,51 +823,13 @@ def _handle_rpc_trust_command(
     command_type: str,
     trust_gate: _RpcTrustGate,
 ) -> None:
-    request_id = command.get("request_id")
-    if not isinstance(request_id, str) or not request_id:
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC trust command requires string field: request_id",
-        )
-        return
-    trusted = command.get("trusted")
-    if not isinstance(trusted, bool):
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC trust command requires boolean field: trusted",
-        )
-        return
-    reason = command.get("reason")
-    if reason is not None and not isinstance(reason, str):
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC trust command field reason must be a string",
-        )
-        return
-    transient = command.get("transient")
-    if transient is not None and not isinstance(transient, bool):
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC trust command field transient must be a boolean",
-        )
-        return
-    if not trust_gate.resolve_request(
-        request_id=request_id,
-        trusted=trusted,
-        reason=reason,
-        transient=transient is True,
-    ):
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=f"No pending trust request with request_id: {request_id}",
-        )
-        return
-    _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    _rpc_execution.handle_rpc_trust_command(
+        command,
+        command_id=command_id,
+        command_type=command_type,
+        trust_gate=trust_gate,
+        write_event=_write_json_event,
+    )
 
 
 def _handle_rpc_cancel_command(
@@ -1463,88 +838,40 @@ def _handle_rpc_cancel_command(
     command_id: str,
     command_type: str,
     running_command: _RpcRunningCommand | None,
+    coordinator: RpcCoordinator | None = None,
     queued_commands: deque[dict[str, object]] | None = None,
 ) -> None:
-    target_id = command.get("target_id")
-    if not isinstance(target_id, str) or not target_id:
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message="RPC cancel command requires string field: target_id",
-        )
-        return
-    if running_command is not None and running_command.command_id == target_id:
-        running_command.cancel_scope.cancel()
-        _write_json_event(
-            RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True)
-        )
-        return
-
-    queued_target = next(
-        (queued for queued in queued_commands or () if queued.get("id") == target_id),
-        None,
+    _rpc_execution.handle_rpc_cancel_command(
+        command,
+        command_id=command_id,
+        command_type=command_type,
+        running_command=running_command,
+        coordinator=coordinator,
+        queued_commands=queued_commands,
+        write_event=_write_json_event,
     )
-    if queued_target is None:
-        _write_rpc_command_error(
-            command_id=command_id,
-            command_type=command_type,
-            message=f"No running or queued RPC command with id: {target_id}",
-        )
-        return
-    assert queued_commands is not None
-    queued_commands.remove(queued_target)
-    target_type = _rpc_command_type(queued_target)
-    _write_json_event(RpcCommandStarted(command_id=target_id, command_type=target_type))
-    _write_json_event(
-        RpcCommandFinished(
-            command_id=target_id,
-            command_type=target_type,
-            ok=False,
-            error=f"RPC command cancelled: {target_id}",
-        )
-    )
-    _write_json_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 
 def _write_rpc_command_error(*, command_id: str, command_type: str, message: str) -> None:
-    _write_json_event(ErrorEvent(message=message))
-    _write_json_event(
-        RpcCommandFinished(
-            command_id=command_id,
-            command_type=command_type,
-            ok=False,
-            error=message,
-        )
+    _rpc_execution.write_rpc_command_error(
+        command_id=command_id,
+        command_type=command_type,
+        message=message,
+        write_event=_write_json_event,
     )
 
 
 def _rpc_command_identity(command: dict[str, object]) -> tuple[str, str, str | None]:
-    command_type = _rpc_command_type(command)
-    command_id, id_error = _rpc_command_id(command)
-    return command_type, command_id, id_error
+    return _rpc_execution.rpc_command_identity(command)
 
 
 def _rpc_command_type(command: dict[str, object]) -> str:
-    command_type = command.get("type")
-    return command_type if isinstance(command_type, str) and command_type else "unknown"
+    return _rpc_execution.rpc_command_type(command)
 
 
 def _rpc_command_id(command: dict[str, object]) -> tuple[str, str | None]:
-    command_id = command.get("id")
-    if command_id is None:
-        return uuid4().hex, None
-    if isinstance(command_id, str) and command_id:
-        return command_id, None
-    return uuid4().hex, "RPC command id must be a non-empty string"
+    return _rpc_execution.rpc_command_id(command)
 
 
 def _parse_rpc_command(line: str) -> dict[str, object] | None:
-    try:
-        command = json.loads(line)
-    except json.JSONDecodeError as exc:
-        _write_json_event(ErrorEvent(message=f"Invalid RPC JSON: {exc.msg}"))
-        return None
-    if not isinstance(command, dict):
-        _write_json_event(ErrorEvent(message="RPC command must be a JSON object"))
-        return None
-    return cast(dict[str, object], command)
+    return _rpc_stdin_transport().parse_command(line)

@@ -263,3 +263,26 @@ def test_coordinator_accepts_compatibility_event_types() -> None:
         assert coordinator.session_state.entry_count == 1
 
     anyio.run(scenario)
+
+
+def test_coordinator_owns_running_and_queued_cancellation() -> None:
+    async def scenario() -> None:
+        state = _RpcSessionState(None, (), 0)
+        coordinator = RpcCoordinator(state)
+        active_scope = anyio.CancelScope()
+        coordinator.running_command = _RpcRunningCommand("active", "prompt", active_scope)
+        queued = {"id": "queued", "type": "prompt"}
+        coordinator.queued_commands.extend([queued, {"id": "later", "type": "prompt"}])
+
+        active_result = coordinator.cancel("active")
+        queued_result = coordinator.cancel("queued")
+        missing_result = coordinator.cancel("missing")
+
+        assert active_result.outcome == "running"
+        assert active_scope.cancel_called is True
+        assert queued_result.outcome == "queued"
+        assert queued_result.command is queued
+        assert list(coordinator.queued_commands) == [{"id": "later", "type": "prompt"}]
+        assert missing_result.outcome == "missing"
+
+    anyio.run(scenario)

@@ -44,6 +44,25 @@ _RPC_COORDINATOR_FORBIDDEN_IMPORTS = (
     "wisp.trust",
     "wisp.tui",
 )
+_RPC_TRANSPORT_FORBIDDEN_IMPORTS = (
+    "wisp.agent",
+    "wisp.coding",
+    "wisp.config",
+    "wisp.runtime",
+    "wisp.sessions",
+    "wisp.trust",
+    "wisp.tui",
+)
+_RPC_EXECUTION_FORBIDDEN_IMPORTS = (
+    "os",
+    "queue",
+    "stat",
+    "sys",
+    "threading",
+    "wisp.cli.rpc",
+    "wisp.trust",
+    "wisp.tui",
+)
 
 
 def _module_imports(path: Path) -> set[str]:
@@ -97,6 +116,26 @@ def test_rpc_coordinator_does_not_own_transport_or_runtime_policy() -> None:
         imported
         for imported in sorted(_module_imports(path))
         if imported.startswith(_RPC_COORDINATOR_FORBIDDEN_IMPORTS)
+    ]
+
+    assert violations == []
+
+
+@pytest.mark.parametrize(
+    ("filename", "forbidden"),
+    [
+        ("rpc_transport.py", _RPC_TRANSPORT_FORBIDDEN_IMPORTS),
+        ("rpc_execution.py", _RPC_EXECUTION_FORBIDDEN_IMPORTS),
+    ],
+)
+def test_rpc_layers_preserve_dependency_direction(
+    filename: str,
+    forbidden: tuple[str, ...],
+) -> None:
+    path = Path(__file__).parents[1] / "src" / "wisp" / "cli" / filename
+
+    violations = [
+        imported for imported in sorted(_module_imports(path)) if imported.startswith(forbidden)
     ]
 
     assert violations == []
