@@ -18,7 +18,6 @@ from wisp.sessions.entries import (
     CompactionSessionEntry,
     MessageSessionEntry,
     SessionEntry,
-    is_session_tree_entry,
 )
 from wisp.sessions.replay import replay_session_entries
 
@@ -29,17 +28,6 @@ def _usage(input_tokens: int, output_tokens: int, total_tokens: int) -> TokenUsa
         output_tokens=output_tokens,
         total_tokens=total_tokens,
     )
-
-
-def _linear_entries(entries: tuple[SessionEntry, ...]) -> tuple[SessionEntry, ...]:
-    parent_id: str | None = None
-    attached: list[SessionEntry] = []
-    for entry in entries:
-        if is_session_tree_entry(entry):
-            entry = entry.model_copy(update={"parent_id": parent_id})
-            parent_id = entry.id
-        attached.append(entry)
-    return tuple(attached)
 
 
 def test_context_estimate_accounts_for_system_messages_tools_and_results() -> None:
@@ -194,9 +182,7 @@ def test_session_stats_sum_authoritative_usage_and_invalidate_pre_compaction_obs
             usage=_usage(10, 5, 30),
         ),
     )
-    entries = _linear_entries(
-        (old_user, old_assistant, retained_user, retained_assistant, compaction)
-    )
+    entries = (old_user, old_assistant, retained_user, retained_assistant, compaction)
     replay = replay_session_entries(entries)
 
     stats = build_session_stats(
@@ -264,16 +250,14 @@ def test_session_stats_use_latest_post_compaction_assistant_observation() -> Non
             usage=_usage(12, 3, 21),
         ),
     )
-    entries = _linear_entries(
-        (
-            user,
-            assistant,
-            retained_user,
-            retained_assistant,
-            compaction,
-            post_user,
-            post_assistant,
-        )
+    entries = (
+        user,
+        assistant,
+        retained_user,
+        retained_assistant,
+        compaction,
+        post_user,
+        post_assistant,
     )
     replay = replay_session_entries(entries)
     fingerprint = context_fingerprint(replay.messages)

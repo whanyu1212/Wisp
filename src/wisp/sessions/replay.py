@@ -131,9 +131,10 @@ def replay_session_entries(
     *,
     leaf_id: str | None = None,
 ) -> SessionReplay:
-    """Replay one selected root-to-leaf path into the provider context."""
+    """Replay one selected path, preserving compatibility for detached flat entries."""
 
-    tree = resolve_session_tree(entries)
+    normalized_entries = _normalize_detached_linear_entries(entries)
+    tree = resolve_session_tree(normalized_entries)
     path = tree.path_to(leaf_id) if leaf_id is not None else tree.active_path
     replay = _replay_session_path(path)
     return SessionReplay(
@@ -141,6 +142,27 @@ def replay_session_entries(
         active_leaf_id=leaf_id if leaf_id is not None else tree.active_leaf_id,
         path_entry_ids=tuple(entry.id for entry in path),
     )
+
+
+def _normalize_detached_linear_entries(
+    entries: Sequence[SessionEntry],
+) -> tuple[SessionEntry, ...]:
+    """Treat a wholly detached in-memory sequence as the legacy public flat form."""
+
+    normalized = tuple(entries)
+    if len(normalized) < 2 or not all(
+        is_session_tree_entry(entry) and entry.parent_id is None for entry in normalized
+    ):
+        return normalized
+
+    parent_id: str | None = None
+    attached: list[SessionEntry] = []
+    for entry in normalized:
+        assert is_session_tree_entry(entry)
+        attached_entry = entry.model_copy(update={"parent_id": parent_id})
+        attached.append(attached_entry)
+        parent_id = attached_entry.id
+    return tuple(attached)
 
 
 def _path_to_leaf(

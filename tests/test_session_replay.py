@@ -85,19 +85,6 @@ def _compaction_entry(
     )
 
 
-def _linear_entries(entries: tuple[SessionEntry, ...]) -> tuple[SessionEntry, ...]:
-    """Attach detached test entries as one explicit v2 parent chain."""
-
-    parent_id: str | None = None
-    attached: list[SessionEntry] = []
-    for entry in entries:
-        if is_session_tree_entry(entry):
-            entry = entry.model_copy(update={"parent_id": parent_id})
-            parent_id = entry.id
-        attached.append(entry)
-    return tuple(attached)
-
-
 def test_jsonl_raw_messages_remain_audit_while_context_uses_summary_and_suffix(
     tmp_path: Path,
 ) -> None:
@@ -251,7 +238,7 @@ def test_replay_supports_repeated_compaction_and_new_messages() -> None:
         _message_entry("user-4", "user", "fourth"),
     )
 
-    replay = replay_session_entries(_linear_entries(entries))
+    replay = replay_session_entries(entries)
 
     assert replay.context_entry_ids == (
         "compact-2",
@@ -265,6 +252,28 @@ def test_replay_supports_repeated_compaction_and_new_messages() -> None:
         "third answer",
         "fourth",
     ]
+
+
+def test_replay_preserves_public_flat_entry_compatibility() -> None:
+    entries = (
+        _message_entry("user", "user", "question"),
+        _message_entry("assistant", "assistant", "answer"),
+    )
+
+    replay = replay_session_entries(entries)
+
+    assert replay.path_entry_ids == ("user", "assistant")
+    assert replay.active_leaf_id == "assistant"
+    assert [message.content for message in replay.messages] == ["question", "answer"]
+
+
+def test_replay_does_not_normalize_partially_linked_tree() -> None:
+    root = _message_entry("root", "user", "question")
+    child = _message_entry("child", "assistant", "answer").model_copy(update={"parent_id": "root"})
+    detached = _message_entry("detached", "user", "next")
+
+    with pytest.raises(SessionReplayError, match="expected active leaf 'child'"):
+        replay_session_entries((root, child, detached))
 
 
 @pytest.mark.parametrize(
@@ -310,7 +319,7 @@ def test_replay_rejects_invalid_compaction_targets(
     error: str,
 ) -> None:
     with pytest.raises(SessionReplayError, match=error):
-        replay_session_entries(_linear_entries(entries))
+        replay_session_entries(entries)
 
 
 def test_atomic_compaction_append_rejects_stale_plan_and_remains_idempotent(
@@ -448,7 +457,7 @@ def test_replay_preserves_tool_result_order_and_nearest_call_entry_ids() -> None
     )
     entries = (first_call, retry, second_call, later, result)
 
-    replay = replay_session_entries(_linear_entries(entries))
+    replay = replay_session_entries(entries)
     repair = plan_interrupted_tool_repairs(
         tuple(entry.message for entry in entries if entry.message is not None)
     )
@@ -475,7 +484,7 @@ def test_replay_rejects_compaction_that_splits_a_turn() -> None:
     )
 
     with pytest.raises(SessionReplayError, match="splits a conversation turn"):
-        replay_session_entries(_linear_entries(entries))
+        replay_session_entries(entries)
 
 
 def test_replay_rejects_compaction_that_retains_a_truncated_turn() -> None:
@@ -488,7 +497,7 @@ def test_replay_rejects_compaction_that_retains_a_truncated_turn() -> None:
     )
 
     with pytest.raises(SessionReplayError, match="retain a complete user turn"):
-        replay_session_entries(_linear_entries(entries))
+        replay_session_entries(entries)
 
 
 def test_replay_rejects_compaction_that_splits_tool_call_and_result() -> None:
@@ -516,4 +525,4 @@ def test_replay_rejects_compaction_that_splits_tool_call_and_result() -> None:
     )
 
     with pytest.raises(SessionReplayError, match="splits a conversation turn"):
-        replay_session_entries(_linear_entries(entries))
+        replay_session_entries(entries)
