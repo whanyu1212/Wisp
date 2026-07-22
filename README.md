@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/wisp-banner.png" alt="Wisp — A Python coding agent that stays in sync." width="100%">
+</p>
+
 # Wisp
 
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
