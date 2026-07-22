@@ -149,6 +149,7 @@ class CodingSession:
         self._context_observations: dict[str, _ContextObservation] = {}
         self._operation_active = False
         self._active_harness: AgentHarness | None = None
+        self._accepting_follow_ups = False
         self._apply_configuration(
             CodingSessionConfiguration(
                 provider=provider,
@@ -227,7 +228,7 @@ class CodingSession:
         """Queue user text for the active run's next completed-turn boundary."""
 
         harness = self._active_harness
-        if harness is None or not harness.is_running:
+        if harness is None or not self._accepting_follow_ups:
             raise RuntimeError("CodingSession has no active agent run")
         return harness.follow_up(content)
 
@@ -267,6 +268,7 @@ class CodingSession:
                 try:
                     await events.aclose()
                 finally:
+                    self._accepting_follow_ups = False
                     self._active_harness = None
                     self._operation_active = False
 
@@ -312,6 +314,7 @@ class CodingSession:
             messages=(*prompt_messages, *self._conversation_history(history)),
         )
         self._active_harness = harness
+        self._accepting_follow_ups = True
         await self._repair_and_flush(session, harness)
 
         yield await emit(AgentStarted(session_id=session.session_id))
@@ -529,6 +532,7 @@ class CodingSession:
                 defer_context_overflow_errors=True,
             )
 
+        self._accepting_follow_ups = False
         auto_compaction_saved = False
         auto_compaction_status = _AutoCompactionStatus()
         if not recovered_from_overflow:

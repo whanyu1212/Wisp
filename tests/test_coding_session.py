@@ -272,13 +272,17 @@ def test_coding_session_persists_follow_up_at_injection_boundary(tmp_path: Path)
 
         def queue_once(event: WispEvent) -> None:
             nonlocal queued
-            if isinstance(event, MessageCompleted) and not queued:
+            if event.type == "agent.started" and not queued:
                 queued = True
+                update = agent.follow_up("continue")
+                assert update.follow_up == ("continue",)
+
+        def observe_first_completion(event: WispEvent) -> None:
+            assert isinstance(event, MessageCompleted)
+            if event.content == "first answer":
                 assert all(
                     message.content != "continue" for message in session.read_context_messages()
                 )
-                update = agent.follow_up("continue")
-                assert update.follow_up == ("continue",)
 
         def observe_injection(event: WispEvent) -> None:
             nonlocal persisted_at_injection
@@ -288,7 +292,8 @@ def test_coding_session_persists_follow_up_at_injection_boundary(tmp_path: Path)
                 for message in session.read_context_messages()
             )
 
-        event_bus.on("message.completed", queue_once)
+        event_bus.on("agent.started", queue_once)
+        event_bus.on("message.completed", observe_first_completion)
         event_bus.on("queue.message.injected", observe_injection)
         events = [event async for event in agent.run("initial", session=session)]
         assert persisted_at_injection
