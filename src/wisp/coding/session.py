@@ -90,6 +90,22 @@ class _PendingSessionEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class _RetainedQueueState:
+    messages: QueuedMessages
+    steering_mode: QueueMode = "one_at_a_time"
+    follow_up_mode: QueueMode = "one_at_a_time"
+
+
+def _retained_queue_state(harness: AgentHarness) -> _RetainedQueueState:
+    config = harness.config
+    return _RetainedQueueState(
+        messages=harness.queued_messages,
+        steering_mode=config.steering_mode,
+        follow_up_mode=config.follow_up_mode,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class _ContextObservation:
     provider: str
     model: str | None
@@ -154,7 +170,7 @@ class CodingSession:
         self._active_session_id: str | None = None
         self._last_session_id: str | None = None
         self._accepting_queued_messages = False
-        self._retained_queues: dict[str, QueuedMessages] = {}
+        self._retained_queues: dict[str, _RetainedQueueState] = {}
         self._apply_configuration(
             CodingSessionConfiguration(
                 provider=provider,
@@ -296,12 +312,14 @@ class CodingSession:
         return harness
 
     @staticmethod
-    def _queue_updated_from_snapshot(queued: QueuedMessages | None) -> QueueUpdated:
+    def _queue_updated_from_snapshot(queued: _RetainedQueueState | None) -> QueueUpdated:
         if queued is None:
             return QueueUpdated()
         return QueueUpdated(
-            steering=tuple(message.content for message in queued.steering),
-            follow_up=tuple(message.content for message in queued.follow_up),
+            steering=tuple(message.content for message in queued.messages.steering),
+            follow_up=tuple(message.content for message in queued.messages.follow_up),
+            steering_mode=queued.steering_mode,
+            follow_up_mode=queued.follow_up_mode,
         )
 
     def _apply_configuration(self, configuration: CodingSessionConfiguration) -> None:
@@ -342,8 +360,8 @@ class CodingSession:
                 finally:
                     self._accepting_queued_messages = False
                     if self._active_harness is not None and self._active_session_id is not None:
-                        queued = self._active_harness.queued_messages
-                        if queued.count:
+                        queued = _retained_queue_state(self._active_harness)
+                        if queued.messages.count:
                             self._retained_queues[self._active_session_id] = queued
                         else:
                             self._retained_queues.pop(self._active_session_id, None)
@@ -394,10 +412,14 @@ class CodingSession:
             ),
             messages=(*prompt_messages, *self._conversation_history(history)),
         )
-        retained = self._retained_queues.pop(session.session_id, QueuedMessages())
-        for message in retained.steering:
+        retained = self._retained_queues.pop(session.session_id, None)
+        if retained is not None:
+            harness.set_steering_mode(retained.steering_mode)
+            harness.set_follow_up_mode(retained.follow_up_mode)
+        retained_messages = retained.messages if retained is not None else QueuedMessages()
+        for message in retained_messages.steering:
             harness.steer_message(message)
-        for message in retained.follow_up:
+        for message in retained_messages.follow_up:
             harness.follow_up_message(message)
         self._active_harness = harness
         self._accepting_queued_messages = True

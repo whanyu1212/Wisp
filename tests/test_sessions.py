@@ -110,6 +110,32 @@ def test_session_store_summaries_propagate_malformed_session_files(tmp_path: Pat
         JsonlSessionStore(tmp_path).summaries()
 
 
+def test_session_store_summaries_use_lightweight_metadata_scan(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def write() -> str:
+        leaf = await session.append_message(Message(role="user", content="large payload"))
+        return leaf.id
+
+    leaf_id = anyio.run(write)
+
+    def fail_full_entry_decode(*args: object, **kwargs: object) -> SessionEntry:
+        raise AssertionError("summaries should not fully decode session entries")
+
+    monkeypatch.setattr(jsonl_module, "session_entry_from_json", fail_full_entry_decode)
+
+    summaries = store.summaries()
+
+    assert len(summaries) == 1
+    assert summaries[0].session_id == session.session_id
+    assert summaries[0].entry_count == 1
+    assert summaries[0].active_leaf_id == leaf_id
+
+
 def test_session_persists_event_entries_without_polluting_messages(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 

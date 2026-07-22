@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import threading
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
@@ -24,6 +26,8 @@ from wisp.sessions.branching import (
     project_session_path,
 )
 from wisp.sessions.entries import (
+    PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION,
+    SESSION_ENTRY_SCHEMA_VERSION,
     ActiveLeafSessionEntry,
     CompactionSessionEntry,
     EventSessionEntry,
@@ -36,7 +40,14 @@ from wisp.sessions.entries import (
     session_entry_to_json,
     typed_event_from_envelope,
 )
-from wisp.sessions.errors import MalformedSessionEntryError, SessionError, StaleSessionTreeError
+from wisp.sessions.errors import (
+    MalformedPersistedEventError,
+    MalformedSessionEntryError,
+    SessionError,
+    StaleSessionTreeError,
+    UnsupportedPersistedEventVersionError,
+    UnsupportedSessionEntryVersionError,
+)
 from wisp.sessions.replay import (
     SessionReplay,
     SessionReplayError,
@@ -108,6 +119,23 @@ class SessionSummary:
     session_id: str
     path: Path
     updated_at: datetime
+    entry_count: int
+    active_leaf_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _SessionSummaryEntryMetadata:
+    id: str
+    session_id: str
+    kind: str
+    parent_id: str | None = None
+    previous_leaf_id: str | None = None
+    active_leaf_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SessionSummaryMetadata:
+    session_id: str
     entry_count: int
     active_leaf_id: str | None
 
@@ -251,16 +279,13 @@ class JsonlSessionStore:
 
     def _summary_for_path(self, path: Path) -> SessionSummary:
         info = path.stat()
-        entries = tuple(_read_entries(path))
-        if not entries:
-            raise SessionError(f"Session file is empty: {path}")
-        tree = resolve_session_tree(entries)
+        metadata = _read_session_summary_metadata(path)
         return SessionSummary(
-            session_id=entries[0].session_id,
+            session_id=metadata.session_id,
             path=path.resolve(strict=False),
             updated_at=datetime.fromtimestamp(info.st_mtime, UTC),
-            entry_count=len(entries),
-            active_leaf_id=tree.active_leaf_id,
+            entry_count=metadata.entry_count,
+            active_leaf_id=metadata.active_leaf_id,
         )
 
     def _resolve_path(self, reference: str | Path) -> Path:
@@ -953,6 +978,264 @@ def _read_session_id(path: Path) -> str:
     for entry in _read_entries(path, limit=1):
         return entry.session_id
     raise SessionError(f"Session file is empty: {path}")
+
+
+_SESSION_TREE_ENTRY_KINDS = frozenset({"message", "event", "compaction"})
+
+
+def _read_session_summary_metadata(path: Path) -> _SessionSummaryMetadata:
+    if not path.is_file():
+        raise SessionNotFoundError(f"Session file does not exist: {path}")
+
+    session_id: str | None = None
+    entry_count = 0
+    active_leaf_id: str | None = None
+    node_ids: set[str] = set()
+    seen_entry_ids: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8") as session_file:
+            for line_number, line in enumerate(session_file, start=1):
+                if not line.strip():
+                    continue
+                source = f"{path}:{line_number}"
+                entry = _summary_entry_metadata_from_json(
+                    line,
+                    source=source,
+                    legacy_parent_id=active_leaf_id,
+                )
+                if session_id is None:
+                    session_id = entry.session_id
+                elif entry.session_id != session_id:
+                    raise MalformedSessionEntryError(
+                        f"Session entry at {source} belongs to {entry.session_id}, "
+                        f"expected {session_id}"
+                    )
+                if entry.id in seen_entry_ids:
+                    raise MalformedSessionEntryError(
+                        f"Duplicate session entry id {entry.id} at {source}"
+                    )
+                seen_entry_ids.add(entry.id)
+                active_leaf_id = _resolve_summary_entry(
+                    entry,
+                    active_leaf_id=active_leaf_id,
+                    node_ids=node_ids,
+                )
+                entry_count += 1
+    except UnicodeDecodeError as exc:
+        raise SessionError(f"Session file is not valid UTF-8: {path}") from exc
+    except OSError as exc:
+        raise SessionError(f"Could not read session file: {path}") from exc
+    if session_id is None:
+        raise SessionError(f"Session file is empty: {path}")
+    return _SessionSummaryMetadata(
+        session_id=session_id,
+        entry_count=entry_count,
+        active_leaf_id=active_leaf_id,
+    )
+
+
+def _summary_entry_metadata_from_json(
+    line: str,
+    *,
+    source: str,
+    legacy_parent_id: str | None,
+) -> _SessionSummaryEntryMetadata:
+    location = f" at {source}"
+    try:
+        raw_value = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise MalformedSessionEntryError(f"Malformed session entry JSON{location}") from exc
+    if not isinstance(raw_value, dict):
+        raise MalformedSessionEntryError(f"Malformed session entry JSON{location}")
+    raw = cast(JsonObject, raw_value)
+
+    if "schema_version" not in raw:
+        return _legacy_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
+
+    version = raw["schema_version"]
+    if type(version) is not int:
+        raise MalformedSessionEntryError(
+            f"Session entry schema_version must be an integer{location}"
+        )
+    if version == 1:
+        return _v1_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
+    if version != SESSION_ENTRY_SCHEMA_VERSION:
+        raise UnsupportedSessionEntryVersionError(
+            f"Unsupported session entry schema_version {version}{location}; "
+            f"expected {SESSION_ENTRY_SCHEMA_VERSION}"
+        )
+    return _v2_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
+
+
+def _legacy_summary_entry_metadata(
+    raw: JsonObject,
+    *,
+    location: str,
+    parent_id: str | None,
+) -> _SessionSummaryEntryMetadata:
+    _require_summary_base_fields(raw, location=location)
+    kind = raw.get("kind", "message")
+    if kind not in _SESSION_TREE_ENTRY_KINDS:
+        raise MalformedSessionEntryError(f"Unknown legacy session entry kind {kind!r}{location}")
+    populated = tuple(name for name in _SESSION_TREE_ENTRY_KINDS if raw.get(name) is not None)
+    if populated != (kind,):
+        raise MalformedSessionEntryError(
+            f"Legacy {kind} session entries require exactly a {kind} payload{location}"
+        )
+    return _SessionSummaryEntryMetadata(
+        id=_required_summary_string(raw, "id", location=location),
+        session_id=_required_summary_string(raw, "session_id", location=location),
+        kind=kind,
+        parent_id=parent_id,
+    )
+
+
+def _v1_summary_entry_metadata(
+    raw: JsonObject,
+    *,
+    location: str,
+    parent_id: str | None,
+) -> _SessionSummaryEntryMetadata:
+    _require_summary_base_fields(raw, location=location)
+    kind = raw.get("kind")
+    if kind not in _SESSION_TREE_ENTRY_KINDS:
+        raise MalformedSessionEntryError(f"Unknown v1 session entry kind {kind!r}{location}")
+    if kind == "event":
+        _require_summary_event_envelope(raw, location=location)
+    forbidden = tuple(
+        field for field in ("parent_id", "previous_leaf_id", "active_leaf_id") if field in raw
+    )
+    if forbidden:
+        fields = ", ".join(forbidden)
+        raise MalformedSessionEntryError(
+            f"V1 session entry contains v2 structural field(s) {fields}{location}"
+        )
+    return _SessionSummaryEntryMetadata(
+        id=_required_summary_string(raw, "id", location=location),
+        session_id=_required_summary_string(raw, "session_id", location=location),
+        kind=kind,
+        parent_id=parent_id,
+    )
+
+
+def _v2_summary_entry_metadata(
+    raw: JsonObject,
+    *,
+    location: str,
+    parent_id: str | None,
+) -> _SessionSummaryEntryMetadata:
+    _require_summary_base_fields(raw, location=location)
+    kind = raw.get("kind")
+    if kind in _SESSION_TREE_ENTRY_KINDS:
+        if kind == "event":
+            _require_summary_event_envelope(raw, location=location)
+        return _SessionSummaryEntryMetadata(
+            id=_required_summary_string(raw, "id", location=location),
+            session_id=_required_summary_string(raw, "session_id", location=location),
+            kind=kind,
+            parent_id=_optional_summary_string(
+                raw,
+                "parent_id",
+                location=location,
+                default=parent_id,
+            ),
+        )
+    if kind == "active_leaf":
+        return _SessionSummaryEntryMetadata(
+            id=_required_summary_string(raw, "id", location=location),
+            session_id=_required_summary_string(raw, "session_id", location=location),
+            kind=kind,
+            previous_leaf_id=_optional_summary_string(
+                raw,
+                "previous_leaf_id",
+                location=location,
+                default=parent_id,
+            ),
+            active_leaf_id=_optional_summary_string(
+                raw,
+                "active_leaf_id",
+                location=location,
+            ),
+        )
+    raise MalformedSessionEntryError(f"Malformed session entry{location}")
+
+
+def _require_summary_base_fields(raw: JsonObject, *, location: str) -> None:
+    missing = tuple(field for field in ("id", "session_id", "created_at") if field not in raw)
+    if missing:
+        fields = ", ".join(missing)
+        raise MalformedSessionEntryError(
+            f"Persisted session entry is missing required field(s) {fields}{location}"
+        )
+
+
+def _require_summary_event_envelope(raw: JsonObject, *, location: str) -> None:
+    event = raw.get("event")
+    if not isinstance(event, dict):
+        raise MalformedSessionEntryError(f"Malformed session entry{location}")
+    version = event.get("schema_version")
+    if type(version) is not int:
+        raise MalformedPersistedEventError(
+            f"Persisted event envelope schema_version must be an integer{location}"
+        )
+    if version != PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION:
+        raise UnsupportedPersistedEventVersionError(
+            f"Unsupported persisted event envelope schema_version {version}{location}; "
+            f"expected {PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION}"
+        )
+
+
+def _required_summary_string(raw: JsonObject, field: str, *, location: str) -> str:
+    value = raw.get(field)
+    if not isinstance(value, str) or not value:
+        raise MalformedSessionEntryError(f"Malformed session entry{location}")
+    return value
+
+
+def _optional_summary_string(
+    raw: JsonObject,
+    field: str,
+    *,
+    location: str,
+    default: str | None = None,
+) -> str | None:
+    value = raw.get(field, default)
+    if value is None or isinstance(value, str):
+        return value
+    raise MalformedSessionEntryError(f"Malformed session entry{location}")
+
+
+def _resolve_summary_entry(
+    entry: _SessionSummaryEntryMetadata,
+    *,
+    active_leaf_id: str | None,
+    node_ids: set[str],
+) -> str | None:
+    if entry.kind in _SESSION_TREE_ENTRY_KINDS:
+        parent_id = entry.parent_id
+        if parent_id == entry.id:
+            raise SessionReplayError(f"Session entry {entry.id} cannot parent itself")
+        if parent_id is not None and parent_id not in node_ids:
+            raise SessionReplayError(
+                f"Session entry {entry.id} references unknown parent {parent_id}"
+            )
+        if parent_id != active_leaf_id:
+            raise SessionReplayError(
+                f"Session entry {entry.id} has parent {parent_id!r}, "
+                f"expected active leaf {active_leaf_id!r}"
+            )
+        node_ids.add(entry.id)
+        return entry.id
+    if entry.previous_leaf_id != active_leaf_id:
+        raise SessionReplayError(
+            f"Active-leaf entry {entry.id} expected previous leaf "
+            f"{entry.previous_leaf_id!r}, found {active_leaf_id!r}"
+        )
+    if entry.active_leaf_id is not None and entry.active_leaf_id not in node_ids:
+        raise SessionReplayError(
+            f"Active-leaf entry {entry.id} references unknown leaf {entry.active_leaf_id}"
+        )
+    return entry.active_leaf_id
 
 
 def _read_entries(path: Path, *, limit: int | None = None) -> list[SessionEntry]:
