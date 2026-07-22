@@ -1185,6 +1185,8 @@ def _require_summary_event_envelope(raw: JsonObject, *, location: str) -> None:
             f"Unsupported persisted event envelope schema_version {version}{location}; "
             f"expected {PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION}"
         )
+    if not isinstance(event.get("payload"), dict):
+        raise MalformedSessionEntryError(f"Malformed session entry{location}")
 
 
 def _require_summary_declared_payload(raw: JsonObject, kind: object, *, location: str) -> None:

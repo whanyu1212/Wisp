@@ -159,6 +159,29 @@ def test_session_store_summaries_reject_entries_missing_declared_payload(
         JsonlSessionStore(tmp_path).summaries()
 
 
+@pytest.mark.parametrize("payload", [None, "not-object"])
+def test_session_store_summaries_reject_event_envelopes_missing_payload(
+    tmp_path: Path,
+    payload: object,
+) -> None:
+    event: dict[str, object] = {"schema_version": 1}
+    if payload is not None:
+        event["payload"] = payload
+    record: dict[str, object] = {
+        "schema_version": 2,
+        "id": "entry",
+        "session_id": "session",
+        "created_at": "2026-07-11T00:00:00Z",
+        "kind": "event",
+        "event": event,
+        "parent_id": None,
+    }
+    (tmp_path / "broken.jsonl").write_text(f"{json.dumps(record)}\n", encoding="utf-8")
+
+    with pytest.raises(MalformedSessionEntryError, match="Malformed session entry"):
+        JsonlSessionStore(tmp_path).summaries()
+
+
 def test_session_persists_event_entries_without_polluting_messages(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 
