@@ -37,8 +37,10 @@ def build_session_stats(
     """Derive one consistent statistics snapshot from durable session state."""
 
     usage_records = tuple(_usage_records(entries))
+    entries_by_id = {entry.id: entry for entry in entries}
+    active_entries = tuple(entries_by_id[entry_id] for entry_id in replay.path_entry_ids)
     durable_observation, durable_entry_id, durable_observation_is_latest = _latest_observation(
-        entries
+        active_entries
     )
     if observed_tokens is None:
         observed_tokens = durable_observation

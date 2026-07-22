@@ -19,9 +19,22 @@ from wisp.providers.catalog import (
 from wisp.sessions.entries import (
     CompactionSessionEntry,
     MessageSessionEntry,
+    SessionEntry,
     SessionEntryAdapter,
+    is_session_tree_entry,
 )
 from wisp.sessions.replay import replay_session_entries
+
+
+def _linear_entries(entries: tuple[SessionEntry, ...]) -> tuple[SessionEntry, ...]:
+    parent_id: str | None = None
+    attached: list[SessionEntry] = []
+    for entry in entries:
+        if is_session_tree_entry(entry):
+            entry = entry.model_copy(update={"parent_id": parent_id})
+            parent_id = entry.id
+        attached.append(entry)
+    return tuple(attached)
 
 
 def _models() -> ModelRegistry:
@@ -206,48 +219,50 @@ def test_session_stats_uses_persisted_cost_snapshots_for_messages_and_compaction
         "model",
         TokenUsage(input_tokens=100, output_tokens=100, total_tokens=200),
     )
-    entries = (
-        MessageSessionEntry(
-            id="user",
-            session_id="session",
-            message=Message(role="user", content="question"),
-        ),
-        MessageSessionEntry(
-            id="answer",
-            session_id="session",
-            message=Message(
-                role="assistant",
-                content="answer",
-                usage=TokenUsage(input_tokens=100, output_tokens=100, total_tokens=200),
-                cost=cost,
+    entries = _linear_entries(
+        (
+            MessageSessionEntry(
+                id="user",
+                session_id="session",
+                message=Message(role="user", content="question"),
             ),
-        ),
-        MessageSessionEntry(
-            id="next-user",
-            session_id="session",
-            message=Message(role="user", content="next question"),
-        ),
-        MessageSessionEntry(
-            id="next-answer",
-            session_id="session",
-            message=Message(
-                role="assistant",
-                content="next answer",
-                finish_reason="stop",
-                cost=cost,
+            MessageSessionEntry(
+                id="answer",
+                session_id="session",
+                message=Message(
+                    role="assistant",
+                    content="answer",
+                    usage=TokenUsage(input_tokens=100, output_tokens=100, total_tokens=200),
+                    cost=cost,
+                ),
             ),
-        ),
-        CompactionSessionEntry(
-            id="compact",
-            session_id="session",
-            compaction=CompactionRecord(
-                summary="summary",
-                replaced_entry_ids=("user", "answer"),
-                provider="openai",
-                usage=TokenUsage(input_tokens=100, output_tokens=100, total_tokens=200),
-                cost=cost,
+            MessageSessionEntry(
+                id="next-user",
+                session_id="session",
+                message=Message(role="user", content="next question"),
             ),
-        ),
+            MessageSessionEntry(
+                id="next-answer",
+                session_id="session",
+                message=Message(
+                    role="assistant",
+                    content="next answer",
+                    finish_reason="stop",
+                    cost=cost,
+                ),
+            ),
+            CompactionSessionEntry(
+                id="compact",
+                session_id="session",
+                compaction=CompactionRecord(
+                    summary="summary",
+                    replaced_entry_ids=("user", "answer"),
+                    provider="openai",
+                    usage=TokenUsage(input_tokens=100, output_tokens=100, total_tokens=200),
+                    cost=cost,
+                ),
+            ),
+        )
     )
 
     stats = build_session_stats(
@@ -269,17 +284,19 @@ def test_session_stats_uses_persisted_cost_snapshots_for_messages_and_compaction
 
 
 def test_session_stats_marks_legacy_successful_messages_unpriced() -> None:
-    entries = (
-        MessageSessionEntry(
-            id="user",
-            session_id="session",
-            message=Message(role="user", content="question"),
-        ),
-        MessageSessionEntry(
-            id="answer",
-            session_id="session",
-            message=Message(role="assistant", content="answer", finish_reason="stop"),
-        ),
+    entries = _linear_entries(
+        (
+            MessageSessionEntry(
+                id="user",
+                session_id="session",
+                message=Message(role="user", content="question"),
+            ),
+            MessageSessionEntry(
+                id="answer",
+                session_id="session",
+                message=Message(role="assistant", content="answer", finish_reason="stop"),
+            ),
+        )
     )
 
     stats = build_session_stats(

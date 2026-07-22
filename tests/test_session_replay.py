@@ -11,12 +11,14 @@ from wisp.agent.messages import CompactionRecord, Message
 from wisp.agent.transcript import plan_interrupted_tool_repairs
 from wisp.events import ToolCallSnapshot
 from wisp.sessions.entries import (
+    ActiveLeafSessionEntry,
     CompactionSessionEntry,
     EventSessionEntry,
     MessageSessionEntry,
     PersistedEventEnvelope,
     SessionEntry,
     SessionEntryAdapter,
+    is_session_tree_entry,
 )
 from wisp.sessions.jsonl import JsonlSessionStore, SessionError
 from wisp.sessions.replay import (
@@ -81,6 +83,19 @@ def _compaction_entry(
             provider="openai",
         ),
     )
+
+
+def _linear_entries(entries: tuple[SessionEntry, ...]) -> tuple[SessionEntry, ...]:
+    """Attach detached test entries as one explicit v2 parent chain."""
+
+    parent_id: str | None = None
+    attached: list[SessionEntry] = []
+    for entry in entries:
+        if is_session_tree_entry(entry):
+            entry = entry.model_copy(update={"parent_id": parent_id})
+            parent_id = entry.id
+        attached.append(entry)
+    return tuple(attached)
 
 
 def test_jsonl_raw_messages_remain_audit_while_context_uses_summary_and_suffix(
@@ -164,6 +179,59 @@ def test_jsonl_raw_messages_remain_audit_while_context_uses_summary_and_suffix(
     ]
 
 
+def test_active_leaf_selection_branches_without_rewriting_audit(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> tuple[SessionEntry, SessionEntry, SessionEntry]:
+        root = await session.append_message(Message(role="user", content="question"))
+        original = await session.append_message(Message(role="assistant", content="first answer"))
+        control = await session.select_active_leaf(
+            root.id,
+            expected_active_leaf_id=original.id,
+        )
+        alternate = await session.append_message(
+            Message(role="assistant", content="alternate answer")
+        )
+        return original, control, alternate
+
+    original, control, alternate = anyio.run(write)
+
+    assert isinstance(control, ActiveLeafSessionEntry)
+    assert control.previous_leaf_id == original.id
+    assert control.active_leaf_id == original.parent_id
+    assert is_session_tree_entry(alternate)
+    assert alternate.parent_id == original.parent_id
+    assert [message.content for message in session.read_messages()] == [
+        "question",
+        "first answer",
+        "alternate answer",
+    ]
+    assert [message.content for message in session.read_context_messages()] == [
+        "question",
+        "alternate answer",
+    ]
+    assert [
+        message.content
+        for message in replay_session_entries(session.read_entries(), leaf_id=original.id).messages
+    ] == ["question", "first answer"]
+
+
+def test_active_leaf_selection_rejects_stale_expected_leaf(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        root = await session.append_message(Message(role="user", content="question"))
+        with pytest.raises(SessionReplayError, match="expected previous leaf"):
+            await session.select_active_leaf(
+                root.id,
+                expected_active_leaf_id="stale-leaf",
+            )
+
+    anyio.run(write)
+
+    assert len(session.read_entries()) == 1
+
+
 def test_replay_supports_repeated_compaction_and_new_messages() -> None:
     entries = (
         _message_entry("user-1", "user", "first"),
@@ -183,7 +251,7 @@ def test_replay_supports_repeated_compaction_and_new_messages() -> None:
         _message_entry("user-4", "user", "fourth"),
     )
 
-    replay = replay_session_entries(entries)
+    replay = replay_session_entries(_linear_entries(entries))
 
     assert replay.context_entry_ids == (
         "compact-2",
@@ -242,7 +310,7 @@ def test_replay_rejects_invalid_compaction_targets(
     error: str,
 ) -> None:
     with pytest.raises(SessionReplayError, match=error):
-        replay_session_entries(entries)
+        replay_session_entries(_linear_entries(entries))
 
 
 def test_atomic_compaction_append_rejects_stale_plan_and_remains_idempotent(
@@ -380,7 +448,7 @@ def test_replay_preserves_tool_result_order_and_nearest_call_entry_ids() -> None
     )
     entries = (first_call, retry, second_call, later, result)
 
-    replay = replay_session_entries(entries)
+    replay = replay_session_entries(_linear_entries(entries))
     repair = plan_interrupted_tool_repairs(
         tuple(entry.message for entry in entries if entry.message is not None)
     )
@@ -407,7 +475,7 @@ def test_replay_rejects_compaction_that_splits_a_turn() -> None:
     )
 
     with pytest.raises(SessionReplayError, match="splits a conversation turn"):
-        replay_session_entries(entries)
+        replay_session_entries(_linear_entries(entries))
 
 
 def test_replay_rejects_compaction_that_retains_a_truncated_turn() -> None:
@@ -420,7 +488,7 @@ def test_replay_rejects_compaction_that_retains_a_truncated_turn() -> None:
     )
 
     with pytest.raises(SessionReplayError, match="retain a complete user turn"):
-        replay_session_entries(entries)
+        replay_session_entries(_linear_entries(entries))
 
 
 def test_replay_rejects_compaction_that_splits_tool_call_and_result() -> None:
@@ -448,4 +516,4 @@ def test_replay_rejects_compaction_that_splits_tool_call_and_result() -> None:
     )
 
     with pytest.raises(SessionReplayError, match="splits a conversation turn"):
-        replay_session_entries(entries)
+        replay_session_entries(_linear_entries(entries))
