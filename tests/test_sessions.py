@@ -136,6 +136,29 @@ def test_session_store_summaries_use_lightweight_metadata_scan(
     assert summaries[0].active_leaf_id == leaf_id
 
 
+@pytest.mark.parametrize("kind", ["message", "compaction"])
+@pytest.mark.parametrize("payload", [None, "not-object"])
+def test_session_store_summaries_reject_entries_missing_declared_payload(
+    tmp_path: Path,
+    kind: str,
+    payload: object,
+) -> None:
+    record: dict[str, object] = {
+        "schema_version": 2,
+        "id": "entry",
+        "session_id": "session",
+        "created_at": "2026-07-11T00:00:00Z",
+        "kind": kind,
+        "parent_id": None,
+    }
+    if payload is not None:
+        record[kind] = payload
+    (tmp_path / "broken.jsonl").write_text(f"{json.dumps(record)}\n", encoding="utf-8")
+
+    with pytest.raises(MalformedSessionEntryError, match="Malformed session entry"):
+        JsonlSessionStore(tmp_path).summaries()
+
+
 def test_session_persists_event_entries_without_polluting_messages(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 

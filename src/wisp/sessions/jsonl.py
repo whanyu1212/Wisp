@@ -1100,6 +1100,7 @@ def _v1_summary_entry_metadata(
     kind = raw.get("kind")
     if kind not in _SESSION_TREE_ENTRY_KINDS:
         raise MalformedSessionEntryError(f"Unknown v1 session entry kind {kind!r}{location}")
+    _require_summary_declared_payload(raw, kind, location=location)
     if kind == "event":
         _require_summary_event_envelope(raw, location=location)
     forbidden = tuple(
@@ -1127,6 +1128,7 @@ def _v2_summary_entry_metadata(
     _require_summary_base_fields(raw, location=location)
     kind = raw.get("kind")
     if kind in _SESSION_TREE_ENTRY_KINDS:
+        _require_summary_declared_payload(raw, kind, location=location)
         if kind == "event":
             _require_summary_event_envelope(raw, location=location)
         return _SessionSummaryEntryMetadata(
@@ -1183,6 +1185,12 @@ def _require_summary_event_envelope(raw: JsonObject, *, location: str) -> None:
             f"Unsupported persisted event envelope schema_version {version}{location}; "
             f"expected {PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION}"
         )
+
+
+def _require_summary_declared_payload(raw: JsonObject, kind: object, *, location: str) -> None:
+    assert isinstance(kind, str)
+    if not isinstance(raw.get(kind), dict):
+        raise MalformedSessionEntryError(f"Malformed session entry{location}")
 
 
 def _required_summary_string(raw: JsonObject, field: str, *, location: str) -> str:
