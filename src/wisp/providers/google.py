@@ -21,6 +21,7 @@ from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,
 )
+from wisp.providers.continuations import ContinuationStore
 from wisp.providers.events import (
     JsonObject,
     ProviderEvent,
@@ -46,8 +47,8 @@ DEFAULT_GOOGLE_MODEL = "gemini-3.5-flash"
 # rounds is the same thing Anthropic does: the model-role turn that produced
 # the tool call (including any thought_signature parts) must be resent ahead
 # of the tool's functionResponse, since AgentHarness's `messages` never grows
-# across tool rounds. Mirrors AnthropicProvider._replays exactly.
-_MAX_PENDING_REPLAYS = 128
+# across tool rounds. Mirrors AnthropicProvider's replay behavior exactly.
+_MAX_PENDING_CALL_INFO = 128
 
 _TERMINAL_FINISH_REASON_TO_PROVIDER: dict[genai_types.FinishReason, ProviderFinishReason] = {
     genai_types.FinishReason.STOP: "stop",
@@ -89,7 +90,7 @@ class GoogleProvider:
         self._api_key = _normalize_optional(api_key)
         self._client = client
         self._retry_policy = retry_policy or RetryPolicy()
-        self._replays: OrderedDict[str, tuple[genai_types.Content, ...]] = OrderedDict()
+        self._replays = ContinuationStore[tuple[genai_types.Content, ...]]()
         # Gemini's functionResponse.name is required and must match the
         # original FunctionCall.name -- but ToolCallResult (provider-neutral,
         # shared with every other provider) carries only call_id, not name.
@@ -117,8 +118,8 @@ class GoogleProvider:
         turn that produced the tool call) and its functionResponse
         immediately before the newest ones. ``AgentHarness``'s ``messages``
         never grows across tool rounds, so this provider reconstructs the
-        accumulated tail from its own ``_replays`` cache keyed by
-        ``previous_response_id`` -- see ``_MAX_PENDING_REPLAYS``.
+        accumulated tail from its own replay state keyed by
+        ``previous_response_id``.
 
         ``effort`` maps to ``ThinkingConfig.thinking_level`` (Gemini's
         ``"MINIMAL"``/``"LOW"``/``"MEDIUM"``/``"HIGH"`` tiers where the
@@ -225,6 +226,7 @@ class GoogleProvider:
             )
 
         if failure is not None:
+            self._replays.discard(previous_response_id)
             yield failure
             return
 
@@ -253,6 +255,7 @@ class GoogleProvider:
                     partial_content="".join(chunks),
                     response_id=None,
                 )
+                self._replays.discard(previous_response_id)
                 yield failure
                 return
             previous_tail = self._get_replay(previous_response_id)
@@ -263,15 +266,15 @@ class GoogleProvider:
                 new_turn,
             )
             if previous_response_id is not None and previous_response_id != response_id:
-                self._replays.pop(previous_response_id, None)
-            self._store_replay(response_id, replay_tail)
+                self._replays.consume(previous_response_id)
+            self._replays.remember(response_id, replay_tail)
             for tool_call, provider_id in zip(tool_calls, tool_call_provider_ids, strict=True):
                 self._remember_call_info(
                     tool_call.call_id,
                     _CallInfo(name=tool_call.name, provider_id=_normalize_optional(provider_id)),
                 )
         elif previous_response_id is not None:
-            self._replays.pop(previous_response_id, None)
+            self._replays.consume(previous_response_id)
 
         yield ProviderResponseCompleted(
             content="".join(chunks),
@@ -356,18 +359,12 @@ class GoogleProvider:
         # A peek, not a pop: _create_stream can be re-invoked by the retry loop
         # in `stream()` before a response ever completes, so the replay must
         # survive a failed attempt to be available to the next one.
-        return self._replays.get(previous_response_id, ())
-
-    def _store_replay(self, response_id: str, replay_tail: tuple[genai_types.Content, ...]) -> None:
-        self._replays.pop(response_id, None)
-        self._replays[response_id] = replay_tail
-        while len(self._replays) > _MAX_PENDING_REPLAYS:
-            self._replays.popitem(last=False)
+        return self._replays.get(previous_response_id) or ()
 
     def _remember_call_info(self, call_id: str, info: _CallInfo) -> None:
         self._call_info.pop(call_id, None)
         self._call_info[call_id] = info
-        while len(self._call_info) > _MAX_PENDING_REPLAYS:
+        while len(self._call_info) > _MAX_PENDING_CALL_INFO:
             self._call_info.popitem(last=False)
 
     def _tool_results_to_content(

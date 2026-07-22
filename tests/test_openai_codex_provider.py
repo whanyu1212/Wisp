@@ -597,7 +597,7 @@ def test_openai_codex_provider_raises_after_exhausting_opening_retries(tmp_path:
 def test_openai_codex_provider_normalizes_post_start_sse_failure(tmp_path: Path) -> None:
     store = _store_with_oauth(tmp_path)
 
-    async def run() -> list[object]:
+    async def run() -> tuple[list[object], object]:
         transport = httpx.MockTransport(
             lambda _request: httpx.Response(
                 200,
@@ -610,12 +610,26 @@ def test_openai_codex_provider_normalizes_post_start_sse_failure(tmp_path: Path)
                 auth_resolver=StoredProviderAuthResolver(store),
                 client=client,
             )
-            return [event async for event in provider.stream([Message(role="user", content="hi")])]
+            provider._continuations.remember("previous-response", ())  # noqa: SLF001
+            events = [
+                event
+                async for event in provider.stream(
+                    [Message(role="user", content="hi")],
+                    previous_response_id="previous-response",
+                )
+            ]
+            remaining = provider._continuations.get("previous-response")  # noqa: SLF001
+            return events, remaining
 
-    assert anyio.run(run) == [
+    events, remaining = anyio.run(run)
+    assert events == [
         ProviderResponseStarted(model="gpt-5.6-sol"),
-        ProviderResponseFailed(message="Invalid OpenAI Codex SSE event: Expecting value"),
+        ProviderResponseFailed(
+            message="Invalid OpenAI Codex SSE event: Expecting value",
+            response_id="previous-response",
+        ),
     ]
+    assert remaining is None
 
 
 @pytest.mark.parametrize(

@@ -366,10 +366,15 @@ def test_google_provider_maps_finish_reasons(
 
 def test_google_provider_emits_failed_terminal_on_stream_error() -> None:
     provider = FailingGoogleProvider()
+    provider._replays.remember("previous-response", ())  # noqa: SLF001
 
     async def run() -> list[object]:
         return [
-            event async for event in provider.stream([WispMessage(role="user", content="hello")])
+            event
+            async for event in provider.stream(
+                [WispMessage(role="user", content="hello")],
+                previous_response_id="previous-response",
+            )
         ]
 
     events = anyio.run(run)
@@ -380,6 +385,7 @@ def test_google_provider_emits_failed_terminal_on_stream_error() -> None:
     ]
     assert isinstance(events[2], ProviderResponseFailed)
     assert events[2].partial_content == "partial"
+    assert provider._replays.get("previous-response") is None  # noqa: SLF001
 
 
 def test_google_provider_emits_failed_terminal_when_stream_ends_without_finish_reason() -> None:
