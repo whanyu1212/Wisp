@@ -243,7 +243,9 @@ class CodingSession:
         """Return the current or retained queue state without requiring an active run."""
 
         harness = self._active_harness
-        if harness is not None:
+        if harness is not None and (
+            session is None or session.session_id == self._active_session_id
+        ):
             return harness.queue_updated_event()
 
         session_id = session.session_id if session is not None else self._last_session_id

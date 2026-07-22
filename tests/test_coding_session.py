@@ -15,6 +15,7 @@ from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.coding.session import CodingSession
 from wisp.events import (
     AgentCompleted,
+    AgentStarted,
     ErrorEvent,
     MessageCompleted,
     MessageDelta,
@@ -507,7 +508,20 @@ def test_coding_session_retains_unconsumed_queues_for_same_session_retry(
         )
 
         other_session = store.create()
+        checked_other_active_state = False
+
+        def assert_explicit_session_state_while_other_session_runs(event: WispEvent) -> None:
+            nonlocal checked_other_active_state
+            if not isinstance(event, AgentStarted) or event.session_id != other_session.session_id:
+                return
+            checked_other_active_state = True
+            assert agent.queue_state().steering == ()
+            assert agent.queue_state(session).steering == ("retained steering",)
+            assert agent.queue_state(session).follow_up == ("retained follow-up",)
+
+        event_bus.on("agent.started", assert_explicit_session_state_while_other_session_runs)
         other_events = [event async for event in agent.run("other", session=other_session)]
+        assert checked_other_active_state
         assert not any(isinstance(event, QueueMessageInjected) for event in other_events)
 
         events = [
