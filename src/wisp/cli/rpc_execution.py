@@ -119,10 +119,37 @@ class RpcCommandExecutor:
         self.coordinator.running_command = running_command
         command_type = rpc_command_type(command)
         if command_type == "prompt":
-            new_running_command, new_session = start_rpc_prompt_command(
+            return self._dispatch_prompt(command)
+        if command_type == "compact":
+            return self._dispatch_compact(command)
+        if command_type == "get_session_stats":
+            return self._dispatch_session_stats(command)
+        return self._dispatch_control(command, running_command)
+
+    def _dispatch_prompt(self, command: dict[str, object]) -> _RpcDispatchResult:
+        new_running_command, new_session = start_rpc_prompt_command(
+            command,
+            agent=self.agent,
+            sessions=self.sessions,
+            session_state=self.session_state,
+            task_group=self.task_group,
+            send=self.send,
+            trust_gate=self.trust_gate,
+            write_event=self.write_event,
+            render_events=self.render_events,
+            running_command_factory=self.running_command_factory,
+            command_completed_factory=self.command_completed_factory,
+        )
+        return _RpcDispatchResult(
+            running_command=new_running_command,
+            selected_session=new_session,
+        )
+
+    def _dispatch_compact(self, command: dict[str, object]) -> _RpcDispatchResult:
+        return _RpcDispatchResult(
+            running_command=start_rpc_compact_command(
                 command,
                 agent=self.agent,
-                sessions=self.sessions,
                 session_state=self.session_state,
                 task_group=self.task_group,
                 send=self.send,
@@ -132,38 +159,27 @@ class RpcCommandExecutor:
                 running_command_factory=self.running_command_factory,
                 command_completed_factory=self.command_completed_factory,
             )
-            return _RpcDispatchResult(
-                running_command=new_running_command,
-                selected_session=new_session,
+        )
+
+    def _dispatch_session_stats(self, command: dict[str, object]) -> _RpcDispatchResult:
+        return _RpcDispatchResult(
+            running_command=start_rpc_session_stats_command(
+                command,
+                agent=self.agent,
+                session_state=self.session_state,
+                task_group=self.task_group,
+                send=self.send,
+                write_event=self.write_event,
+                running_command_factory=self.running_command_factory,
+                command_completed_factory=self.command_completed_factory,
             )
-        if command_type == "compact":
-            return _RpcDispatchResult(
-                running_command=start_rpc_compact_command(
-                    command,
-                    agent=self.agent,
-                    session_state=self.session_state,
-                    task_group=self.task_group,
-                    send=self.send,
-                    trust_gate=self.trust_gate,
-                    write_event=self.write_event,
-                    render_events=self.render_events,
-                    running_command_factory=self.running_command_factory,
-                    command_completed_factory=self.command_completed_factory,
-                )
-            )
-        if command_type == "get_session_stats":
-            return _RpcDispatchResult(
-                running_command=start_rpc_session_stats_command(
-                    command,
-                    agent=self.agent,
-                    session_state=self.session_state,
-                    task_group=self.task_group,
-                    send=self.send,
-                    write_event=self.write_event,
-                    running_command_factory=self.running_command_factory,
-                    command_completed_factory=self.command_completed_factory,
-                )
-            )
+        )
+
+    def _dispatch_control(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
         should_shutdown = handle_rpc_control_command(
             command,
             running_command=running_command,

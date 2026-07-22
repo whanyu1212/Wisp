@@ -5,6 +5,7 @@ from pathlib import Path
 
 import anyio
 
+from tests.rpc_support import build_rpc_executor_fixture
 from wisp.cli.rpc_configuration import _RpcConfigureOverrides
 from wisp.cli.rpc_coordinator import RpcCoordinator, _RpcRunningCommand, _RpcSessionState
 from wisp.cli.rpc_execution import RpcCommandExecutor
@@ -30,37 +31,10 @@ class _TrustResolver:
 
 def test_executor_dispatches_validation_and_shutdown_without_stdin(tmp_path: Path) -> None:
     async def scenario() -> None:
-        config = WispConfig(provider="fake", session_dir=tmp_path)
-        runtime = await build_runtime(
-            auth_path=config.auth_path,
-            retry_policy=config.retry_policy,
-        )
-        sessions = JsonlSessionStore(tmp_path)
-        agent = CodingSession(provider=runtime.providers.get("fake"), sessions=sessions)
-        state = _RpcSessionState(None, (), 0)
-        coordinator = RpcCoordinator(state)
-        events: list[WispEvent] = []
-
-        async def render_events(stream: AsyncIterator[WispEvent]) -> None:
-            async for event in stream:
-                events.append(event)
-
+        fixture = await build_rpc_executor_fixture(tmp_path)
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
-            executor = RpcCommandExecutor(
-                agent=agent,
-                runtime=runtime,
-                sessions=sessions,
-                session_state=state,
-                task_group=task_group,
-                send=send,
-                approval_policy=_ApprovalResolver(),
-                trust_gate=_TrustResolver(),
-                configure_overrides=_RpcConfigureOverrides(),
-                coordinator=coordinator,
-                write_event=events.append,
-                render_events=render_events,
-            )
+            executor = fixture.executor(task_group=task_group, send=send)
 
             invalid = executor.dispatch({"id": "bad", "type": "prompt"}, None)
             shutdown = executor.dispatch({"id": "bye", "type": "shutdown"}, None)
@@ -70,15 +44,19 @@ def test_executor_dispatches_validation_and_shutdown_without_stdin(tmp_path: Pat
             assert shutdown.should_shutdown is True
             task_group.cancel_scope.cancel()
 
-        assert [type(event) for event in events] == [
+        assert [type(event) for event in fixture.events] == [
             RpcCommandStarted,
             ErrorEvent,
             RpcCommandFinished,
             RpcCommandStarted,
             RpcCommandFinished,
         ]
-        assert events[1].message == "RPC prompt command requires string field: prompt"
-        assert events[-1].command_id == "bye"
+        error_event = fixture.events[1]
+        finished_event = fixture.events[-1]
+        assert isinstance(error_event, ErrorEvent)
+        assert isinstance(finished_event, RpcCommandFinished)
+        assert error_event.message == "RPC prompt command requires string field: prompt"
+        assert finished_event.command_id == "bye"
 
     anyio.run(scenario)
 

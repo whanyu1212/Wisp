@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import anyio
@@ -43,6 +44,7 @@ from wisp.sessions.jsonl import (
     JsonlSessionStore,
     SessionError,
     SessionNotFoundError,
+    SessionSummary,
 )
 
 
@@ -59,6 +61,53 @@ def test_session_store_loads_by_path_filename_and_id_prefix(tmp_path: Path) -> N
     assert store.load(session.path.name).path == session.path
     assert store.load(session.session_id[:12]).path == session.path
     assert store.load(session.session_id[:12]).read_messages()[0].content == "hello"
+
+
+def test_session_store_summaries_return_empty_for_empty_store(tmp_path: Path) -> None:
+    assert JsonlSessionStore(tmp_path).summaries() == ()
+
+
+def test_session_store_summaries_are_newest_first_and_bounded(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+    first = store.create()
+    second = store.create()
+
+    async def write() -> tuple[str, str]:
+        first_leaf = await first.append_message(Message(role="user", content="first"))
+        await second.append_message(Message(role="user", content="second"))
+        second_leaf = await second.append_message(Message(role="assistant", content="answer"))
+        return first_leaf.id, second_leaf.id
+
+    first_leaf_id, second_leaf_id = anyio.run(write)
+    first_mtime = 1_800_000_000
+    second_mtime = first_mtime + 60
+    os.utime(first.path, (first_mtime, first_mtime))
+    os.utime(second.path, (second_mtime, second_mtime))
+
+    summaries = store.summaries()
+
+    assert [summary.session_id for summary in summaries] == [second.session_id, first.session_id]
+    assert isinstance(summaries[0], SessionSummary)
+    assert summaries[0].path == second.path.resolve(strict=False)
+    assert summaries[0].updated_at == datetime.fromtimestamp(second_mtime, UTC)
+    assert summaries[0].entry_count == 2
+    assert summaries[0].active_leaf_id == second_leaf_id
+    assert summaries[1].entry_count == 1
+    assert summaries[1].active_leaf_id == first_leaf_id
+    assert [summary.session_id for summary in store.summaries(limit=1)] == [second.session_id]
+    assert store.summaries(limit=0) == ()
+
+
+def test_session_store_summaries_reject_negative_limit(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="limit must be non-negative"):
+        JsonlSessionStore(tmp_path).summaries(limit=-1)
+
+
+def test_session_store_summaries_propagate_malformed_session_files(tmp_path: Path) -> None:
+    (tmp_path / "broken.jsonl").write_text("not-json\n", encoding="utf-8")
+
+    with pytest.raises(SessionError):
+        JsonlSessionStore(tmp_path).summaries()
 
 
 def test_session_persists_event_entries_without_polluting_messages(tmp_path: Path) -> None:

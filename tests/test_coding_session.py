@@ -18,7 +18,9 @@ from wisp.events import (
     ErrorEvent,
     MessageCompleted,
     MessageDelta,
+    QueueKind,
     QueueMessageInjected,
+    QueueMode,
     QueueUpdated,
     SessionSaved,
     ToolApprovalRequested,
@@ -367,6 +369,94 @@ def test_coding_session_accepts_and_persists_steering_from_agent_start(tmp_path:
         agent.steer("too late")
 
 
+def test_coding_session_queue_state_is_safe_while_idle(tmp_path: Path) -> None:
+    agent = CodingSession(provider=FakeProvider(), sessions=JsonlSessionStore(tmp_path))
+
+    state = agent.queue_state()
+
+    assert state.steering == ()
+    assert state.follow_up == ()
+    assert state.steering_mode == "one_at_a_time"
+    assert state.follow_up_mode == "one_at_a_time"
+    with pytest.raises(RuntimeError, match="no active agent run"):
+        agent.set_queue_mode("steering", "all")
+    with pytest.raises(RuntimeError, match="no active agent run"):
+        agent.pop_queue("steering")
+    with pytest.raises(RuntimeError, match="no active agent run"):
+        agent.clear_queue()
+
+
+def test_coding_session_queue_facade_delegates_to_active_harness(tmp_path: Path) -> None:
+    async def run_agent() -> None:
+        provider = ScriptedProvider(
+            [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
+        )
+        store = JsonlSessionStore(tmp_path)
+        event_bus = EventBus()
+        agent = CodingSession(provider=provider, sessions=store, events=event_bus)
+
+        def exercise_queue_facade(event: WispEvent) -> None:
+            if event.type != "agent.started":
+                return
+            assert agent.queue_state().steering == ()
+            assert agent.set_queue_mode("steering", "all").steering_mode == "all"
+            assert agent.set_queue_mode("follow_up", "all").follow_up_mode == "all"
+            assert agent.steer("steer one").steering == ("steer one",)
+            assert agent.follow_up("follow one").follow_up == ("follow one",)
+            popped, pop_state = agent.pop_queue("steering")
+            assert popped is not None
+            assert popped.content == "steer one"
+            assert pop_state.steering == ()
+            assert agent.steer("steer two").steering == ("steer two",)
+            cleared_follow_up, follow_up_state = agent.clear_queue("follow_up")
+            assert [message.content for message in cleared_follow_up.follow_up] == ["follow one"]
+            assert follow_up_state.follow_up == ()
+            cleared_all, final_state = agent.clear_queue()
+            assert [message.content for message in cleared_all.steering] == ["steer two"]
+            assert cleared_all.follow_up == ()
+            assert final_state.steering == ()
+            assert final_state.follow_up == ()
+            assert final_state.steering_mode == "all"
+            assert final_state.follow_up_mode == "all"
+
+        event_bus.on("agent.started", exercise_queue_facade)
+        _events = [event async for event in agent.run("initial")]
+
+    anyio.run(run_agent)
+
+
+def test_coding_session_queue_facade_rejects_invalid_kind_and_mode(
+    tmp_path: Path,
+) -> None:
+    async def run_agent() -> None:
+        provider = ScriptedProvider(
+            [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
+        )
+        event_bus = EventBus()
+        agent = CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            events=event_bus,
+        )
+
+        def exercise_invalid_inputs(event: WispEvent) -> None:
+            if event.type != "agent.started":
+                return
+            with pytest.raises(ValueError, match="Unsupported queue kind"):
+                agent.set_queue_mode(cast(QueueKind, "unknown"), "all")
+            with pytest.raises(ValueError, match="Unsupported queue kind"):
+                agent.pop_queue(cast(QueueKind, "unknown"))
+            with pytest.raises(ValueError, match="Unsupported queue kind"):
+                agent.clear_queue(cast(QueueKind, "unknown"))
+            with pytest.raises(ValueError, match="Unsupported queue mode"):
+                agent.set_queue_mode("steering", cast(QueueMode, "invalid"))
+
+        event_bus.on("agent.started", exercise_invalid_inputs)
+        _events = [event async for event in agent.run("initial")]
+
+    anyio.run(run_agent)
+
+
 def test_coding_session_retains_unconsumed_queues_for_same_session_retry(
     tmp_path: Path,
 ) -> None:
@@ -409,6 +499,8 @@ def test_coding_session_retains_unconsumed_queues_for_same_session_retry(
         with pytest.raises(RuntimeError, match="provider failed"):
             _failed_events = [event async for event in agent.run("first", session=session)]
 
+        assert agent.queue_state().steering == ("retained steering",)
+        assert agent.queue_state(session).follow_up == ("retained follow-up",)
         assert all(
             message.content not in {"retained steering", "retained follow-up"}
             for message in session.read_context_messages()

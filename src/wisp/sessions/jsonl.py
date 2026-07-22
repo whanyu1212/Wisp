@@ -54,6 +54,7 @@ __all__ = [
     "JsonlSession",
     "JsonlSessionStore",
     "SessionForkResult",
+    "SessionSummary",
     "SessionError",
     "SessionNotFoundError",
     "StaleCompactionError",
@@ -98,6 +99,17 @@ class SessionForkResult:
     fork_leaf_id: str | None
     selected_entry_id: str
     selected_prompt: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSummary:
+    """Bounded metadata for listing persisted sessions without loading messages."""
+
+    session_id: str
+    path: Path
+    updated_at: datetime
+    entry_count: int
+    active_leaf_id: str | None
 
 
 class JsonlSessionStore:
@@ -174,6 +186,21 @@ class JsonlSessionStore:
         path = max(files, key=lambda candidate: (candidate.stat().st_mtime_ns, candidate.name))
         return JsonlSession(session_id=_read_session_id(path), path=path)
 
+    def summaries(self, limit: int | None = None) -> tuple[SessionSummary, ...]:
+        """Return newest-first metadata for persisted sessions."""
+
+        if limit is not None and limit < 0:
+            raise ValueError("limit must be non-negative")
+        files = tuple(
+            sorted(
+                self._session_files(),
+                key=lambda candidate: (candidate.stat().st_mtime_ns, candidate.name),
+                reverse=True,
+            )
+        )
+        selected = files[:limit] if limit is not None else files
+        return tuple(self._summary_for_path(path) for path in selected)
+
     def _clone_once(
         self,
         source: JsonlSession,
@@ -221,6 +248,20 @@ class JsonlSessionStore:
         )
         target._create_with_entries_once(copied_entries)  # noqa: SLF001
         return target
+
+    def _summary_for_path(self, path: Path) -> SessionSummary:
+        info = path.stat()
+        entries = tuple(_read_entries(path))
+        if not entries:
+            raise SessionError(f"Session file is empty: {path}")
+        tree = resolve_session_tree(entries)
+        return SessionSummary(
+            session_id=entries[0].session_id,
+            path=path.resolve(strict=False),
+            updated_at=datetime.fromtimestamp(info.st_mtime, UTC),
+            entry_count=len(entries),
+            active_leaf_id=tree.active_leaf_id,
+        )
 
     def _resolve_path(self, reference: str | Path) -> Path:
         selected = Path(reference).expanduser()
