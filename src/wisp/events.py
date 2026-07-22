@@ -18,16 +18,18 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 12
+EVENT_SCHEMA_VERSION = 13
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
+QUEUE_UPDATE_SCHEMA_VERSION = 13
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
 FinishReason = Literal["stop", "tool_calls", "length", "error", "cancelled"]
 RetryReason = Literal["network", "timeout", "rate_limit", "server_error", "transient_http"]
 CompactionReason = Literal["manual", "threshold", "overflow"]
+QueueMode = Literal["one_at_a_time", "all"]
 
 
 def utc_now() -> datetime:
@@ -40,7 +42,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12] = 12
+    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13] = 13
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -585,6 +587,24 @@ class SessionStatsReported(WispEvent):
         return data
 
 
+class QueueUpdated(WispEvent):
+    """Current harness-owned steering and follow-up queue state."""
+
+    type: Literal["queue.updated"] = "queue.updated"
+    steering: tuple[str, ...] = ()
+    follow_up: tuple[str, ...] = ()
+    steering_mode: QueueMode = "one_at_a_time"
+    follow_up_mode: QueueMode = "one_at_a_time"
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < QUEUE_UPDATE_SCHEMA_VERSION:
+            raise ValueError(
+                f"queue updates require schema_version {QUEUE_UPDATE_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+
 class ModelProviderAutoSwitched(WispEvent):
     """A model-only ``configure`` command's resolved model belonged to another provider.
 
@@ -635,6 +655,7 @@ type KnownWispEvent = Annotated[
     | RpcCommandStarted
     | RpcCommandFinished
     | SessionStatsReported
+    | QueueUpdated
     | ModelProviderAutoSwitched
     | ErrorEvent,
     Field(discriminator="type"),
@@ -645,13 +666,13 @@ JsonObjectAdapter: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 def _require_current_schema(data: JsonObject) -> None:
     version = data.get("schema_version")
-    if type(version) is not int or version not in (5, 6, 7, 8, 9, 10, 11, EVENT_SCHEMA_VERSION):
+    if type(version) is not int or not 5 <= version <= EVENT_SCHEMA_VERSION:
         raise ValueError(
             "Unsupported Wisp event schema_version: "
             f"{version!r}; expected 5 through {EVENT_SCHEMA_VERSION}"
         )
     if data.get("type") in {"compaction.started", "compaction.completed"}:
-        if version not in {8, 9, 10, 11, EVENT_SCHEMA_VERSION}:
+        if not 8 <= version <= EVENT_SCHEMA_VERSION:
             raise ValueError(
                 f"Compaction events require schema_version 8 through {EVENT_SCHEMA_VERSION}, "
                 f"got {version!r}"
@@ -704,12 +725,13 @@ def _require_current_schema(data: JsonObject) -> None:
                 "Session cost metadata requires schema_version "
                 f"{COST_ACCOUNTING_SCHEMA_VERSION} or newer"
             )
-    if data.get("type") in {"context.estimated", "session.stats"} and version not in {
-        9,
-        10,
-        11,
-        EVENT_SCHEMA_VERSION,
-    }:
+    if data.get("type") == "queue.updated" and version < QUEUE_UPDATE_SCHEMA_VERSION:
+        raise ValueError(
+            f"Queue update events require schema_version {QUEUE_UPDATE_SCHEMA_VERSION} or newer"
+        )
+    if data.get("type") in {"context.estimated", "session.stats"} and not (
+        9 <= version <= EVENT_SCHEMA_VERSION
+    ):
         raise ValueError(
             f"Context statistics events require schema_version 9 through {EVENT_SCHEMA_VERSION}, "
             f"got {version!r}"

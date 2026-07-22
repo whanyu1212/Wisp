@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from typing import cast
 
 import anyio
 import pytest
 
 from wisp.agent.execution import ToolExecutionEvent
-from wisp.agent.harness import AgentHarness, AgentHarnessConfig
+from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueueKind
 from wisp.agent.messages import Message
-from wisp.events import MessageDelta, ToolCallSnapshot, ToolExecutionEnded, TurnCompleted
+from wisp.events import (
+    MessageDelta,
+    QueueMode,
+    QueueUpdated,
+    ToolCallSnapshot,
+    ToolExecutionEnded,
+    TurnCompleted,
+    wisp_event_from_json,
+)
 from wisp.providers.base import Provider, ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderEvent,
@@ -451,6 +460,11 @@ def test_harness_rejects_overlapping_runs_and_resets_when_stream_closes() -> Non
         with pytest.raises(RuntimeError, match="already running"):
             harness.replace_config(harness.config)
 
+        steering_update = harness.steer("adjust this run")
+        follow_up_update = harness.follow_up("then summarize")
+        assert steering_update.steering == ("adjust this run",)
+        assert follow_up_update.follow_up == ("then summarize",)
+
         assert [(message.role, message.content) for message in harness.messages] == [
             ("user", "first")
         ]
@@ -466,6 +480,98 @@ def test_harness_rejects_overlapping_runs_and_resets_when_stream_closes() -> Non
         ("user", "restored"),
         ("assistant", "ready"),
     ]
+
+
+def test_harness_queue_contract_preserves_fifo_snapshots_and_transcript_boundary() -> None:
+    harness = _harness(ScriptedProvider([]))
+
+    first_update = harness.steer("first steering")
+    second_update = harness.steer("second steering")
+    follow_up_update = harness.follow_up("follow up")
+    snapshot = harness.queued_messages
+
+    assert first_update.steering == ("first steering",)
+    assert second_update.steering == ("first steering", "second steering")
+    assert follow_up_update.follow_up == ("follow up",)
+    assert [message.content for message in snapshot.steering] == [
+        "first steering",
+        "second steering",
+    ]
+    assert [message.content for message in snapshot.follow_up] == ["follow up"]
+    assert snapshot.count == 3
+    assert harness.pending_message_count == 3
+    assert harness.has_queued_messages()
+    assert harness.messages == ()
+
+    assert harness.pop_latest_steering() == snapshot.steering[-1]
+    assert [message.content for message in harness.clear_queue("follow_up")] == ["follow up"]
+    assert harness.queue_updated_event().steering == ("first steering",)
+
+    cleared = harness.clear_queues()
+    assert [message.content for message in cleared.steering] == ["first steering"]
+    assert cleared.follow_up == ()
+    assert harness.queued_messages.count == 0
+    assert harness.pop_latest_steering() is None
+    assert harness.pop_latest_follow_up() is None
+    assert not harness.has_queued_messages()
+    assert harness.messages == ()
+
+
+def test_harness_queue_contract_rejects_non_user_messages_without_partial_mutation() -> None:
+    harness = _harness(ScriptedProvider([]))
+    assistant = Message(role="assistant", content="not user input")
+
+    with pytest.raises(ValueError, match="queues require a user message"):
+        harness.steer_message(assistant)
+    with pytest.raises(ValueError, match="queues require a user message"):
+        harness.follow_up_message(assistant)
+    with pytest.raises(ValueError, match="Unsupported queue kind"):
+        harness.clear_queue(cast(QueueKind, "unknown"))
+
+    assert harness.pending_message_count == 0
+    assert harness.messages == ()
+
+
+def test_harness_queue_modes_are_independent_and_reported_in_updates() -> None:
+    harness = _harness(ScriptedProvider([]))
+
+    steering_update = harness.set_steering_mode("all")
+    follow_up_update = harness.set_follow_up_mode("all")
+
+    assert steering_update.steering_mode == "all"
+    assert steering_update.follow_up_mode == "one_at_a_time"
+    assert follow_up_update.steering_mode == "all"
+    assert follow_up_update.follow_up_mode == "all"
+    assert harness.config.steering_mode == "all"
+    assert harness.config.follow_up_mode == "all"
+
+    with pytest.raises(ValueError, match="Unsupported queue mode"):
+        AgentHarnessConfig(
+            provider=ScriptedProvider([]),
+            tool_executor=RecordingToolExecutor(),
+            steering_mode=cast(QueueMode, "invalid"),
+        )
+
+    with pytest.raises(ValueError, match="Unsupported queue mode"):
+        harness.set_steering_mode(cast(QueueMode, "invalid"))
+    with pytest.raises(ValueError, match="Unsupported queue mode"):
+        harness.set_follow_up_mode(cast(QueueMode, "invalid"))
+
+    assert harness.config.steering_mode == "all"
+    assert harness.config.follow_up_mode == "all"
+
+
+def test_queue_updated_event_is_versioned_and_round_trips() -> None:
+    event = QueueUpdated(
+        steering=("adjust",),
+        follow_up=("summarize",),
+        steering_mode="all",
+    )
+
+    assert event.schema_version == 13
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    with pytest.raises(ValueError, match="require schema_version 13"):
+        wisp_event_from_json(event.model_copy(update={"schema_version": 12}).model_dump_json())
 
 
 def test_harness_rejects_non_user_prompt_messages() -> None:

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import AsyncGenerator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Literal
 
 import anyio
 
@@ -18,6 +20,8 @@ from wisp.agent.transcript import plan_interrupted_tool_repairs
 from wisp.events import (
     ErrorEvent,
     MessageCompleted,
+    QueueMode,
+    QueueUpdated,
     ToolExecutionEnded,
     TurnCompleted,
     TurnStarted,
@@ -39,6 +43,34 @@ class AgentHarnessConfig:
     context_reserve_tokens: int = 16_384
     context_pressure_threshold: float = 0.8
     cost_estimator: UsageCostEstimator | None = None
+    steering_mode: QueueMode = "one_at_a_time"
+    follow_up_mode: QueueMode = "one_at_a_time"
+
+    def __post_init__(self) -> None:
+        """Reject invalid queue modes even when callers bypass static typing."""
+        _require_queue_mode(self.steering_mode)
+        _require_queue_mode(self.follow_up_mode)
+
+
+QueueKind = Literal["steering", "follow_up"]
+
+
+def _require_queue_mode(mode: object) -> None:
+    if mode not in {"one_at_a_time", "all"}:
+        raise ValueError(f"Unsupported queue mode: {mode!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedMessages:
+    """Immutable snapshot of harness-owned queued user messages."""
+
+    steering: tuple[Message, ...] = ()
+    follow_up: tuple[Message, ...] = ()
+
+    @property
+    def count(self) -> int:
+        """Return the total number of queued messages."""
+        return len(self.steering) + len(self.follow_up)
 
 
 class SimpleCancellationToken:
@@ -87,6 +119,8 @@ class AgentHarness:
         self._current_token: SimpleCancellationToken | None = None
         self._current_scope: anyio.CancelScope | None = None
         self._running = False
+        self._steering_queue: deque[Message] = deque()
+        self._follow_up_queue: deque[Message] = deque()
 
     @property
     def config(self) -> AgentHarnessConfig:
@@ -102,6 +136,23 @@ class AgentHarness:
     def is_running(self) -> bool:
         """Return whether a prompt or continuation is active."""
         return self._running
+
+    @property
+    def queued_messages(self) -> QueuedMessages:
+        """Return an immutable snapshot of both pending queues."""
+        return QueuedMessages(
+            steering=tuple(self._steering_queue),
+            follow_up=tuple(self._follow_up_queue),
+        )
+
+    @property
+    def pending_message_count(self) -> int:
+        """Return the total number of pending steering and follow-up messages."""
+        return self.queued_messages.count
+
+    def has_queued_messages(self) -> bool:
+        """Return whether either queue contains a pending message."""
+        return bool(self._steering_queue or self._follow_up_queue)
 
     def replace_config(self, config: AgentHarnessConfig) -> None:
         """Replace provider/tool configuration between runs."""
@@ -134,6 +185,71 @@ class AgentHarness:
         if self._current_scope is not None:
             self._current_scope.cancel()
         return True
+
+    def steer(self, content: str) -> QueueUpdated:
+        """Queue user text for injection after the current assistant/tool batch."""
+        return self.steer_message(Message(role="user", content=content))
+
+    def steer_message(self, message: Message) -> QueueUpdated:
+        """Queue a user message for steering without changing the transcript."""
+        self._require_user_queue_message(message)
+        self._steering_queue.append(message)
+        return self.queue_updated_event()
+
+    def follow_up(self, content: str) -> QueueUpdated:
+        """Queue user text for injection when a run would otherwise stop."""
+        return self.follow_up_message(Message(role="user", content=content))
+
+    def follow_up_message(self, message: Message) -> QueueUpdated:
+        """Queue a user message for follow-up without changing the transcript."""
+        self._require_user_queue_message(message)
+        self._follow_up_queue.append(message)
+        return self.queue_updated_event()
+
+    def set_steering_mode(self, mode: QueueMode) -> QueueUpdated:
+        """Set how many steering messages a future drain will inject."""
+        self._config = replace(self._config, steering_mode=mode)
+        return self.queue_updated_event()
+
+    def set_follow_up_mode(self, mode: QueueMode) -> QueueUpdated:
+        """Set how many follow-up messages a future drain will inject."""
+        self._config = replace(self._config, follow_up_mode=mode)
+        return self.queue_updated_event()
+
+    def pop_latest_steering(self) -> Message | None:
+        """Remove and return the latest steering message for editing."""
+        if not self._steering_queue:
+            return None
+        return self._steering_queue.pop()
+
+    def pop_latest_follow_up(self) -> Message | None:
+        """Remove and return the latest follow-up message for editing."""
+        if not self._follow_up_queue:
+            return None
+        return self._follow_up_queue.pop()
+
+    def clear_queue(self, kind: QueueKind) -> tuple[Message, ...]:
+        """Clear one queue and return its previous contents in FIFO order."""
+        queue = self._queue_for(kind)
+        cleared = tuple(queue)
+        queue.clear()
+        return cleared
+
+    def clear_queues(self) -> QueuedMessages:
+        """Clear both queues and return their previous contents."""
+        cleared = self.queued_messages
+        self._steering_queue.clear()
+        self._follow_up_queue.clear()
+        return cleared
+
+    def queue_updated_event(self) -> QueueUpdated:
+        """Return current queue state as a portable versioned event."""
+        return QueueUpdated(
+            steering=tuple(message.content for message in self._steering_queue),
+            follow_up=tuple(message.content for message in self._follow_up_queue),
+            steering_mode=self._config.steering_mode,
+            follow_up_mode=self._config.follow_up_mode,
+        )
 
     def prompt(
         self,
@@ -283,7 +399,27 @@ class AgentHarness:
 
     def _ensure_idle(self) -> None:
         if self._running:
-            raise RuntimeError("AgentHarness is already running")
+            raise RuntimeError(
+                "AgentHarness is already running; use steer() or follow_up() to queue messages"
+            )
+
+    def _queue_for(self, kind: QueueKind) -> deque[Message]:
+        if kind == "steering":
+            return self._steering_queue
+        if kind == "follow_up":
+            return self._follow_up_queue
+        raise ValueError(f"Unsupported queue kind: {kind!r}")
+
+    @staticmethod
+    def _require_user_queue_message(message: Message) -> None:
+        if message.role != "user":
+            raise ValueError("AgentHarness queues require a user message")
 
 
-__all__ = ["AgentHarness", "AgentHarnessConfig", "SimpleCancellationToken"]
+__all__ = [
+    "AgentHarness",
+    "AgentHarnessConfig",
+    "QueuedMessages",
+    "QueueKind",
+    "SimpleCancellationToken",
+]
