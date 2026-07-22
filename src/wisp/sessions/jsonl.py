@@ -388,6 +388,8 @@ class JsonlSession:
             entry_index=self._entry_index,
             active_leaf_id=active_leaf_id,
         )
+        if isinstance(persisted, CompactionSessionEntry):
+            replay_session_entries((*self._entry_index.values(), persisted))
 
         try:
             self._append_line(session_entry_to_json(persisted))

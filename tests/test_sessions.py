@@ -183,6 +183,8 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
 
     async def write() -> None:
         message = await session.append_message(Message(role="user", content="hello"))
+        await session.append_message(Message(role="user", content="retained"))
+        await session.append_message(Message(role="assistant", content="answer"))
         await session.append_event(ErrorEvent(message="boom"))
         await session.append_entry(
             CompactionSessionEntry(
@@ -198,18 +200,26 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
     anyio.run(write)
 
     records = [json.loads(line) for line in session.path.read_text().splitlines()]
-    assert [record["kind"] for record in records] == ["message", "event", "compaction"]
-    assert [record["schema_version"] for record in records] == [2, 2, 2]
+    assert [record["kind"] for record in records] == [
+        "message",
+        "message",
+        "message",
+        "event",
+        "compaction",
+    ]
+    assert [record["schema_version"] for record in records] == [2, 2, 2, 2, 2]
     assert [record["parent_id"] for record in records] == [
         None,
         records[0]["id"],
         records[1]["id"],
+        records[2]["id"],
+        records[3]["id"],
     ]
-    assert records[1]["event"]["schema_version"] == 1
-    assert records[1]["event"]["payload"]["schema_version"] == 12
+    assert records[3]["event"]["schema_version"] == 1
+    assert records[3]["event"]["payload"]["schema_version"] == 12
     assert isinstance(session.read_entries()[0], MessageSessionEntry)
-    assert isinstance(session.read_entries()[1], EventSessionEntry)
-    assert isinstance(session.read_entries()[2], CompactionSessionEntry)
+    assert isinstance(session.read_entries()[3], EventSessionEntry)
+    assert isinstance(session.read_entries()[4], CompactionSessionEntry)
 
 
 def test_legacy_session_entry_constructor_returns_concrete_variants() -> None:

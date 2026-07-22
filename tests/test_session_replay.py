@@ -384,6 +384,127 @@ def test_atomic_compaction_append_rejects_stale_plan_and_remains_idempotent(
     assert [entry.id for entry in session.read_entries()].count("compact") == 1
 
 
+@pytest.mark.parametrize(
+    ("replaced_entry_ids", "error"),
+    [
+        (("missing",), "unknown"),
+        (("user-2", "assistant-2"), "prefix"),
+        (("user-1", "assistant-1", "user-2"), "splits a conversation turn"),
+    ],
+)
+def test_atomic_compaction_append_rejects_invalid_candidate_before_persisting(
+    tmp_path: Path,
+    replaced_entry_ids: tuple[str, ...],
+    error: str,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        for entry_id, role, content in (
+            ("user-1", "user", "one"),
+            ("assistant-1", "assistant", "answer one"),
+            ("user-2", "user", "two"),
+            ("assistant-2", "assistant", "answer two"),
+        ):
+            await session.append_entry(
+                MessageSessionEntry(
+                    id=entry_id,
+                    session_id=session.session_id,
+                    message=Message(role=role, content=content),
+                )
+            )
+        context_ids = session.read_context().context_entry_ids
+        with pytest.raises(SessionReplayError, match=error):
+            await session.append_compaction_entry(
+                CompactionSessionEntry(
+                    id="invalid",
+                    session_id=session.session_id,
+                    compaction=CompactionRecord(
+                        summary="Invalid summary.",
+                        replaced_entry_ids=replaced_entry_ids,
+                        provider="test",
+                    ),
+                ),
+                expected_context_entry_ids=context_ids,
+            )
+
+    anyio.run(write)
+
+    assert all(entry.kind != "compaction" for entry in session.read_entries())
+
+
+def test_atomic_compaction_append_rejects_inactive_candidate_before_persisting(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        message_ids: list[str] = []
+        for role, content in (
+            ("user", "one"),
+            ("assistant", "answer one"),
+            ("user", "two"),
+            ("assistant", "answer two"),
+        ):
+            entry = await session.append_message(Message(role=role, content=content))
+            message_ids.append(entry.id)
+        context_ids = session.read_context().context_entry_ids
+        await session.append_compaction_entry(
+            CompactionSessionEntry(
+                id="valid",
+                session_id=session.session_id,
+                compaction=CompactionRecord(
+                    summary="First turn.",
+                    replaced_entry_ids=tuple(message_ids[:2]),
+                    provider="test",
+                ),
+            ),
+            expected_context_entry_ids=context_ids,
+        )
+        active_ids = session.read_context().context_entry_ids
+        with pytest.raises(SessionReplayError, match="inactive"):
+            await session.append_compaction_entry(
+                CompactionSessionEntry(
+                    id="invalid",
+                    session_id=session.session_id,
+                    compaction=CompactionRecord(
+                        summary="Invalid summary.",
+                        replaced_entry_ids=(message_ids[0],),
+                        provider="test",
+                    ),
+                ),
+                expected_context_entry_ids=active_ids,
+            )
+
+    anyio.run(write)
+
+    assert [entry.id for entry in session.read_entries() if entry.kind == "compaction"] == ["valid"]
+
+
+def test_generic_append_rejects_invalid_compaction_before_persisting(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        await session.append_message(Message(role="user", content="one"))
+        await session.append_message(Message(role="assistant", content="answer"))
+        with pytest.raises(SessionReplayError, match="unknown"):
+            await session.append_entry(
+                CompactionSessionEntry(
+                    id="invalid",
+                    session_id=session.session_id,
+                    compaction=CompactionRecord(
+                        summary="Invalid summary.",
+                        replaced_entry_ids=("missing",),
+                        provider="test",
+                    ),
+                )
+            )
+
+    anyio.run(write)
+
+    assert all(entry.kind != "compaction" for entry in session.read_entries())
+
+
 def test_atomic_compaction_append_serializes_competing_processes(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     session = store.create()
