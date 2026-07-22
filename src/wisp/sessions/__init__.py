@@ -12,13 +12,15 @@ from .entries import (
     SessionTreeEntry,
 )
 from .errors import (
+    InvalidSessionBranchPointError,
     MalformedPersistedEventError,
     MalformedSessionEntryError,
     SessionError,
+    StaleSessionTreeError,
     UnsupportedPersistedEventVersionError,
     UnsupportedSessionEntryVersionError,
 )
-from .jsonl import JsonlSession, JsonlSessionStore
+from .jsonl import JsonlSession, JsonlSessionStore, SessionForkResult
 from .replay import (
     SessionContextRow,
     SessionReplay,
@@ -32,6 +34,7 @@ from .replay import (
 __all__ = [
     "JsonlSession",
     "JsonlSessionStore",
+    "InvalidSessionBranchPointError",
     "PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION",
     "SESSION_ENTRY_SCHEMA_VERSION",
     "ActiveLeafSessionEntry",
@@ -44,11 +47,13 @@ __all__ = [
     "SessionContextRow",
     "SessionEntry",
     "SessionError",
+    "SessionForkResult",
     "SessionReplay",
     "SessionReplayError",
     "SessionTreeEntry",
     "SessionTreeState",
     "StaleCompactionError",
+    "StaleSessionTreeError",
     "UnsupportedPersistedEventVersionError",
     "UnsupportedSessionEntryVersionError",
     "replay_session_entries",
