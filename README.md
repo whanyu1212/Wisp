@@ -135,6 +135,11 @@ audit log without entering model context. Existing unversioned and v1 linear ses
 readable through an in-memory compatibility decoder and are never rewritten during load. Persisted
 events retain their raw payload and original event schema version, and are validated as typed events
 only when requested.
+The typed session API can also derive a new session without rewriting its source. A clone copies
+the complete active path, while a fork copies the path before a selected user message and returns
+that prompt for editing. Copied entries retain their stable IDs, parent links, timestamps, events,
+compactions, and accounting metadata under a new session ID. These core operations are not yet
+exposed as CLI, RPC, or TUI commands.
 The former `wisp.agent.messages.SessionEntry(...)` constructor remains available as a deprecated
 factory; new integrations should import the concrete entry models from `wisp.sessions`.
 

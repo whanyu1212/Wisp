@@ -21,3 +21,11 @@ class MalformedPersistedEventError(SessionError):
 
 class UnsupportedPersistedEventVersionError(SessionError):
     """Raised when a raw persisted event uses an unsupported schema version."""
+
+
+class InvalidSessionBranchPointError(SessionError):
+    """Raised when an entry cannot be used for the requested branch operation."""
+
+
+class StaleSessionTreeError(SessionError):
+    """Raised when session tree state changed before an operation could commit."""

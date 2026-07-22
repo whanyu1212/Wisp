@@ -7,6 +7,7 @@ import stat
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -17,6 +18,11 @@ import anyio
 
 from wisp.agent.messages import Message
 from wisp.events import JsonObject, KnownWispEvent, WispEvent
+from wisp.sessions.branching import (
+    SessionBranchProjection,
+    project_fork_from_user_message,
+    project_session_path,
+)
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,
@@ -24,12 +30,13 @@ from wisp.sessions.entries import (
     MessageSessionEntry,
     PersistedEventEnvelope,
     SessionEntry,
+    SessionTreeEntry,
     is_session_tree_entry,
     session_entry_from_json,
     session_entry_to_json,
     typed_event_from_envelope,
 )
-from wisp.sessions.errors import MalformedSessionEntryError, SessionError
+from wisp.sessions.errors import MalformedSessionEntryError, SessionError, StaleSessionTreeError
 from wisp.sessions.replay import (
     SessionReplay,
     SessionReplayError,
@@ -46,6 +53,7 @@ __all__ = [
     "AmbiguousSessionError",
     "JsonlSession",
     "JsonlSessionStore",
+    "SessionForkResult",
     "SessionError",
     "SessionNotFoundError",
     "StaleCompactionError",
@@ -80,6 +88,18 @@ class AmbiguousSessionError(SessionError):
     """Raised when a session reference matches more than one session."""
 
 
+@dataclass(frozen=True, slots=True)
+class SessionForkResult:
+    """A forked session plus the selected user prompt to edit and resubmit."""
+
+    session: JsonlSession
+    source_session_id: str
+    source_active_leaf_id: str | None
+    fork_leaf_id: str | None
+    selected_entry_id: str
+    selected_prompt: str
+
+
 class JsonlSessionStore:
     """Creates and opens JSONL-backed Wisp sessions."""
 
@@ -91,6 +111,53 @@ class JsonlSessionStore:
         timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         path = self.root / f"{timestamp}-{session_id[:8]}.jsonl"
         return JsonlSession(session_id=session_id, path=path)
+
+    async def clone(
+        self,
+        source: JsonlSession,
+        *,
+        expected_active_leaf_id: str | None,
+    ) -> JsonlSession:
+        """Copy the source's complete active branch into a new session."""
+
+        return await anyio.to_thread.run_sync(
+            self._clone_once,
+            source,
+            expected_active_leaf_id,
+            None,
+        )
+
+    async def clone_to_leaf(
+        self,
+        source: JsonlSession,
+        leaf_id: str,
+        *,
+        expected_active_leaf_id: str | None,
+    ) -> JsonlSession:
+        """Copy one explicit source root-to-leaf path into a new session."""
+
+        return await anyio.to_thread.run_sync(
+            self._clone_once,
+            source,
+            expected_active_leaf_id,
+            leaf_id,
+        )
+
+    async def fork_from_user_message(
+        self,
+        source: JsonlSession,
+        entry_id: str,
+        *,
+        expected_active_leaf_id: str | None,
+    ) -> SessionForkResult:
+        """Fork before one user message and return its editable prompt text."""
+
+        return await anyio.to_thread.run_sync(
+            self._fork_from_user_message_once,
+            source,
+            entry_id,
+            expected_active_leaf_id,
+        )
 
     def load(self, reference: str | Path) -> JsonlSession:
         """Open a session by JSONL path, filename, full id, or id prefix."""
@@ -106,6 +173,54 @@ class JsonlSessionStore:
             raise SessionNotFoundError(f"No sessions found in {self.root}")
         path = max(files, key=lambda candidate: (candidate.stat().st_mtime_ns, candidate.name))
         return JsonlSession(session_id=_read_session_id(path), path=path)
+
+    def _clone_once(
+        self,
+        source: JsonlSession,
+        expected_active_leaf_id: str | None,
+        leaf_id: str | None,
+    ) -> JsonlSession:
+        entries, active_leaf_id = source._snapshot_entries_for_branch_once(  # noqa: SLF001
+            expected_active_leaf_id
+        )
+        selected_leaf_id = active_leaf_id if leaf_id is None else leaf_id
+        if selected_leaf_id is None:
+            raise SessionError("Cannot clone an empty session")
+        projection = project_session_path(entries, leaf_id=selected_leaf_id)
+        return self._persist_projection(projection)
+
+    def _fork_from_user_message_once(
+        self,
+        source: JsonlSession,
+        entry_id: str,
+        expected_active_leaf_id: str | None,
+    ) -> SessionForkResult:
+        entries, source_active_leaf_id = source._snapshot_entries_for_branch_once(  # noqa: SLF001
+            expected_active_leaf_id
+        )
+        projection = project_fork_from_user_message(entries, entry_id=entry_id)
+        target = self._persist_projection(projection)
+        assert projection.selected_entry_id is not None
+        assert projection.selected_prompt is not None
+        return SessionForkResult(
+            session=target,
+            source_session_id=source.session_id,
+            source_active_leaf_id=source_active_leaf_id,
+            fork_leaf_id=projection.source_leaf_id,
+            selected_entry_id=projection.selected_entry_id,
+            selected_prompt=projection.selected_prompt,
+        )
+
+    def _persist_projection(self, projection: SessionBranchProjection) -> JsonlSession:
+        target = self.create()
+        if not projection.entries:
+            return target
+        copied_entries = tuple(
+            entry.model_copy(update={"session_id": target.session_id})
+            for entry in projection.entries
+        )
+        target._create_with_entries_once(copied_entries)  # noqa: SLF001
+        return target
 
     def _resolve_path(self, reference: str | Path) -> Path:
         selected = Path(reference).expanduser()
@@ -316,6 +431,96 @@ class JsonlSession:
             for entry in self.read_entries()
             if isinstance(entry, EventSessionEntry)
         )
+
+    def _snapshot_entries_for_branch_once(
+        self,
+        expected_active_leaf_id: str | None,
+    ) -> tuple[tuple[SessionEntry, ...], str | None]:
+        """Read one coherent tree snapshot and reject stale branch requests."""
+
+        with self._file_state.lock:
+            with self._interprocess_lock():
+                self._refresh_entry_index()
+                assert self._entry_index is not None
+                entries = tuple(self._entry_index.values())
+                active_leaf_id = _active_leaf_id(self._entry_index)
+                if active_leaf_id != expected_active_leaf_id:
+                    raise StaleSessionTreeError(
+                        "Session tree changed: expected active leaf "
+                        f"{expected_active_leaf_id!r}, found {active_leaf_id!r}"
+                    )
+                resolve_session_tree(entries)
+                return entries, active_leaf_id
+
+    def _create_with_entries_once(self, entries: tuple[SessionTreeEntry, ...]) -> None:
+        """Exclusively publish a complete projected session file."""
+
+        with self._file_state.lock:
+            with self._interprocess_lock():
+                self._create_with_entries_locked(entries)
+
+    def _create_with_entries_locked(self, entries: tuple[SessionTreeEntry, ...]) -> None:
+        """Publish projected entries while holding the destination mutation locks."""
+
+        if not entries:
+            raise ValueError("Projected session entries cannot be empty")
+        if any(entry.session_id != self.session_id for entry in entries):
+            raise SessionError("Projected entries do not belong to the target session")
+        # Validate both the tree and provider-visible compaction semantics before
+        # making the target path discoverable.
+        replay_session_entries(entries)
+        lines = tuple(session_entry_to_json(entry) for entry in entries)
+
+        _ensure_private_directory(self.path.parent)
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        temp_path = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
+        fd = -1
+        created_signature: tuple[int, int] | None = None
+        published = False
+        try:
+            fd = os.open(temp_path, flags, PRIVATE_FILE_MODE)
+            info = os.fstat(fd)
+            created_signature = (info.st_dev, info.st_ino)
+            if not stat.S_ISREG(info.st_mode):
+                raise SessionError(f"Session file is not a regular file: {temp_path}")
+            if os.name == "posix":
+                os.fchmod(fd, PRIVATE_FILE_MODE)
+            with os.fdopen(fd, "w", encoding="utf-8") as session_file:
+                fd = -1
+                for line in lines:
+                    session_file.write(line)
+                    session_file.write("\n")
+
+            persisted = tuple(_read_entries(temp_path))
+            if persisted != entries:
+                raise SessionError(f"Projected session validation failed: {temp_path}")
+            # A hard link publishes the already complete inode without replacing
+            # any destination another process may have created concurrently.
+            os.link(temp_path, self.path)
+            published = True
+            temp_path.unlink()
+        except Exception:
+            if fd != -1:
+                os.close(fd)
+            if created_signature is not None:
+                _unlink_if_same_file(temp_path, created_signature)
+                if published:
+                    _unlink_if_same_file(self.path, created_signature)
+            raise
+
+        self._file_state.generation += 1
+        self._entry_index = {entry.id: entry for entry in entries}
+        self._entry_index_generation = self._file_state.generation
+        final_info = self._validate_session_file()
+        if final_info is None:
+            self._invalidate_entry_index()
+            raise SessionError(f"Projected session disappeared after creation: {self.path}")
+        if created_signature != (final_info.st_dev, final_info.st_ino):
+            self._invalidate_entry_index()
+            raise SessionError(f"Projected session was replaced during creation: {self.path}")
+        self._entry_index_signature = _session_file_signature(final_info)
 
     def _append_line(self, line: str) -> None:
         _ensure_private_directory(self.path.parent)
@@ -616,6 +821,22 @@ def _validate_private_directory(path: Path) -> None:
         info = path.lstat()
         if stat.S_IMODE(info.st_mode) & 0o077:
             raise SessionError(f"Session directory is not private: {path}")
+
+
+def _unlink_if_same_file(path: Path, expected: tuple[int, int]) -> None:
+    """Remove a failed new file only while it is still the inode we created."""
+
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    if stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) == expected:
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def _session_file_signature(info: os.stat_result) -> _FileSignature:
