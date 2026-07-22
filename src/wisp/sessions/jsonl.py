@@ -32,6 +32,7 @@ from wisp.sessions.entries import (
 from wisp.sessions.errors import MalformedSessionEntryError, SessionError
 from wisp.sessions.replay import (
     SessionReplay,
+    SessionReplayError,
     StaleCompactionError,
     replay_session_entries,
     resolve_session_tree,
@@ -367,23 +368,26 @@ class JsonlSession:
             return existing
 
         assert self._entry_index is not None
-        entries = tuple(self._entry_index.values())
-        tree = resolve_session_tree(entries)
+        active_leaf_id = _active_leaf_id(self._entry_index)
         if (
             is_session_tree_entry(entry)
             and entry.parent_id is not None
-            and entry.parent_id != tree.active_leaf_id
+            and entry.parent_id != active_leaf_id
         ):
             raise SessionError(
                 f"Session entry {entry.id} specifies parent {entry.parent_id!r}, "
-                f"but the active leaf is {tree.active_leaf_id!r}"
+                f"but the active leaf is {active_leaf_id!r}"
             )
         persisted = (
-            entry.model_copy(update={"parent_id": tree.active_leaf_id})
+            entry.model_copy(update={"parent_id": active_leaf_id})
             if is_session_tree_entry(entry)
             else entry
         )
-        resolve_session_tree((*entries, persisted))
+        _validate_append_transition(
+            persisted,
+            entry_index=self._entry_index,
+            active_leaf_id=active_leaf_id,
+        )
 
         try:
             self._append_line(session_entry_to_json(persisted))
@@ -614,6 +618,49 @@ def _validate_private_directory(path: Path) -> None:
 
 def _session_file_signature(info: os.stat_result) -> _FileSignature:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _active_leaf_id(entry_index: dict[str, SessionEntry]) -> str | None:
+    """Read current leaf state from the last validated transition in constant time."""
+
+    if not entry_index:
+        return None
+    last_entry = entry_index[next(reversed(entry_index))]
+    if is_session_tree_entry(last_entry):
+        return last_entry.id
+    assert isinstance(last_entry, ActiveLeafSessionEntry)
+    return last_entry.active_leaf_id
+
+
+def _validate_append_transition(
+    entry: SessionEntry,
+    *,
+    entry_index: dict[str, SessionEntry],
+    active_leaf_id: str | None,
+) -> None:
+    """Validate one proposed transition against an already validated entry index."""
+
+    if is_session_tree_entry(entry):
+        if entry.parent_id != active_leaf_id:
+            raise SessionReplayError(
+                f"Session entry {entry.id} has parent {entry.parent_id!r}, "
+                f"expected active leaf {active_leaf_id!r}"
+            )
+        return
+
+    assert isinstance(entry, ActiveLeafSessionEntry)
+    if entry.previous_leaf_id != active_leaf_id:
+        raise SessionReplayError(
+            f"Active-leaf entry {entry.id} expected previous leaf "
+            f"{entry.previous_leaf_id!r}, found {active_leaf_id!r}"
+        )
+    if entry.active_leaf_id is None:
+        return
+    target = entry_index.get(entry.active_leaf_id)
+    if target is None or not is_session_tree_entry(target):
+        raise SessionReplayError(
+            f"Active-leaf entry {entry.id} references unknown leaf {entry.active_leaf_id}"
+        )
 
 
 def _matches_detached_entry(existing: SessionEntry, candidate: SessionEntry) -> bool:

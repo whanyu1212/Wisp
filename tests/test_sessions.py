@@ -941,6 +941,32 @@ def test_concurrent_session_handles_append_one_record(
     )
 
 
+def test_repeated_append_does_not_rescan_full_session_tree(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    resolve_session_tree = jsonl_module.resolve_session_tree
+    resolver_calls = 0
+
+    def counted_resolver(entries: tuple[SessionEntry, ...]) -> object:
+        nonlocal resolver_calls
+        resolver_calls += 1
+        return resolve_session_tree(entries)
+
+    monkeypatch.setattr(jsonl_module, "resolve_session_tree", counted_resolver)
+
+    async def write() -> None:
+        for index in range(50):
+            await session.append_message(Message(role="user", content=str(index)))
+
+    anyio.run(write)
+
+    assert resolver_calls == 0
+    assert len(session.read_entries()) == 50
+    assert resolver_calls == 1
+
+
 def test_append_entry_reloads_identity_after_uncertain_write_failure(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
