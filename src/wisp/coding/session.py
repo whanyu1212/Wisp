@@ -47,7 +47,9 @@ from wisp.events import (
     ErrorEvent,
     MessageCompleted,
     MessageDelta,
+    QueueKind,
     QueueMessageInjected,
+    QueueMode,
     QueueUpdated,
     SessionSaved,
     SessionStats,
@@ -85,6 +87,22 @@ PERSISTED_SESSION_EVENT_TYPES = frozenset(
 class _PendingSessionEntry:
     session: JsonlSession
     entry: SessionEntry
+
+
+@dataclass(frozen=True, slots=True)
+class _RetainedQueueState:
+    messages: QueuedMessages
+    steering_mode: QueueMode = "one_at_a_time"
+    follow_up_mode: QueueMode = "one_at_a_time"
+
+
+def _retained_queue_state(harness: AgentHarness) -> _RetainedQueueState:
+    config = harness.config
+    return _RetainedQueueState(
+        messages=harness.queued_messages,
+        steering_mode=config.steering_mode,
+        follow_up_mode=config.follow_up_mode,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,8 +168,9 @@ class CodingSession:
         self._operation_active = False
         self._active_harness: AgentHarness | None = None
         self._active_session_id: str | None = None
+        self._last_session_id: str | None = None
         self._accepting_queued_messages = False
-        self._retained_queues: dict[str, QueuedMessages] = {}
+        self._retained_queues: dict[str, _RetainedQueueState] = {}
         self._apply_configuration(
             CodingSessionConfiguration(
                 provider=provider,
@@ -229,18 +248,79 @@ class CodingSession:
     def follow_up(self, content: str) -> QueueUpdated:
         """Queue user text for the active run's next completed-turn boundary."""
 
-        harness = self._active_harness
-        if harness is None or not self._accepting_queued_messages:
-            raise RuntimeError("CodingSession has no active agent run")
-        return harness.follow_up(content)
+        return self._active_queue_harness().follow_up(content)
 
     def steer(self, content: str) -> QueueUpdated:
         """Queue user text after the active run's current assistant/tool batch."""
 
+        return self._active_queue_harness().steer(content)
+
+    def queue_state(self, session: JsonlSession | None = None) -> QueueUpdated:
+        """Return the current or retained queue state without requiring an active run."""
+
+        harness = self._active_harness
+        if harness is not None and (
+            session is None or session.session_id == self._active_session_id
+        ):
+            return harness.queue_updated_event()
+
+        session_id = session.session_id if session is not None else self._last_session_id
+        if session_id is None:
+            return QueueUpdated()
+        return self._queue_updated_from_snapshot(self._retained_queues.get(session_id))
+
+    def set_queue_mode(self, kind: QueueKind, mode: QueueMode) -> QueueUpdated:
+        """Set one active queue's drain mode."""
+
+        harness = self._active_queue_harness()
+        if kind == "steering":
+            return harness.set_steering_mode(mode)
+        if kind == "follow_up":
+            return harness.set_follow_up_mode(mode)
+        raise ValueError(f"Unsupported queue kind: {kind!r}")
+
+    def pop_queue(self, kind: QueueKind) -> tuple[Message | None, QueueUpdated]:
+        """Remove the latest active queued message of one kind, if any."""
+
+        harness = self._active_queue_harness()
+        if kind == "steering":
+            message = harness.pop_latest_steering()
+        elif kind == "follow_up":
+            message = harness.pop_latest_follow_up()
+        else:
+            raise ValueError(f"Unsupported queue kind: {kind!r}")
+        return message, harness.queue_updated_event()
+
+    def clear_queue(self, kind: QueueKind | None = None) -> tuple[QueuedMessages, QueueUpdated]:
+        """Clear active queues and return their previous contents plus the new state."""
+
+        harness = self._active_queue_harness()
+        if kind is None:
+            cleared = harness.clear_queues()
+        elif kind == "steering":
+            cleared = QueuedMessages(steering=harness.clear_queue(kind))
+        elif kind == "follow_up":
+            cleared = QueuedMessages(follow_up=harness.clear_queue(kind))
+        else:
+            raise ValueError(f"Unsupported queue kind: {kind!r}")
+        return cleared, harness.queue_updated_event()
+
+    def _active_queue_harness(self) -> AgentHarness:
         harness = self._active_harness
         if harness is None or not self._accepting_queued_messages:
             raise RuntimeError("CodingSession has no active agent run")
-        return harness.steer(content)
+        return harness
+
+    @staticmethod
+    def _queue_updated_from_snapshot(queued: _RetainedQueueState | None) -> QueueUpdated:
+        if queued is None:
+            return QueueUpdated()
+        return QueueUpdated(
+            steering=tuple(message.content for message in queued.messages.steering),
+            follow_up=tuple(message.content for message in queued.messages.follow_up),
+            steering_mode=queued.steering_mode,
+            follow_up_mode=queued.follow_up_mode,
+        )
 
     def _apply_configuration(self, configuration: CodingSessionConfiguration) -> None:
         if configuration.context_reserve_tokens < 0:
@@ -280,8 +360,8 @@ class CodingSession:
                 finally:
                     self._accepting_queued_messages = False
                     if self._active_harness is not None and self._active_session_id is not None:
-                        queued = self._active_harness.queued_messages
-                        if queued.count:
+                        queued = _retained_queue_state(self._active_harness)
+                        if queued.messages.count:
                             self._retained_queues[self._active_session_id] = queued
                         else:
                             self._retained_queues.pop(self._active_session_id, None)
@@ -299,6 +379,7 @@ class CodingSession:
     ) -> AsyncGenerator[WispEvent, None]:
         session = session or self.sessions.create()
         self._active_session_id = session.session_id
+        self._last_session_id = session.session_id
         recover_history = session.session_id in self._history_refresh_session_ids or any(
             pending.entry.session_id == session.session_id for pending in self._pending_entries
         )
@@ -331,10 +412,14 @@ class CodingSession:
             ),
             messages=(*prompt_messages, *self._conversation_history(history)),
         )
-        retained = self._retained_queues.pop(session.session_id, QueuedMessages())
-        for message in retained.steering:
+        retained = self._retained_queues.pop(session.session_id, None)
+        if retained is not None:
+            harness.set_steering_mode(retained.steering_mode)
+            harness.set_follow_up_mode(retained.follow_up_mode)
+        retained_messages = retained.messages if retained is not None else QueuedMessages()
+        for message in retained_messages.steering:
             harness.steer_message(message)
-        for message in retained.follow_up:
+        for message in retained_messages.follow_up:
             harness.follow_up_message(message)
         self._active_harness = harness
         self._accepting_queued_messages = True
