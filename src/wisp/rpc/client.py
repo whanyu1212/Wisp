@@ -21,6 +21,7 @@ from wisp.rpc.commands import (
     CompactCommand,
     ConfigureCommand,
     FollowUpCommand,
+    GetMessagesCommand,
     GetQueueStateCommand,
     GetSessionStatsCommand,
     GetStateCommand,
@@ -90,6 +91,27 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("state")
         await self._transport.send(GetStateCommand(id=selected_id))
+        return selected_id
+
+    async def get_messages(
+        self,
+        *,
+        session_id: str | None = None,
+        limit: int = 200,
+        before_entry_id: str | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        """Request a bounded persisted transcript page."""
+
+        selected_id = command_id or self._command_id_factory("messages")
+        await self._transport.send(
+            GetMessagesCommand(
+                id=selected_id,
+                session_id=session_id,
+                limit=limit,
+                before_entry_id=before_entry_id,
+            )
+        )
         return selected_id
 
     async def steer(self, content: str, *, command_id: str | None = None) -> str:

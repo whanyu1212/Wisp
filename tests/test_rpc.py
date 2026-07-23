@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import anyio
@@ -15,6 +16,9 @@ from wisp.events import (
     QueueItemsRemoved,
     RpcCommandFinished,
     RpcCommandStarted,
+    RpcMessageSnapshot,
+    RpcMessagesReported,
+    RpcMessageToolCallSnapshot,
     RpcStateReported,
     RpcStateSnapshot,
     TrustRequested,
@@ -26,6 +30,7 @@ from wisp.rpc import (
     CompactCommand,
     ConfigureCommand,
     FollowUpCommand,
+    GetMessagesCommand,
     GetQueueStateCommand,
     GetSessionStatsCommand,
     GetStateCommand,
@@ -122,6 +127,35 @@ def test_get_state_command_serializes_as_jsonl_and_parses() -> None:
     assert rpc_command_from_json(command.to_json_line()) == command
 
 
+def test_get_messages_command_serializes_as_jsonl_and_parses() -> None:
+    command = GetMessagesCommand(
+        id="messages-1",
+        session_id="session-1",
+        limit=25,
+        before_entry_id="entry-1",
+    )
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "messages-1",
+        "type": "get_messages",
+        "session_id": "session-1",
+        "limit": 25,
+        "before_entry_id": "entry-1",
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_get_messages_command_rejects_invalid_bounds() -> None:
+    with pytest.raises(ValidationError):
+        GetMessagesCommand(limit=0)
+    with pytest.raises(ValidationError):
+        GetMessagesCommand(limit=501)
+    with pytest.raises(ValidationError):
+        GetMessagesCommand(session_id="")
+    with pytest.raises(ValidationError):
+        GetMessagesCommand(before_entry_id="")
+
+
 def test_rpc_state_report_round_trips_only_at_schema_v16() -> None:
     event = RpcStateReported(
         command_id="state-1",
@@ -140,6 +174,36 @@ def test_rpc_state_report_round_trips_only_at_schema_v16() -> None:
     assert wisp_event_from_json(event.model_dump_json()) == event
     with pytest.raises(ValueError, match="require schema_version 16"):
         wisp_event_from_json(event.model_copy(update={"schema_version": 15}).model_dump_json())
+
+
+def test_rpc_messages_report_round_trips_only_at_schema_v17() -> None:
+    event = RpcMessagesReported(
+        command_id="messages-1",
+        session_id="session-1",
+        session_path=Path("/tmp/session.jsonl"),
+        active_leaf_id="entry-2",
+        messages=(
+            RpcMessageSnapshot(
+                entry_id="entry-1",
+                created_at=datetime(2026, 7, 23, tzinfo=UTC),
+                role="assistant",
+                content="running",
+                content_original_bytes=7,
+                tool_calls=(
+                    RpcMessageToolCallSnapshot(
+                        call_id="call-1",
+                        name="bash",
+                        arguments={"command": "pwd"},
+                        arguments_original_bytes=17,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    with pytest.raises(ValueError, match="require schema_version 17"):
+        wisp_event_from_json(event.model_copy(update={"schema_version": 16}).model_dump_json())
 
 
 def test_rpc_state_snapshot_is_frozen_and_forbids_extra_fields() -> None:
@@ -364,7 +428,7 @@ def test_wisp_event_from_json_parses_provider_retry_progress() -> None:
     assert wisp_event_from_json(retry.model_dump_json()) == retry
 
 
-@pytest.mark.parametrize("schema_version", [5, 15])
+@pytest.mark.parametrize("schema_version", [5, 16])
 def test_wisp_event_from_json_accepts_legacy_schema_versions(schema_version: int) -> None:
     payload: dict[str, object] = {
         "type": "rpc.command.finished",
@@ -406,6 +470,11 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         compact_id = await controller.compact("Keep paths")
         stats_id = await controller.get_session_stats()
         state_id = await controller.get_state()
+        messages_id = await controller.get_messages(
+            session_id="session-1",
+            limit=25,
+            before_entry_id="entry-1",
+        )
         steer_id = await controller.steer("redirect")
         follow_up_id = await controller.follow_up("continue")
         queue_state_id = await controller.get_queue_state()
@@ -427,6 +496,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             compact_id,
             stats_id,
             state_id,
+            messages_id,
             steer_id,
             follow_up_id,
             queue_state_id,
@@ -442,6 +512,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             "compact-id",
             "stats-id",
             "state-id",
+            "messages-id",
             "steer-id",
             "follow-up-id",
             "queue-state-id",
@@ -458,6 +529,12 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             CompactCommand(id="compact-id", instructions="Keep paths"),
             GetSessionStatsCommand(id="stats-id"),
             GetStateCommand(id="state-id"),
+            GetMessagesCommand(
+                id="messages-id",
+                session_id="session-1",
+                limit=25,
+                before_entry_id="entry-1",
+            ),
             SteerCommand(id="steer-id", content="redirect"),
             FollowUpCommand(id="follow-up-id", content="continue"),
             GetQueueStateCommand(id="queue-state-id"),

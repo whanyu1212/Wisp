@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
+from functools import partial
 from typing import Protocol, cast
 from uuid import uuid4
 
@@ -25,6 +26,7 @@ from wisp.events import (
     QueueMode,
     RpcCommandFinished,
     RpcCommandStarted,
+    RpcMessagesReported,
     RpcStateReported,
     RpcStateSnapshot,
     SessionStatsReported,
@@ -36,7 +38,14 @@ from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES, ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.entries import MessageSessionEntry
-from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
+from wisp.sessions.jsonl import (
+    DEFAULT_SESSION_MESSAGE_PAGE_LIMIT,
+    MAX_SESSION_MESSAGE_PAGE_LIMIT,
+    JsonlSession,
+    JsonlSessionStore,
+    SessionError,
+    SessionMessagePage,
+)
 from wisp.sessions.replay import resolve_session_tree
 
 from .rpc_configuration import _RpcConfigureOverrides
@@ -131,6 +140,8 @@ class RpcCommandExecutor:
             return self._dispatch_compact(command)
         if command_type == "get_session_stats":
             return self._dispatch_session_stats(command)
+        if command_type == "get_messages":
+            return self._dispatch_messages(command)
         if command_type == "get_state":
             return self._dispatch_state(command, running_command)
         if command_type in QUEUE_RPC_COMMAND_TYPES:
@@ -177,6 +188,20 @@ class RpcCommandExecutor:
             running_command=start_rpc_session_stats_command(
                 command,
                 agent=self.agent,
+                session_state=self.session_state,
+                task_group=self.task_group,
+                send=self.send,
+                write_event=self.write_event,
+                running_command_factory=self.running_command_factory,
+                command_completed_factory=self.command_completed_factory,
+            )
+        )
+
+    def _dispatch_messages(self, command: dict[str, object]) -> _RpcDispatchResult:
+        return _RpcDispatchResult(
+            running_command=start_rpc_messages_command(
+                command,
+                sessions=self.sessions,
                 session_state=self.session_state,
                 task_group=self.task_group,
                 send=self.send,
@@ -421,6 +446,78 @@ def start_rpc_session_stats_command(
     )
 
 
+def start_rpc_messages_command(
+    command: dict[str, object],
+    *,
+    sessions: JsonlSessionStore,
+    session_state: _RpcSessionState,
+    task_group: TaskGroup,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    write_event: RpcEventWriter,
+    running_command_factory: RunningCommandFactory = _RpcRunningCommand,
+    command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+) -> _RpcRunningCommand | None:
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return None
+
+    limit = _rpc_message_limit(command)
+    if isinstance(limit, str):
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=limit,
+            write_event=write_event,
+        )
+        return None
+    session_id = _optional_non_empty_string(command, "session_id", command_type)
+    if isinstance(session_id, ValueError):
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=str(session_id),
+            write_event=write_event,
+        )
+        return None
+    before_entry_id = _optional_non_empty_string(command, "before_entry_id", command_type)
+    if isinstance(before_entry_id, ValueError):
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=str(before_entry_id),
+            write_event=write_event,
+        )
+        return None
+
+    cancel_scope = anyio.CancelScope()
+    task_group.start_soon(
+        run_rpc_messages_command,
+        sessions,
+        session_state.session,
+        session_state.entry_count,
+        session_id,
+        limit,
+        before_entry_id,
+        command_id,
+        cancel_scope,
+        send.clone(),
+        write_event,
+        command_completed_factory,
+    )
+    return running_command_factory(
+        command_id=command_id,
+        command_type="get_messages",
+        cancel_scope=cancel_scope,
+    )
+
+
 async def run_rpc_session_stats_command(
     agent: CodingSession,
     session: JsonlSession | None,
@@ -467,6 +564,110 @@ async def run_rpc_session_stats_command(
             command_completed_factory(
                 command_id=command_id,
                 command_type="get_session_stats",
+                ok=ok,
+                history=refreshed_history,
+                entry_count=refreshed_entry_count,
+            )
+        )
+        await send.aclose()
+
+
+async def run_rpc_messages_command(
+    sessions: JsonlSessionStore,
+    selected_session: JsonlSession | None,
+    selected_entry_count: int,
+    session_id: str | None,
+    limit: int,
+    before_entry_id: str | None,
+    command_id: str,
+    cancel_scope: anyio.CancelScope,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    write_event: RpcEventWriter,
+    command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+) -> None:
+    ok = False
+    error: str | None = None
+    refreshed_history: tuple[Message, ...] | None = None
+    refreshed_entry_count = selected_entry_count
+    try:
+        with cancel_scope:
+            selected_read = session_id is None
+            if session_id is None:
+                session = selected_session
+            else:
+                session = await anyio.to_thread.run_sync(sessions.load, session_id)
+
+            if session is None:
+                page = SessionMessagePage(
+                    session_id=None,
+                    path=None,
+                    active_leaf_id=None,
+                    messages=(),
+                    truncated=False,
+                    next_before_entry_id=None,
+                )
+            elif not session.path.is_file():
+                page = SessionMessagePage(
+                    session_id=session.session_id,
+                    path=session.path,
+                    active_leaf_id=None,
+                    messages=(),
+                    truncated=False,
+                    next_before_entry_id=None,
+                )
+            else:
+                page = await anyio.to_thread.run_sync(
+                    partial(
+                        session.read_message_page,
+                        limit=limit,
+                        before_entry_id=before_entry_id,
+                    )
+                )
+
+            if selected_read and session is not None:
+                refreshed_entry_count, refreshed_history = await anyio.to_thread.run_sync(
+                    updated_rpc_session_state,
+                    session,
+                    (),
+                    selected_entry_count,
+                )
+            if cancel_scope.cancel_called:
+                error = "RPC get_messages command cancelled"
+                refreshed_history = None
+                refreshed_entry_count = selected_entry_count
+            else:
+                write_event(
+                    RpcMessagesReported(
+                        command_id=command_id,
+                        session_id=page.session_id,
+                        session_path=page.path,
+                        active_leaf_id=page.active_leaf_id,
+                        messages=page.messages,
+                        truncated=page.truncated,
+                        next_before_entry_id=page.next_before_entry_id,
+                    )
+                )
+                ok = True
+        if cancel_scope.cancel_called and error is None:
+            error = "RPC get_messages command cancelled"
+    except BaseException as exc:
+        if isinstance(exc, anyio.get_cancelled_exc_class()):
+            error = "RPC get_messages command cancelled"
+        else:
+            error = str(exc)
+    finally:
+        write_event(
+            RpcCommandFinished(
+                command_id=command_id,
+                command_type="get_messages",
+                ok=ok,
+                error=error,
+            )
+        )
+        await send.send(
+            command_completed_factory(
+                command_id=command_id,
+                command_type="get_messages",
                 ok=ok,
                 history=refreshed_history,
                 entry_count=refreshed_entry_count,
@@ -918,6 +1119,31 @@ def _project_buffered_prompt_queue_commands(
             "pending_follow_up_count": follow_up_count,
         }
     )
+
+
+def _rpc_message_limit(command: dict[str, object]) -> int | str:
+    limit = command.get("limit", DEFAULT_SESSION_MESSAGE_PAGE_LIMIT)
+    if type(limit) is not int:
+        return "RPC get_messages command field limit must be an integer"
+    if limit < 1 or limit > MAX_SESSION_MESSAGE_PAGE_LIMIT:
+        return (
+            "RPC get_messages command field limit must be between "
+            f"1 and {MAX_SESSION_MESSAGE_PAGE_LIMIT}"
+        )
+    return limit
+
+
+def _optional_non_empty_string(
+    command: dict[str, object],
+    field: str,
+    command_type: str,
+) -> str | None | ValueError:
+    value = command.get(field)
+    if value is None:
+        return None
+    if isinstance(value, str) and value:
+        return value
+    return ValueError(f"RPC {command_type} command field {field} must be a non-empty string")
 
 
 def require_rpc_queue_kind(

@@ -19,7 +19,14 @@ from weakref import WeakValueDictionary
 import anyio
 
 from wisp.agent.messages import Message
-from wisp.events import JsonObject, KnownWispEvent, WispEvent
+from wisp.events import (
+    JsonObject,
+    KnownWispEvent,
+    RpcMessageSnapshot,
+    RpcMessageToolCallSnapshot,
+    ToolCallSnapshot,
+    WispEvent,
+)
 from wisp.sessions.branching import (
     SessionBranchProjection,
     project_fork_from_user_message,
@@ -58,13 +65,22 @@ from wisp.sessions.replay import (
 
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
+DEFAULT_SESSION_MESSAGE_PAGE_LIMIT = 200
+MAX_SESSION_MESSAGE_PAGE_LIMIT = 500
+MESSAGE_CONTENT_BYTE_LIMIT = 64 * 1024
+TOOL_ARGUMENTS_BYTE_LIMIT = 64 * 1024
+MESSAGE_TOOL_CALL_LIMIT = 16
+MESSAGE_PAGE_TEXT_BYTE_LIMIT = 512 * 1024
 _FileSignature = tuple[int, int, int, int]
 
 __all__ = [
     "AmbiguousSessionError",
+    "DEFAULT_SESSION_MESSAGE_PAGE_LIMIT",
     "JsonlSession",
     "JsonlSessionStore",
+    "MAX_SESSION_MESSAGE_PAGE_LIMIT",
     "SessionForkResult",
+    "SessionMessagePage",
     "SessionSummary",
     "SessionError",
     "SessionNotFoundError",
@@ -121,6 +137,23 @@ class SessionSummary:
     updated_at: datetime
     entry_count: int
     active_leaf_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionMessagePage:
+    """Bounded active transcript page for frontend and RPC consumers."""
+
+    session_id: str | None
+    path: Path | None
+    active_leaf_id: str | None
+    messages: tuple[RpcMessageSnapshot, ...]
+    truncated: bool
+    next_before_entry_id: str | None
+
+
+@dataclass(slots=True)
+class _MessagePageTextBudget:
+    remaining: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,6 +504,22 @@ class JsonlSession:
         """Read the selected root-to-leaf tree path, excluding state records."""
 
         return tuple(resolve_session_tree(self.read_entries()).active_path)
+
+    def read_message_page(
+        self,
+        *,
+        limit: int = DEFAULT_SESSION_MESSAGE_PAGE_LIMIT,
+        before_entry_id: str | None = None,
+    ) -> SessionMessagePage:
+        """Read a bounded active-path transcript page in chronological order."""
+
+        return _message_page_from_entries(
+            self.read_entries(),
+            session_id=self.session_id,
+            path=self.path,
+            limit=limit,
+            before_entry_id=before_entry_id,
+        )
 
     def read_context_messages(self) -> tuple[Message, ...]:
         """Read only the messages in the active replay context."""
@@ -919,6 +968,187 @@ def _active_leaf_id(entry_index: dict[str, SessionEntry]) -> str | None:
         return last_entry.id
     assert isinstance(last_entry, ActiveLeafSessionEntry)
     return last_entry.active_leaf_id
+
+
+def _message_page_from_entries(
+    entries: Sequence[SessionEntry],
+    *,
+    session_id: str,
+    path: Path,
+    limit: int,
+    before_entry_id: str | None,
+) -> SessionMessagePage:
+    if limit < 1:
+        raise ValueError("message page limit must be at least 1")
+    if limit > MAX_SESSION_MESSAGE_PAGE_LIMIT:
+        raise ValueError(f"message page limit cannot exceed {MAX_SESSION_MESSAGE_PAGE_LIMIT}")
+
+    tree = resolve_session_tree(entries)
+    active_messages = tuple(
+        entry for entry in tree.active_path if isinstance(entry, MessageSessionEntry)
+    )
+    if before_entry_id is None:
+        candidates = active_messages
+    else:
+        cursor_index = next(
+            (index for index, entry in enumerate(active_messages) if entry.id == before_entry_id),
+            None,
+        )
+        if cursor_index is None:
+            raise SessionError(f"Session message cursor not found: {before_entry_id}")
+        candidates = active_messages[:cursor_index]
+
+    truncated = len(candidates) > limit
+    selected = candidates[-limit:]
+    text_budget = _MessagePageTextBudget(remaining=MESSAGE_PAGE_TEXT_BYTE_LIMIT)
+    newest_first_messages = tuple(
+        _rpc_message_snapshot(entry, text_budget=text_budget) for entry in reversed(selected)
+    )
+    return SessionMessagePage(
+        session_id=session_id,
+        path=path,
+        active_leaf_id=tree.active_leaf_id,
+        messages=tuple(reversed(newest_first_messages)),
+        truncated=truncated,
+        next_before_entry_id=selected[0].id if truncated and selected else None,
+    )
+
+
+def _rpc_message_snapshot(
+    entry: MessageSessionEntry,
+    *,
+    text_budget: _MessagePageTextBudget,
+) -> RpcMessageSnapshot:
+    message = entry.message
+    content, content_original_bytes, content_truncated = _clip_text_with_budget(
+        message.content,
+        limit=MESSAGE_CONTENT_BYTE_LIMIT,
+        text_budget=text_budget,
+    )
+    tool_calls = message.tool_calls or ()
+    selected_tool_calls = tool_calls[:MESSAGE_TOOL_CALL_LIMIT]
+    return RpcMessageSnapshot(
+        entry_id=entry.id,
+        parent_id=entry.parent_id,
+        operation_id=entry.operation_id,
+        created_at=entry.created_at,
+        role=message.role,
+        content=content,
+        content_original_bytes=content_original_bytes,
+        content_truncated=content_truncated,
+        tool_call_id=message.tool_call_id,
+        tool_name=message.tool_name,
+        tool_calls=tuple(
+            _rpc_tool_call_snapshot(tool_call, text_budget=text_budget)
+            for tool_call in selected_tool_calls
+        ),
+        tool_calls_original_count=len(tool_calls),
+        tool_calls_truncated=len(tool_calls) > MESSAGE_TOOL_CALL_LIMIT,
+        response_id=message.response_id,
+        finish_reason=message.finish_reason,
+        is_error=message.is_error,
+        usage=message.usage,
+        cost=message.cost,
+    )
+
+
+def _rpc_tool_call_snapshot(
+    tool_call: ToolCallSnapshot,
+    *,
+    text_budget: _MessagePageTextBudget,
+) -> RpcMessageToolCallSnapshot:
+    clipped_arguments, original_bytes, truncated = _clip_json_object(
+        tool_call.arguments,
+        limit=TOOL_ARGUMENTS_BYTE_LIMIT,
+        text_budget=text_budget,
+    )
+    return RpcMessageToolCallSnapshot(
+        call_id=tool_call.call_id,
+        name=tool_call.name,
+        arguments=clipped_arguments,
+        arguments_original_bytes=original_bytes,
+        arguments_truncated=truncated,
+        parse_error=tool_call.parse_error,
+    )
+
+
+def _clip_text_with_budget(
+    text: str,
+    *,
+    limit: int,
+    text_budget: _MessagePageTextBudget,
+) -> tuple[str, int, bool]:
+    effective_limit = min(limit, max(text_budget.remaining, 0))
+    clipped, original_bytes, truncated = _clip_text(text, limit=effective_limit)
+    text_budget.remaining = max(text_budget.remaining - len(clipped.encode("utf-8")), 0)
+    return clipped, original_bytes, truncated
+
+
+def _clip_text(text: str, *, limit: int) -> tuple[str, int, bool]:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text, len(encoded), False
+    return encoded[:limit].decode("utf-8", errors="ignore"), len(encoded), True
+
+
+def _clip_json_object(
+    arguments: JsonObject,
+    *,
+    limit: int,
+    text_budget: _MessagePageTextBudget,
+) -> tuple[JsonObject, int, bool]:
+    rendered = json.dumps(
+        arguments,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    encoded = rendered.encode("utf-8")
+    effective_limit = min(limit, max(text_budget.remaining, 0))
+    if len(encoded) <= effective_limit:
+        text_budget.remaining = max(text_budget.remaining - len(encoded), 0)
+        return dict(arguments), len(encoded), False
+    preview_arguments, preview_bytes = _clip_json_preview_wrapper(
+        rendered,
+        limit=effective_limit,
+    )
+    text_budget.remaining = max(text_budget.remaining - preview_bytes, 0)
+    return preview_arguments, len(encoded), True
+
+
+def _clip_json_preview_wrapper(rendered: str, *, limit: int) -> tuple[JsonObject, int]:
+    empty_preview: JsonObject = {"truncated_json_preview": ""}
+    empty_preview_bytes = _json_object_byte_count(empty_preview)
+    if limit < empty_preview_bytes:
+        return {}, 0
+
+    rendered_bytes = rendered.encode("utf-8")
+    low = 0
+    high = len(rendered_bytes)
+    best_preview = ""
+    best_byte_count = empty_preview_bytes
+    while low <= high:
+        midpoint = (low + high) // 2
+        preview = rendered_bytes[:midpoint].decode("utf-8", errors="ignore")
+        candidate: JsonObject = {"truncated_json_preview": preview}
+        candidate_byte_count = _json_object_byte_count(candidate)
+        if candidate_byte_count <= limit:
+            best_preview = preview
+            best_byte_count = candidate_byte_count
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    return {"truncated_json_preview": best_preview}, best_byte_count
+
+
+def _json_object_byte_count(value: JsonObject) -> int:
+    rendered = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return len(rendered.encode("utf-8"))
 
 
 def _validate_append_transition(

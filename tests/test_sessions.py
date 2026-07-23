@@ -43,9 +43,27 @@ from wisp.sessions.jsonl import (
     JsonlSession,
     JsonlSessionStore,
     SessionError,
+    SessionMessagePage,
     SessionNotFoundError,
     SessionSummary,
 )
+
+
+def _message_page_text_bytes(page: SessionMessagePage) -> int:
+    total = 0
+    for message in page.messages:
+        total += len(message.content.encode("utf-8"))
+        for tool_call in message.tool_calls:
+            if not tool_call.arguments:
+                continue
+            rendered = json.dumps(
+                tool_call.arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            total += len(rendered.encode("utf-8"))
+    return total
 
 
 def test_session_store_loads_by_path_filename_and_id_prefix(tmp_path: Path) -> None:
@@ -206,6 +224,214 @@ def test_session_persists_event_entries_without_polluting_messages(tmp_path: Pat
     assert events[1]["message"] == "boom"
 
 
+def test_session_message_page_reads_active_path_messages_and_pages(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> tuple[str, str, str]:
+        root = await session.append_message(Message(role="user", content="root"))
+        answer = await session.append_message(Message(role="assistant", content="answer"))
+        await session.append_message(Message(role="user", content="abandoned"))
+        abandoned_answer = await session.append_message(
+            Message(role="assistant", content="abandoned answer")
+        )
+        await session.select_active_leaf(
+            answer.id,
+            expected_active_leaf_id=abandoned_answer.id,
+        )
+        branch = await session.append_message(Message(role="user", content="branch"))
+        await session.append_event(ErrorEvent(message="audit only"))
+        await session.append_message(Message(role="assistant", content="branch answer"))
+        return root.id, answer.id, branch.id
+
+    root_id, answer_id, branch_id = anyio.run(write)
+
+    page = session.read_message_page(limit=2)
+
+    assert isinstance(page, SessionMessagePage)
+    assert page.session_id == session.session_id
+    assert page.path == session.path
+    assert page.active_leaf_id != branch_id
+    assert [message.entry_id for message in page.messages] == [
+        branch_id,
+        page.active_leaf_id,
+    ]
+    assert [message.content for message in page.messages] == ["branch", "branch answer"]
+    assert page.messages[0].parent_id == answer_id
+    assert page.truncated is True
+    assert page.next_before_entry_id == branch_id
+
+    older = session.read_message_page(limit=2, before_entry_id=branch_id)
+
+    assert [message.entry_id for message in older.messages] == [root_id, answer_id]
+    assert [message.content for message in older.messages] == ["root", "answer"]
+    assert older.truncated is False
+    assert older.next_before_entry_id is None
+
+
+def test_session_message_page_rejects_invalid_limits_and_unknown_cursor(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        await session.append_message(Message(role="user", content="hello"))
+
+    anyio.run(write)
+
+    with pytest.raises(ValueError, match="at least 1"):
+        session.read_message_page(limit=0)
+    with pytest.raises(ValueError, match="cannot exceed 500"):
+        session.read_message_page(limit=501)
+    with pytest.raises(SessionError, match="Session message cursor not found"):
+        session.read_message_page(before_entry_id="missing")
+
+
+def test_session_message_page_clips_large_content_and_tool_arguments(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    content = "🙂" * 20_000
+    tool_argument = "x" * 70_000
+
+    async def write() -> None:
+        await session.append_message(
+            Message(
+                role="assistant",
+                content=content,
+                tool_calls=tuple(
+                    ToolCallSnapshot(
+                        call_id=f"call-{index}",
+                        name="bash",
+                        arguments={"command": tool_argument},
+                    )
+                    for index in range(20)
+                ),
+                finish_reason="tool_calls",
+            )
+        )
+
+    anyio.run(write)
+
+    page = session.read_message_page()
+    message = page.messages[0]
+    tool_call = message.tool_calls[0]
+
+    assert message.content_truncated is True
+    assert message.content_original_bytes == len(content.encode("utf-8"))
+    assert message.content.encode("utf-8").decode("utf-8") == message.content
+    assert len(message.content.encode("utf-8")) <= 64 * 1024
+    assert len(message.tool_calls) == 16
+    assert message.tool_calls_original_count == 20
+    assert message.tool_calls_truncated is True
+    assert tool_call.arguments_truncated is True
+    assert tool_call.arguments_original_bytes > 64 * 1024
+    assert set(tool_call.arguments) == {"truncated_json_preview"}
+    assert len(str(tool_call.arguments["truncated_json_preview"]).encode("utf-8")) <= 64 * 1024
+
+
+def test_session_message_page_applies_aggregate_budget_newest_first(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    oversized = "x" * 70_000
+
+    async def write() -> None:
+        for _ in range(9):
+            await session.append_message(Message(role="assistant", content=oversized))
+        await session.append_message(Message(role="user", content="latest user"))
+        await session.append_message(Message(role="assistant", content="latest assistant"))
+
+    anyio.run(write)
+
+    page = session.read_message_page(limit=11)
+
+    assert len(page.messages) == 11
+    assert page.messages[-2].content == "latest user"
+    assert page.messages[-2].content_truncated is False
+    assert page.messages[-1].content == "latest assistant"
+    assert page.messages[-1].content_truncated is False
+    assert page.messages[0].content == ""
+    assert page.messages[0].content_truncated is True
+    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+
+
+def test_session_message_page_budgets_serialized_truncated_argument_wrapper(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    escaping_argument = "\\" * 70_000
+
+    async def write() -> None:
+        await session.append_message(
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    ToolCallSnapshot(
+                        call_id="call-1",
+                        name="bash",
+                        arguments={"command": escaping_argument},
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        )
+
+    anyio.run(write)
+
+    page = session.read_message_page()
+    tool_call = page.messages[0].tool_calls[0]
+    rendered_arguments = json.dumps(
+        tool_call.arguments,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    assert tool_call.arguments_truncated is True
+    assert set(tool_call.arguments) == {"truncated_json_preview"}
+    assert len(rendered_arguments.encode("utf-8")) <= jsonl_module.TOOL_ARGUMENTS_BYTE_LIMIT
+    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+
+
+def test_session_message_page_enforces_aggregate_text_budget(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    content = "🙂" * 20_000
+    tool_argument = "x" * 70_000
+
+    async def write() -> None:
+        for index in range(10):
+            await session.append_message(
+                Message(
+                    role="assistant",
+                    content=content,
+                    tool_calls=(
+                        ToolCallSnapshot(
+                            call_id=f"call-{index}",
+                            name="bash",
+                            arguments={"command": tool_argument},
+                        ),
+                    ),
+                    finish_reason="tool_calls",
+                )
+            )
+
+    anyio.run(write)
+
+    page = session.read_message_page(limit=10)
+
+    assert len(page.messages) == 10
+    assert any(message.content_truncated for message in page.messages)
+    assert any(
+        tool_call.arguments_truncated
+        for message in page.messages
+        for tool_call in message.tool_calls
+    )
+    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+
+
 def test_session_round_trips_completed_message_metadata(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
     assistant = Message(
@@ -270,13 +496,18 @@ def test_session_loads_legacy_messages_without_rewriting_them(tmp_path: Path) ->
     path.write_text(f"{json.dumps(legacy_entry)}\n", encoding="utf-8")
     original = path.read_bytes()
 
-    message = JsonlSessionStore(tmp_path).load(path).read_messages()[0]
+    session = JsonlSessionStore(tmp_path).load(path)
+    message = session.read_messages()[0]
+    page = session.read_message_page()
 
     assert message.tool_calls is None
     assert message.response_id is None
     assert message.finish_reason is None
     assert message.is_error is None
     assert message.usage is None
+    assert [snapshot.entry_id for snapshot in page.messages] == ["legacy-entry"]
+    assert [snapshot.content for snapshot in page.messages] == ["done"]
+    assert page.active_leaf_id == "legacy-entry"
     assert path.read_bytes() == original
 
 
@@ -337,7 +568,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
         records[3]["id"],
     ]
     assert records[3]["event"]["schema_version"] == 1
-    assert records[3]["event"]["payload"]["schema_version"] == 16
+    assert records[3]["event"]["payload"]["schema_version"] == 17
     assert isinstance(session.read_entries()[0], MessageSessionEntry)
     assert isinstance(session.read_entries()[3], EventSessionEntry)
     assert isinstance(session.read_entries()[4], CompactionSessionEntry)
@@ -543,7 +774,7 @@ def test_session_upgrades_legacy_v5_v6_events_only_on_typed_access(
 
 def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path) -> None:
     path = tmp_path / "future-event.jsonl"
-    raw_event = {"type": "future.event", "schema_version": 17, "future": True}
+    raw_event = {"type": "future.event", "schema_version": 18, "future": True}
     legacy = {
         "id": "future-event",
         "session_id": "event-session",
@@ -555,7 +786,7 @@ def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path)
     session = JsonlSessionStore(tmp_path).load(path)
 
     assert session.read_events() == (raw_event,)
-    with pytest.raises(UnsupportedPersistedEventVersionError, match="schema_version 17"):
+    with pytest.raises(UnsupportedPersistedEventVersionError, match="schema_version 18"):
         session.read_typed_events()
 
 

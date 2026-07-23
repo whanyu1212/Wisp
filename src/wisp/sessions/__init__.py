@@ -20,7 +20,13 @@ from .errors import (
     UnsupportedPersistedEventVersionError,
     UnsupportedSessionEntryVersionError,
 )
-from .jsonl import JsonlSession, JsonlSessionStore, SessionForkResult, SessionSummary
+from .jsonl import (
+    JsonlSession,
+    JsonlSessionStore,
+    SessionForkResult,
+    SessionMessagePage,
+    SessionSummary,
+)
 from .replay import (
     SessionContextRow,
     SessionReplay,
@@ -48,6 +54,7 @@ __all__ = [
     "SessionEntry",
     "SessionError",
     "SessionForkResult",
+    "SessionMessagePage",
     "SessionReplay",
     "SessionReplayError",
     "SessionSummary",

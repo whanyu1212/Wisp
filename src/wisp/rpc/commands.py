@@ -61,6 +61,15 @@ class GetStateCommand(RpcCommandModel):
     type: Literal["get_state"] = "get_state"
 
 
+class GetMessagesCommand(RpcCommandModel):
+    """Return a bounded persisted transcript page."""
+
+    type: Literal["get_messages"] = "get_messages"
+    session_id: str | None = Field(default=None, min_length=1)
+    limit: int = Field(default=200, ge=1, le=500)
+    before_entry_id: str | None = Field(default=None, min_length=1)
+
+
 class SteerCommand(RpcCommandModel):
     """Queue text after the active run's current assistant/tool batch."""
 
@@ -158,6 +167,7 @@ type RpcCommand = Annotated[
     | CompactCommand
     | GetSessionStatsCommand
     | GetStateCommand
+    | GetMessagesCommand
     | SteerCommand
     | FollowUpCommand
     | GetQueueStateCommand
