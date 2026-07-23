@@ -23,6 +23,7 @@ from wisp.rpc.commands import (
     FollowUpCommand,
     GetQueueStateCommand,
     GetSessionStatsCommand,
+    GetStateCommand,
     PopQueueCommand,
     PromptCommand,
     RpcCommand,
@@ -82,6 +83,13 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("stats")
         await self._transport.send(GetSessionStatsCommand(id=selected_id))
+        return selected_id
+
+    async def get_state(self, *, command_id: str | None = None) -> str:
+        """Request an immediate in-memory RPC state snapshot."""
+
+        selected_id = command_id or self._command_id_factory("state")
+        await self._transport.send(GetStateCommand(id=selected_id))
         return selected_id
 
     async def steer(self, content: str, *, command_id: str | None = None) -> str:

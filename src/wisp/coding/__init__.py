@@ -11,11 +11,13 @@ from wisp.coding.configuration import (
     resolve_coding_session_configuration,
 )
 from wisp.coding.session import CodingSession
+from wisp.events import CodingSessionState
 
 __all__ = [
     "AlreadyCompactedError",
     "CodingSession",
     "CodingSessionConfiguration",
+    "CodingSessionState",
     "CompactionSummaryError",
     "ManualCompactionPlan",
     "NothingToCompactError",

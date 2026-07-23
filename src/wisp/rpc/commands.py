@@ -55,6 +55,12 @@ class GetSessionStatsCommand(RpcCommandModel):
     type: Literal["get_session_stats"] = "get_session_stats"
 
 
+class GetStateCommand(RpcCommandModel):
+    """Return an immediate in-memory RPC state snapshot."""
+
+    type: Literal["get_state"] = "get_state"
+
+
 class SteerCommand(RpcCommandModel):
     """Queue text after the active run's current assistant/tool batch."""
 
@@ -151,6 +157,7 @@ type RpcCommand = Annotated[
     PromptCommand
     | CompactCommand
     | GetSessionStatsCommand
+    | GetStateCommand
     | SteerCommand
     | FollowUpCommand
     | GetQueueStateCommand

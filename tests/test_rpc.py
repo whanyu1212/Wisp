@@ -7,6 +7,7 @@ from pathlib import Path
 
 import anyio
 import pytest
+from pydantic import ValidationError
 
 from wisp.events import (
     ProjectConfigApplied,
@@ -14,6 +15,8 @@ from wisp.events import (
     QueueItemsRemoved,
     RpcCommandFinished,
     RpcCommandStarted,
+    RpcStateReported,
+    RpcStateSnapshot,
     TrustRequested,
     TrustResolved,
     wisp_event_from_json,
@@ -25,6 +28,7 @@ from wisp.rpc import (
     FollowUpCommand,
     GetQueueStateCommand,
     GetSessionStatsCommand,
+    GetStateCommand,
     JsonlSubprocessRpcTransport,
     PopQueueCommand,
     RpcController,
@@ -106,6 +110,66 @@ def test_get_session_stats_command_serializes_as_jsonl_and_parses() -> None:
         "type": "get_session_stats",
     }
     assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_get_state_command_serializes_as_jsonl_and_parses() -> None:
+    command = GetStateCommand(id="state-1")
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "state-1",
+        "type": "get_state",
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_rpc_state_report_round_trips_only_at_schema_v16() -> None:
+    event = RpcStateReported(
+        command_id="state-1",
+        state=RpcStateSnapshot(
+            provider="fake",
+            model="fake-model",
+            effort=None,
+            auto_compaction_enabled=True,
+            steering_mode="one_at_a_time",
+            follow_up_mode="one_at_a_time",
+            pending_steering_count=0,
+            pending_follow_up_count=0,
+        ),
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    with pytest.raises(ValueError, match="require schema_version 16"):
+        wisp_event_from_json(event.model_copy(update={"schema_version": 15}).model_dump_json())
+
+
+def test_rpc_state_snapshot_is_frozen_and_forbids_extra_fields() -> None:
+    state = RpcStateSnapshot(
+        provider="fake",
+        model="fake-model",
+        effort=None,
+        auto_compaction_enabled=True,
+        steering_mode="one_at_a_time",
+        follow_up_mode="one_at_a_time",
+        pending_steering_count=0,
+        pending_follow_up_count=0,
+    )
+
+    with pytest.raises(ValidationError, match="frozen"):
+        state.provider = "other"
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        RpcStateSnapshot.model_validate(
+            {
+                "provider": "fake",
+                "model": "fake-model",
+                "effort": None,
+                "auto_compaction_enabled": True,
+                "steering_mode": "one_at_a_time",
+                "follow_up_mode": "one_at_a_time",
+                "pending_steering_count": 0,
+                "pending_follow_up_count": 0,
+                "unexpected": True,
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -300,16 +364,17 @@ def test_wisp_event_from_json_parses_provider_retry_progress() -> None:
     assert wisp_event_from_json(retry.model_dump_json()) == retry
 
 
-def test_wisp_event_from_json_accepts_schema_v5() -> None:
+@pytest.mark.parametrize("schema_version", [5, 15])
+def test_wisp_event_from_json_accepts_legacy_schema_versions(schema_version: int) -> None:
     payload: dict[str, object] = {
         "type": "rpc.command.finished",
-        "schema_version": 5,
+        "schema_version": schema_version,
         "command_id": "cmd-1",
         "command_type": "prompt",
         "ok": True,
     }
 
-    assert wisp_event_from_json(json.dumps(payload)).schema_version == 5
+    assert wisp_event_from_json(json.dumps(payload)).schema_version == schema_version
 
 
 @pytest.mark.parametrize("schema_version", [None, 1, 2, 3, 4])
@@ -340,6 +405,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         prompt_id = await controller.prompt("hello")
         compact_id = await controller.compact("Keep paths")
         stats_id = await controller.get_session_stats()
+        state_id = await controller.get_state()
         steer_id = await controller.steer("redirect")
         follow_up_id = await controller.follow_up("continue")
         queue_state_id = await controller.get_queue_state()
@@ -360,6 +426,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             prompt_id,
             compact_id,
             stats_id,
+            state_id,
             steer_id,
             follow_up_id,
             queue_state_id,
@@ -374,6 +441,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             "prompt-id",
             "compact-id",
             "stats-id",
+            "state-id",
             "steer-id",
             "follow-up-id",
             "queue-state-id",
@@ -389,6 +457,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             PromptCommand(id="prompt-id", prompt="hello"),
             CompactCommand(id="compact-id", instructions="Keep paths"),
             GetSessionStatsCommand(id="stats-id"),
+            GetStateCommand(id="state-id"),
             SteerCommand(id="steer-id", content="redirect"),
             FollowUpCommand(id="follow-up-id", content="continue"),
             GetQueueStateCommand(id="queue-state-id"),

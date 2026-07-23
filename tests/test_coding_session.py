@@ -387,6 +387,42 @@ def test_coding_session_queue_state_is_safe_while_idle(tmp_path: Path) -> None:
         agent.clear_queue()
 
 
+def test_coding_session_state_snapshot_uses_effective_configuration_without_io(
+    tmp_path: Path,
+) -> None:
+    store = JsonlSessionStore(tmp_path)
+    default_agent = CodingSession(provider=FakeProvider(), sessions=store)
+    configured_agent = CodingSession(
+        provider=FakeProvider(),
+        sessions=store,
+        model="configured-model",
+        effort="high",
+        auto_compaction_enabled=False,
+    )
+
+    assert default_agent.state_snapshot().model_dump() == {
+        "provider": "fake",
+        "model": "fake",
+        "effort": None,
+        "auto_compaction_enabled": True,
+        "steering_mode": "one_at_a_time",
+        "follow_up_mode": "one_at_a_time",
+        "pending_steering_count": 0,
+        "pending_follow_up_count": 0,
+    }
+    assert configured_agent.state_snapshot().model_dump() == {
+        "provider": "fake",
+        "model": "configured-model",
+        "effort": "high",
+        "auto_compaction_enabled": False,
+        "steering_mode": "one_at_a_time",
+        "follow_up_mode": "one_at_a_time",
+        "pending_steering_count": 0,
+        "pending_follow_up_count": 0,
+    }
+    assert tuple(tmp_path.iterdir()) == ()
+
+
 def test_coding_session_queue_facade_delegates_to_active_harness(tmp_path: Path) -> None:
     async def run_agent() -> None:
         provider = ScriptedProvider(
@@ -404,6 +440,13 @@ def test_coding_session_queue_facade_delegates_to_active_harness(tmp_path: Path)
             assert agent.set_queue_mode("follow_up", "all").follow_up_mode == "all"
             assert agent.steer("steer one").steering == ("steer one",)
             assert agent.follow_up("follow one").follow_up == ("follow one",)
+            snapshot = agent.state_snapshot()
+            assert snapshot.steering_mode == "all"
+            assert snapshot.follow_up_mode == "all"
+            assert snapshot.pending_steering_count == 1
+            assert snapshot.pending_follow_up_count == 1
+            assert agent.queue_state().steering == ("steer one",)
+            assert agent.queue_state().follow_up == ("follow one",)
             popped, pop_state = agent.pop_queue("steering")
             assert popped is not None
             assert popped.content == "steer one"
@@ -511,6 +554,21 @@ def test_coding_session_retains_unconsumed_queues_for_same_session_retry(
             "retained follow-up two",
         )
         assert agent.queue_state(session).follow_up_mode == "all"
+        entry_count_before_snapshot = len(session.read_entries())
+        retained_snapshot = agent.state_snapshot(session)
+        assert retained_snapshot.steering_mode == "all"
+        assert retained_snapshot.follow_up_mode == "all"
+        assert retained_snapshot.pending_steering_count == 2
+        assert retained_snapshot.pending_follow_up_count == 2
+        assert len(session.read_entries()) == entry_count_before_snapshot
+        assert agent.queue_state(session).steering == (
+            "retained steering one",
+            "retained steering two",
+        )
+        assert agent.queue_state(session).follow_up == (
+            "retained follow-up one",
+            "retained follow-up two",
+        )
         assert all(
             message.content
             not in {

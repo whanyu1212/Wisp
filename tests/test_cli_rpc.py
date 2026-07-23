@@ -783,6 +783,7 @@ def test_rpc_queue_commands_wait_for_prompt_readiness_then_bypass(
     monkeypatch.setattr(_RpcTrustGate, "resolve", delayed_resolve)
     commands = [
         {"id": "prompt-1", "type": "prompt", "prompt": "block"},
+        {"id": "rpc-state-1", "type": "get_state"},
         {"id": "steer-1", "type": "steer", "content": "one"},
         {"id": "steer-2", "type": "steer", "content": "two"},
         {"id": "follow-1", "type": "follow_up", "content": "later"},
@@ -829,6 +830,18 @@ def test_rpc_queue_commands_wait_for_prompt_readiness_then_bypass(
     assert state_records[1]["follow_up"] == ["later"]
     assert state_records[1]["follow_up_mode"] == "all"
 
+    rpc_state_records = command_records("rpc-state-1")
+    assert [record["type"] for record in rpc_state_records] == [
+        "rpc.command.started",
+        "rpc.state",
+        "rpc.command.finished",
+    ]
+    assert rpc_state_records[1]["state"]["active_command_id"] == "prompt-1"
+    assert rpc_state_records[1]["state"]["active_command_type"] == "prompt"
+    assert rpc_state_records[1]["state"]["cancel_requested"] is False
+    assert rpc_state_records[1]["state"]["session_id"]
+    assert rpc_state_records[1]["state"]["session_path"]
+
     pop_records = command_records("pop-1")
     assert [record["type"] for record in pop_records] == [
         "rpc.command.started",
@@ -857,6 +870,7 @@ def test_rpc_queue_commands_wait_for_prompt_readiness_then_bypass(
         if record["type"] == "rpc.command.finished" and record["command_id"] == "prompt-1"
     )
     for command_id in (
+        "rpc-state-1",
         "steer-1",
         "steer-2",
         "follow-1",
@@ -1017,7 +1031,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "agent.completed",
         "rpc.command.finished",
     ]
-    assert all(record["schema_version"] == 15 for record in records)
+    assert all(record["schema_version"] == 16 for record in records)
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"
@@ -1057,13 +1071,61 @@ def test_rpc_mode_reports_stats_after_queued_prompt(tmp_path: Path) -> None:
     assert finished == [
         {
             "type": "rpc.command.finished",
-            "schema_version": 15,
+            "schema_version": 16,
             "timestamp": finished[0]["timestamp"],
             "command_id": "stats-1",
             "command_type": "get_session_stats",
             "ok": True,
             "error": None,
         }
+    ]
+
+
+def test_rpc_mode_reports_idle_and_reconfigured_state(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"state-1","type":"get_state"}\n'
+            '{"id":"configure-1","type":"configure","model":"gpt-5.5","effort":"high"}\n'
+            '{"id":"state-2","type":"get_state"}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    reports = [record for record in records if record["type"] == "rpc.state"]
+    assert [record["command_id"] for record in reports] == ["state-1", "state-2"]
+    assert reports[0]["state"] == {
+        "provider": "fake",
+        "model": "fake",
+        "effort": None,
+        "auto_compaction_enabled": True,
+        "steering_mode": "one_at_a_time",
+        "follow_up_mode": "one_at_a_time",
+        "pending_steering_count": 0,
+        "pending_follow_up_count": 0,
+        "session_id": None,
+        "session_path": None,
+        "active_command_id": None,
+        "active_command_type": None,
+        "cancel_requested": False,
+    }
+    assert reports[1]["state"] == {
+        **reports[0]["state"],
+        "model": "gpt-5.5",
+        "effort": "high",
+    }
+    assert [record["type"] for record in records] == [
+        "rpc.command.started",
+        "rpc.state",
+        "rpc.command.finished",
+        "rpc.command.started",
+        "rpc.command.finished",
+        "rpc.command.started",
+        "rpc.state",
+        "rpc.command.finished",
     ]
 
 

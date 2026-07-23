@@ -74,7 +74,12 @@ type RpcReject = Callable[[dict[str, object], str], None]
 type RpcCommandType = Callable[[dict[str, object]], str]
 
 _MAX_QUEUED_RPC_COMMANDS = 100
-_BYPASS_QUEUE_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {"approval", "cancel", "trust"}
+_ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
+    "approval",
+    "cancel",
+    "get_state",
+    "trust",
+}
 
 
 class RpcControlReceiver(Protocol):
@@ -204,7 +209,7 @@ class RpcCoordinator:
                 reject=reject,
             )
             return False
-        if running is not None and (selected_type not in _BYPASS_QUEUE_COMMANDS):
+        if running is not None and (selected_type not in _ACTIVE_COMMAND_BYPASS_COMMANDS):
             self._enqueue_command(command, queue=self.queued_commands, reject=reject)
             return False
         return self._dispatch(command, dispatch=dispatch)

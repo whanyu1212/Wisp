@@ -17,6 +17,7 @@ from wisp.agent.messages import Message
 from wisp.coding import CodingSession
 from wisp.events import (
     AgentStarted,
+    CodingSessionState,
     ErrorEvent,
     ModelProviderAutoSwitched,
     QueueItemsRemoved,
@@ -24,6 +25,8 @@ from wisp.events import (
     QueueMode,
     RpcCommandFinished,
     RpcCommandStarted,
+    RpcStateReported,
+    RpcStateSnapshot,
     SessionStatsReported,
     WispEvent,
 )
@@ -128,6 +131,8 @@ class RpcCommandExecutor:
             return self._dispatch_compact(command)
         if command_type == "get_session_stats":
             return self._dispatch_session_stats(command)
+        if command_type == "get_state":
+            return self._dispatch_state(command, running_command)
         if command_type in QUEUE_RPC_COMMAND_TYPES:
             return self._dispatch_queue(command, running_command)
         return self._dispatch_control(command, running_command)
@@ -190,6 +195,21 @@ class RpcCommandExecutor:
             command,
             agent=self.agent,
             session=self.session_state.session,
+            write_event=self.write_event,
+        )
+        return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_state(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        handle_rpc_state_command(
+            command,
+            agent=self.agent,
+            session=self.session_state.session,
+            running_command=running_command,
+            pending_prompt_queue_commands=tuple(self.coordinator.pending_prompt_queue_commands),
             write_event=self.write_event,
         )
         return _RpcDispatchResult(running_command=running_command)
@@ -787,6 +807,117 @@ def handle_rpc_queue_command(
         write_event(removed)
     write_event(state)
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def handle_rpc_state_command(
+    command: dict[str, object],
+    *,
+    agent: CodingSession,
+    session: JsonlSession | None,
+    running_command: _RpcRunningCommand | None,
+    pending_prompt_queue_commands: tuple[dict[str, object], ...] = (),
+    write_event: RpcEventWriter,
+) -> None:
+    """Return one coherent in-memory state snapshot without becoming active."""
+
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return
+
+    try:
+        core_state = _project_buffered_prompt_queue_commands(
+            agent.state_snapshot(session),
+            pending_prompt_queue_commands,
+        )
+        state = RpcStateSnapshot(
+            **core_state.model_dump(),
+            session_id=session.session_id if session is not None else None,
+            session_path=session.path if session is not None else None,
+            active_command_id=(running_command.command_id if running_command is not None else None),
+            active_command_type=(
+                running_command.command_type if running_command is not None else None
+            ),
+            cancel_requested=(
+                running_command.cancel_scope.cancel_called if running_command is not None else False
+            ),
+        )
+    except Exception as exc:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=str(exc),
+            write_event=write_event,
+        )
+        return
+
+    write_event(RpcStateReported(command_id=command_id, state=state))
+    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def _project_buffered_prompt_queue_commands(
+    state: CodingSessionState,
+    commands: tuple[dict[str, object], ...],
+) -> CodingSessionState:
+    """Project prompt-startup queue commands without mutating coordinator/session state."""
+
+    if not commands:
+        return state
+    steering_mode = state.steering_mode
+    follow_up_mode = state.follow_up_mode
+    steering_count = state.pending_steering_count
+    follow_up_count = state.pending_follow_up_count
+    for command in commands:
+        command_type = rpc_command_type(command)
+        _, id_error = rpc_command_id(command)
+        if id_error is not None:
+            continue
+        try:
+            if command_type == "steer":
+                if isinstance(command.get("content"), str):
+                    steering_count += 1
+            elif command_type == "follow_up":
+                if isinstance(command.get("content"), str):
+                    follow_up_count += 1
+            elif command_type == "set_queue_mode":
+                kind = require_rpc_queue_kind(command, command_type=command_type)
+                mode = require_rpc_queue_mode(command)
+                if kind == "steering":
+                    steering_mode = mode
+                else:
+                    follow_up_mode = mode
+            elif command_type == "pop_queue":
+                kind = require_rpc_queue_kind(command, command_type=command_type)
+                if kind == "steering":
+                    steering_count = max(0, steering_count - 1)
+                else:
+                    follow_up_count = max(0, follow_up_count - 1)
+            elif command_type == "clear_queue":
+                clear_kind = optional_rpc_queue_kind(command, command_type=command_type)
+                if clear_kind is None:
+                    steering_count = 0
+                    follow_up_count = 0
+                elif clear_kind == "steering":
+                    steering_count = 0
+                else:
+                    follow_up_count = 0
+        except ValueError:
+            continue
+
+    return state.model_copy(
+        update={
+            "steering_mode": steering_mode,
+            "follow_up_mode": follow_up_mode,
+            "pending_steering_count": steering_count,
+            "pending_follow_up_count": follow_up_count,
+        }
+    )
 
 
 def require_rpc_queue_kind(
