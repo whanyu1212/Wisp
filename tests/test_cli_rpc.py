@@ -784,6 +784,7 @@ def test_rpc_queue_commands_wait_for_prompt_readiness_then_bypass(
     commands = [
         {"id": "prompt-1", "type": "prompt", "prompt": "block"},
         {"id": "rpc-state-1", "type": "get_state"},
+        {"id": "messages-1", "type": "get_messages"},
         {"id": "steer-1", "type": "steer", "content": "one"},
         {"id": "steer-2", "type": "steer", "content": "two"},
         {"id": "follow-1", "type": "follow_up", "content": "later"},
@@ -886,6 +887,15 @@ def test_rpc_queue_commands_wait_for_prompt_readiness_then_bypass(
         )
         assert queue_finish_index < prompt_finish_index
         assert records[queue_finish_index]["ok"] is True
+    messages_finish_index = next(
+        index
+        for index, record in enumerate(records)
+        if record["type"] == "rpc.command.finished" and record["command_id"] == "messages-1"
+    )
+    assert messages_finish_index > prompt_finish_index
+    messages_report = next(record for record in records if record["type"] == "rpc.messages")
+    assert messages_report["command_id"] == "messages-1"
+    assert messages_report["session_id"]
 
 
 def test_rpc_rejects_container_queue_fields_and_remains_usable(tmp_path: Path) -> None:
@@ -1031,7 +1041,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "agent.completed",
         "rpc.command.finished",
     ]
-    assert all(record["schema_version"] == 16 for record in records)
+    assert all(record["schema_version"] == 17 for record in records)
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"
@@ -1071,10 +1081,60 @@ def test_rpc_mode_reports_stats_after_queued_prompt(tmp_path: Path) -> None:
     assert finished == [
         {
             "type": "rpc.command.finished",
-            "schema_version": 16,
+            "schema_version": 17,
             "timestamp": finished[0]["timestamp"],
             "command_id": "stats-1",
             "command_type": "get_session_stats",
+            "ok": True,
+            "error": None,
+        }
+    ]
+
+
+def test_rpc_mode_reports_messages_after_queued_prompt(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"prompt-1","type":"prompt","prompt":"hello"}\n'
+            '{"id":"messages-1","type":"get_messages","limit":5}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    report = next(record for record in records if record["type"] == "rpc.messages")
+    assert report["command_id"] == "messages-1"
+    assert report["schema_version"] == 17
+    assert report["session_id"]
+    assert report["session_path"]
+    assert report["active_leaf_id"]
+    assert report["truncated"] is False
+    assert report["next_before_entry_id"] is None
+    turn_messages = report["messages"][-2:]
+    assert [message["role"] for message in turn_messages] == ["user", "assistant"]
+    assert [message["content"] for message in turn_messages] == [
+        "hello",
+        "fake response to: hello",
+    ]
+    assert turn_messages[1]["parent_id"] == turn_messages[0]["entry_id"]
+    assert turn_messages[1]["entry_id"] == report["active_leaf_id"]
+    assert all(message["content_truncated"] is False for message in turn_messages)
+    finished = [
+        record
+        for record in records
+        if record["type"] == "rpc.command.finished" and record["command_id"] == "messages-1"
+    ]
+    assert finished == [
+        {
+            "type": "rpc.command.finished",
+            "schema_version": 17,
+            "timestamp": finished[0]["timestamp"],
+            "command_id": "messages-1",
+            "command_type": "get_messages",
             "ok": True,
             "error": None,
         }

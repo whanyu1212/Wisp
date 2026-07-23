@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 16
+EVENT_SCHEMA_VERSION = 17
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -26,6 +26,7 @@ QUEUE_UPDATE_SCHEMA_VERSION = 13
 QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION = 14
 QUEUE_ITEMS_REMOVED_SCHEMA_VERSION = 15
 RPC_STATE_SCHEMA_VERSION = 16
+RPC_MESSAGES_SCHEMA_VERSION = 17
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -46,7 +47,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] = 16
+    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] = 17
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -263,6 +264,44 @@ class RpcStateSnapshot(CodingSessionState):
     active_command_id: str | None = None
     active_command_type: str | None = None
     cancel_requested: bool = False
+
+
+class RpcMessageToolCallSnapshot(BaseModel):
+    """Bounded tool-call state retained on an RPC transcript message."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    call_id: str
+    name: str
+    arguments: JsonObject
+    arguments_original_bytes: int = Field(ge=0)
+    arguments_truncated: bool = False
+    parse_error: str | None = None
+
+
+class RpcMessageSnapshot(BaseModel):
+    """One bounded, frontend-oriented persisted message snapshot."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    entry_id: str
+    parent_id: str | None = None
+    operation_id: str | None = None
+    created_at: datetime
+    role: MessageRole
+    content: str
+    content_original_bytes: int = Field(ge=0)
+    content_truncated: bool = False
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    tool_calls: tuple[RpcMessageToolCallSnapshot, ...] = ()
+    tool_calls_original_count: int = Field(default=0, ge=0)
+    tool_calls_truncated: bool = False
+    response_id: str | None = None
+    finish_reason: FinishReason | None = None
+    is_error: bool | None = None
+    usage: TokenUsage | None = None
+    cost: UsageCost | None = None
 
 
 class MessageCompleted(WispEvent):
@@ -632,6 +671,31 @@ class RpcStateReported(WispEvent):
         return self
 
 
+class RpcMessagesReported(WispEvent):
+    """On-demand, bounded persisted transcript page returned over RPC."""
+
+    type: Literal["rpc.messages"] = "rpc.messages"
+    command_id: str
+    session_id: str | None = None
+    session_path: Path | None = None
+    active_leaf_id: str | None = None
+    messages: tuple[RpcMessageSnapshot, ...] = ()
+    truncated: bool = False
+    next_before_entry_id: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < RPC_MESSAGES_SCHEMA_VERSION:
+            raise ValueError(
+                f"RPC message reports require schema_version {RPC_MESSAGES_SCHEMA_VERSION} or newer"
+            )
+        if self.next_before_entry_id is not None and not self.truncated:
+            raise ValueError(
+                "RPC message reports cannot include next_before_entry_id unless truncated"
+            )
+        return self
+
+
 class QueueUpdated(WispEvent):
     """Current harness-owned steering and follow-up queue state."""
 
@@ -746,6 +810,7 @@ type KnownWispEvent = Annotated[
     | RpcCommandFinished
     | SessionStatsReported
     | RpcStateReported
+    | RpcMessagesReported
     | QueueUpdated
     | QueueItemsRemoved
     | QueueMessageInjected
@@ -825,6 +890,11 @@ def _require_current_schema(data: JsonObject) -> None:
     if data.get("type") == "rpc.state" and version < RPC_STATE_SCHEMA_VERSION:
         raise ValueError(
             f"RPC state events require schema_version {RPC_STATE_SCHEMA_VERSION} or newer"
+        )
+    if data.get("type") == "rpc.messages" and version < RPC_MESSAGES_SCHEMA_VERSION:
+        raise ValueError(
+            "RPC message report events require schema_version "
+            f"{RPC_MESSAGES_SCHEMA_VERSION} or newer"
         )
     if data.get("type") == "queue.items.removed" and version < QUEUE_ITEMS_REMOVED_SCHEMA_VERSION:
         raise ValueError(

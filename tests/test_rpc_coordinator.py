@@ -80,6 +80,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
             [
                 _RpcInputCommand({"id": "prompt", "type": "prompt"}),
                 _RpcInputCommand({"id": "queued", "type": "prompt"}),
+                _RpcInputCommand({"id": "messages", "type": "get_messages"}),
                 _RpcInputCommand({"id": "approval", "type": "approval"}),
                 _RpcInputCommand({"id": "steer", "type": "steer"}),
                 _RpcInputCommand({"id": "follow", "type": "follow_up"}),
@@ -90,6 +91,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcPromptReady("prompt"),
                 _RpcCommandCompleted("prompt", "prompt", True, (), 1),
                 _RpcCommandCompleted("queued", "prompt", True, (), 2),
+                _RpcCommandCompleted("messages", "get_messages", True, (), 2),
                 _RpcInputClosed(),
             ]
         )
@@ -102,9 +104,11 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
         ) -> _RpcDispatchResult:
             command_id = str(command["id"])
             dispatched.append(command_id)
-            if command["type"] != "prompt":
+            if command["type"] not in {"prompt", "get_messages"}:
                 return _RpcDispatchResult(running)
-            return _RpcDispatchResult(_RpcRunningCommand(command_id, "prompt", anyio.CancelScope()))
+            return _RpcDispatchResult(
+                _RpcRunningCommand(command_id, str(command["type"]), anyio.CancelScope())
+            )
 
         await coordinator.run(
             receiver,
@@ -123,6 +127,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
             "pop",
             "clear",
             "queued",
+            "messages",
         ]
 
     anyio.run(scenario)
@@ -231,10 +236,10 @@ def test_coordinator_state_bypasses_active_prompt_without_draining_pending_queue
     anyio.run(scenario)
 
 
-def test_coordinator_state_bypasses_active_compact_and_stats_commands() -> None:
+def test_coordinator_state_bypasses_active_read_commands() -> None:
     async def scenario() -> None:
         async def assert_bypasses(
-            active_type: Literal["compact", "get_session_stats"],
+            active_type: Literal["compact", "get_session_stats", "get_messages"],
         ) -> None:
             coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
             running_command = _RpcRunningCommand(
@@ -271,6 +276,7 @@ def test_coordinator_state_bypasses_active_compact_and_stats_commands() -> None:
 
         await assert_bypasses("compact")
         await assert_bypasses("get_session_stats")
+        await assert_bypasses("get_messages")
 
     anyio.run(scenario)
 
