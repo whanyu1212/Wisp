@@ -703,6 +703,71 @@ def test_harness_all_mode_drains_one_follow_up_batch() -> None:
     ]
 
 
+@pytest.mark.parametrize("kind", ["steering", "follow_up"])
+@pytest.mark.parametrize("mutation", ["pop", "clear"])
+def test_harness_all_mode_tolerates_queue_edits_during_drain(
+    kind: QueueKind,
+    mutation: str,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="first answer"),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="second answer"),
+            ],
+        ]
+    )
+    harness = AgentHarness(
+        AgentHarnessConfig(
+            provider=provider,
+            tool_executor=RecordingToolExecutor(),
+            steering_mode="all" if kind == "steering" else "one_at_a_time",
+            follow_up_mode="all" if kind == "follow_up" else "one_at_a_time",
+        )
+    )
+    enqueue = harness.steer if kind == "steering" else harness.follow_up
+    for content in ("one", "two", "three"):
+        enqueue(content)
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        mutated = False
+        async for event in harness.prompt("initial"):
+            events.append(event)
+            if isinstance(event, QueueMessageInjected) and not mutated:
+                mutated = True
+                if mutation == "pop":
+                    removed = (
+                        harness.pop_latest_steering()
+                        if kind == "steering"
+                        else harness.pop_latest_follow_up()
+                    )
+                    assert removed is not None
+                    assert removed.content == "three"
+                else:
+                    assert [message.content for message in harness.clear_queue(kind)] == [
+                        "two",
+                        "three",
+                    ]
+        return events
+
+    events = anyio.run(run)
+
+    expected = ["one", "two"] if mutation == "pop" else ["one"]
+    assert [
+        event.content for event in events if isinstance(event, QueueMessageInjected)
+    ] == expected
+    assert harness.queued_messages.steering == ()
+    assert harness.queued_messages.follow_up == ()
+    queue_updates = [event for event in events if isinstance(event, QueueUpdated)]
+    assert queue_updates[-1].steering == ()
+    assert queue_updates[-1].follow_up == ()
+
+
 def test_harness_closing_before_completion_preserves_follow_up_queue() -> None:
     provider = ScriptedProvider(
         [

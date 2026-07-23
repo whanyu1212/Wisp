@@ -426,12 +426,10 @@ class AgentHarness:
                         ):
                             yield cancellation_event
                         return
-                    drain_count = (
-                        min(1, len(self._steering_queue))
-                        if self._config.steering_mode == "one_at_a_time"
-                        else len(self._steering_queue)
-                    )
-                    for _ in range(drain_count):
+                    drain_batch = tuple(self._steering_queue)
+                    if self._config.steering_mode == "one_at_a_time":
+                        drain_batch = drain_batch[:1]
+                    for message in drain_batch:
                         if token.is_cancelled():
                             for cancellation_event in _cancelled_events(
                                 active_turn,
@@ -439,7 +437,9 @@ class AgentHarness:
                             ):
                                 yield cancellation_event
                             return
-                        message = self._steering_queue.popleft()
+                        if not self._steering_queue or self._steering_queue[0] is not message:
+                            continue
+                        self._steering_queue.popleft()
                         self._messages.append(message)
                         yield QueueMessageInjected(
                             kind="steering",
@@ -457,15 +457,13 @@ class AgentHarness:
                 ):
                     break
 
-                drain_count = (
-                    min(1, len(self._follow_up_queue))
-                    if self._config.follow_up_mode == "one_at_a_time"
-                    else len(self._follow_up_queue)
-                )
-                if drain_count == 0:
+                drain_batch = tuple(self._follow_up_queue)
+                if self._config.follow_up_mode == "one_at_a_time":
+                    drain_batch = drain_batch[:1]
+                if not drain_batch:
                     break
 
-                for _ in range(drain_count):
+                for message in drain_batch:
                     if token.is_cancelled():
                         for cancellation_event in _cancelled_events(
                             active_turn,
@@ -473,7 +471,9 @@ class AgentHarness:
                         ):
                             yield cancellation_event
                         return
-                    message = self._follow_up_queue.popleft()
+                    if not self._follow_up_queue or self._follow_up_queue[0] is not message:
+                        continue
+                    self._follow_up_queue.popleft()
                     self._messages.append(message)
                     yield QueueMessageInjected(
                         kind="follow_up",
