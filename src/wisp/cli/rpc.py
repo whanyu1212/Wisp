@@ -74,6 +74,9 @@ from .rpc_coordinator import (
     _RpcInputCommand as _RpcInputCommand,
 )
 from .rpc_coordinator import (
+    _RpcPromptReady as _RpcPromptReady,
+)
+from .rpc_coordinator import (
     _RpcRunningCommand as _RpcRunningCommand,
 )
 from .rpc_coordinator import (

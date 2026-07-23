@@ -43,6 +43,7 @@ from .rpc_coordinator import (
     _RpcCommandCompleted,
     _RpcControlEvent,
     _RpcDispatchResult,
+    _RpcPromptReady,
     _RpcRunningCommand,
     _RpcSessionState,
 )
@@ -485,6 +486,10 @@ async def run_rpc_prompt_command(
                         entry_start,
                     )
                     run_start_captured = True
+                yield event
+                with anyio.CancelScope(shield=True):
+                    await send.send(_RpcPromptReady(command_id=command_id))
+                continue
             yield event
 
     try:

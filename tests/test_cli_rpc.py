@@ -11,6 +11,7 @@ import wisp.coding.tool_execution as tool_execution
 from tests.cli_support import *
 from wisp.agent.messages import CompactionRecord
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
+from wisp.cli.rpc import _RpcTrustGate
 from wisp.events import ContextBudget, ContextEstimate, ToolCallSnapshot
 from wisp.providers.base import Provider
 from wisp.providers.catalog import (
@@ -763,16 +764,23 @@ def test_rpc_cancels_blocked_compact_then_runs_queued_prompt(
     assert any(record.get("content") == "done after cancel" for record in records)
 
 
-def test_rpc_queue_commands_bypass_a_running_prompt(
+def test_rpc_queue_commands_wait_for_prompt_readiness_then_bypass(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    provider = BlockingOperationProvider(block_prompt=True)
+    provider = BlockingOperationProvider()
 
     async def build_runtime() -> WispRuntime:
         return await _runtime_with_provider(provider)
 
+    original_resolve = _RpcTrustGate.resolve
+
+    async def delayed_resolve(self: _RpcTrustGate) -> bool:
+        await anyio.sleep(0.05)
+        return await original_resolve(self)
+
     monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    monkeypatch.setattr(_RpcTrustGate, "resolve", delayed_resolve)
     commands = [
         {"id": "prompt-1", "type": "prompt", "prompt": "block"},
         {"id": "steer-1", "type": "steer", "content": "one"},
@@ -787,7 +795,6 @@ def test_rpc_queue_commands_bypass_a_running_prompt(
         {"id": "state-1", "type": "get_queue_state"},
         {"id": "pop-1", "type": "pop_queue", "kind": "steering"},
         {"id": "clear-1", "type": "clear_queue", "kind": "follow_up"},
-        {"id": "cancel-1", "type": "cancel", "target_id": "prompt-1"},
     ]
     result = CliRunner().invoke(
         app,
@@ -1393,6 +1400,8 @@ def test_rpc_prompt_cancellation_restores_active_leaf_before_completion_boundary
                 await started.wait()
                 cancel_scope.cancel()
                 completed = await receive.receive()
+                if isinstance(completed, cli_module.rpc._RpcPromptReady):
+                    completed = await receive.receive()
 
         entries = session.read_entries()
         assert session.read_context_messages() == ()
@@ -1456,6 +1465,8 @@ def test_rpc_cancellation_during_run_snapshot_preserves_existing_context(
                 cancel_scope.cancel()
                 release_snapshot.set()
                 completed = await receive.receive()
+                if isinstance(completed, cli_module.rpc._RpcPromptReady):
+                    completed = await receive.receive()
 
         assert session.read_context_messages() == committed_history
         assert not any(
@@ -1542,6 +1553,8 @@ def test_rpc_prestart_cancellation_preserves_loaded_tool_repair(tmp_path: Path) 
                 await started.wait()
                 cancel_scope.cancel()
                 completed = await receive.receive()
+                if isinstance(completed, cli_module.rpc._RpcPromptReady):
+                    completed = await receive.receive()
 
         audit_messages = session.read_messages()
         assert [message.role for message in audit_messages[:3]] == ["user", "assistant", "tool"]
@@ -1610,6 +1623,8 @@ def test_rpc_prompt_cancellation_retains_entries_after_completion_boundary(
                 await started.wait()
                 cancel_scope.cancel()
                 completed = await receive.receive()
+                if isinstance(completed, cli_module.rpc._RpcPromptReady):
+                    completed = await receive.receive()
 
         retained = [
             message
