@@ -875,6 +875,9 @@ def _project_buffered_prompt_queue_commands(
     follow_up_count = state.pending_follow_up_count
     for command in commands:
         command_type = rpc_command_type(command)
+        _, id_error = rpc_command_id(command)
+        if id_error is not None:
+            continue
         try:
             if command_type == "steer":
                 if isinstance(command.get("content"), str):

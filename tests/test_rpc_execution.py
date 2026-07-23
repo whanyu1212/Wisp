@@ -173,6 +173,14 @@ def test_executor_state_projects_prompt_startup_queue_buffer(tmp_path: Path) -> 
         selected_session = fixture.sessions.create()
         fixture.session_state.session = selected_session
         buffered_commands: list[dict[str, object]] = [
+            {"id": [], "type": "steer", "content": "not real"},
+            {
+                "id": "",
+                "type": "set_queue_mode",
+                "kind": "follow_up",
+                "mode": "all",
+            },
+            {"type": "steer", "content": "anonymous"},
             {"id": "steer-1", "type": "steer", "content": "redirect"},
             {"id": "follow-1", "type": "follow_up", "content": "continue"},
             {
@@ -197,7 +205,7 @@ def test_executor_state_projects_prompt_startup_queue_buffer(tmp_path: Path) -> 
 
         assert result.running_command is running
         report = next(event for event in fixture.events if isinstance(event, RpcStateReported))
-        assert report.state.pending_steering_count == 1
+        assert report.state.pending_steering_count == 2
         assert report.state.pending_follow_up_count == 0
         assert report.state.steering_mode == "all"
         assert report.state.follow_up_mode == "one_at_a_time"
