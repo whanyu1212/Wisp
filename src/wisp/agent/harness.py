@@ -29,6 +29,8 @@ from wisp.events import (
 )
 from wisp.providers.base import Provider, ToolSpec
 
+_MAX_PENDING_QUEUE_MESSAGES = 100
+
 
 @dataclass(frozen=True, slots=True)
 class AgentHarnessConfig:
@@ -46,18 +48,21 @@ class AgentHarnessConfig:
     cost_estimator: UsageCostEstimator | None = None
     steering_mode: QueueMode = "one_at_a_time"
     follow_up_mode: QueueMode = "one_at_a_time"
+    max_pending_queue_messages: int = _MAX_PENDING_QUEUE_MESSAGES
 
     def __post_init__(self) -> None:
         """Reject invalid queue modes even when callers bypass static typing."""
         _require_queue_mode(self.steering_mode)
         _require_queue_mode(self.follow_up_mode)
+        if type(self.max_pending_queue_messages) is not int or self.max_pending_queue_messages < 0:
+            raise ValueError("max_pending_queue_messages must be a non-negative integer")
 
 
 type AgentHarnessEvent = AgentLoopEvent | QueueMessageInjected | QueueUpdated
 
 
 def _require_queue_mode(mode: object) -> None:
-    if mode not in {"one_at_a_time", "all"}:
+    if not isinstance(mode, str) or mode not in {"one_at_a_time", "all"}:
         raise ValueError(f"Unsupported queue mode: {mode!r}")
 
 
@@ -194,6 +199,7 @@ class AgentHarness:
     def steer_message(self, message: Message) -> QueueUpdated:
         """Queue a user message for steering without changing the transcript."""
         self._require_user_queue_message(message)
+        self._require_queue_capacity()
         self._steering_queue.append(message)
         return self.queue_updated_event()
 
@@ -204,6 +210,7 @@ class AgentHarness:
     def follow_up_message(self, message: Message) -> QueueUpdated:
         """Queue a user message for follow-up without changing the transcript."""
         self._require_user_queue_message(message)
+        self._require_queue_capacity()
         self._follow_up_queue.append(message)
         return self.queue_updated_event()
 
@@ -419,12 +426,10 @@ class AgentHarness:
                         ):
                             yield cancellation_event
                         return
-                    drain_count = (
-                        min(1, len(self._steering_queue))
-                        if self._config.steering_mode == "one_at_a_time"
-                        else len(self._steering_queue)
-                    )
-                    for _ in range(drain_count):
+                    drain_batch = tuple(self._steering_queue)
+                    if self._config.steering_mode == "one_at_a_time":
+                        drain_batch = drain_batch[:1]
+                    for message in drain_batch:
                         if token.is_cancelled():
                             for cancellation_event in _cancelled_events(
                                 active_turn,
@@ -432,7 +437,9 @@ class AgentHarness:
                             ):
                                 yield cancellation_event
                             return
-                        message = self._steering_queue.popleft()
+                        if not self._steering_queue or self._steering_queue[0] is not message:
+                            continue
+                        self._steering_queue.popleft()
                         self._messages.append(message)
                         yield QueueMessageInjected(
                             kind="steering",
@@ -450,15 +457,13 @@ class AgentHarness:
                 ):
                     break
 
-                drain_count = (
-                    min(1, len(self._follow_up_queue))
-                    if self._config.follow_up_mode == "one_at_a_time"
-                    else len(self._follow_up_queue)
-                )
-                if drain_count == 0:
+                drain_batch = tuple(self._follow_up_queue)
+                if self._config.follow_up_mode == "one_at_a_time":
+                    drain_batch = drain_batch[:1]
+                if not drain_batch:
                     break
 
-                for _ in range(drain_count):
+                for message in drain_batch:
                     if token.is_cancelled():
                         for cancellation_event in _cancelled_events(
                             active_turn,
@@ -466,7 +471,9 @@ class AgentHarness:
                         ):
                             yield cancellation_event
                         return
-                    message = self._follow_up_queue.popleft()
+                    if not self._follow_up_queue or self._follow_up_queue[0] is not message:
+                        continue
+                    self._follow_up_queue.popleft()
                     self._messages.append(message)
                     yield QueueMessageInjected(
                         kind="follow_up",
@@ -492,6 +499,12 @@ class AgentHarness:
         if kind == "follow_up":
             return self._follow_up_queue
         raise ValueError(f"Unsupported queue kind: {kind!r}")
+
+    def _require_queue_capacity(self) -> None:
+        pending = len(self._steering_queue) + len(self._follow_up_queue)
+        maximum = self._config.max_pending_queue_messages
+        if pending >= maximum:
+            raise RuntimeError(f"Agent queue is full (maximum {maximum} pending messages)")
 
     @staticmethod
     def _require_user_queue_message(message: Message) -> None:

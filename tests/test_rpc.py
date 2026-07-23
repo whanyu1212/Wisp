@@ -11,6 +11,7 @@ import pytest
 from wisp.events import (
     ProjectConfigApplied,
     ProviderRetrying,
+    QueueItemsRemoved,
     RpcCommandFinished,
     RpcCommandStarted,
     TrustRequested,
@@ -18,11 +19,17 @@ from wisp.events import (
     wisp_event_from_json,
 )
 from wisp.rpc import (
+    ClearQueueCommand,
     CompactCommand,
     ConfigureCommand,
+    FollowUpCommand,
+    GetQueueStateCommand,
     GetSessionStatsCommand,
     JsonlSubprocessRpcTransport,
+    PopQueueCommand,
     RpcController,
+    SetQueueModeCommand,
+    SteerCommand,
 )
 from wisp.rpc.commands import (
     ApprovalCommand,
@@ -99,6 +106,87 @@ def test_get_session_stats_command_serializes_as_jsonl_and_parses() -> None:
         "type": "get_session_stats",
     }
     assert rpc_command_from_json(command.to_json_line()) == command
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (SteerCommand(id="steer-1", content="redirect"), {"content": "redirect"}),
+        (FollowUpCommand(id="follow-1", content="continue"), {"content": "continue"}),
+        (GetQueueStateCommand(id="state-1"), {}),
+        (
+            SetQueueModeCommand(id="mode-1", kind="steering", mode="all"),
+            {"kind": "steering", "mode": "all"},
+        ),
+        (PopQueueCommand(id="pop-1", kind="follow_up"), {"kind": "follow_up"}),
+        (ClearQueueCommand(id="clear-1"), {}),
+        (ClearQueueCommand(id="clear-2", kind="steering"), {"kind": "steering"}),
+    ],
+)
+def test_queue_commands_serialize_as_jsonl_and_parse(
+    command: RpcCommand,
+    expected: dict[str, object],
+) -> None:
+    payload = json.loads(command.to_json_line())
+
+    assert payload == {"id": command.id, "type": command.type, **expected}
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '{"type":"set_queue_mode","kind":"unknown","mode":"all"}',
+        '{"type":"set_queue_mode","kind":"steering","mode":"invalid"}',
+        '{"type":"pop_queue","kind":"unknown"}',
+        '{"type":"clear_queue","kind":"unknown"}',
+    ],
+)
+def test_typed_queue_commands_reject_invalid_kinds_and_modes(line: str) -> None:
+    with pytest.raises(ValueError):
+        rpc_command_from_json(line)
+
+
+def test_queue_items_removed_round_trips_through_json() -> None:
+    event = QueueItemsRemoved(
+        command_id="clear-1",
+        operation="clear",
+        steering=("first", "second"),
+        follow_up=("later",),
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    with pytest.raises(ValueError, match="require schema_version 15"):
+        wisp_event_from_json(event.model_copy(update={"schema_version": 14}).model_dump_json())
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        (
+            {"operation": "pop", "kind": None},
+            "queue pop results require a queue kind",
+        ),
+        (
+            {"operation": "pop", "kind": "steering", "steering": ("one", "two")},
+            "at most one removed item",
+        ),
+        (
+            {"operation": "clear", "kind": "steering", "follow_up": ("wrong",)},
+            "cannot contain follow-up items",
+        ),
+        (
+            {"operation": "clear", "kind": "follow_up", "steering": ("wrong",)},
+            "cannot contain steering items",
+        ),
+    ],
+)
+def test_queue_items_removed_rejects_impossible_payloads(
+    kwargs: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        QueueItemsRemoved(command_id="queue-1", **kwargs)
 
 
 def test_approval_scope_serializes_only_when_selected() -> None:
@@ -252,6 +340,12 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         prompt_id = await controller.prompt("hello")
         compact_id = await controller.compact("Keep paths")
         stats_id = await controller.get_session_stats()
+        steer_id = await controller.steer("redirect")
+        follow_up_id = await controller.follow_up("continue")
+        queue_state_id = await controller.get_queue_state()
+        queue_mode_id = await controller.set_queue_mode("steering", "all")
+        queue_pop_id = await controller.pop_queue("steering")
+        queue_clear_id = await controller.clear_queue("follow_up")
         cancel_id = await controller.cancel(prompt_id)
         approval_id = await controller.approve(
             "call-1",
@@ -266,6 +360,12 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             prompt_id,
             compact_id,
             stats_id,
+            steer_id,
+            follow_up_id,
+            queue_state_id,
+            queue_mode_id,
+            queue_pop_id,
+            queue_clear_id,
             cancel_id,
             approval_id,
             configure_id,
@@ -274,6 +374,12 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             "prompt-id",
             "compact-id",
             "stats-id",
+            "steer-id",
+            "follow-up-id",
+            "queue-state-id",
+            "queue-mode-id",
+            "queue-pop-id",
+            "queue-clear-id",
             "cancel-id",
             "approval-id",
             "configure-id",
@@ -283,6 +389,12 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             PromptCommand(id="prompt-id", prompt="hello"),
             CompactCommand(id="compact-id", instructions="Keep paths"),
             GetSessionStatsCommand(id="stats-id"),
+            SteerCommand(id="steer-id", content="redirect"),
+            FollowUpCommand(id="follow-up-id", content="continue"),
+            GetQueueStateCommand(id="queue-state-id"),
+            SetQueueModeCommand(id="queue-mode-id", kind="steering", mode="all"),
+            PopQueueCommand(id="queue-pop-id", kind="steering"),
+            ClearQueueCommand(id="queue-clear-id", kind="follow_up"),
             CancelCommand(id="cancel-id", target_id="prompt-id"),
             ApprovalCommand(
                 id="approval-id",

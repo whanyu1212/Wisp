@@ -13,6 +13,7 @@ from wisp.cli.rpc_coordinator import (
     _RpcDispatchResult,
     _RpcInputClosed,
     _RpcInputCommand,
+    _RpcPromptReady,
     _RpcRunningCommand,
     _RpcSessionState,
 )
@@ -80,6 +81,13 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcInputCommand({"id": "prompt", "type": "prompt"}),
                 _RpcInputCommand({"id": "queued", "type": "prompt"}),
                 _RpcInputCommand({"id": "approval", "type": "approval"}),
+                _RpcInputCommand({"id": "steer", "type": "steer"}),
+                _RpcInputCommand({"id": "follow", "type": "follow_up"}),
+                _RpcInputCommand({"id": "state", "type": "get_queue_state"}),
+                _RpcInputCommand({"id": "mode", "type": "set_queue_mode"}),
+                _RpcInputCommand({"id": "pop", "type": "pop_queue"}),
+                _RpcInputCommand({"id": "clear", "type": "clear_queue"}),
+                _RpcPromptReady("prompt"),
                 _RpcCommandCompleted("prompt", "prompt", True, (), 1),
                 _RpcCommandCompleted("queued", "prompt", True, (), 2),
                 _RpcInputClosed(),
@@ -94,7 +102,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
         ) -> _RpcDispatchResult:
             command_id = str(command["id"])
             dispatched.append(command_id)
-            if command["type"] == "approval":
+            if command["type"] != "prompt":
                 return _RpcDispatchResult(running)
             return _RpcDispatchResult(_RpcRunningCommand(command_id, "prompt", anyio.CancelScope()))
 
@@ -105,7 +113,139 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
             command_type=_command_type,
         )
 
-        assert dispatched == ["prompt", "approval", "queued"]
+        assert dispatched == [
+            "prompt",
+            "approval",
+            "steer",
+            "follow",
+            "state",
+            "mode",
+            "pop",
+            "clear",
+            "queued",
+        ]
+
+    anyio.run(scenario)
+
+
+def test_coordinator_buffers_queue_commands_until_prompt_ready() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        dispatched: list[str] = []
+
+        def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            command_id = str(command["id"])
+            dispatched.append(command_id)
+            if command["type"] != "prompt":
+                return _RpcDispatchResult(running)
+            return _RpcDispatchResult(_RpcRunningCommand(command_id, "prompt", anyio.CancelScope()))
+
+        coordinator.handle_event(
+            _RpcInputCommand({"id": "prompt", "type": "prompt"}),
+            dispatch=dispatch,
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+        coordinator.handle_event(
+            _RpcInputCommand({"id": "steer", "type": "steer"}),
+            dispatch=dispatch,
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+
+        assert dispatched == ["prompt"]
+        assert list(coordinator.pending_prompt_queue_commands) == [{"id": "steer", "type": "steer"}]
+
+        coordinator.handle_event(
+            _RpcPromptReady("prompt"),
+            dispatch=dispatch,
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+
+        assert dispatched == ["prompt", "steer"]
+        assert not coordinator.pending_prompt_queue_commands
+
+    anyio.run(scenario)
+
+
+def test_coordinator_ignores_stale_prompt_readiness() -> None:
+    async def scenario() -> None:
+        receiver = _Receiver(
+            [
+                _RpcInputCommand({"id": "prompt", "type": "prompt"}),
+                _RpcInputCommand({"id": "steer", "type": "steer"}),
+                _RpcPromptReady("stale"),
+                _RpcCommandCompleted("prompt", "prompt", True, (), 1),
+                _RpcInputClosed(),
+            ]
+        )
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        dispatched: list[tuple[str, str | None]] = []
+
+        def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            command_id = str(command["id"])
+            dispatched.append((command_id, running.command_id if running is not None else None))
+            if command["type"] != "prompt":
+                return _RpcDispatchResult(running)
+            return _RpcDispatchResult(_RpcRunningCommand(command_id, "prompt", anyio.CancelScope()))
+
+        await coordinator.run(
+            receiver,
+            dispatch=dispatch,
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+
+        assert dispatched == [("prompt", None), ("steer", None)]
+
+    anyio.run(scenario)
+
+
+def test_coordinator_does_not_retarget_queue_commands_when_prompt_fails_before_ready() -> None:
+    async def scenario() -> None:
+        receiver = _Receiver(
+            [
+                _RpcInputCommand({"id": "first", "type": "prompt"}),
+                _RpcInputCommand({"id": "second", "type": "prompt"}),
+                _RpcInputCommand({"id": "steer", "type": "steer"}),
+                _RpcCommandCompleted("first", "prompt", False, (), 0),
+                _RpcPromptReady("second"),
+                _RpcCommandCompleted("second", "prompt", True, (), 1),
+                _RpcInputClosed(),
+            ]
+        )
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        dispatched: list[tuple[str, str | None]] = []
+
+        def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            command_id = str(command["id"])
+            dispatched.append((command_id, running.command_id if running is not None else None))
+            if command["type"] != "prompt":
+                return _RpcDispatchResult(running)
+            return _RpcDispatchResult(_RpcRunningCommand(command_id, "prompt", anyio.CancelScope()))
+
+        await coordinator.run(
+            receiver,
+            dispatch=dispatch,
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+
+        assert dispatched == [
+            ("first", None),
+            ("steer", None),
+            ("second", None),
+        ]
 
     anyio.run(scenario)
 
@@ -271,15 +411,21 @@ def test_coordinator_owns_running_and_queued_cancellation() -> None:
         coordinator = RpcCoordinator(state)
         active_scope = anyio.CancelScope()
         coordinator.running_command = _RpcRunningCommand("active", "prompt", active_scope)
+        pending = {"id": "pending", "type": "steer"}
+        coordinator.pending_prompt_queue_commands.append(pending)
         queued = {"id": "queued", "type": "prompt"}
         coordinator.queued_commands.extend([queued, {"id": "later", "type": "prompt"}])
 
         active_result = coordinator.cancel("active")
+        pending_result = coordinator.cancel("pending")
         queued_result = coordinator.cancel("queued")
         missing_result = coordinator.cancel("missing")
 
         assert active_result.outcome == "running"
         assert active_scope.cancel_called is True
+        assert pending_result.outcome == "queued"
+        assert pending_result.command is pending
+        assert not coordinator.pending_prompt_queue_commands
         assert queued_result.outcome == "queued"
         assert queued_result.command is queued
         assert list(coordinator.queued_commands) == [{"id": "later", "type": "prompt"}]

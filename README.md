@@ -390,8 +390,8 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 14`; readers also accept legacy schema v5
-through v13 events for compatibility. A successful prompt follows this lifecycle (tool events
+Every outbound `WispEvent` includes `"schema_version": 15`; readers also accept legacy schema v5
+through v14 events for compatibility. A successful prompt follows this lifecycle (tool events
 repeat inside a turn when the model requests tools):
 
 ```text
@@ -420,6 +420,10 @@ The exception is successful schema-v11 overflow recovery: after `context.overflo
 overflow compaction lifecycle events, then the failed `turn.completed`, and continues once. Its
 `compaction.completed.will_retry=true` marks that failed turn as nonterminal; no `error` or
 intermediate `agent.completed` is emitted unless compaction or the retry setup fails.
+
+Schema v15 adds `queue.items.removed`, emitted by successful RPC `pop_queue` and `clear_queue`
+commands with the exact removed text, queue kind, operation, and command id. The following
+`queue.updated` remains the authoritative post-mutation state.
 
 Schema v13 adds `queue.updated`, a typed snapshot of harness-owned steering and follow-up queues
 and their independent drain modes. Queue text remains outside the durable transcript until the
@@ -506,14 +510,28 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 | `{"id":"cmd-1","type":"prompt","prompt":"…"}` | Run one agent turn, streaming `WispEvent` JSONL |
 | `{"id":"compact-1","type":"compact","instructions":"Focus on unresolved work"}` | Compact older context in the active session |
 | `{"id":"stats-1","type":"get_session_stats"}` | Emit a derived `session.stats` snapshot |
+| `{"id":"steer-1","type":"steer","content":"Use the other approach"}` | Queue text after the active assistant/tool batch |
+| `{"id":"follow-1","type":"follow_up","content":"Then summarize"}` | Queue text for when the active run would otherwise stop |
+| `{"id":"queue-1","type":"get_queue_state"}` | Emit the active or retained `queue.updated` snapshot |
+| `{"id":"mode-1","type":"set_queue_mode","kind":"steering","mode":"all"}` | Set one active queue's drain mode |
+| `{"id":"pop-1","type":"pop_queue","kind":"steering"}` | Remove the latest item from one active queue |
+| `{"id":"clear-1","type":"clear_queue","kind":"follow_up"}` | Clear one active queue; omit `kind` to clear both |
 | `{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}` | Request cancellation of a running or queued operation |
 | `{"id":"approval-1","type":"approval","call_id":"call-1","approved":true,"scope":"tool_session"}` | Approve/deny a pending tool request |
 | `{"id":"trust-1","type":"trust","request_id":"req-1","trusted":true}` | Answer a project-trust request |
 | `{"id":"cmd-2","type":"shutdown"}` | Exit cleanly |
 
 Each command emits `rpc.command.started` / `rpc.command.finished` so clients can group the events
-between them. Prompts, compactions, and statistics reads run sequentially; `cancel`, `approval`,
-and `trust` are handled while an operation runs.
+between them. Prompts, compactions, and statistics reads run sequentially; queue commands,
+`cancel`, `approval`, and `trust` are handled while an operation runs. `get_queue_state` is safe
+while idle. Queue mutations require an active run that is still accepting messages and otherwise
+fail with `CodingSession has no active agent run`. Successful queue commands emit the authoritative
+`queue.updated`; `pop_queue` and `clear_queue` first emit `queue.items.removed` with the exact
+removed text. Pop removes the latest item for an edit-and-requeue workflow, while clear results
+preserve FIFO order. Wisp uses its native `content`, unified queue-kind commands, and
+`one_at_a_time` spelling; Pi compatibility aliases are not accepted yet. The shared harness caps
+the combined steering and follow-up backlog at 100 pending messages; additional enqueue commands
+fail without changing either queue.
 A prompt may emit threshold compaction events before its `rpc.command.finished`; this does not
 create a nested `compact` RPC command.
 When an allowed mutating/command tool needs approval, Wisp emits `tool.approval.requested` with a
@@ -554,8 +572,9 @@ finally:
     await controller.close()
 ```
 
-`RpcController` exposes typed `prompt`, `compact`, `get_session_stats`, `cancel`, `approve`,
-`configure`, and `shutdown` methods and yields parsed `WispEvent` objects.
+`RpcController` exposes typed `prompt`, `compact`, `get_session_stats`, `steer`, `follow_up`,
+`get_queue_state`, `set_queue_mode`, `pop_queue`, `clear_queue`, `cancel`, `approve`, `configure`,
+and `shutdown` methods and yields parsed `WispEvent` objects.
 
 ## Development
 

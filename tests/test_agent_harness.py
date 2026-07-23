@@ -534,6 +534,31 @@ def test_harness_queue_contract_rejects_non_user_messages_without_partial_mutati
     assert harness.messages == ()
 
 
+def test_harness_queue_capacity_is_shared_and_recovers_after_removal() -> None:
+    harness = AgentHarness(
+        AgentHarnessConfig(
+            provider=ScriptedProvider([]),
+            tool_executor=RecordingToolExecutor(),
+            max_pending_queue_messages=2,
+        )
+    )
+
+    harness.steer("first")
+    harness.follow_up("second")
+
+    with pytest.raises(RuntimeError, match="maximum 2 pending messages"):
+        harness.steer("overflow")
+
+    assert harness.queue_updated_event().steering == ("first",)
+    assert harness.queue_updated_event().follow_up == ("second",)
+    assert harness.pop_latest_follow_up() is not None
+
+    recovered = harness.steer("replacement")
+
+    assert recovered.steering == ("first", "replacement")
+    assert recovered.follow_up == ()
+
+
 def test_harness_queue_modes_are_independent_and_reported_in_updates() -> None:
     harness = _harness(ScriptedProvider([]))
 
@@ -553,6 +578,19 @@ def test_harness_queue_modes_are_independent_and_reported_in_updates() -> None:
             tool_executor=RecordingToolExecutor(),
             steering_mode=cast(QueueMode, "invalid"),
         )
+    with pytest.raises(ValueError, match="Unsupported queue mode"):
+        AgentHarnessConfig(
+            provider=ScriptedProvider([]),
+            tool_executor=RecordingToolExecutor(),
+            steering_mode=cast(QueueMode, ["all"]),
+        )
+    for invalid_limit in (-1, True):
+        with pytest.raises(ValueError, match="non-negative integer"):
+            AgentHarnessConfig(
+                provider=ScriptedProvider([]),
+                tool_executor=RecordingToolExecutor(),
+                max_pending_queue_messages=invalid_limit,
+            )
 
     with pytest.raises(ValueError, match="Unsupported queue mode"):
         harness.set_steering_mode(cast(QueueMode, "invalid"))
@@ -570,7 +608,7 @@ def test_queue_updated_event_is_versioned_and_round_trips() -> None:
         steering_mode="all",
     )
 
-    assert event.schema_version == 14
+    assert event.schema_version == 15
     assert wisp_event_from_json(event.model_dump_json()) == event
     with pytest.raises(ValueError, match="require schema_version 13"):
         wisp_event_from_json(event.model_copy(update={"schema_version": 12}).model_dump_json())
@@ -663,6 +701,71 @@ def test_harness_all_mode_drains_one_follow_up_batch() -> None:
         ("user", "one"),
         ("user", "two"),
     ]
+
+
+@pytest.mark.parametrize("kind", ["steering", "follow_up"])
+@pytest.mark.parametrize("mutation", ["pop", "clear"])
+def test_harness_all_mode_tolerates_queue_edits_during_drain(
+    kind: QueueKind,
+    mutation: str,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="first answer"),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="second answer"),
+            ],
+        ]
+    )
+    harness = AgentHarness(
+        AgentHarnessConfig(
+            provider=provider,
+            tool_executor=RecordingToolExecutor(),
+            steering_mode="all" if kind == "steering" else "one_at_a_time",
+            follow_up_mode="all" if kind == "follow_up" else "one_at_a_time",
+        )
+    )
+    enqueue = harness.steer if kind == "steering" else harness.follow_up
+    for content in ("one", "two", "three"):
+        enqueue(content)
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        mutated = False
+        async for event in harness.prompt("initial"):
+            events.append(event)
+            if isinstance(event, QueueMessageInjected) and not mutated:
+                mutated = True
+                if mutation == "pop":
+                    removed = (
+                        harness.pop_latest_steering()
+                        if kind == "steering"
+                        else harness.pop_latest_follow_up()
+                    )
+                    assert removed is not None
+                    assert removed.content == "three"
+                else:
+                    assert [message.content for message in harness.clear_queue(kind)] == [
+                        "two",
+                        "three",
+                    ]
+        return events
+
+    events = anyio.run(run)
+
+    expected = ["one", "two"] if mutation == "pop" else ["one"]
+    assert [
+        event.content for event in events if isinstance(event, QueueMessageInjected)
+    ] == expected
+    assert harness.queued_messages.steering == ()
+    assert harness.queued_messages.follow_up == ()
+    queue_updates = [event for event in events if isinstance(event, QueueUpdated)]
+    assert queue_updates[-1].steering == ()
+    assert queue_updates[-1].follow_up == ()
 
 
 def test_harness_closing_before_completion_preserves_follow_up_queue() -> None:
@@ -772,7 +875,7 @@ def test_harness_follow_up_preserves_tool_iteration_limit_across_segments() -> N
 def test_queue_message_injected_event_requires_schema_14_and_round_trips() -> None:
     event = QueueMessageInjected(kind="follow_up", content="continue")
 
-    assert event.schema_version == 14
+    assert event.schema_version == 15
     assert wisp_event_from_json(event.model_dump_json()) == event
     with pytest.raises(ValueError, match="require schema_version 14"):
         wisp_event_from_json(event.model_copy(update={"schema_version": 13}).model_dump_json())

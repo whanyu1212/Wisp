@@ -18,12 +18,13 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 14
+EVENT_SCHEMA_VERSION = 15
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
 QUEUE_UPDATE_SCHEMA_VERSION = 13
 QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION = 14
+QUEUE_ITEMS_REMOVED_SCHEMA_VERSION = 15
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -44,7 +45,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14] = 14
+    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] = 15
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -607,6 +608,34 @@ class QueueUpdated(WispEvent):
         return self
 
 
+class QueueItemsRemoved(WispEvent):
+    """Queued text removed by an RPC pop or clear operation."""
+
+    type: Literal["queue.items.removed"] = "queue.items.removed"
+    command_id: str
+    operation: Literal["pop", "clear"]
+    kind: QueueKind | None = None
+    steering: tuple[str, ...] = ()
+    follow_up: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < QUEUE_ITEMS_REMOVED_SCHEMA_VERSION:
+            raise ValueError(
+                "queue removal results require schema_version "
+                f"{QUEUE_ITEMS_REMOVED_SCHEMA_VERSION} or newer"
+            )
+        if self.operation == "pop" and self.kind is None:
+            raise ValueError("queue pop results require a queue kind")
+        if self.kind == "steering" and self.follow_up:
+            raise ValueError("steering queue removal results cannot contain follow-up items")
+        if self.kind == "follow_up" and self.steering:
+            raise ValueError("follow-up queue removal results cannot contain steering items")
+        if self.operation == "pop" and len(self.steering) + len(self.follow_up) > 1:
+            raise ValueError("queue pop results can contain at most one removed item")
+        return self
+
+
 class QueueMessageInjected(WispEvent):
     """A queued user message crossed into the active transcript."""
 
@@ -675,6 +704,7 @@ type KnownWispEvent = Annotated[
     | RpcCommandFinished
     | SessionStatsReported
     | QueueUpdated
+    | QueueItemsRemoved
     | QueueMessageInjected
     | ModelProviderAutoSwitched
     | ErrorEvent,
@@ -748,6 +778,11 @@ def _require_current_schema(data: JsonObject) -> None:
     if data.get("type") == "queue.updated" and version < QUEUE_UPDATE_SCHEMA_VERSION:
         raise ValueError(
             f"Queue update events require schema_version {QUEUE_UPDATE_SCHEMA_VERSION} or newer"
+        )
+    if data.get("type") == "queue.items.removed" and version < QUEUE_ITEMS_REMOVED_SCHEMA_VERSION:
+        raise ValueError(
+            "Queue removal result events require schema_version "
+            f"{QUEUE_ITEMS_REMOVED_SCHEMA_VERSION} or newer"
         )
     if (
         data.get("type") == "queue.message.injected"

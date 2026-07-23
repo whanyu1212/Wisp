@@ -6,7 +6,20 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from wisp.events import QueueKind, QueueMode
+
 type ApprovalScope = Literal["once", "tool_session", "all_session"]
+
+QUEUE_RPC_COMMAND_TYPES = frozenset(
+    {
+        "clear_queue",
+        "follow_up",
+        "get_queue_state",
+        "pop_queue",
+        "set_queue_mode",
+        "steer",
+    }
+)
 
 
 class RpcCommandModel(BaseModel):
@@ -40,6 +53,48 @@ class GetSessionStatsCommand(RpcCommandModel):
     """Return lifetime usage and current context-budget statistics."""
 
     type: Literal["get_session_stats"] = "get_session_stats"
+
+
+class SteerCommand(RpcCommandModel):
+    """Queue text after the active run's current assistant/tool batch."""
+
+    type: Literal["steer"] = "steer"
+    content: str
+
+
+class FollowUpCommand(RpcCommandModel):
+    """Queue text for when the active run would otherwise stop."""
+
+    type: Literal["follow_up"] = "follow_up"
+    content: str
+
+
+class GetQueueStateCommand(RpcCommandModel):
+    """Return the active or retained queue state."""
+
+    type: Literal["get_queue_state"] = "get_queue_state"
+
+
+class SetQueueModeCommand(RpcCommandModel):
+    """Set one active queue's drain mode."""
+
+    type: Literal["set_queue_mode"] = "set_queue_mode"
+    kind: QueueKind
+    mode: QueueMode
+
+
+class PopQueueCommand(RpcCommandModel):
+    """Remove the latest item from one active queue."""
+
+    type: Literal["pop_queue"] = "pop_queue"
+    kind: QueueKind
+
+
+class ClearQueueCommand(RpcCommandModel):
+    """Clear one or both active queues."""
+
+    type: Literal["clear_queue"] = "clear_queue"
+    kind: QueueKind | None = None
 
 
 class CancelCommand(RpcCommandModel):
@@ -96,6 +151,12 @@ type RpcCommand = Annotated[
     PromptCommand
     | CompactCommand
     | GetSessionStatsCommand
+    | SteerCommand
+    | FollowUpCommand
+    | GetQueueStateCommand
+    | SetQueueModeCommand
+    | PopQueueCommand
+    | ClearQueueCommand
     | CancelCommand
     | ApprovalCommand
     | TrustCommand
