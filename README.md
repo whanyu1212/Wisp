@@ -532,8 +532,10 @@ Each command emits `rpc.command.started` / `rpc.command.finished` so clients can
 between them. Prompts, compactions, and statistics reads run sequentially; `get_state`, queue
 commands, `cancel`, `approval`, and `trust` are handled while an operation runs. `get_state`
 preserves the active command and any queued commands, including during prompt startup, compaction,
-statistics reads, approval/trust waits, and after cancellation is requested. It reports coherent
-in-memory state only: use `get_session_stats` for persisted entry, message, usage, context, and cost
+statistics reads, approval/trust waits, and after cancellation is requested. During prompt startup,
+queue commands buffered before prompt readiness are projected into the reported queue modes and
+pending counts without draining the buffer. It reports coherent in-memory state only: use
+`get_session_stats` for persisted entry, message, usage, context, and cost
 statistics. `get_queue_state` is safe
 while idle. Queue mutations require an active run that is still accepting messages and otherwise
 fail with `CodingSession has no active agent run`. Successful queue commands emit the authoritative

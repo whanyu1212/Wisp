@@ -167,6 +167,45 @@ def test_executor_reports_state_without_replacing_running_command(
     anyio.run(scenario)
 
 
+def test_executor_state_projects_prompt_startup_queue_buffer(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        selected_session = fixture.sessions.create()
+        fixture.session_state.session = selected_session
+        buffered_commands: list[dict[str, object]] = [
+            {"id": "steer-1", "type": "steer", "content": "redirect"},
+            {"id": "follow-1", "type": "follow_up", "content": "continue"},
+            {
+                "id": "mode",
+                "type": "set_queue_mode",
+                "kind": "steering",
+                "mode": "all",
+            },
+            {"id": "steer-2", "type": "steer", "content": "refine"},
+            {"id": "pop", "type": "pop_queue", "kind": "steering"},
+            {"id": "clear", "type": "clear_queue", "kind": "follow_up"},
+            {"id": "invalid", "type": "follow_up"},
+        ]
+        fixture.coordinator.pending_prompt_queue_commands.extend(buffered_commands)
+        running = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+
+            result = executor.dispatch({"id": "state-1", "type": "get_state"}, running)
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is running
+        report = next(event for event in fixture.events if isinstance(event, RpcStateReported))
+        assert report.state.pending_steering_count == 1
+        assert report.state.pending_follow_up_count == 0
+        assert report.state.steering_mode == "all"
+        assert report.state.follow_up_mode == "one_at_a_time"
+        assert list(fixture.coordinator.pending_prompt_queue_commands) == buffered_commands
+
+    anyio.run(scenario)
+
+
 def test_executor_state_is_idle_safe_and_reports_snapshot_failures(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
