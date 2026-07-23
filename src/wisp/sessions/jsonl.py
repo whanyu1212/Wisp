@@ -1001,12 +1001,14 @@ def _message_page_from_entries(
     truncated = len(candidates) > limit
     selected = candidates[-limit:]
     text_budget = _MessagePageTextBudget(remaining=MESSAGE_PAGE_TEXT_BYTE_LIMIT)
-    messages = tuple(_rpc_message_snapshot(entry, text_budget=text_budget) for entry in selected)
+    newest_first_messages = tuple(
+        _rpc_message_snapshot(entry, text_budget=text_budget) for entry in reversed(selected)
+    )
     return SessionMessagePage(
         session_id=session_id,
         path=path,
         active_leaf_id=tree.active_leaf_id,
-        messages=messages,
+        messages=tuple(reversed(newest_first_messages)),
         truncated=truncated,
         next_before_entry_id=selected[0].id if truncated and selected else None,
     )
@@ -1106,9 +1108,47 @@ def _clip_json_object(
     if len(encoded) <= effective_limit:
         text_budget.remaining = max(text_budget.remaining - len(encoded), 0)
         return dict(arguments), len(encoded), False
-    preview, _, _ = _clip_text(rendered, limit=effective_limit)
-    text_budget.remaining = max(text_budget.remaining - len(preview.encode("utf-8")), 0)
-    return {"truncated_json_preview": preview}, len(encoded), True
+    preview_arguments, preview_bytes = _clip_json_preview_wrapper(
+        rendered,
+        limit=effective_limit,
+    )
+    text_budget.remaining = max(text_budget.remaining - preview_bytes, 0)
+    return preview_arguments, len(encoded), True
+
+
+def _clip_json_preview_wrapper(rendered: str, *, limit: int) -> tuple[JsonObject, int]:
+    empty_preview: JsonObject = {"truncated_json_preview": ""}
+    empty_preview_bytes = _json_object_byte_count(empty_preview)
+    if limit < empty_preview_bytes:
+        return {}, 0
+
+    rendered_bytes = rendered.encode("utf-8")
+    low = 0
+    high = len(rendered_bytes)
+    best_preview = ""
+    best_byte_count = empty_preview_bytes
+    while low <= high:
+        midpoint = (low + high) // 2
+        preview = rendered_bytes[:midpoint].decode("utf-8", errors="ignore")
+        candidate: JsonObject = {"truncated_json_preview": preview}
+        candidate_byte_count = _json_object_byte_count(candidate)
+        if candidate_byte_count <= limit:
+            best_preview = preview
+            best_byte_count = candidate_byte_count
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    return {"truncated_json_preview": best_preview}, best_byte_count
+
+
+def _json_object_byte_count(value: JsonObject) -> int:
+    rendered = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return len(rendered.encode("utf-8"))
 
 
 def _validate_append_transition(

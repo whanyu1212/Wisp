@@ -54,10 +54,7 @@ def _message_page_text_bytes(page: SessionMessagePage) -> int:
     for message in page.messages:
         total += len(message.content.encode("utf-8"))
         for tool_call in message.tool_calls:
-            if tool_call.arguments_truncated:
-                preview = tool_call.arguments.get("truncated_json_preview")
-                if isinstance(preview, str):
-                    total += len(preview.encode("utf-8"))
+            if not tool_call.arguments:
                 continue
             rendered = json.dumps(
                 tool_call.arguments,
@@ -332,6 +329,71 @@ def test_session_message_page_clips_large_content_and_tool_arguments(
     assert tool_call.arguments_original_bytes > 64 * 1024
     assert set(tool_call.arguments) == {"truncated_json_preview"}
     assert len(str(tool_call.arguments["truncated_json_preview"]).encode("utf-8")) <= 64 * 1024
+
+
+def test_session_message_page_applies_aggregate_budget_newest_first(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    oversized = "x" * 70_000
+
+    async def write() -> None:
+        for _ in range(9):
+            await session.append_message(Message(role="assistant", content=oversized))
+        await session.append_message(Message(role="user", content="latest user"))
+        await session.append_message(Message(role="assistant", content="latest assistant"))
+
+    anyio.run(write)
+
+    page = session.read_message_page(limit=11)
+
+    assert len(page.messages) == 11
+    assert page.messages[-2].content == "latest user"
+    assert page.messages[-2].content_truncated is False
+    assert page.messages[-1].content == "latest assistant"
+    assert page.messages[-1].content_truncated is False
+    assert page.messages[0].content == ""
+    assert page.messages[0].content_truncated is True
+    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+
+
+def test_session_message_page_budgets_serialized_truncated_argument_wrapper(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    escaping_argument = "\\" * 70_000
+
+    async def write() -> None:
+        await session.append_message(
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    ToolCallSnapshot(
+                        call_id="call-1",
+                        name="bash",
+                        arguments={"command": escaping_argument},
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        )
+
+    anyio.run(write)
+
+    page = session.read_message_page()
+    tool_call = page.messages[0].tool_calls[0]
+    rendered_arguments = json.dumps(
+        tool_call.arguments,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    assert tool_call.arguments_truncated is True
+    assert set(tool_call.arguments) == {"truncated_json_preview"}
+    assert len(rendered_arguments.encode("utf-8")) <= jsonl_module.TOOL_ARGUMENTS_BYTE_LIMIT
+    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
 def test_session_message_page_enforces_aggregate_text_budget(tmp_path: Path) -> None:
