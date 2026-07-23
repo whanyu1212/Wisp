@@ -24,6 +24,8 @@ from wisp.events import (
     QueueMode,
     RpcCommandFinished,
     RpcCommandStarted,
+    RpcStateReported,
+    RpcStateSnapshot,
     SessionStatsReported,
     WispEvent,
 )
@@ -128,6 +130,8 @@ class RpcCommandExecutor:
             return self._dispatch_compact(command)
         if command_type == "get_session_stats":
             return self._dispatch_session_stats(command)
+        if command_type == "get_state":
+            return self._dispatch_state(command, running_command)
         if command_type in QUEUE_RPC_COMMAND_TYPES:
             return self._dispatch_queue(command, running_command)
         return self._dispatch_control(command, running_command)
@@ -190,6 +194,20 @@ class RpcCommandExecutor:
             command,
             agent=self.agent,
             session=self.session_state.session,
+            write_event=self.write_event,
+        )
+        return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_state(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        handle_rpc_state_command(
+            command,
+            agent=self.agent,
+            session=self.session_state.session,
+            running_command=running_command,
             write_event=self.write_event,
         )
         return _RpcDispatchResult(running_command=running_command)
@@ -786,6 +804,54 @@ def handle_rpc_queue_command(
     if removed is not None:
         write_event(removed)
     write_event(state)
+    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def handle_rpc_state_command(
+    command: dict[str, object],
+    *,
+    agent: CodingSession,
+    session: JsonlSession | None,
+    running_command: _RpcRunningCommand | None,
+    write_event: RpcEventWriter,
+) -> None:
+    """Return one coherent in-memory state snapshot without becoming active."""
+
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return
+
+    try:
+        core_state = agent.state_snapshot(session)
+        state = RpcStateSnapshot(
+            **core_state.model_dump(),
+            session_id=session.session_id if session is not None else None,
+            session_path=session.path if session is not None else None,
+            active_command_id=(running_command.command_id if running_command is not None else None),
+            active_command_type=(
+                running_command.command_type if running_command is not None else None
+            ),
+            cancel_requested=(
+                running_command.cancel_scope.cancel_called if running_command is not None else False
+            ),
+        )
+    except Exception as exc:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=str(exc),
+            write_event=write_event,
+        )
+        return
+
+    write_event(RpcStateReported(command_id=command_id, state=state))
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 

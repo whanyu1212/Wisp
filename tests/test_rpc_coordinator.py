@@ -172,6 +172,109 @@ def test_coordinator_buffers_queue_commands_until_prompt_ready() -> None:
     anyio.run(scenario)
 
 
+def test_coordinator_state_bypasses_active_prompt_without_draining_pending_queue() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        dispatched: list[tuple[str, str | None]] = []
+
+        def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            command_id = str(command["id"])
+            dispatched.append((command_id, running.command_id if running is not None else None))
+            if command["type"] == "prompt":
+                return _RpcDispatchResult(
+                    _RpcRunningCommand(command_id, "prompt", anyio.CancelScope())
+                )
+            return _RpcDispatchResult(running)
+
+        def handle(command: dict[str, object]) -> None:
+            coordinator.handle_event(
+                _RpcInputCommand(command),
+                dispatch=dispatch,
+                reject=lambda _command, _message: None,
+                command_type=_command_type,
+            )
+
+        handle({"id": "prompt", "type": "prompt"})
+        handle({"id": "steer", "type": "steer"})
+        handle({"id": "queued", "type": "compact"})
+        handle({"id": "state-before", "type": "get_state"})
+
+        assert dispatched == [
+            ("prompt", None),
+            ("state-before", "prompt"),
+        ]
+        assert list(coordinator.pending_prompt_queue_commands) == [{"id": "steer", "type": "steer"}]
+        assert list(coordinator.queued_commands) == [{"id": "queued", "type": "compact"}]
+
+        coordinator.handle_event(
+            _RpcPromptReady("prompt"),
+            dispatch=dispatch,
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+        handle({"id": "state-after", "type": "get_state"})
+
+        assert dispatched == [
+            ("prompt", None),
+            ("state-before", "prompt"),
+            ("steer", "prompt"),
+            ("state-after", "prompt"),
+        ]
+        assert not coordinator.pending_prompt_queue_commands
+        assert list(coordinator.queued_commands) == [{"id": "queued", "type": "compact"}]
+        assert coordinator.running_command is not None
+        assert coordinator.running_command.command_id == "prompt"
+
+    anyio.run(scenario)
+
+
+def test_coordinator_state_bypasses_active_compact_and_stats_commands() -> None:
+    async def scenario() -> None:
+        async def assert_bypasses(
+            active_type: Literal["compact", "get_session_stats"],
+        ) -> None:
+            coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+            running_command = _RpcRunningCommand(
+                command_id=f"active-{active_type}",
+                command_type=active_type,
+                cancel_scope=anyio.CancelScope(),
+            )
+            coordinator.running_command = running_command
+            dispatched: list[tuple[str, str | None]] = []
+
+            def dispatch(
+                command: dict[str, object],
+                running: _RpcRunningCommand | None,
+            ) -> _RpcDispatchResult:
+                dispatched.append(
+                    (
+                        str(command["id"]),
+                        running.command_id if running is not None else None,
+                    )
+                )
+                return _RpcDispatchResult(running)
+
+            coordinator.handle_event(
+                _RpcInputCommand({"id": "state", "type": "get_state"}),
+                dispatch=dispatch,
+                reject=lambda _command, _message: None,
+                command_type=_command_type,
+            )
+
+            assert dispatched == [("state", running_command.command_id)]
+            assert coordinator.running_command is running_command
+            assert not coordinator.pending_prompt_queue_commands
+            assert not coordinator.queued_commands
+
+        await assert_bypasses("compact")
+        await assert_bypasses("get_session_stats")
+
+    anyio.run(scenario)
+
+
 def test_coordinator_ignores_stale_prompt_readiness() -> None:
     async def scenario() -> None:
         receiver = _Receiver(

@@ -39,6 +39,7 @@ from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
     AgentCompleted,
     AgentStarted,
+    CodingSessionState,
     CompactionCompleted,
     CompactionReason,
     CompactionStarted,
@@ -268,6 +269,21 @@ class CodingSession:
         if session_id is None:
             return QueueUpdated()
         return self._queue_updated_from_snapshot(self._retained_queues.get(session_id))
+
+    def state_snapshot(self, session: JsonlSession | None = None) -> CodingSessionState:
+        """Return an immediate configuration and queue summary without I/O."""
+
+        queue = self.queue_state(session)
+        return CodingSessionState(
+            provider=self.provider.name,
+            model=self.model or self.provider.default_model,
+            effort=self.effort,
+            auto_compaction_enabled=self.auto_compaction_enabled,
+            steering_mode=queue.steering_mode,
+            follow_up_mode=queue.follow_up_mode,
+            pending_steering_count=len(queue.steering),
+            pending_follow_up_count=len(queue.follow_up),
+        )
 
     def set_queue_mode(self, kind: QueueKind, mode: QueueMode) -> QueueUpdated:
         """Set one active queue's drain mode."""

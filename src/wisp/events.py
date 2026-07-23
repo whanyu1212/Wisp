@@ -18,13 +18,14 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 15
+EVENT_SCHEMA_VERSION = 16
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
 QUEUE_UPDATE_SCHEMA_VERSION = 13
 QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION = 14
 QUEUE_ITEMS_REMOVED_SCHEMA_VERSION = 15
+RPC_STATE_SCHEMA_VERSION = 16
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -45,7 +46,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] = 15
+    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] = 16
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -237,6 +238,31 @@ class SessionStats(BaseModel):
                 }
             return normalized
         return data
+
+
+class CodingSessionState(BaseModel):
+    """Read-only in-memory configuration and queue summary."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider: str
+    model: str | None = None
+    effort: str | None = None
+    auto_compaction_enabled: bool
+    steering_mode: QueueMode
+    follow_up_mode: QueueMode
+    pending_steering_count: int = Field(ge=0)
+    pending_follow_up_count: int = Field(ge=0)
+
+
+class RpcStateSnapshot(CodingSessionState):
+    """RPC-facing state extended with session and active-command identity."""
+
+    session_id: str | None = None
+    session_path: Path | None = None
+    active_command_id: str | None = None
+    active_command_type: str | None = None
+    cancel_requested: bool = False
 
 
 class MessageCompleted(WispEvent):
@@ -590,6 +616,22 @@ class SessionStatsReported(WispEvent):
         return data
 
 
+class RpcStateReported(WispEvent):
+    """Immediate, non-persisted in-memory state returned over RPC."""
+
+    type: Literal["rpc.state"] = "rpc.state"
+    command_id: str
+    state: RpcStateSnapshot
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < RPC_STATE_SCHEMA_VERSION:
+            raise ValueError(
+                f"RPC state reports require schema_version {RPC_STATE_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+
 class QueueUpdated(WispEvent):
     """Current harness-owned steering and follow-up queue state."""
 
@@ -703,6 +745,7 @@ type KnownWispEvent = Annotated[
     | RpcCommandStarted
     | RpcCommandFinished
     | SessionStatsReported
+    | RpcStateReported
     | QueueUpdated
     | QueueItemsRemoved
     | QueueMessageInjected
@@ -778,6 +821,10 @@ def _require_current_schema(data: JsonObject) -> None:
     if data.get("type") == "queue.updated" and version < QUEUE_UPDATE_SCHEMA_VERSION:
         raise ValueError(
             f"Queue update events require schema_version {QUEUE_UPDATE_SCHEMA_VERSION} or newer"
+        )
+    if data.get("type") == "rpc.state" and version < RPC_STATE_SCHEMA_VERSION:
+        raise ValueError(
+            f"RPC state events require schema_version {RPC_STATE_SCHEMA_VERSION} or newer"
         )
     if data.get("type") == "queue.items.removed" and version < QUEUE_ITEMS_REMOVED_SCHEMA_VERSION:
         raise ValueError(
