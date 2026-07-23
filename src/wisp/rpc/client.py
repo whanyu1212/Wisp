@@ -115,9 +115,7 @@ class RpcController:
         """Set one active queue's drain mode."""
 
         selected_id = command_id or self._command_id_factory("queue-mode")
-        await self._transport.send(
-            SetQueueModeCommand(id=selected_id, kind=kind, mode=mode)
-        )
+        await self._transport.send(SetQueueModeCommand(id=selected_id, kind=kind, mode=mode))
         return selected_id
 
     async def pop_queue(self, kind: QueueKind, *, command_id: str | None = None) -> str:

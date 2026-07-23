@@ -203,9 +203,7 @@ def test_executor_queue_commands_delegate_and_report_removed_items(
             ("pop", "pop", "steering", ("two",), ()),
             ("clear", "clear", "follow_up", (), ("later",)),
         ]
-        assert all(
-            event.ok for event in fixture.events if isinstance(event, RpcCommandFinished)
-        )
+        assert all(event.ok for event in fixture.events if isinstance(event, RpcCommandFinished))
 
     anyio.run(scenario)
 
@@ -294,8 +292,7 @@ def test_executor_reports_empty_pop_and_clear_as_success(
 
         removed = [event for event in fixture.events if isinstance(event, QueueItemsRemoved)]
         assert [
-            (event.command_id, event.kind, event.steering, event.follow_up)
-            for event in removed
+            (event.command_id, event.kind, event.steering, event.follow_up) for event in removed
         ] == [
             ("pop", "steering", (), ()),
             ("clear", None, (), ()),

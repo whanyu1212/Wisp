@@ -53,6 +53,7 @@ type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
 type RunningCommandFactory = Callable[..., _RpcRunningCommand]
 type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
 
+
 class RpcApprovalResolver(Protocol):
     def resolve_approval(
         self,
@@ -754,9 +755,7 @@ def handle_rpc_queue_command(
                 operation="pop",
                 kind=kind,
                 steering=(popped.content,) if popped is not None and kind == "steering" else (),
-                follow_up=(popped.content,)
-                if popped is not None and kind == "follow_up"
-                else (),
+                follow_up=(popped.content,) if popped is not None and kind == "follow_up" else (),
             )
         elif command_type == "clear_queue":
             clear_kind = optional_rpc_queue_kind(command, command_type=command_type)
@@ -792,9 +791,7 @@ def require_rpc_queue_kind(
 ) -> QueueKind:
     kind = optional_rpc_queue_kind(command, command_type=command_type)
     if kind is None:
-        raise ValueError(
-            f"RPC {command_type} command field kind must be 'steering' or 'follow_up'"
-        )
+        raise ValueError(f"RPC {command_type} command field kind must be 'steering' or 'follow_up'")
     return kind
 
 
@@ -808,18 +805,14 @@ def optional_rpc_queue_kind(
         return None
     if isinstance(kind, str) and kind in {"steering", "follow_up"}:
         return cast(QueueKind, kind)
-    raise ValueError(
-        f"RPC {command_type} command field kind must be 'steering' or 'follow_up'"
-    )
+    raise ValueError(f"RPC {command_type} command field kind must be 'steering' or 'follow_up'")
 
 
 def require_rpc_queue_mode(command: dict[str, object]) -> QueueMode:
     mode = command.get("mode")
     if isinstance(mode, str) and mode in {"one_at_a_time", "all"}:
         return cast(QueueMode, mode)
-    raise ValueError(
-        "RPC set_queue_mode command field mode must be 'one_at_a_time' or 'all'"
-    )
+    raise ValueError("RPC set_queue_mode command field mode must be 'one_at_a_time' or 'all'")
 
 
 def handle_rpc_control_command(

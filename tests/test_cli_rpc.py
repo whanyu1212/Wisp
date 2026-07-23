@@ -907,8 +907,7 @@ def test_rpc_pending_queue_is_bounded_while_prompt_is_blocked(
     monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
     commands = [{"id": "prompt", "type": "prompt", "prompt": "block"}]
     commands.extend(
-        {"id": f"steer-{index}", "type": "steer", "content": str(index)}
-        for index in range(101)
+        {"id": f"steer-{index}", "type": "steer", "content": str(index)} for index in range(101)
     )
     commands.extend(
         [
@@ -932,9 +931,7 @@ def test_rpc_pending_queue_is_bounded_while_prompt_is_blocked(
     }
     assert finished["steer-99"]["ok"] is True
     assert finished["steer-100"]["ok"] is False
-    assert finished["steer-100"]["error"] == (
-        "Agent queue is full (maximum 100 pending messages)"
-    )
+    assert finished["steer-100"]["error"] == ("Agent queue is full (maximum 100 pending messages)")
     assert finished["state"]["ok"] is True
     assert finished["cancel"]["ok"] is True
     state_start = next(
@@ -942,9 +939,7 @@ def test_rpc_pending_queue_is_bounded_while_prompt_is_blocked(
         for index, record in enumerate(records)
         if record["type"] == "rpc.command.started" and record["command_id"] == "state"
     )
-    state = next(
-        record for record in records[state_start:] if record["type"] == "queue.updated"
-    )
+    state = next(record for record in records[state_start:] if record["type"] == "queue.updated")
     assert len(state["steering"]) == 100
     assert state["follow_up"] == []
 

@@ -779,10 +779,7 @@ def _require_current_schema(data: JsonObject) -> None:
         raise ValueError(
             f"Queue update events require schema_version {QUEUE_UPDATE_SCHEMA_VERSION} or newer"
         )
-    if (
-        data.get("type") == "queue.items.removed"
-        and version < QUEUE_ITEMS_REMOVED_SCHEMA_VERSION
-    ):
+    if data.get("type") == "queue.items.removed" and version < QUEUE_ITEMS_REMOVED_SCHEMA_VERSION:
         raise ValueError(
             "Queue removal result events require schema_version "
             f"{QUEUE_ITEMS_REMOVED_SCHEMA_VERSION} or newer"

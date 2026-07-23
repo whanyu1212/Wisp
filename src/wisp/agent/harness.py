@@ -54,10 +54,7 @@ class AgentHarnessConfig:
         """Reject invalid queue modes even when callers bypass static typing."""
         _require_queue_mode(self.steering_mode)
         _require_queue_mode(self.follow_up_mode)
-        if (
-            type(self.max_pending_queue_messages) is not int
-            or self.max_pending_queue_messages < 0
-        ):
+        if type(self.max_pending_queue_messages) is not int or self.max_pending_queue_messages < 0:
             raise ValueError("max_pending_queue_messages must be a non-negative integer")
 
 
