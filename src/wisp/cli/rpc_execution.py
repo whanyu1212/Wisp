@@ -631,19 +631,24 @@ async def run_rpc_messages_command(
                     (),
                     selected_entry_count,
                 )
-            write_event(
-                RpcMessagesReported(
-                    command_id=command_id,
-                    session_id=page.session_id,
-                    session_path=page.path,
-                    active_leaf_id=page.active_leaf_id,
-                    messages=page.messages,
-                    truncated=page.truncated,
-                    next_before_entry_id=page.next_before_entry_id,
+            if cancel_scope.cancel_called:
+                error = "RPC get_messages command cancelled"
+                refreshed_history = None
+                refreshed_entry_count = selected_entry_count
+            else:
+                write_event(
+                    RpcMessagesReported(
+                        command_id=command_id,
+                        session_id=page.session_id,
+                        session_path=page.path,
+                        active_leaf_id=page.active_leaf_id,
+                        messages=page.messages,
+                        truncated=page.truncated,
+                        next_before_entry_id=page.next_before_entry_id,
+                    )
                 )
-            )
-            ok = True
-        if cancel_scope.cancel_called:
+                ok = True
+        if cancel_scope.cancel_called and error is None:
             error = "RPC get_messages command cancelled"
     except BaseException as exc:
         if isinstance(exc, anyio.get_cancelled_exc_class()):

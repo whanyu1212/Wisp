@@ -289,6 +289,33 @@ def test_executor_messages_reports_empty_without_selected_session(tmp_path: Path
     anyio.run(scenario)
 
 
+def test_executor_messages_cancelled_before_publish_reports_failed_without_payload(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+
+            result = executor.dispatch({"id": "messages", "type": "get_messages"}, None)
+            assert result.running_command is not None
+            result.running_command.cancel_scope.cancel()
+            completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok is False
+        assert completed.history is None
+        assert completed.entry_count == 0
+        assert not any(isinstance(event, RpcMessagesReported) for event in fixture.events)
+        finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
+        assert [(event.command_id, event.ok, event.error) for event in finished] == [
+            ("messages", False, "RPC get_messages command cancelled")
+        ]
+
+    anyio.run(scenario)
+
+
 def test_executor_messages_reads_selected_and_explicit_sessions(
     tmp_path: Path,
 ) -> None:
