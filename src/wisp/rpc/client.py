@@ -12,17 +12,23 @@ from uuid import uuid4
 import anyio
 from anyio.abc import Process
 
-from wisp.events import KnownWispEvent, wisp_event_from_json
+from wisp.events import KnownWispEvent, QueueKind, QueueMode, wisp_event_from_json
 from wisp.rpc.commands import (
     ApprovalCommand,
     ApprovalScope,
     CancelCommand,
+    ClearQueueCommand,
     CompactCommand,
     ConfigureCommand,
+    FollowUpCommand,
+    GetQueueStateCommand,
     GetSessionStatsCommand,
+    PopQueueCommand,
     PromptCommand,
     RpcCommand,
+    SetQueueModeCommand,
     ShutdownCommand,
+    SteerCommand,
     TrustCommand,
 )
 
@@ -76,6 +82,61 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("stats")
         await self._transport.send(GetSessionStatsCommand(id=selected_id))
+        return selected_id
+
+    async def steer(self, content: str, *, command_id: str | None = None) -> str:
+        """Queue steering text for the active run."""
+
+        selected_id = command_id or self._command_id_factory("steer")
+        await self._transport.send(SteerCommand(id=selected_id, content=content))
+        return selected_id
+
+    async def follow_up(self, content: str, *, command_id: str | None = None) -> str:
+        """Queue follow-up text for the active run."""
+
+        selected_id = command_id or self._command_id_factory("follow-up")
+        await self._transport.send(FollowUpCommand(id=selected_id, content=content))
+        return selected_id
+
+    async def get_queue_state(self, *, command_id: str | None = None) -> str:
+        """Request the active or retained queue state."""
+
+        selected_id = command_id or self._command_id_factory("queue-state")
+        await self._transport.send(GetQueueStateCommand(id=selected_id))
+        return selected_id
+
+    async def set_queue_mode(
+        self,
+        kind: QueueKind,
+        mode: QueueMode,
+        *,
+        command_id: str | None = None,
+    ) -> str:
+        """Set one active queue's drain mode."""
+
+        selected_id = command_id or self._command_id_factory("queue-mode")
+        await self._transport.send(
+            SetQueueModeCommand(id=selected_id, kind=kind, mode=mode)
+        )
+        return selected_id
+
+    async def pop_queue(self, kind: QueueKind, *, command_id: str | None = None) -> str:
+        """Remove the latest item from one active queue."""
+
+        selected_id = command_id or self._command_id_factory("queue-pop")
+        await self._transport.send(PopQueueCommand(id=selected_id, kind=kind))
+        return selected_id
+
+    async def clear_queue(
+        self,
+        kind: QueueKind | None = None,
+        *,
+        command_id: str | None = None,
+    ) -> str:
+        """Clear one or both active queues."""
+
+        selected_id = command_id or self._command_id_factory("queue-clear")
+        await self._transport.send(ClearQueueCommand(id=selected_id, kind=kind))
         return selected_id
 
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str:

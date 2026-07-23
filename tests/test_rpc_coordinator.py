@@ -80,6 +80,12 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcInputCommand({"id": "prompt", "type": "prompt"}),
                 _RpcInputCommand({"id": "queued", "type": "prompt"}),
                 _RpcInputCommand({"id": "approval", "type": "approval"}),
+                _RpcInputCommand({"id": "steer", "type": "steer"}),
+                _RpcInputCommand({"id": "follow", "type": "follow_up"}),
+                _RpcInputCommand({"id": "state", "type": "get_queue_state"}),
+                _RpcInputCommand({"id": "mode", "type": "set_queue_mode"}),
+                _RpcInputCommand({"id": "pop", "type": "pop_queue"}),
+                _RpcInputCommand({"id": "clear", "type": "clear_queue"}),
                 _RpcCommandCompleted("prompt", "prompt", True, (), 1),
                 _RpcCommandCompleted("queued", "prompt", True, (), 2),
                 _RpcInputClosed(),
@@ -94,7 +100,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
         ) -> _RpcDispatchResult:
             command_id = str(command["id"])
             dispatched.append(command_id)
-            if command["type"] == "approval":
+            if command["type"] != "prompt":
                 return _RpcDispatchResult(running)
             return _RpcDispatchResult(_RpcRunningCommand(command_id, "prompt", anyio.CancelScope()))
 
@@ -105,7 +111,17 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
             command_type=_command_type,
         )
 
-        assert dispatched == ["prompt", "approval", "queued"]
+        assert dispatched == [
+            "prompt",
+            "approval",
+            "steer",
+            "follow",
+            "state",
+            "mode",
+            "pop",
+            "clear",
+            "queued",
+        ]
 
     anyio.run(scenario)
 

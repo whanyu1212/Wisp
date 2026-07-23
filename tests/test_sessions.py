@@ -337,7 +337,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
         records[3]["id"],
     ]
     assert records[3]["event"]["schema_version"] == 1
-    assert records[3]["event"]["payload"]["schema_version"] == 14
+    assert records[3]["event"]["payload"]["schema_version"] == 15
     assert isinstance(session.read_entries()[0], MessageSessionEntry)
     assert isinstance(session.read_entries()[3], EventSessionEntry)
     assert isinstance(session.read_entries()[4], CompactionSessionEntry)
@@ -543,7 +543,7 @@ def test_session_upgrades_legacy_v5_v6_events_only_on_typed_access(
 
 def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path) -> None:
     path = tmp_path / "future-event.jsonl"
-    raw_event = {"type": "future.event", "schema_version": 15, "future": True}
+    raw_event = {"type": "future.event", "schema_version": 16, "future": True}
     legacy = {
         "id": "future-event",
         "session_id": "event-session",
@@ -555,7 +555,7 @@ def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path)
     session = JsonlSessionStore(tmp_path).load(path)
 
     assert session.read_events() == (raw_event,)
-    with pytest.raises(UnsupportedPersistedEventVersionError, match="schema_version 15"):
+    with pytest.raises(UnsupportedPersistedEventVersionError, match="schema_version 16"):
         session.read_typed_events()
 
 

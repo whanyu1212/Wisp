@@ -763,6 +763,192 @@ def test_rpc_cancels_blocked_compact_then_runs_queued_prompt(
     assert any(record.get("content") == "done after cancel" for record in records)
 
 
+def test_rpc_queue_commands_bypass_a_running_prompt(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    provider = BlockingOperationProvider(block_prompt=True)
+
+    async def build_runtime() -> WispRuntime:
+        return await _runtime_with_provider(provider)
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    commands = [
+        {"id": "prompt-1", "type": "prompt", "prompt": "block"},
+        {"id": "steer-1", "type": "steer", "content": "one"},
+        {"id": "steer-2", "type": "steer", "content": "two"},
+        {"id": "follow-1", "type": "follow_up", "content": "later"},
+        {
+            "id": "mode-1",
+            "type": "set_queue_mode",
+            "kind": "follow_up",
+            "mode": "all",
+        },
+        {"id": "state-1", "type": "get_queue_state"},
+        {"id": "pop-1", "type": "pop_queue", "kind": "steering"},
+        {"id": "clear-1", "type": "clear_queue", "kind": "follow_up"},
+        {"id": "cancel-1", "type": "cancel", "target_id": "prompt-1"},
+    ]
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input="".join(f"{json.dumps(command)}\n" for command in commands),
+        env={"WISP_PROVIDER": provider.name, "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+
+    def command_records(command_id: str) -> list[dict[str, object]]:
+        start = next(
+            index
+            for index, record in enumerate(records)
+            if record["type"] == "rpc.command.started" and record["command_id"] == command_id
+        )
+        finish = next(
+            index
+            for index, record in enumerate(records[start:], start=start)
+            if record["type"] == "rpc.command.finished" and record["command_id"] == command_id
+        )
+        return records[start : finish + 1]
+
+    state_records = command_records("state-1")
+    assert [record["type"] for record in state_records] == [
+        "rpc.command.started",
+        "queue.updated",
+        "rpc.command.finished",
+    ]
+    assert state_records[1]["steering"] == ["one", "two"]
+    assert state_records[1]["follow_up"] == ["later"]
+    assert state_records[1]["follow_up_mode"] == "all"
+
+    pop_records = command_records("pop-1")
+    assert [record["type"] for record in pop_records] == [
+        "rpc.command.started",
+        "queue.items.removed",
+        "queue.updated",
+        "rpc.command.finished",
+    ]
+    assert pop_records[1]["operation"] == "pop"
+    assert pop_records[1]["steering"] == ["two"]
+    assert pop_records[2]["steering"] == ["one"]
+
+    clear_records = command_records("clear-1")
+    assert [record["type"] for record in clear_records] == [
+        "rpc.command.started",
+        "queue.items.removed",
+        "queue.updated",
+        "rpc.command.finished",
+    ]
+    assert clear_records[1]["operation"] == "clear"
+    assert clear_records[1]["follow_up"] == ["later"]
+    assert clear_records[2]["follow_up"] == []
+
+    prompt_finish_index = next(
+        index
+        for index, record in enumerate(records)
+        if record["type"] == "rpc.command.finished" and record["command_id"] == "prompt-1"
+    )
+    for command_id in (
+        "steer-1",
+        "steer-2",
+        "follow-1",
+        "mode-1",
+        "state-1",
+        "pop-1",
+        "clear-1",
+    ):
+        queue_finish_index = next(
+            index
+            for index, record in enumerate(records)
+            if record["type"] == "rpc.command.finished" and record["command_id"] == command_id
+        )
+        assert queue_finish_index < prompt_finish_index
+        assert records[queue_finish_index]["ok"] is True
+
+
+def test_rpc_rejects_container_queue_fields_and_remains_usable(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"kind","type":"pop_queue","kind":[]}\n'
+            '{"id":"mode","type":"set_queue_mode","kind":"steering","mode":{}}\n'
+            '{"id":"state","type":"get_queue_state"}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [(record["command_id"], record["ok"]) for record in finished] == [
+        ("kind", False),
+        ("mode", False),
+        ("state", True),
+    ]
+    assert finished[0]["error"] == (
+        "RPC pop_queue command field kind must be 'steering' or 'follow_up'"
+    )
+    assert finished[1]["error"] == (
+        "RPC set_queue_mode command field mode must be 'one_at_a_time' or 'all'"
+    )
+
+
+def test_rpc_pending_queue_is_bounded_while_prompt_is_blocked(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    provider = BlockingOperationProvider(block_prompt=True)
+
+    async def build_runtime() -> WispRuntime:
+        return await _runtime_with_provider(provider)
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    commands = [{"id": "prompt", "type": "prompt", "prompt": "block"}]
+    commands.extend(
+        {"id": f"steer-{index}", "type": "steer", "content": str(index)}
+        for index in range(101)
+    )
+    commands.extend(
+        [
+            {"id": "state", "type": "get_queue_state"},
+            {"id": "cancel", "type": "cancel", "target_id": "prompt"},
+        ]
+    )
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input="".join(f"{json.dumps(command)}\n" for command in commands),
+        env={"WISP_PROVIDER": provider.name, "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    finished = {
+        record["command_id"]: record
+        for record in records
+        if record["type"] == "rpc.command.finished"
+    }
+    assert finished["steer-99"]["ok"] is True
+    assert finished["steer-100"]["ok"] is False
+    assert finished["steer-100"]["error"] == (
+        "Agent queue is full (maximum 100 pending messages)"
+    )
+    assert finished["state"]["ok"] is True
+    assert finished["cancel"]["ok"] is True
+    state_start = next(
+        index
+        for index, record in enumerate(records)
+        if record["type"] == "rpc.command.started" and record["command_id"] == "state"
+    )
+    state = next(
+        record for record in records[state_start:] if record["type"] == "queue.updated"
+    )
+    assert len(state["steering"]) == 100
+    assert state["follow_up"] == []
+
+
 def test_rpc_repeat_compaction_failure_leaves_process_usable(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -829,7 +1015,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "agent.completed",
         "rpc.command.finished",
     ]
-    assert all(record["schema_version"] == 14 for record in records)
+    assert all(record["schema_version"] == 15 for record in records)
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"
@@ -869,7 +1055,7 @@ def test_rpc_mode_reports_stats_after_queued_prompt(tmp_path: Path) -> None:
     assert finished == [
         {
             "type": "rpc.command.finished",
-            "schema_version": 14,
+            "schema_version": 15,
             "timestamp": finished[0]["timestamp"],
             "command_id": "stats-1",
             "command_type": "get_session_stats",

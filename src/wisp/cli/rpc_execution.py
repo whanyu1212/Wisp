@@ -19,6 +19,9 @@ from wisp.events import (
     AgentStarted,
     ErrorEvent,
     ModelProviderAutoSwitched,
+    QueueItemsRemoved,
+    QueueKind,
+    QueueMode,
     RpcCommandFinished,
     RpcCommandStarted,
     SessionStatsReported,
@@ -26,7 +29,7 @@ from wisp.events import (
 )
 from wisp.providers.base import Provider, ProviderError
 from wisp.providers.catalog import AmbiguousModelError, UnknownModelError
-from wisp.rpc.commands import ApprovalScope
+from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES, ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.entries import MessageSessionEntry
@@ -49,7 +52,6 @@ type RpcEventWriter = Callable[[WispEvent], None]
 type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
 type RunningCommandFactory = Callable[..., _RpcRunningCommand]
 type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
-
 
 class RpcApprovalResolver(Protocol):
     def resolve_approval(
@@ -124,6 +126,8 @@ class RpcCommandExecutor:
             return self._dispatch_compact(command)
         if command_type == "get_session_stats":
             return self._dispatch_session_stats(command)
+        if command_type in QUEUE_RPC_COMMAND_TYPES:
+            return self._dispatch_queue(command, running_command)
         return self._dispatch_control(command, running_command)
 
     def _dispatch_prompt(self, command: dict[str, object]) -> _RpcDispatchResult:
@@ -174,6 +178,19 @@ class RpcCommandExecutor:
                 command_completed_factory=self.command_completed_factory,
             )
         )
+
+    def _dispatch_queue(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        handle_rpc_queue_command(
+            command,
+            agent=self.agent,
+            session=self.session_state.session,
+            write_event=self.write_event,
+        )
+        return _RpcDispatchResult(running_command=running_command)
 
     def _dispatch_control(
         self,
@@ -687,6 +704,121 @@ def reject_rpc_command(
         command_type=command_type,
         message=id_error or message,
         write_event=write_event,
+    )
+
+
+def handle_rpc_queue_command(
+    command: dict[str, object],
+    *,
+    agent: CodingSession,
+    session: JsonlSession | None,
+    write_event: RpcEventWriter,
+) -> None:
+    """Execute one synchronous queue command through the shared session facade."""
+
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return
+
+    removed: QueueItemsRemoved | None = None
+    try:
+        if command_type == "get_queue_state":
+            state = agent.queue_state(session)
+        elif command_type in {"steer", "follow_up"}:
+            content = command.get("content")
+            if not isinstance(content, str):
+                write_rpc_command_error(
+                    command_id=command_id,
+                    command_type=command_type,
+                    message=f"RPC {command_type} command requires string field: content",
+                    write_event=write_event,
+                )
+                return
+            state = agent.steer(content) if command_type == "steer" else agent.follow_up(content)
+        elif command_type == "set_queue_mode":
+            kind = require_rpc_queue_kind(command, command_type=command_type)
+            mode = require_rpc_queue_mode(command)
+            state = agent.set_queue_mode(kind, mode)
+        elif command_type == "pop_queue":
+            kind = require_rpc_queue_kind(command, command_type=command_type)
+            popped, state = agent.pop_queue(kind)
+            removed = QueueItemsRemoved(
+                command_id=command_id,
+                operation="pop",
+                kind=kind,
+                steering=(popped.content,) if popped is not None and kind == "steering" else (),
+                follow_up=(popped.content,)
+                if popped is not None and kind == "follow_up"
+                else (),
+            )
+        elif command_type == "clear_queue":
+            clear_kind = optional_rpc_queue_kind(command, command_type=command_type)
+            cleared, state = agent.clear_queue(clear_kind)
+            removed = QueueItemsRemoved(
+                command_id=command_id,
+                operation="clear",
+                kind=clear_kind,
+                steering=tuple(message.content for message in cleared.steering),
+                follow_up=tuple(message.content for message in cleared.follow_up),
+            )
+        else:  # pragma: no cover - dispatch owns the closed command set
+            raise AssertionError(f"Unsupported queue RPC command: {command_type}")
+    except (RuntimeError, ValueError) as exc:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=str(exc),
+            write_event=write_event,
+        )
+        return
+
+    if removed is not None:
+        write_event(removed)
+    write_event(state)
+    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def require_rpc_queue_kind(
+    command: dict[str, object],
+    *,
+    command_type: str,
+) -> QueueKind:
+    kind = optional_rpc_queue_kind(command, command_type=command_type)
+    if kind is None:
+        raise ValueError(
+            f"RPC {command_type} command field kind must be 'steering' or 'follow_up'"
+        )
+    return kind
+
+
+def optional_rpc_queue_kind(
+    command: dict[str, object],
+    *,
+    command_type: str,
+) -> QueueKind | None:
+    kind = command.get("kind")
+    if kind is None:
+        return None
+    if isinstance(kind, str) and kind in {"steering", "follow_up"}:
+        return cast(QueueKind, kind)
+    raise ValueError(
+        f"RPC {command_type} command field kind must be 'steering' or 'follow_up'"
+    )
+
+
+def require_rpc_queue_mode(command: dict[str, object]) -> QueueMode:
+    mode = command.get("mode")
+    if isinstance(mode, str) and mode in {"one_at_a_time", "all"}:
+        return cast(QueueMode, mode)
+    raise ValueError(
+        "RPC set_queue_mode command field mode must be 'one_at_a_time' or 'all'"
     )
 
 

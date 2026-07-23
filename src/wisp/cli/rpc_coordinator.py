@@ -10,6 +10,7 @@ from typing import Literal, Protocol, cast
 import anyio
 
 from wisp.agent.messages import Message
+from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES
 from wisp.sessions.jsonl import JsonlSession
 
 
@@ -68,7 +69,7 @@ type RpcReject = Callable[[dict[str, object], str], None]
 type RpcCommandType = Callable[[dict[str, object]], str]
 
 _MAX_QUEUED_RPC_COMMANDS = 100
-_BYPASS_QUEUE_COMMANDS = frozenset({"approval", "cancel", "trust"})
+_BYPASS_QUEUE_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {"approval", "cancel", "trust"}
 
 
 class RpcControlReceiver(Protocol):
