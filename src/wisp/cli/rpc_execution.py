@@ -1575,14 +1575,18 @@ async def run_rpc_navigate_session_tree_command(
             await anyio.sleep(0)
             expected_active_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
             await anyio.sleep(0)
-            # Appending the active-leaf record is the durable commit boundary.
-            # Once entered, replay and coordinator publication must complete.
+            # A changed navigation appends an active-leaf record and crosses the
+            # durable commit boundary. Replay and coordinator publication must
+            # then complete even if cancellation arrives while this is shielded.
             with anyio.CancelScope(shield=True):
                 navigation = await session.navigate_tree(
                     entry_id,
                     expected_active_leaf_id=expected_active_leaf_id,
                     operation_id=command_id,
                 )
+                if cancel_scope.cancel_called and not navigation.changed:
+                    error = "RPC navigate_session_tree command cancelled"
+                    return
                 (
                     refreshed_entry_count,
                     refreshed_history,
@@ -1591,6 +1595,11 @@ async def run_rpc_navigate_session_tree_command(
                     rpc_selected_session_state,
                     session,
                 )
+            if cancel_scope.cancel_called and not navigation.changed:
+                refreshed_history = None
+                refreshed_entry_count = selected_entry_count
+                error = "RPC navigate_session_tree command cancelled"
+                return
             navigated = RpcSessionTreeNavigated(
                 command_id=command_id,
                 session_id=session.session_id,

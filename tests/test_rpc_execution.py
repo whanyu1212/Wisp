@@ -1455,6 +1455,78 @@ def test_executor_navigation_cancellation_after_commit_reports_success(
     anyio.run(scenario)
 
 
+def test_executor_navigation_cancellation_during_no_op_reports_cancelled(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        session = fixture.sessions.create()
+        await session.append_message(Message(role="user", content="one"))
+        active = await session.append_message(Message(role="assistant", content="answer"))
+        previous_history = session.read_context_messages()
+        fixture.session_state.session = session
+        fixture.session_state.history = previous_history
+        fixture.session_state.entry_count = 2
+        original_navigate = session.navigate_tree
+        no_op_complete = anyio.Event()
+        release = anyio.Event()
+
+        async def pause_after_no_op(
+            entry_id: str,
+            *,
+            expected_active_leaf_id: str | None,
+            operation_id: str | None = None,
+        ) -> SessionTreeNavigation:
+            result = await original_navigate(
+                entry_id,
+                expected_active_leaf_id=expected_active_leaf_id,
+                operation_id=operation_id,
+            )
+            assert result.changed is False
+            no_op_complete.set()
+            await release.wait()
+            return result
+
+        monkeypatch.setattr(session, "navigate_tree", pause_after_no_op)
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = executor.dispatch(
+                {
+                    "id": "navigate",
+                    "type": "navigate_session_tree",
+                    "entry_id": active.id,
+                },
+                None,
+            )
+            assert result.running_command is not None
+            await no_op_complete.wait()
+            result.running_command.cancel_scope.cancel()
+            release.set()
+            completed = await receive.receive()
+            fixture.coordinator.running_command = result.running_command
+            fixture.coordinator.handle_event(
+                completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok is False
+        assert session.read_active_leaf_id() == active.id
+        assert fixture.session_state.history == previous_history
+        assert fixture.session_state.entry_count == 2
+        assert not any(isinstance(event, RpcSessionTreeNavigated) for event in fixture.events)
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.ok is False
+        assert finished.error == "RPC navigate_session_tree command cancelled"
+
+    anyio.run(scenario)
+
+
 def test_executor_clone_cancellation_before_commit_preserves_source(
     tmp_path: Path,
 ) -> None:
