@@ -51,6 +51,7 @@ from wisp.sessions.errors import (
     MalformedPersistedEventError,
     MalformedSessionEntryError,
     SessionError,
+    SessionNavigationCancelledError,
     StaleSessionTreeError,
     UnsupportedPersistedEventVersionError,
     UnsupportedSessionEntryVersionError,
@@ -492,6 +493,7 @@ class JsonlSession:
         *,
         expected_active_leaf_id: str | None,
         operation_id: str | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> SessionTreeNavigation:
         """Atomically navigate to one stored entry using Pi-style prompt restoration."""
 
@@ -503,6 +505,7 @@ class JsonlSession:
                 entry_id,
                 expected_active_leaf_id,
                 operation_id,
+                cancel_requested,
             )
 
     async def truncate_entries(self, count: int) -> None:
@@ -773,6 +776,7 @@ class JsonlSession:
         entry_id: str,
         expected_active_leaf_id: str | None,
         operation_id: str | None,
+        cancel_requested: Callable[[], bool] | None,
     ) -> SessionTreeNavigation:
         with self._file_state.lock:
             with self._interprocess_lock():
@@ -791,6 +795,7 @@ class JsonlSession:
                 if target is None:
                     raise SessionReplayError(f"Session tree entry not found: {entry_id}")
                 if entry_id == previous_active_leaf_id:
+                    _raise_if_navigation_cancelled(cancel_requested)
                     return SessionTreeNavigation(
                         selected_entry_id=entry_id,
                         previous_active_leaf_id=previous_active_leaf_id,
@@ -807,6 +812,7 @@ class JsonlSession:
                     editor_text = target.message.content
 
                 if active_leaf_id == previous_active_leaf_id:
+                    _raise_if_navigation_cancelled(cancel_requested)
                     return SessionTreeNavigation(
                         selected_entry_id=entry_id,
                         previous_active_leaf_id=previous_active_leaf_id,
@@ -823,6 +829,7 @@ class JsonlSession:
                     operation_id=operation_id,
                 )
                 replay_session_entries((*entries, selection))
+                _raise_if_navigation_cancelled(cancel_requested)
                 persisted = self._append_entry_locked(selection)
                 assert isinstance(persisted, ActiveLeafSessionEntry)
                 return SessionTreeNavigation(
@@ -1243,6 +1250,13 @@ def _clip_text(text: str, *, limit: int) -> tuple[str, int, bool]:
     if len(encoded) <= limit:
         return text, len(encoded), False
     return encoded[:limit].decode("utf-8", errors="ignore"), len(encoded), True
+
+
+def _raise_if_navigation_cancelled(
+    cancel_requested: Callable[[], bool] | None,
+) -> None:
+    if cancel_requested is not None and cancel_requested():
+        raise SessionNavigationCancelledError("Session tree navigation cancelled")
 
 
 def _tree_page_from_entries(

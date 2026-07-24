@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import threading
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Literal
 
@@ -11,6 +12,7 @@ from pytest import MonkeyPatch
 from tests.rpc_support import build_rpc_executor_fixture
 from wisp.agent.harness import QueuedMessages
 from wisp.agent.messages import Message
+from wisp.cli import rpc_execution as rpc_execution_module
 from wisp.cli.rpc_configuration import _RpcConfigureOverrides
 from wisp.cli.rpc_coordinator import (
     RpcCoordinator,
@@ -1295,12 +1297,14 @@ def test_executor_navigation_rejects_concurrent_leaf_change(
             *,
             expected_active_leaf_id: str | None,
             operation_id: str | None = None,
+            cancel_requested: Callable[[], bool] | None = None,
         ) -> SessionTreeNavigation:
             await session.append_message(Message(role="assistant", content="concurrent"))
             return await original_navigate(
                 entry_id,
                 expected_active_leaf_id=expected_active_leaf_id,
                 operation_id=operation_id,
+                cancel_requested=cancel_requested,
             )
 
         monkeypatch.setattr(session, "navigate_tree", change_before_navigation)
@@ -1351,16 +1355,19 @@ def test_executor_navigation_cancellation_before_commit_preserves_leaf(
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            result = executor.dispatch(
-                {
-                    "id": "navigate",
-                    "type": "navigate_session_tree",
-                    "entry_id": selected.id,
-                },
-                None,
-            )
-            assert result.running_command is not None
-            result.running_command.cancel_scope.cancel()
+            async with session._append_lock:
+                result = executor.dispatch(
+                    {
+                        "id": "navigate",
+                        "type": "navigate_session_tree",
+                        "entry_id": selected.id,
+                    },
+                    None,
+                )
+                assert result.running_command is not None
+                while session._append_lock.statistics().tasks_waiting == 0:
+                    await anyio.sleep(0)
+                result.running_command.cancel_scope.cancel()
             completed = await receive.receive()
             fixture.coordinator.running_command = result.running_command
             fixture.coordinator.handle_event(
@@ -1394,26 +1401,22 @@ def test_executor_navigation_cancellation_after_commit_reports_success(
         fixture.session_state.session = session
         fixture.session_state.history = session.read_context_messages()
         fixture.session_state.entry_count = 2
-        original_navigate = session.navigate_tree
-        committed = anyio.Event()
-        release = anyio.Event()
+        original_selected_state = rpc_execution_module.rpc_selected_session_state
+        committed = threading.Event()
+        release = threading.Event()
 
-        async def pause_after_navigation(
-            entry_id: str,
-            *,
-            expected_active_leaf_id: str | None,
-            operation_id: str | None = None,
-        ) -> SessionTreeNavigation:
-            result = await original_navigate(
-                entry_id,
-                expected_active_leaf_id=expected_active_leaf_id,
-                operation_id=operation_id,
-            )
+        def pause_after_navigation(
+            selected_session: JsonlSession,
+        ) -> tuple[int, tuple[Message, ...], str | None]:
             committed.set()
-            await release.wait()
-            return result
+            assert release.wait(timeout=5)
+            return original_selected_state(selected_session)
 
-        monkeypatch.setattr(session, "navigate_tree", pause_after_navigation)
+        monkeypatch.setattr(
+            rpc_execution_module,
+            "rpc_selected_session_state",
+            pause_after_navigation,
+        )
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
@@ -1426,7 +1429,7 @@ def test_executor_navigation_cancellation_after_commit_reports_success(
                 None,
             )
             assert result.running_command is not None
-            await committed.wait()
+            assert await anyio.to_thread.run_sync(lambda: committed.wait(timeout=5))
             result.running_command.cancel_scope.cancel()
             release.set()
             completed = await receive.receive()
@@ -1477,11 +1480,13 @@ def test_executor_navigation_cancellation_during_no_op_reports_cancelled(
             *,
             expected_active_leaf_id: str | None,
             operation_id: str | None = None,
+            cancel_requested: Callable[[], bool] | None = None,
         ) -> SessionTreeNavigation:
             result = await original_navigate(
                 entry_id,
                 expected_active_leaf_id=expected_active_leaf_id,
                 operation_id=operation_id,
+                cancel_requested=cancel_requested,
             )
             assert result.changed is False
             no_op_complete.set()

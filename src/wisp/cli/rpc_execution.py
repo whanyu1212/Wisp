@@ -46,6 +46,7 @@ from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES, ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.entries import MessageSessionEntry
+from wisp.sessions.errors import SessionNavigationCancelledError
 from wisp.sessions.jsonl import (
     DEFAULT_SESSION_MESSAGE_PAGE_LIMIT,
     DEFAULT_SESSION_TREE_PAGE_LIMIT,
@@ -1575,18 +1576,16 @@ async def run_rpc_navigate_session_tree_command(
             await anyio.sleep(0)
             expected_active_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
             await anyio.sleep(0)
-            # A changed navigation appends an active-leaf record and crosses the
-            # durable commit boundary. Replay and coordinator publication must
-            # then complete even if cancellation arrives while this is shielded.
-            with anyio.CancelScope(shield=True):
-                navigation = await session.navigate_tree(
-                    entry_id,
-                    expected_active_leaf_id=expected_active_leaf_id,
-                    operation_id=command_id,
-                )
-                if cancel_scope.cancel_called and not navigation.changed:
-                    error = "RPC navigate_session_tree command cancelled"
-                    return
+            navigation = await session.navigate_tree(
+                entry_id,
+                expected_active_leaf_id=expected_active_leaf_id,
+                operation_id=command_id,
+                cancel_requested=lambda: cancel_scope.cancel_called,
+            )
+            # A changed navigation has crossed its durable commit boundary.
+            # Replay and coordinator publication must then complete even if
+            # cancellation arrives after the active-leaf append.
+            with anyio.CancelScope(shield=navigation.changed):
                 (
                     refreshed_entry_count,
                     refreshed_history,
@@ -1628,7 +1627,10 @@ async def run_rpc_navigate_session_tree_command(
         refreshed_entry_count = selected_entry_count
         post_apply_events = ()
         finish_in_worker = True
-        if isinstance(exc, anyio.get_cancelled_exc_class()):
+        if isinstance(
+            exc,
+            (anyio.get_cancelled_exc_class(), SessionNavigationCancelledError),
+        ):
             error = "RPC navigate_session_tree command cancelled"
         else:
             error = str(exc)

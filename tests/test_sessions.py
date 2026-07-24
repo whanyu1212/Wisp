@@ -42,6 +42,7 @@ from wisp.sessions.entries import (
 from wisp.sessions.errors import (
     MalformedPersistedEventError,
     MalformedSessionEntryError,
+    SessionNavigationCancelledError,
     StaleSessionTreeError,
     UnsupportedPersistedEventVersionError,
     UnsupportedSessionEntryVersionError,
@@ -508,6 +509,30 @@ def test_session_tree_navigation_rejects_missing_and_stale_entries(tmp_path: Pat
     anyio.run(navigate)
 
     assert len(session.read_entries()) == 1
+
+
+def test_session_tree_navigation_honors_cancellation_at_commit_boundary(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def navigate() -> None:
+        selected = await session.append_message(Message(role="user", content="root"))
+        active = await session.append_message(Message(role="assistant", content="answer"))
+        with pytest.raises(
+            SessionNavigationCancelledError,
+            match="Session tree navigation cancelled",
+        ):
+            await session.navigate_tree(
+                selected.id,
+                expected_active_leaf_id=active.id,
+                cancel_requested=lambda: True,
+            )
+        assert session.read_active_leaf_id() == active.id
+
+    anyio.run(navigate)
+
+    assert len(session.read_entries()) == 2
 
 
 def test_session_message_page_clips_large_content_and_tool_arguments(
