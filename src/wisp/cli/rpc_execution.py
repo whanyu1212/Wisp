@@ -1227,6 +1227,11 @@ async def run_rpc_sessions_command(
     try:
         with cancel_scope:
             summaries = await anyio.to_thread.run_sync(partial(sessions.summaries, limit=limit))
+            selected_session_name = (
+                await anyio.to_thread.run_sync(selected_session.read_name)
+                if selected_session is not None
+                else None
+            )
             if cancel_scope.cancel_called:
                 error = "RPC get_sessions command cancelled"
             else:
@@ -1240,9 +1245,7 @@ async def run_rpc_sessions_command(
                         selected_session_path=(
                             selected_session.path if selected_session is not None else None
                         ),
-                        selected_session_name=(
-                            selected_session.read_name() if selected_session is not None else None
-                        ),
+                        selected_session_name=selected_session_name,
                     )
                 )
                 ok = True
@@ -1808,6 +1811,7 @@ async def run_rpc_set_session_name_command(
                 selected_target = (
                     selected_session is not None
                     and target.session_id == selected_session.session_id
+                    and target.path == selected_session.path
                 )
             await anyio.sleep(0)
             with anyio.CancelScope(shield=True):

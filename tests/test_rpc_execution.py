@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import threading
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -496,6 +497,7 @@ def test_executor_sessions_reports_empty_catalog(tmp_path: Path) -> None:
 
 def test_executor_sessions_reports_bounded_catalog_with_selected_metadata(
     tmp_path: Path,
+    monkeypatch: MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
@@ -505,6 +507,13 @@ def test_executor_sessions_reports_bounded_catalog_with_selected_metadata(
         await second.append_message(Message(role="user", content="two"))
         fixture.session_state.session = first
         fixture.session_state.entry_count = 1
+        event_loop_thread = threading.get_ident()
+
+        def read_name_from_worker() -> str:
+            assert threading.get_ident() != event_loop_thread
+            return "Selected"
+
+        monkeypatch.setattr(first, "read_name", read_name_from_worker)
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
@@ -528,6 +537,7 @@ def test_executor_sessions_reports_bounded_catalog_with_selected_metadata(
         assert report.sessions[0].active_leaf_id is not None
         assert report.selected_session_id == first.session_id
         assert report.selected_session_path == first.path
+        assert report.selected_session_name == "Selected"
         assert fixture.session_state.session is first
 
     anyio.run(scenario)
@@ -713,6 +723,57 @@ def test_executor_set_session_name_with_explicit_id_does_not_switch_selection(
         changed = name_events[0]
         assert changed.session_id == other.session_id
         assert changed.name == "Other"
+
+    anyio.run(scenario)
+
+
+def test_executor_set_session_name_with_explicit_path_requires_same_selected_path(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        selected = fixture.sessions.create()
+        await selected.append_message(Message(role="user", content="selected"))
+        await selected.set_name("Selected")
+        copied_path = tmp_path / "copied-session.jsonl"
+        shutil.copy2(selected.path, copied_path)
+        copied = fixture.sessions.load(copied_path)
+        assert copied.session_id == selected.session_id
+        fixture.session_state.session = selected
+        fixture.session_state.history = selected.read_context_messages()
+        fixture.session_state.entry_count = len(selected.read_entries())
+        fixture.session_state.name = "Selected"
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+
+            result = executor.dispatch(
+                {
+                    "id": "name",
+                    "type": "set_session_name",
+                    "session_id": str(copied_path),
+                    "name": "Copied",
+                },
+                None,
+            )
+            completed = await receive.receive()
+            fixture.coordinator.running_command = result.running_command
+            fixture.coordinator.handle_event(
+                completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok is True
+        assert completed.session_name_updated is False
+        assert fixture.session_state.session is selected
+        assert fixture.session_state.history == selected.read_context_messages()
+        assert fixture.session_state.entry_count == 2
+        assert fixture.session_state.name == "Selected"
+        assert selected.read_name() == "Selected"
+        assert copied.read_name() == "Copied"
 
     anyio.run(scenario)
 
