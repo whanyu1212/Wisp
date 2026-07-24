@@ -195,7 +195,9 @@ def test_session_names_are_normalized_cleared_and_latest_wins(tmp_path: Path) ->
     assert cleared.entry_count == 3
     assert session.read_name() is None
     entries = session.read_entries()
-    assert [entry.name for entry in entries if isinstance(entry, SessionInfoSessionEntry)] == [
+    info_entries = [entry for entry in entries if isinstance(entry, SessionInfoSessionEntry)]
+    assert [entry.schema_version for entry in info_entries] == [3, 3, 3]
+    assert [entry.name for entry in info_entries] == [
         "alpha beta",
         "alpha beta",
         None,
@@ -273,7 +275,7 @@ def test_session_summaries_expose_names_and_reject_malformed_metadata(tmp_path: 
     assert summaries[0].name == "Named"
 
     broken = {
-        "schema_version": 2,
+        "schema_version": 3,
         "id": "entry",
         "session_id": "session",
         "created_at": "2026-07-11T00:00:00Z",
@@ -923,7 +925,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
         "event",
         "compaction",
     ]
-    assert [record["schema_version"] for record in records] == [2, 2, 2, 2, 2]
+    assert [record["schema_version"] for record in records] == [3, 3, 3, 3, 3]
     assert [record["parent_id"] for record in records] == [
         None,
         records[0]["id"],
@@ -1032,7 +1034,7 @@ def test_session_upgrades_v1_entries_to_a_parent_chain_without_rewriting(tmp_pat
 
     entries = JsonlSessionStore(tmp_path).load(path).read_entries()
 
-    assert [entry.schema_version for entry in entries] == [2, 2]
+    assert [entry.schema_version for entry in entries] == [3, 3]
     assert [entry.parent_id for entry in entries if isinstance(entry, MessageSessionEntry)] == [
         None,
         "first",
@@ -1075,6 +1077,24 @@ def test_session_accepts_v2_entries_with_omitted_null_structural_references(
         assert isinstance(loaded, ActiveLeafSessionEntry)
         assert loaded.previous_leaf_id is None
         assert loaded.active_leaf_id is None
+
+
+def test_session_rejects_v2_session_info_entries(tmp_path: Path) -> None:
+    path = tmp_path / "v2-session-info.jsonl"
+    entry = {
+        "schema_version": 2,
+        "id": "name",
+        "session_id": "session",
+        "kind": "session_info",
+        "name": "old-version-name",
+        "created_at": "2026-07-11T00:00:00Z",
+    }
+    path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
+
+    with pytest.raises(MalformedSessionEntryError, match="session entry"):
+        JsonlSessionStore(tmp_path).load(path).read_entries()
+    with pytest.raises(MalformedSessionEntryError, match="session entry"):
+        JsonlSessionStore(tmp_path).summaries()
 
 
 def test_session_reads_public_exclude_none_serialization_as_linear_chain(
@@ -1176,7 +1196,7 @@ def test_session_rejects_malformed_event_only_on_typed_access(tmp_path: Path) ->
     ("schema_version", "error_type", "match"),
     [
         ("1", MalformedSessionEntryError, "must be an integer"),
-        (3, UnsupportedSessionEntryVersionError, "schema_version 3"),
+        (4, UnsupportedSessionEntryVersionError, "schema_version 4"),
     ],
 )
 def test_session_distinguishes_malformed_and_future_entry_versions(

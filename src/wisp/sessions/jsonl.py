@@ -1630,12 +1630,14 @@ def _summary_entry_metadata_from_json(
         )
     if version == 1:
         return _v1_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
+    if version == 2:
+        return _v2_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
     if version != SESSION_ENTRY_SCHEMA_VERSION:
         raise UnsupportedSessionEntryVersionError(
             f"Unsupported session entry schema_version {version}{location}; "
             f"expected {SESSION_ENTRY_SCHEMA_VERSION}"
         )
-    return _v2_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
+    return _v3_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
 
 
 def _legacy_summary_entry_metadata(
@@ -1730,14 +1732,25 @@ def _v2_summary_entry_metadata(
                 location=location,
             ),
         )
+    raise MalformedSessionEntryError(f"Malformed session entry{location}")
+
+
+def _v3_summary_entry_metadata(
+    raw: JsonObject,
+    *,
+    location: str,
+    parent_id: str | None,
+) -> _SessionSummaryEntryMetadata:
+    kind = raw.get("kind")
     if kind == "session_info":
+        _require_summary_base_fields(raw, location=location)
         return _SessionSummaryEntryMetadata(
             id=_required_summary_string(raw, "id", location=location),
             session_id=_required_summary_string(raw, "session_id", location=location),
             kind=kind,
             name=_summary_session_name(raw, location=location),
         )
-    raise MalformedSessionEntryError(f"Malformed session entry{location}")
+    return _v2_summary_entry_metadata(raw, location=location, parent_id=parent_id)
 
 
 def _require_summary_base_fields(raw: JsonObject, *, location: str) -> None:

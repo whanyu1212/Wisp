@@ -26,7 +26,7 @@ from wisp.sessions.errors import (
     UnsupportedSessionEntryVersionError,
 )
 
-SESSION_ENTRY_SCHEMA_VERSION: Literal[2] = 2
+SESSION_ENTRY_SCHEMA_VERSION: Literal[3] = 3
 PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION: Literal[1] = 1
 _MIN_SUPPORTED_EVENT_SCHEMA_VERSION = 5
 MAX_SESSION_NAME_BYTES = 256
@@ -38,7 +38,7 @@ class SessionEntryBase(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    schema_version: Literal[2] = SESSION_ENTRY_SCHEMA_VERSION
+    schema_version: Literal[3] = SESSION_ENTRY_SCHEMA_VERSION
     id: str = Field(default_factory=lambda: uuid4().hex, min_length=1)
     session_id: str = Field(min_length=1)
     operation_id: str | None = None
@@ -202,6 +202,16 @@ def session_entry_from_dict(
                 source=source,
                 parent_id=legacy_parent_id,
             )
+        elif version == 2:
+            if raw.get("kind") == "session_info":
+                raise MalformedSessionEntryError(
+                    f"Unknown v2 session entry kind 'session_info'{location}"
+                )
+            normalized = _normalize_v2_structural_fields(
+                raw,
+                parent_id=legacy_parent_id,
+            )
+            normalized["schema_version"] = SESSION_ENTRY_SCHEMA_VERSION
         elif version != SESSION_ENTRY_SCHEMA_VERSION:
             raise UnsupportedSessionEntryVersionError(
                 f"Unsupported session entry schema_version {version}{location}; "
@@ -300,7 +310,7 @@ def _upgrade_v1_entry(
     source: str | None,
     parent_id: str | None,
 ) -> JsonObject:
-    """Upgrade one v1 discriminated entry into an in-memory v2 tree node."""
+    """Upgrade one v1 discriminated entry into an in-memory current tree node."""
 
     location = f" at {source}" if source is not None else ""
     kind = raw.get("kind")
