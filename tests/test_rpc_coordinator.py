@@ -86,6 +86,8 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcInputCommand({"id": "messages", "type": "get_messages"}),
                 _RpcInputCommand({"id": "sessions", "type": "get_sessions"}),
                 _RpcInputCommand({"id": "select", "type": "select_session"}),
+                _RpcInputCommand({"id": "clone", "type": "clone_session"}),
+                _RpcInputCommand({"id": "fork", "type": "fork_session", "entry_id": "entry"}),
                 _RpcInputCommand({"id": "approval", "type": "approval"}),
                 _RpcInputCommand({"id": "steer", "type": "steer"}),
                 _RpcInputCommand({"id": "follow", "type": "follow_up"}),
@@ -99,6 +101,8 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcCommandCompleted("messages", "get_messages", True, (), 2),
                 _RpcCommandCompleted("sessions", "get_sessions", True, (), 2),
                 _RpcCommandCompleted("select", "select_session", True, (), 2),
+                _RpcCommandCompleted("clone", "clone_session", True, (), 2),
+                _RpcCommandCompleted("fork", "fork_session", True, (), 2),
                 _RpcInputClosed(),
             ]
         )
@@ -116,6 +120,8 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 "get_messages",
                 "get_sessions",
                 "select_session",
+                "clone_session",
+                "fork_session",
             }:
                 return _RpcDispatchResult(running)
             return _RpcDispatchResult(
@@ -142,6 +148,8 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
             "messages",
             "sessions",
             "select",
+            "clone",
+            "fork",
         ]
 
     anyio.run(scenario)
@@ -259,6 +267,8 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
                 "get_messages",
                 "get_sessions",
                 "select_session",
+                "clone_session",
+                "fork_session",
             ],
         ) -> None:
             coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
@@ -299,24 +309,26 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
         await assert_bypasses("get_messages")
         await assert_bypasses("get_sessions")
         await assert_bypasses("select_session")
+        await assert_bypasses("clone_session")
+        await assert_bypasses("fork_session")
 
     anyio.run(scenario)
 
 
-def test_coordinator_applies_selected_session_from_async_completion(tmp_path: Path) -> None:
+def test_coordinator_applies_derived_session_from_async_completion(tmp_path: Path) -> None:
     async def scenario() -> None:
         session = JsonlSessionStore(tmp_path).create()
         history = (Message(role="user", content="resumed"),)
         state = _RpcSessionState(session=None, history=(), entry_count=0)
         coordinator = RpcCoordinator(state)
         coordinator.running_command = _RpcRunningCommand(
-            "select",
-            "select_session",
+            "clone",
+            "clone_session",
             anyio.CancelScope(),
         )
 
         coordinator.handle_event(
-            _RpcCommandCompleted("select", "select_session", True, history, 1, session),
+            _RpcCommandCompleted("clone", "clone_session", True, history, 1, session),
             dispatch=lambda _command, running: _RpcDispatchResult(running),
             reject=lambda _command, _message: None,
             command_type=_command_type,

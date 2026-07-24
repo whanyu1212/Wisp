@@ -143,7 +143,7 @@ The typed session API can also derive a new session without rewriting its source
 the complete active path, while a fork copies the path before a selected user message and returns
 that prompt for editing. Copied entries retain their stable IDs, parent links, timestamps, events,
 compactions, and accounting metadata under a new session ID. These core operations are not yet
-exposed as CLI, RPC, or TUI commands.
+exposed as direct CLI or TUI commands; RPC clients can use `clone_session` and `fork_session`.
 The former `wisp.agent.messages.SessionEntry(...)` constructor remains available as a deprecated
 factory; new integrations should import the concrete entry models from `wisp.sessions`.
 
@@ -390,8 +390,8 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 18`; readers also accept legacy schema v5
-through v17 events for compatibility. A successful prompt follows this lifecycle (tool events
+Every outbound `WispEvent` includes `"schema_version": 19`; readers also accept legacy schema v5
+through v18 events for compatibility. A successful prompt follows this lifecycle (tool events
 repeat inside a turn when the model requests tools):
 
 ```text
@@ -420,6 +420,18 @@ The exception is successful schema-v11 overflow recovery: after `context.overflo
 overflow compaction lifecycle events, then the failed `turn.completed`, and continues once. Its
 `compaction.completed.will_retry=true` marks that failed turn as nonterminal; no `error` or
 intermediate `agent.completed` is emitted unless compaction or the retry setup fails.
+
+Schema v19 adds `rpc.session.cloned` and `rpc.session.forked` for durable session derivation.
+`clone_session` copies the selected session's complete active path, while `fork_session` copies
+the path before one persisted user-message entry and returns that entry's exact, untruncated
+prompt text for editing. Both commands atomically select the derived session before their result
+event is emitted. Forking the first user message selects a reserved empty session whose file is
+created by the next persisted prompt, so it does not appear in `get_sessions` until then.
+
+Pi's RPC `clone` and `fork` operations are the behavioral reference: they also replace the active
+session and return editable text for a fork. Wisp intentionally uses typed result events with
+stable source/target identities, entry counts, active-leaf metadata, and optimistic source-tree
+validation. This RPC slice does not add Pi-style extension lifecycle hooks.
 
 Schema v18 adds `rpc.sessions` and `rpc.session.selected` for RPC session picker/resume flows.
 `get_sessions` returns bounded persisted session summaries — session id, path, updated timestamp,
@@ -537,6 +549,8 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 | `{"id":"messages-1","type":"get_messages","limit":200}` | Emit a bounded active transcript page |
 | `{"id":"sessions-1","type":"get_sessions","limit":50}` | Emit a bounded persisted session catalog |
 | `{"id":"select-1","type":"select_session","session_id":"…"}` | Select a persisted session for later RPC commands |
+| `{"id":"clone-1","type":"clone_session"}` | Clone the selected active path and select the clone |
+| `{"id":"fork-1","type":"fork_session","entry_id":"…"}` | Fork before a user message, select the fork, and return its prompt |
 | `{"id":"steer-1","type":"steer","content":"Use the other approach"}` | Queue text after the active assistant/tool batch |
 | `{"id":"follow-1","type":"follow_up","content":"Then summarize"}` | Queue text for when the active run would otherwise stop |
 | `{"id":"queue-1","type":"get_queue_state"}` | Emit the active or retained `queue.updated` snapshot |
@@ -549,8 +563,8 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 | `{"id":"cmd-2","type":"shutdown"}` | Exit cleanly |
 
 Each command emits `rpc.command.started` / `rpc.command.finished` so clients can group the events
-between them. Prompts, compactions, statistics reads, transcript reads, session catalog reads, and
-session selection run sequentially; `get_state`, queue
+between them. Prompts, compactions, statistics reads, transcript reads, session catalog reads,
+session selection, cloning, and forking run sequentially; `get_state`, queue
 commands, `cancel`, `approval`, and `trust` are handled while an operation runs. `get_state`
 preserves the active command and any queued commands, including during prompt startup, compaction,
 statistics reads, approval/trust waits, and after cancellation is requested. During prompt startup,
@@ -563,7 +577,11 @@ session and returns an empty page with null session fields before any session is
 the selected session. `get_sessions` accepts `limit` (`0..200`, default `50`) and never switches the
 selected session. `select_session` accepts a non-empty session id/path/prefix, preserves the
 previous selection on failure, and makes later selected-session reads use that session's active
-leaf. `get_queue_state` is safe
+leaf. `clone_session` and `fork_session` require a selected session and atomically replace it only
+after the derived session validates. The source remains append-only and unchanged. Derivation
+cancellation is honored before its durable store operation begins; after publication starts, the
+operation completes rather than reporting a cancelled command that already created a session.
+`get_queue_state` is safe
 while idle. Queue mutations require an active run that is still accepting messages and otherwise
 fail with `CodingSession has no active agent run`. Successful queue commands emit the authoritative
 `queue.updated`; `pop_queue` and `clear_queue` first emit `queue.items.removed` with the exact
@@ -613,9 +631,9 @@ finally:
 ```
 
 `RpcController` exposes typed `prompt`, `compact`, `get_session_stats`, `get_state`, `get_messages`,
-`get_sessions`, `select_session`, `steer`, `follow_up`, `get_queue_state`, `set_queue_mode`,
-`pop_queue`, `clear_queue`, `cancel`, `approve`, `configure`, and `shutdown` methods and yields
-parsed `WispEvent` objects.
+`get_sessions`, `select_session`, `clone_session`, `fork_session`, `steer`, `follow_up`,
+`get_queue_state`, `set_queue_mode`, `pop_queue`, `clear_queue`, `cancel`, `approve`, `configure`,
+and `shutdown` methods and yields parsed `WispEvent` objects.
 
 ## Development
 

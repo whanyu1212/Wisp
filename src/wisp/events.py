@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 18
+EVENT_SCHEMA_VERSION = 19
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -28,6 +28,7 @@ QUEUE_ITEMS_REMOVED_SCHEMA_VERSION = 15
 RPC_STATE_SCHEMA_VERSION = 16
 RPC_MESSAGES_SCHEMA_VERSION = 17
 RPC_SESSIONS_SCHEMA_VERSION = 18
+RPC_SESSION_DERIVATION_SCHEMA_VERSION = 19
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -48,7 +49,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18] = 18
+    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] = 19
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -752,6 +753,52 @@ class RpcSessionSelected(WispEvent):
         return self
 
 
+class _RpcSessionDerived(WispEvent):
+    """Shared source and target identity for RPC session derivation."""
+
+    command_id: str
+    source_session_id: str = Field(min_length=1)
+    source_session_path: Path
+    source_active_leaf_id: str | None = Field(default=None, min_length=1)
+    session_id: str = Field(min_length=1)
+    session_path: Path
+    active_leaf_id: str | None = Field(default=None, min_length=1)
+    entry_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_derivation(self) -> Self:
+        if self.schema_version < RPC_SESSION_DERIVATION_SCHEMA_VERSION:
+            raise ValueError(
+                "RPC session derivation events require schema_version "
+                f"{RPC_SESSION_DERIVATION_SCHEMA_VERSION} or newer"
+            )
+        if self.source_session_id == self.session_id:
+            raise ValueError("RPC session derivation must create a new session id")
+        return self
+
+
+class RpcSessionCloned(_RpcSessionDerived):
+    """Confirmation that the active path was cloned and selected."""
+
+    type: Literal["rpc.session.cloned"] = "rpc.session.cloned"
+
+    @model_validator(mode="after")
+    def _validate_clone(self) -> Self:
+        if self.active_leaf_id is None:
+            raise ValueError("RPC cloned sessions require an active leaf")
+        if self.entry_count == 0:
+            raise ValueError("RPC cloned sessions require at least one entry")
+        return self
+
+
+class RpcSessionForked(_RpcSessionDerived):
+    """Confirmation that a session was forked before a user message and selected."""
+
+    type: Literal["rpc.session.forked"] = "rpc.session.forked"
+    selected_entry_id: str = Field(min_length=1)
+    selected_prompt: str
+
+
 class QueueUpdated(WispEvent):
     """Current harness-owned steering and follow-up queue state."""
 
@@ -869,6 +916,8 @@ type KnownWispEvent = Annotated[
     | RpcMessagesReported
     | RpcSessionsReported
     | RpcSessionSelected
+    | RpcSessionCloned
+    | RpcSessionForked
     | QueueUpdated
     | QueueItemsRemoved
     | QueueMessageInjected
@@ -959,6 +1008,13 @@ def _require_current_schema(data: JsonObject) -> None:
     ):
         raise ValueError(
             f"RPC session events require schema_version {RPC_SESSIONS_SCHEMA_VERSION} or newer"
+        )
+    if data.get("type") in {"rpc.session.cloned", "rpc.session.forked"} and (
+        version < RPC_SESSION_DERIVATION_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "RPC session derivation events require schema_version "
+            f"{RPC_SESSION_DERIVATION_SCHEMA_VERSION} or newer"
         )
     if data.get("type") == "queue.items.removed" and version < QUEUE_ITEMS_REMOVED_SCHEMA_VERSION:
         raise ValueError(

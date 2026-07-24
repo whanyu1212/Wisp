@@ -21,6 +21,8 @@ type _SequentialRpcCommandType = Literal[
     "get_messages",
     "get_sessions",
     "select_session",
+    "clone_session",
+    "fork_session",
 ]
 
 
@@ -196,11 +198,7 @@ class RpcCoordinator:
                 if completed.history is not None:
                     self.session_state.history = completed.history
                 selected_session = getattr(completed, "selected_session", None)
-                if (
-                    completed.ok
-                    and completed.command_type == "select_session"
-                    and selected_session is not None
-                ):
+                if completed.ok and selected_session is not None:
                     self.session_state.session = selected_session
                 if self._completion_event_writer is not None:
                     for queued_event in getattr(completed, "post_apply_events", ()):

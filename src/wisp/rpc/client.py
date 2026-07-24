@@ -18,9 +18,11 @@ from wisp.rpc.commands import (
     ApprovalScope,
     CancelCommand,
     ClearQueueCommand,
+    CloneSessionCommand,
     CompactCommand,
     ConfigureCommand,
     FollowUpCommand,
+    ForkSessionCommand,
     GetMessagesCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
@@ -128,6 +130,20 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("select-session")
         await self._transport.send(SelectSessionCommand(id=selected_id, session_id=session_id))
+        return selected_id
+
+    async def clone_session(self, *, command_id: str | None = None) -> str:
+        """Clone the selected session and select the clone."""
+
+        selected_id = command_id or self._command_id_factory("clone-session")
+        await self._transport.send(CloneSessionCommand(id=selected_id))
+        return selected_id
+
+    async def fork_session(self, entry_id: str, *, command_id: str | None = None) -> str:
+        """Fork before a selected user message and select the fork."""
+
+        selected_id = command_id or self._command_id_factory("fork-session")
+        await self._transport.send(ForkSessionCommand(id=selected_id, entry_id=entry_id))
         return selected_id
 
     async def steer(self, content: str, *, command_id: str | None = None) -> str:
