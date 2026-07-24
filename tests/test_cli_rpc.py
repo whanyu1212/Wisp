@@ -1041,7 +1041,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "agent.completed",
         "rpc.command.finished",
     ]
-    assert all(record["schema_version"] == 19 for record in records)
+    assert all(record["schema_version"] == 20 for record in records)
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"
@@ -1081,7 +1081,7 @@ def test_rpc_mode_reports_stats_after_queued_prompt(tmp_path: Path) -> None:
     assert finished == [
         {
             "type": "rpc.command.finished",
-            "schema_version": 19,
+            "schema_version": 20,
             "timestamp": finished[0]["timestamp"],
             "command_id": "stats-1",
             "command_type": "get_session_stats",
@@ -1108,7 +1108,7 @@ def test_rpc_mode_reports_messages_after_queued_prompt(tmp_path: Path) -> None:
     records = _jsonl_records(result.stdout)
     report = next(record for record in records if record["type"] == "rpc.messages")
     assert report["command_id"] == "messages-1"
-    assert report["schema_version"] == 19
+    assert report["schema_version"] == 20
     assert report["session_id"]
     assert report["session_path"]
     assert report["active_leaf_id"]
@@ -1131,7 +1131,7 @@ def test_rpc_mode_reports_messages_after_queued_prompt(tmp_path: Path) -> None:
     assert finished == [
         {
             "type": "rpc.command.finished",
-            "schema_version": 19,
+            "schema_version": 20,
             "timestamp": finished[0]["timestamp"],
             "command_id": "messages-1",
             "command_type": "get_messages",
@@ -1154,7 +1154,7 @@ def test_rpc_mode_reports_sessions_catalog(tmp_path: Path) -> None:
     records = _jsonl_records(result.stdout)
     report = next(record for record in records if record["type"] == "rpc.sessions")
     assert report["command_id"] == "sessions-1"
-    assert report["schema_version"] == 19
+    assert report["schema_version"] == 20
     assert report["selected_session_id"] is None
     assert report["selected_session_path"] is None
     assert len(report["sessions"]) == 1
@@ -1187,14 +1187,14 @@ def test_rpc_mode_select_session_then_reads_messages(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
     selected = next(record for record in records if record["type"] == "rpc.session.selected")
-    assert selected["schema_version"] == 19
+    assert selected["schema_version"] == 20
     assert selected["command_id"] == "select-1"
     assert selected["session_id"] == session.session_id
     assert selected["session_path"] == str(session.path)
     assert selected["entry_count"] == 4
 
     report = next(record for record in records if record["type"] == "rpc.messages")
-    assert report["schema_version"] == 19
+    assert report["schema_version"] == 20
     assert report["session_id"] == session.session_id
     assert [message["content"] for message in report["messages"]] == [
         "first",
@@ -1236,7 +1236,7 @@ def test_rpc_mode_clones_selected_session_then_reads_clone(tmp_path: Path) -> No
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
-    assert all(record["schema_version"] == 19 for record in records)
+    assert all(record["schema_version"] == 20 for record in records)
     cloned = next(record for record in records if record["type"] == "rpc.session.cloned")
     assert cloned["command_id"] == "clone-1"
     assert cloned["source_session_id"] == source.session_id
@@ -1290,7 +1290,7 @@ def test_rpc_mode_first_message_fork_persists_after_edited_prompt(tmp_path: Path
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
-    assert all(record["schema_version"] == 19 for record in records)
+    assert all(record["schema_version"] == 20 for record in records)
     forked = next(record for record in records if record["type"] == "rpc.session.forked")
     assert forked["command_id"] == "fork-1"
     assert forked["source_session_id"] == source.session_id
@@ -1306,6 +1306,206 @@ def test_rpc_mode_first_message_fork_persists_after_edited_prompt(tmp_path: Path
         "fake response to: edited first",
     ]
     assert Path(forked["session_path"]).is_file()
+
+
+def test_rpc_mode_pages_navigates_and_resubmits_session_tree_prompt(
+    tmp_path: Path,
+) -> None:
+    session = _create_two_turn_session(tmp_path)
+    entries = session.read_entries()
+    selected = entries[2]
+    assert isinstance(selected, MessageSessionEntry)
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"tree-empty","type":"get_session_tree"}\n'
+            + json.dumps(
+                {
+                    "id": "select-1",
+                    "type": "select_session",
+                    "session_id": session.session_id,
+                }
+            )
+            + "\n"
+            '{"id":"tree-1","type":"get_session_tree","limit":2}\n'
+            + json.dumps(
+                {
+                    "id": "tree-2",
+                    "type": "get_session_tree",
+                    "limit": 10,
+                    "after_entry_id": entries[1].id,
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "id": "navigate-1",
+                    "type": "navigate_session_tree",
+                    "entry_id": selected.id,
+                }
+            )
+            + "\n"
+            '{"id":"prompt-1","type":"prompt","prompt":"edited second"}\n'
+            '{"id":"messages-1","type":"get_messages","limit":10}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert all(record["schema_version"] == 20 for record in records)
+    tree_reports = [record for record in records if record["type"] == "rpc.session.tree"]
+    assert tree_reports[0]["session_id"] is None
+    assert tree_reports[0]["session_path"] is None
+    assert tree_reports[0]["nodes"] == []
+    assert tree_reports[1]["total_node_count"] == 4
+    assert [node["entry_id"] for node in tree_reports[1]["nodes"]] == [
+        entries[0].id,
+        entries[1].id,
+    ]
+    assert tree_reports[1]["truncated"] is True
+    assert tree_reports[1]["next_after_entry_id"] == entries[1].id
+    assert [node["entry_id"] for node in tree_reports[2]["nodes"]] == [
+        entries[2].id,
+        entries[3].id,
+    ]
+    assert tree_reports[2]["truncated"] is False
+    assert tree_reports[2]["next_after_entry_id"] is None
+
+    navigated = next(record for record in records if record["type"] == "rpc.session.tree.navigated")
+    assert navigated["selected_entry_id"] == selected.id
+    assert navigated["previous_active_leaf_id"] == entries[3].id
+    assert navigated["active_leaf_id"] == entries[1].id
+    assert navigated["editor_text"] == "second"
+    assert navigated["changed"] is True
+    assert navigated["entry_count"] == 5
+
+    messages = next(record for record in records if record["type"] == "rpc.messages")
+    assert [
+        message["content"] for message in messages["messages"] if message["role"] != "system"
+    ] == [
+        "first",
+        "answer one",
+        "edited second",
+        "fake response to: edited second",
+    ]
+    assert [node["preview"] for report in tree_reports[1:] for node in report["nodes"]] == [
+        "first",
+        "answer one",
+        "second",
+        "answer two",
+    ]
+
+    resumed = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            json.dumps(
+                {
+                    "id": "select-2",
+                    "type": "select_session",
+                    "session_id": session.session_id,
+                }
+            )
+            + "\n"
+            '{"id":"messages-2","type":"get_messages","limit":10}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+    assert resumed.exit_code == 0, resumed.output
+    resumed_records = _jsonl_records(resumed.stdout)
+    resumed_messages = next(
+        record for record in resumed_records if record["type"] == "rpc.messages"
+    )
+    assert [
+        message["content"]
+        for message in resumed_messages["messages"]
+        if message["role"] != "system"
+    ] == [
+        "first",
+        "answer one",
+        "edited second",
+        "fake response to: edited second",
+    ]
+
+
+def test_rpc_tree_navigation_repairs_incomplete_tool_boundary_before_prompt(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> MessageSessionEntry:
+        await session.append_message(Message(role="user", content="old prompt"))
+        assistant = await session.append_message(
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    ToolCallSnapshot(
+                        call_id="call-1",
+                        name="read",
+                        arguments={"path": "README.md"},
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        )
+        await session.append_message(
+            Message(
+                role="tool",
+                content="old result",
+                tool_call_id="call-1",
+                tool_name="read",
+            )
+        )
+        return assistant
+
+    assistant = anyio.run(write)
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            json.dumps(
+                {
+                    "id": "select-1",
+                    "type": "select_session",
+                    "session_id": session.session_id,
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "id": "navigate-1",
+                    "type": "navigate_session_tree",
+                    "entry_id": assistant.id,
+                }
+            )
+            + "\n"
+            '{"id":"prompt-1","type":"prompt","prompt":"continue"}\n'
+            '{"id":"messages-1","type":"get_messages","limit":10}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    navigated = next(record for record in records if record["type"] == "rpc.session.tree.navigated")
+    assert navigated["active_leaf_id"] == assistant.id
+    assert navigated["editor_text"] is None
+    messages = next(record for record in records if record["type"] == "rpc.messages")
+    active = [message for message in messages["messages"] if message["role"] != "system"]
+    assert [message["role"] for message in active] == [
+        "user",
+        "assistant",
+        "tool",
+        "user",
+        "assistant",
+    ]
+    assert active[2]["content"] == INTERRUPTED_TOOL_RESULT_TEXT
+    assert active[2]["tool_call_id"] == "call-1"
+    assert active[2]["is_error"] is True
+    assert active[-2]["content"] == "continue"
 
 
 def test_rpc_mode_reports_idle_and_reconfigured_state(tmp_path: Path) -> None:

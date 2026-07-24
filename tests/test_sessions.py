@@ -22,7 +22,14 @@ from wisp.events import (
     ToolCallRequested,
     ToolCallSnapshot,
 )
-from wisp.sessions import jsonl as jsonl_module
+from wisp.sessions import (
+    SessionTreeNavigation,
+    SessionTreeNodeSummary,
+    SessionTreePage,
+)
+from wisp.sessions import (
+    jsonl as jsonl_module,
+)
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,
@@ -35,6 +42,7 @@ from wisp.sessions.entries import (
 from wisp.sessions.errors import (
     MalformedPersistedEventError,
     MalformedSessionEntryError,
+    StaleSessionTreeError,
     UnsupportedPersistedEventVersionError,
     UnsupportedSessionEntryVersionError,
 )
@@ -64,6 +72,12 @@ def _message_page_text_bytes(page: SessionMessagePage) -> int:
             )
             total += len(rendered.encode("utf-8"))
     return total
+
+
+def test_session_tree_facades_are_publicly_exported() -> None:
+    assert SessionTreePage.__module__ == "wisp.sessions.jsonl"
+    assert SessionTreeNodeSummary.__module__ == "wisp.sessions.jsonl"
+    assert SessionTreeNavigation.__module__ == "wisp.sessions.jsonl"
 
 
 def test_session_store_loads_by_path_filename_and_id_prefix(tmp_path: Path) -> None:
@@ -286,6 +300,214 @@ def test_session_message_page_rejects_invalid_limits_and_unknown_cursor(
         session.read_message_page(limit=501)
     with pytest.raises(SessionError, match="Session message cursor not found"):
         session.read_message_page(before_entry_id="missing")
+
+
+def test_session_tree_page_returns_empty_identified_reserved_session(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    page = session.read_tree_page()
+
+    assert page == SessionTreePage(
+        session_id=session.session_id,
+        path=session.path,
+        active_leaf_id=None,
+        total_node_count=0,
+        nodes=(),
+        truncated=False,
+        next_after_entry_id=None,
+    )
+    assert not session.path.exists()
+
+
+def test_session_tree_page_includes_inactive_nodes_and_pages_in_append_order(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    long_prompt = "🙂" * 200
+
+    async def write() -> tuple[str, ...]:
+        root = await session.append_message(Message(role="user", content=long_prompt))
+        answer = await session.append_message(Message(role="assistant", content="answer"))
+        abandoned = await session.append_message(Message(role="user", content="abandoned"))
+        abandoned_answer = await session.append_message(
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    ToolCallSnapshot(call_id="call-1", name="read", arguments={"path": "secret"}),
+                ),
+                finish_reason="tool_calls",
+            )
+        )
+        await session.select_active_leaf(
+            answer.id,
+            expected_active_leaf_id=abandoned_answer.id,
+        )
+        branch = await session.append_message(Message(role="user", content="branch"))
+        event = await session.append_event(ErrorEvent(message="hidden event payload"))
+        branch_answer = await session.append_message(
+            Message(role="assistant", content="branch answer")
+        )
+        return (
+            root.id,
+            answer.id,
+            abandoned.id,
+            abandoned_answer.id,
+            branch.id,
+            event.id,
+            branch_answer.id,
+        )
+
+    node_ids = anyio.run(write)
+
+    first = session.read_tree_page(limit=4)
+    second = session.read_tree_page(limit=4, after_entry_id=first.next_after_entry_id)
+    exhausted = session.read_tree_page(limit=4, after_entry_id=node_ids[-1])
+
+    assert [node.entry_id for node in first.nodes] == list(node_ids[:4])
+    assert [node.entry_id for node in second.nodes] == list(node_ids[4:])
+    assert first.total_node_count == second.total_node_count == 7
+    assert first.active_leaf_id == second.active_leaf_id == node_ids[-1]
+    assert first.truncated is True
+    assert first.next_after_entry_id == node_ids[3]
+    assert second.truncated is False
+    assert second.next_after_entry_id is None
+    assert exhausted.total_node_count == 7
+    assert exhausted.nodes == ()
+    assert exhausted.truncated is False
+    assert exhausted.next_after_entry_id is None
+    assert first.nodes[0].preview_truncated is True
+    assert len(first.nodes[0].preview.encode("utf-8")) <= 512
+    assert first.nodes[0].preview.encode("utf-8").decode("utf-8") == first.nodes[0].preview
+    assert first.nodes[3].preview == "[tool calls: read]"
+    assert "secret" not in first.nodes[3].preview
+    assert second.nodes[1].preview == "error"
+    assert "hidden event payload" not in second.nodes[1].preview
+
+
+def test_session_tree_compaction_preview_is_utf8_bounded() -> None:
+    entry = CompactionSessionEntry(
+        session_id="session-1",
+        compaction=CompactionRecord(
+            summary="漢🙂" * 300,
+            replaced_entry_ids=("entry-1",),
+            provider="fake",
+        ),
+    )
+
+    node = jsonl_module._session_tree_node_summary(entry)  # noqa: SLF001
+
+    assert node.kind == "compaction"
+    assert node.role is None
+    assert node.preview_truncated is True
+    assert len(node.preview.encode("utf-8")) <= 512
+    assert node.preview.encode("utf-8").decode("utf-8") == node.preview
+
+
+def test_session_tree_page_rejects_invalid_limits_and_unknown_cursor(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        await session.append_message(Message(role="user", content="hello"))
+
+    anyio.run(write)
+
+    with pytest.raises(ValueError, match="between 1 and 500"):
+        session.read_tree_page(limit=0)
+    with pytest.raises(ValueError, match="between 1 and 500"):
+        session.read_tree_page(limit=501)
+    with pytest.raises(ValueError, match="cursor must be non-empty"):
+        session.read_tree_page(after_entry_id="")
+    with pytest.raises(SessionError, match="Session tree cursor not found: missing"):
+        session.read_tree_page(after_entry_id="missing")
+
+
+def test_session_tree_navigation_restores_user_prompt_and_selects_other_nodes(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    exact_prompt = "edit this 🙂\nwithout clipping" * 100
+
+    async def navigate() -> tuple[str, str, str]:
+        root = await session.append_message(Message(role="user", content="root"))
+        answer = await session.append_message(Message(role="assistant", content="answer"))
+        selected = await session.append_message(Message(role="user", content=exact_prompt))
+        leaf = await session.append_message(Message(role="assistant", content="old answer"))
+
+        restored = await session.navigate_tree(
+            selected.id,
+            expected_active_leaf_id=leaf.id,
+            operation_id="navigate-user",
+        )
+        assert restored.selected_entry_id == selected.id
+        assert restored.previous_active_leaf_id == leaf.id
+        assert restored.active_leaf_id == answer.id
+        assert restored.editor_text == exact_prompt
+        assert restored.changed is True
+        assert restored.entry_count == 5
+
+        current = await session.navigate_tree(
+            answer.id,
+            expected_active_leaf_id=answer.id,
+            operation_id="navigate-current",
+        )
+        assert current.active_leaf_id == answer.id
+        assert current.editor_text is None
+        assert current.changed is False
+        assert current.entry_count == 5
+
+        reset = await session.navigate_tree(
+            root.id,
+            expected_active_leaf_id=answer.id,
+            operation_id="navigate-root",
+        )
+        assert reset.active_leaf_id is None
+        assert reset.editor_text == "root"
+        assert reset.changed is True
+        assert reset.entry_count == 6
+        return root.id, answer.id, leaf.id
+
+    root_id, answer_id, old_leaf_id = anyio.run(navigate)
+
+    assert session.read_active_leaf_id() is None
+    assert session.read_context_messages() == ()
+    selections = [
+        entry for entry in session.read_entries() if isinstance(entry, ActiveLeafSessionEntry)
+    ]
+    assert [(entry.previous_leaf_id, entry.active_leaf_id) for entry in selections] == [
+        (old_leaf_id, answer_id),
+        (answer_id, None),
+    ]
+    assert [entry.operation_id for entry in selections] == [
+        "navigate-user",
+        "navigate-root",
+    ]
+    assert root_id != answer_id
+
+
+def test_session_tree_navigation_rejects_missing_and_stale_entries(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def navigate() -> None:
+        leaf = await session.append_message(Message(role="user", content="root"))
+        with pytest.raises(SessionError, match="Session tree entry not found: missing"):
+            await session.navigate_tree(
+                "missing",
+                expected_active_leaf_id=leaf.id,
+            )
+        with pytest.raises(StaleSessionTreeError, match="expected active leaf 'stale'"):
+            await session.navigate_tree(
+                leaf.id,
+                expected_active_leaf_id="stale",
+            )
+        with pytest.raises(ValueError, match="entry id must be non-empty"):
+            await session.navigate_tree("", expected_active_leaf_id=leaf.id)
+
+    anyio.run(navigate)
+
+    assert len(session.read_entries()) == 1
 
 
 def test_session_message_page_clips_large_content_and_tool_arguments(
@@ -568,7 +790,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
         records[3]["id"],
     ]
     assert records[3]["event"]["schema_version"] == 1
-    assert records[3]["event"]["payload"]["schema_version"] == 19
+    assert records[3]["event"]["payload"]["schema_version"] == 20
     assert isinstance(session.read_entries()[0], MessageSessionEntry)
     assert isinstance(session.read_entries()[3], EventSessionEntry)
     assert isinstance(session.read_entries()[4], CompactionSessionEntry)
@@ -774,7 +996,7 @@ def test_session_upgrades_legacy_v5_v6_events_only_on_typed_access(
 
 def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path) -> None:
     path = tmp_path / "future-event.jsonl"
-    raw_event = {"type": "future.event", "schema_version": 20, "future": True}
+    raw_event = {"type": "future.event", "schema_version": 21, "future": True}
     legacy = {
         "id": "future-event",
         "session_id": "event-session",
@@ -786,7 +1008,7 @@ def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path)
     session = JsonlSessionStore(tmp_path).load(path)
 
     assert session.read_events() == (raw_event,)
-    with pytest.raises(UnsupportedPersistedEventVersionError, match="schema_version 20"):
+    with pytest.raises(UnsupportedPersistedEventVersionError, match="schema_version 21"):
         session.read_typed_events()
 
 

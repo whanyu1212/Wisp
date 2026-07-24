@@ -34,12 +34,14 @@ from wisp.events import (
     RpcSessionForked,
     RpcSessionSelected,
     RpcSessionsReported,
+    RpcSessionTreeNavigated,
+    RpcSessionTreeReported,
     RpcStateReported,
     RpcStateSnapshot,
     WispEvent,
 )
 from wisp.runtime.extensions import build_runtime
-from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionTreeNavigation
 
 
 class _ApprovalResolver:
@@ -1041,6 +1043,414 @@ def test_executor_fork_rejects_non_user_and_missing_entries(tmp_path: Path) -> N
             "Session fork entry must be a persisted user message: missing",
         ]
         assert not any(isinstance(event, RpcSessionForked) for event in fixture.events)
+
+    anyio.run(scenario)
+
+
+def test_executor_session_tree_reports_empty_and_bounded_selected_pages(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+
+            empty = executor.dispatch(
+                {"id": "tree-empty", "type": "get_session_tree"},
+                None,
+            )
+            empty_completed = await receive.receive()
+            fixture.coordinator.running_command = empty.running_command
+            fixture.coordinator.handle_event(
+                empty_completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+
+            session = fixture.sessions.create()
+            fixture.session_state.session = session
+            reserved = executor.dispatch(
+                {"id": "tree-reserved", "type": "get_session_tree"},
+                None,
+            )
+            reserved_completed = await receive.receive()
+            fixture.coordinator.running_command = reserved.running_command
+            fixture.coordinator.handle_event(
+                reserved_completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            first = await session.append_message(Message(role="user", content="first"))
+            await session.append_message(Message(role="assistant", content="answer"))
+            fixture.session_state.history = session.read_context_messages()
+            fixture.session_state.entry_count = 2
+            selected = executor.dispatch(
+                {"id": "tree-selected", "type": "get_session_tree", "limit": 1},
+                None,
+            )
+            selected_completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        reports = [event for event in fixture.events if isinstance(event, RpcSessionTreeReported)]
+        assert empty_completed.ok is True
+        assert reports[0].session_id is None
+        assert reports[0].session_path is None
+        assert reports[0].nodes == ()
+        assert reports[0].total_node_count == 0
+        assert reserved_completed.ok is True
+        assert reports[1].session_id == session.session_id
+        assert reports[1].session_path == session.path
+        assert reports[1].active_leaf_id is None
+        assert reports[1].nodes == ()
+        assert reports[1].total_node_count == 0
+        assert selected.running_command is not None
+        assert selected.running_command.command_type == "get_session_tree"
+        assert selected_completed.ok is True
+        assert selected_completed.history == session.read_context_messages()
+        assert selected_completed.entry_count == 2
+        assert reports[2].session_id == session.session_id
+        assert reports[2].session_path == session.path
+        assert reports[2].total_node_count == 2
+        assert [node.entry_id for node in reports[2].nodes] == [first.id]
+        assert reports[2].truncated is True
+        assert reports[2].next_after_entry_id == first.id
+
+    anyio.run(scenario)
+
+
+def test_executor_navigation_applies_history_before_reporting_success(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        session = fixture.sessions.create()
+        await session.append_message(Message(role="user", content="first"))
+        answer = await session.append_message(Message(role="assistant", content="answer"))
+        editable = "edit this exact prompt 漢🙂"
+        selected = await session.append_message(Message(role="user", content=editable))
+        await session.append_message(Message(role="assistant", content="old answer"))
+        fixture.session_state.session = session
+        fixture.session_state.history = session.read_context_messages()
+        fixture.session_state.entry_count = 4
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+
+            result = executor.dispatch(
+                {
+                    "id": "navigate",
+                    "type": "navigate_session_tree",
+                    "entry_id": selected.id,
+                },
+                None,
+            )
+            completed = await receive.receive()
+            assert not any(isinstance(event, RpcSessionTreeNavigated) for event in fixture.events)
+            fixture.coordinator.running_command = result.running_command
+            fixture.coordinator.handle_event(
+                completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is not None
+        assert result.running_command.command_type == "navigate_session_tree"
+        assert completed.ok is True
+        assert [message.content for message in fixture.session_state.history] == [
+            "first",
+            "answer",
+        ]
+        assert fixture.session_state.entry_count == 5
+        assert session.read_active_leaf_id() == answer.id
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            RpcSessionTreeNavigated,
+            RpcCommandFinished,
+        ]
+        report = fixture.events[1]
+        assert isinstance(report, RpcSessionTreeNavigated)
+        assert report.session_id == session.session_id
+        assert report.session_path == session.path
+        assert report.selected_entry_id == selected.id
+        assert report.previous_active_leaf_id is not None
+        assert report.active_leaf_id == answer.id
+        assert report.editor_text == editable
+        assert report.changed is True
+        assert report.entry_count == 5
+
+    anyio.run(scenario)
+
+
+def test_executor_session_tree_reports_validation_and_lookup_failures(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        invalid_commands: list[dict[str, object]] = [
+            {"id": [], "type": "get_session_tree"},
+            {"id": "limit-bool", "type": "get_session_tree", "limit": True},
+            {"id": "limit-low", "type": "get_session_tree", "limit": 0},
+            {"id": "limit-high", "type": "get_session_tree", "limit": 501},
+            {"id": "cursor", "type": "get_session_tree", "after_entry_id": ""},
+            {"id": "navigate-empty", "type": "navigate_session_tree", "entry_id": ""},
+            {"id": "navigate-none", "type": "navigate_session_tree", "entry_id": "entry"},
+        ]
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            for command in invalid_commands:
+                assert executor.dispatch(command, None).running_command is None
+
+            no_session_cursor = executor.dispatch(
+                {
+                    "id": "no-session-cursor",
+                    "type": "get_session_tree",
+                    "after_entry_id": "missing",
+                },
+                None,
+            )
+            no_session_cursor_completed = await receive.receive()
+            fixture.coordinator.running_command = no_session_cursor.running_command
+            fixture.coordinator.handle_event(
+                no_session_cursor_completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            session = fixture.sessions.create()
+            await session.append_message(Message(role="user", content="one"))
+            fixture.session_state.session = session
+            fixture.session_state.history = session.read_context_messages()
+            fixture.session_state.entry_count = 1
+            unknown_cursor = executor.dispatch(
+                {
+                    "id": "unknown-cursor",
+                    "type": "get_session_tree",
+                    "after_entry_id": "missing",
+                },
+                None,
+            )
+            cursor_completed = await receive.receive()
+            fixture.coordinator.running_command = unknown_cursor.running_command
+            fixture.coordinator.handle_event(
+                cursor_completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            executor.dispatch(
+                {
+                    "id": "missing-entry",
+                    "type": "navigate_session_tree",
+                    "entry_id": "missing",
+                },
+                None,
+            )
+            entry_completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert no_session_cursor_completed.ok is False
+        assert cursor_completed.ok is False
+        assert entry_completed.ok is False
+        assert fixture.session_state.history == session.read_context_messages()
+        finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
+        assert [event.error for event in finished] == [
+            "RPC command id must be a non-empty string",
+            "RPC get_session_tree command field limit must be an integer",
+            "RPC get_session_tree command field limit must be between 1 and 500",
+            "RPC get_session_tree command field limit must be between 1 and 500",
+            ("RPC get_session_tree command field after_entry_id must be a non-empty string"),
+            ("RPC navigate_session_tree command field entry_id must be a non-empty string"),
+            ("RPC navigate_session_tree command requires an existing persisted session"),
+            "Session tree cursor not found: missing",
+            "Session tree cursor not found: missing",
+            "Session tree entry not found: missing",
+        ]
+
+    anyio.run(scenario)
+
+
+def test_executor_navigation_rejects_concurrent_leaf_change(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        session = fixture.sessions.create()
+        selected = await session.append_message(Message(role="user", content="one"))
+        await session.append_message(Message(role="assistant", content="answer"))
+        previous_history = session.read_context_messages()
+        fixture.session_state.session = session
+        fixture.session_state.history = previous_history
+        fixture.session_state.entry_count = 2
+        original_navigate = session.navigate_tree
+
+        async def change_before_navigation(
+            entry_id: str,
+            *,
+            expected_active_leaf_id: str | None,
+            operation_id: str | None = None,
+        ) -> SessionTreeNavigation:
+            await session.append_message(Message(role="assistant", content="concurrent"))
+            return await original_navigate(
+                entry_id,
+                expected_active_leaf_id=expected_active_leaf_id,
+                operation_id=operation_id,
+            )
+
+        monkeypatch.setattr(session, "navigate_tree", change_before_navigation)
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = executor.dispatch(
+                {
+                    "id": "navigate",
+                    "type": "navigate_session_tree",
+                    "entry_id": selected.id,
+                },
+                None,
+            )
+            completed = await receive.receive()
+            fixture.coordinator.running_command = result.running_command
+            fixture.coordinator.handle_event(
+                completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok is False
+        assert fixture.session_state.history == previous_history
+        assert fixture.session_state.entry_count == 2
+        assert not any(isinstance(event, RpcSessionTreeNavigated) for event in fixture.events)
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.error is not None
+        assert finished.error.startswith("Session tree changed: expected active leaf")
+
+    anyio.run(scenario)
+
+
+def test_executor_navigation_cancellation_before_commit_preserves_leaf(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        session = fixture.sessions.create()
+        selected = await session.append_message(Message(role="user", content="one"))
+        active = await session.append_message(Message(role="assistant", content="answer"))
+        fixture.session_state.session = session
+        fixture.session_state.history = session.read_context_messages()
+        fixture.session_state.entry_count = 2
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = executor.dispatch(
+                {
+                    "id": "navigate",
+                    "type": "navigate_session_tree",
+                    "entry_id": selected.id,
+                },
+                None,
+            )
+            assert result.running_command is not None
+            result.running_command.cancel_scope.cancel()
+            completed = await receive.receive()
+            fixture.coordinator.running_command = result.running_command
+            fixture.coordinator.handle_event(
+                completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok is False
+        assert session.read_active_leaf_id() == active.id
+        assert fixture.session_state.entry_count == 2
+        assert not any(isinstance(event, RpcSessionTreeNavigated) for event in fixture.events)
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.error == "RPC navigate_session_tree command cancelled"
+
+    anyio.run(scenario)
+
+
+def test_executor_navigation_cancellation_after_commit_reports_success(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        session = fixture.sessions.create()
+        selected = await session.append_message(Message(role="user", content="one"))
+        await session.append_message(Message(role="assistant", content="answer"))
+        fixture.session_state.session = session
+        fixture.session_state.history = session.read_context_messages()
+        fixture.session_state.entry_count = 2
+        original_navigate = session.navigate_tree
+        committed = anyio.Event()
+        release = anyio.Event()
+
+        async def pause_after_navigation(
+            entry_id: str,
+            *,
+            expected_active_leaf_id: str | None,
+            operation_id: str | None = None,
+        ) -> SessionTreeNavigation:
+            result = await original_navigate(
+                entry_id,
+                expected_active_leaf_id=expected_active_leaf_id,
+                operation_id=operation_id,
+            )
+            committed.set()
+            await release.wait()
+            return result
+
+        monkeypatch.setattr(session, "navigate_tree", pause_after_navigation)
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = executor.dispatch(
+                {
+                    "id": "navigate",
+                    "type": "navigate_session_tree",
+                    "entry_id": selected.id,
+                },
+                None,
+            )
+            assert result.running_command is not None
+            await committed.wait()
+            result.running_command.cancel_scope.cancel()
+            release.set()
+            completed = await receive.receive()
+            fixture.coordinator.running_command = result.running_command
+            fixture.coordinator.handle_event(
+                completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok is True
+        assert session.read_active_leaf_id() is None
+        assert fixture.session_state.history == ()
+        assert fixture.session_state.entry_count == 3
+        report = next(
+            event for event in fixture.events if isinstance(event, RpcSessionTreeNavigated)
+        )
+        assert report.changed is True
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.ok is True
+        assert finished.error is None
 
     anyio.run(scenario)
 

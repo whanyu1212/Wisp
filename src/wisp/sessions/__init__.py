@@ -26,6 +26,9 @@ from .jsonl import (
     SessionForkResult,
     SessionMessagePage,
     SessionSummary,
+    SessionTreeNavigation,
+    SessionTreeNodeSummary,
+    SessionTreePage,
 )
 from .replay import (
     SessionContextRow,
@@ -59,6 +62,9 @@ __all__ = [
     "SessionReplayError",
     "SessionSummary",
     "SessionTreeEntry",
+    "SessionTreeNavigation",
+    "SessionTreeNodeSummary",
+    "SessionTreePage",
     "SessionTreeState",
     "StaleCompactionError",
     "StaleSessionTreeError",

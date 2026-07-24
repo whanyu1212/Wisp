@@ -390,8 +390,8 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 19`; readers also accept legacy schema v5
-through v18 events for compatibility. A successful prompt follows this lifecycle (tool events
+Every outbound `WispEvent` includes `"schema_version": 20`; readers also accept legacy schema v5
+through v19 events for compatibility. A successful prompt follows this lifecycle (tool events
 repeat inside a turn when the model requests tools):
 
 ```text
@@ -420,6 +420,23 @@ The exception is successful schema-v11 overflow recovery: after `context.overflo
 overflow compaction lifecycle events, then the failed `turn.completed`, and continues once. Its
 `compaction.completed.will_retry=true` marks that failed turn as nonterminal; no `error` or
 intermediate `agent.completed` is emitted unless compaction or the retry setup fails.
+
+Schema v20 adds `rpc.session.tree` and `rpc.session.tree.navigated`. `get_session_tree` returns
+persisted message, event, and compaction nodes from the selected session in append order, including
+inactive branches but excluding active-leaf state records. Pages use exposed entry IDs as
+`after_entry_id` cursors. Each node carries stable parent/operation metadata and a UTF-8-safe
+preview capped at 512 bytes; event previews expose only the event type, tool arguments are never
+included, and compaction previews contain only the bounded summary.
+
+`navigate_session_tree` matches Pi's edit-and-resubmit workflow within the current session file.
+Selecting the current active node is a successful no-op. Selecting another user message activates
+its parent and returns the exact, untruncated prompt as `editor_text`; selecting any other node
+activates that node directly. The append-only active-leaf update and refreshed replay are applied
+before the result event is emitted, and subsequent prompts retain the existing interrupted
+tool-call repair. Cancellation is honored before mutation; once the durable selection begins it is
+allowed to finish and reports success. Unlike Pi, this slice uses typed events, explicit optimistic
+leaf validation, and bounded flat pages; it intentionally omits branch summaries, labels, and
+extension lifecycle hooks.
 
 Schema v19 adds `rpc.session.cloned` and `rpc.session.forked` for durable session derivation.
 `clone_session` copies the selected session's complete active path, while `fork_session` copies
@@ -551,6 +568,8 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 | `{"id":"select-1","type":"select_session","session_id":"…"}` | Select a persisted session for later RPC commands |
 | `{"id":"clone-1","type":"clone_session"}` | Clone the selected active path and select the clone |
 | `{"id":"fork-1","type":"fork_session","entry_id":"…"}` | Fork before a user message, select the fork, and return its prompt |
+| `{"id":"tree-1","type":"get_session_tree","limit":200}` | Emit a bounded append-order page of the selected session tree |
+| `{"id":"navigate-1","type":"navigate_session_tree","entry_id":"…"}` | Navigate in-file and optionally restore a user prompt for editing |
 | `{"id":"steer-1","type":"steer","content":"Use the other approach"}` | Queue text after the active assistant/tool batch |
 | `{"id":"follow-1","type":"follow_up","content":"Then summarize"}` | Queue text for when the active run would otherwise stop |
 | `{"id":"queue-1","type":"get_queue_state"}` | Emit the active or retained `queue.updated` snapshot |
@@ -564,7 +583,7 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 
 Each command emits `rpc.command.started` / `rpc.command.finished` so clients can group the events
 between them. Prompts, compactions, statistics reads, transcript reads, session catalog reads,
-session selection, cloning, and forking run sequentially; `get_state`, queue
+session selection, cloning, forking, tree reads, and tree navigation run sequentially; `get_state`, queue
 commands, `cancel`, `approval`, and `trust` are handled while an operation runs. `get_state`
 preserves the active command and any queued commands, including during prompt startup, compaction,
 statistics reads, approval/trust waits, and after cancellation is requested. During prompt startup,
@@ -581,6 +600,12 @@ leaf. `clone_session` and `fork_session` require a selected session and atomical
 after the derived session validates. The source remains append-only and unchanged. Derivation
 cancellation is honored before its durable store operation begins; after publication starts, the
 operation completes rather than reporting a cancelled command that already created a session.
+`get_session_tree` accepts `limit` (`1..500`, default `200`) and `after_entry_id`; it returns an
+empty snapshot with null session fields before selection and an identified empty snapshot for a
+reserved unpersisted session. `navigate_session_tree` requires a selected persisted session.
+Failures leave the coordinator history and prior active leaf unchanged. Successful navigation
+emits `rpc.session.tree.navigated` only after refreshed history is active, so later `get_messages`
+and prompts immediately use the selected path.
 `get_queue_state` is safe
 while idle. Queue mutations require an active run that is still accepting messages and otherwise
 fail with `CodingSession has no active agent run`. Successful queue commands emit the authoritative

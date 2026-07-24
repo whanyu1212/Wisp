@@ -32,6 +32,9 @@ from wisp.events import (
     RpcSessionSelected,
     RpcSessionsReported,
     RpcSessionSummary,
+    RpcSessionTreeNavigated,
+    RpcSessionTreeNode,
+    RpcSessionTreeReported,
     RpcStateReported,
     RpcStateSnapshot,
     SessionStatsReported,
@@ -45,12 +48,16 @@ from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import (
     DEFAULT_SESSION_MESSAGE_PAGE_LIMIT,
+    DEFAULT_SESSION_TREE_PAGE_LIMIT,
     MAX_SESSION_MESSAGE_PAGE_LIMIT,
+    MAX_SESSION_TREE_PAGE_LIMIT,
     JsonlSession,
     JsonlSessionStore,
     SessionError,
     SessionMessagePage,
     SessionSummary,
+    SessionTreeNodeSummary,
+    SessionTreePage,
 )
 from wisp.sessions.replay import replay_session_entries, resolve_session_tree
 
@@ -159,6 +166,10 @@ class RpcCommandExecutor:
             return self._dispatch_clone_session(command)
         if command_type == "fork_session":
             return self._dispatch_fork_session(command)
+        if command_type == "get_session_tree":
+            return self._dispatch_session_tree(command)
+        if command_type == "navigate_session_tree":
+            return self._dispatch_navigate_session_tree(command)
         if command_type == "get_state":
             return self._dispatch_state(command, running_command)
         if command_type in QUEUE_RPC_COMMAND_TYPES:
@@ -275,6 +286,35 @@ class RpcCommandExecutor:
             running_command=start_rpc_fork_session_command(
                 command,
                 sessions=self.sessions,
+                session_state=self.session_state,
+                task_group=self.task_group,
+                send=self.send,
+                write_event=self.write_event,
+                running_command_factory=self.running_command_factory,
+                command_completed_factory=self.command_completed_factory,
+            )
+        )
+
+    def _dispatch_session_tree(self, command: dict[str, object]) -> _RpcDispatchResult:
+        return _RpcDispatchResult(
+            running_command=start_rpc_session_tree_command(
+                command,
+                session_state=self.session_state,
+                task_group=self.task_group,
+                send=self.send,
+                write_event=self.write_event,
+                running_command_factory=self.running_command_factory,
+                command_completed_factory=self.command_completed_factory,
+            )
+        )
+
+    def _dispatch_navigate_session_tree(
+        self,
+        command: dict[str, object],
+    ) -> _RpcDispatchResult:
+        return _RpcDispatchResult(
+            running_command=start_rpc_navigate_session_tree_command(
+                command,
                 session_state=self.session_state,
                 task_group=self.task_group,
                 send=self.send,
@@ -802,6 +842,124 @@ def start_rpc_fork_session_command(
     )
 
 
+def start_rpc_session_tree_command(
+    command: dict[str, object],
+    *,
+    session_state: _RpcSessionState,
+    task_group: TaskGroup,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    write_event: RpcEventWriter,
+    running_command_factory: RunningCommandFactory = _RpcRunningCommand,
+    command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+) -> _RpcRunningCommand | None:
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return None
+
+    limit = _rpc_session_tree_limit(command)
+    if isinstance(limit, str):
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=limit,
+            write_event=write_event,
+        )
+        return None
+    after_entry_id = _optional_non_empty_string(command, "after_entry_id", command_type)
+    if isinstance(after_entry_id, ValueError):
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=str(after_entry_id),
+            write_event=write_event,
+        )
+        return None
+
+    cancel_scope = anyio.CancelScope()
+    task_group.start_soon(
+        run_rpc_session_tree_command,
+        session_state.session,
+        session_state.entry_count,
+        limit,
+        after_entry_id,
+        command_id,
+        cancel_scope,
+        send.clone(),
+        write_event,
+        command_completed_factory,
+    )
+    return running_command_factory(
+        command_id=command_id,
+        command_type="get_session_tree",
+        cancel_scope=cancel_scope,
+    )
+
+
+def start_rpc_navigate_session_tree_command(
+    command: dict[str, object],
+    *,
+    session_state: _RpcSessionState,
+    task_group: TaskGroup,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    write_event: RpcEventWriter,
+    running_command_factory: RunningCommandFactory = _RpcRunningCommand,
+    command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+) -> _RpcRunningCommand | None:
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return None
+    entry_id = _required_non_empty_string(command, "entry_id", command_type)
+    if isinstance(entry_id, ValueError):
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=str(entry_id),
+            write_event=write_event,
+        )
+        return None
+    session = session_state.session
+    if session is None or not session.path.is_file():
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=("RPC navigate_session_tree command requires an existing persisted session"),
+            write_event=write_event,
+        )
+        return None
+
+    cancel_scope = anyio.CancelScope()
+    task_group.start_soon(
+        run_rpc_navigate_session_tree_command,
+        session,
+        session_state.entry_count,
+        entry_id,
+        command_id,
+        cancel_scope,
+        send.clone(),
+        write_event,
+        command_completed_factory,
+    )
+    return running_command_factory(
+        command_id=command_id,
+        command_type="navigate_session_tree",
+        cancel_scope=cancel_scope,
+    )
+
+
 async def run_rpc_session_stats_command(
     agent: CodingSession,
     session: JsonlSession | None,
@@ -1304,6 +1462,190 @@ async def run_rpc_fork_session_command(
         await send.aclose()
 
 
+async def run_rpc_session_tree_command(
+    session: JsonlSession | None,
+    selected_entry_count: int,
+    limit: int,
+    after_entry_id: str | None,
+    command_id: str,
+    cancel_scope: anyio.CancelScope,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    write_event: RpcEventWriter,
+    command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+) -> None:
+    ok = False
+    error: str | None = None
+    refreshed_history: tuple[Message, ...] | None = None
+    refreshed_entry_count = selected_entry_count
+    try:
+        with cancel_scope:
+            if session is None:
+                if after_entry_id is not None:
+                    raise SessionError(f"Session tree cursor not found: {after_entry_id}")
+                page = SessionTreePage(
+                    session_id=None,
+                    path=None,
+                    active_leaf_id=None,
+                    total_node_count=0,
+                    nodes=(),
+                    truncated=False,
+                    next_after_entry_id=None,
+                )
+            else:
+                page = await anyio.to_thread.run_sync(
+                    partial(
+                        session.read_tree_page,
+                        limit=limit,
+                        after_entry_id=after_entry_id,
+                    )
+                )
+                if session.path.is_file():
+                    (
+                        refreshed_entry_count,
+                        refreshed_history,
+                        _,
+                    ) = await anyio.to_thread.run_sync(
+                        rpc_selected_session_state,
+                        session,
+                    )
+            if cancel_scope.cancel_called:
+                error = "RPC get_session_tree command cancelled"
+                refreshed_history = None
+                refreshed_entry_count = selected_entry_count
+            else:
+                write_event(
+                    RpcSessionTreeReported(
+                        command_id=command_id,
+                        session_id=page.session_id,
+                        session_path=page.path,
+                        active_leaf_id=page.active_leaf_id,
+                        total_node_count=page.total_node_count,
+                        nodes=tuple(_rpc_session_tree_node(node) for node in page.nodes),
+                        truncated=page.truncated,
+                        next_after_entry_id=page.next_after_entry_id,
+                    )
+                )
+                ok = True
+        if cancel_scope.cancel_called and error is None:
+            error = "RPC get_session_tree command cancelled"
+    except BaseException as exc:
+        if isinstance(exc, anyio.get_cancelled_exc_class()):
+            error = "RPC get_session_tree command cancelled"
+        else:
+            error = str(exc)
+    finally:
+        write_event(
+            RpcCommandFinished(
+                command_id=command_id,
+                command_type="get_session_tree",
+                ok=ok,
+                error=error,
+            )
+        )
+        await send.send(
+            command_completed_factory(
+                command_id=command_id,
+                command_type="get_session_tree",
+                ok=ok,
+                history=refreshed_history,
+                entry_count=refreshed_entry_count,
+            )
+        )
+        await send.aclose()
+
+
+async def run_rpc_navigate_session_tree_command(
+    session: JsonlSession,
+    selected_entry_count: int,
+    entry_id: str,
+    command_id: str,
+    cancel_scope: anyio.CancelScope,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    write_event: RpcEventWriter,
+    command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+) -> None:
+    ok = False
+    error: str | None = None
+    refreshed_history: tuple[Message, ...] | None = None
+    refreshed_entry_count = selected_entry_count
+    post_apply_events: tuple[WispEvent, ...] = ()
+    finish_in_worker = True
+    try:
+        with cancel_scope:
+            await anyio.sleep(0)
+            expected_active_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
+            await anyio.sleep(0)
+            # Appending the active-leaf record is the durable commit boundary.
+            # Once entered, replay and coordinator publication must complete.
+            with anyio.CancelScope(shield=True):
+                navigation = await session.navigate_tree(
+                    entry_id,
+                    expected_active_leaf_id=expected_active_leaf_id,
+                    operation_id=command_id,
+                )
+                (
+                    refreshed_entry_count,
+                    refreshed_history,
+                    active_leaf_id,
+                ) = await anyio.to_thread.run_sync(
+                    rpc_selected_session_state,
+                    session,
+                )
+            navigated = RpcSessionTreeNavigated(
+                command_id=command_id,
+                session_id=session.session_id,
+                session_path=session.path,
+                selected_entry_id=navigation.selected_entry_id,
+                previous_active_leaf_id=navigation.previous_active_leaf_id,
+                active_leaf_id=active_leaf_id,
+                editor_text=navigation.editor_text,
+                changed=navigation.changed,
+                entry_count=refreshed_entry_count,
+            )
+            post_apply_events = (
+                navigated,
+                RpcCommandFinished(
+                    command_id=command_id,
+                    command_type="navigate_session_tree",
+                    ok=True,
+                ),
+            )
+            finish_in_worker = False
+            ok = True
+        if cancel_scope.cancel_called and not ok:
+            error = "RPC navigate_session_tree command cancelled"
+    except BaseException as exc:
+        refreshed_history = None
+        refreshed_entry_count = selected_entry_count
+        post_apply_events = ()
+        finish_in_worker = True
+        if isinstance(exc, anyio.get_cancelled_exc_class()):
+            error = "RPC navigate_session_tree command cancelled"
+        else:
+            error = str(exc)
+    finally:
+        if finish_in_worker:
+            write_event(
+                RpcCommandFinished(
+                    command_id=command_id,
+                    command_type="navigate_session_tree",
+                    ok=ok,
+                    error=error,
+                )
+            )
+        await send.send(
+            command_completed_factory(
+                command_id=command_id,
+                command_type="navigate_session_tree",
+                ok=ok,
+                history=refreshed_history,
+                entry_count=refreshed_entry_count,
+                post_apply_events=post_apply_events,
+            )
+        )
+        await send.aclose()
+
+
 async def run_rpc_prompt_command(
     agent: CodingSession,
     session: JsonlSession,
@@ -1574,6 +1916,19 @@ def _rpc_session_summary(summary: SessionSummary) -> RpcSessionSummary:
     )
 
 
+def _rpc_session_tree_node(summary: SessionTreeNodeSummary) -> RpcSessionTreeNode:
+    return RpcSessionTreeNode(
+        entry_id=summary.entry_id,
+        parent_id=summary.parent_id,
+        operation_id=summary.operation_id,
+        created_at=summary.created_at,
+        kind=summary.kind,
+        role=summary.role,
+        preview=summary.preview,
+        preview_truncated=summary.preview_truncated,
+    )
+
+
 def reject_rpc_command(
     command: dict[str, object],
     *,
@@ -1797,6 +2152,18 @@ def _rpc_session_catalog_limit(command: dict[str, object]) -> int | str:
         return (
             "RPC get_sessions command field limit must be between "
             f"0 and {MAX_RPC_SESSION_CATALOG_LIMIT}"
+        )
+    return limit
+
+
+def _rpc_session_tree_limit(command: dict[str, object]) -> int | str:
+    limit = command.get("limit", DEFAULT_SESSION_TREE_PAGE_LIMIT)
+    if type(limit) is not int:
+        return "RPC get_session_tree command field limit must be an integer"
+    if limit < 1 or limit > MAX_SESSION_TREE_PAGE_LIMIT:
+        return (
+            "RPC get_session_tree command field limit must be between "
+            f"1 and {MAX_SESSION_TREE_PAGE_LIMIT}"
         )
     return limit
 
