@@ -12,13 +12,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
 import anyio
 
-from wisp.agent.messages import Message
+from wisp.agent.messages import Message, Role
 from wisp.events import (
     JsonObject,
     KnownWispEvent,
@@ -51,6 +51,7 @@ from wisp.sessions.errors import (
     MalformedPersistedEventError,
     MalformedSessionEntryError,
     SessionError,
+    SessionNavigationCancelledError,
     StaleSessionTreeError,
     UnsupportedPersistedEventVersionError,
     UnsupportedSessionEntryVersionError,
@@ -67,6 +68,9 @@ PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 DEFAULT_SESSION_MESSAGE_PAGE_LIMIT = 200
 MAX_SESSION_MESSAGE_PAGE_LIMIT = 500
+DEFAULT_SESSION_TREE_PAGE_LIMIT = 200
+MAX_SESSION_TREE_PAGE_LIMIT = 500
+SESSION_TREE_PREVIEW_BYTE_LIMIT = 512
 MESSAGE_CONTENT_BYTE_LIMIT = 64 * 1024
 TOOL_ARGUMENTS_BYTE_LIMIT = 64 * 1024
 MESSAGE_TOOL_CALL_LIMIT = 16
@@ -76,12 +80,17 @@ _FileSignature = tuple[int, int, int, int]
 __all__ = [
     "AmbiguousSessionError",
     "DEFAULT_SESSION_MESSAGE_PAGE_LIMIT",
+    "DEFAULT_SESSION_TREE_PAGE_LIMIT",
     "JsonlSession",
     "JsonlSessionStore",
     "MAX_SESSION_MESSAGE_PAGE_LIMIT",
+    "MAX_SESSION_TREE_PAGE_LIMIT",
     "SessionForkResult",
     "SessionMessagePage",
     "SessionSummary",
+    "SessionTreeNavigation",
+    "SessionTreeNodeSummary",
+    "SessionTreePage",
     "SessionError",
     "SessionNotFoundError",
     "StaleCompactionError",
@@ -149,6 +158,45 @@ class SessionMessagePage:
     messages: tuple[RpcMessageSnapshot, ...]
     truncated: bool
     next_before_entry_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTreeNodeSummary:
+    """Bounded frontend-facing metadata for one persisted session tree node."""
+
+    entry_id: str
+    parent_id: str | None
+    operation_id: str | None
+    created_at: datetime
+    kind: Literal["message", "event", "compaction"]
+    role: Role | None
+    preview: str
+    preview_truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTreePage:
+    """One append-ordered page of a selected session tree."""
+
+    session_id: str | None
+    path: Path | None
+    active_leaf_id: str | None
+    total_node_count: int
+    nodes: tuple[SessionTreeNodeSummary, ...]
+    truncated: bool
+    next_after_entry_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTreeNavigation:
+    """The durable result of navigating within one append-only session tree."""
+
+    selected_entry_id: str
+    previous_active_leaf_id: str | None
+    active_leaf_id: str | None
+    editor_text: str | None
+    changed: bool
+    entry_count: int
 
 
 @dataclass(slots=True)
@@ -439,6 +487,27 @@ class JsonlSession:
         assert isinstance(persisted, ActiveLeafSessionEntry)
         return persisted
 
+    async def navigate_tree(
+        self,
+        entry_id: str,
+        *,
+        expected_active_leaf_id: str | None,
+        operation_id: str | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> SessionTreeNavigation:
+        """Atomically navigate to one stored entry using Pi-style prompt restoration."""
+
+        if not entry_id:
+            raise ValueError("Session tree entry id must be non-empty")
+        async with self._append_lock:
+            return await anyio.to_thread.run_sync(
+                self._navigate_tree_once,
+                entry_id,
+                expected_active_leaf_id,
+                operation_id,
+                cancel_requested,
+            )
+
     async def truncate_entries(self, count: int) -> None:
         """Remove entries after count, preserving the first count entries."""
 
@@ -519,6 +588,28 @@ class JsonlSession:
             path=self.path,
             limit=limit,
             before_entry_id=before_entry_id,
+        )
+
+    def read_tree_page(
+        self,
+        *,
+        limit: int = DEFAULT_SESSION_TREE_PAGE_LIMIT,
+        after_entry_id: str | None = None,
+    ) -> SessionTreePage:
+        """Read bounded tree-node metadata in persisted append order."""
+
+        try:
+            self.path.lstat()
+        except FileNotFoundError:
+            entries: tuple[SessionEntry, ...] = ()
+        else:
+            entries = self.read_entries()
+        return _tree_page_from_entries(
+            entries,
+            session_id=self.session_id,
+            path=self.path,
+            limit=limit,
+            after_entry_id=after_entry_id,
         )
 
     def read_context_messages(self) -> tuple[Message, ...]:
@@ -679,6 +770,76 @@ class JsonlSession:
                         f"{expected_context_entry_ids}, found {replay.context_entry_ids}"
                     )
                 return self._append_entry_locked(entry)
+
+    def _navigate_tree_once(
+        self,
+        entry_id: str,
+        expected_active_leaf_id: str | None,
+        operation_id: str | None,
+        cancel_requested: Callable[[], bool] | None,
+    ) -> SessionTreeNavigation:
+        with self._file_state.lock:
+            with self._interprocess_lock():
+                self._refresh_entry_index()
+                assert self._entry_index is not None
+                entries = tuple(self._entry_index.values())
+                tree = resolve_session_tree(entries)
+                previous_active_leaf_id = tree.active_leaf_id
+                if previous_active_leaf_id != expected_active_leaf_id:
+                    raise StaleSessionTreeError(
+                        "Session tree changed: expected active leaf "
+                        f"{expected_active_leaf_id!r}, found {previous_active_leaf_id!r}"
+                    )
+
+                target = next((node for node in tree.nodes if node.id == entry_id), None)
+                if target is None:
+                    raise SessionReplayError(f"Session tree entry not found: {entry_id}")
+                if entry_id == previous_active_leaf_id:
+                    _raise_if_navigation_cancelled(cancel_requested)
+                    return SessionTreeNavigation(
+                        selected_entry_id=entry_id,
+                        previous_active_leaf_id=previous_active_leaf_id,
+                        active_leaf_id=previous_active_leaf_id,
+                        editor_text=None,
+                        changed=False,
+                        entry_count=len(entries),
+                    )
+
+                editor_text: str | None = None
+                active_leaf_id: str | None = entry_id
+                if isinstance(target, MessageSessionEntry) and target.message.role == "user":
+                    active_leaf_id = target.parent_id
+                    editor_text = target.message.content
+
+                if active_leaf_id == previous_active_leaf_id:
+                    _raise_if_navigation_cancelled(cancel_requested)
+                    return SessionTreeNavigation(
+                        selected_entry_id=entry_id,
+                        previous_active_leaf_id=previous_active_leaf_id,
+                        active_leaf_id=active_leaf_id,
+                        editor_text=editor_text,
+                        changed=False,
+                        entry_count=len(entries),
+                    )
+
+                selection = ActiveLeafSessionEntry(
+                    session_id=self.session_id,
+                    previous_leaf_id=previous_active_leaf_id,
+                    active_leaf_id=active_leaf_id,
+                    operation_id=operation_id,
+                )
+                replay_session_entries((*entries, selection))
+                _raise_if_navigation_cancelled(cancel_requested)
+                persisted = self._append_entry_locked(selection)
+                assert isinstance(persisted, ActiveLeafSessionEntry)
+                return SessionTreeNavigation(
+                    selected_entry_id=entry_id,
+                    previous_active_leaf_id=previous_active_leaf_id,
+                    active_leaf_id=active_leaf_id,
+                    editor_text=editor_text,
+                    changed=True,
+                    entry_count=len(self._entry_index),
+                )
 
     def _append_entry_locked(self, entry: SessionEntry) -> SessionEntry:
         _ensure_private_directory(self.path.parent)
@@ -1089,6 +1250,87 @@ def _clip_text(text: str, *, limit: int) -> tuple[str, int, bool]:
     if len(encoded) <= limit:
         return text, len(encoded), False
     return encoded[:limit].decode("utf-8", errors="ignore"), len(encoded), True
+
+
+def _raise_if_navigation_cancelled(
+    cancel_requested: Callable[[], bool] | None,
+) -> None:
+    if cancel_requested is not None and cancel_requested():
+        raise SessionNavigationCancelledError("Session tree navigation cancelled")
+
+
+def _tree_page_from_entries(
+    entries: Sequence[SessionEntry],
+    *,
+    session_id: str | None,
+    path: Path | None,
+    limit: int,
+    after_entry_id: str | None,
+) -> SessionTreePage:
+    if type(limit) is not int or limit < 1 or limit > MAX_SESSION_TREE_PAGE_LIMIT:
+        raise ValueError(
+            f"Session tree page limit must be between 1 and {MAX_SESSION_TREE_PAGE_LIMIT}"
+        )
+    if after_entry_id is not None and not after_entry_id:
+        raise ValueError("Session tree cursor must be non-empty")
+
+    tree = resolve_session_tree(entries)
+    start = 0
+    if after_entry_id is not None:
+        cursor_index = next(
+            (index for index, node in enumerate(tree.nodes) if node.id == after_entry_id),
+            None,
+        )
+        if cursor_index is None:
+            raise SessionError(f"Session tree cursor not found: {after_entry_id}")
+        start = cursor_index + 1
+
+    selected = tree.nodes[start : start + limit]
+    end = start + len(selected)
+    truncated = end < len(tree.nodes)
+    return SessionTreePage(
+        session_id=session_id,
+        path=path,
+        active_leaf_id=tree.active_leaf_id,
+        total_node_count=len(tree.nodes),
+        nodes=tuple(_session_tree_node_summary(node) for node in selected),
+        truncated=truncated,
+        next_after_entry_id=selected[-1].id if truncated and selected else None,
+    )
+
+
+def _session_tree_node_summary(entry: SessionTreeEntry) -> SessionTreeNodeSummary:
+    role: Role | None = None
+    if isinstance(entry, MessageSessionEntry):
+        role = entry.message.role
+        preview = entry.message.content
+        if not preview and entry.message.tool_calls:
+            names = ", ".join(call.name for call in entry.message.tool_calls)
+            preview = f"[tool calls: {names}]"
+        kind: Literal["message", "event", "compaction"] = "message"
+    elif isinstance(entry, EventSessionEntry):
+        event_type = entry.event.payload.get("type")
+        preview = event_type if isinstance(event_type, str) else "event"
+        kind = "event"
+    else:
+        assert isinstance(entry, CompactionSessionEntry)
+        preview = entry.compaction.summary
+        kind = "compaction"
+
+    clipped, _original_bytes, truncated = _clip_text(
+        preview,
+        limit=SESSION_TREE_PREVIEW_BYTE_LIMIT,
+    )
+    return SessionTreeNodeSummary(
+        entry_id=entry.id,
+        parent_id=entry.parent_id,
+        operation_id=entry.operation_id,
+        created_at=entry.created_at,
+        kind=kind,
+        role=role,
+        preview=clipped,
+        preview_truncated=truncated,
+    )
 
 
 def _clip_json_object(

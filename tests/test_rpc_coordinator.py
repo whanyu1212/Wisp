@@ -88,6 +88,10 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcInputCommand({"id": "select", "type": "select_session"}),
                 _RpcInputCommand({"id": "clone", "type": "clone_session"}),
                 _RpcInputCommand({"id": "fork", "type": "fork_session", "entry_id": "entry"}),
+                _RpcInputCommand({"id": "tree", "type": "get_session_tree"}),
+                _RpcInputCommand(
+                    {"id": "navigate", "type": "navigate_session_tree", "entry_id": "entry"}
+                ),
                 _RpcInputCommand({"id": "approval", "type": "approval"}),
                 _RpcInputCommand({"id": "steer", "type": "steer"}),
                 _RpcInputCommand({"id": "follow", "type": "follow_up"}),
@@ -103,6 +107,8 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcCommandCompleted("select", "select_session", True, (), 2),
                 _RpcCommandCompleted("clone", "clone_session", True, (), 2),
                 _RpcCommandCompleted("fork", "fork_session", True, (), 2),
+                _RpcCommandCompleted("tree", "get_session_tree", True, (), 2),
+                _RpcCommandCompleted("navigate", "navigate_session_tree", True, (), 2),
                 _RpcInputClosed(),
             ]
         )
@@ -122,6 +128,8 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 "select_session",
                 "clone_session",
                 "fork_session",
+                "get_session_tree",
+                "navigate_session_tree",
             }:
                 return _RpcDispatchResult(running)
             return _RpcDispatchResult(
@@ -150,6 +158,8 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
             "select",
             "clone",
             "fork",
+            "tree",
+            "navigate",
         ]
 
     anyio.run(scenario)
@@ -269,6 +279,8 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
                 "select_session",
                 "clone_session",
                 "fork_session",
+                "get_session_tree",
+                "navigate_session_tree",
             ],
         ) -> None:
             coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
@@ -311,6 +323,8 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
         await assert_bypasses("select_session")
         await assert_bypasses("clone_session")
         await assert_bypasses("fork_session")
+        await assert_bypasses("get_session_tree")
+        await assert_bypasses("navigate_session_tree")
 
     anyio.run(scenario)
 

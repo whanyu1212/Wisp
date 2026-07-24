@@ -97,6 +97,21 @@ class ForkSessionCommand(RpcCommandModel):
     entry_id: str = Field(min_length=1)
 
 
+class GetSessionTreeCommand(RpcCommandModel):
+    """Return a bounded page of the selected session's tree."""
+
+    type: Literal["get_session_tree"] = "get_session_tree"
+    limit: int = Field(default=200, ge=1, le=500, strict=True)
+    after_entry_id: str | None = Field(default=None, min_length=1)
+
+
+class NavigateSessionTreeCommand(RpcCommandModel):
+    """Navigate the selected session to one persisted tree entry."""
+
+    type: Literal["navigate_session_tree"] = "navigate_session_tree"
+    entry_id: str = Field(min_length=1)
+
+
 class SteerCommand(RpcCommandModel):
     """Queue text after the active run's current assistant/tool batch."""
 
@@ -199,6 +214,8 @@ type RpcCommand = Annotated[
     | SelectSessionCommand
     | CloneSessionCommand
     | ForkSessionCommand
+    | GetSessionTreeCommand
+    | NavigateSessionTreeCommand
     | SteerCommand
     | FollowUpCommand
     | GetQueueStateCommand

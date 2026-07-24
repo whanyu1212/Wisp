@@ -29,3 +29,7 @@ class InvalidSessionBranchPointError(SessionError):
 
 class StaleSessionTreeError(SessionError):
     """Raised when session tree state changed before an operation could commit."""
+
+
+class SessionNavigationCancelledError(SessionError):
+    """Raised when tree navigation is cancelled before its durable commit."""

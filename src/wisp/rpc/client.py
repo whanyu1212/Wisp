@@ -27,7 +27,9 @@ from wisp.rpc.commands import (
     GetQueueStateCommand,
     GetSessionsCommand,
     GetSessionStatsCommand,
+    GetSessionTreeCommand,
     GetStateCommand,
+    NavigateSessionTreeCommand,
     PopQueueCommand,
     PromptCommand,
     RpcCommand,
@@ -144,6 +146,37 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("fork-session")
         await self._transport.send(ForkSessionCommand(id=selected_id, entry_id=entry_id))
+        return selected_id
+
+    async def get_session_tree(
+        self,
+        *,
+        limit: int = 200,
+        after_entry_id: str | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        """Request a bounded page of the selected session's tree."""
+
+        selected_id = command_id or self._command_id_factory("session-tree")
+        await self._transport.send(
+            GetSessionTreeCommand(
+                id=selected_id,
+                limit=limit,
+                after_entry_id=after_entry_id,
+            )
+        )
+        return selected_id
+
+    async def navigate_session_tree(
+        self,
+        entry_id: str,
+        *,
+        command_id: str | None = None,
+    ) -> str:
+        """Navigate the selected session to one persisted tree entry."""
+
+        selected_id = command_id or self._command_id_factory("navigate-session-tree")
+        await self._transport.send(NavigateSessionTreeCommand(id=selected_id, entry_id=entry_id))
         return selected_id
 
     async def steer(self, content: str, *, command_id: str | None = None) -> str:

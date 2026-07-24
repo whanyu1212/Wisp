@@ -23,6 +23,8 @@ type _SequentialRpcCommandType = Literal[
     "select_session",
     "clone_session",
     "fork_session",
+    "get_session_tree",
+    "navigate_session_tree",
 ]
 
 

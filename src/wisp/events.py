@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 19
+EVENT_SCHEMA_VERSION = 20
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -29,6 +29,7 @@ RPC_STATE_SCHEMA_VERSION = 16
 RPC_MESSAGES_SCHEMA_VERSION = 17
 RPC_SESSIONS_SCHEMA_VERSION = 18
 RPC_SESSION_DERIVATION_SCHEMA_VERSION = 19
+RPC_SESSION_TREE_SCHEMA_VERSION = 20
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -49,7 +50,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] = 19
+    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] = 20
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -316,6 +317,27 @@ class RpcSessionSummary(BaseModel):
     updated_at: datetime
     entry_count: int = Field(ge=0)
     active_leaf_id: str | None = Field(default=None, min_length=1)
+
+
+class RpcSessionTreeNode(BaseModel):
+    """One bounded node summary from a persisted session tree."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    entry_id: str = Field(min_length=1)
+    parent_id: str | None = Field(default=None, min_length=1)
+    operation_id: str | None = None
+    created_at: datetime
+    kind: Literal["message", "event", "compaction"]
+    role: MessageRole | None = None
+    preview: str
+    preview_truncated: bool = False
+
+    @model_validator(mode="after")
+    def _validate_role(self) -> Self:
+        if (self.kind == "message") != (self.role is not None):
+            raise ValueError("RPC session tree message nodes must include role only for messages")
+        return self
 
 
 class MessageCompleted(WispEvent):
@@ -799,6 +821,79 @@ class RpcSessionForked(_RpcSessionDerived):
     selected_prompt: str
 
 
+class RpcSessionTreeReported(WispEvent):
+    """Bounded append-order page of the selected persisted session tree."""
+
+    type: Literal["rpc.session.tree"] = "rpc.session.tree"
+    command_id: str
+    session_id: str | None = Field(default=None, min_length=1)
+    session_path: Path | None = None
+    active_leaf_id: str | None = Field(default=None, min_length=1)
+    total_node_count: int = Field(ge=0)
+    nodes: tuple[RpcSessionTreeNode, ...] = ()
+    truncated: bool = False
+    next_after_entry_id: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_tree_report(self) -> Self:
+        if self.schema_version < RPC_SESSION_TREE_SCHEMA_VERSION:
+            raise ValueError(
+                "RPC session tree events require schema_version "
+                f"{RPC_SESSION_TREE_SCHEMA_VERSION} or newer"
+            )
+        if (self.session_id is None) != (self.session_path is None):
+            raise ValueError(
+                "RPC session tree reports must include session_id and session_path together"
+            )
+        if len(self.nodes) > self.total_node_count:
+            raise ValueError("RPC session tree page cannot exceed total_node_count")
+        if (self.next_after_entry_id is not None) != self.truncated:
+            raise ValueError(
+                "RPC session tree reports require next_after_entry_id exactly when truncated"
+            )
+        if self.truncated and (
+            not self.nodes or self.next_after_entry_id != self.nodes[-1].entry_id
+        ):
+            raise ValueError(
+                "RPC session tree next_after_entry_id must identify the final returned node"
+            )
+        if len({node.entry_id for node in self.nodes}) != len(self.nodes):
+            raise ValueError("RPC session tree pages cannot contain duplicate entry ids")
+        if self.session_id is None and (
+            self.active_leaf_id is not None or self.total_node_count or self.nodes or self.truncated
+        ):
+            raise ValueError("RPC session tree reports without a session must be empty")
+        return self
+
+
+class RpcSessionTreeNavigated(WispEvent):
+    """Confirmation that a selected session's active path changed."""
+
+    type: Literal["rpc.session.tree.navigated"] = "rpc.session.tree.navigated"
+    command_id: str
+    session_id: str = Field(min_length=1)
+    session_path: Path
+    selected_entry_id: str = Field(min_length=1)
+    previous_active_leaf_id: str | None = Field(default=None, min_length=1)
+    active_leaf_id: str | None = Field(default=None, min_length=1)
+    editor_text: str | None = None
+    changed: bool
+    entry_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < RPC_SESSION_TREE_SCHEMA_VERSION:
+            raise ValueError(
+                "RPC session tree navigation events require schema_version "
+                f"{RPC_SESSION_TREE_SCHEMA_VERSION} or newer"
+            )
+        if self.changed == (self.previous_active_leaf_id == self.active_leaf_id):
+            raise ValueError(
+                "RPC session tree navigation changed must match the active-leaf transition"
+            )
+        return self
+
+
 class QueueUpdated(WispEvent):
     """Current harness-owned steering and follow-up queue state."""
 
@@ -918,6 +1013,8 @@ type KnownWispEvent = Annotated[
     | RpcSessionSelected
     | RpcSessionCloned
     | RpcSessionForked
+    | RpcSessionTreeReported
+    | RpcSessionTreeNavigated
     | QueueUpdated
     | QueueItemsRemoved
     | QueueMessageInjected
@@ -1015,6 +1112,13 @@ def _require_current_schema(data: JsonObject) -> None:
         raise ValueError(
             "RPC session derivation events require schema_version "
             f"{RPC_SESSION_DERIVATION_SCHEMA_VERSION} or newer"
+        )
+    if data.get("type") in {"rpc.session.tree", "rpc.session.tree.navigated"} and (
+        version < RPC_SESSION_TREE_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "RPC session tree events require schema_version "
+            f"{RPC_SESSION_TREE_SCHEMA_VERSION} or newer"
         )
     if data.get("type") == "queue.items.removed" and version < QUEUE_ITEMS_REMOVED_SCHEMA_VERSION:
         raise ValueError(
