@@ -117,13 +117,13 @@ def test_fork_starts_unnamed_and_preserves_source_name(tmp_path: Path) -> None:
     async def seed_and_fork() -> JsonlSession:
         await source.set_name("Named Source")
         selected = await source.append_message(Message(role="user", content="edit me"))
-        return (
-            await store.fork_from_user_message(
-                source,
-                selected.id,
-                expected_active_leaf_id=selected.id,
-            )
-        ).session
+        result = await store.fork_from_user_message(
+            source,
+            selected.id,
+            expected_active_leaf_id=selected.id,
+        )
+        assert result.source_session_name == "Named Source"
+        return result.session
 
     forked = anyio.run(seed_and_fork)
 

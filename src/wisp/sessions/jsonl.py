@@ -136,6 +136,7 @@ class SessionForkResult:
     session: JsonlSession
     source_session_id: str
     source_active_leaf_id: str | None
+    source_session_name: str | None
     fork_leaf_id: str | None
     selected_entry_id: str
     selected_prompt: str
@@ -360,6 +361,7 @@ class JsonlSessionStore:
             session=target,
             source_session_id=source.session_id,
             source_active_leaf_id=source_active_leaf_id,
+            source_session_name=_session_name_from_entries(entries),
             fork_leaf_id=projection.source_leaf_id,
             selected_entry_id=projection.selected_entry_id,
             selected_prompt=projection.selected_prompt,

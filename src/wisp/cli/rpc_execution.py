@@ -1500,7 +1500,6 @@ async def run_rpc_fork_session_command(
             source_active_leaf_id = await anyio.to_thread.run_sync(
                 source_session.read_active_leaf_id
             )
-            source_name = await anyio.to_thread.run_sync(source_session.read_name)
             await anyio.sleep(0)
             with anyio.CancelScope(shield=True):
                 fork_result = await sessions.fork_from_user_message(
@@ -1522,7 +1521,7 @@ async def run_rpc_fork_session_command(
                 source_session_id=fork_result.source_session_id,
                 source_session_path=source_session.path,
                 source_active_leaf_id=fork_result.source_active_leaf_id,
-                source_session_name=source_name,
+                source_session_name=fork_result.source_session_name,
                 session_id=fork_result.session.session_id,
                 session_path=fork_result.session.path,
                 active_leaf_id=active_leaf_id,
