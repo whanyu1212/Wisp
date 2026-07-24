@@ -479,6 +479,125 @@ def test_rpc_session_name_changed_round_trips_only_at_schema_v21() -> None:
         wisp_event_from_json(event.model_copy(update={"schema_version": 20}).model_dump_json())
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "schema_version": 20,
+            "type": "rpc.state",
+            "command_id": "state-1",
+            "state": {
+                "provider": "fake",
+                "model": "fake-model",
+                "effort": None,
+                "auto_compaction_enabled": True,
+                "steering_mode": "one_at_a_time",
+                "follow_up_mode": "one_at_a_time",
+                "pending_steering_count": 0,
+                "pending_follow_up_count": 0,
+                "session_name": "Named",
+                "active_command_id": None,
+                "active_command_type": None,
+                "cancel_requested": False,
+            },
+        },
+        {
+            "schema_version": 20,
+            "type": "rpc.sessions",
+            "command_id": "sessions-1",
+            "sessions": [],
+            "selected_session_id": "session-1",
+            "selected_session_path": "/tmp/session-1.jsonl",
+            "selected_session_name": "Named",
+        },
+        {
+            "schema_version": 20,
+            "type": "rpc.sessions",
+            "command_id": "sessions-1",
+            "sessions": [
+                {
+                    "session_id": "session-1",
+                    "session_path": "/tmp/session-1.jsonl",
+                    "updated_at": "2026-07-24T00:00:00Z",
+                    "entry_count": 1,
+                    "active_leaf_id": "entry-1",
+                    "name": "Named",
+                }
+            ],
+        },
+        {
+            "schema_version": 20,
+            "type": "rpc.session.selected",
+            "command_id": "select-1",
+            "session_id": "session-1",
+            "session_path": "/tmp/session-1.jsonl",
+            "active_leaf_id": "entry-1",
+            "entry_count": 1,
+            "session_name": "Named",
+        },
+        {
+            "schema_version": 20,
+            "type": "rpc.session.cloned",
+            "command_id": "clone-1",
+            "source_session_id": "source",
+            "source_session_path": "/tmp/source.jsonl",
+            "source_active_leaf_id": "entry-1",
+            "source_session_name": "Source",
+            "session_id": "clone",
+            "session_path": "/tmp/clone.jsonl",
+            "active_leaf_id": "entry-1",
+            "session_name": "Clone",
+            "entry_count": 1,
+        },
+        {
+            "schema_version": 20,
+            "type": "rpc.session.forked",
+            "command_id": "fork-1",
+            "source_session_id": "source",
+            "source_session_path": "/tmp/source.jsonl",
+            "source_active_leaf_id": "entry-2",
+            "source_session_name": "Source",
+            "session_id": "fork",
+            "session_path": "/tmp/fork.jsonl",
+            "active_leaf_id": "entry-1",
+            "session_name": "Fork",
+            "entry_count": 1,
+            "selected_entry_id": "entry-2",
+            "selected_prompt": "edit me",
+        },
+    ],
+)
+def test_rpc_session_name_fields_require_schema_v21(payload: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="session name fields require schema_version 21"):
+        wisp_event_from_json(json.dumps(payload))
+
+
+def test_rpc_session_name_fields_are_stripped_for_legacy_serialized_events() -> None:
+    event = RpcSessionsReported(
+        schema_version=20,
+        command_id="sessions-1",
+        sessions=(
+            RpcSessionSummary(
+                session_id="session-1",
+                session_path=Path("/tmp/session-1.jsonl"),
+                updated_at=datetime(2026, 7, 24, tzinfo=UTC),
+                entry_count=1,
+                active_leaf_id="entry-1",
+                name="Named",
+            ),
+        ),
+        selected_session_id="session-1",
+        selected_session_path=Path("/tmp/session-1.jsonl"),
+        selected_session_name="Named",
+    )
+
+    payload = json.loads(event.model_dump_json())
+
+    assert "selected_session_name" not in payload
+    assert "name" not in payload["sessions"][0]
+    assert wisp_event_from_json(json.dumps(payload)).schema_version == 20
+
+
 def test_rpc_session_tree_events_reject_inconsistent_payloads() -> None:
     with pytest.raises(ValidationError, match="session_id and session_path together"):
         RpcSessionTreeReported(

@@ -709,6 +709,14 @@ class RpcStateReported(WispEvent):
             )
         return self
 
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < RPC_SESSION_NAME_SCHEMA_VERSION:
+            state = cast(dict[str, object], data["state"])
+            state.pop("session_name", None)
+        return data
+
 
 class RpcMessagesReported(WispEvent):
     """On-demand, bounded persisted transcript page returned over RPC."""
@@ -758,6 +766,18 @@ class RpcSessionsReported(WispEvent):
             )
         return self
 
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < RPC_SESSION_NAME_SCHEMA_VERSION:
+            data.pop("selected_session_name", None)
+            sessions = data.get("sessions")
+            if isinstance(sessions, list):
+                for summary in sessions:
+                    if isinstance(summary, dict):
+                        summary.pop("name", None)
+        return data
+
 
 class RpcSessionSelected(WispEvent):
     """Confirmation that an RPC session selection has become active."""
@@ -778,6 +798,13 @@ class RpcSessionSelected(WispEvent):
                 f"{RPC_SESSIONS_SCHEMA_VERSION} or newer"
             )
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < RPC_SESSION_NAME_SCHEMA_VERSION:
+            data.pop("session_name", None)
+        return data
 
 
 class _RpcSessionDerived(WispEvent):
@@ -804,6 +831,14 @@ class _RpcSessionDerived(WispEvent):
         if self.source_session_id == self.session_id:
             raise ValueError("RPC session derivation must create a new session id")
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < RPC_SESSION_NAME_SCHEMA_VERSION:
+            data.pop("source_session_name", None)
+            data.pop("session_name", None)
+        return data
 
 
 class RpcSessionCloned(_RpcSessionDerived):
@@ -1062,6 +1097,7 @@ def _require_current_schema(data: JsonObject) -> None:
             "Unsupported Wisp event schema_version: "
             f"{version!r}; expected 5 through {EVENT_SCHEMA_VERSION}"
         )
+    _reject_legacy_session_name_fields(data, version=version)
     if data.get("type") in {"compaction.started", "compaction.completed"}:
         if not 8 <= version <= EVENT_SCHEMA_VERSION:
             raise ValueError(
@@ -1175,6 +1211,32 @@ def _require_current_schema(data: JsonObject) -> None:
         raise ValueError(
             f"Context statistics events require schema_version 9 through {EVENT_SCHEMA_VERSION}, "
             f"got {version!r}"
+        )
+
+
+def _reject_legacy_session_name_fields(data: JsonObject, *, version: int) -> None:
+    if version >= RPC_SESSION_NAME_SCHEMA_VERSION:
+        return
+    event_type = data.get("type")
+    has_name_field = False
+    if event_type == "rpc.state":
+        state = data.get("state")
+        has_name_field = isinstance(state, dict) and "session_name" in state
+    elif event_type == "rpc.sessions":
+        has_name_field = "selected_session_name" in data
+        sessions = data.get("sessions")
+        if isinstance(sessions, list):
+            has_name_field = has_name_field or any(
+                isinstance(summary, dict) and "name" in summary for summary in sessions
+            )
+    elif event_type == "rpc.session.selected":
+        has_name_field = "session_name" in data
+    elif event_type in {"rpc.session.cloned", "rpc.session.forked"}:
+        has_name_field = "source_session_name" in data or "session_name" in data
+    if has_name_field:
+        raise ValueError(
+            "RPC session name fields require schema_version "
+            f"{RPC_SESSION_NAME_SCHEMA_VERSION} or newer"
         )
 
 
