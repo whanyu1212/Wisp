@@ -894,6 +894,8 @@ async def run_rpc_select_session_command(
     refreshed_history: tuple[Message, ...] | None = None
     refreshed_entry_count = selected_entry_count
     active_leaf_id: str | None = None
+    post_apply_events: tuple[WispEvent, ...] = ()
+    finish_in_worker = True
     try:
         with cancel_scope:
             loaded_session = await anyio.to_thread.run_sync(sessions.load, session_id)
@@ -914,8 +916,16 @@ async def run_rpc_select_session_command(
                     active_leaf_id=active_leaf_id,
                     entry_count=refreshed_entry_count,
                 )
-                write_event(selected)
                 selected_session = loaded_session
+                post_apply_events = (
+                    selected,
+                    RpcCommandFinished(
+                        command_id=command_id,
+                        command_type="select_session",
+                        ok=True,
+                    ),
+                )
+                finish_in_worker = False
                 ok = True
         if cancel_scope.cancel_called and error is None:
             error = "RPC select_session command cancelled"
@@ -923,19 +933,22 @@ async def run_rpc_select_session_command(
         selected_session = None
         refreshed_history = None
         refreshed_entry_count = selected_entry_count
+        post_apply_events = ()
+        finish_in_worker = True
         if isinstance(exc, anyio.get_cancelled_exc_class()):
             error = "RPC select_session command cancelled"
         else:
             error = str(exc)
     finally:
-        write_event(
-            RpcCommandFinished(
-                command_id=command_id,
-                command_type="select_session",
-                ok=ok,
-                error=error,
+        if finish_in_worker:
+            write_event(
+                RpcCommandFinished(
+                    command_id=command_id,
+                    command_type="select_session",
+                    ok=ok,
+                    error=error,
+                )
             )
-        )
         await send.send(
             command_completed_factory(
                 command_id=command_id,
@@ -944,6 +957,7 @@ async def run_rpc_select_session_command(
                 history=refreshed_history,
                 entry_count=refreshed_entry_count,
                 selected_session=selected_session,
+                post_apply_events=post_apply_events,
             )
         )
         await send.aclose()

@@ -90,10 +90,12 @@ async def build_rpc_executor_fixture(tmp_path: Path) -> RpcExecutorFixture:
     sessions = JsonlSessionStore(tmp_path)
     agent = CodingSession(provider=runtime.providers.get("fake"), sessions=sessions)
     state = _RpcSessionState(None, (), 0)
+    writer = RecordingEventWriter()
     return RpcExecutorFixture(
         runtime=runtime,
         sessions=sessions,
         agent=agent,
         session_state=state,
-        coordinator=RpcCoordinator(state),
+        coordinator=RpcCoordinator(state, completion_event_writer=writer),
+        writer=writer,
     )

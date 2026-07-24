@@ -8,7 +8,7 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
-from tests.rpc_support import RecordingEventWriter, build_rpc_executor_fixture
+from tests.rpc_support import build_rpc_executor_fixture
 from wisp.agent.harness import QueuedMessages
 from wisp.agent.messages import Message
 from wisp.cli.rpc_configuration import _RpcConfigureOverrides
@@ -574,6 +574,7 @@ def test_executor_select_session_updates_coordinator_state(tmp_path: Path) -> No
                 None,
             )
             completed = await receive.receive()
+            assert not any(isinstance(event, RpcSessionSelected) for event in fixture.events)
             fixture.coordinator.running_command = result.running_command
             fixture.coordinator.handle_event(
                 completed,
@@ -586,6 +587,7 @@ def test_executor_select_session_updates_coordinator_state(tmp_path: Path) -> No
         assert result.running_command is not None
         assert result.running_command.command_type == "select_session"
         assert completed.ok is True
+        assert completed.post_apply_events
         assert completed.selected_session is not None
         assert completed.selected_session.session_id == selected.session_id
         assert completed.selected_session.path == selected.path
@@ -661,57 +663,6 @@ def test_executor_select_session_reports_validation_and_load_failures(
             ("select_session", False, "Session not found: missing"),
         ]
         assert not any(isinstance(event, RpcSessionSelected) for event in fixture.events)
-
-    anyio.run(scenario)
-
-
-def test_executor_select_session_publish_failure_preserves_previous_selection(
-    tmp_path: Path,
-) -> None:
-    class FailingSelectWriter(RecordingEventWriter):
-        def __call__(self, event: WispEvent) -> None:
-            if isinstance(event, RpcSessionSelected):
-                raise RuntimeError("select publish failed")
-            super().__call__(event)
-
-    async def scenario() -> None:
-        fixture = await build_rpc_executor_fixture(tmp_path)
-        previous = fixture.sessions.create()
-        await previous.append_message(Message(role="user", content="previous"))
-        target = fixture.sessions.create()
-        await target.append_message(Message(role="user", content="target"))
-        fixture.session_state.session = previous
-        fixture.session_state.history = (Message(role="user", content="previous"),)
-        fixture.session_state.entry_count = 1
-        fixture.writer = FailingSelectWriter()
-
-        send, receive = anyio.create_memory_object_stream(10)
-        async with send, receive, anyio.create_task_group() as task_group:
-            executor = fixture.executor(task_group=task_group, send=send)
-
-            result = executor.dispatch(
-                {"id": "select", "type": "select_session", "session_id": target.session_id},
-                None,
-            )
-            completed = await receive.receive()
-            fixture.coordinator.running_command = result.running_command
-            fixture.coordinator.handle_event(
-                completed,
-                dispatch=lambda _command, running: _RpcDispatchResult(running),
-                reject=lambda _command, _message: None,
-                command_type=lambda command: str(command.get("type")),
-            )
-            task_group.cancel_scope.cancel()
-
-        assert completed.ok is False
-        assert completed.selected_session is None
-        assert completed.history is None
-        assert completed.entry_count == 1
-        assert fixture.session_state.session is previous
-        finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
-        assert [(event.command_type, event.ok, event.error) for event in finished] == [
-            ("select_session", False, "select publish failed")
-        ]
 
     anyio.run(scenario)
 

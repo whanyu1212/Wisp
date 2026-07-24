@@ -410,6 +410,7 @@ async def _run_rpc(
         max_queued_commands=_MAX_QUEUED_RPC_COMMANDS,
         input_closed_type=_RpcInputClosed,
         command_completed_type=_RpcCommandCompleted,
+        completion_event_writer=_write_json_event,
     )
     send, receive = anyio.create_memory_object_stream[_RpcControlEvent](100)
     stop_reader = anyio.Event()
@@ -468,7 +469,7 @@ def _dispatch_rpc_command(
     queued_commands: deque[dict[str, object]] | None = None,
 ) -> _RpcDispatchResult:
     if coordinator is None:
-        coordinator = RpcCoordinator(session_state)
+        coordinator = RpcCoordinator(session_state, completion_event_writer=_write_json_event)
         coordinator.running_command = running_command
         if queued_commands is not None:
             coordinator.queued_commands = queued_commands

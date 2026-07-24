@@ -10,6 +10,7 @@ from typing import Literal, Protocol, cast
 import anyio
 
 from wisp.agent.messages import Message
+from wisp.events import WispEvent
 from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES
 from wisp.sessions.jsonl import JsonlSession
 
@@ -41,6 +42,7 @@ class _RpcCommandCompleted:
     history: tuple[Message, ...] | None
     entry_count: int
     selected_session: JsonlSession | None = None
+    post_apply_events: tuple[WispEvent, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,7 @@ type RpcDispatch = Callable[
 ]
 type RpcReject = Callable[[dict[str, object], str], None]
 type RpcCommandType = Callable[[dict[str, object]], str]
+type RpcCompletionEventWriter = Callable[[WispEvent], None]
 
 _MAX_QUEUED_RPC_COMMANDS = 100
 _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
@@ -108,6 +111,7 @@ class RpcCoordinator:
         input_closed_type: type[object] = _RpcInputClosed,
         command_completed_type: type[object] = _RpcCommandCompleted,
         prompt_ready_type: type[object] = _RpcPromptReady,
+        completion_event_writer: RpcCompletionEventWriter | None = None,
     ) -> None:
         if max_queued_commands < 0:
             raise ValueError("max_queued_commands must be non-negative")
@@ -122,6 +126,7 @@ class RpcCoordinator:
         self._command_completed_type = command_completed_type
         self._prompt_ready_type = prompt_ready_type
         self._prompt_queue_ready = False
+        self._completion_event_writer = completion_event_writer
 
     async def run(
         self,
@@ -197,6 +202,9 @@ class RpcCoordinator:
                     and selected_session is not None
                 ):
                     self.session_state.session = selected_session
+                if self._completion_event_writer is not None:
+                    for queued_event in getattr(completed, "post_apply_events", ()):
+                        self._completion_event_writer(queued_event)
             return False
         if isinstance(event, self._prompt_ready_type):
             ready = cast(_RpcPromptReady, event)

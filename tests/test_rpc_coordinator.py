@@ -18,6 +18,7 @@ from wisp.cli.rpc_coordinator import (
     _RpcRunningCommand,
     _RpcSessionState,
 )
+from wisp.events import RpcSessionSelected, WispEvent
 from wisp.sessions.jsonl import JsonlSessionStore
 
 
@@ -325,6 +326,48 @@ def test_coordinator_applies_selected_session_from_async_completion(tmp_path: Pa
         assert state.session is session
         assert state.history == history
         assert state.entry_count == 1
+
+    anyio.run(scenario)
+
+
+def test_coordinator_emits_post_apply_events_after_selecting_session(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = JsonlSessionStore(tmp_path).create()
+        state = _RpcSessionState(session=None, history=(), entry_count=0)
+        observed: list[tuple[WispEvent, object]] = []
+
+        def write_event(event: WispEvent) -> None:
+            observed.append((event, state.session))
+
+        coordinator = RpcCoordinator(state, completion_event_writer=write_event)
+        coordinator.running_command = _RpcRunningCommand(
+            "select",
+            "select_session",
+            anyio.CancelScope(),
+        )
+        selected = RpcSessionSelected(
+            command_id="select",
+            session_id=session.session_id,
+            session_path=session.path,
+            entry_count=0,
+        )
+
+        coordinator.handle_event(
+            _RpcCommandCompleted(
+                "select",
+                "select_session",
+                True,
+                (),
+                0,
+                session,
+                (selected,),
+            ),
+            dispatch=lambda _command, running: _RpcDispatchResult(running),
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+
+        assert observed == [(selected, session)]
 
     anyio.run(scenario)
 
