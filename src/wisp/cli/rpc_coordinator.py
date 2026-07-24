@@ -13,6 +13,15 @@ from wisp.agent.messages import Message
 from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES
 from wisp.sessions.jsonl import JsonlSession
 
+type _SequentialRpcCommandType = Literal[
+    "prompt",
+    "compact",
+    "get_session_stats",
+    "get_messages",
+    "get_sessions",
+    "select_session",
+]
+
 
 @dataclass(frozen=True)
 class _RpcInputCommand:
@@ -27,10 +36,11 @@ class _RpcInputClosed:
 @dataclass(frozen=True)
 class _RpcCommandCompleted:
     command_id: str
-    command_type: Literal["prompt", "compact", "get_session_stats"]
+    command_type: _SequentialRpcCommandType
     ok: bool
     history: tuple[Message, ...] | None
     entry_count: int
+    selected_session: JsonlSession | None = None
 
 
 @dataclass(frozen=True)
@@ -48,7 +58,7 @@ class _RpcSessionState:
 @dataclass(frozen=True)
 class _RpcRunningCommand:
     command_id: str
-    command_type: Literal["prompt", "compact", "get_session_stats"]
+    command_type: _SequentialRpcCommandType
     cancel_scope: anyio.CancelScope
 
 
@@ -180,6 +190,13 @@ class RpcCoordinator:
                 self.session_state.entry_count = completed.entry_count
                 if completed.history is not None:
                     self.session_state.history = completed.history
+                selected_session = getattr(completed, "selected_session", None)
+                if (
+                    completed.ok
+                    and completed.command_type == "select_session"
+                    and selected_session is not None
+                ):
+                    self.session_state.session = selected_session
             return False
         if isinstance(event, self._prompt_ready_type):
             ready = cast(_RpcPromptReady, event)

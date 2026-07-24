@@ -23,11 +23,13 @@ from wisp.rpc.commands import (
     FollowUpCommand,
     GetMessagesCommand,
     GetQueueStateCommand,
+    GetSessionsCommand,
     GetSessionStatsCommand,
     GetStateCommand,
     PopQueueCommand,
     PromptCommand,
     RpcCommand,
+    SelectSessionCommand,
     SetQueueModeCommand,
     ShutdownCommand,
     SteerCommand,
@@ -112,6 +114,20 @@ class RpcController:
                 before_entry_id=before_entry_id,
             )
         )
+        return selected_id
+
+    async def get_sessions(self, *, limit: int = 50, command_id: str | None = None) -> str:
+        """Request a bounded persisted session catalog."""
+
+        selected_id = command_id or self._command_id_factory("sessions")
+        await self._transport.send(GetSessionsCommand(id=selected_id, limit=limit))
+        return selected_id
+
+    async def select_session(self, session_id: str, *, command_id: str | None = None) -> str:
+        """Select a persisted session as the active RPC session."""
+
+        selected_id = command_id or self._command_id_factory("select-session")
+        await self._transport.send(SelectSessionCommand(id=selected_id, session_id=session_id))
         return selected_id
 
     async def steer(self, content: str, *, command_id: str | None = None) -> str:

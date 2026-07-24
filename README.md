@@ -390,8 +390,8 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 17`; readers also accept legacy schema v5
-through v16 events for compatibility. A successful prompt follows this lifecycle (tool events
+Every outbound `WispEvent` includes `"schema_version": 18`; readers also accept legacy schema v5
+through v17 events for compatibility. A successful prompt follows this lifecycle (tool events
 repeat inside a turn when the model requests tools):
 
 ```text
@@ -420,6 +420,13 @@ The exception is successful schema-v11 overflow recovery: after `context.overflo
 overflow compaction lifecycle events, then the failed `turn.completed`, and continues once. Its
 `compaction.completed.will_retry=true` marks that failed turn as nonterminal; no `error` or
 intermediate `agent.completed` is emitted unless compaction or the retry setup fails.
+
+Schema v18 adds `rpc.sessions` and `rpc.session.selected` for RPC session picker/resume flows.
+`get_sessions` returns bounded persisted session summaries — session id, path, updated timestamp,
+entry count, and active leaf — plus the currently selected session identity. `select_session`
+loads one persisted session through the same session-store resolution used by resume flows and
+updates the active RPC session only after the load/replay succeeds. Neither event includes message
+bodies; use `get_messages` after selection to read a bounded transcript page.
 
 Schema v17 adds `rpc.messages`, the bounded, non-persisted response to RPC `get_messages`. It reads
 the selected session, or an explicitly requested session id/path/prefix, and returns active-path
@@ -528,6 +535,8 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 | `{"id":"stats-1","type":"get_session_stats"}` | Emit a derived `session.stats` snapshot |
 | `{"id":"state-1","type":"get_state"}` | Emit an immediate in-memory `rpc.state` snapshot |
 | `{"id":"messages-1","type":"get_messages","limit":200}` | Emit a bounded active transcript page |
+| `{"id":"sessions-1","type":"get_sessions","limit":50}` | Emit a bounded persisted session catalog |
+| `{"id":"select-1","type":"select_session","session_id":"…"}` | Select a persisted session for later RPC commands |
 | `{"id":"steer-1","type":"steer","content":"Use the other approach"}` | Queue text after the active assistant/tool batch |
 | `{"id":"follow-1","type":"follow_up","content":"Then summarize"}` | Queue text for when the active run would otherwise stop |
 | `{"id":"queue-1","type":"get_queue_state"}` | Emit the active or retained `queue.updated` snapshot |
@@ -540,7 +549,8 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 | `{"id":"cmd-2","type":"shutdown"}` | Exit cleanly |
 
 Each command emits `rpc.command.started` / `rpc.command.finished` so clients can group the events
-between them. Prompts, compactions, statistics reads, and transcript reads run sequentially; `get_state`, queue
+between them. Prompts, compactions, statistics reads, transcript reads, session catalog reads, and
+session selection run sequentially; `get_state`, queue
 commands, `cancel`, `approval`, and `trust` are handled while an operation runs. `get_state`
 preserves the active command and any queued commands, including during prompt startup, compaction,
 statistics reads, approval/trust waits, and after cancellation is requested. During prompt startup,
@@ -550,7 +560,10 @@ pending counts without draining the buffer. It reports coherent in-memory state 
 `get_messages` for bounded persisted transcript pages. `get_messages` defaults to the selected
 session and returns an empty page with null session fields before any session is selected; pass
 `session_id`, `limit` (`1..500`), and `before_entry_id` to read a specific page without switching
-the selected session. `get_queue_state` is safe
+the selected session. `get_sessions` accepts `limit` (`0..200`, default `50`) and never switches the
+selected session. `select_session` accepts a non-empty session id/path/prefix, preserves the
+previous selection on failure, and makes later selected-session reads use that session's active
+leaf. `get_queue_state` is safe
 while idle. Queue mutations require an active run that is still accepting messages and otherwise
 fail with `CodingSession has no active agent run`. Successful queue commands emit the authoritative
 `queue.updated`; `pop_queue` and `clear_queue` first emit `queue.items.removed` with the exact
@@ -600,8 +613,9 @@ finally:
 ```
 
 `RpcController` exposes typed `prompt`, `compact`, `get_session_stats`, `get_state`, `get_messages`,
-`steer`, `follow_up`, `get_queue_state`, `set_queue_mode`, `pop_queue`, `clear_queue`, `cancel`,
-`approve`, `configure`, and `shutdown` methods and yields parsed `WispEvent` objects.
+`get_sessions`, `select_session`, `steer`, `follow_up`, `get_queue_state`, `set_queue_mode`,
+`pop_queue`, `clear_queue`, `cancel`, `approve`, `configure`, and `shutdown` methods and yields
+parsed `WispEvent` objects.
 
 ## Development
 

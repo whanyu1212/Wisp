@@ -19,6 +19,9 @@ from wisp.events import (
     RpcMessageSnapshot,
     RpcMessagesReported,
     RpcMessageToolCallSnapshot,
+    RpcSessionSelected,
+    RpcSessionsReported,
+    RpcSessionSummary,
     RpcStateReported,
     RpcStateSnapshot,
     TrustRequested,
@@ -32,11 +35,13 @@ from wisp.rpc import (
     FollowUpCommand,
     GetMessagesCommand,
     GetQueueStateCommand,
+    GetSessionsCommand,
     GetSessionStatsCommand,
     GetStateCommand,
     JsonlSubprocessRpcTransport,
     PopQueueCommand,
     RpcController,
+    SelectSessionCommand,
     SetQueueModeCommand,
     SteerCommand,
 )
@@ -147,6 +152,10 @@ def test_get_messages_command_serializes_as_jsonl_and_parses() -> None:
 
 def test_get_messages_command_rejects_invalid_bounds() -> None:
     with pytest.raises(ValidationError):
+        GetMessagesCommand(limit=True)
+    with pytest.raises(ValidationError):
+        GetMessagesCommand(limit="2")
+    with pytest.raises(ValidationError):
         GetMessagesCommand(limit=0)
     with pytest.raises(ValidationError):
         GetMessagesCommand(limit=501)
@@ -154,6 +163,44 @@ def test_get_messages_command_rejects_invalid_bounds() -> None:
         GetMessagesCommand(session_id="")
     with pytest.raises(ValidationError):
         GetMessagesCommand(before_entry_id="")
+
+
+def test_get_sessions_command_serializes_as_jsonl_and_parses() -> None:
+    command = GetSessionsCommand(id="sessions-1", limit=25)
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "sessions-1",
+        "type": "get_sessions",
+        "limit": 25,
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_get_sessions_command_rejects_invalid_bounds() -> None:
+    with pytest.raises(ValidationError):
+        GetSessionsCommand(limit=True)
+    with pytest.raises(ValidationError):
+        GetSessionsCommand(limit="2")
+    with pytest.raises(ValidationError):
+        GetSessionsCommand(limit=-1)
+    with pytest.raises(ValidationError):
+        GetSessionsCommand(limit=201)
+
+
+def test_select_session_command_serializes_as_jsonl_and_parses() -> None:
+    command = SelectSessionCommand(id="select-1", session_id="session-1")
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "select-1",
+        "type": "select_session",
+        "session_id": "session-1",
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_select_session_command_rejects_invalid_id() -> None:
+    with pytest.raises(ValidationError):
+        SelectSessionCommand(session_id="")
 
 
 def test_rpc_state_report_round_trips_only_at_schema_v16() -> None:
@@ -204,6 +251,73 @@ def test_rpc_messages_report_round_trips_only_at_schema_v17() -> None:
     assert wisp_event_from_json(event.model_dump_json()) == event
     with pytest.raises(ValueError, match="require schema_version 17"):
         wisp_event_from_json(event.model_copy(update={"schema_version": 16}).model_dump_json())
+
+
+def test_rpc_sessions_report_round_trips_only_at_schema_v18() -> None:
+    event = RpcSessionsReported(
+        command_id="sessions-1",
+        sessions=(
+            RpcSessionSummary(
+                session_id="session-1",
+                session_path=Path("/tmp/session-1.jsonl"),
+                updated_at=datetime(2026, 7, 24, tzinfo=UTC),
+                entry_count=3,
+                active_leaf_id="entry-3",
+            ),
+        ),
+        selected_session_id="session-1",
+        selected_session_path=Path("/tmp/session-1.jsonl"),
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    with pytest.raises(ValueError, match="require schema_version 18"):
+        wisp_event_from_json(event.model_copy(update={"schema_version": 17}).model_dump_json())
+
+
+def test_rpc_session_selected_round_trips_only_at_schema_v18() -> None:
+    event = RpcSessionSelected(
+        command_id="select-1",
+        session_id="session-1",
+        session_path=Path("/tmp/session-1.jsonl"),
+        active_leaf_id="entry-3",
+        entry_count=3,
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    with pytest.raises(ValueError, match="require schema_version 18"):
+        wisp_event_from_json(event.model_copy(update={"schema_version": 17}).model_dump_json())
+
+
+def test_rpc_session_events_reject_incomplete_or_empty_identity() -> None:
+    with pytest.raises(ValidationError, match="String should have at least 1 character"):
+        RpcSessionSummary(
+            session_id="",
+            session_path=Path("/tmp/session-1.jsonl"),
+            updated_at=datetime(2026, 7, 24, tzinfo=UTC),
+            entry_count=0,
+        )
+    with pytest.raises(ValidationError, match="String should have at least 1 character"):
+        RpcSessionSummary(
+            session_id="session-1",
+            session_path=Path("/tmp/session-1.jsonl"),
+            updated_at=datetime(2026, 7, 24, tzinfo=UTC),
+            entry_count=0,
+            active_leaf_id="",
+        )
+    with pytest.raises(ValidationError, match="selected_session_id and selected_session_path"):
+        RpcSessionsReported(command_id="sessions-1", selected_session_id="session-1")
+    with pytest.raises(ValidationError, match="selected_session_id and selected_session_path"):
+        RpcSessionsReported(
+            command_id="sessions-1",
+            selected_session_path=Path("/tmp/session-1.jsonl"),
+        )
+    with pytest.raises(ValidationError, match="String should have at least 1 character"):
+        RpcSessionSelected(
+            command_id="select-1",
+            session_id="",
+            session_path=Path("/tmp/session-1.jsonl"),
+            entry_count=0,
+        )
 
 
 def test_rpc_state_snapshot_is_frozen_and_forbids_extra_fields() -> None:
@@ -428,7 +542,7 @@ def test_wisp_event_from_json_parses_provider_retry_progress() -> None:
     assert wisp_event_from_json(retry.model_dump_json()) == retry
 
 
-@pytest.mark.parametrize("schema_version", [5, 16])
+@pytest.mark.parametrize("schema_version", [5, 17])
 def test_wisp_event_from_json_accepts_legacy_schema_versions(schema_version: int) -> None:
     payload: dict[str, object] = {
         "type": "rpc.command.finished",
@@ -475,6 +589,8 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             limit=25,
             before_entry_id="entry-1",
         )
+        sessions_id = await controller.get_sessions(limit=25)
+        select_id = await controller.select_session("session-1")
         steer_id = await controller.steer("redirect")
         follow_up_id = await controller.follow_up("continue")
         queue_state_id = await controller.get_queue_state()
@@ -497,6 +613,8 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             stats_id,
             state_id,
             messages_id,
+            sessions_id,
+            select_id,
             steer_id,
             follow_up_id,
             queue_state_id,
@@ -513,6 +631,8 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             "stats-id",
             "state-id",
             "messages-id",
+            "sessions-id",
+            "select-session-id",
             "steer-id",
             "follow-up-id",
             "queue-state-id",
@@ -535,6 +655,8 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
                 limit=25,
                 before_entry_id="entry-1",
             ),
+            GetSessionsCommand(id="sessions-id", limit=25),
+            SelectSessionCommand(id="select-session-id", session_id="session-1"),
             SteerCommand(id="steer-id", content="redirect"),
             FollowUpCommand(id="follow-up-id", content="continue"),
             GetQueueStateCommand(id="queue-state-id"),
