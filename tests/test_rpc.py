@@ -19,6 +19,8 @@ from wisp.events import (
     RpcMessageSnapshot,
     RpcMessagesReported,
     RpcMessageToolCallSnapshot,
+    RpcSessionCloned,
+    RpcSessionForked,
     RpcSessionSelected,
     RpcSessionsReported,
     RpcSessionSummary,
@@ -30,9 +32,11 @@ from wisp.events import (
 )
 from wisp.rpc import (
     ClearQueueCommand,
+    CloneSessionCommand,
     CompactCommand,
     ConfigureCommand,
     FollowUpCommand,
+    ForkSessionCommand,
     GetMessagesCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
@@ -203,6 +207,28 @@ def test_select_session_command_rejects_invalid_id() -> None:
         SelectSessionCommand(session_id="")
 
 
+def test_session_derivation_commands_serialize_as_jsonl_and_parse() -> None:
+    clone = CloneSessionCommand(id="clone-1")
+    fork = ForkSessionCommand(id="fork-1", entry_id="entry-1")
+
+    assert json.loads(clone.to_json_line()) == {
+        "id": "clone-1",
+        "type": "clone_session",
+    }
+    assert json.loads(fork.to_json_line()) == {
+        "id": "fork-1",
+        "type": "fork_session",
+        "entry_id": "entry-1",
+    }
+    assert rpc_command_from_json(clone.to_json_line()) == clone
+    assert rpc_command_from_json(fork.to_json_line()) == fork
+
+
+def test_fork_session_command_rejects_empty_entry_id() -> None:
+    with pytest.raises(ValidationError):
+        ForkSessionCommand(entry_id="")
+
+
 def test_rpc_state_report_round_trips_only_at_schema_v16() -> None:
     event = RpcStateReported(
         command_id="state-1",
@@ -286,6 +312,54 @@ def test_rpc_session_selected_round_trips_only_at_schema_v18() -> None:
     assert wisp_event_from_json(event.model_dump_json()) == event
     with pytest.raises(ValueError, match="require schema_version 18"):
         wisp_event_from_json(event.model_copy(update={"schema_version": 17}).model_dump_json())
+
+
+def test_rpc_session_derivation_events_round_trip_only_at_schema_v19() -> None:
+    clone = RpcSessionCloned(
+        command_id="clone-1",
+        source_session_id="source",
+        source_session_path=Path("/tmp/source.jsonl"),
+        source_active_leaf_id="entry-2",
+        session_id="clone",
+        session_path=Path("/tmp/clone.jsonl"),
+        active_leaf_id="entry-2",
+        entry_count=2,
+    )
+    fork = RpcSessionForked(
+        command_id="fork-1",
+        source_session_id="source",
+        source_session_path=Path("/tmp/source.jsonl"),
+        source_active_leaf_id="entry-4",
+        session_id="fork",
+        session_path=Path("/tmp/fork.jsonl"),
+        active_leaf_id="entry-2",
+        entry_count=2,
+        selected_entry_id="entry-3",
+        selected_prompt="edit me",
+    )
+
+    assert wisp_event_from_json(clone.model_dump_json()) == clone
+    assert wisp_event_from_json(fork.model_dump_json()) == fork
+    for event in (clone, fork):
+        with pytest.raises(ValueError, match="require schema_version 19"):
+            wisp_event_from_json(event.model_copy(update={"schema_version": 18}).model_dump_json())
+
+
+def test_rpc_session_derivation_events_reject_invalid_targets() -> None:
+    fields = {
+        "command_id": "clone-1",
+        "source_session_id": "same",
+        "source_session_path": Path("/tmp/source.jsonl"),
+        "source_active_leaf_id": "entry-1",
+        "session_id": "same",
+        "session_path": Path("/tmp/clone.jsonl"),
+        "active_leaf_id": "entry-1",
+        "entry_count": 1,
+    }
+    with pytest.raises(ValidationError, match="must create a new session id"):
+        RpcSessionCloned(**fields)
+    with pytest.raises(ValidationError, match="require an active leaf"):
+        RpcSessionCloned(**{**fields, "session_id": "clone", "active_leaf_id": None})
 
 
 def test_rpc_session_events_reject_incomplete_or_empty_identity() -> None:
@@ -591,6 +665,8 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         )
         sessions_id = await controller.get_sessions(limit=25)
         select_id = await controller.select_session("session-1")
+        clone_id = await controller.clone_session()
+        fork_id = await controller.fork_session("entry-1")
         steer_id = await controller.steer("redirect")
         follow_up_id = await controller.follow_up("continue")
         queue_state_id = await controller.get_queue_state()
@@ -615,6 +691,8 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             messages_id,
             sessions_id,
             select_id,
+            clone_id,
+            fork_id,
             steer_id,
             follow_up_id,
             queue_state_id,
@@ -633,6 +711,8 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             "messages-id",
             "sessions-id",
             "select-session-id",
+            "clone-session-id",
+            "fork-session-id",
             "steer-id",
             "follow-up-id",
             "queue-state-id",
@@ -657,6 +737,8 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             ),
             GetSessionsCommand(id="sessions-id", limit=25),
             SelectSessionCommand(id="select-session-id", session_id="session-1"),
+            CloneSessionCommand(id="clone-session-id"),
+            ForkSessionCommand(id="fork-session-id", entry_id="entry-1"),
             SteerCommand(id="steer-id", content="redirect"),
             FollowUpCommand(id="follow-up-id", content="continue"),
             GetQueueStateCommand(id="queue-state-id"),

@@ -84,6 +84,19 @@ class SelectSessionCommand(RpcCommandModel):
     session_id: str = Field(min_length=1)
 
 
+class CloneSessionCommand(RpcCommandModel):
+    """Clone the selected session's active path and select the clone."""
+
+    type: Literal["clone_session"] = "clone_session"
+
+
+class ForkSessionCommand(RpcCommandModel):
+    """Fork before a persisted user message and select the fork."""
+
+    type: Literal["fork_session"] = "fork_session"
+    entry_id: str = Field(min_length=1)
+
+
 class SteerCommand(RpcCommandModel):
     """Queue text after the active run's current assistant/tool batch."""
 
@@ -184,6 +197,8 @@ type RpcCommand = Annotated[
     | GetMessagesCommand
     | GetSessionsCommand
     | SelectSessionCommand
+    | CloneSessionCommand
+    | ForkSessionCommand
     | SteerCommand
     | FollowUpCommand
     | GetQueueStateCommand

@@ -1041,7 +1041,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "agent.completed",
         "rpc.command.finished",
     ]
-    assert all(record["schema_version"] == 18 for record in records)
+    assert all(record["schema_version"] == 19 for record in records)
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"
@@ -1081,7 +1081,7 @@ def test_rpc_mode_reports_stats_after_queued_prompt(tmp_path: Path) -> None:
     assert finished == [
         {
             "type": "rpc.command.finished",
-            "schema_version": 18,
+            "schema_version": 19,
             "timestamp": finished[0]["timestamp"],
             "command_id": "stats-1",
             "command_type": "get_session_stats",
@@ -1108,7 +1108,7 @@ def test_rpc_mode_reports_messages_after_queued_prompt(tmp_path: Path) -> None:
     records = _jsonl_records(result.stdout)
     report = next(record for record in records if record["type"] == "rpc.messages")
     assert report["command_id"] == "messages-1"
-    assert report["schema_version"] == 18
+    assert report["schema_version"] == 19
     assert report["session_id"]
     assert report["session_path"]
     assert report["active_leaf_id"]
@@ -1131,7 +1131,7 @@ def test_rpc_mode_reports_messages_after_queued_prompt(tmp_path: Path) -> None:
     assert finished == [
         {
             "type": "rpc.command.finished",
-            "schema_version": 18,
+            "schema_version": 19,
             "timestamp": finished[0]["timestamp"],
             "command_id": "messages-1",
             "command_type": "get_messages",
@@ -1154,7 +1154,7 @@ def test_rpc_mode_reports_sessions_catalog(tmp_path: Path) -> None:
     records = _jsonl_records(result.stdout)
     report = next(record for record in records if record["type"] == "rpc.sessions")
     assert report["command_id"] == "sessions-1"
-    assert report["schema_version"] == 18
+    assert report["schema_version"] == 19
     assert report["selected_session_id"] is None
     assert report["selected_session_path"] is None
     assert len(report["sessions"]) == 1
@@ -1187,14 +1187,14 @@ def test_rpc_mode_select_session_then_reads_messages(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
     selected = next(record for record in records if record["type"] == "rpc.session.selected")
-    assert selected["schema_version"] == 18
+    assert selected["schema_version"] == 19
     assert selected["command_id"] == "select-1"
     assert selected["session_id"] == session.session_id
     assert selected["session_path"] == str(session.path)
     assert selected["entry_count"] == 4
 
     report = next(record for record in records if record["type"] == "rpc.messages")
-    assert report["schema_version"] == 18
+    assert report["schema_version"] == 19
     assert report["session_id"] == session.session_id
     assert [message["content"] for message in report["messages"]] == [
         "first",
@@ -1211,6 +1211,101 @@ def test_rpc_mode_select_session_then_reads_messages(tmp_path: Path) -> None:
         ("select-1", "select_session", True),
         ("messages-1", "get_messages", True),
     ]
+
+
+def test_rpc_mode_clones_selected_session_then_reads_clone(tmp_path: Path) -> None:
+    source = _create_two_turn_session(tmp_path)
+    source_before = source.path.read_bytes()
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            json.dumps(
+                {
+                    "id": "select-1",
+                    "type": "select_session",
+                    "session_id": source.session_id,
+                }
+            )
+            + "\n"
+            '{"id":"clone-1","type":"clone_session"}\n'
+            '{"id":"messages-1","type":"get_messages","limit":10}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert all(record["schema_version"] == 19 for record in records)
+    cloned = next(record for record in records if record["type"] == "rpc.session.cloned")
+    assert cloned["command_id"] == "clone-1"
+    assert cloned["source_session_id"] == source.session_id
+    assert cloned["source_session_path"] == str(source.path)
+    assert cloned["session_id"] != source.session_id
+    assert cloned["entry_count"] == 4
+    assert cloned["active_leaf_id"] == source.read_active_leaf_id()
+
+    report = next(record for record in records if record["type"] == "rpc.messages")
+    assert report["session_id"] == cloned["session_id"]
+    assert report["session_path"] == cloned["session_path"]
+    assert [message["content"] for message in report["messages"]] == [
+        "first",
+        "answer one",
+        "second",
+        "answer two",
+    ]
+    assert Path(cloned["session_path"]).is_file()
+    assert source.path.read_bytes() == source_before
+
+
+def test_rpc_mode_first_message_fork_persists_after_edited_prompt(tmp_path: Path) -> None:
+    source = _create_two_turn_session(tmp_path)
+    selected_entry = source.read_entries()[0]
+    assert isinstance(selected_entry, MessageSessionEntry)
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            json.dumps(
+                {
+                    "id": "select-1",
+                    "type": "select_session",
+                    "session_id": source.session_id,
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "id": "fork-1",
+                    "type": "fork_session",
+                    "entry_id": selected_entry.id,
+                }
+            )
+            + "\n"
+            '{"id":"prompt-1","type":"prompt","prompt":"edited first"}\n'
+            '{"id":"messages-1","type":"get_messages","limit":10}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert all(record["schema_version"] == 19 for record in records)
+    forked = next(record for record in records if record["type"] == "rpc.session.forked")
+    assert forked["command_id"] == "fork-1"
+    assert forked["source_session_id"] == source.session_id
+    assert forked["selected_entry_id"] == selected_entry.id
+    assert forked["selected_prompt"] == "first"
+    assert forked["entry_count"] == 0
+    assert forked["active_leaf_id"] is None
+
+    report = next(record for record in records if record["type"] == "rpc.messages")
+    assert report["session_id"] == forked["session_id"]
+    assert [message["content"] for message in report["messages"]][-2:] == [
+        "edited first",
+        "fake response to: edited first",
+    ]
+    assert Path(forked["session_path"]).is_file()
 
 
 def test_rpc_mode_reports_idle_and_reconfigured_state(tmp_path: Path) -> None:
