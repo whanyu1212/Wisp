@@ -980,6 +980,51 @@ def test_executor_clone_session_applies_target_before_reporting_success(
     anyio.run(scenario)
 
 
+def test_executor_clone_session_reports_name_from_inherited_clone_snapshot(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        source = fixture.sessions.create()
+        await source.append_message(Message(role="user", content="one"))
+        await source.set_name("Named Source")
+        fixture.session_state.session = source
+        fixture.session_state.history = source.read_context_messages()
+        fixture.session_state.entry_count = len(source.read_entries())
+
+        def stale_source_name_read() -> str | None:
+            raise AssertionError("clone event must not pre-read the source name")
+
+        monkeypatch.setattr(source, "read_name", stale_source_name_read)
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+
+            result = executor.dispatch({"id": "clone", "type": "clone_session"}, None)
+            completed = await receive.receive()
+            fixture.coordinator.running_command = result.running_command
+            fixture.coordinator.handle_event(
+                completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok is True
+        assert completed.selected_session is fixture.session_state.session
+        assert completed.selected_session is not None
+        assert fixture.session_state.name == "Named Source"
+        report = next(event for event in fixture.events if isinstance(event, RpcSessionCloned))
+        assert report.source_session_name == "Named Source"
+        assert report.session_name == "Named Source"
+        assert report.entry_count == 2
+        assert completed.selected_session.read_name() == "Named Source"
+
+    anyio.run(scenario)
+
+
 def test_executor_fork_session_returns_prompt_and_selects_parent_path(
     tmp_path: Path,
 ) -> None:

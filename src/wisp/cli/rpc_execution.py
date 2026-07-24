@@ -1394,7 +1394,6 @@ async def run_rpc_clone_session_command(
             source_active_leaf_id = await anyio.to_thread.run_sync(
                 source_session.read_active_leaf_id
             )
-            source_name = await anyio.to_thread.run_sync(source_session.read_name)
             await anyio.sleep(0)
             # Publishing a derived session is the durable commit boundary. Once
             # entered, cancellation must not leave a created target reported as
@@ -1418,7 +1417,7 @@ async def run_rpc_clone_session_command(
                 source_session_id=source_session.session_id,
                 source_session_path=source_session.path,
                 source_active_leaf_id=source_active_leaf_id,
-                source_session_name=source_name,
+                source_session_name=refreshed_name,
                 session_id=cloned_session.session_id,
                 session_path=cloned_session.path,
                 active_leaf_id=active_leaf_id,
