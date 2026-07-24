@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 20
+EVENT_SCHEMA_VERSION = 21
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -30,6 +30,7 @@ RPC_MESSAGES_SCHEMA_VERSION = 17
 RPC_SESSIONS_SCHEMA_VERSION = 18
 RPC_SESSION_DERIVATION_SCHEMA_VERSION = 19
 RPC_SESSION_TREE_SCHEMA_VERSION = 20
+RPC_SESSION_NAME_SCHEMA_VERSION = 21
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -50,7 +51,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] = 20
+    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] = 21
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -264,6 +265,7 @@ class RpcStateSnapshot(CodingSessionState):
 
     session_id: str | None = None
     session_path: Path | None = None
+    session_name: str | None = None
     active_command_id: str | None = None
     active_command_type: str | None = None
     cancel_requested: bool = False
@@ -317,6 +319,7 @@ class RpcSessionSummary(BaseModel):
     updated_at: datetime
     entry_count: int = Field(ge=0)
     active_leaf_id: str | None = Field(default=None, min_length=1)
+    name: str | None = None
 
 
 class RpcSessionTreeNode(BaseModel):
@@ -740,6 +743,7 @@ class RpcSessionsReported(WispEvent):
     sessions: tuple[RpcSessionSummary, ...] = ()
     selected_session_id: str | None = Field(default=None, min_length=1)
     selected_session_path: Path | None = None
+    selected_session_name: str | None = None
 
     @model_validator(mode="after")
     def _validate_schema_version(self) -> Self:
@@ -764,6 +768,7 @@ class RpcSessionSelected(WispEvent):
     session_path: Path
     active_leaf_id: str | None = Field(default=None, min_length=1)
     entry_count: int = Field(ge=0)
+    session_name: str | None = None
 
     @model_validator(mode="after")
     def _validate_schema_version(self) -> Self:
@@ -782,9 +787,11 @@ class _RpcSessionDerived(WispEvent):
     source_session_id: str = Field(min_length=1)
     source_session_path: Path
     source_active_leaf_id: str | None = Field(default=None, min_length=1)
+    source_session_name: str | None = None
     session_id: str = Field(min_length=1)
     session_path: Path
     active_leaf_id: str | None = Field(default=None, min_length=1)
+    session_name: str | None = None
     entry_count: int = Field(ge=0)
 
     @model_validator(mode="after")
@@ -819,6 +826,27 @@ class RpcSessionForked(_RpcSessionDerived):
     type: Literal["rpc.session.forked"] = "rpc.session.forked"
     selected_entry_id: str = Field(min_length=1)
     selected_prompt: str
+
+
+class RpcSessionNameChanged(WispEvent):
+    """Confirmation that a session display name metadata record was appended."""
+
+    type: Literal["rpc.session.name_changed"] = "rpc.session.name_changed"
+    command_id: str
+    session_id: str = Field(min_length=1)
+    session_path: Path
+    previous_name: str | None = None
+    name: str | None = None
+    entry_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < RPC_SESSION_NAME_SCHEMA_VERSION:
+            raise ValueError(
+                "RPC session name events require schema_version "
+                f"{RPC_SESSION_NAME_SCHEMA_VERSION} or newer"
+            )
+        return self
 
 
 class RpcSessionTreeReported(WispEvent):
@@ -1013,6 +1041,7 @@ type KnownWispEvent = Annotated[
     | RpcSessionSelected
     | RpcSessionCloned
     | RpcSessionForked
+    | RpcSessionNameChanged
     | RpcSessionTreeReported
     | RpcSessionTreeNavigated
     | QueueUpdated
@@ -1112,6 +1141,13 @@ def _require_current_schema(data: JsonObject) -> None:
         raise ValueError(
             "RPC session derivation events require schema_version "
             f"{RPC_SESSION_DERIVATION_SCHEMA_VERSION} or newer"
+        )
+    if data.get("type") == "rpc.session.name_changed" and (
+        version < RPC_SESSION_NAME_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "RPC session name events require schema_version "
+            f"{RPC_SESSION_NAME_SCHEMA_VERSION} or newer"
         )
     if data.get("type") in {"rpc.session.tree", "rpc.session.tree.navigated"} and (
         version < RPC_SESSION_TREE_SCHEMA_VERSION

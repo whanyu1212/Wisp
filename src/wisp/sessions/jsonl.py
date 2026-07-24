@@ -33,6 +33,7 @@ from wisp.sessions.branching import (
     project_session_path,
 )
 from wisp.sessions.entries import (
+    MAX_SESSION_NAME_BYTES,
     PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION,
     SESSION_ENTRY_SCHEMA_VERSION,
     ActiveLeafSessionEntry,
@@ -41,8 +42,10 @@ from wisp.sessions.entries import (
     MessageSessionEntry,
     PersistedEventEnvelope,
     SessionEntry,
+    SessionInfoSessionEntry,
     SessionTreeEntry,
     is_session_tree_entry,
+    normalize_session_name,
     session_entry_from_json,
     session_entry_to_json,
     typed_event_from_envelope,
@@ -87,6 +90,7 @@ __all__ = [
     "MAX_SESSION_TREE_PAGE_LIMIT",
     "SessionForkResult",
     "SessionMessagePage",
+    "SessionNameChange",
     "SessionSummary",
     "SessionTreeNavigation",
     "SessionTreeNodeSummary",
@@ -146,6 +150,18 @@ class SessionSummary:
     updated_at: datetime
     entry_count: int
     active_leaf_id: str | None
+    name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionNameChange:
+    """The durable result of appending one session display-name metadata record."""
+
+    session_id: str
+    path: Path
+    previous_name: str | None
+    name: str | None
+    entry_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +228,7 @@ class _SessionSummaryEntryMetadata:
     parent_id: str | None = None
     previous_leaf_id: str | None = None
     active_leaf_id: str | None = None
+    name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +236,7 @@ class _SessionSummaryMetadata:
     session_id: str
     entry_count: int
     active_leaf_id: str | None
+    name: str | None
 
 
 class JsonlSessionStore:
@@ -323,7 +341,7 @@ class JsonlSessionStore:
         if selected_leaf_id is None:
             raise SessionError("Cannot clone an empty session")
         projection = project_session_path(entries, leaf_id=selected_leaf_id)
-        return self._persist_projection(projection)
+        return self._persist_projection(projection, name=_session_name_from_entries(entries))
 
     def _fork_from_user_message_once(
         self,
@@ -335,7 +353,7 @@ class JsonlSessionStore:
             expected_active_leaf_id
         )
         projection = project_fork_from_user_message(entries, entry_id=entry_id)
-        target = self._persist_projection(projection)
+        target = self._persist_projection(projection, name=None)
         assert projection.selected_entry_id is not None
         assert projection.selected_prompt is not None
         return SessionForkResult(
@@ -347,14 +365,25 @@ class JsonlSessionStore:
             selected_prompt=projection.selected_prompt,
         )
 
-    def _persist_projection(self, projection: SessionBranchProjection) -> JsonlSession:
+    def _persist_projection(
+        self,
+        projection: SessionBranchProjection,
+        *,
+        name: str | None,
+    ) -> JsonlSession:
         target = self.create()
-        if not projection.entries:
+        if not projection.entries and name is None:
             return target
-        copied_entries = tuple(
+        copied_tree_entries = tuple(
             entry.model_copy(update={"session_id": target.session_id})
             for entry in projection.entries
         )
+        copied_entries: tuple[SessionEntry, ...] = copied_tree_entries
+        if name is not None:
+            copied_entries = (
+                *copied_entries,
+                SessionInfoSessionEntry(session_id=target.session_id, name=name),
+            )
         target._create_with_entries_once(copied_entries)  # noqa: SLF001
         return target
 
@@ -367,6 +396,7 @@ class JsonlSessionStore:
             updated_at=datetime.fromtimestamp(info.st_mtime, UTC),
             entry_count=metadata.entry_count,
             active_leaf_id=metadata.active_leaf_id,
+            name=metadata.name,
         )
 
     def _resolve_path(self, reference: str | Path) -> Path:
@@ -435,6 +465,27 @@ class JsonlSession:
             operation_id=operation_id,
         )
         return await self.append_entry(entry)
+
+    async def set_name(
+        self,
+        name: str,
+        *,
+        operation_id: str | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> SessionNameChange:
+        """Append a session display-name metadata record."""
+
+        entry = SessionInfoSessionEntry(
+            session_id=self.session_id,
+            name=name,
+            operation_id=operation_id,
+        )
+        async with self._append_lock:
+            return await anyio.to_thread.run_sync(
+                self._set_name_once,
+                entry,
+                cancel_requested,
+            )
 
     async def append_entry(self, entry: SessionEntry) -> SessionEntry:
         """Persist a prebuilt entry once, keyed by its stable entry id."""
@@ -559,6 +610,13 @@ class JsonlSession:
             entry.message for entry in self.read_entries() if isinstance(entry, MessageSessionEntry)
         )
 
+    def read_name(self) -> str | None:
+        """Read the latest append-only display name for this session."""
+
+        if not self.path.is_file():
+            return None
+        return _session_name_from_entries(self.read_entries())
+
     def read_context(self) -> SessionReplay:
         """Replay the active provider context while preserving durable entry ids."""
 
@@ -658,14 +716,14 @@ class JsonlSession:
                 resolve_session_tree(entries)
                 return entries, active_leaf_id
 
-    def _create_with_entries_once(self, entries: tuple[SessionTreeEntry, ...]) -> None:
+    def _create_with_entries_once(self, entries: tuple[SessionEntry, ...]) -> None:
         """Exclusively publish a complete projected session file."""
 
         with self._file_state.lock:
             with self._interprocess_lock():
                 self._create_with_entries_locked(entries)
 
-    def _create_with_entries_locked(self, entries: tuple[SessionTreeEntry, ...]) -> None:
+    def _create_with_entries_locked(self, entries: tuple[SessionEntry, ...]) -> None:
         """Publish projected entries while holding the destination mutation locks."""
 
         if not entries:
@@ -770,6 +828,27 @@ class JsonlSession:
                         f"{expected_context_entry_ids}, found {replay.context_entry_ids}"
                     )
                 return self._append_entry_locked(entry)
+
+    def _set_name_once(
+        self,
+        entry: SessionInfoSessionEntry,
+        cancel_requested: Callable[[], bool] | None,
+    ) -> SessionNameChange:
+        with self._file_state.lock:
+            with self._interprocess_lock():
+                self._refresh_entry_index()
+                assert self._entry_index is not None
+                previous_name = _session_name_from_entries(tuple(self._entry_index.values()))
+                _raise_if_session_name_cancelled(cancel_requested)
+                persisted = self._append_entry_locked(entry)
+                assert isinstance(persisted, SessionInfoSessionEntry)
+                return SessionNameChange(
+                    session_id=self.session_id,
+                    path=self.path,
+                    previous_name=previous_name,
+                    name=persisted.name,
+                    entry_count=len(self._entry_index),
+                )
 
     def _navigate_tree_once(
         self,
@@ -1122,13 +1201,20 @@ def _session_file_signature(info: os.stat_result) -> _FileSignature:
 def _active_leaf_id(entry_index: dict[str, SessionEntry]) -> str | None:
     """Read current leaf state from the last validated transition in constant time."""
 
-    if not entry_index:
-        return None
-    last_entry = entry_index[next(reversed(entry_index))]
-    if is_session_tree_entry(last_entry):
-        return last_entry.id
-    assert isinstance(last_entry, ActiveLeafSessionEntry)
-    return last_entry.active_leaf_id
+    for entry in reversed(entry_index.values()):
+        if is_session_tree_entry(entry):
+            return entry.id
+        if isinstance(entry, ActiveLeafSessionEntry):
+            return entry.active_leaf_id
+    return None
+
+
+def _session_name_from_entries(entries: Sequence[SessionEntry]) -> str | None:
+    name: str | None = None
+    for entry in entries:
+        if isinstance(entry, SessionInfoSessionEntry):
+            name = entry.name
+    return name
 
 
 def _message_page_from_entries(
@@ -1257,6 +1343,13 @@ def _raise_if_navigation_cancelled(
 ) -> None:
     if cancel_requested is not None and cancel_requested():
         raise SessionNavigationCancelledError("Session tree navigation cancelled")
+
+
+def _raise_if_session_name_cancelled(
+    cancel_requested: Callable[[], bool] | None,
+) -> None:
+    if cancel_requested is not None and cancel_requested():
+        raise SessionNavigationCancelledError("Session name update cancelled")
 
 
 def _tree_page_from_entries(
@@ -1408,6 +1501,8 @@ def _validate_append_transition(
                 f"expected active leaf {active_leaf_id!r}"
             )
         return
+    if isinstance(entry, SessionInfoSessionEntry):
+        return
 
     assert isinstance(entry, ActiveLeafSessionEntry)
     if entry.previous_leaf_id != active_leaf_id:
@@ -1462,6 +1557,7 @@ def _read_session_summary_metadata(path: Path) -> _SessionSummaryMetadata:
     session_id: str | None = None
     entry_count = 0
     active_leaf_id: str | None = None
+    name: str | None = None
     node_ids: set[str] = set()
     seen_entry_ids: set[str] = set()
     try:
@@ -1492,6 +1588,8 @@ def _read_session_summary_metadata(path: Path) -> _SessionSummaryMetadata:
                     active_leaf_id=active_leaf_id,
                     node_ids=node_ids,
                 )
+                if entry.kind == "session_info":
+                    name = entry.name
                 entry_count += 1
     except UnicodeDecodeError as exc:
         raise SessionError(f"Session file is not valid UTF-8: {path}") from exc
@@ -1503,6 +1601,7 @@ def _read_session_summary_metadata(path: Path) -> _SessionSummaryMetadata:
         session_id=session_id,
         entry_count=entry_count,
         active_leaf_id=active_leaf_id,
+        name=name,
     )
 
 
@@ -1631,6 +1730,13 @@ def _v2_summary_entry_metadata(
                 location=location,
             ),
         )
+    if kind == "session_info":
+        return _SessionSummaryEntryMetadata(
+            id=_required_summary_string(raw, "id", location=location),
+            session_id=_required_summary_string(raw, "session_id", location=location),
+            kind=kind,
+            name=_summary_session_name(raw, location=location),
+        )
     raise MalformedSessionEntryError(f"Malformed session entry{location}")
 
 
@@ -1687,6 +1793,24 @@ def _optional_summary_string(
     raise MalformedSessionEntryError(f"Malformed session entry{location}")
 
 
+def _summary_session_name(raw: JsonObject, *, location: str) -> str | None:
+    if "name" not in raw:
+        raise MalformedSessionEntryError(f"Malformed session entry{location}")
+    value = raw["name"]
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise MalformedSessionEntryError(f"Malformed session entry{location}")
+    normalized = normalize_session_name(value)
+    if normalized is None:
+        return None
+    if len(normalized.encode("utf-8")) > MAX_SESSION_NAME_BYTES:
+        raise MalformedSessionEntryError(
+            f"session name cannot exceed {MAX_SESSION_NAME_BYTES} UTF-8 bytes{location}"
+        )
+    return normalized
+
+
 def _resolve_summary_entry(
     entry: _SessionSummaryEntryMetadata,
     *,
@@ -1708,6 +1832,8 @@ def _resolve_summary_entry(
             )
         node_ids.add(entry.id)
         return entry.id
+    if entry.kind == "session_info":
+        return active_leaf_id
     if entry.previous_leaf_id != active_leaf_id:
         raise SessionReplayError(
             f"Active-leaf entry {entry.id} expected previous leaf "

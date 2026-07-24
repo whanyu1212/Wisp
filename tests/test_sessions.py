@@ -23,6 +23,7 @@ from wisp.events import (
     ToolCallSnapshot,
 )
 from wisp.sessions import (
+    SessionNameChange,
     SessionTreeNavigation,
     SessionTreeNodeSummary,
     SessionTreePage,
@@ -37,6 +38,7 @@ from wisp.sessions.entries import (
     MessageSessionEntry,
     SessionEntry,
     SessionEntryAdapter,
+    SessionInfoSessionEntry,
     session_entry_to_json,
 )
 from wisp.sessions.errors import (
@@ -79,6 +81,7 @@ def test_session_tree_facades_are_publicly_exported() -> None:
     assert SessionTreePage.__module__ == "wisp.sessions.jsonl"
     assert SessionTreeNodeSummary.__module__ == "wisp.sessions.jsonl"
     assert SessionTreeNavigation.__module__ == "wisp.sessions.jsonl"
+    assert SessionNameChange.__module__ == "wisp.sessions.jsonl"
 
 
 def test_session_store_loads_by_path_filename_and_id_prefix(tmp_path: Path) -> None:
@@ -167,6 +170,120 @@ def test_session_store_summaries_use_lightweight_metadata_scan(
     assert summaries[0].session_id == session.session_id
     assert summaries[0].entry_count == 1
     assert summaries[0].active_leaf_id == leaf_id
+
+
+def test_session_names_are_normalized_cleared_and_latest_wins(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def write() -> tuple[SessionNameChange, SessionNameChange, SessionNameChange]:
+        first = await session.set_name("  alpha\r\nbeta\n ")
+        second = await session.set_name("alpha beta")
+        cleared = await session.set_name(" \r\n ")
+        return first, second, cleared
+
+    first, second, cleared = anyio.run(write)
+
+    assert first.previous_name is None
+    assert first.name == "alpha beta"
+    assert first.entry_count == 1
+    assert second.previous_name == "alpha beta"
+    assert second.name == "alpha beta"
+    assert second.entry_count == 2
+    assert cleared.previous_name == "alpha beta"
+    assert cleared.name is None
+    assert cleared.entry_count == 3
+    assert session.read_name() is None
+    entries = session.read_entries()
+    assert [entry.name for entry in entries if isinstance(entry, SessionInfoSessionEntry)] == [
+        "alpha beta",
+        "alpha beta",
+        None,
+    ]
+
+
+def test_session_name_limit_is_enforced_by_utf8_bytes(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write_ok() -> None:
+        await session.set_name("界" * 85 + "a")
+
+    anyio.run(write_ok)
+    assert len(session.read_name().encode("utf-8")) == 256  # type: ignore[union-attr]
+
+    async def write_oversized() -> None:
+        await session.set_name("界" * 86)
+
+    with pytest.raises(ValueError, match="256 UTF-8 bytes"):
+        anyio.run(write_oversized)
+
+
+def test_session_name_metadata_does_not_affect_replay_messages_or_tree(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> str:
+        first = await session.append_message(Message(role="user", content="hello"))
+        await session.set_name("Named")
+        await session.append_message(Message(role="assistant", content="answer"))
+        await session.set_name("")
+        return first.id
+
+    first_id = anyio.run(write)
+
+    assert [message.content for message in session.read_context_messages()] == [
+        "hello",
+        "answer",
+    ]
+    message_page = session.read_message_page()
+    assert [message.content for message in message_page.messages] == ["hello", "answer"]
+    tree_page = session.read_tree_page()
+    assert [node.kind for node in tree_page.nodes] == ["message", "message"]
+    assert tree_page.total_node_count == 2
+    assert tree_page.nodes[0].entry_id == first_id
+
+
+def test_metadata_only_session_is_valid_and_accepts_later_first_prompt(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        await session.set_name("Draft")
+        await session.append_message(Message(role="user", content="first"))
+
+    anyio.run(write)
+
+    entries = session.read_entries()
+    assert isinstance(entries[0], SessionInfoSessionEntry)
+    assert isinstance(entries[1], MessageSessionEntry)
+    assert entries[1].parent_id is None
+    assert session.read_name() == "Draft"
+    assert session.read_context_messages()[0].content == "first"
+
+
+def test_session_summaries_expose_names_and_reject_malformed_metadata(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def write() -> None:
+        await session.set_name("Named")
+
+    anyio.run(write)
+
+    summaries = store.summaries()
+
+    assert summaries[0].name == "Named"
+
+    broken = {
+        "schema_version": 2,
+        "id": "entry",
+        "session_id": "session",
+        "created_at": "2026-07-11T00:00:00Z",
+        "kind": "session_info",
+        "name": "界" * 86,
+    }
+    (tmp_path / "broken.jsonl").write_text(f"{json.dumps(broken)}\n", encoding="utf-8")
+
+    with pytest.raises(MalformedSessionEntryError, match="256 UTF-8 bytes"):
+        store.summaries()
 
 
 @pytest.mark.parametrize("kind", ["message", "compaction"])
@@ -815,7 +932,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
         records[3]["id"],
     ]
     assert records[3]["event"]["schema_version"] == 1
-    assert records[3]["event"]["payload"]["schema_version"] == 20
+    assert records[3]["event"]["payload"]["schema_version"] == 21
     assert isinstance(session.read_entries()[0], MessageSessionEntry)
     assert isinstance(session.read_entries()[3], EventSessionEntry)
     assert isinstance(session.read_entries()[4], CompactionSessionEntry)
@@ -1021,7 +1138,7 @@ def test_session_upgrades_legacy_v5_v6_events_only_on_typed_access(
 
 def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path) -> None:
     path = tmp_path / "future-event.jsonl"
-    raw_event = {"type": "future.event", "schema_version": 21, "future": True}
+    raw_event = {"type": "future.event", "schema_version": 22, "future": True}
     legacy = {
         "id": "future-event",
         "session_id": "event-session",
@@ -1033,7 +1150,7 @@ def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path)
     session = JsonlSessionStore(tmp_path).load(path)
 
     assert session.read_events() == (raw_event,)
-    with pytest.raises(UnsupportedPersistedEventVersionError, match="schema_version 21"):
+    with pytest.raises(UnsupportedPersistedEventVersionError, match="schema_version 22"):
         session.read_typed_events()
 
 

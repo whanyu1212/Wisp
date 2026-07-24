@@ -14,6 +14,7 @@ from wisp.sessions.entries import (
     EventSessionEntry,
     MessageSessionEntry,
     SessionEntry,
+    SessionInfoSessionEntry,
     SessionTreeEntry,
     is_session_tree_entry,
 )
@@ -104,6 +105,9 @@ def resolve_session_tree(entries: Sequence[SessionEntry]) -> SessionTreeState:
             nodes.append(entry)
             node_by_id[entry.id] = entry
             active_leaf_id = entry.id
+            continue
+
+        if isinstance(entry, SessionInfoSessionEntry):
             continue
 
         assert isinstance(entry, ActiveLeafSessionEntry)

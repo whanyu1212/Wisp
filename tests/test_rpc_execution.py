@@ -34,6 +34,7 @@ from wisp.events import (
     RpcMessagesReported,
     RpcSessionCloned,
     RpcSessionForked,
+    RpcSessionNameChanged,
     RpcSessionSelected,
     RpcSessionsReported,
     RpcSessionTreeNavigated,
@@ -610,6 +611,108 @@ def test_executor_select_session_updates_coordinator_state(tmp_path: Path) -> No
         assert report.session_path == selected.path
         assert report.active_leaf_id is not None
         assert report.entry_count == 2
+
+    anyio.run(scenario)
+
+
+def test_executor_set_session_name_updates_selected_cached_state(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        selected = fixture.sessions.create()
+        await selected.append_message(Message(role="user", content="one"))
+        fixture.session_state.session = selected
+        fixture.session_state.history = (Message(role="user", content="one"),)
+        fixture.session_state.entry_count = 1
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+
+            result = executor.dispatch(
+                {"id": "name", "type": "set_session_name", "name": "  Alpha\r\nBeta  "},
+                None,
+            )
+            completed = await receive.receive()
+            assert not any(isinstance(event, RpcSessionNameChanged) for event in fixture.events)
+            fixture.coordinator.running_command = result.running_command
+            fixture.coordinator.handle_event(
+                completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            executor.dispatch({"id": "state", "type": "get_state"}, None)
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok is True
+        assert completed.session_name == "Alpha Beta"
+        assert completed.session_name_updated is True
+        assert fixture.session_state.session is selected
+        assert fixture.session_state.name == "Alpha Beta"
+        assert fixture.session_state.entry_count == 2
+        name_events = [
+            event for event in fixture.events if isinstance(event, RpcSessionNameChanged)
+        ]
+        changed = name_events[0]
+        assert changed.command_id == "name"
+        assert changed.session_id == selected.session_id
+        assert changed.previous_name is None
+        assert changed.name == "Alpha Beta"
+        assert changed.entry_count == 2
+        state = next(event for event in fixture.events if isinstance(event, RpcStateReported))
+        assert state.state.session_name == "Alpha Beta"
+
+    anyio.run(scenario)
+
+
+def test_executor_set_session_name_with_explicit_id_does_not_switch_selection(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        selected = fixture.sessions.create()
+        await selected.append_message(Message(role="user", content="selected"))
+        await selected.set_name("Selected")
+        other = fixture.sessions.create()
+        await other.append_message(Message(role="user", content="other"))
+        fixture.session_state.session = selected
+        fixture.session_state.history = (Message(role="user", content="selected"),)
+        fixture.session_state.entry_count = 2
+        fixture.session_state.name = "Selected"
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+
+            result = executor.dispatch(
+                {
+                    "id": "name",
+                    "type": "set_session_name",
+                    "session_id": other.session_id,
+                    "name": "Other",
+                },
+                None,
+            )
+            completed = await receive.receive()
+            fixture.coordinator.running_command = result.running_command
+            fixture.coordinator.handle_event(
+                completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok is True
+        assert completed.session_name_updated is False
+        assert fixture.session_state.session is selected
+        assert fixture.session_state.name == "Selected"
+        assert fixture.session_state.entry_count == 2
+        assert other.read_name() == "Other"
+        name_events = [
+            event for event in fixture.events if isinstance(event, RpcSessionNameChanged)
+        ]
+        changed = name_events[0]
+        assert changed.session_id == other.session_id
+        assert changed.name == "Other"
 
     anyio.run(scenario)
 

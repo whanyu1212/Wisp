@@ -23,6 +23,7 @@ from wisp.rpc.commands import (
     RpcCommand,
     SelectSessionCommand,
     SetQueueModeCommand,
+    SetSessionNameCommand,
     ShutdownCommand,
     SteerCommand,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "RpcController",
     "RpcTransport",
     "SelectSessionCommand",
+    "SetSessionNameCommand",
     "SetQueueModeCommand",
     "ShutdownCommand",
     "SteerCommand",

@@ -20,6 +20,7 @@ from wisp.sessions.entries import (
     CompactionSessionEntry,
     MessageSessionEntry,
     SessionEntry,
+    SessionInfoSessionEntry,
     SessionTreeEntry,
     is_session_tree_entry,
     session_entry_to_json,
@@ -84,6 +85,51 @@ def test_clone_copies_only_active_path_and_preserves_entry_identity(tmp_path: Pa
     reloaded = store.load(cloned.path)
     assert reloaded.read_entries() == copied
     assert reloaded.read_context_messages() == cloned.read_context_messages()
+
+
+def test_clone_inherits_effective_name_with_new_metadata_entry(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+    source = store.create()
+
+    async def seed_and_clone() -> JsonlSession:
+        leaf = await source.append_message(Message(role="user", content="root"))
+        await source.set_name("Named Source")
+        return await store.clone(source, expected_active_leaf_id=leaf.id)
+
+    cloned = anyio.run(seed_and_clone)
+
+    assert source.read_name() == "Named Source"
+    assert cloned.read_name() == "Named Source"
+    source_info = next(
+        entry for entry in source.read_entries() if isinstance(entry, SessionInfoSessionEntry)
+    )
+    cloned_info = next(
+        entry for entry in cloned.read_entries() if isinstance(entry, SessionInfoSessionEntry)
+    )
+    assert cloned_info.id != source_info.id
+    assert cloned_info.session_id == cloned.session_id
+
+
+def test_fork_starts_unnamed_and_preserves_source_name(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+    source = store.create()
+
+    async def seed_and_fork() -> JsonlSession:
+        await source.set_name("Named Source")
+        selected = await source.append_message(Message(role="user", content="edit me"))
+        return (
+            await store.fork_from_user_message(
+                source,
+                selected.id,
+                expected_active_leaf_id=selected.id,
+            )
+        ).session
+
+    forked = anyio.run(seed_and_fork)
+
+    assert source.read_name() == "Named Source"
+    assert forked.read_name() is None
+    assert not forked.path.exists()
 
 
 def test_clone_to_leaf_copies_an_inactive_user_or_assistant_path(tmp_path: Path) -> None:
@@ -475,10 +521,14 @@ def test_clone_snapshot_remains_coherent_when_source_appends_after_snapshot(
     continue_clone = threading.Event()
     persist_projection = store._persist_projection  # noqa: SLF001
 
-    def pause_after_snapshot(projection: SessionBranchProjection) -> JsonlSession:
+    def pause_after_snapshot(
+        projection: SessionBranchProjection,
+        *,
+        name: str | None,
+    ) -> JsonlSession:
         snapshot_taken.set()
         assert continue_clone.wait(timeout=5)
-        return persist_projection(projection)
+        return persist_projection(projection, name=name)
 
     monkeypatch.setattr(store, "_persist_projection", pause_after_snapshot)
     cloned: JsonlSession | None = None

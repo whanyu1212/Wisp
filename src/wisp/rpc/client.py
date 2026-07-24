@@ -35,6 +35,7 @@ from wisp.rpc.commands import (
     RpcCommand,
     SelectSessionCommand,
     SetQueueModeCommand,
+    SetSessionNameCommand,
     ShutdownCommand,
     SteerCommand,
     TrustCommand,
@@ -177,6 +178,25 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("navigate-session-tree")
         await self._transport.send(NavigateSessionTreeCommand(id=selected_id, entry_id=entry_id))
+        return selected_id
+
+    async def set_session_name(
+        self,
+        name: str,
+        *,
+        session_id: str | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        """Set or clear one session's display name."""
+
+        selected_id = command_id or self._command_id_factory("set-session-name")
+        await self._transport.send(
+            SetSessionNameCommand(
+                id=selected_id,
+                name=name,
+                session_id=session_id,
+            )
+        )
         return selected_id
 
     async def steer(self, content: str, *, command_id: str | None = None) -> str:

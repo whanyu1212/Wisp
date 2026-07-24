@@ -25,6 +25,7 @@ type _SequentialRpcCommandType = Literal[
     "fork_session",
     "get_session_tree",
     "navigate_session_tree",
+    "set_session_name",
 ]
 
 
@@ -47,6 +48,8 @@ class _RpcCommandCompleted:
     entry_count: int
     selected_session: JsonlSession | None = None
     post_apply_events: tuple[WispEvent, ...] = ()
+    session_name: str | None = None
+    session_name_updated: bool = False
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,7 @@ class _RpcSessionState:
     session: JsonlSession | None
     history: tuple[Message, ...]
     entry_count: int
+    name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -199,6 +203,8 @@ class RpcCoordinator:
                 self.session_state.entry_count = completed.entry_count
                 if completed.history is not None:
                     self.session_state.history = completed.history
+                if getattr(completed, "session_name_updated", False):
+                    self.session_state.name = getattr(completed, "session_name", None)
                 selected_session = getattr(completed, "selected_session", None)
                 if completed.ok and selected_session is not None:
                     self.session_state.session = selected_session

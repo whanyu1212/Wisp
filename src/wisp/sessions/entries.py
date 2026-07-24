@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Annotated, Literal, TypeGuard
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
 from wisp.agent.messages import CompactionRecord, Message
 from wisp.events import (
@@ -28,6 +29,8 @@ from wisp.sessions.errors import (
 SESSION_ENTRY_SCHEMA_VERSION: Literal[2] = 2
 PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION: Literal[1] = 1
 _MIN_SUPPORTED_EVENT_SCHEMA_VERSION = 5
+MAX_SESSION_NAME_BYTES = 256
+_SESSION_NAME_NEWLINES_RE = re.compile(r"[\r\n]+")
 
 
 class SessionEntryBase(BaseModel):
@@ -86,11 +89,36 @@ class ActiveLeafSessionEntry(SessionEntryBase):
     active_leaf_id: str | None
 
 
+class SessionInfoSessionEntry(SessionEntryBase):
+    """Append-only session metadata that does not participate in the tree."""
+
+    kind: Literal["session_info"] = "session_info"
+    name: str | None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _normalize_name(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        normalized = normalize_session_name(value)
+        if normalized is None:
+            return None
+        if len(normalized.encode("utf-8")) > MAX_SESSION_NAME_BYTES:
+            raise ValueError(f"session name cannot exceed {MAX_SESSION_NAME_BYTES} UTF-8 bytes")
+        return normalized
+
+
 type SessionTreeEntry = MessageSessionEntry | EventSessionEntry | CompactionSessionEntry
 
 
 type SessionEntry = Annotated[
-    MessageSessionEntry | EventSessionEntry | CompactionSessionEntry | ActiveLeafSessionEntry,
+    MessageSessionEntry
+    | EventSessionEntry
+    | CompactionSessionEntry
+    | ActiveLeafSessionEntry
+    | SessionInfoSessionEntry,
     Field(discriminator="kind"),
 ]
 
@@ -115,7 +143,16 @@ def session_entry_to_json(entry: SessionEntry) -> str:
     elif isinstance(entry, ActiveLeafSessionEntry):
         raw["previous_leaf_id"] = entry.previous_leaf_id
         raw["active_leaf_id"] = entry.active_leaf_id
+    elif isinstance(entry, SessionInfoSessionEntry):
+        raw["name"] = entry.name
     return json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+
+
+def normalize_session_name(name: str) -> str | None:
+    """Normalize user-facing session names before persistence."""
+
+    normalized = _SESSION_NAME_NEWLINES_RE.sub(" ", name).strip()
+    return normalized or None
 
 
 def session_entry_from_json(

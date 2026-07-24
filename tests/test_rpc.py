@@ -21,6 +21,7 @@ from wisp.events import (
     RpcMessageToolCallSnapshot,
     RpcSessionCloned,
     RpcSessionForked,
+    RpcSessionNameChanged,
     RpcSessionSelected,
     RpcSessionsReported,
     RpcSessionSummary,
@@ -52,6 +53,7 @@ from wisp.rpc import (
     RpcController,
     SelectSessionCommand,
     SetQueueModeCommand,
+    SetSessionNameCommand,
     SteerCommand,
 )
 from wisp.rpc.commands import (
@@ -267,6 +269,29 @@ def test_session_tree_commands_reject_invalid_fields() -> None:
         NavigateSessionTreeCommand(entry_id="")
 
 
+def test_set_session_name_command_serializes_as_jsonl_and_parses() -> None:
+    command = SetSessionNameCommand(
+        id="name-1",
+        name="  first\r\nname  ",
+        session_id="session-1",
+    )
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "name-1",
+        "type": "set_session_name",
+        "name": "  first\r\nname  ",
+        "session_id": "session-1",
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
+    assert json.loads(SetSessionNameCommand(id="clear-1", name="").to_json_line()) == {
+        "id": "clear-1",
+        "type": "set_session_name",
+        "name": "",
+    }
+    with pytest.raises(ValidationError, match="String should have at least 1 character"):
+        SetSessionNameCommand(name="ok", session_id="")
+
+
 def test_rpc_state_report_round_trips_only_at_schema_v16() -> None:
     event = RpcStateReported(
         command_id="state-1",
@@ -437,6 +462,21 @@ def test_rpc_session_tree_events_round_trip_only_at_schema_v20() -> None:
     for event in (report, navigated):
         with pytest.raises(ValueError, match="require schema_version 20"):
             wisp_event_from_json(event.model_copy(update={"schema_version": 19}).model_dump_json())
+
+
+def test_rpc_session_name_changed_round_trips_only_at_schema_v21() -> None:
+    event = RpcSessionNameChanged(
+        command_id="name-1",
+        session_id="session-1",
+        session_path=Path("/tmp/session-1.jsonl"),
+        previous_name="Old",
+        name=None,
+        entry_count=4,
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    with pytest.raises(ValueError, match="require schema_version 21"):
+        wisp_event_from_json(event.model_copy(update={"schema_version": 20}).model_dump_json())
 
 
 def test_rpc_session_tree_events_reject_inconsistent_payloads() -> None:
@@ -752,7 +792,7 @@ def test_wisp_event_from_json_parses_provider_retry_progress() -> None:
     assert wisp_event_from_json(retry.model_dump_json()) == retry
 
 
-@pytest.mark.parametrize("schema_version", [5, 17, 18, 19])
+@pytest.mark.parametrize("schema_version", [5, 17, 18, 19, 20])
 def test_wisp_event_from_json_accepts_legacy_schema_versions(schema_version: int) -> None:
     payload: dict[str, object] = {
         "type": "rpc.command.finished",
@@ -805,6 +845,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         fork_id = await controller.fork_session("entry-1")
         tree_id = await controller.get_session_tree(limit=25, after_entry_id="entry-1")
         navigate_id = await controller.navigate_session_tree("entry-2")
+        name_id = await controller.set_session_name("Display", session_id="session-1")
         steer_id = await controller.steer("redirect")
         follow_up_id = await controller.follow_up("continue")
         queue_state_id = await controller.get_queue_state()
@@ -833,6 +874,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             fork_id,
             tree_id,
             navigate_id,
+            name_id,
             steer_id,
             follow_up_id,
             queue_state_id,
@@ -855,6 +897,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             "fork-session-id",
             "session-tree-id",
             "navigate-session-tree-id",
+            "set-session-name-id",
             "steer-id",
             "follow-up-id",
             "queue-state-id",
@@ -889,6 +932,11 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             NavigateSessionTreeCommand(
                 id="navigate-session-tree-id",
                 entry_id="entry-2",
+            ),
+            SetSessionNameCommand(
+                id="set-session-name-id",
+                name="Display",
+                session_id="session-1",
             ),
             SteerCommand(id="steer-id", content="redirect"),
             FollowUpCommand(id="follow-up-id", content="continue"),

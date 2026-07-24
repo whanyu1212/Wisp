@@ -9,6 +9,7 @@ from .entries import (
     MessageSessionEntry,
     PersistedEventEnvelope,
     SessionEntry,
+    SessionInfoSessionEntry,
     SessionTreeEntry,
 )
 from .errors import (
@@ -26,6 +27,7 @@ from .jsonl import (
     JsonlSessionStore,
     SessionForkResult,
     SessionMessagePage,
+    SessionNameChange,
     SessionSummary,
     SessionTreeNavigation,
     SessionTreeNodeSummary,
@@ -59,6 +61,8 @@ __all__ = [
     "SessionError",
     "SessionForkResult",
     "SessionMessagePage",
+    "SessionInfoSessionEntry",
+    "SessionNameChange",
     "SessionNavigationCancelledError",
     "SessionReplay",
     "SessionReplayError",
