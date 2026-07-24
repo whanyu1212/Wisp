@@ -14,6 +14,7 @@ from wisp.sessions.entries import (
     EventSessionEntry,
     MessageSessionEntry,
     SessionEntry,
+    SessionInfoSessionEntry,
     SessionTreeEntry,
     is_session_tree_entry,
 )
@@ -106,6 +107,9 @@ def resolve_session_tree(entries: Sequence[SessionEntry]) -> SessionTreeState:
             active_leaf_id = entry.id
             continue
 
+        if isinstance(entry, SessionInfoSessionEntry):
+            continue
+
         assert isinstance(entry, ActiveLeafSessionEntry)
         if entry.previous_leaf_id != active_leaf_id:
             raise SessionReplayError(
@@ -150,18 +154,26 @@ def _normalize_detached_linear_entries(
     """Treat a wholly detached in-memory sequence as the legacy public flat form."""
 
     normalized = tuple(entries)
-    if len(normalized) < 2 or not all(
-        is_session_tree_entry(entry) and entry.parent_id is None for entry in normalized
+    tree_entries = tuple(entry for entry in normalized if is_session_tree_entry(entry))
+    if (
+        len(tree_entries) < 2
+        or any(
+            not is_session_tree_entry(entry) and not isinstance(entry, SessionInfoSessionEntry)
+            for entry in normalized
+        )
+        or any(entry.parent_id is not None for entry in tree_entries)
     ):
         return normalized
 
     parent_id: str | None = None
     attached: list[SessionEntry] = []
     for entry in normalized:
-        assert is_session_tree_entry(entry)
-        attached_entry = entry.model_copy(update={"parent_id": parent_id})
-        attached.append(attached_entry)
-        parent_id = attached_entry.id
+        if is_session_tree_entry(entry):
+            attached_entry = entry.model_copy(update={"parent_id": parent_id})
+            attached.append(attached_entry)
+            parent_id = attached_entry.id
+            continue
+        attached.append(entry)
     return tuple(attached)
 
 

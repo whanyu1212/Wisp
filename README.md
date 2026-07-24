@@ -390,8 +390,8 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 20`; readers also accept legacy schema v5
-through v19 events for compatibility. A successful prompt follows this lifecycle (tool events
+Every outbound `WispEvent` includes `"schema_version": 21`; readers also accept legacy schema v5
+through v20 events for compatibility. A successful prompt follows this lifecycle (tool events
 repeat inside a turn when the model requests tools):
 
 ```text
@@ -421,6 +421,19 @@ overflow compaction lifecycle events, then the failed `turn.completed`, and cont
 `compaction.completed.will_retry=true` marks that failed turn as nonterminal; no `error` or
 intermediate `agent.completed` is emitted unless compaction or the retry setup fails.
 
+Schema v21 adds `rpc.session.name_changed` and nullable session display names on existing session
+RPC state, catalog, selection, clone, and fork payloads. `set_session_name` appends a non-tree
+metadata record; CR/LF runs are normalized to spaces, surrounding whitespace is trimmed, names are
+limited to 256 UTF-8 bytes, and an empty normalized name clears the display name. Omitting
+`session_id` renames the selected session and fails when none is selected. Supplying `session_id`
+renames that persisted session without switching selection. Session-info metadata never changes
+active leaf, replay, transcript pages, tree pages, or usage accounting.
+
+Pi's `/name` and RPC naming behavior is the reference for user-visible display names. Wisp
+intentionally exposes typed result events, optional explicit-session targeting, non-tree metadata
+records, bounded normalization, and clone-only inheritance. Clones inherit the source's effective
+name through a new target metadata record; forks start unnamed to avoid duplicate picker labels.
+
 Schema v20 adds `rpc.session.tree` and `rpc.session.tree.navigated`. `get_session_tree` returns
 persisted message, event, and compaction nodes from the selected session in append order, including
 inactive branches but excluding active-leaf state records. Pages use exposed entry IDs as
@@ -442,8 +455,9 @@ Schema v19 adds `rpc.session.cloned` and `rpc.session.forked` for durable sessio
 `clone_session` copies the selected session's complete active path, while `fork_session` copies
 the path before one persisted user-message entry and returns that entry's exact, untruncated
 prompt text for editing. Both commands atomically select the derived session before their result
-event is emitted. Forking the first user message selects a reserved empty session whose file is
-created by the next persisted prompt, so it does not appear in `get_sessions` until then.
+event is emitted. Clones inherit the selected display name; forks start unnamed. Forking the first
+user message selects a reserved empty session whose file is created by the next persisted prompt,
+so it does not appear in `get_sessions` until then.
 
 Pi's RPC `clone` and `fork` operations are the behavioral reference: they also replace the active
 session and return editable text for a fork. Wisp intentionally uses typed result events with
@@ -452,10 +466,11 @@ validation. This RPC slice does not add Pi-style extension lifecycle hooks.
 
 Schema v18 adds `rpc.sessions` and `rpc.session.selected` for RPC session picker/resume flows.
 `get_sessions` returns bounded persisted session summaries — session id, path, updated timestamp,
-entry count, and active leaf — plus the currently selected session identity. `select_session`
-loads one persisted session through the same session-store resolution used by resume flows and
-updates the active RPC session only after the load/replay succeeds. Neither event includes message
-bodies; use `get_messages` after selection to read a bounded transcript page.
+entry count, active leaf, and nullable display name — plus the currently selected session identity
+and name. `select_session` loads one persisted session through the same session-store resolution
+used by resume flows and updates the active RPC session only after the load/replay succeeds.
+Neither event includes message bodies; use `get_messages` after selection to read a bounded
+transcript page.
 
 Schema v17 adds `rpc.messages`, the bounded, non-persisted response to RPC `get_messages`. It reads
 the selected session, or an explicitly requested session id/path/prefix, and returns active-path
@@ -469,9 +484,9 @@ operation.
 
 Schema v16 adds `rpc.state`, the immediate, non-persisted response to RPC `get_state`. It reports
 the applied provider, effective model, effort, auto-compaction setting, count-only queue summary,
-selected session identity, and active command identity/cancellation state without reading session
-files or exposing messages. The effective model is the configured override when present and the
-provider default otherwise.
+selected session identity/name, and active command identity/cancellation state without reading
+session files or exposing messages. The effective model is the configured override when present and
+the provider default otherwise.
 
 Schema v15 adds `queue.items.removed`, emitted by successful RPC `pop_queue` and `clear_queue`
 commands with the exact removed text, queue kind, operation, and command id. The following
@@ -570,6 +585,7 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 | `{"id":"fork-1","type":"fork_session","entry_id":"…"}` | Fork before a user message, select the fork, and return its prompt |
 | `{"id":"tree-1","type":"get_session_tree","limit":200}` | Emit a bounded append-order page of the selected session tree |
 | `{"id":"navigate-1","type":"navigate_session_tree","entry_id":"…"}` | Navigate in-file and optionally restore a user prompt for editing |
+| `{"id":"name-1","type":"set_session_name","name":"Roadmap cleanup"}` | Rename the selected session; empty normalized names clear it |
 | `{"id":"steer-1","type":"steer","content":"Use the other approach"}` | Queue text after the active assistant/tool batch |
 | `{"id":"follow-1","type":"follow_up","content":"Then summarize"}` | Queue text for when the active run would otherwise stop |
 | `{"id":"queue-1","type":"get_queue_state"}` | Emit the active or retained `queue.updated` snapshot |
@@ -583,8 +599,9 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 
 Each command emits `rpc.command.started` / `rpc.command.finished` so clients can group the events
 between them. Prompts, compactions, statistics reads, transcript reads, session catalog reads,
-session selection, cloning, forking, tree reads, and tree navigation run sequentially; `get_state`, queue
-commands, `cancel`, `approval`, and `trust` are handled while an operation runs. `get_state`
+session selection, cloning, forking, tree reads, tree navigation, and session renaming run
+sequentially; `get_state`, queue commands, `cancel`, `approval`, and `trust` are handled while an
+operation runs. `get_state`
 preserves the active command and any queued commands, including during prompt startup, compaction,
 statistics reads, approval/trust waits, and after cancellation is requested. During prompt startup,
 queue commands buffered before prompt readiness are projected into the reported queue modes and
@@ -596,10 +613,14 @@ session and returns an empty page with null session fields before any session is
 the selected session. `get_sessions` accepts `limit` (`0..200`, default `50`) and never switches the
 selected session. `select_session` accepts a non-empty session id/path/prefix, preserves the
 previous selection on failure, and makes later selected-session reads use that session's active
-leaf. `clone_session` and `fork_session` require a selected session and atomically replace it only
-after the derived session validates. The source remains append-only and unchanged. Derivation
-cancellation is honored before its durable store operation begins; after publication starts, the
-operation completes rather than reporting a cancelled command that already created a session.
+leaf. `set_session_name` accepts a string `name` and optional non-empty `session_id`; omitted
+`session_id` targets the selected session, while explicit IDs rename a persisted session without
+switching. Empty normalized names clear the display name. The result is emitted only after the
+selected-session cache is updated when the selected session was renamed. `clone_session` and
+`fork_session` require a selected session and atomically replace it only after the derived session
+validates. The source remains append-only and unchanged. Derivation cancellation is honored before
+its durable store operation begins; after publication starts, the operation completes rather than
+reporting a cancelled command that already created a session.
 `get_session_tree` accepts `limit` (`1..500`, default `200`) and `after_entry_id`; it returns an
 empty snapshot with null session fields before selection and an identified empty snapshot for a
 reserved unpersisted session. `navigate_session_tree` requires a selected persisted session.
@@ -656,9 +677,10 @@ finally:
 ```
 
 `RpcController` exposes typed `prompt`, `compact`, `get_session_stats`, `get_state`, `get_messages`,
-`get_sessions`, `select_session`, `clone_session`, `fork_session`, `steer`, `follow_up`,
-`get_queue_state`, `set_queue_mode`, `pop_queue`, `clear_queue`, `cancel`, `approve`, `configure`,
-and `shutdown` methods and yields parsed `WispEvent` objects.
+`get_sessions`, `select_session`, `clone_session`, `fork_session`, `get_session_tree`,
+`navigate_session_tree`, `set_session_name`, `steer`, `follow_up`, `get_queue_state`,
+`set_queue_mode`, `pop_queue`, `clear_queue`, `cancel`, `approve`, `configure`, and `shutdown`
+methods and yields parsed `WispEvent` objects.
 
 ## Development
 

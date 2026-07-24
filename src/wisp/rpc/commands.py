@@ -112,6 +112,14 @@ class NavigateSessionTreeCommand(RpcCommandModel):
     entry_id: str = Field(min_length=1)
 
 
+class SetSessionNameCommand(RpcCommandModel):
+    """Set or clear one session's display name."""
+
+    type: Literal["set_session_name"] = "set_session_name"
+    name: str
+    session_id: str | None = Field(default=None, min_length=1)
+
+
 class SteerCommand(RpcCommandModel):
     """Queue text after the active run's current assistant/tool batch."""
 
@@ -216,6 +224,7 @@ type RpcCommand = Annotated[
     | ForkSessionCommand
     | GetSessionTreeCommand
     | NavigateSessionTreeCommand
+    | SetSessionNameCommand
     | SteerCommand
     | FollowUpCommand
     | GetQueueStateCommand

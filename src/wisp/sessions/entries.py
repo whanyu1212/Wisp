@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Annotated, Literal, TypeGuard
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
 from wisp.agent.messages import CompactionRecord, Message
 from wisp.events import (
@@ -25,9 +26,11 @@ from wisp.sessions.errors import (
     UnsupportedSessionEntryVersionError,
 )
 
-SESSION_ENTRY_SCHEMA_VERSION: Literal[2] = 2
+SESSION_ENTRY_SCHEMA_VERSION: Literal[3] = 3
 PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION: Literal[1] = 1
 _MIN_SUPPORTED_EVENT_SCHEMA_VERSION = 5
+MAX_SESSION_NAME_BYTES = 256
+_SESSION_NAME_NEWLINES_RE = re.compile(r"[\r\n]+")
 
 
 class SessionEntryBase(BaseModel):
@@ -35,7 +38,7 @@ class SessionEntryBase(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    schema_version: Literal[2] = SESSION_ENTRY_SCHEMA_VERSION
+    schema_version: Literal[3] = SESSION_ENTRY_SCHEMA_VERSION
     id: str = Field(default_factory=lambda: uuid4().hex, min_length=1)
     session_id: str = Field(min_length=1)
     operation_id: str | None = None
@@ -86,11 +89,36 @@ class ActiveLeafSessionEntry(SessionEntryBase):
     active_leaf_id: str | None
 
 
+class SessionInfoSessionEntry(SessionEntryBase):
+    """Append-only session metadata that does not participate in the tree."""
+
+    kind: Literal["session_info"] = "session_info"
+    name: str | None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _normalize_name(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        normalized = normalize_session_name(value)
+        if normalized is None:
+            return None
+        if len(normalized.encode("utf-8")) > MAX_SESSION_NAME_BYTES:
+            raise ValueError(f"session name cannot exceed {MAX_SESSION_NAME_BYTES} UTF-8 bytes")
+        return normalized
+
+
 type SessionTreeEntry = MessageSessionEntry | EventSessionEntry | CompactionSessionEntry
 
 
 type SessionEntry = Annotated[
-    MessageSessionEntry | EventSessionEntry | CompactionSessionEntry | ActiveLeafSessionEntry,
+    MessageSessionEntry
+    | EventSessionEntry
+    | CompactionSessionEntry
+    | ActiveLeafSessionEntry
+    | SessionInfoSessionEntry,
     Field(discriminator="kind"),
 ]
 
@@ -115,7 +143,16 @@ def session_entry_to_json(entry: SessionEntry) -> str:
     elif isinstance(entry, ActiveLeafSessionEntry):
         raw["previous_leaf_id"] = entry.previous_leaf_id
         raw["active_leaf_id"] = entry.active_leaf_id
+    elif isinstance(entry, SessionInfoSessionEntry):
+        raw["name"] = entry.name
     return json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+
+
+def normalize_session_name(name: str) -> str | None:
+    """Normalize user-facing session names before persistence."""
+
+    normalized = _SESSION_NAME_NEWLINES_RE.sub(" ", name).strip()
+    return normalized or None
 
 
 def session_entry_from_json(
@@ -165,6 +202,16 @@ def session_entry_from_dict(
                 source=source,
                 parent_id=legacy_parent_id,
             )
+        elif version == 2:
+            if raw.get("kind") == "session_info":
+                raise MalformedSessionEntryError(
+                    f"Unknown v2 session entry kind 'session_info'{location}"
+                )
+            normalized = _normalize_v2_structural_fields(
+                raw,
+                parent_id=legacy_parent_id,
+            )
+            normalized["schema_version"] = SESSION_ENTRY_SCHEMA_VERSION
         elif version != SESSION_ENTRY_SCHEMA_VERSION:
             raise UnsupportedSessionEntryVersionError(
                 f"Unsupported session entry schema_version {version}{location}; "
@@ -263,7 +310,7 @@ def _upgrade_v1_entry(
     source: str | None,
     parent_id: str | None,
 ) -> JsonObject:
-    """Upgrade one v1 discriminated entry into an in-memory v2 tree node."""
+    """Upgrade one v1 discriminated entry into an in-memory current tree node."""
 
     location = f" at {source}" if source is not None else ""
     kind = raw.get("kind")
