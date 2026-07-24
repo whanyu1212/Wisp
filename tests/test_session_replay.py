@@ -18,6 +18,7 @@ from wisp.sessions.entries import (
     PersistedEventEnvelope,
     SessionEntry,
     SessionEntryAdapter,
+    SessionInfoSessionEntry,
     is_session_tree_entry,
 )
 from wisp.sessions.jsonl import JsonlSessionStore, SessionError
@@ -257,6 +258,20 @@ def test_replay_supports_repeated_compaction_and_new_messages() -> None:
 def test_replay_preserves_public_flat_entry_compatibility() -> None:
     entries = (
         _message_entry("user", "user", "question"),
+        _message_entry("assistant", "assistant", "answer"),
+    )
+
+    replay = replay_session_entries(entries)
+
+    assert replay.path_entry_ids == ("user", "assistant")
+    assert replay.active_leaf_id == "assistant"
+    assert [message.content for message in replay.messages] == ["question", "answer"]
+
+
+def test_replay_preserves_public_flat_entry_compatibility_with_metadata() -> None:
+    entries = (
+        _message_entry("user", "user", "question"),
+        SessionInfoSessionEntry(id="name", session_id=SESSION_ID, name="Named session"),
         _message_entry("assistant", "assistant", "answer"),
     )
 
