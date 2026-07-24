@@ -66,8 +66,22 @@ class GetMessagesCommand(RpcCommandModel):
 
     type: Literal["get_messages"] = "get_messages"
     session_id: str | None = Field(default=None, min_length=1)
-    limit: int = Field(default=200, ge=1, le=500)
+    limit: int = Field(default=200, ge=1, le=500, strict=True)
     before_entry_id: str | None = Field(default=None, min_length=1)
+
+
+class GetSessionsCommand(RpcCommandModel):
+    """Return a bounded catalog of persisted sessions."""
+
+    type: Literal["get_sessions"] = "get_sessions"
+    limit: int = Field(default=50, ge=0, le=200, strict=True)
+
+
+class SelectSessionCommand(RpcCommandModel):
+    """Select a persisted session as the active RPC session."""
+
+    type: Literal["select_session"] = "select_session"
+    session_id: str = Field(min_length=1)
 
 
 class SteerCommand(RpcCommandModel):
@@ -168,6 +182,8 @@ type RpcCommand = Annotated[
     | GetSessionStatsCommand
     | GetStateCommand
     | GetMessagesCommand
+    | GetSessionsCommand
+    | SelectSessionCommand
     | SteerCommand
     | FollowUpCommand
     | GetQueueStateCommand

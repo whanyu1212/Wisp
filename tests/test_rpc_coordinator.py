@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 import anyio
@@ -17,6 +18,8 @@ from wisp.cli.rpc_coordinator import (
     _RpcRunningCommand,
     _RpcSessionState,
 )
+from wisp.events import RpcSessionSelected, WispEvent
+from wisp.sessions.jsonl import JsonlSessionStore
 
 
 class _Receiver:
@@ -81,6 +84,8 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcInputCommand({"id": "prompt", "type": "prompt"}),
                 _RpcInputCommand({"id": "queued", "type": "prompt"}),
                 _RpcInputCommand({"id": "messages", "type": "get_messages"}),
+                _RpcInputCommand({"id": "sessions", "type": "get_sessions"}),
+                _RpcInputCommand({"id": "select", "type": "select_session"}),
                 _RpcInputCommand({"id": "approval", "type": "approval"}),
                 _RpcInputCommand({"id": "steer", "type": "steer"}),
                 _RpcInputCommand({"id": "follow", "type": "follow_up"}),
@@ -92,6 +97,8 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcCommandCompleted("prompt", "prompt", True, (), 1),
                 _RpcCommandCompleted("queued", "prompt", True, (), 2),
                 _RpcCommandCompleted("messages", "get_messages", True, (), 2),
+                _RpcCommandCompleted("sessions", "get_sessions", True, (), 2),
+                _RpcCommandCompleted("select", "select_session", True, (), 2),
                 _RpcInputClosed(),
             ]
         )
@@ -104,7 +111,12 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
         ) -> _RpcDispatchResult:
             command_id = str(command["id"])
             dispatched.append(command_id)
-            if command["type"] not in {"prompt", "get_messages"}:
+            if command["type"] not in {
+                "prompt",
+                "get_messages",
+                "get_sessions",
+                "select_session",
+            }:
                 return _RpcDispatchResult(running)
             return _RpcDispatchResult(
                 _RpcRunningCommand(command_id, str(command["type"]), anyio.CancelScope())
@@ -128,6 +140,8 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
             "clear",
             "queued",
             "messages",
+            "sessions",
+            "select",
         ]
 
     anyio.run(scenario)
@@ -239,7 +253,13 @@ def test_coordinator_state_bypasses_active_prompt_without_draining_pending_queue
 def test_coordinator_state_bypasses_active_read_commands() -> None:
     async def scenario() -> None:
         async def assert_bypasses(
-            active_type: Literal["compact", "get_session_stats", "get_messages"],
+            active_type: Literal[
+                "compact",
+                "get_session_stats",
+                "get_messages",
+                "get_sessions",
+                "select_session",
+            ],
         ) -> None:
             coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
             running_command = _RpcRunningCommand(
@@ -277,6 +297,103 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
         await assert_bypasses("compact")
         await assert_bypasses("get_session_stats")
         await assert_bypasses("get_messages")
+        await assert_bypasses("get_sessions")
+        await assert_bypasses("select_session")
+
+    anyio.run(scenario)
+
+
+def test_coordinator_applies_selected_session_from_async_completion(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = JsonlSessionStore(tmp_path).create()
+        history = (Message(role="user", content="resumed"),)
+        state = _RpcSessionState(session=None, history=(), entry_count=0)
+        coordinator = RpcCoordinator(state)
+        coordinator.running_command = _RpcRunningCommand(
+            "select",
+            "select_session",
+            anyio.CancelScope(),
+        )
+
+        coordinator.handle_event(
+            _RpcCommandCompleted("select", "select_session", True, history, 1, session),
+            dispatch=lambda _command, running: _RpcDispatchResult(running),
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+
+        assert coordinator.running_command is None
+        assert state.session is session
+        assert state.history == history
+        assert state.entry_count == 1
+
+    anyio.run(scenario)
+
+
+def test_coordinator_emits_post_apply_events_after_selecting_session(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = JsonlSessionStore(tmp_path).create()
+        state = _RpcSessionState(session=None, history=(), entry_count=0)
+        observed: list[tuple[WispEvent, object]] = []
+
+        def write_event(event: WispEvent) -> None:
+            observed.append((event, state.session))
+
+        coordinator = RpcCoordinator(state, completion_event_writer=write_event)
+        coordinator.running_command = _RpcRunningCommand(
+            "select",
+            "select_session",
+            anyio.CancelScope(),
+        )
+        selected = RpcSessionSelected(
+            command_id="select",
+            session_id=session.session_id,
+            session_path=session.path,
+            entry_count=0,
+        )
+
+        coordinator.handle_event(
+            _RpcCommandCompleted(
+                "select",
+                "select_session",
+                True,
+                (),
+                0,
+                session,
+                (selected,),
+            ),
+            dispatch=lambda _command, running: _RpcDispatchResult(running),
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+
+        assert observed == [(selected, session)]
+
+    anyio.run(scenario)
+
+
+def test_coordinator_ignores_selected_session_on_failed_completion(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store = JsonlSessionStore(tmp_path)
+        previous = store.create()
+        attempted = store.create()
+        state = _RpcSessionState(session=previous, history=(), entry_count=0)
+        coordinator = RpcCoordinator(state)
+        coordinator.running_command = _RpcRunningCommand(
+            "select",
+            "select_session",
+            anyio.CancelScope(),
+        )
+
+        coordinator.handle_event(
+            _RpcCommandCompleted("select", "select_session", False, (), 0, attempted),
+            dispatch=lambda _command, running: _RpcDispatchResult(running),
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+
+        assert coordinator.running_command is None
+        assert state.session is previous
 
     anyio.run(scenario)
 

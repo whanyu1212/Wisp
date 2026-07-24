@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 17
+EVENT_SCHEMA_VERSION = 18
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -27,6 +27,7 @@ QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION = 14
 QUEUE_ITEMS_REMOVED_SCHEMA_VERSION = 15
 RPC_STATE_SCHEMA_VERSION = 16
 RPC_MESSAGES_SCHEMA_VERSION = 17
+RPC_SESSIONS_SCHEMA_VERSION = 18
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -47,7 +48,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] = 17
+    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18] = 18
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -302,6 +303,18 @@ class RpcMessageSnapshot(BaseModel):
     is_error: bool | None = None
     usage: TokenUsage | None = None
     cost: UsageCost | None = None
+
+
+class RpcSessionSummary(BaseModel):
+    """One persisted session summary returned by the RPC session catalog."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    session_id: str = Field(min_length=1)
+    session_path: Path
+    updated_at: datetime
+    entry_count: int = Field(ge=0)
+    active_leaf_id: str | None = Field(default=None, min_length=1)
 
 
 class MessageCompleted(WispEvent):
@@ -696,6 +709,49 @@ class RpcMessagesReported(WispEvent):
         return self
 
 
+class RpcSessionsReported(WispEvent):
+    """On-demand, bounded persisted session catalog returned over RPC."""
+
+    type: Literal["rpc.sessions"] = "rpc.sessions"
+    command_id: str
+    sessions: tuple[RpcSessionSummary, ...] = ()
+    selected_session_id: str | None = Field(default=None, min_length=1)
+    selected_session_path: Path | None = None
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < RPC_SESSIONS_SCHEMA_VERSION:
+            raise ValueError(
+                f"RPC session reports require schema_version {RPC_SESSIONS_SCHEMA_VERSION} or newer"
+            )
+        if (self.selected_session_id is None) != (self.selected_session_path is None):
+            raise ValueError(
+                "RPC session reports must include selected_session_id and "
+                "selected_session_path together"
+            )
+        return self
+
+
+class RpcSessionSelected(WispEvent):
+    """Confirmation that an RPC session selection has become active."""
+
+    type: Literal["rpc.session.selected"] = "rpc.session.selected"
+    command_id: str
+    session_id: str = Field(min_length=1)
+    session_path: Path
+    active_leaf_id: str | None = Field(default=None, min_length=1)
+    entry_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < RPC_SESSIONS_SCHEMA_VERSION:
+            raise ValueError(
+                f"RPC session selection events require schema_version "
+                f"{RPC_SESSIONS_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+
 class QueueUpdated(WispEvent):
     """Current harness-owned steering and follow-up queue state."""
 
@@ -811,6 +867,8 @@ type KnownWispEvent = Annotated[
     | SessionStatsReported
     | RpcStateReported
     | RpcMessagesReported
+    | RpcSessionsReported
+    | RpcSessionSelected
     | QueueUpdated
     | QueueItemsRemoved
     | QueueMessageInjected
@@ -895,6 +953,12 @@ def _require_current_schema(data: JsonObject) -> None:
         raise ValueError(
             "RPC message report events require schema_version "
             f"{RPC_MESSAGES_SCHEMA_VERSION} or newer"
+        )
+    if data.get("type") in {"rpc.sessions", "rpc.session.selected"} and (
+        version < RPC_SESSIONS_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            f"RPC session events require schema_version {RPC_SESSIONS_SCHEMA_VERSION} or newer"
         )
     if data.get("type") == "queue.items.removed" and version < QUEUE_ITEMS_REMOVED_SCHEMA_VERSION:
         raise ValueError(
