@@ -6,6 +6,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from functools import partial
+from pathlib import Path
 from typing import Protocol, cast
 from uuid import uuid4
 
@@ -46,7 +47,7 @@ from wisp.providers.catalog import AmbiguousModelError, UnknownModelError
 from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES, ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
-from wisp.sessions.entries import MessageSessionEntry
+from wisp.sessions.entries import MessageSessionEntry, SessionEntry, SessionInfoSessionEntry
 from wisp.sessions.errors import SessionNavigationCancelledError
 from wisp.sessions.jsonl import (
     DEFAULT_SESSION_MESSAGE_PAGE_LIMIT,
@@ -1811,7 +1812,8 @@ async def run_rpc_set_session_name_command(
                 selected_target = (
                     selected_session is not None
                     and target.session_id == selected_session.session_id
-                    and target.path == selected_session.path
+                    and _normalized_session_path(target)
+                    == _normalized_session_path(selected_session)
                 )
             await anyio.sleep(0)
             with anyio.CancelScope(shield=True):
@@ -2139,7 +2141,19 @@ def rpc_selected_session_state(
 ) -> tuple[int, tuple[Message, ...], str | None, str | None]:
     entries = session.read_entries()
     replay = replay_session_entries(entries)
-    return len(entries), replay.messages, replay.active_leaf_id, session.read_name()
+    return len(entries), replay.messages, replay.active_leaf_id, _session_name_from_entries(entries)
+
+
+def _normalized_session_path(session: JsonlSession) -> Path:
+    return session.path.expanduser().resolve(strict=False)
+
+
+def _session_name_from_entries(entries: tuple[SessionEntry, ...]) -> str | None:
+    name: str | None = None
+    for entry in entries:
+        if isinstance(entry, SessionInfoSessionEntry):
+            name = entry.name
+    return name
 
 
 def rpc_derived_session_state(
