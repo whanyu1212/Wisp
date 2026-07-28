@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 22
+EVENT_SCHEMA_VERSION = 23
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -32,6 +32,7 @@ RPC_SESSION_DERIVATION_SCHEMA_VERSION = 19
 RPC_SESSION_TREE_SCHEMA_VERSION = 20
 RPC_SESSION_NAME_SCHEMA_VERSION = 21
 RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION = 22
+RPC_COMMANDS_SCHEMA_VERSION = 23
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -53,7 +54,9 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22] = 22
+    schema_version: Literal[
+        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
+    ] = 23
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -271,6 +274,43 @@ class RpcStateSnapshot(CodingSessionState):
     active_command_id: str | None = None
     active_command_type: str | None = None
     cancel_requested: bool = False
+
+
+class RpcCommandArgument(BaseModel):
+    """Frontend-neutral argument metadata for a discoverable RPC command."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    description: str = ""
+    required: bool = False
+
+
+class RpcCommandDescriptor(BaseModel):
+    """Frontend-neutral command metadata returned by RPC discovery."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    category: str = Field(min_length=1)
+    aliases: tuple[str, ...] = ()
+    slash_command: str = Field(min_length=2)
+    slash_aliases: tuple[str, ...] = ()
+    arguments: tuple[RpcCommandArgument, ...] = ()
+    accepts_arguments: bool = False
+    prefill_on_partial_enter: bool = False
+    order: int
+
+    @model_validator(mode="after")
+    def _validate_slash_spelling(self) -> Self:
+        if self.slash_command != f"/{self.name}":
+            raise ValueError("RPC command descriptor slash_command must match name")
+        for alias in self.slash_aliases:
+            if not (alias.startswith("/") or alias.startswith(":")):
+                raise ValueError("RPC command descriptor slash_aliases must be command tokens")
+        return self
 
 
 class RpcMessageToolCallSnapshot(BaseModel):
@@ -740,6 +780,22 @@ class RpcStateReported(WispEvent):
         return data
 
 
+class RpcCommandsReported(WispEvent):
+    """Immediate, non-persisted command registry snapshot returned over RPC."""
+
+    type: Literal["rpc.commands"] = "rpc.commands"
+    command_id: str
+    commands: tuple[RpcCommandDescriptor, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < RPC_COMMANDS_SCHEMA_VERSION:
+            raise ValueError(
+                f"RPC command reports require schema_version {RPC_COMMANDS_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+
 class RpcMessagesReported(WispEvent):
     """On-demand, bounded persisted transcript page returned over RPC."""
 
@@ -1111,6 +1167,7 @@ type KnownWispEvent = Annotated[
     | RpcCommandFinished
     | SessionStatsReported
     | RpcStateReported
+    | RpcCommandsReported
     | RpcMessagesReported
     | RpcSessionsReported
     | RpcSessionSelected
@@ -1199,6 +1256,11 @@ def _require_current_schema(data: JsonObject) -> None:
     if data.get("type") == "rpc.state" and version < RPC_STATE_SCHEMA_VERSION:
         raise ValueError(
             f"RPC state events require schema_version {RPC_STATE_SCHEMA_VERSION} or newer"
+        )
+    if data.get("type") == "rpc.commands" and version < RPC_COMMANDS_SCHEMA_VERSION:
+        raise ValueError(
+            "RPC command report events require schema_version "
+            f"{RPC_COMMANDS_SCHEMA_VERSION} or newer"
         )
     if data.get("type") == "rpc.messages" and version < RPC_MESSAGES_SCHEMA_VERSION:
         raise ValueError(

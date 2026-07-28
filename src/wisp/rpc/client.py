@@ -23,6 +23,7 @@ from wisp.rpc.commands import (
     ConfigureCommand,
     FollowUpCommand,
     ForkSessionCommand,
+    GetCommandsCommand,
     GetMessagesCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
@@ -98,6 +99,13 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("state")
         await self._transport.send(GetStateCommand(id=selected_id))
+        return selected_id
+
+    async def get_commands(self, *, command_id: str | None = None) -> str:
+        """Request an immediate in-memory command registry snapshot."""
+
+        selected_id = command_id or self._command_id_factory("commands")
+        await self._transport.send(GetCommandsCommand(id=selected_id))
         return selected_id
 
     async def get_messages(

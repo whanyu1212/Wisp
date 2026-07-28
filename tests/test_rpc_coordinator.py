@@ -92,6 +92,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcInputCommand(
                     {"id": "navigate", "type": "navigate_session_tree", "entry_id": "entry"}
                 ),
+                _RpcInputCommand({"id": "commands", "type": "get_commands"}),
                 _RpcInputCommand({"id": "approval", "type": "approval"}),
                 _RpcInputCommand({"id": "steer", "type": "steer"}),
                 _RpcInputCommand({"id": "follow", "type": "follow_up"}),
@@ -130,6 +131,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 "fork_session",
                 "get_session_tree",
                 "navigate_session_tree",
+                "set_session_name",
             }:
                 return _RpcDispatchResult(running)
             return _RpcDispatchResult(
@@ -145,6 +147,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
 
         assert dispatched == [
             "prompt",
+            "commands",
             "approval",
             "steer",
             "follow",
@@ -238,10 +241,12 @@ def test_coordinator_state_bypasses_active_prompt_without_draining_pending_queue
         handle({"id": "steer", "type": "steer"})
         handle({"id": "queued", "type": "compact"})
         handle({"id": "state-before", "type": "get_state"})
+        handle({"id": "commands-before", "type": "get_commands"})
 
         assert dispatched == [
             ("prompt", None),
             ("state-before", "prompt"),
+            ("commands-before", "prompt"),
         ]
         assert list(coordinator.pending_prompt_queue_commands) == [{"id": "steer", "type": "steer"}]
         assert list(coordinator.queued_commands) == [{"id": "queued", "type": "compact"}]
@@ -253,12 +258,15 @@ def test_coordinator_state_bypasses_active_prompt_without_draining_pending_queue
             command_type=_command_type,
         )
         handle({"id": "state-after", "type": "get_state"})
+        handle({"id": "commands-after", "type": "get_commands"})
 
         assert dispatched == [
             ("prompt", None),
             ("state-before", "prompt"),
+            ("commands-before", "prompt"),
             ("steer", "prompt"),
             ("state-after", "prompt"),
+            ("commands-after", "prompt"),
         ]
         assert not coordinator.pending_prompt_queue_commands
         assert list(coordinator.queued_commands) == [{"id": "queued", "type": "compact"}]
@@ -281,6 +289,7 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
                 "fork_session",
                 "get_session_tree",
                 "navigate_session_tree",
+                "set_session_name",
             ],
         ) -> None:
             coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
@@ -310,8 +319,17 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
                 reject=lambda _command, _message: None,
                 command_type=_command_type,
             )
+            coordinator.handle_event(
+                _RpcInputCommand({"id": "commands", "type": "get_commands"}),
+                dispatch=dispatch,
+                reject=lambda _command, _message: None,
+                command_type=_command_type,
+            )
 
-            assert dispatched == [("state", running_command.command_id)]
+            assert dispatched == [
+                ("state", running_command.command_id),
+                ("commands", running_command.command_id),
+            ]
             assert coordinator.running_command is running_command
             assert not coordinator.pending_prompt_queue_commands
             assert not coordinator.queued_commands
@@ -325,6 +343,7 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
         await assert_bypasses("fork_session")
         await assert_bypasses("get_session_tree")
         await assert_bypasses("navigate_session_tree")
+        await assert_bypasses("set_session_name")
 
     anyio.run(scenario)
 

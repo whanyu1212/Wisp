@@ -338,10 +338,10 @@ Available slash commands:
 ```
 
 Slash command metadata is backed by Wisp's frontend-neutral runtime command descriptors rather
-than a Textual-owned table. This PR-sized slice registers built-in descriptor metadata for shared
-slash suggestions, parsing, and future palette/RPC discovery. It does not yet add extension command
-handlers, dynamic project extension loading, `get_commands`, skills, prompt templates, package
-management, or configurable keybindings.
+than a Textual-owned table. Built-in descriptor metadata now drives shared slash suggestions,
+parsing, and RPC `get_commands` discovery. It does not yet add extension command handlers, dynamic
+project extension loading, skills, prompt templates, package management, or configurable
+keybindings.
 
 TUI login currently uses the `openai-codex` device-code flow; browser login is available from the
 CLI (`uv run wisp auth login openai-codex`). `/model` with no arguments opens a model picker in
@@ -415,8 +415,17 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 22`; readers also accept legacy schema v5
-through v21 events for compatibility. Schema v22 adds optional `tool_result` presentation
+Every outbound `WispEvent` includes `"schema_version": 23`; readers also accept legacy schema v5
+through v22 events for compatibility. Schema v23 adds `rpc.commands`, an immediate,
+non-persisted command-registry snapshot returned by RPC `get_commands`. Each descriptor includes
+stable names, user-facing slash spellings, aliases, category, argument metadata, display order, and
+partial-enter behavior. This is discovery metadata only: command handlers, dynamic enabled state,
+palette UI, keybindings, skills, templates, and extension lifecycle hooks remain separate work.
+
+Pi's shared command surfaces are the behavioral reference. Wisp intentionally exposes typed
+descriptor events over RPC and keeps execution/handler semantics out of this discovery slice.
+
+Schema v22 adds optional `tool_result` presentation
 metadata on RPC `get_messages` tool-message rows so TUI and RPC consumers can reconstruct
 historical tool cards without replaying provider-visible history. A successful prompt follows this lifecycle (tool events
 repeat inside a turn when the model requests tools):
@@ -605,6 +614,7 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 | `{"id":"compact-1","type":"compact","instructions":"Focus on unresolved work"}` | Compact older context in the active session |
 | `{"id":"stats-1","type":"get_session_stats"}` | Emit a derived `session.stats` snapshot |
 | `{"id":"state-1","type":"get_state"}` | Emit an immediate in-memory `rpc.state` snapshot |
+| `{"id":"commands-1","type":"get_commands"}` | Emit an immediate in-memory `rpc.commands` descriptor snapshot |
 | `{"id":"messages-1","type":"get_messages","limit":200}` | Emit a bounded active transcript page |
 | `{"id":"sessions-1","type":"get_sessions","limit":50}` | Emit a bounded persisted session catalog |
 | `{"id":"select-1","type":"select_session","session_id":"…"}` | Select a persisted session for later RPC commands |
@@ -627,14 +637,17 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 Each command emits `rpc.command.started` / `rpc.command.finished` so clients can group the events
 between them. Prompts, compactions, statistics reads, transcript reads, session catalog reads,
 session selection, cloning, forking, tree reads, tree navigation, and session renaming run
-sequentially; `get_state`, queue commands, `cancel`, `approval`, and `trust` are handled while an
-operation runs. `get_state`
-preserves the active command and any queued commands, including during prompt startup, compaction,
-statistics reads, approval/trust waits, and after cancellation is requested. During prompt startup,
+sequentially; `get_state`, `get_commands`, queue commands, `cancel`, `approval`, and `trust` are
+handled while an operation runs. `get_state` and `get_commands`
+preserve the active command and any queued commands, including during prompt startup, compaction,
+statistics reads, transcript reads, session operations, approval/trust waits, and after
+cancellation is requested. During prompt startup,
 queue commands buffered before prompt readiness are projected into the reported queue modes and
-pending counts without draining the buffer. It reports coherent in-memory state only: use
+pending counts without draining the buffer. `get_state` reports coherent in-memory state only: use
 `get_session_stats` for persisted entry, message, usage, context, and cost statistics, and
-`get_messages` for bounded persisted transcript pages. `get_messages` defaults to the selected
+`get_messages` for bounded persisted transcript pages. `get_commands` reads the in-memory runtime
+command registry, including extension-registered descriptors, and never reads session files or
+executes a command handler. `get_messages` defaults to the selected
 session and returns an empty page with null session fields before any session is selected; pass
 `session_id`, `limit` (`1..500`), and `before_entry_id` to read a specific page without switching
 the selected session. `get_sessions` accepts `limit` (`0..200`, default `50`) and never switches the
@@ -703,8 +716,9 @@ finally:
     await controller.close()
 ```
 
-`RpcController` exposes typed `prompt`, `compact`, `get_session_stats`, `get_state`, `get_messages`,
-`get_sessions`, `select_session`, `clone_session`, `fork_session`, `get_session_tree`,
+`RpcController` exposes typed `prompt`, `compact`, `get_session_stats`, `get_state`,
+`get_commands`, `get_messages`, `get_sessions`, `select_session`, `clone_session`,
+`fork_session`, `get_session_tree`,
 `navigate_session_tree`, `set_session_name`, `steer`, `follow_up`, `get_queue_state`,
 `set_queue_mode`, `pop_queue`, `clear_queue`, `cancel`, `approve`, `configure`, and `shutdown`
 methods and yields parsed `WispEvent` objects.
