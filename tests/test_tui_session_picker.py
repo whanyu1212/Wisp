@@ -111,6 +111,35 @@ def test_session_picker_ctrl_c_restores_draft_without_interrupting() -> None:
     assert open_ is False
 
 
+def test_session_switch_ctrl_c_preserves_hidden_draft_until_finished() -> None:
+    async def scenario() -> tuple[str, str, bool, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            editor = app.query_one("#input", PromptEditor)
+            editor.value = "pending switch draft"
+            renderer.session_switch_started("target")
+            await pilot.pause()
+            hidden_before = not editor.display
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            draft_while_pending = editor.value
+            still_hidden = not editor.display
+            renderer.session_switch_finished()
+            await pilot.pause()
+            return (
+                draft_while_pending,
+                editor.value,
+                hidden_before and still_hidden,
+                editor.has_focus,
+            )
+
+    pending_draft, restored_draft, stayed_hidden, focused = anyio.run(scenario)
+    assert pending_draft == "pending switch draft"
+    assert restored_draft == "pending switch draft"
+    assert stayed_hidden is True
+    assert focused is True
+
+
 def test_session_picker_empty_catalog_is_dismissible() -> None:
     async def scenario() -> tuple[int, bool, bool]:
         app, renderer = create_textual_tui()
