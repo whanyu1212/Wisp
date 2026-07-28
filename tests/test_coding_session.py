@@ -53,7 +53,11 @@ from wisp.providers.events import (
 from wisp.providers.fake import FakeProvider, ScriptedProvider
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry
-from wisp.sessions.entries import MessageSessionEntry, SessionEntry
+from wisp.sessions.entries import (
+    MessageSessionEntry,
+    SessionEntry,
+    ToolResultPresentationSnapshot,
+)
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import ToolArguments, ToolInputSchema
@@ -1612,6 +1616,16 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
     assert tool_message["tool_name"] == "echo"
     assert tool_message["content"] == "echo: hello"
     assert tool_message["is_error"] is False
+    assert message_records[4]["tool_result"] == {
+        "created": False,
+        "truncated": False,
+    }
+    loaded_tool_entry = next(
+        entry
+        for entry in JsonlSessionStore(tmp_path).load(saved.path).read_entries()
+        if isinstance(entry, MessageSessionEntry) and entry.message.role == "tool"
+    )
+    assert loaded_tool_entry.tool_result == ToolResultPresentationSnapshot()
     final_message = message_records[5]["message"]
     assert final_message["content"] == "final answer"
     assert final_message["finish_reason"] == "stop"

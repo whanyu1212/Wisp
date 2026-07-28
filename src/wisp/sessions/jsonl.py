@@ -24,6 +24,7 @@ from wisp.events import (
     KnownWispEvent,
     RpcMessageSnapshot,
     RpcMessageToolCallSnapshot,
+    RpcMessageToolResultSnapshot,
     ToolCallSnapshot,
     WispEvent,
 )
@@ -44,6 +45,7 @@ from wisp.sessions.entries import (
     SessionEntry,
     SessionInfoSessionEntry,
     SessionTreeEntry,
+    ToolResultPresentationSnapshot,
     is_session_tree_entry,
     normalize_session_name,
     session_entry_from_json,
@@ -1298,6 +1300,31 @@ def _rpc_message_snapshot(
         is_error=message.is_error,
         usage=message.usage,
         cost=message.cost,
+        tool_result=_rpc_tool_result_snapshot(entry.tool_result, text_budget=text_budget),
+    )
+
+
+def _rpc_tool_result_snapshot(
+    tool_result: ToolResultPresentationSnapshot | None,
+    *,
+    text_budget: _MessagePageTextBudget,
+) -> RpcMessageToolResultSnapshot | None:
+    if tool_result is None:
+        return None
+    before_text = tool_result.before_text
+    if before_text is not None:
+        clipped_before_text, _, before_text_truncated = _clip_text_with_budget(
+            before_text,
+            limit=MESSAGE_CONTENT_BYTE_LIMIT,
+            text_budget=text_budget,
+        )
+        before_text = None if before_text_truncated else clipped_before_text
+    return RpcMessageToolResultSnapshot(
+        exit_code=tool_result.exit_code,
+        before_text=before_text,
+        created=tool_result.created,
+        summary=tool_result.summary,
+        truncated=tool_result.truncated,
     )
 
 

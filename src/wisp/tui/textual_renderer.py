@@ -31,7 +31,11 @@ from wisp.events import (
     TurnStarted,
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
-from wisp.tui.history import HistoricalTranscriptMessage
+from wisp.tui.history import (
+    HistoricalToolCard,
+    HistoricalTranscriptEntry,
+    HistoricalTranscriptMessage,
+)
 from wisp.tui.rendering import (
     TuiViewSnapshot,
     _compaction_completed_text,
@@ -224,6 +228,43 @@ class TextualTuiRenderer:
                 self.app.write_user(message.content)
             else:
                 self.app.write_assistant(message.content)
+
+    def render_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
+        for entry in entries:
+            if isinstance(entry, HistoricalTranscriptMessage):
+                if entry.role == "user":
+                    self.app.write_user(entry.content)
+                else:
+                    self.app.write_assistant(entry.content)
+            else:
+                self._render_historical_tool_card(entry)
+
+    def _render_historical_tool_card(self, entry: HistoricalToolCard) -> None:
+        self.app.mount_tool_call(entry.card_id, entry.name, entry.arguments)
+        if entry.missing_result:
+            self.app.resolve_tool_call(
+                entry.card_id,
+                "cancelled",
+                detail=entry.output,
+            )
+            return
+        failed = tool_result_failed(entry.is_error, entry.exit_code)
+        self.app.resolve_tool_call(
+            entry.card_id,
+            "error" if failed else "done",
+            detail=render_tool_result(
+                entry.name,
+                entry.arguments,
+                entry.output,
+                is_error=entry.is_error,
+                exit_code=entry.exit_code,
+                before_text=entry.before_text,
+                created=entry.created,
+                summary=entry.summary,
+            ),
+            full_output=entry.output,
+            truncated=entry.truncated,
+        )
 
     def queued_prompts_cleared(self) -> None:
         # The shell dropped its queued follow-ups (cancel/quit/input-closed/error),

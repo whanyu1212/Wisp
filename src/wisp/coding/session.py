@@ -63,7 +63,12 @@ from wisp.providers.base import ContextOverflowError, Provider, ToolSpec
 from wisp.providers.catalog import ModelRegistry
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
-from wisp.sessions.entries import CompactionSessionEntry, MessageSessionEntry, SessionEntry
+from wisp.sessions.entries import (
+    CompactionSessionEntry,
+    MessageSessionEntry,
+    SessionEntry,
+    ToolResultPresentationSnapshot,
+)
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import SessionReplay, replay_session_entries
 from wisp.tools.approval import ToolApprovalPolicy
@@ -1097,10 +1102,22 @@ class CodingSession:
         *,
         operation_id: str | None = None,
     ) -> str:
+        tool_result = (
+            ToolResultPresentationSnapshot(
+                exit_code=event.exit_code,
+                before_text=event.before_text,
+                created=event.created,
+                summary=event.summary,
+                truncated=event.truncated,
+            )
+            if isinstance(event, ToolExecutionEnded)
+            else None
+        )
         return self._queue_message(
             session,
             message_from_completion_event(event),
             operation_id=operation_id,
+            tool_result=tool_result,
         )
 
     def _queue_message(
@@ -1109,12 +1126,14 @@ class CodingSession:
         message: Message,
         *,
         operation_id: str | None = None,
+        tool_result: ToolResultPresentationSnapshot | None = None,
     ) -> str:
         entry = MessageSessionEntry(
             session_id=session.session_id,
             message=message,
             operation_id=operation_id,
             created_at=message.created_at,
+            tool_result=tool_result,
         )
         self._pending_entries.append(_PendingSessionEntry(session=session, entry=entry))
         return entry.id

@@ -53,7 +53,9 @@ from wisp.tui.commands import (
 )
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
+    HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
+    history_entries_from_rpc_messages,
     history_from_rpc_messages,
 )
 from wisp.tui.launch import _stdin_is_interactive
@@ -306,7 +308,10 @@ class TuiShell:
                 event = signal.event
                 if isinstance(event, RpcMessagesReported) and event.command_id == command_id:
                     if not rendered:
-                        self._render_history(history_from_rpc_messages(event.messages))
+                        self._render_history_entries(
+                            history_entries_from_rpc_messages(event.messages),
+                            text_fallback=history_from_rpc_messages(event.messages),
+                        )
                         rendered = True
                     continue
                 should_exit = await self._handle_rpc_event(event)
@@ -325,6 +330,18 @@ class TuiShell:
         if not callable(render_history):
             return
         cast(Callable[[tuple[HistoricalTranscriptMessage, ...]], None], render_history)(messages)
+
+    def _render_history_entries(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+        *,
+        text_fallback: tuple[HistoricalTranscriptMessage, ...],
+    ) -> None:
+        render_entries = getattr(self.renderer, "render_history_entries", None)
+        if callable(render_entries):
+            cast(Callable[[tuple[HistoricalTranscriptEntry, ...]], None], render_entries)(entries)
+            return
+        self._render_history(text_fallback)
 
     async def _handle_signal(self, signal: _TuiSignal) -> bool:
         if isinstance(signal, _InputLine):

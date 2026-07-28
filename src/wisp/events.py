@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 21
+EVENT_SCHEMA_VERSION = 22
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -31,6 +31,7 @@ RPC_SESSIONS_SCHEMA_VERSION = 18
 RPC_SESSION_DERIVATION_SCHEMA_VERSION = 19
 RPC_SESSION_TREE_SCHEMA_VERSION = 20
 RPC_SESSION_NAME_SCHEMA_VERSION = 21
+RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION = 22
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -51,7 +52,7 @@ class WispEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] = 21
+    schema_version: Literal[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22] = 22
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -284,6 +285,18 @@ class RpcMessageToolCallSnapshot(BaseModel):
     parse_error: str | None = None
 
 
+class RpcMessageToolResultSnapshot(BaseModel):
+    """Bounded presentation metadata for a persisted tool-result message."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    exit_code: int | None = None
+    before_text: str | None = None
+    created: bool = False
+    summary: str | None = None
+    truncated: bool = False
+
+
 class RpcMessageSnapshot(BaseModel):
     """One bounded, frontend-oriented persisted message snapshot."""
 
@@ -307,6 +320,13 @@ class RpcMessageSnapshot(BaseModel):
     is_error: bool | None = None
     usage: TokenUsage | None = None
     cost: UsageCost | None = None
+    tool_result: RpcMessageToolResultSnapshot | None = None
+
+    @model_validator(mode="after")
+    def _validate_tool_result_role(self) -> Self:
+        if self.tool_result is not None and self.role != "tool":
+            raise ValueError("RPC tool-result metadata is valid only on tool messages")
+        return self
 
 
 class RpcSessionSummary(BaseModel):
@@ -735,6 +755,13 @@ class RpcMessagesReported(WispEvent):
         if self.schema_version < RPC_MESSAGES_SCHEMA_VERSION:
             raise ValueError(
                 f"RPC message reports require schema_version {RPC_MESSAGES_SCHEMA_VERSION} or newer"
+            )
+        if self.schema_version < RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION and any(
+            message.tool_result is not None for message in self.messages
+        ):
+            raise ValueError(
+                "RPC message tool-result metadata requires schema_version "
+                f"{RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION} or newer"
             )
         if self.next_before_entry_id is not None and not self.truncated:
             raise ValueError(
@@ -1165,6 +1192,16 @@ def _require_current_schema(data: JsonObject) -> None:
             "RPC message report events require schema_version "
             f"{RPC_MESSAGES_SCHEMA_VERSION} or newer"
         )
+    if data.get("type") == "rpc.messages" and version < RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION:
+        messages = data.get("messages")
+        if isinstance(messages, list) and any(
+            isinstance(message, dict) and message.get("tool_result") is not None
+            for message in messages
+        ):
+            raise ValueError(
+                "RPC message tool-result metadata requires schema_version "
+                f"{RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION} or newer"
+            )
     if data.get("type") in {"rpc.sessions", "rpc.session.selected"} and (
         version < RPC_SESSIONS_SCHEMA_VERSION
     ):

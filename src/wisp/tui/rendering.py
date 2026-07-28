@@ -32,7 +32,12 @@ from wisp.events import (
     TrustRequested,
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
-from wisp.tui.history import TUI_HISTORY_MESSAGE_LIMIT, HistoricalTranscriptMessage
+from wisp.tui.history import (
+    TUI_HISTORY_MESSAGE_LIMIT,
+    HistoricalToolCard,
+    HistoricalTranscriptEntry,
+    HistoricalTranscriptMessage,
+)
 
 
 class TuiRendererKind(StrEnum):
@@ -162,6 +167,29 @@ class LineTuiRenderer:
         for message in messages:
             label = "you" if message.role == "user" else "assistant"
             self.console.print(f"{label}: {message.content}", markup=False, highlight=False)
+
+    def render_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
+        pending_text: list[HistoricalTranscriptMessage] = []
+
+        def flush_text() -> None:
+            if pending_text:
+                render_history = getattr(self, "render_history", None)
+                if callable(render_history):
+                    render_history(tuple(pending_text))
+                pending_text.clear()
+
+        for entry in entries:
+            if isinstance(entry, HistoricalTranscriptMessage):
+                pending_text.append(entry)
+            else:
+                flush_text()
+                status = "✗" if entry.is_error or entry.exit_code not in {None, 0} else "✓"
+                self.console.print(
+                    f"{status} historical tool {entry.name}: {_historical_tool_line(entry)}",
+                    markup=False,
+                    highlight=False,
+                )
+        flush_text()
 
     def queued_prompts_cleared(self) -> None:
         # No large-paste compact-echo cache in the text renderer; nothing to drop.
@@ -433,6 +461,33 @@ class FullscreenTuiRenderer:
             style = "bold" if message.role == "user" else "green"
             self._append(message.role, message.content, style=style, preserve_scroll=False)
         if messages:
+            self._clamp_transcript_scroll()
+            self._refresh()
+
+    def render_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
+        pending_text: list[HistoricalTranscriptMessage] = []
+
+        def flush_text() -> None:
+            if pending_text:
+                render_history = getattr(self, "render_history", None)
+                if callable(render_history):
+                    render_history(tuple(pending_text))
+                pending_text.clear()
+
+        for entry in entries:
+            if isinstance(entry, HistoricalTranscriptMessage):
+                pending_text.append(entry)
+            else:
+                flush_text()
+                style = "red" if entry.is_error or entry.exit_code not in {None, 0} else "cyan"
+                self._append(
+                    "tool",
+                    f"{entry.name}: {_historical_tool_line(entry)}",
+                    style=style,
+                    preserve_scroll=False,
+                )
+        flush_text()
+        if entries:
             self._clamp_transcript_scroll()
             self._refresh()
 
@@ -1101,6 +1156,20 @@ def _compact_session_path(path: object) -> str:
 
 def _first_line(text: str) -> str:
     return next((line.strip() for line in text.splitlines() if line.strip()), "(no output)")
+
+
+def _historical_tool_line(entry: HistoricalToolCard) -> str:
+    if entry.missing_result:
+        return "no persisted result"
+    if entry.summary:
+        return entry.summary
+    if entry.exit_code not in {None, 0}:
+        first_line = _first_line(entry.output)
+        return f"exit {entry.exit_code}: {first_line}"
+    first_line = _first_line(entry.output)
+    if entry.truncated:
+        return f"{first_line} [truncated]"
+    return first_line
 
 
 def _markup_escape(value: object) -> str:

@@ -5,10 +5,18 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from typing import Annotated, Literal, TypeGuard
+from typing import Annotated, Literal, Self, TypeGuard
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from wisp.agent.messages import CompactionRecord, Message
 from wisp.events import (
@@ -51,11 +59,30 @@ class SessionTreeEntryBase(SessionEntryBase):
     parent_id: str | None = None
 
 
+class ToolResultPresentationSnapshot(BaseModel):
+    """UI-only metadata for reconstructing a resolved historical tool card."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    exit_code: int | None = None
+    before_text: str | None = None
+    created: bool = False
+    summary: str | None = None
+    truncated: bool = False
+
+
 class MessageSessionEntry(SessionTreeEntryBase):
     """One provider/frontend-visible message record."""
 
     kind: Literal["message"] = "message"
     message: Message
+    tool_result: ToolResultPresentationSnapshot | None = None
+
+    @model_validator(mode="after")
+    def _validate_tool_result(self) -> Self:
+        if self.tool_result is not None and self.message.role != "tool":
+            raise ValueError("tool-result presentation metadata is valid only on tool messages")
+        return self
 
 
 class PersistedEventEnvelope(BaseModel):

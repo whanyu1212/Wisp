@@ -19,6 +19,7 @@ from wisp.events import (
     RpcMessageSnapshot,
     RpcMessagesReported,
     RpcMessageToolCallSnapshot,
+    RpcMessageToolResultSnapshot,
     RpcSessionCloned,
     RpcSessionForked,
     RpcSessionNameChanged,
@@ -340,6 +341,42 @@ def test_rpc_messages_report_round_trips_only_at_schema_v17() -> None:
     assert wisp_event_from_json(event.model_dump_json()) == event
     with pytest.raises(ValueError, match="require schema_version 17"):
         wisp_event_from_json(event.model_copy(update={"schema_version": 16}).model_dump_json())
+
+
+def test_rpc_messages_tool_result_metadata_requires_schema_v22() -> None:
+    event = RpcMessagesReported(
+        command_id="messages-1",
+        messages=(
+            RpcMessageSnapshot(
+                entry_id="entry-1",
+                created_at=datetime(2026, 7, 28, tzinfo=UTC),
+                role="tool",
+                content="boom",
+                content_original_bytes=4,
+                tool_call_id="call-1",
+                tool_name="bash",
+                is_error=False,
+                tool_result=RpcMessageToolResultSnapshot(
+                    exit_code=1,
+                    summary="command failed",
+                    truncated=True,
+                ),
+            ),
+        ),
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    with pytest.raises(ValueError, match="tool-result metadata requires schema_version 22"):
+        wisp_event_from_json(event.model_copy(update={"schema_version": 21}).model_dump_json())
+    with pytest.raises(ValueError, match="valid only on tool messages"):
+        RpcMessageSnapshot(
+            entry_id="entry-2",
+            created_at=datetime(2026, 7, 28, tzinfo=UTC),
+            role="assistant",
+            content="not a tool",
+            content_original_bytes=10,
+            tool_result=RpcMessageToolResultSnapshot(summary="invalid"),
+        )
 
 
 def test_rpc_sessions_report_round_trips_only_at_schema_v18() -> None:

@@ -24,7 +24,7 @@ from wisp.events import (
 from wisp.trust_flow import TrustDecision
 from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.compact_echo import MAX_PENDING_ECHOES as _MAX_PENDING_ECHOES
-from wisp.tui.history import HistoricalTranscriptMessage
+from wisp.tui.history import HistoricalToolCard, HistoricalTranscriptMessage
 from wisp.tui.textual_app import (
     TextualTui,
     TextualTuiRenderer,
@@ -950,6 +950,35 @@ def test_textual_tui_renderer_renders_hydrated_history_in_order_and_escapes() ->
         "you: old [red]prompt[/red]",
         "assistant: old answer",
     ]
+
+
+def test_textual_tui_renderer_renders_historical_tool_cards() -> None:
+    async def scenario() -> tuple[str, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.render_history_entries(
+                (
+                    HistoricalTranscriptMessage(role="user", content="old prompt"),
+                    HistoricalToolCard(
+                        card_id="history:tool-1",
+                        name="bash",
+                        arguments={"command": "false"},
+                        output="[red]boom[/red]",
+                        is_error=False,
+                        exit_code=1,
+                    ),
+                )
+            )
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            cards = [child for child in transcript.children if isinstance(child, ToolCard)]
+            return "\n".join(_transcript_texts(app_instance)), len(cards)
+
+    rendered, card_count = anyio.run(scenario)
+    assert card_count == 1
+    assert "you: old prompt" in rendered
+    assert "✗ bash" in rendered
+    assert "[red]boom[/red]" in rendered
 
 
 def _render_events_to_transcript(events: list[object]) -> str:
