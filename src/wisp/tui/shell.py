@@ -6,7 +6,7 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 import anyio
 from anyio.streams.memory import MemoryObjectSendStream
@@ -51,7 +51,11 @@ from wisp.tui.commands import (
     TuiSlashCommandName,
     parse_tui_slash_command,
 )
-from wisp.tui.history import TUI_HISTORY_MESSAGE_LIMIT, history_from_rpc_messages
+from wisp.tui.history import (
+    TUI_HISTORY_MESSAGE_LIMIT,
+    HistoricalTranscriptMessage,
+    history_from_rpc_messages,
+)
 from wisp.tui.launch import _stdin_is_interactive
 from wisp.tui.live import LiveFullscreenInputInterrupted
 from wisp.tui.rendering import TuiRenderer, TuiRendererKind, create_tui_renderer
@@ -311,7 +315,7 @@ class TuiShell:
                 event = signal.event
                 if isinstance(event, RpcMessagesReported) and event.command_id == command_id:
                     if not rendered:
-                        self.renderer.render_history(history_from_rpc_messages(event.messages))
+                        self._render_history(history_from_rpc_messages(event.messages))
                         rendered = True
                     continue
                 should_exit = await self._handle_rpc_event(event)
@@ -324,6 +328,12 @@ class TuiShell:
                 return self._handle_rpc_closed(signal, pending_command_id=command_id)
             if await self._handle_signal(signal):
                 return True
+
+    def _render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
+        render_history = getattr(self.renderer, "render_history", None)
+        if not callable(render_history):
+            return
+        cast(Callable[[tuple[HistoricalTranscriptMessage, ...]], None], render_history)(messages)
 
     async def _handle_signal(self, signal: _TuiSignal) -> bool:
         if isinstance(signal, _InputLine):

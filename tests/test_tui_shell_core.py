@@ -358,6 +358,38 @@ def test_tui_shell_ignores_wrong_and_duplicate_history_reports() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_history_hydration_allows_legacy_renderer_without_hook() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            messages_events=[
+                [
+                    RpcMessagesReported(
+                        command_id="messages-1",
+                        messages=(_rpc_message("user", "old prompt", entry_id="user-1"),),
+                    ),
+                    RpcCommandFinished(
+                        command_id="messages-1",
+                        command_type="get_messages",
+                        ok=True,
+                    ),
+                ]
+            ]
+        )
+        renderer = LineTuiRenderer(_console()[0])
+        renderer.render_history = None  # type: ignore[method-assign]
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from([]),
+        )
+
+        await shell.run()
+
+        assert controller.messages_requests == [("messages-1", None, 500, None)]
+
+    anyio.run(run)
+
+
 def test_tui_shell_history_failure_does_not_block_input() -> None:
     async def run() -> None:
         controller = ScriptedController(
