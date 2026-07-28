@@ -8,16 +8,21 @@ from decimal import Decimal
 import pytest
 
 from tests.tui_support import *
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     ContextBudget,
     ContextEstimate,
     MessageRole,
     ProviderRetrying,
+    RpcMessageToolCallSnapshot,
+    RpcMessageToolResultSnapshot,
     SessionCostSummary,
 )
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
+    HistoricalToolCard,
     HistoricalTranscriptMessage,
+    history_entries_from_rpc_messages,
     history_from_rpc_messages,
 )
 
@@ -28,6 +33,11 @@ def _rpc_message(
     *,
     entry_id: str,
     content_truncated: bool = False,
+    tool_call_id: str | None = None,
+    tool_name: str | None = None,
+    tool_calls: tuple[RpcMessageToolCallSnapshot, ...] = (),
+    is_error: bool | None = None,
+    tool_result: RpcMessageToolResultSnapshot | None = None,
 ) -> RpcMessageSnapshot:
     return RpcMessageSnapshot(
         entry_id=entry_id,
@@ -36,6 +46,11 @@ def _rpc_message(
         content=content,
         content_original_bytes=len(content.encode("utf-8")),
         content_truncated=content_truncated,
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        tool_calls=tool_calls,
+        is_error=is_error,
+        tool_result=tool_result,
     )
 
 
@@ -88,6 +103,130 @@ def test_history_from_rpc_messages_filters_to_visible_user_and_assistant_text() 
     )
 
 
+def test_history_entries_from_rpc_messages_pairs_tool_calls_and_results() -> None:
+    entries = history_entries_from_rpc_messages(
+        (
+            _rpc_message("user", "old prompt", entry_id="user-1"),
+            _rpc_message(
+                "assistant",
+                "I'll inspect it.",
+                entry_id="assistant-1",
+                tool_calls=(
+                    RpcMessageToolCallSnapshot(
+                        call_id="call-1",
+                        name="read",
+                        arguments={"path": "app.py"},
+                        arguments_original_bytes=17,
+                    ),
+                ),
+            ),
+            _rpc_message(
+                "tool",
+                "file contents",
+                entry_id="tool-1",
+                tool_call_id="call-1",
+                tool_name="read",
+                tool_result=RpcMessageToolResultSnapshot(
+                    summary="read 3 lines from app.py",
+                    truncated=True,
+                ),
+            ),
+        )
+    )
+
+    assert entries == (
+        HistoricalTranscriptMessage(role="user", content="old prompt"),
+        HistoricalTranscriptMessage(role="assistant", content="I'll inspect it."),
+        HistoricalToolCard(
+            card_id="history:tool-1",
+            name="read",
+            arguments={"path": "app.py"},
+            output="file contents",
+            is_error=False,
+            summary="read 3 lines from app.py",
+            truncated=True,
+        ),
+    )
+    assert history_from_rpc_messages(tuple()) == ()
+
+
+def test_history_entries_from_rpc_messages_handles_orphan_and_missing_tool_results() -> None:
+    entries = history_entries_from_rpc_messages(
+        (
+            _rpc_message(
+                "tool",
+                "orphan output",
+                entry_id="tool-1",
+                tool_call_id="orphan",
+                tool_name="bash",
+                is_error=True,
+                content_truncated=True,
+                tool_result=RpcMessageToolResultSnapshot(exit_code=2),
+            ),
+            _rpc_message(
+                "assistant",
+                "",
+                entry_id="assistant-1",
+                tool_calls=(
+                    RpcMessageToolCallSnapshot(
+                        call_id="missing",
+                        name="grep",
+                        arguments={"pattern": "x"},
+                        arguments_original_bytes=15,
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert entries == (
+        HistoricalToolCard(
+            card_id="history:tool-1",
+            name="bash",
+            arguments={},
+            output="orphan output\n[content truncated]",
+            is_error=True,
+            exit_code=2,
+            truncated=True,
+        ),
+        HistoricalToolCard(
+            card_id="history:missing:missing",
+            name="grep",
+            arguments={"pattern": "x"},
+            output="No persisted tool result.",
+            is_error=True,
+            status="cancelled",
+            missing_result=True,
+        ),
+    )
+
+
+def test_history_entries_from_rpc_messages_marks_legacy_interrupted_repairs_cancelled() -> None:
+    entries = history_entries_from_rpc_messages(
+        (
+            _rpc_message(
+                "tool",
+                INTERRUPTED_TOOL_RESULT_TEXT,
+                entry_id="repair-1",
+                tool_call_id="call-1",
+                tool_name="read",
+                is_error=True,
+            ),
+        )
+    )
+
+    assert entries == (
+        HistoricalToolCard(
+            card_id="history:repair-1",
+            name="read",
+            arguments={},
+            output=INTERRUPTED_TOOL_RESULT_TEXT,
+            is_error=True,
+            status="cancelled",
+        ),
+    )
+
+
 def test_tui_renderers_render_hydrated_history() -> None:
     messages = (
         HistoricalTranscriptMessage(role="user", content="old [red]prompt[/red]"),
@@ -106,6 +245,34 @@ def test_tui_renderers_render_hydrated_history() -> None:
     assert [(entry.role, entry.content) for entry in fullscreen.state.transcript] == [
         ("user", "old [red]prompt[/red]"),
         ("assistant", "old answer"),
+    ]
+
+
+def test_line_and_fullscreen_renderers_render_historical_tool_entries() -> None:
+    entries = (
+        HistoricalTranscriptMessage(role="user", content="old prompt"),
+        HistoricalToolCard(
+            card_id="history:tool-1",
+            name="bash",
+            arguments={"command": "false"},
+            output="[red]boom[/red]",
+            is_error=False,
+            exit_code=1,
+        ),
+    )
+    console, output = _console()
+    line = LineTuiRenderer(console)
+    fullscreen = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+
+    line.render_history_entries(entries)
+    fullscreen.render_history_entries(entries)
+
+    rendered = output.getvalue()
+    assert "you: old prompt" in rendered
+    assert "✗ historical tool bash: exit 1: [red]boom[/red]" in rendered
+    assert [(entry.role, entry.content) for entry in fullscreen.state.transcript] == [
+        ("user", "old prompt"),
+        ("tool", "bash: exit 1: [red]boom[/red]"),
     ]
 
 

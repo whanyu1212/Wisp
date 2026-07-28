@@ -54,7 +54,9 @@ from wisp.events import (
     QueueUpdated,
     SessionSaved,
     SessionStats,
+    ToolApprovalResolved,
     ToolExecutionEnded,
+    ToolPresentationStatus,
     TurnCompleted,
     TurnStarted,
     WispEvent,
@@ -63,7 +65,12 @@ from wisp.providers.base import ContextOverflowError, Provider, ToolSpec
 from wisp.providers.catalog import ModelRegistry
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
-from wisp.sessions.entries import CompactionSessionEntry, MessageSessionEntry, SessionEntry
+from wisp.sessions.entries import (
+    CompactionSessionEntry,
+    MessageSessionEntry,
+    SessionEntry,
+    ToolResultPresentationSnapshot,
+)
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import SessionReplay, replay_session_entries
 from wisp.tools.approval import ToolApprovalPolicy
@@ -454,6 +461,7 @@ class CodingSession:
         had_unsafe_tool_round = False
         overflow_recovery_attempted = False
         recovered_from_overflow = False
+        tool_presentation_statuses: dict[str, ToolPresentationStatus] = {}
         harness_events = harness.prompt_message(
             user_message,
             defer_context_overflow_errors=True,
@@ -483,6 +491,8 @@ class CodingSession:
                         tool_iterations += 1
                     elif isinstance(event, ToolExecutionEnded) and self._tool_is_unsafe(event.name):
                         had_unsafe_tool_round = True
+                    elif isinstance(event, ToolApprovalResolved) and not event.approved:
+                        tool_presentation_statuses[event.call_id] = "denied"
                     completion_entry_id: str | None = None
                     if isinstance(event, QueueMessageInjected):
                         self._queue_message(
@@ -495,8 +505,16 @@ class CodingSession:
                             operation_id=operation_id,
                         )
                     if isinstance(event, MessageCompleted | ToolExecutionEnded):
+                        tool_status = (
+                            tool_presentation_statuses.pop(event.call_id, None)
+                            if isinstance(event, ToolExecutionEnded)
+                            else None
+                        )
                         completion_entry_id = self._queue_completion(
-                            session, event, operation_id=operation_id
+                            session,
+                            event,
+                            operation_id=operation_id,
+                            tool_status=tool_status,
                         )
                     if (
                         isinstance(event, MessageCompleted)
@@ -784,7 +802,11 @@ class CodingSession:
         repair_plan = plan_interrupted_tool_repairs(replay.messages)
         if repair_plan.repairs:
             for repair in repair_plan.repairs:
-                self._queue_message(session, repair)
+                self._queue_message(
+                    session,
+                    repair,
+                    tool_result=ToolResultPresentationSnapshot(status="cancelled"),
+                )
             await self._flush_pending_entries()
             self._history_refresh_session_ids.add(session.session_id)
             replay = await self._read_context(session)
@@ -1096,11 +1118,25 @@ class CodingSession:
         event: MessageCompleted | ToolExecutionEnded,
         *,
         operation_id: str | None = None,
+        tool_status: ToolPresentationStatus | None = None,
     ) -> str:
+        tool_result = (
+            ToolResultPresentationSnapshot(
+                status=tool_status or _tool_result_status(event),
+                exit_code=event.exit_code,
+                before_text=event.before_text,
+                created=event.created,
+                summary=event.summary,
+                truncated=event.truncated,
+            )
+            if isinstance(event, ToolExecutionEnded)
+            else None
+        )
         return self._queue_message(
             session,
             message_from_completion_event(event),
             operation_id=operation_id,
+            tool_result=tool_result,
         )
 
     def _queue_message(
@@ -1109,12 +1145,14 @@ class CodingSession:
         message: Message,
         *,
         operation_id: str | None = None,
+        tool_result: ToolResultPresentationSnapshot | None = None,
     ) -> str:
         entry = MessageSessionEntry(
             session_id=session.session_id,
             message=message,
             operation_id=operation_id,
             created_at=message.created_at,
+            tool_result=tool_result,
         )
         self._pending_entries.append(_PendingSessionEntry(session=session, entry=entry))
         return entry.id
@@ -1129,7 +1167,12 @@ class CodingSession:
         """Persist synthetic repairs before the transcript crosses a new boundary."""
 
         for message in harness.repair_interrupted_tool_calls():
-            self._queue_message(session, message, operation_id=operation_id)
+            self._queue_message(
+                session,
+                message,
+                operation_id=operation_id,
+                tool_result=ToolResultPresentationSnapshot(status="cancelled"),
+            )
         await self._flush_pending_entries()
 
     async def _read_context(self, session: JsonlSession) -> SessionReplay:
@@ -1147,6 +1190,12 @@ class CodingSession:
                     self._history_refresh_session_ids.add(pending.entry.session_id)
                     raise
                 self._pending_entries.popleft()
+
+
+def _tool_result_status(event: ToolExecutionEnded) -> ToolPresentationStatus:
+    if event.is_error or event.exit_code not in {None, 0}:
+        return "error"
+    return "done"
 
 
 __all__ = ["CodingSession", "PERSISTED_SESSION_EVENT_TYPES"]

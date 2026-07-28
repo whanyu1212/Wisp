@@ -22,13 +22,19 @@ from wisp.events import (
     ProviderRetrying,
     RpcMessageSnapshot,
     RpcMessagesReported,
+    RpcMessageToolCallSnapshot,
+    RpcMessageToolResultSnapshot,
     SessionStatsReported,
     TokenUsage,
     UsageCost,
     UsageCostRates,
 )
 from wisp.tui import auth_commands as tui_auth_commands_module
-from wisp.tui.history import HistoricalTranscriptMessage
+from wisp.tui.history import (
+    HistoricalToolCard,
+    HistoricalTranscriptEntry,
+    HistoricalTranscriptMessage,
+)
 from wisp.tui.state import TuiViewState
 
 
@@ -57,6 +63,11 @@ def _rpc_message(
     *,
     entry_id: str,
     content_truncated: bool = False,
+    tool_call_id: str | None = None,
+    tool_name: str | None = None,
+    tool_calls: tuple[RpcMessageToolCallSnapshot, ...] = (),
+    is_error: bool | None = None,
+    tool_result: RpcMessageToolResultSnapshot | None = None,
 ) -> RpcMessageSnapshot:
     return RpcMessageSnapshot(
         entry_id=entry_id,
@@ -65,6 +76,11 @@ def _rpc_message(
         content=content,
         content_original_bytes=len(content.encode("utf-8")),
         content_truncated=content_truncated,
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        tool_calls=tool_calls,
+        is_error=is_error,
+        tool_result=tool_result,
     )
 
 
@@ -304,6 +320,91 @@ def test_tui_shell_hydrates_resume_history_before_reading_prompt() -> None:
             ("user", "old prompt"),
             ("assistant", "old answer"),
         ]
+
+    anyio.run(run)
+
+
+def test_tui_shell_hydrates_rich_history_entries_before_reading_prompt() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.calls: list[str] = []
+            self.entries: list[tuple[HistoricalTranscriptEntry, ...]] = []
+
+        def render_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
+            self.calls.append("history_entries")
+            self.entries.append(entries)
+
+        def running(self) -> None:
+            self.calls.append("running")
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        controller = ScriptedController(
+            [
+                [
+                    completed_message(content="live answer"),
+                    RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
+                ]
+            ],
+            messages_events=[
+                [
+                    RpcMessagesReported(
+                        command_id="messages-1",
+                        messages=(
+                            _rpc_message("user", "old prompt", entry_id="user-1"),
+                            _rpc_message(
+                                "assistant",
+                                "",
+                                entry_id="assistant-1",
+                                tool_calls=(
+                                    RpcMessageToolCallSnapshot(
+                                        call_id="call-1",
+                                        name="bash",
+                                        arguments={"command": "pwd"},
+                                        arguments_original_bytes=17,
+                                    ),
+                                ),
+                            ),
+                            _rpc_message(
+                                "tool",
+                                "/repo",
+                                entry_id="tool-1",
+                                tool_call_id="call-1",
+                                tool_name="bash",
+                                tool_result=RpcMessageToolResultSnapshot(summary="ran pwd"),
+                            ),
+                        ),
+                    ),
+                    RpcCommandFinished(
+                        command_id="messages-1",
+                        command_type="get_messages",
+                        ok=True,
+                    ),
+                ]
+            ],
+        )
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from(["new prompt"]),
+        )
+
+        await shell.run()
+
+        assert controller.prompts == ["new prompt"]
+        assert renderer.calls[:2] == ["history_entries", "running"]
+        assert renderer.entries[0] == (
+            HistoricalTranscriptMessage(role="user", content="old prompt"),
+            HistoricalToolCard(
+                card_id="history:tool-1",
+                name="bash",
+                arguments={"command": "pwd"},
+                output="/repo",
+                is_error=False,
+                summary="ran pwd",
+            ),
+        )
 
     anyio.run(run)
 

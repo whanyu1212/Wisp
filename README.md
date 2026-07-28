@@ -375,9 +375,11 @@ uv run wisp tui --line          # simple line renderer, for fallback/debugging
 ```
 
 On `--continue` or `--resume`, the TUI hydrates up to 500 active-path persisted
-user/assistant messages through the same RPC `get_messages` command available to other
-frontends before it accepts new input. Historical tool calls/results are not reconstructed
-as resolved cards yet; new tool activity in the resumed session still renders live cards.
+messages through the same RPC `get_messages` command available to other frontends before
+it accepts new input. Text entries are restored as user/assistant transcript lines.
+Persisted tool calls/results are restored as resolved tool cards when tool-result
+presentation metadata is available; legacy sessions without that metadata still render a
+generic historical card from the transcript message.
 
 The legacy `--mode tui` entrypoint remains for compatibility and honors
 `--tui-renderer line|fullscreen|textual` plus `WISP_TUI_RENDERER`.
@@ -395,8 +397,10 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 21`; readers also accept legacy schema v5
-through v20 events for compatibility. A successful prompt follows this lifecycle (tool events
+Every outbound `WispEvent` includes `"schema_version": 22`; readers also accept legacy schema v5
+through v21 events for compatibility. Schema v22 adds optional `tool_result` presentation
+metadata on RPC `get_messages` tool-message rows so TUI and RPC consumers can reconstruct
+historical tool cards without replaying provider-visible history. A successful prompt follows this lifecycle (tool events
 repeat inside a turn when the model requests tools):
 
 ```text

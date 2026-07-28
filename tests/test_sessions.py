@@ -18,6 +18,7 @@ from wisp.events import (
     ContextBudget,
     ContextEstimate,
     ErrorEvent,
+    RpcMessageToolResultSnapshot,
     TokenUsage,
     ToolCallRequested,
     ToolCallSnapshot,
@@ -39,6 +40,7 @@ from wisp.sessions.entries import (
     SessionEntry,
     SessionEntryAdapter,
     SessionInfoSessionEntry,
+    ToolResultPresentationSnapshot,
     session_entry_to_json,
 )
 from wisp.sessions.errors import (
@@ -74,6 +76,10 @@ def _message_page_text_bytes(page: SessionMessagePage) -> int:
                 separators=(",", ":"),
             )
             total += len(rendered.encode("utf-8"))
+        if message.tool_result is not None and message.tool_result.before_text is not None:
+            total += len(message.tool_result.before_text.encode("utf-8"))
+        if message.tool_result is not None and message.tool_result.summary is not None:
+            total += len(message.tool_result.summary.encode("utf-8"))
     return total
 
 
@@ -196,7 +202,7 @@ def test_session_names_are_normalized_cleared_and_latest_wins(tmp_path: Path) ->
     assert session.read_name() is None
     entries = session.read_entries()
     info_entries = [entry for entry in entries if isinstance(entry, SessionInfoSessionEntry)]
-    assert [entry.schema_version for entry in info_entries] == [3, 3, 3]
+    assert [entry.schema_version for entry in info_entries] == [4, 4, 4]
     assert [entry.name for entry in info_entries] == [
         "alpha beta",
         "alpha beta",
@@ -762,6 +768,119 @@ def test_session_message_page_budgets_serialized_truncated_argument_wrapper(
     assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
+def test_session_message_page_projects_tool_result_presentation_metadata(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    entry = MessageSessionEntry(
+        session_id=session.session_id,
+        message=Message(
+            role="tool",
+            content="created file",
+            tool_call_id="call-1",
+            tool_name="write",
+            is_error=False,
+        ),
+        tool_result=ToolResultPresentationSnapshot(
+            status="done",
+            before_text="old\n",
+            created=False,
+            summary="wrote file",
+            truncated=True,
+        ),
+    )
+
+    async def write() -> None:
+        await session.append_entry(entry)
+
+    anyio.run(write)
+
+    reloaded = session.read_entries()[0]
+    assert isinstance(reloaded, MessageSessionEntry)
+    assert reloaded.tool_result == entry.tool_result
+
+    page = session.read_message_page()
+    assert page.messages[0].tool_result == RpcMessageToolResultSnapshot(
+        status="done",
+        before_text="old\n",
+        created=False,
+        summary="wrote file",
+        truncated=True,
+    )
+
+
+def test_session_message_entry_rejects_tool_result_metadata_on_non_tool_message() -> None:
+    with pytest.raises(ValidationError, match="valid only on tool messages"):
+        MessageSessionEntry(
+            session_id="session-1",
+            message=Message(role="assistant", content="not a tool result"),
+            tool_result=ToolResultPresentationSnapshot(summary="invalid"),
+        )
+
+
+def test_session_message_page_drops_partial_before_text_metadata(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    oversized_before_text = "x" * (jsonl_module.MESSAGE_CONTENT_BYTE_LIMIT + 1)
+
+    async def write() -> None:
+        await session.append_entry(
+            MessageSessionEntry(
+                session_id=session.session_id,
+                message=Message(
+                    role="tool",
+                    content="ok",
+                    tool_call_id="call-1",
+                    tool_name="write",
+                    is_error=False,
+                ),
+                tool_result=ToolResultPresentationSnapshot(
+                    before_text=oversized_before_text,
+                    created=False,
+                ),
+            )
+        )
+
+    anyio.run(write)
+
+    page = session.read_message_page()
+    assert page.messages[0].tool_result is not None
+    assert page.messages[0].tool_result.before_text is None
+    assert page.messages[0].tool_result.truncated is True
+    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+
+
+def test_session_message_page_bounds_tool_result_summary_metadata(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    oversized_summary = "🙂" * (jsonl_module.MESSAGE_CONTENT_BYTE_LIMIT + 1)
+
+    async def write() -> None:
+        await session.append_entry(
+            MessageSessionEntry(
+                session_id=session.session_id,
+                message=Message(
+                    role="tool",
+                    content="ok",
+                    tool_call_id="call-1",
+                    tool_name="read",
+                    is_error=False,
+                ),
+                tool_result=ToolResultPresentationSnapshot(summary=oversized_summary),
+            )
+        )
+
+    anyio.run(write)
+
+    page = session.read_message_page()
+    assert page.messages[0].tool_result is not None
+    assert page.messages[0].tool_result.summary is not None
+    assert (
+        len(page.messages[0].tool_result.summary.encode("utf-8"))
+        <= jsonl_module.MESSAGE_CONTENT_BYTE_LIMIT
+    )
+    assert page.messages[0].tool_result.truncated is True
+    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+
+
 def test_session_message_page_enforces_aggregate_text_budget(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
     content = "🙂" * 20_000
@@ -925,7 +1044,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
         "event",
         "compaction",
     ]
-    assert [record["schema_version"] for record in records] == [3, 3, 3, 3, 3]
+    assert [record["schema_version"] for record in records] == [4, 4, 4, 4, 4]
     assert [record["parent_id"] for record in records] == [
         None,
         records[0]["id"],
@@ -934,7 +1053,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
         records[3]["id"],
     ]
     assert records[3]["event"]["schema_version"] == 1
-    assert records[3]["event"]["payload"]["schema_version"] == 21
+    assert records[3]["event"]["payload"]["schema_version"] == 22
     assert isinstance(session.read_entries()[0], MessageSessionEntry)
     assert isinstance(session.read_entries()[3], EventSessionEntry)
     assert isinstance(session.read_entries()[4], CompactionSessionEntry)
@@ -1034,7 +1153,7 @@ def test_session_upgrades_v1_entries_to_a_parent_chain_without_rewriting(tmp_pat
 
     entries = JsonlSessionStore(tmp_path).load(path).read_entries()
 
-    assert [entry.schema_version for entry in entries] == [3, 3]
+    assert [entry.schema_version for entry in entries] == [4, 4]
     assert [entry.parent_id for entry in entries if isinstance(entry, MessageSessionEntry)] == [
         None,
         "first",
@@ -1077,6 +1196,37 @@ def test_session_accepts_v2_entries_with_omitted_null_structural_references(
         assert isinstance(loaded, ActiveLeafSessionEntry)
         assert loaded.previous_leaf_id is None
         assert loaded.active_leaf_id is None
+
+
+def test_session_upgrades_v3_entries_but_rejects_v4_tool_result_field(
+    tmp_path: Path,
+) -> None:
+    legacy_path = tmp_path / "v3-message.jsonl"
+    legacy_entry = {
+        "schema_version": 3,
+        "id": "message",
+        "session_id": "session",
+        "kind": "message",
+        "message": {"role": "tool", "content": "ok", "tool_call_id": "call-1"},
+        "created_at": "2026-07-11T00:00:00Z",
+    }
+    legacy_path.write_text(f"{json.dumps(legacy_entry)}\n", encoding="utf-8")
+
+    loaded = JsonlSessionStore(tmp_path).load(legacy_path).read_entries()[0]
+
+    assert isinstance(loaded, MessageSessionEntry)
+    assert loaded.schema_version == 4
+    assert loaded.tool_result is None
+
+    malformed_path = tmp_path / "v3-tool-result.jsonl"
+    malformed_entry = legacy_entry | {
+        "id": "bad-message",
+        "tool_result": {"status": "done"},
+    }
+    malformed_path.write_text(f"{json.dumps(malformed_entry)}\n", encoding="utf-8")
+
+    with pytest.raises(MalformedSessionEntryError, match="cannot include tool_result"):
+        JsonlSessionStore(tmp_path).load(malformed_path).read_entries()
 
 
 def test_session_rejects_v2_session_info_entries(tmp_path: Path) -> None:
@@ -1158,7 +1308,7 @@ def test_session_upgrades_legacy_v5_v6_events_only_on_typed_access(
 
 def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path) -> None:
     path = tmp_path / "future-event.jsonl"
-    raw_event = {"type": "future.event", "schema_version": 22, "future": True}
+    raw_event = {"type": "future.event", "schema_version": 23, "future": True}
     legacy = {
         "id": "future-event",
         "session_id": "event-session",
@@ -1170,7 +1320,7 @@ def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path)
     session = JsonlSessionStore(tmp_path).load(path)
 
     assert session.read_events() == (raw_event,)
-    with pytest.raises(UnsupportedPersistedEventVersionError, match="schema_version 22"):
+    with pytest.raises(UnsupportedPersistedEventVersionError, match="schema_version 23"):
         session.read_typed_events()
 
 
@@ -1196,7 +1346,7 @@ def test_session_rejects_malformed_event_only_on_typed_access(tmp_path: Path) ->
     ("schema_version", "error_type", "match"),
     [
         ("1", MalformedSessionEntryError, "must be an integer"),
-        (4, UnsupportedSessionEntryVersionError, "schema_version 4"),
+        (5, UnsupportedSessionEntryVersionError, "schema_version 5"),
     ],
 )
 def test_session_distinguishes_malformed_and_future_entry_versions(

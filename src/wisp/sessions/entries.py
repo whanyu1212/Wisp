@@ -5,10 +5,18 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from typing import Annotated, Literal, TypeGuard
+from typing import Annotated, Literal, Self, TypeGuard
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from wisp.agent.messages import CompactionRecord, Message
 from wisp.events import (
@@ -16,6 +24,7 @@ from wisp.events import (
     JsonObject,
     JsonObjectAdapter,
     KnownWispEvent,
+    ToolPresentationStatus,
     utc_now,
     wisp_event_from_dict,
 )
@@ -26,7 +35,7 @@ from wisp.sessions.errors import (
     UnsupportedSessionEntryVersionError,
 )
 
-SESSION_ENTRY_SCHEMA_VERSION: Literal[3] = 3
+SESSION_ENTRY_SCHEMA_VERSION: Literal[4] = 4
 PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION: Literal[1] = 1
 _MIN_SUPPORTED_EVENT_SCHEMA_VERSION = 5
 MAX_SESSION_NAME_BYTES = 256
@@ -38,7 +47,7 @@ class SessionEntryBase(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    schema_version: Literal[3] = SESSION_ENTRY_SCHEMA_VERSION
+    schema_version: Literal[4] = SESSION_ENTRY_SCHEMA_VERSION
     id: str = Field(default_factory=lambda: uuid4().hex, min_length=1)
     session_id: str = Field(min_length=1)
     operation_id: str | None = None
@@ -51,11 +60,31 @@ class SessionTreeEntryBase(SessionEntryBase):
     parent_id: str | None = None
 
 
+class ToolResultPresentationSnapshot(BaseModel):
+    """UI-only metadata for reconstructing a resolved historical tool card."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    status: ToolPresentationStatus | None = None
+    exit_code: int | None = None
+    before_text: str | None = None
+    created: bool = False
+    summary: str | None = None
+    truncated: bool = False
+
+
 class MessageSessionEntry(SessionTreeEntryBase):
     """One provider/frontend-visible message record."""
 
     kind: Literal["message"] = "message"
     message: Message
+    tool_result: ToolResultPresentationSnapshot | None = None
+
+    @model_validator(mode="after")
+    def _validate_tool_result(self) -> Self:
+        if self.tool_result is not None and self.message.role != "tool":
+            raise ValueError("tool-result presentation metadata is valid only on tool messages")
+        return self
 
 
 class PersistedEventEnvelope(BaseModel):
@@ -206,6 +235,16 @@ def session_entry_from_dict(
             if raw.get("kind") == "session_info":
                 raise MalformedSessionEntryError(
                     f"Unknown v2 session entry kind 'session_info'{location}"
+                )
+            normalized = _normalize_v2_structural_fields(
+                raw,
+                parent_id=legacy_parent_id,
+            )
+            normalized["schema_version"] = SESSION_ENTRY_SCHEMA_VERSION
+        elif version == 3:
+            if raw.get("kind") == "message" and "tool_result" in raw:
+                raise MalformedSessionEntryError(
+                    f"V3 message session entries cannot include tool_result{location}"
                 )
             normalized = _normalize_v2_structural_fields(
                 raw,

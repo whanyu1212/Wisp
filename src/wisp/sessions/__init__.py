@@ -11,6 +11,7 @@ from .entries import (
     SessionEntry,
     SessionInfoSessionEntry,
     SessionTreeEntry,
+    ToolResultPresentationSnapshot,
 )
 from .errors import (
     InvalidSessionBranchPointError,
@@ -74,6 +75,7 @@ __all__ = [
     "SessionTreeState",
     "StaleCompactionError",
     "StaleSessionTreeError",
+    "ToolResultPresentationSnapshot",
     "UnsupportedPersistedEventVersionError",
     "UnsupportedSessionEntryVersionError",
     "replay_session_entries",

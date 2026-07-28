@@ -3,7 +3,10 @@
 from wisp.tui.app import run_tui
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
+    HistoricalToolCard,
+    HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
+    history_entries_from_rpc_messages,
     history_from_rpc_messages,
 )
 from wisp.tui.launch import TuiOptions
@@ -26,6 +29,8 @@ from wisp.tui.state import TuiInteractionState, TuiStatus, TuiViewState
 __all__ = [
     "FullscreenTuiRenderer",
     "FullscreenTuiState",
+    "HistoricalToolCard",
+    "HistoricalTranscriptEntry",
     "HistoricalTranscriptMessage",
     "LineTuiRenderer",
     "LiveFullscreenInputInterrupted",
@@ -43,6 +48,7 @@ __all__ = [
     "create_tui_renderer",
     "format_tui_footer_lines",
     "format_tui_footer_text",
+    "history_entries_from_rpc_messages",
     "history_from_rpc_messages",
     "run_tui",
 ]

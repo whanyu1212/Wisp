@@ -53,7 +53,11 @@ from wisp.providers.events import (
 from wisp.providers.fake import FakeProvider, ScriptedProvider
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry
-from wisp.sessions.entries import MessageSessionEntry, SessionEntry
+from wisp.sessions.entries import (
+    MessageSessionEntry,
+    SessionEntry,
+    ToolResultPresentationSnapshot,
+)
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import ToolArguments, ToolInputSchema
@@ -695,6 +699,14 @@ def test_coding_session_persists_completion_before_exposing_it(
     assert repair.tool_call_id == "call-1"
     assert repair.content == INTERRUPTED_TOOL_RESULT_TEXT
     assert repair.is_error is True
+    repair_entry = next(
+        entry
+        for entry in session.read_entries()
+        if isinstance(entry, MessageSessionEntry)
+        and entry.message.tool_call_id == "call-1"
+        and entry.message.content == INTERRUPTED_TOOL_RESULT_TEXT
+    )
+    assert repair_entry.tool_result == ToolResultPresentationSnapshot(status="cancelled")
 
 
 def test_coding_session_does_not_persist_partial_assistant_on_generator_close(
@@ -1612,6 +1624,17 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
     assert tool_message["tool_name"] == "echo"
     assert tool_message["content"] == "echo: hello"
     assert tool_message["is_error"] is False
+    assert message_records[4]["tool_result"] == {
+        "status": "done",
+        "created": False,
+        "truncated": False,
+    }
+    loaded_tool_entry = next(
+        entry
+        for entry in JsonlSessionStore(tmp_path).load(saved.path).read_entries()
+        if isinstance(entry, MessageSessionEntry) and entry.message.role == "tool"
+    )
+    assert loaded_tool_entry.tool_result == ToolResultPresentationSnapshot(status="done")
     final_message = message_records[5]["message"]
     assert final_message["content"] == "final answer"
     assert final_message["finish_reason"] == "stop"
@@ -1810,6 +1833,13 @@ def test_coding_session_blocks_approval_required_tool_without_override(tmp_path:
     ]
     assert event_records[3]["event"]["payload"]["approved"] is False
     assert "requires approval" in event_records[3]["event"]["payload"]["reason"]
+    tool_entry = next(
+        entry
+        for entry in JsonlSessionStore(tmp_path).load(saved.path).read_entries()
+        if isinstance(entry, MessageSessionEntry) and entry.message.role == "tool"
+    )
+    assert tool_entry.tool_result is not None
+    assert tool_entry.tool_result.status == "denied"
 
 
 def test_coding_session_approves_required_tool_with_override(tmp_path: Path) -> None:
