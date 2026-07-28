@@ -282,7 +282,11 @@ def test_tui_shell_resume_send_failure_finishes_switch_ui() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:
             super().__init__(_console()[0])
+            self.started: list[str] = []
             self.finished = 0
+
+        def session_switch_started(self, session_id: str) -> None:
+            self.started.append(session_id)
 
         def session_switch_finished(self) -> None:
             self.finished += 1
@@ -293,6 +297,7 @@ def test_tui_shell_resume_send_failure_finishes_switch_ui() -> None:
 
         await shell._handle_resume_command(("target",))
 
+        assert renderer.started == ["target"]
         assert renderer.finished == 1
         assert shell.pending_session_switch is None
 

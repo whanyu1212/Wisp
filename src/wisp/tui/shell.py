@@ -516,19 +516,21 @@ class TuiShell:
         if not session_id:
             self.renderer.command_error("Usage: /resume [session-id]")
             return
+        # Guard the composer before awaiting a potentially backpressured
+        # transport. Picker selections may already have entered this lifecycle;
+        # renderer implementations intentionally make the repeated start
+        # idempotent.
+        self._call_renderer_optional("session_switch_started", session_id)
         try:
             command_id = await self.controller.select_session(session_id)
         except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
             self.renderer.send_failed("session selection", exc)
-            # A Textual picker selection has already hidden the composer. The
-            # RPC command never started, so no later completion can restore it.
             self._call_renderer_optional("session_switch_finished")
             return
         self.pending_session_switch = _PendingSessionSwitch(
             requested_session_id=session_id,
             select_command_id=command_id,
         )
-        self._call_renderer_optional("session_switch_started", session_id)
         self._update_view(status="switching session")
 
     def _session_operation_active(self) -> bool:
