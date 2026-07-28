@@ -390,6 +390,25 @@ def test_tui_shell_history_hydration_allows_legacy_renderer_without_hook() -> No
     anyio.run(run)
 
 
+def test_tui_shell_skips_history_hydration_for_legacy_controller_without_get_messages() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        controller.get_messages = None  # type: ignore[method-assign]
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from([]),
+        )
+
+        await shell.run()
+
+        assert "failed to send session history" not in output.getvalue()
+        assert controller.session_stats_requests == ["session-stats-1"]
+
+    anyio.run(run)
+
+
 def test_tui_shell_history_failure_does_not_block_input() -> None:
     async def run() -> None:
         controller = ScriptedController(

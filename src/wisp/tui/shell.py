@@ -92,15 +92,6 @@ class TuiController(Protocol):
 
     async def get_session_stats(self, *, command_id: str | None = None) -> str: ...
 
-    async def get_messages(
-        self,
-        *,
-        session_id: str | None = None,
-        limit: int = 200,
-        before_entry_id: str | None = None,
-        command_id: str | None = None,
-    ) -> str: ...
-
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str: ...
 
     async def approve(
@@ -1067,8 +1058,13 @@ class TuiShell:
             self.renderer.send_failed("session stats", exc)
 
     async def _request_session_history(self) -> str | None:
+        get_messages = getattr(self.controller, "get_messages", None)
+        if not callable(get_messages):
+            return None
         try:
-            return await self.controller.get_messages(limit=TUI_HISTORY_MESSAGE_LIMIT)
+            return await cast(Callable[..., Awaitable[str]], get_messages)(
+                limit=TUI_HISTORY_MESSAGE_LIMIT
+            )
         except Exception as exc:  # noqa: BLE001 - history is optional TUI chrome
             self.renderer.send_failed("session history", exc)
             return None
