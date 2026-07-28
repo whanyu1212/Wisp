@@ -1312,6 +1312,7 @@ def _rpc_tool_result_snapshot(
     if tool_result is None:
         return None
     before_text = tool_result.before_text
+    truncated = tool_result.truncated
     if before_text is not None:
         clipped_before_text, _, before_text_truncated = _clip_text_with_budget(
             before_text,
@@ -1319,13 +1320,22 @@ def _rpc_tool_result_snapshot(
             text_budget=text_budget,
         )
         before_text = None if before_text_truncated else clipped_before_text
+        truncated = truncated or before_text_truncated
+    summary = tool_result.summary
+    if summary is not None:
+        summary, _, summary_truncated = _clip_text_with_budget(
+            summary,
+            limit=MESSAGE_CONTENT_BYTE_LIMIT,
+            text_budget=text_budget,
+        )
+        truncated = truncated or summary_truncated
     return RpcMessageToolResultSnapshot(
         status=tool_result.status,
         exit_code=tool_result.exit_code,
         before_text=before_text,
         created=tool_result.created,
-        summary=tool_result.summary,
-        truncated=tool_result.truncated,
+        summary=summary,
+        truncated=truncated,
     )
 
 

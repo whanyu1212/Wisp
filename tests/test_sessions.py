@@ -845,6 +845,39 @@ def test_session_message_page_drops_partial_before_text_metadata(tmp_path: Path)
     page = session.read_message_page()
     assert page.messages[0].tool_result is not None
     assert page.messages[0].tool_result.before_text is None
+    assert page.messages[0].tool_result.truncated is True
+    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+
+
+def test_session_message_page_bounds_tool_result_summary_metadata(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    oversized_summary = "🙂" * (jsonl_module.MESSAGE_CONTENT_BYTE_LIMIT + 1)
+
+    async def write() -> None:
+        await session.append_entry(
+            MessageSessionEntry(
+                session_id=session.session_id,
+                message=Message(
+                    role="tool",
+                    content="ok",
+                    tool_call_id="call-1",
+                    tool_name="read",
+                    is_error=False,
+                ),
+                tool_result=ToolResultPresentationSnapshot(summary=oversized_summary),
+            )
+        )
+
+    anyio.run(write)
+
+    page = session.read_message_page()
+    assert page.messages[0].tool_result is not None
+    assert page.messages[0].tool_result.summary is not None
+    assert (
+        len(page.messages[0].tool_result.summary.encode("utf-8"))
+        <= jsonl_module.MESSAGE_CONTENT_BYTE_LIMIT
+    )
+    assert page.messages[0].tool_result.truncated is True
     assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
