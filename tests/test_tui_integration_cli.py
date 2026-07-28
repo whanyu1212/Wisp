@@ -24,6 +24,7 @@ from wisp.events import (
 from wisp.trust_flow import TrustDecision
 from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.compact_echo import MAX_PENDING_ECHOES as _MAX_PENDING_ECHOES
+from wisp.tui.history import HistoricalTranscriptMessage
 from wisp.tui.textual_app import (
     TextualTui,
     TextualTuiRenderer,
@@ -930,6 +931,25 @@ def test_textual_tui_preserves_brackets_in_streamed_output() -> None:
     rendered = anyio.run(scenario)
     assert "[brackets]" in rendered
     assert "[/close]" in rendered
+
+
+def test_textual_tui_renderer_renders_hydrated_history_in_order_and_escapes() -> None:
+    async def scenario() -> list[str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.render_history(
+                (
+                    HistoricalTranscriptMessage(role="user", content="old [red]prompt[/red]"),
+                    HistoricalTranscriptMessage(role="assistant", content="old answer"),
+                )
+            )
+            await pilot.pause()
+            return _transcript_texts(app_instance)
+
+    assert anyio.run(scenario) == [
+        "you: old [red]prompt[/red]",
+        "assistant: old answer",
+    ]
 
 
 def _render_events_to_transcript(events: list[object]) -> str:

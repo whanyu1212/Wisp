@@ -2,12 +2,37 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
 from tests.tui_support import *
-from wisp.events import ContextBudget, ContextEstimate, ProviderRetrying, SessionCostSummary
+from wisp.events import (
+    ContextBudget,
+    ContextEstimate,
+    MessageRole,
+    ProviderRetrying,
+    SessionCostSummary,
+)
+from wisp.tui.history import HistoricalTranscriptMessage, history_from_rpc_messages
+
+
+def _rpc_message(
+    role: MessageRole,
+    content: str,
+    *,
+    entry_id: str,
+    content_truncated: bool = False,
+) -> RpcMessageSnapshot:
+    return RpcMessageSnapshot(
+        entry_id=entry_id,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        role=role,
+        content=content,
+        content_original_bytes=len(content.encode("utf-8")),
+        content_truncated=content_truncated,
+    )
 
 
 def _context_budget(
@@ -28,6 +53,56 @@ def _context_budget(
         estimated_percent=percent,
         over_budget=False,
     )
+
+
+def test_history_from_rpc_messages_filters_to_visible_user_and_assistant_text() -> None:
+    history = history_from_rpc_messages(
+        (
+            _rpc_message("system", "system prompt", entry_id="system-1"),
+            _rpc_message("user", "hello", entry_id="user-1"),
+            _rpc_message("assistant", "", entry_id="assistant-tools-only"),
+            _rpc_message(
+                "assistant",
+                "",
+                entry_id="assistant-empty-truncated",
+                content_truncated=True,
+            ),
+            _rpc_message(
+                "assistant",
+                "long answer",
+                entry_id="assistant-1",
+                content_truncated=True,
+            ),
+            _rpc_message("tool", "tool output", entry_id="tool-1"),
+        )
+    )
+
+    assert history == (
+        HistoricalTranscriptMessage(role="user", content="hello"),
+        HistoricalTranscriptMessage(role="assistant", content="[content truncated]"),
+        HistoricalTranscriptMessage(role="assistant", content="long answer\n[content truncated]"),
+    )
+
+
+def test_tui_renderers_render_hydrated_history() -> None:
+    messages = (
+        HistoricalTranscriptMessage(role="user", content="old [red]prompt[/red]"),
+        HistoricalTranscriptMessage(role="assistant", content="old answer"),
+    )
+    console, output = _console()
+    line = LineTuiRenderer(console)
+    fullscreen = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+
+    line.render_history(messages)
+    fullscreen.render_history(messages)
+
+    rendered = output.getvalue()
+    assert "you: old [red]prompt[/red]" in rendered
+    assert "assistant: old answer" in rendered
+    assert [(entry.role, entry.content) for entry in fullscreen.state.transcript] == [
+        ("user", "old [red]prompt[/red]"),
+        ("assistant", "old answer"),
+    ]
 
 
 def test_tui_shell_uses_injected_renderer() -> None:

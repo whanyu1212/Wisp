@@ -32,6 +32,7 @@ from wisp.events import (
     TrustRequested,
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
+from wisp.tui.history import HistoricalTranscriptMessage
 
 
 class TuiRendererKind(StrEnum):
@@ -72,6 +73,8 @@ class TuiRenderer(Protocol):
     def command_error(self, message: str) -> None: ...
 
     def prompt_submitted(self, prompt: str) -> None: ...
+
+    def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None: ...
 
     def queued_prompts_cleared(self) -> None: ...
 
@@ -156,6 +159,11 @@ class LineTuiRenderer:
 
     def prompt_submitted(self, prompt: str) -> None:
         pass
+
+    def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
+        for message in messages:
+            label = "you" if message.role == "user" else "assistant"
+            self.console.print(f"{label}: {message.content}", markup=False, highlight=False)
 
     def queued_prompts_cleared(self) -> None:
         # No large-paste compact-echo cache in the text renderer; nothing to drop.
@@ -421,6 +429,14 @@ class FullscreenTuiRenderer:
 
     def prompt_submitted(self, prompt: str) -> None:
         self._append("user", prompt, style="bold")
+
+    def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
+        for message in messages:
+            style = "bold" if message.role == "user" else "green"
+            self._append(message.role, message.content, style=style, preserve_scroll=False)
+        if messages:
+            self._clamp_transcript_scroll()
+            self._refresh()
 
     def queued_prompts_cleared(self) -> None:
         # No large-paste compact-echo cache in the text renderer; nothing to drop.

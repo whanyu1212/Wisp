@@ -374,6 +374,11 @@ uv run wisp tui --yes                           # auto-approve mutating/command 
 uv run wisp tui --line          # simple line renderer, for fallback/debugging
 ```
 
+On `--continue` or `--resume`, the TUI hydrates up to 500 active-path persisted
+user/assistant messages through the same RPC `get_messages` command available to other
+frontends before it accepts new input. Historical tool calls/results are not reconstructed
+as resolved cards yet; new tool activity in the resumed session still renders live cards.
+
 The legacy `--mode tui` entrypoint remains for compatibility and honors
 `--tui-renderer line|fullscreen|textual` plus `WISP_TUI_RENDERER`.
 
