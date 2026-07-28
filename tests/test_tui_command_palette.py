@@ -169,6 +169,8 @@ def test_ctrl_o_palette_preserves_transcript_scroll_position() -> None:
                 app.write_notice(f"historical line {index}")
             await pilot.pause()
             transcript = app.query_one("#transcript", Transcript)
+            transcript.return_to_latest()
+            await pilot.pause()
             transcript.scroll_home(animate=False)
             await pilot.pause()
             before = transcript.scroll_y
