@@ -15,7 +15,11 @@ from wisp.events import (
     ProviderRetrying,
     SessionCostSummary,
 )
-from wisp.tui.history import HistoricalTranscriptMessage, history_from_rpc_messages
+from wisp.tui.history import (
+    TUI_HISTORY_MESSAGE_LIMIT,
+    HistoricalTranscriptMessage,
+    history_from_rpc_messages,
+)
 
 
 def _rpc_message(
@@ -103,6 +107,23 @@ def test_tui_renderers_render_hydrated_history() -> None:
         ("user", "old [red]prompt[/red]"),
         ("assistant", "old answer"),
     ]
+
+
+def test_fullscreen_renderers_retain_the_full_hydrated_page_by_default() -> None:
+    messages = tuple(
+        HistoricalTranscriptMessage(role="user", content=f"message {index}")
+        for index in range(TUI_HISTORY_MESSAGE_LIMIT)
+    )
+    renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+
+    renderer.render_history(messages)
+
+    assert len(renderer.state.transcript) == TUI_HISTORY_MESSAGE_LIMIT
+    assert renderer.state.transcript[0].content == "message 0"
+    assert renderer.state.transcript[-1].content == f"message {TUI_HISTORY_MESSAGE_LIMIT - 1}"
+    assert LiveFullscreenTui(run_application=False).max_transcript_entries == (
+        TUI_HISTORY_MESSAGE_LIMIT
+    )
 
 
 def test_tui_shell_uses_injected_renderer() -> None:
