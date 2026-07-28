@@ -501,10 +501,12 @@ class TuiShell:
             self.renderer.command_error("Usage: /resume [session-id]")
             return
         if not args:
+            self._call_renderer_optional("session_catalog_started")
             try:
                 command_id = await self.controller.get_sessions(limit=200)
             except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
                 self.renderer.send_failed("session catalog", exc)
+                self._call_renderer_optional("session_catalog_finished")
                 return
             self.pending_session_catalog = _PendingSessionCatalog(command_id=command_id)
             self._update_view(status="loading sessions")
@@ -1124,12 +1126,15 @@ class TuiShell:
         self.pending_session_catalog = None
         if not event.ok:
             self.renderer.command_error(event.error or "session catalog failed")
+            self._call_renderer_optional("session_catalog_finished")
             self._sync_view()
             return
         if pending.report is None:
             self.renderer.command_error("Session catalog completed without a result.")
+            self._call_renderer_optional("session_catalog_finished")
             self._sync_view()
             return
+        self._call_renderer_optional("session_catalog_finished")
         self._call_renderer_optional(
             "session_picker_request",
             pending.report.sessions,

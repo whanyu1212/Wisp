@@ -296,7 +296,7 @@ class TextualTui(App[None]):
         self._decision_panel: DecisionPanel | None = None
         self._model_picker: ModelPicker | None = None
         self._session_picker: SessionPicker | None = None
-        self._session_switch_in_progress = False
+        self._session_operation_in_progress = False
         # Monotonic timestamp of the most recent _prepare_decision_panel() call
         # (see on_event / _prepare_decision_panel). Any Key/MouseDown/MouseUp/
         # Paste event timestamped before this barrier is dropped before it
@@ -814,7 +814,7 @@ class TextualTui(App[None]):
         # Selection and history hydration are sequential RPC reads, not an agent
         # command that Ctrl-C can cancel. Keep the hidden composer draft intact
         # until the shell completes (or fails) the session-switch lifecycle.
-        if self._session_switch_in_progress:
+        if self._session_operation_in_progress:
             return
         # If the prompt editor owns the keystroke AND has selected text, ctrl+c
         # means "copy", not "interrupt". Because this binding is priority=True (so
@@ -1024,6 +1024,7 @@ class TextualTui(App[None]):
         *,
         selected_session_id: str | None,
     ) -> None:
+        self._session_operation_in_progress = False
         picker = self._session_picker
         if picker is None:
             return
@@ -1039,12 +1040,22 @@ class TextualTui(App[None]):
             self._input.display = True
             self._input.focus()
 
+    def session_catalog_started(self) -> None:
+        self._session_operation_in_progress = True
+        self._prepare_decision_panel()
+
+    def session_catalog_finished(self) -> None:
+        self._session_operation_in_progress = False
+        if self._input is not None:
+            self._input.display = True
+            self._input.focus()
+
     def session_switch_started(self) -> None:
-        self._session_switch_in_progress = True
+        self._session_operation_in_progress = True
         self._prepare_decision_panel()
 
     def session_switch_finished(self) -> None:
-        self._session_switch_in_progress = False
+        self._session_operation_in_progress = False
         self.hide_session_picker(restore_input=False)
         if self._input is not None:
             self._input.display = True

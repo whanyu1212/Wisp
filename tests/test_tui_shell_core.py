@@ -93,6 +93,13 @@ def test_tui_shell_resume_catalog_uses_rpc_owned_order_and_selection() -> None:
         def __init__(self) -> None:
             super().__init__(_console()[0])
             self.catalogs: list[tuple[tuple[RpcSessionSummary, ...], str | None]] = []
+            self.catalog_lifecycle: list[str] = []
+
+        def session_catalog_started(self) -> None:
+            self.catalog_lifecycle.append("start")
+
+        def session_catalog_finished(self) -> None:
+            self.catalog_lifecycle.append("finish")
 
         def session_picker_request(
             self,
@@ -139,6 +146,7 @@ def test_tui_shell_resume_catalog_uses_rpc_owned_order_and_selection() -> None:
         )
 
         assert renderer.catalogs == [((newer, older), "older")]
+        assert renderer.catalog_lifecycle == ["start", "finish"]
         assert shell.pending_session_catalog is None
 
     anyio.run(run)

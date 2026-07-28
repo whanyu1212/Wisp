@@ -378,6 +378,12 @@ class TextualTuiRenderer:
             selected_session_id=selected_session_id,
         )
 
+    def session_catalog_started(self) -> None:
+        self.app.session_catalog_started()
+
+    def session_catalog_finished(self) -> None:
+        self.app.session_catalog_finished()
+
     def session_switch_started(self, session_id: str) -> None:
         self.app.session_switch_started()
 

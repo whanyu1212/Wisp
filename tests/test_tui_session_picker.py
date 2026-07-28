@@ -53,6 +53,28 @@ def test_session_picker_preserves_rpc_order_and_highlights_selected_session() ->
     assert highlighted == 1
 
 
+def test_session_catalog_loading_hides_composer_and_preserves_draft() -> None:
+    async def scenario() -> tuple[str, bool, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            editor = app.query_one("#input", PromptEditor)
+            editor.value = "draft while catalog loads"
+            renderer.session_catalog_started()
+            await pilot.pause()
+            hidden = not editor.display
+            await pilot.press("enter", "ctrl+c")
+            await pilot.pause()
+            draft = editor.value
+            renderer.session_catalog_finished()
+            await pilot.pause()
+            return draft, hidden, editor.has_focus
+
+    draft, hidden, focused = anyio.run(scenario)
+    assert draft == "draft while catalog loads"
+    assert hidden is True
+    assert focused is True
+
+
 def test_session_picker_renders_persisted_labels_as_plain_text() -> None:
     sessions = (
         RpcSessionSummary(

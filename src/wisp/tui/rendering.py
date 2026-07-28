@@ -135,6 +135,10 @@ class TuiRenderer(Protocol):
         selected_session_id: str | None,
     ) -> None: ...
 
+    def session_catalog_started(self) -> None: ...
+
+    def session_catalog_finished(self) -> None: ...
+
     def session_switch_started(self, session_id: str) -> None: ...
 
     def session_switch_finished(self) -> None: ...
@@ -329,6 +333,12 @@ class LineTuiRenderer:
             markup=False,
             highlight=False,
         )
+
+    def session_catalog_started(self) -> None:
+        pass
+
+    def session_catalog_finished(self) -> None:
+        pass
 
     def session_switch_started(self, session_id: str) -> None:
         self.console.print(f"switching session: {session_id}", markup=False, highlight=False)
@@ -699,6 +709,13 @@ class FullscreenTuiRenderer:
             ),
             style="cyan",
         )
+        self._refresh()
+
+    def session_catalog_started(self) -> None:
+        self.state.status = "loading sessions"
+        self._refresh()
+
+    def session_catalog_finished(self) -> None:
         self._refresh()
 
     def session_switch_started(self, session_id: str) -> None:
