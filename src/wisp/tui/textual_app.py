@@ -579,18 +579,20 @@ class TextualTui(App[None]):
             self._input.value = ""
         self._submit_line(text)
 
-    def _submit_decision_line(self, text: str) -> None:
+    def _submit_decision_line(self, text: str) -> bool:
         # The decision overlay temporarily hides the composer. Keep its draft
         # untouched so approval never discards a follow-up the user was typing.
-        self._submit_line(text)
+        return self._submit_line(text)
 
-    def _submit_line(self, text: str) -> None:
+    def _submit_line(self, text: str) -> bool:
         if self._on_submit is not None:
             self._on_submit()
         try:
             self._prompt_send.send_nowait(text)
         except anyio.WouldBlock:
             self.write_error("input buffer full; command dropped")
+            return False
+        return True
 
     def on_decision_panel_selected(self, event: DecisionPanel.Selected) -> None:
         event.stop()
@@ -607,8 +609,12 @@ class TextualTui(App[None]):
 
     def on_session_picker_selected(self, event: SessionPicker.Selected) -> None:
         event.stop()
-        self.hide_session_picker(restore_input=False)
-        self._submit_decision_line(f"/resume {event.session_id}")
+        # Enter the lifecycle before queueing the typed command: the shell awaits
+        # the RPC transport before it repeats session_switch_started(), so this
+        # closes the interval where Ctrl-C could otherwise clear the hidden draft.
+        self.session_switch_started()
+        if not self._submit_decision_line(f"/resume {event.session_id}"):
+            self.session_switch_finished()
 
     def on_session_picker_cancelled(self, event: SessionPicker.Cancelled) -> None:
         event.stop()

@@ -99,6 +99,33 @@ def test_session_picker_selection_uses_resume_command_and_preserves_draft() -> N
     assert focused is True
 
 
+def test_session_picker_selection_guards_draft_before_shell_starts() -> None:
+    async def scenario() -> tuple[str, str, bool, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            editor = app.query_one("#input", PromptEditor)
+            editor.value = "draft during transport send"
+            renderer.session_picker_request((_session("target"),), selected_session_id=None)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            picker = app.query_one("#session-picker", SessionPicker)
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            guarded_draft = editor.value
+            answer = await app.read_prompt("wisp> ")
+            stayed_hidden = not editor.display and not picker.is_open
+            renderer.session_switch_finished()
+            await pilot.pause()
+            return guarded_draft, answer, stayed_hidden, editor.has_focus
+
+    draft, answer, stayed_hidden, focused = anyio.run(scenario)
+    assert draft == "draft during transport send"
+    assert answer == "/resume target"
+    assert stayed_hidden is True
+    assert focused is True
+
+
 def test_session_picker_escape_restores_draft_without_submission() -> None:
     async def scenario() -> tuple[str, bool, bool]:
         app, renderer = create_textual_tui()
