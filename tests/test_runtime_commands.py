@@ -130,6 +130,21 @@ def test_command_registry_replace_removes_stale_aliases() -> None:
         registry.get("/exit")
 
 
+def test_command_registry_failed_replace_preserves_existing_aliases() -> None:
+    registry = CommandRegistry(
+        (
+            _command("quit", aliases=("exit",)),
+            _command("close", aliases=("bye",)),
+        )
+    )
+
+    with pytest.raises(DuplicateCommandError, match="Command alias already registered: bye"):
+        registry.register(_command("quit", aliases=("bye",)), replace=True)
+
+    assert registry.get("/exit").name == "quit"
+    assert registry.get("/bye").name == "close"
+
+
 def test_command_registry_raises_for_unknown_command() -> None:
     registry = CommandRegistry()
 

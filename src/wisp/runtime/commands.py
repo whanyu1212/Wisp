@@ -120,15 +120,15 @@ class CommandRegistry:
                 f"Command name conflicts with alias: {descriptor.name} -> {owner}"
             )
 
-        if replace and descriptor.name in self._descriptors:
-            self._remove_aliases(descriptor.name)
-
         for alias in descriptor.aliases:
             alias_owner = self._aliases.get(alias)
             if alias_owner is not None and alias_owner != descriptor.name:
                 raise DuplicateCommandError(f"Command alias already registered: {alias}")
             if alias in self._descriptors and alias != descriptor.name:
                 raise DuplicateCommandError(f"Command alias conflicts with name: {alias}")
+
+        if replace and descriptor.name in self._descriptors:
+            self._remove_aliases(descriptor.name)
 
         self._descriptors[descriptor.name] = descriptor
         for alias in descriptor.aliases:
