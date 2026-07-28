@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
+from wisp.events import RpcCommandDescriptor
 from wisp.runtime.builtin_commands import builtin_command_descriptors
-from wisp.runtime.commands import CommandDescriptor, CommandRegistry, UnknownCommandError
+from wisp.runtime.commands import (
+    CommandArgument,
+    CommandDescriptor,
+    CommandRegistry,
+    UnknownCommandError,
+)
 
 
 class TuiSlashCommandName(StrEnum):
@@ -71,9 +77,6 @@ class SlashCommandSpec:
     prefill_on_partial_enter: bool = False
 
 
-_COMMAND_REGISTRY = CommandRegistry(builtin_command_descriptors())
-
-
 def _slash_spec_from_descriptor(descriptor: CommandDescriptor) -> SlashCommandSpec:
     return SlashCommandSpec(
         descriptor.slash_command,
@@ -83,12 +86,67 @@ def _slash_spec_from_descriptor(descriptor: CommandDescriptor) -> SlashCommandSp
     )
 
 
+@dataclass(frozen=True)
+class TuiCommandCatalog:
+    """Executable command metadata shared by TUI command surfaces."""
+
+    descriptors: tuple[CommandDescriptor, ...]
+    _registry: CommandRegistry = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        registry = CommandRegistry(self.descriptors)
+        object.__setattr__(self, "descriptors", registry.all())
+        object.__setattr__(self, "_registry", registry)
+
+    @property
+    def specs(self) -> tuple[SlashCommandSpec, ...]:
+        return tuple(_slash_spec_from_descriptor(descriptor) for descriptor in self.descriptors)
+
+    def get(self, identifier: str) -> CommandDescriptor:
+        return self._registry.get(identifier)
+
+    @classmethod
+    def from_rpc(cls, descriptors: tuple[RpcCommandDescriptor, ...]) -> TuiCommandCatalog:
+        """Build a catalog from RPC discovery, excluding commands without TUI handlers."""
+
+        executable_names = {command.value for command in TuiSlashCommandName}
+        return cls(
+            tuple(
+                _command_descriptor_from_rpc(descriptor)
+                for descriptor in descriptors
+                if descriptor.name in executable_names
+            )
+        )
+
+
+def _command_descriptor_from_rpc(descriptor: RpcCommandDescriptor) -> CommandDescriptor:
+    return CommandDescriptor(
+        name=descriptor.name,
+        title=descriptor.title,
+        description=descriptor.description,
+        category=descriptor.category,
+        aliases=descriptor.aliases,
+        arguments=tuple(
+            CommandArgument(
+                name=argument.name,
+                description=argument.description,
+                required=argument.required,
+            )
+            for argument in descriptor.arguments
+        ),
+        accepts_arguments=descriptor.accepts_arguments,
+        prefill_on_partial_enter=descriptor.prefill_on_partial_enter,
+        order=descriptor.order,
+    )
+
+
+DEFAULT_TUI_COMMAND_CATALOG = TuiCommandCatalog(builtin_command_descriptors())
+
+
 # Ordered for display: the everyday commands first, session/auth after. Only
 # user-facing spellings appear (aliases like /exit, :q are still parsed, but the
 # menu shows one canonical entry per command).
-SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = tuple(
-    _slash_spec_from_descriptor(descriptor) for descriptor in _COMMAND_REGISTRY.all()
-)
+SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = DEFAULT_TUI_COMMAND_CATALOG.specs
 
 
 # The *whole* input is a command attempt only if it's a lone slash-word: a slash
@@ -101,7 +159,11 @@ SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = tuple(
 _COMMAND_ATTEMPT = re.compile(r"^/[A-Za-z][A-Za-z-]*$")
 
 
-def parse_tui_slash_command(text: str) -> TuiSlashCommand | None:
+def parse_tui_slash_command(
+    text: str,
+    *,
+    catalog: TuiCommandCatalog = DEFAULT_TUI_COMMAND_CATALOG,
+) -> TuiSlashCommand | None:
     """Parse a TUI slash command, returning ``None`` for normal prompts.
 
     Returns a command for a known slash word, ``None`` for a normal prompt
@@ -126,7 +188,7 @@ def parse_tui_slash_command(text: str) -> TuiSlashCommand | None:
     # word first, and only shlex the paths that are actually commands.
     first_word = stripped.split(maxsplit=1)[0]
     try:
-        descriptor = _COMMAND_REGISTRY.get(first_word)
+        descriptor = catalog.get(first_word)
     except UnknownCommandError:
         # Not a known command. It's a mistyped-command error only when the WHOLE
         # input is a lone `/word`; any slash word followed by more (words, a path,
@@ -146,8 +208,10 @@ def parse_tui_slash_command(text: str) -> TuiSlashCommand | None:
 
 
 __all__ = [
+    "DEFAULT_TUI_COMMAND_CATALOG",
     "SLASH_COMMAND_SPECS",
     "SlashCommandSpec",
+    "TuiCommandCatalog",
     "TuiSlashCommand",
     "TuiSlashCommandError",
     "TuiSlashCommandName",

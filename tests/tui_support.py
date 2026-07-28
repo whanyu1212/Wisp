@@ -29,7 +29,10 @@ from wisp.events import (
     MessageDelta,
     ModelProviderAutoSwitched,
     ProjectConfigApplied,
+    RpcCommandArgument,
+    RpcCommandDescriptor,
     RpcCommandFinished,
+    RpcCommandsReported,
     RpcMessageSnapshot,
     RpcMessagesReported,
     RpcSessionSelected,
@@ -42,6 +45,7 @@ from wisp.events import (
     TrustRequested,
 )
 from wisp.rpc.commands import ApprovalScope
+from wisp.runtime.builtin_commands import builtin_command_descriptors
 from wisp.tui import (
     FullscreenTuiRenderer,
     LineTuiRenderer,
@@ -87,6 +91,32 @@ type EventBatch = list[KnownWispEvent]
 type ScriptedBatch = EventBatch | tuple[float, EventBatch]
 
 
+def rpc_builtin_command_descriptors() -> tuple[RpcCommandDescriptor, ...]:
+    return tuple(
+        RpcCommandDescriptor(
+            name=descriptor.name,
+            title=descriptor.title,
+            description=descriptor.description,
+            category=descriptor.category.value,
+            aliases=descriptor.aliases,
+            slash_command=descriptor.slash_command,
+            slash_aliases=descriptor.slash_aliases,
+            arguments=tuple(
+                RpcCommandArgument(
+                    name=argument.name,
+                    description=argument.description,
+                    required=argument.required,
+                )
+                for argument in descriptor.arguments
+            ),
+            accepts_arguments=descriptor.accepts_arguments,
+            prefill_on_partial_enter=descriptor.prefill_on_partial_enter,
+            order=descriptor.order,
+        )
+        for descriptor in builtin_command_descriptors()
+    )
+
+
 def completed_message(*, content: str) -> MessageCompleted:
     """Build a completed assistant message event for renderer tests."""
 
@@ -108,6 +138,7 @@ class ScriptedController:
         cancel_events: list[ScriptedBatch] | None = None,
         compact_events: list[ScriptedBatch] | None = None,
         configure_events: list[ScriptedBatch] | None = None,
+        commands_events: list[ScriptedBatch] | None = None,
         messages_events: list[ScriptedBatch] | None = None,
         sessions_events: list[ScriptedBatch] | None = None,
         select_session_events: list[ScriptedBatch] | None = None,
@@ -120,6 +151,7 @@ class ScriptedController:
         self.cancel_events = deque(cancel_events or [])
         self.compact_events = deque(compact_events or [])
         self.configure_events = deque(configure_events or [])
+        self.commands_events = deque(commands_events or [])
         self.messages_events = deque(messages_events or [])
         self.sessions_events = deque(sessions_events or [])
         self.select_session_events = deque(select_session_events or [])
@@ -133,6 +165,7 @@ class ScriptedController:
         self.trusts: list[tuple[str, bool, str | None, bool]] = []
         self.cancelled: list[str] = []
         self.configurations: list[tuple[str | None, str | None, str | None, bool]] = []
+        self.commands_requests: list[str] = []
         self.messages_requests: list[tuple[str, str | None, int, str | None]] = []
         self.sessions_requests: list[tuple[str, int]] = []
         self.selected_sessions: list[tuple[str, str]] = []
@@ -170,6 +203,25 @@ class ScriptedController:
         selected_id = command_id or f"session-stats-{len(self.session_stats_requests) + 1}"
         self.session_stats_requests.append(selected_id)
         await self._emit_scripted(self.session_stats_events, default=[])
+        return selected_id
+
+    async def get_commands(self, *, command_id: str | None = None) -> str:
+        selected_id = command_id or f"commands-{len(self.commands_requests) + 1}"
+        self.commands_requests.append(selected_id)
+        await self._emit_scripted(
+            self.commands_events,
+            default=[
+                RpcCommandsReported(
+                    command_id=selected_id,
+                    commands=rpc_builtin_command_descriptors(),
+                ),
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="get_commands",
+                    ok=True,
+                ),
+            ],
+        )
         return selected_id
 
     async def get_messages(
@@ -375,7 +427,9 @@ __all__ = [
     "ModelProviderAutoSwitched",
     "Path",
     "ProjectConfigApplied",
+    "RpcCommandDescriptor",
     "RpcCommandFinished",
+    "RpcCommandsReported",
     "RpcMessageSnapshot",
     "RpcMessagesReported",
     "ScriptedBatch",

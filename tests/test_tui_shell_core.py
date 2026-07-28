@@ -34,6 +34,7 @@ from wisp.events import (
     UsageCostRates,
 )
 from wisp.tui import auth_commands as tui_auth_commands_module
+from wisp.tui.commands import DEFAULT_TUI_COMMAND_CATALOG, TuiCommandCatalog
 from wisp.tui.history import (
     HistoricalToolCard,
     HistoricalTranscriptEntry,
@@ -707,6 +708,99 @@ def test_tui_shell_history_hydration_allows_legacy_renderer_without_hook() -> No
         await shell.run()
 
         assert controller.messages_requests == [("messages-1", None, 500, None)]
+
+    anyio.run(run)
+
+
+def test_tui_shell_hydrates_rpc_command_catalog_before_accepting_input() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.command_catalogs: list[TuiCommandCatalog] = []
+
+        def command_catalog_updated(self, catalog: TuiCommandCatalog) -> None:
+            self.command_catalogs.append(catalog)
+
+    async def run() -> None:
+        controller = ScriptedController(
+            commands_events=[
+                [
+                    RpcCommandsReported(
+                        command_id="commands-1",
+                        commands=(
+                            RpcCommandDescriptor(
+                                name="help",
+                                title="Runtime help",
+                                description="Show runtime help",
+                                category="general",
+                                aliases=("assist",),
+                                slash_command="/help",
+                                slash_aliases=("/assist",),
+                                order=1,
+                            ),
+                            RpcCommandDescriptor(
+                                name="extension-action",
+                                title="Extension action",
+                                description="No TUI handler",
+                                category="general",
+                                slash_command="/extension-action",
+                                order=2,
+                            ),
+                        ),
+                    ),
+                    RpcCommandFinished(
+                        command_id="commands-1",
+                        command_type="get_commands",
+                        ok=True,
+                    ),
+                ]
+            ]
+        )
+        renderer = RecordingRenderer()
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from([]),
+        )
+
+        await shell.run()
+
+        assert controller.commands_requests == ["commands-1"]
+        assert len(renderer.command_catalogs) == 1
+        assert renderer.command_catalogs[0].descriptors[0].title == "Runtime help"
+        assert renderer.command_catalogs[0].get("/assist").name == "help"
+        assert tuple(item.name for item in shell.command_catalog.descriptors) == ("help",)
+
+    anyio.run(run)
+
+
+def test_tui_shell_command_discovery_failure_keeps_builtin_catalog() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            commands_events=[
+                [
+                    RpcCommandFinished(
+                        command_id="commands-1",
+                        command_type="get_commands",
+                        ok=False,
+                        error="registry failed",
+                    )
+                ]
+            ]
+        )
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from([]),
+        )
+
+        await shell.run()
+
+        assert shell.command_catalog is DEFAULT_TUI_COMMAND_CATALOG
+        assert (
+            "Command discovery unavailable; using built-ins: registry failed" in output.getvalue()
+        )
 
     anyio.run(run)
 

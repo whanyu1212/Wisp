@@ -33,6 +33,7 @@ from wisp.events import (
     TrustRequested,
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
+from wisp.tui.commands import TuiCommandCatalog
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
     HistoricalToolCard,
@@ -118,6 +119,8 @@ class TuiRenderer(Protocol):
     def approval_all_confirmation(self, event: ToolApprovalRequested) -> None: ...
 
     def trust_request(self, event: TrustRequested) -> None: ...
+
+    def command_catalog_updated(self, catalog: TuiCommandCatalog) -> None: ...
 
     def model_picker_request(
         self,
@@ -298,6 +301,9 @@ class LineTuiRenderer:
             f"{_markup_escape(event.project_path)}\n"
             "Trusting lets Wisp load this project's local configuration."
         )
+
+    def command_catalog_updated(self, catalog: TuiCommandCatalog) -> None:
+        pass
 
     def model_picker_request(
         self,
@@ -672,6 +678,9 @@ class FullscreenTuiRenderer:
             style="yellow",
         )
         self._refresh()
+
+    def command_catalog_updated(self, catalog: TuiCommandCatalog) -> None:
+        pass
 
     def model_picker_request(
         self,
