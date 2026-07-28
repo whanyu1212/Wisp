@@ -699,6 +699,14 @@ def test_coding_session_persists_completion_before_exposing_it(
     assert repair.tool_call_id == "call-1"
     assert repair.content == INTERRUPTED_TOOL_RESULT_TEXT
     assert repair.is_error is True
+    repair_entry = next(
+        entry
+        for entry in session.read_entries()
+        if isinstance(entry, MessageSessionEntry)
+        and entry.message.tool_call_id == "call-1"
+        and entry.message.content == INTERRUPTED_TOOL_RESULT_TEXT
+    )
+    assert repair_entry.tool_result == ToolResultPresentationSnapshot(status="cancelled")
 
 
 def test_coding_session_does_not_persist_partial_assistant_on_generator_close(

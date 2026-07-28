@@ -802,7 +802,11 @@ class CodingSession:
         repair_plan = plan_interrupted_tool_repairs(replay.messages)
         if repair_plan.repairs:
             for repair in repair_plan.repairs:
-                self._queue_message(session, repair)
+                self._queue_message(
+                    session,
+                    repair,
+                    tool_result=ToolResultPresentationSnapshot(status="cancelled"),
+                )
             await self._flush_pending_entries()
             self._history_refresh_session_ids.add(session.session_id)
             replay = await self._read_context(session)
@@ -1163,7 +1167,12 @@ class CodingSession:
         """Persist synthetic repairs before the transcript crosses a new boundary."""
 
         for message in harness.repair_interrupted_tool_calls():
-            self._queue_message(session, message, operation_id=operation_id)
+            self._queue_message(
+                session,
+                message,
+                operation_id=operation_id,
+                tool_result=ToolResultPresentationSnapshot(status="cancelled"),
+            )
         await self._flush_pending_entries()
 
     async def _read_context(self, session: JsonlSession) -> SessionReplay:

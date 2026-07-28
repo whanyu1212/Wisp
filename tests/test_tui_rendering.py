@@ -8,6 +8,7 @@ from decimal import Decimal
 import pytest
 
 from tests.tui_support import *
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     ContextBudget,
     ContextEstimate,
@@ -196,6 +197,32 @@ def test_history_entries_from_rpc_messages_handles_orphan_and_missing_tool_resul
             is_error=True,
             status="cancelled",
             missing_result=True,
+        ),
+    )
+
+
+def test_history_entries_from_rpc_messages_marks_legacy_interrupted_repairs_cancelled() -> None:
+    entries = history_entries_from_rpc_messages(
+        (
+            _rpc_message(
+                "tool",
+                INTERRUPTED_TOOL_RESULT_TEXT,
+                entry_id="repair-1",
+                tool_call_id="call-1",
+                tool_name="read",
+                is_error=True,
+            ),
+        )
+    )
+
+    assert entries == (
+        HistoricalToolCard(
+            card_id="history:repair-1",
+            name="read",
+            arguments={},
+            output=INTERRUPTED_TOOL_RESULT_TEXT,
+            is_error=True,
+            status="cancelled",
         ),
     )
 

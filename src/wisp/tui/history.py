@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     JsonObject,
     RpcMessageSnapshot,
@@ -105,13 +106,16 @@ def _historical_tool_card(
     )
     tool_result = message.tool_result
     output = _content_for_history(message)
+    status = tool_result.status if tool_result is not None else None
+    if status is None and message.is_error and message.content == INTERRUPTED_TOOL_RESULT_TEXT:
+        status = "cancelled"
     return HistoricalToolCard(
         card_id=f"history:{message.entry_id}",
         name=message.tool_name or (tool_call.name if tool_call is not None else "unknown"),
         arguments=tool_call.arguments if tool_call is not None else {},
         output=output,
         is_error=bool(message.is_error),
-        status=tool_result.status if tool_result is not None else None,
+        status=status,
         exit_code=tool_result.exit_code if tool_result is not None else None,
         before_text=tool_result.before_text if tool_result is not None else None,
         created=tool_result.created if tool_result is not None else False,
