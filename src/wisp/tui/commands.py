@@ -18,6 +18,7 @@ class TuiSlashCommandName(StrEnum):
     logout = "logout"
     provider = "provider"
     model = "model"
+    resume = "resume"
     compact = "compact"
 
 
@@ -55,6 +56,7 @@ _ALIASES: dict[str, TuiSlashCommandName] = {
     "/logout": TuiSlashCommandName.logout,
     "/provider": TuiSlashCommandName.provider,
     "/model": TuiSlashCommandName.model,
+    "/resume": TuiSlashCommandName.resume,
     "/compact": TuiSlashCommandName.compact,
 }
 
@@ -88,6 +90,7 @@ SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec("/help", "Show the TUI commands"),
     SlashCommandSpec("/compact", "Compact the session context", takes_args=True),
     SlashCommandSpec("/model", "Show or switch the active model", takes_args=True),
+    SlashCommandSpec("/resume", "Browse or resume a previous session", takes_args=True),
     SlashCommandSpec("/provider", "Show or switch the active provider", takes_args=True),
     SlashCommandSpec("/auth", "Show credential status", takes_args=True),
     SlashCommandSpec("/login", "Log in to a provider", takes_args=True),

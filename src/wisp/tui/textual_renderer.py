@@ -23,6 +23,7 @@ from wisp.events import (
     MessageStarted,
     ProviderRetrying,
     RpcCommandFinished,
+    RpcSessionSummary,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
@@ -240,6 +241,18 @@ class TextualTuiRenderer:
             else:
                 self._render_historical_tool_card(entry)
 
+    def replace_history_entries(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+        *,
+        session_label: str,
+    ) -> None:
+        self._tool_started.clear()
+        self._tool_arguments.clear()
+        self.app.replace_transcript()
+        self.app.write_dim(f"resumed session: {session_label}")
+        self.render_history_entries(entries)
+
     def _render_historical_tool_card(self, entry: HistoricalToolCard) -> None:
         self.app.mount_tool_call(entry.card_id, entry.name, entry.arguments)
         status = historical_tool_status(entry)
@@ -353,6 +366,23 @@ class TextualTuiRenderer:
             current_model=current_model,
             current_effort=current_effort,
         )
+
+    def session_picker_request(
+        self,
+        sessions: tuple[RpcSessionSummary, ...],
+        *,
+        selected_session_id: str | None,
+    ) -> None:
+        self.app.show_session_picker(
+            sessions,
+            selected_session_id=selected_session_id,
+        )
+
+    def session_switch_started(self, session_id: str) -> None:
+        self.app.session_switch_started()
+
+    def session_switch_finished(self) -> None:
+        self.app.session_switch_finished()
 
     def event(self, event: KnownWispEvent) -> None:
         # Typed dispatch mirroring LineTuiRenderer.event() so tool calls, tool

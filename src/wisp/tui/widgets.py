@@ -31,7 +31,7 @@ from textual.widget import AwaitMount, Widget
 from textual.widgets import Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
-from wisp.events import ToolApprovalRequested, TrustRequested
+from wisp.events import RpcSessionSummary, ToolApprovalRequested, TrustRequested
 from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tui.commands import (
     MODEL_COMMAND_CLEAR_EFFORT_TOKEN,
@@ -834,6 +834,174 @@ class ModelPicker(Vertical):
             event.stop()
 
 
+class SessionPicker(Vertical):
+    """Interactive newest-first RPC session selector used by bare ``/resume``."""
+
+    DEFAULT_CSS = """
+    SessionPicker {
+        display: none;
+        height: auto;
+        max-height: 20;
+        margin: 0 1;
+        padding: 0 1;
+        border-left: heavy $accent;
+        background: $surface;
+    }
+
+    SessionPicker #session-picker-title {
+        height: 1;
+        color: $accent;
+        text-style: bold;
+    }
+
+    SessionPicker #session-picker-options {
+        height: auto;
+        max-height: 15;
+        border: none;
+        background: transparent;
+        padding: 0;
+    }
+
+    SessionPicker #session-picker-options > .option-list--option-highlighted {
+        background: $accent 30%;
+    }
+
+    SessionPicker #session-picker-hint {
+        height: 1;
+        color: $text-muted;
+        padding: 0 1;
+    }
+    """
+
+    class Selected(Message):
+        """One persisted session chosen for the shell's typed command path."""
+
+        def __init__(self, session_id: str) -> None:
+            super().__init__()
+            self.session_id = session_id
+
+    class Cancelled(Message):
+        """The picker was dismissed without changing session."""
+
+    def __init__(self, id: str | None = None) -> None:  # noqa: A002
+        super().__init__(id=id)
+        self._title = Static("Resume a session", id="session-picker-title", markup=False)
+        self._options = OptionList(id="session-picker-options")
+        self._hint = Static(
+            "enter select · esc cancel",
+            id="session-picker-hint",
+            markup=False,
+        )
+        self._rows: list[str] = []
+        self._submitted = False
+        self._opened_at = 0.0
+
+    def compose(self) -> ComposeResult:
+        yield self._title
+        yield self._options
+        yield self._hint
+
+    @property
+    def is_open(self) -> bool:
+        return self.display
+
+    def focus_options(self) -> None:
+        if self.is_open:
+            self._options.focus()
+
+    def move_highlight_page_up(self) -> None:
+        self._options.action_page_up()  # type: ignore[no-untyped-call]
+
+    def move_highlight_page_down(self) -> None:
+        self._options.action_page_down()  # type: ignore[no-untyped-call]
+
+    def move_highlight_first(self) -> None:
+        self._options.action_first()
+
+    def move_highlight_last(self) -> None:
+        self._options.action_last()
+
+    def show(
+        self,
+        sessions: tuple[RpcSessionSummary, ...],
+        *,
+        selected_session_id: str | None,
+    ) -> None:
+        self._submitted = False
+        self._opened_at = time.monotonic()
+        self._options.clear_options()
+        self._rows = []
+        selected_index: int | None = None
+        for index, session in enumerate(sessions):
+            current = session.session_id == selected_session_id
+            marker = "●" if current else " "
+            name = _truncate_to_cell_width(session.name or session.session_id[:12], 48)
+            updated = session.updated_at.isoformat(timespec="minutes")
+            path = _truncate_to_cell_width(str(session.session_path), 72)
+            label = f"{marker} {name} · {session.entry_count} entries · {updated}\n  {path}"
+            self._options.add_option(Option(label, id=session.session_id))
+            self._rows.append(session.session_id)
+            if current:
+                selected_index = index
+        if sessions:
+            self._options.highlighted = selected_index if selected_index is not None else 0
+            self._hint.update("enter select · esc cancel")
+        else:
+            self._options.add_option(Option("No persisted sessions found.", disabled=True))
+            self._hint.update("esc close")
+        self.display = True
+        self.focus_options()
+
+    def hide(self) -> None:
+        self.display = False
+        self._submitted = False
+
+    def submit_current_selection(self) -> None:
+        if self._submitted or not self.is_open:
+            return
+        highlighted = self._options.highlighted
+        if highlighted is None or highlighted >= len(self._rows):
+            return
+        self._submitted = True
+        self.post_message(self.Selected(self._rows[highlighted]))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list is not self._options:
+            return
+        event.stop()
+        if event.time < self._opened_at:
+            return
+        self.submit_current_selection()
+
+    def on_key(self, event: events.Key) -> None:
+        if not self.is_open:
+            return
+        if event.time < self._opened_at:
+            event.prevent_default()
+            event.stop()
+            return
+        if event.key == "escape":
+            self.post_message(self.Cancelled())
+            event.prevent_default()
+            event.stop()
+        elif event.key == "pageup":
+            self._options.action_page_up()  # type: ignore[no-untyped-call]
+            event.prevent_default()
+            event.stop()
+        elif event.key == "pagedown":
+            self._options.action_page_down()  # type: ignore[no-untyped-call]
+            event.prevent_default()
+            event.stop()
+        elif event.key == "home":
+            self._options.action_first()
+            event.prevent_default()
+            event.stop()
+        elif event.key == "end":
+            self._options.action_last()
+            event.prevent_default()
+            event.stop()
+
+
 class TranscriptEmptyState(Vertical):
     """Centered identity shown only while the transcript has no output.
 
@@ -986,6 +1154,14 @@ class Transcript(VerticalScroll):
             empty_state.display = False
             empty_state.remove()
         return self.mount(widget)
+
+    def clear_messages(self) -> None:
+        """Remove every mounted transcript item and restore tail-follow state."""
+
+        self._empty_state = None
+        self._follow = True
+        self.remove_children()
+        self.scroll_home(animate=False)
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         # Textual updates scroll_y as the position settles (including at the end

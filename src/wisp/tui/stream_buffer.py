@@ -87,6 +87,13 @@ class StreamCoalescer:
         if widget is not None:
             self._app.call_after_refresh(self._finalize, widget, final_text)
 
+    def discard(self) -> None:
+        """Forget an in-flight stream while replacing the owning transcript."""
+
+        self._text = ""
+        self._widget = None
+        self._refresh_pending = False
+
     async def _finalize(self, widget: StreamMessage, text: str) -> None:
         await self._follow_tail_after_content(widget, widget.set_content(text))
 

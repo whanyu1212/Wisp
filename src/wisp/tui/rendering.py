@@ -23,6 +23,7 @@ from wisp.events import (
     MessageCompleted,
     ProviderRetrying,
     RpcCommandFinished,
+    RpcSessionSummary,
     SessionCostSummary,
     SessionSaved,
     ToolApprovalRequested,
@@ -127,6 +128,24 @@ class TuiRenderer(Protocol):
         current_effort: str | None,
     ) -> None: ...
 
+    def session_picker_request(
+        self,
+        sessions: tuple[RpcSessionSummary, ...],
+        *,
+        selected_session_id: str | None,
+    ) -> None: ...
+
+    def session_switch_started(self, session_id: str) -> None: ...
+
+    def session_switch_finished(self) -> None: ...
+
+    def replace_history_entries(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+        *,
+        session_label: str,
+    ) -> None: ...
+
     def event(self, event: KnownWispEvent) -> None: ...
 
     def rpc_event_reader_failed(self, error: str) -> None: ...
@@ -192,6 +211,19 @@ class LineTuiRenderer:
                     highlight=False,
                 )
         flush_text()
+
+    def replace_history_entries(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+        *,
+        session_label: str,
+    ) -> None:
+        self.console.print(
+            f"--- resumed session: {session_label} ---",
+            markup=False,
+            highlight=False,
+        )
+        self.render_history_entries(entries)
 
     def queued_prompts_cleared(self) -> None:
         # No large-paste compact-echo cache in the text renderer; nothing to drop.
@@ -282,6 +314,27 @@ class LineTuiRenderer:
                 current_effort=current_effort,
             )
         )
+
+    def session_picker_request(
+        self,
+        sessions: tuple[RpcSessionSummary, ...],
+        *,
+        selected_session_id: str | None,
+    ) -> None:
+        self.console.print(
+            _render_session_listing_text(
+                sessions,
+                selected_session_id=selected_session_id,
+            ),
+            markup=False,
+            highlight=False,
+        )
+
+    def session_switch_started(self, session_id: str) -> None:
+        self.console.print(f"switching session: {session_id}", markup=False, highlight=False)
+
+    def session_switch_finished(self) -> None:
+        pass
 
     def event(self, event: KnownWispEvent) -> None:
         if isinstance(event, ProviderRetrying):
@@ -494,6 +547,20 @@ class FullscreenTuiRenderer:
             self._clamp_transcript_scroll()
             self._refresh()
 
+    def replace_history_entries(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+        *,
+        session_label: str,
+    ) -> None:
+        self.state.transcript.clear()
+        self.state.streaming_text = ""
+        self.state.transcript_scroll_offset = 0
+        self._append("session", f"resumed session: {session_label}", style="dim")
+        self.render_history_entries(entries)
+        if not entries:
+            self._refresh()
+
     def queued_prompts_cleared(self) -> None:
         # No large-paste compact-echo cache in the text renderer; nothing to drop.
         pass
@@ -616,6 +683,29 @@ class FullscreenTuiRenderer:
             ),
             style="cyan",
         )
+        self._refresh()
+
+    def session_picker_request(
+        self,
+        sessions: tuple[RpcSessionSummary, ...],
+        *,
+        selected_session_id: str | None,
+    ) -> None:
+        self._append(
+            "system",
+            _render_session_listing_text(
+                sessions,
+                selected_session_id=selected_session_id,
+            ),
+            style="cyan",
+        )
+        self._refresh()
+
+    def session_switch_started(self, session_id: str) -> None:
+        self.state.status = "switching session"
+        self._refresh()
+
+    def session_switch_finished(self) -> None:
         self._refresh()
 
     def scroll_transcript_up(self, amount: int | None = None) -> None:
@@ -1140,10 +1230,33 @@ def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? 
         "  /logout [provider]       remove stored provider credentials\n"
         "  /provider [provider]     show or switch provider for future prompts\n"
         "  /model [model]           show or switch model for future prompts\n"
+        "  /resume [session-id]     browse or resume a previous session\n"
         "  /quit, /exit             quit the TUI\n"
         "While a prompt or compaction is running, submitted input is queued as a follow-up.\n"
         f"{approval_hint}"
     )
+
+
+def _render_session_listing_text(
+    sessions: tuple[RpcSessionSummary, ...],
+    *,
+    selected_session_id: str | None,
+) -> str:
+    """Render the RPC-owned newest-first session catalog for non-Textual UIs."""
+
+    if not sessions:
+        return "No persisted sessions found."
+    lines = ["Sessions (newest first):"]
+    for session in sessions:
+        marker = "*" if session.session_id == selected_session_id else " "
+        label = session.name or session.session_id[:12]
+        updated = session.updated_at.isoformat(timespec="minutes")
+        lines.append(
+            f"{marker} {label}  {session.entry_count} entries  {updated}\n"
+            f"    {session.session_id}  {_compact_session_path(session.session_path)}"
+        )
+    lines.append("Resume with /resume <session-id>.")
+    return "\n".join(lines)
 
 
 def _wrap_transcript_line(line: str, *, width: int | None) -> list[str]:
