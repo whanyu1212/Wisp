@@ -31,6 +31,7 @@ from wisp.events import (
     TurnStarted,
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
+from wisp.tui.history import HistoricalTranscriptMessage
 from wisp.tui.rendering import (
     TuiViewSnapshot,
     _compaction_completed_text,
@@ -216,6 +217,13 @@ class TextualTuiRenderer:
         # Echo a compact line for large pastes (marker kept) while the model still
         # received the full expanded text via controller.prompt(prompt).
         self.app.write_user(self.app.compact_echo_for(prompt))
+
+    def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
+        for message in messages:
+            if message.role == "user":
+                self.app.write_user(message.content)
+            else:
+                self.app.write_assistant(message.content)
 
     def queued_prompts_cleared(self) -> None:
         # The shell dropped its queued follow-ups (cancel/quit/input-closed/error),

@@ -30,6 +30,8 @@ from wisp.events import (
     ModelProviderAutoSwitched,
     ProjectConfigApplied,
     RpcCommandFinished,
+    RpcMessageSnapshot,
+    RpcMessagesReported,
     SessionSaved,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -104,6 +106,7 @@ class ScriptedController:
         cancel_events: list[ScriptedBatch] | None = None,
         compact_events: list[ScriptedBatch] | None = None,
         configure_events: list[ScriptedBatch] | None = None,
+        messages_events: list[ScriptedBatch] | None = None,
         session_stats_events: list[ScriptedBatch] | None = None,
         shutdown_events: list[ScriptedBatch] | None = None,
         close_after_prompt: bool = False,
@@ -113,6 +116,7 @@ class ScriptedController:
         self.cancel_events = deque(cancel_events or [])
         self.compact_events = deque(compact_events or [])
         self.configure_events = deque(configure_events or [])
+        self.messages_events = deque(messages_events or [])
         self.session_stats_events = deque(session_stats_events or [])
         self.shutdown_events = deque(shutdown_events or [])
         self.close_after_prompt = close_after_prompt
@@ -123,6 +127,7 @@ class ScriptedController:
         self.trusts: list[tuple[str, bool, str | None, bool]] = []
         self.cancelled: list[str] = []
         self.configurations: list[tuple[str | None, str | None, str | None, bool]] = []
+        self.messages_requests: list[tuple[str, str | None, int, str | None]] = []
         self.session_stats_requests: list[str] = []
         self.shutdown_count = 0
         self.closed = False
@@ -157,6 +162,29 @@ class ScriptedController:
         selected_id = command_id or f"session-stats-{len(self.session_stats_requests) + 1}"
         self.session_stats_requests.append(selected_id)
         await self._emit_scripted(self.session_stats_events, default=[])
+        return selected_id
+
+    async def get_messages(
+        self,
+        *,
+        session_id: str | None = None,
+        limit: int = 200,
+        before_entry_id: str | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        selected_id = command_id or f"messages-{len(self.messages_requests) + 1}"
+        self.messages_requests.append((selected_id, session_id, limit, before_entry_id))
+        await self._emit_scripted(
+            self.messages_events,
+            default=[
+                RpcMessagesReported(command_id=selected_id),
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="get_messages",
+                    ok=True,
+                ),
+            ],
+        )
         return selected_id
 
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str:
@@ -293,6 +321,8 @@ __all__ = [
     "Path",
     "ProjectConfigApplied",
     "RpcCommandFinished",
+    "RpcMessageSnapshot",
+    "RpcMessagesReported",
     "ScriptedBatch",
     "ScriptedController",
     "SessionSaved",

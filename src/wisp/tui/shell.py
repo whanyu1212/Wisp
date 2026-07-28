@@ -6,7 +6,7 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 import anyio
 from anyio.streams.memory import MemoryObjectSendStream
@@ -28,6 +28,7 @@ from wisp.events import (
     ProjectConfigApplied,
     ProviderRetrying,
     RpcCommandFinished,
+    RpcMessagesReported,
     SessionSaved,
     SessionStatsReported,
     ToolApprovalRequested,
@@ -49,6 +50,11 @@ from wisp.tui.commands import (
     TuiSlashCommandError,
     TuiSlashCommandName,
     parse_tui_slash_command,
+)
+from wisp.tui.history import (
+    TUI_HISTORY_MESSAGE_LIMIT,
+    HistoricalTranscriptMessage,
+    history_from_rpc_messages,
 )
 from wisp.tui.launch import _stdin_is_interactive
 from wisp.tui.live import LiveFullscreenInputInterrupted
@@ -209,11 +215,14 @@ class TuiShell:
 
         self.renderer.startup()
         self._sync_view()
-        await self._request_session_stats()
         send, receive = anyio.create_memory_object_stream[_TuiSignal](100)
         async with anyio.create_task_group() as task_group, send, receive:
-            task_group.start_soon(self._read_inputs, send.clone())
             task_group.start_soon(self._read_rpc_events, send.clone())
+            if await self._hydrate_session_history(receive):
+                task_group.cancel_scope.cancel()
+                return
+            await self._request_session_stats()
+            task_group.start_soon(self._read_inputs, send.clone())
             while True:
                 signal = await receive.receive()
                 should_exit = await self._handle_signal(signal)
@@ -282,6 +291,40 @@ class TuiShell:
                 await send.send(_RpcEventsClosed(error=str(exc)))
             else:
                 await send.send(_RpcEventsClosed())
+
+    async def _hydrate_session_history(
+        self,
+        receive: anyio.abc.ObjectReceiveStream[_TuiSignal],
+    ) -> bool:
+        command_id = await self._request_session_history()
+        if command_id is None:
+            return False
+        rendered = False
+        while True:
+            signal = await receive.receive()
+            if isinstance(signal, _RpcEvent):
+                event = signal.event
+                if isinstance(event, RpcMessagesReported) and event.command_id == command_id:
+                    if not rendered:
+                        self._render_history(history_from_rpc_messages(event.messages))
+                        rendered = True
+                    continue
+                should_exit = await self._handle_rpc_event(event)
+                if should_exit:
+                    return True
+                if isinstance(event, RpcCommandFinished) and event.command_id == command_id:
+                    return False
+                continue
+            if isinstance(signal, _RpcEventsClosed):
+                return self._handle_rpc_closed(signal, pending_command_id=command_id)
+            if await self._handle_signal(signal):
+                return True
+
+    def _render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
+        render_history = getattr(self.renderer, "render_history", None)
+        if not callable(render_history):
+            return
+        cast(Callable[[tuple[HistoricalTranscriptMessage, ...]], None], render_history)(messages)
 
     async def _handle_signal(self, signal: _TuiSignal) -> bool:
         if isinstance(signal, _InputLine):
@@ -1014,7 +1057,24 @@ class TuiShell:
         except Exception as exc:  # noqa: BLE001 - stats are optional TUI chrome
             self.renderer.send_failed("session stats", exc)
 
-    def _handle_rpc_closed(self, signal: _RpcEventsClosed) -> bool:
+    async def _request_session_history(self) -> str | None:
+        get_messages = getattr(self.controller, "get_messages", None)
+        if not callable(get_messages):
+            return None
+        try:
+            return await cast(Callable[..., Awaitable[str]], get_messages)(
+                limit=TUI_HISTORY_MESSAGE_LIMIT
+            )
+        except Exception as exc:  # noqa: BLE001 - history is optional TUI chrome
+            self.renderer.send_failed("session history", exc)
+            return None
+
+    def _handle_rpc_closed(
+        self,
+        signal: _RpcEventsClosed,
+        *,
+        pending_command_id: str | None = None,
+    ) -> bool:
         self._update_view(status="error")
         if signal.error is not None:
             self.renderer.rpc_event_reader_failed(signal.error)
@@ -1026,6 +1086,8 @@ class TuiShell:
         elif self.pending_configures:
             command_id = next(iter(self.pending_configures))
             self.renderer.rpc_stream_ended_before_command(command_id)
+        elif pending_command_id is not None:
+            self.renderer.rpc_stream_ended_before_command(pending_command_id)
         elif self.state.shutdown_command_id is not None:
             self.renderer.rpc_stream_ended_before_shutdown(self.state.shutdown_command_id)
         elif signal.error is None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 
@@ -16,14 +17,18 @@ from wisp.events import (
     ContextEstimate,
     ContextEstimated,
     MessageCompleted,
+    MessageRole,
     MessageStarted,
     ProviderRetrying,
+    RpcMessageSnapshot,
+    RpcMessagesReported,
     SessionStatsReported,
     TokenUsage,
     UsageCost,
     UsageCostRates,
 )
 from wisp.tui import auth_commands as tui_auth_commands_module
+from wisp.tui.history import HistoricalTranscriptMessage
 from wisp.tui.state import TuiViewState
 
 
@@ -43,6 +48,23 @@ def _context_budget(
         remaining_tokens=None,
         estimated_percent=estimated / window * 100 if window else None,
         over_budget=False,
+    )
+
+
+def _rpc_message(
+    role: MessageRole,
+    content: str,
+    *,
+    entry_id: str,
+    content_truncated: bool = False,
+) -> RpcMessageSnapshot:
+    return RpcMessageSnapshot(
+        entry_id=entry_id,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        role=role,
+        content=content,
+        content_original_bytes=len(content.encode("utf-8")),
+        content_truncated=content_truncated,
     )
 
 
@@ -223,6 +245,205 @@ def test_tui_shell_updates_context_before_suppressing_streamed_completion() -> N
         assert renderer.snapshots[-1].context is not None
         assert renderer.snapshots[-1].context.observed_tokens == 12_000
         assert renderer.snapshots[-1].context.observed_is_current is True
+
+    anyio.run(run)
+
+
+def test_tui_shell_hydrates_resume_history_before_reading_prompt() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.calls: list[str] = []
+            self.histories: list[tuple[HistoricalTranscriptMessage, ...]] = []
+
+        def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
+            self.calls.append("history")
+            self.histories.append(messages)
+
+        def running(self) -> None:
+            self.calls.append("running")
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        controller = ScriptedController(
+            [
+                [
+                    completed_message(content="live answer"),
+                    RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
+                ]
+            ],
+            messages_events=[
+                [
+                    RpcMessagesReported(
+                        command_id="messages-1",
+                        messages=(
+                            _rpc_message("user", "old prompt", entry_id="user-1"),
+                            _rpc_message("assistant", "old answer", entry_id="assistant-1"),
+                        ),
+                    ),
+                    RpcCommandFinished(
+                        command_id="messages-1",
+                        command_type="get_messages",
+                        ok=True,
+                    ),
+                ]
+            ],
+        )
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from(["new prompt"]),
+        )
+
+        await shell.run()
+
+        assert controller.messages_requests == [("messages-1", None, 500, None)]
+        assert controller.prompts == ["new prompt"]
+        assert renderer.calls[:2] == ["history", "running"]
+        assert [(message.role, message.content) for message in renderer.histories[0]] == [
+            ("user", "old prompt"),
+            ("assistant", "old answer"),
+        ]
+
+    anyio.run(run)
+
+
+def test_tui_shell_ignores_wrong_and_duplicate_history_reports() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.histories: list[tuple[HistoricalTranscriptMessage, ...]] = []
+
+        def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
+            self.histories.append(messages)
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        controller = ScriptedController(
+            messages_events=[
+                [
+                    RpcMessagesReported(
+                        command_id="other",
+                        messages=(_rpc_message("user", "wrong", entry_id="wrong"),),
+                    ),
+                    RpcMessagesReported(
+                        command_id="messages-1",
+                        messages=(_rpc_message("user", "right", entry_id="right"),),
+                    ),
+                    RpcMessagesReported(
+                        command_id="messages-1",
+                        messages=(_rpc_message("user", "duplicate", entry_id="duplicate"),),
+                    ),
+                    RpcCommandFinished(
+                        command_id="messages-1",
+                        command_type="get_messages",
+                        ok=True,
+                    ),
+                ]
+            ]
+        )
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from([]),
+        )
+
+        await shell.run()
+
+        assert len(renderer.histories) == 1
+        assert [(message.role, message.content) for message in renderer.histories[0]] == [
+            ("user", "right")
+        ]
+
+    anyio.run(run)
+
+
+def test_tui_shell_history_hydration_allows_legacy_renderer_without_hook() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            messages_events=[
+                [
+                    RpcMessagesReported(
+                        command_id="messages-1",
+                        messages=(_rpc_message("user", "old prompt", entry_id="user-1"),),
+                    ),
+                    RpcCommandFinished(
+                        command_id="messages-1",
+                        command_type="get_messages",
+                        ok=True,
+                    ),
+                ]
+            ]
+        )
+        renderer = LineTuiRenderer(_console()[0])
+        renderer.render_history = None  # type: ignore[method-assign]
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from([]),
+        )
+
+        await shell.run()
+
+        assert controller.messages_requests == [("messages-1", None, 500, None)]
+
+    anyio.run(run)
+
+
+def test_tui_shell_skips_history_hydration_for_legacy_controller_without_get_messages() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        controller.get_messages = None  # type: ignore[method-assign]
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from([]),
+        )
+
+        await shell.run()
+
+        assert "failed to send session history" not in output.getvalue()
+        assert controller.session_stats_requests == ["session-stats-1"]
+
+    anyio.run(run)
+
+
+def test_tui_shell_history_failure_does_not_block_input() -> None:
+    async def run() -> None:
+        controller = ScriptedController(
+            [
+                [
+                    completed_message(content="answer"),
+                    RpcCommandFinished(command_id="prompt-1", command_type="prompt", ok=True),
+                ]
+            ],
+            messages_events=[
+                [
+                    ErrorEvent(message="history failed"),
+                    RpcCommandFinished(
+                        command_id="messages-1",
+                        command_type="get_messages",
+                        ok=False,
+                        error="history failed",
+                    ),
+                ]
+            ],
+        )
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=await _reader_from(["hello"]),
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert controller.prompts == ["hello"]
+        assert "error: history failed" in rendered
+        assert "command failed: history failed" in rendered
+        assert "answer" in rendered
 
     anyio.run(run)
 
