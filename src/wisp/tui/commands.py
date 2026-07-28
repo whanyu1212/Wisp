@@ -7,6 +7,9 @@ import shlex
 from dataclasses import dataclass
 from enum import StrEnum
 
+from wisp.runtime.builtin_commands import builtin_command_descriptors
+from wisp.runtime.commands import CommandDescriptor, CommandRegistry, UnknownCommandError
+
 
 class TuiSlashCommandName(StrEnum):
     """Built-in TUI slash commands."""
@@ -46,21 +49,6 @@ class TuiSlashCommandError(ValueError):
     """Raised when a slash command is syntactically invalid."""
 
 
-_ALIASES: dict[str, TuiSlashCommandName] = {
-    "/help": TuiSlashCommandName.help,
-    "/quit": TuiSlashCommandName.quit,
-    "/exit": TuiSlashCommandName.quit,
-    ":q": TuiSlashCommandName.quit,
-    "/auth": TuiSlashCommandName.auth,
-    "/login": TuiSlashCommandName.login,
-    "/logout": TuiSlashCommandName.logout,
-    "/provider": TuiSlashCommandName.provider,
-    "/model": TuiSlashCommandName.model,
-    "/resume": TuiSlashCommandName.resume,
-    "/compact": TuiSlashCommandName.compact,
-}
-
-
 @dataclass(frozen=True)
 class SlashCommandSpec:
     """A user-facing slash command for the inline completion menu.
@@ -83,24 +71,23 @@ class SlashCommandSpec:
     prefill_on_partial_enter: bool = False
 
 
+_COMMAND_REGISTRY = CommandRegistry(builtin_command_descriptors())
+
+
+def _slash_spec_from_descriptor(descriptor: CommandDescriptor) -> SlashCommandSpec:
+    return SlashCommandSpec(
+        descriptor.slash_command,
+        descriptor.description,
+        takes_args=descriptor.accepts_arguments,
+        prefill_on_partial_enter=descriptor.prefill_on_partial_enter,
+    )
+
+
 # Ordered for display: the everyday commands first, session/auth after. Only
 # user-facing spellings appear (aliases like /exit, :q are still parsed, but the
 # menu shows one canonical entry per command).
-SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
-    SlashCommandSpec("/help", "Show the TUI commands"),
-    SlashCommandSpec("/compact", "Compact the session context", takes_args=True),
-    SlashCommandSpec("/model", "Show or switch the active model", takes_args=True),
-    SlashCommandSpec("/resume", "Browse or resume a previous session", takes_args=True),
-    SlashCommandSpec("/provider", "Show or switch the active provider", takes_args=True),
-    SlashCommandSpec("/auth", "Show credential status", takes_args=True),
-    SlashCommandSpec("/login", "Log in to a provider", takes_args=True),
-    SlashCommandSpec(
-        "/logout",
-        "Remove stored credentials",
-        takes_args=True,
-        prefill_on_partial_enter=True,
-    ),
-    SlashCommandSpec("/quit", "Quit the TUI"),
+SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = tuple(
+    _slash_spec_from_descriptor(descriptor) for descriptor in _COMMAND_REGISTRY.all()
 )
 
 
@@ -138,14 +125,15 @@ def parse_tui_slash_command(text: str) -> TuiSlashCommand | None:
     # (`/todo remember "this`). So decide what the line *is* from the bare first
     # word first, and only shlex the paths that are actually commands.
     first_word = stripped.split(maxsplit=1)[0]
-    name = _ALIASES.get(first_word)
-    if name is None:
+    try:
+        descriptor = _COMMAND_REGISTRY.get(first_word)
+    except UnknownCommandError:
         # Not a known command. It's a mistyped-command error only when the WHOLE
         # input is a lone `/word`; any slash word followed by more (words, a path,
         # a quote) is a literal prompt and passes through as None to the model —
         # never touching shlex.
         if _COMMAND_ATTEMPT.match(stripped):
-            raise TuiSlashCommandError(f"Unknown command: {first_word}")
+            raise TuiSlashCommandError(f"Unknown command: {first_word}") from None
         return None
 
     # Known command: now tokenize for args. A quote error here IS a command error
@@ -154,7 +142,7 @@ def parse_tui_slash_command(text: str) -> TuiSlashCommand | None:
         parts = shlex.split(stripped)
     except ValueError as exc:
         raise TuiSlashCommandError(str(exc)) from exc
-    return TuiSlashCommand(name=name, args=tuple(parts[1:]))
+    return TuiSlashCommand(name=TuiSlashCommandName(descriptor.name), args=tuple(parts[1:]))
 
 
 __all__ = [

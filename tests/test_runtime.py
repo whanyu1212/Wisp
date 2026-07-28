@@ -8,6 +8,8 @@ from wisp.providers.fake import FakeProvider
 from wisp.providers.openai import OpenAIProvider
 from wisp.retry import RetryPolicy
 from wisp.runtime import (
+    CommandDescriptor,
+    CommandRegistry,
     EventBus,
     ExtensionAPI,
     ProviderRegistry,
@@ -69,42 +71,87 @@ def test_tool_registry_raises_for_unknown_tool() -> None:
 def test_extension_api_registers_provider_and_tool() -> None:
     providers = ProviderRegistry()
     tools = ToolRegistry()
+    commands = CommandRegistry()
     event_bus = EventBus()
-    api = ExtensionAPI(providers=providers, tools=tools, events=event_bus)
+    api = ExtensionAPI(providers=providers, tools=tools, commands=commands, events=event_bus)
 
     api.register_provider(FakeProvider())
     api.register_tool(ReadTool())
+    api.register_command(
+        CommandDescriptor(
+            name="help",
+            title="Help",
+            description="Show help",
+        )
+    )
 
     assert providers.names() == ("fake",)
     assert tools.names() == ("read",)
+    assert commands.names() == ("help",)
 
 
 def test_activate_extensions_runs_extension_factories() -> None:
-    async def run() -> tuple[str, ...]:
+    async def run() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
         providers = ProviderRegistry()
         tools = ToolRegistry()
+        commands = CommandRegistry()
         event_bus = EventBus()
-        api = ExtensionAPI(providers=providers, tools=tools, events=event_bus)
+        api = ExtensionAPI(providers=providers, tools=tools, commands=commands, events=event_bus)
 
         def extension(api: ExtensionAPI) -> None:
             api.register_provider(FakeProvider())
             api.register_tool(ReadTool())
+            api.register_command(
+                CommandDescriptor(
+                    name="help",
+                    title="Help",
+                    description="Show help",
+                )
+            )
 
         await activate_extensions(api, [extension])
-        return providers.names(), tools.names()
+        return providers.names(), tools.names(), commands.names()
 
-    assert anyio.run(run) == (("fake",), ("read",))
+    assert anyio.run(run) == (("fake",), ("read",), ("help",))
 
 
-def test_build_runtime_activates_builtin_providers_and_tools() -> None:
-    async def run() -> tuple[tuple[str, ...], tuple[str, ...]]:
+def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
+    async def run() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
         runtime = await build_runtime()
-        return runtime.providers.names(), runtime.tools.names()
+        return runtime.providers.names(), runtime.tools.names(), runtime.commands.names()
 
     assert anyio.run(run) == (
         ("fake", "openai", "openai-codex", "anthropic", "google"),
         ("read", "write", "edit", "bash", "grep", "find", "ls"),
+        ("help", "compact", "model", "resume", "provider", "auth", "login", "logout", "quit"),
     )
+
+
+def test_direct_runtime_construction_uses_extension_api_command_registry() -> None:
+    async def run() -> tuple[str, ...]:
+        template = await build_runtime()
+        providers = ProviderRegistry()
+        tools = ToolRegistry()
+        events = EventBus()
+        api = ExtensionAPI(providers=providers, tools=tools, events=events)
+        runtime = WispRuntime(
+            providers=providers,
+            tools=tools,
+            events=events,
+            api=api,
+            models=template.models,
+        )
+
+        api.register_command(
+            CommandDescriptor(
+                name="help",
+                title="Help",
+                description="Show help",
+            )
+        )
+        return runtime.commands.names()
+
+    assert anyio.run(run) == ("help",)
 
 
 def test_build_runtime_passes_retry_policy_to_builtin_providers() -> None:

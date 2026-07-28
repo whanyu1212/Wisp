@@ -11,6 +11,7 @@ from wisp.providers.openai import OpenAIProvider
 from wisp.providers.openai_codex import OpenAICodexProvider
 from wisp.retry import RetryPolicy
 from wisp.runtime.api import ExtensionAPI
+from wisp.runtime.builtin_commands import builtin_command_descriptors
 from wisp.tools.builtin import builtin_tools
 
 
@@ -36,3 +37,5 @@ def activate(
     api.register_provider(GoogleProvider(retry_policy=retry_policy))
     for tool in builtin_tools():
         api.register_tool(tool)
+    for command in builtin_command_descriptors():
+        api.register_command(command)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from wisp.runtime.builtin_commands import builtin_command_descriptors
 from wisp.tui.commands import (
     SLASH_COMMAND_SPECS,
     TuiSlashCommandError,
@@ -71,6 +72,19 @@ def test_resume_command_parses_and_is_available_in_slash_menu() -> None:
     assert selected.name is TuiSlashCommandName.resume
     assert selected.args == ("session-123",)
     assert spec.takes_args is True
+
+
+def test_slash_command_specs_project_shared_builtin_descriptors() -> None:
+    descriptors = builtin_command_descriptors()
+
+    assert tuple(spec.command for spec in SLASH_COMMAND_SPECS) == tuple(
+        descriptor.slash_command for descriptor in descriptors
+    )
+    assert tuple(spec.description for spec in SLASH_COMMAND_SPECS) == tuple(
+        descriptor.description for descriptor in descriptors
+    )
+    assert "/exit" not in {spec.command for spec in SLASH_COMMAND_SPECS}
+    assert ":q" not in {spec.command for spec in SLASH_COMMAND_SPECS}
 
 
 def test_parse_tui_slash_command_aliases_quit() -> None:
