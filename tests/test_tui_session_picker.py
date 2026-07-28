@@ -92,6 +92,25 @@ def test_session_picker_escape_restores_draft_without_submission() -> None:
     assert open_ is False
 
 
+def test_session_picker_ctrl_c_restores_draft_without_interrupting() -> None:
+    async def scenario() -> tuple[str, bool, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            editor = app.query_one("#input", PromptEditor)
+            editor.value = "keep me too"
+            renderer.session_picker_request((_session("target"),), selected_session_id=None)
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            picker = app.query_one("#session-picker", SessionPicker)
+            return editor.value, editor.has_focus, picker.is_open
+
+    draft, focused, open_ = anyio.run(scenario)
+    assert draft == "keep me too"
+    assert focused is True
+    assert open_ is False
+
+
 def test_session_picker_empty_catalog_is_dismissible() -> None:
     async def scenario() -> tuple[int, bool, bool]:
         app, renderer = create_textual_tui()

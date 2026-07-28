@@ -798,6 +798,12 @@ class TextualTui(App[None]):
             self.notify("Copied selection to clipboard.")
 
     def action_interrupt(self) -> None:
+        # The session picker is a transient decision overlay, not active agent
+        # work. Treat ctrl+c as picker cancellation so the hidden composer draft
+        # is restored instead of queueing KeyboardInterrupt and clearing it.
+        if self._session_picker is not None and self._session_picker.is_open:
+            self.hide_session_picker()
+            return
         # If the prompt editor owns the keystroke AND has selected text, ctrl+c
         # means "copy", not "interrupt". Because this binding is priority=True (so
         # it fires before TextArea's own handler and would otherwise swallow copy),
