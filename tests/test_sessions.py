@@ -202,7 +202,7 @@ def test_session_names_are_normalized_cleared_and_latest_wins(tmp_path: Path) ->
     assert session.read_name() is None
     entries = session.read_entries()
     info_entries = [entry for entry in entries if isinstance(entry, SessionInfoSessionEntry)]
-    assert [entry.schema_version for entry in info_entries] == [3, 3, 3]
+    assert [entry.schema_version for entry in info_entries] == [4, 4, 4]
     assert [entry.name for entry in info_entries] == [
         "alpha beta",
         "alpha beta",
@@ -1044,7 +1044,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
         "event",
         "compaction",
     ]
-    assert [record["schema_version"] for record in records] == [3, 3, 3, 3, 3]
+    assert [record["schema_version"] for record in records] == [4, 4, 4, 4, 4]
     assert [record["parent_id"] for record in records] == [
         None,
         records[0]["id"],
@@ -1153,7 +1153,7 @@ def test_session_upgrades_v1_entries_to_a_parent_chain_without_rewriting(tmp_pat
 
     entries = JsonlSessionStore(tmp_path).load(path).read_entries()
 
-    assert [entry.schema_version for entry in entries] == [3, 3]
+    assert [entry.schema_version for entry in entries] == [4, 4]
     assert [entry.parent_id for entry in entries if isinstance(entry, MessageSessionEntry)] == [
         None,
         "first",
@@ -1196,6 +1196,37 @@ def test_session_accepts_v2_entries_with_omitted_null_structural_references(
         assert isinstance(loaded, ActiveLeafSessionEntry)
         assert loaded.previous_leaf_id is None
         assert loaded.active_leaf_id is None
+
+
+def test_session_upgrades_v3_entries_but_rejects_v4_tool_result_field(
+    tmp_path: Path,
+) -> None:
+    legacy_path = tmp_path / "v3-message.jsonl"
+    legacy_entry = {
+        "schema_version": 3,
+        "id": "message",
+        "session_id": "session",
+        "kind": "message",
+        "message": {"role": "tool", "content": "ok", "tool_call_id": "call-1"},
+        "created_at": "2026-07-11T00:00:00Z",
+    }
+    legacy_path.write_text(f"{json.dumps(legacy_entry)}\n", encoding="utf-8")
+
+    loaded = JsonlSessionStore(tmp_path).load(legacy_path).read_entries()[0]
+
+    assert isinstance(loaded, MessageSessionEntry)
+    assert loaded.schema_version == 4
+    assert loaded.tool_result is None
+
+    malformed_path = tmp_path / "v3-tool-result.jsonl"
+    malformed_entry = legacy_entry | {
+        "id": "bad-message",
+        "tool_result": {"status": "done"},
+    }
+    malformed_path.write_text(f"{json.dumps(malformed_entry)}\n", encoding="utf-8")
+
+    with pytest.raises(MalformedSessionEntryError, match="cannot include tool_result"):
+        JsonlSessionStore(tmp_path).load(malformed_path).read_entries()
 
 
 def test_session_rejects_v2_session_info_entries(tmp_path: Path) -> None:
@@ -1315,7 +1346,7 @@ def test_session_rejects_malformed_event_only_on_typed_access(tmp_path: Path) ->
     ("schema_version", "error_type", "match"),
     [
         ("1", MalformedSessionEntryError, "must be an integer"),
-        (4, UnsupportedSessionEntryVersionError, "schema_version 4"),
+        (5, UnsupportedSessionEntryVersionError, "schema_version 5"),
     ],
 )
 def test_session_distinguishes_malformed_and_future_entry_versions(

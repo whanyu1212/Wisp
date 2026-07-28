@@ -1672,7 +1672,7 @@ def _summary_entry_metadata_from_json(
         return _v1_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
     if version == 2:
         return _v2_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
-    if version != SESSION_ENTRY_SCHEMA_VERSION:
+    if version not in {3, SESSION_ENTRY_SCHEMA_VERSION}:
         raise UnsupportedSessionEntryVersionError(
             f"Unsupported session entry schema_version {version}{location}; "
             f"expected {SESSION_ENTRY_SCHEMA_VERSION}"
