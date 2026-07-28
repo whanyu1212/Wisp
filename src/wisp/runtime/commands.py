@@ -161,7 +161,7 @@ class CommandRegistry:
 
 
 def _normalize_identifier(identifier: str) -> str:
-    if identifier.startswith("/"):
+    if identifier.startswith("/") and _COMMAND_NAME_RE.fullmatch(identifier[1:]):
         return identifier[1:]
     return identifier
 

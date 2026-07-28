@@ -38,7 +38,11 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             arguments=(
                 CommandArgument(
                     name="model",
-                    description="Optional model id and effort tier",
+                    description="Optional model id",
+                ),
+                CommandArgument(
+                    name="effort",
+                    description="Optional effort tier or '-' to clear",
                 ),
             ),
             accepts_arguments=True,
@@ -95,6 +99,10 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
                 CommandArgument(
                     name="provider",
                     description="Optional provider name",
+                ),
+                CommandArgument(
+                    name="method",
+                    description="Optional login method, such as device-code",
                 ),
             ),
             accepts_arguments=True,

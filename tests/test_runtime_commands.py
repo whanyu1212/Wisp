@@ -10,6 +10,7 @@ from wisp.runtime import (
     DuplicateCommandError,
     UnknownCommandError,
 )
+from wisp.runtime.builtin_commands import builtin_command_descriptors
 
 
 def _command(
@@ -88,6 +89,13 @@ def test_command_registry_resolves_names_slash_names_and_aliases() -> None:
     assert registry.get(":q").name == "quit"
 
 
+def test_command_registry_does_not_slash_normalize_special_aliases() -> None:
+    registry = CommandRegistry((_command("quit", aliases=("exit", ":q")),))
+
+    with pytest.raises(UnknownCommandError):
+        registry.get("/:q")
+
+
 def test_command_registry_returns_deterministic_order() -> None:
     registry = CommandRegistry(
         (
@@ -150,3 +158,16 @@ def test_command_registry_raises_for_unknown_command() -> None:
 
     with pytest.raises(UnknownCommandError, match="Unknown command: /missing"):
         registry.get("/missing")
+
+
+def test_builtin_command_descriptors_capture_supported_arguments() -> None:
+    descriptors = {descriptor.name: descriptor for descriptor in builtin_command_descriptors()}
+
+    assert tuple(argument.name for argument in descriptors["model"].arguments) == (
+        "model",
+        "effort",
+    )
+    assert tuple(argument.name for argument in descriptors["login"].arguments) == (
+        "provider",
+        "method",
+    )

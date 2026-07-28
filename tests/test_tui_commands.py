@@ -92,6 +92,7 @@ def test_parse_tui_slash_command_aliases_quit() -> None:
     assert parse_tui_slash_command("/exit").name is TuiSlashCommandName.quit  # type: ignore[union-attr]
     assert parse_tui_slash_command(":q") is not None
     assert parse_tui_slash_command(":q").name is TuiSlashCommandName.quit  # type: ignore[union-attr]
+    assert parse_tui_slash_command("/:q") is None
 
 
 def test_parse_tui_slash_command_rejects_unknown_command() -> None:
