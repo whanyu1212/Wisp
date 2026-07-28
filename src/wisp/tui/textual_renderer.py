@@ -35,6 +35,7 @@ from wisp.tui.history import (
     HistoricalToolCard,
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
+    historical_tool_status,
 )
 from wisp.tui.rendering import (
     TuiViewSnapshot,
@@ -241,17 +242,17 @@ class TextualTuiRenderer:
 
     def _render_historical_tool_card(self, entry: HistoricalToolCard) -> None:
         self.app.mount_tool_call(entry.card_id, entry.name, entry.arguments)
-        if entry.missing_result:
+        status = historical_tool_status(entry)
+        if status in {"cancelled", "denied"}:
             self.app.resolve_tool_call(
                 entry.card_id,
-                "cancelled",
+                status,
                 detail=entry.output,
             )
             return
-        failed = tool_result_failed(entry.is_error, entry.exit_code)
         self.app.resolve_tool_call(
             entry.card_id,
-            "error" if failed else "done",
+            status,
             detail=render_tool_result(
                 entry.name,
                 entry.arguments,

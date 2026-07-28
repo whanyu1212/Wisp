@@ -194,6 +194,7 @@ def test_history_entries_from_rpc_messages_handles_orphan_and_missing_tool_resul
             arguments={"pattern": "x"},
             output="No persisted tool result.",
             is_error=True,
+            status="cancelled",
             missing_result=True,
         ),
     )

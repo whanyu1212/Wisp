@@ -1320,6 +1320,7 @@ def _rpc_tool_result_snapshot(
         )
         before_text = None if before_text_truncated else clipped_before_text
     return RpcMessageToolResultSnapshot(
+        status=tool_result.status,
         exit_code=tool_result.exit_code,
         before_text=before_text,
         created=tool_result.created,

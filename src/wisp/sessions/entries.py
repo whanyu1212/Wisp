@@ -24,6 +24,7 @@ from wisp.events import (
     JsonObject,
     JsonObjectAdapter,
     KnownWispEvent,
+    ToolPresentationStatus,
     utc_now,
     wisp_event_from_dict,
 )
@@ -64,6 +65,7 @@ class ToolResultPresentationSnapshot(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
+    status: ToolPresentationStatus | None = None
     exit_code: int | None = None
     before_text: str | None = None
     created: bool = False

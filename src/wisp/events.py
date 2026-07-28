@@ -40,6 +40,7 @@ RetryReason = Literal["network", "timeout", "rate_limit", "server_error", "trans
 CompactionReason = Literal["manual", "threshold", "overflow"]
 QueueMode = Literal["one_at_a_time", "all"]
 QueueKind = Literal["steering", "follow_up"]
+ToolPresentationStatus = Literal["done", "error", "denied", "cancelled"]
 
 
 def utc_now() -> datetime:
@@ -290,6 +291,7 @@ class RpcMessageToolResultSnapshot(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    status: ToolPresentationStatus | None = None
     exit_code: int | None = None
     before_text: str | None = None
     created: bool = False
@@ -768,6 +770,17 @@ class RpcMessagesReported(WispEvent):
                 "RPC message reports cannot include next_before_entry_id unless truncated"
             )
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION:
+            messages = data.get("messages")
+            if isinstance(messages, list):
+                for message in messages:
+                    if isinstance(message, dict):
+                        message.pop("tool_result", None)
+        return data
 
 
 class RpcSessionsReported(WispEvent):

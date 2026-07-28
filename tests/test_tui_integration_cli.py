@@ -981,6 +981,31 @@ def test_textual_tui_renderer_renders_historical_tool_cards() -> None:
     assert "[red]boom[/red]" in rendered
 
 
+def test_textual_tui_renderer_preserves_historical_denied_tool_cards() -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.render_history_entries(
+                (
+                    HistoricalToolCard(
+                        card_id="history:tool-1",
+                        name="write",
+                        arguments={"path": "x.py"},
+                        output="too risky",
+                        is_error=True,
+                        status="denied",
+                    ),
+                )
+            )
+            await pilot.pause()
+            return "\n".join(_transcript_texts(app_instance))
+
+    rendered = anyio.run(scenario)
+    assert "⊘ write" in rendered
+    assert "too risky" in rendered
+    assert "✗ write" not in rendered
+
+
 def _render_events_to_transcript(events: list[object]) -> str:
     # Drive TextualTuiRenderer.event() through a live app and return the plain
     # text of every mounted transcript message.

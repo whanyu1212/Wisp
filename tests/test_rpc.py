@@ -366,8 +366,10 @@ def test_rpc_messages_tool_result_metadata_requires_schema_v22() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
+    payload = json.loads(event.model_dump_json())
+    payload["schema_version"] = 21
     with pytest.raises(ValueError, match="tool-result metadata requires schema_version 22"):
-        wisp_event_from_json(event.model_copy(update={"schema_version": 21}).model_dump_json())
+        wisp_event_from_json(json.dumps(payload))
     with pytest.raises(ValueError, match="valid only on tool messages"):
         RpcMessageSnapshot(
             entry_id="entry-2",
@@ -377,6 +379,31 @@ def test_rpc_messages_tool_result_metadata_requires_schema_v22() -> None:
             content_original_bytes=10,
             tool_result=RpcMessageToolResultSnapshot(summary="invalid"),
         )
+
+
+def test_rpc_messages_tool_result_metadata_strips_from_legacy_serialization() -> None:
+    event = RpcMessagesReported(
+        command_id="messages-1",
+        messages=(
+            RpcMessageSnapshot(
+                entry_id="entry-1",
+                created_at=datetime(2026, 7, 28, tzinfo=UTC),
+                role="tool",
+                content="denied",
+                content_original_bytes=6,
+                tool_call_id="call-1",
+                tool_name="write",
+                is_error=True,
+                tool_result=RpcMessageToolResultSnapshot(status="denied"),
+            ),
+        ),
+    )
+    legacy = event.model_copy(update={"schema_version": 21})
+
+    payload = json.loads(legacy.model_dump_json())
+
+    assert "tool_result" not in payload["messages"][0]
+    assert wisp_event_from_json(json.dumps(payload)).schema_version == 21
 
 
 def test_rpc_sessions_report_round_trips_only_at_schema_v18() -> None:

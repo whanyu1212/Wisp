@@ -37,6 +37,7 @@ from wisp.tui.history import (
     HistoricalToolCard,
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
+    historical_tool_status,
 )
 
 
@@ -183,9 +184,10 @@ class LineTuiRenderer:
                 pending_text.append(entry)
             else:
                 flush_text()
-                status = "✗" if entry.is_error or entry.exit_code not in {None, 0} else "✓"
+                status = historical_tool_status(entry)
+                glyph = _HISTORICAL_TOOL_GLYPHS[status]
                 self.console.print(
-                    f"{status} historical tool {entry.name}: {_historical_tool_line(entry)}",
+                    f"{glyph} historical tool {entry.name}: {_historical_tool_line(entry)}",
                     markup=False,
                     highlight=False,
                 )
@@ -479,7 +481,8 @@ class FullscreenTuiRenderer:
                 pending_text.append(entry)
             else:
                 flush_text()
-                style = "red" if entry.is_error or entry.exit_code not in {None, 0} else "cyan"
+                status = historical_tool_status(entry)
+                style = _HISTORICAL_TOOL_STYLES[status]
                 self._append(
                     "tool",
                     f"{entry.name}: {_historical_tool_line(entry)}",
@@ -1159,8 +1162,11 @@ def _first_line(text: str) -> str:
 
 
 def _historical_tool_line(entry: HistoricalToolCard) -> str:
-    if entry.missing_result:
+    status = historical_tool_status(entry)
+    if status == "cancelled":
         return "no persisted result"
+    if status == "denied":
+        return _first_line(entry.output)
     if entry.summary:
         return entry.summary
     if entry.exit_code not in {None, 0}:
@@ -1170,6 +1176,21 @@ def _historical_tool_line(entry: HistoricalToolCard) -> str:
     if entry.truncated:
         return f"{first_line} [truncated]"
     return first_line
+
+
+_HISTORICAL_TOOL_GLYPHS = {
+    "done": "✓",
+    "error": "✗",
+    "denied": "⊘",
+    "cancelled": "⊘",
+}
+
+_HISTORICAL_TOOL_STYLES = {
+    "done": "cyan",
+    "error": "red",
+    "denied": "yellow",
+    "cancelled": "yellow",
+}
 
 
 def _markup_escape(value: object) -> str:

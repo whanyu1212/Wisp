@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from wisp.events import JsonObject, RpcMessageSnapshot, RpcMessageToolCallSnapshot
+from wisp.events import (
+    JsonObject,
+    RpcMessageSnapshot,
+    RpcMessageToolCallSnapshot,
+    ToolPresentationStatus,
+)
 
 TUI_HISTORY_MESSAGE_LIMIT = 500
 _TRUNCATED_SUFFIX = "[content truncated]"
@@ -28,6 +33,7 @@ class HistoricalToolCard:
     arguments: JsonObject
     output: str
     is_error: bool
+    status: ToolPresentationStatus | None = None
     exit_code: int | None = None
     before_text: str | None = None
     created: bool = False
@@ -105,6 +111,7 @@ def _historical_tool_card(
         arguments=tool_call.arguments if tool_call is not None else {},
         output=output,
         is_error=bool(message.is_error),
+        status=tool_result.status if tool_result is not None else None,
         exit_code=tool_result.exit_code if tool_result is not None else None,
         before_text=tool_result.before_text if tool_result is not None else None,
         created=tool_result.created if tool_result is not None else False,
@@ -124,7 +131,18 @@ def _missing_tool_cards(
             arguments=tool_call.arguments,
             output="No persisted tool result.",
             is_error=True,
+            status="cancelled",
             missing_result=True,
         )
         for call_id, tool_call in pending_tool_calls.items()
     )
+
+
+def historical_tool_status(entry: HistoricalToolCard) -> ToolPresentationStatus:
+    if entry.status is not None:
+        return entry.status
+    if entry.missing_result:
+        return "cancelled"
+    if entry.is_error or entry.exit_code not in {None, 0}:
+        return "error"
+    return "done"

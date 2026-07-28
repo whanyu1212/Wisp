@@ -54,7 +54,9 @@ from wisp.events import (
     QueueUpdated,
     SessionSaved,
     SessionStats,
+    ToolApprovalResolved,
     ToolExecutionEnded,
+    ToolPresentationStatus,
     TurnCompleted,
     TurnStarted,
     WispEvent,
@@ -459,6 +461,7 @@ class CodingSession:
         had_unsafe_tool_round = False
         overflow_recovery_attempted = False
         recovered_from_overflow = False
+        tool_presentation_statuses: dict[str, ToolPresentationStatus] = {}
         harness_events = harness.prompt_message(
             user_message,
             defer_context_overflow_errors=True,
@@ -488,6 +491,8 @@ class CodingSession:
                         tool_iterations += 1
                     elif isinstance(event, ToolExecutionEnded) and self._tool_is_unsafe(event.name):
                         had_unsafe_tool_round = True
+                    elif isinstance(event, ToolApprovalResolved) and not event.approved:
+                        tool_presentation_statuses[event.call_id] = "denied"
                     completion_entry_id: str | None = None
                     if isinstance(event, QueueMessageInjected):
                         self._queue_message(
@@ -500,8 +505,16 @@ class CodingSession:
                             operation_id=operation_id,
                         )
                     if isinstance(event, MessageCompleted | ToolExecutionEnded):
+                        tool_status = (
+                            tool_presentation_statuses.pop(event.call_id, None)
+                            if isinstance(event, ToolExecutionEnded)
+                            else None
+                        )
                         completion_entry_id = self._queue_completion(
-                            session, event, operation_id=operation_id
+                            session,
+                            event,
+                            operation_id=operation_id,
+                            tool_status=tool_status,
                         )
                     if (
                         isinstance(event, MessageCompleted)
@@ -1101,9 +1114,11 @@ class CodingSession:
         event: MessageCompleted | ToolExecutionEnded,
         *,
         operation_id: str | None = None,
+        tool_status: ToolPresentationStatus | None = None,
     ) -> str:
         tool_result = (
             ToolResultPresentationSnapshot(
+                status=tool_status or _tool_result_status(event),
                 exit_code=event.exit_code,
                 before_text=event.before_text,
                 created=event.created,
@@ -1166,6 +1181,12 @@ class CodingSession:
                     self._history_refresh_session_ids.add(pending.entry.session_id)
                     raise
                 self._pending_entries.popleft()
+
+
+def _tool_result_status(event: ToolExecutionEnded) -> ToolPresentationStatus:
+    if event.is_error or event.exit_code not in {None, 0}:
+        return "error"
+    return "done"
 
 
 __all__ = ["CodingSession", "PERSISTED_SESSION_EVENT_TYPES"]
