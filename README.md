@@ -343,6 +343,14 @@ parsing, and RPC `get_commands` discovery. It does not yet add extension command
 project extension loading, skills, prompt templates, package management, or configurable
 keybindings.
 
+In the Textual TUI, press `Ctrl+O` to open Wisp's searchable command palette. The palette and
+inline `/` suggestions consume the same executable catalog loaded through RPC `get_commands`.
+Selecting an action routes its canonical slash spelling through the existing TUI command handler,
+so approval, trust, and active-operation restrictions remain unchanged. Opening or dismissing the
+palette preserves the composer draft and transcript position. Textual's framework `Ctrl+P` palette
+remains disabled. Dynamic availability reasons, suggested actions, configurable bindings, and
+extension command handlers remain future work.
+
 TUI login currently uses the `openai-codex` device-code flow; browser login is available from the
 CLI (`uv run wisp auth login openai-codex`). `/model` with no arguments opens a model picker in
 the Textual TUI and lists every catalog model grouped by provider in line mode. `/resume` with no
@@ -420,10 +428,13 @@ through v22 events for compatibility. Schema v23 adds `rpc.commands`, an immedia
 non-persisted command-registry snapshot returned by RPC `get_commands`. Each descriptor includes
 stable names, user-facing slash spellings, aliases, category, argument metadata, display order, and
 partial-enter behavior. This is discovery metadata only: command handlers, dynamic enabled state,
-palette UI, keybindings, skills, templates, and extension lifecycle hooks remain separate work.
+configurable keybindings, skills, templates, and extension lifecycle hooks remain separate work.
 
 Pi's shared command surfaces are the behavioral reference. Wisp intentionally exposes typed
 descriptor events over RPC and keeps execution/handler semantics out of this discovery slice.
+Pi's shared slash-command discovery, configurable keybindings, and temporary selectors also inform
+Wisp's TUI behavior; Wisp intentionally adds an OpenCode-style palette rather than claiming Pi has
+this exact global surface.
 
 Schema v22 adds optional `tool_result` presentation
 metadata on RPC `get_messages` tool-message rows so TUI and RPC consumers can reconstruct

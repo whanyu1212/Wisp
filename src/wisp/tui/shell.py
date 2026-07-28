@@ -28,6 +28,7 @@ from wisp.events import (
     ProjectConfigApplied,
     ProviderRetrying,
     RpcCommandFinished,
+    RpcCommandsReported,
     RpcMessagesReported,
     RpcSessionSelected,
     RpcSessionsReported,
@@ -47,7 +48,9 @@ from wisp.rpc.commands import ApprovalScope
 from wisp.settings import persist_user_effort
 from wisp.tui.auth_commands import AuthCommands
 from wisp.tui.commands import (
+    DEFAULT_TUI_COMMAND_CATALOG,
     MODEL_COMMAND_CLEAR_EFFORT_TOKEN,
+    TuiCommandCatalog,
     TuiSlashCommand,
     TuiSlashCommandError,
     TuiSlashCommandName,
@@ -95,6 +98,8 @@ class TuiController(Protocol):
     ) -> str: ...
 
     async def get_session_stats(self, *, command_id: str | None = None) -> str: ...
+
+    async def get_commands(self, *, command_id: str | None = None) -> str: ...
 
     async def get_messages(
         self,
@@ -212,6 +217,7 @@ class TuiShell:
         self.view = TuiViewState(provider=provider, model=model)
         self.current_provider = provider
         self.current_model = model
+        self.command_catalog = DEFAULT_TUI_COMMAND_CATALOG
         self.models = ModelRegistry(effective_catalog())
         # Mirrors wisp.providers.catalog.startup_effort's filtering on the RPC
         # side (see CodingSession construction in cli/rpc.py and cli/__init__.py):
@@ -253,6 +259,9 @@ class TuiShell:
         async with anyio.create_task_group() as task_group, send, receive:
             task_group.start_soon(self._read_rpc_events, send.clone())
             if await self._hydrate_session_history(receive):
+                task_group.cancel_scope.cancel()
+                return
+            if await self._hydrate_command_catalog(receive):
                 task_group.cancel_scope.cancel()
                 return
             await self._request_session_stats()
@@ -357,6 +366,58 @@ class TuiShell:
             if await self._handle_signal(signal):
                 return True
 
+    async def _hydrate_command_catalog(
+        self,
+        receive: anyio.abc.ObjectReceiveStream[_TuiSignal],
+    ) -> bool:
+        """Load executable command metadata before accepting interactive input."""
+
+        try:
+            command_id = await self.controller.get_commands()
+        except Exception as exc:  # noqa: BLE001 - discovery is optional TUI startup polish
+            self.renderer.notice(f"Command discovery unavailable; using built-ins: {exc}")
+            self._publish_command_catalog()
+            return False
+
+        report: RpcCommandsReported | None = None
+        while True:
+            signal = await receive.receive()
+            if isinstance(signal, _RpcEvent):
+                event = signal.event
+                if isinstance(event, RpcCommandsReported) and event.command_id == command_id:
+                    report = event
+                    continue
+                if isinstance(event, RpcCommandFinished) and event.command_id == command_id:
+                    if event.ok and report is not None:
+                        try:
+                            self.command_catalog = TuiCommandCatalog.from_rpc(report.commands)
+                        except ValueError as exc:
+                            self.renderer.notice(
+                                f"Command discovery was invalid; using built-ins: {exc}"
+                            )
+                            self._publish_command_catalog()
+                        else:
+                            self._publish_command_catalog()
+                    else:
+                        reason = event.error or "command catalog completed without a result"
+                        self.renderer.notice(
+                            f"Command discovery unavailable; using built-ins: {reason}"
+                        )
+                        self._publish_command_catalog()
+                    return False
+                if await self._handle_rpc_event(event):
+                    return True
+                continue
+            if isinstance(signal, _RpcEventsClosed):
+                return self._handle_rpc_closed(signal, pending_command_id=command_id)
+            if await self._handle_signal(signal):
+                return True
+
+    def _publish_command_catalog(self) -> None:
+        update_catalog = getattr(self.renderer, "command_catalog_updated", None)
+        if callable(update_catalog):
+            cast(Callable[[TuiCommandCatalog], None], update_catalog)(self.command_catalog)
+
     def _render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
         render_history = getattr(self.renderer, "render_history", None)
         if not callable(render_history):
@@ -400,7 +461,7 @@ class TuiShell:
         if self.state.status is TuiStatus.exiting:
             return False
         try:
-            command = parse_tui_slash_command(text)
+            command = parse_tui_slash_command(text, catalog=self.command_catalog)
         except TuiSlashCommandError as exc:
             self.renderer.command_error(str(exc))
             return False

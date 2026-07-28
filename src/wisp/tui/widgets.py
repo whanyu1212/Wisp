@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from textual import events
 from textual.app import ComposeResult
@@ -28,15 +29,19 @@ from textual.content import Content
 from textual.message import Message
 from textual.timer import Timer
 from textual.widget import AwaitMount, Widget
-from textual.widgets import Markdown, OptionList, Static, TextArea
+from textual.widgets import Input, Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from wisp.events import RpcSessionSummary, ToolApprovalRequested, TrustRequested
 from wisp.providers.catalog import ModelCatalogProviderEntry
+from wisp.runtime.commands import CommandDescriptor
+from wisp.tui.command_palette import search_command_catalog
 from wisp.tui.commands import (
+    DEFAULT_TUI_COMMAND_CATALOG,
     MODEL_COMMAND_CLEAR_EFFORT_TOKEN,
     SLASH_COMMAND_SPECS,
     SlashCommandSpec,
+    TuiCommandCatalog,
 )
 from wisp.tui.decision_content import (
     _approval_content,
@@ -53,6 +58,12 @@ from wisp.tui.rendering import (
 _TOOL_OUTPUT_PREVIEW_LINES = 8
 _TOOL_OUTPUT_PREVIEW_BYTES = 2_000
 PASTE_DISPLAY_THRESHOLD = 2_000
+
+
+@dataclass(frozen=True)
+class TranscriptViewportState:
+    scroll_y: float
+    following: bool
 
 
 class PromptEditor(TextArea):
@@ -1183,6 +1194,24 @@ class Transcript(VerticalScroll):
 
         return self._follow
 
+    def viewport_state(self) -> TranscriptViewportState:
+        """Capture the current viewport offset and tail-follow intent."""
+
+        return TranscriptViewportState(scroll_y=self.scroll_y, following=self._follow)
+
+    def restore_viewport_state(self, state: TranscriptViewportState) -> None:
+        """Restore a viewport snapshot after temporary layout changes."""
+
+        if state.following:
+            self.return_to_latest()
+            return
+        previous = self._follow
+        target_y = min(max(0.0, state.scroll_y), self.max_scroll_y)
+        self.scroll_to(y=target_y, animate=False)
+        self._follow = False
+        if previous:
+            self.post_message(self.FollowChanged(False))
+
     def follow_tail(self) -> None:
         """Scroll to the newest content iff the user hasn't scrolled away."""
         if self._follow:
@@ -1196,6 +1225,205 @@ class Transcript(VerticalScroll):
         self.scroll_end(animate=False)
         if not was_following:
             self.post_message(self.FollowChanged(True))
+
+
+class CommandPalette(Vertical):
+    """Searchable overlay backed by the TUI's executable command catalog."""
+
+    DEFAULT_CSS = """
+    CommandPalette {
+        overlay: screen;
+        constrain: inside;
+        display: none;
+        width: 72;
+        max-width: 90%;
+        height: auto;
+        max-height: 18;
+        offset: 0 -100%;
+        border: round $accent;
+        background: $panel;
+        padding: 0 1;
+    }
+
+    CommandPalette #command-palette-query {
+        height: 3;
+        border: none;
+        border-bottom: solid $secondary;
+        background: transparent;
+        padding: 0 1;
+    }
+
+    CommandPalette #command-palette-options {
+        height: auto;
+        max-height: 12;
+        border: none;
+        background: transparent;
+        padding: 0;
+        scrollbar-size-vertical: 1;
+    }
+
+    CommandPalette #command-palette-options > .option-list--option-highlighted {
+        background: $accent 30%;
+    }
+
+    CommandPalette #command-palette-hint {
+        height: 1;
+        color: $text-muted;
+        text-align: right;
+        text-style: dim;
+    }
+    """
+
+    class Selected(Message):
+        """One command explicitly selected from the palette."""
+
+        def __init__(self, descriptor: CommandDescriptor) -> None:
+            super().__init__()
+            self.descriptor = descriptor
+
+    class Cancelled(Message):
+        """The palette was dismissed without invoking a command."""
+
+    def __init__(self, id: str | None = None) -> None:  # noqa: A002
+        super().__init__(id=id)
+        self._query = Input(placeholder="Search commands", id="command-palette-query")
+        self._options = OptionList(id="command-palette-options")
+        self._hint = Static(
+            "↑↓ navigate · enter run · esc cancel",
+            id="command-palette-hint",
+            markup=False,
+        )
+        self._catalog = DEFAULT_TUI_COMMAND_CATALOG
+        self._visible: tuple[CommandDescriptor, ...] = ()
+        self._submitted = False
+        self._opened_at = 0.0
+
+    def compose(self) -> ComposeResult:
+        yield self._query
+        yield self._options
+        yield self._hint
+
+    @property
+    def is_open(self) -> bool:
+        return self.display
+
+    def set_catalog(self, catalog: TuiCommandCatalog) -> None:
+        self._catalog = catalog
+        if self.is_open:
+            self._refresh_options()
+
+    def move_highlight_page_up(self) -> None:
+        self._options.action_page_up()  # type: ignore[no-untyped-call]
+
+    def move_highlight_page_down(self) -> None:
+        self._options.action_page_down()  # type: ignore[no-untyped-call]
+
+    def move_highlight_first(self) -> None:
+        self._options.action_first()
+
+    def move_highlight_last(self) -> None:
+        self._options.action_last()
+
+    def show(self) -> None:
+        self._submitted = False
+        self._opened_at = time.monotonic()
+        self._query.value = ""
+        self.display = True
+        self._refresh_options()
+        self._query.focus()
+
+    def hide(self) -> None:
+        self.display = False
+        self._submitted = False
+
+    def _refresh_options(self) -> None:
+        matches = search_command_catalog(self._catalog, self._query.value)
+        self._visible = tuple(match.descriptor for match in matches)
+        self._options.clear_options()
+        for descriptor in self._visible:
+            self._options.add_option(
+                Option(
+                    Content(self._option_label(descriptor)),
+                    id=descriptor.name,
+                )
+            )
+        if self._visible:
+            self._options.highlighted = 0
+            self._hint.update("↑↓ navigate · enter run · esc cancel")
+        else:
+            self._options.add_option(Option("No matching commands.", disabled=True))
+            self._hint.update("esc close")
+
+    @staticmethod
+    def _option_label(descriptor: CommandDescriptor) -> str:
+        arguments = " ".join(
+            f"<{argument.name}>" if argument.required else f"[{argument.name}]"
+            for argument in descriptor.arguments
+        )
+        invocation = descriptor.slash_command
+        if arguments:
+            invocation = f"{invocation} {arguments}"
+        aliases = ", ".join(descriptor.slash_aliases)
+        alias_text = f" · aliases {aliases}" if aliases else ""
+        return (
+            f"{descriptor.title}  {invocation} · {descriptor.category}\n"
+            f"  {descriptor.description}{alias_text}"
+        )
+
+    def _move(self, action: str) -> None:
+        getattr(self._options, action)()
+
+    def submit_current_selection(self) -> None:
+        if self._submitted or not self.is_open:
+            return
+        highlighted = self._options.highlighted
+        if highlighted is None or highlighted >= len(self._visible):
+            return
+        self._submitted = True
+        self.post_message(self.Selected(self._visible[highlighted]))
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input is not self._query:
+            return
+        event.stop()
+        self._refresh_options()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list is not self._options:
+            return
+        event.stop()
+        if event.time < self._opened_at:
+            return
+        self.submit_current_selection()
+
+    def on_key(self, event: events.Key) -> None:
+        if not self.is_open:
+            return
+        if event.time < self._opened_at:
+            event.prevent_default()
+            event.stop()
+            return
+        actions = {
+            "down": "action_cursor_down",
+            "up": "action_cursor_up",
+            "pagedown": "action_page_down",
+            "pageup": "action_page_up",
+            "home": "action_first",
+            "end": "action_last",
+        }
+        action = actions.get(event.key)
+        if action is not None:
+            self._move(action)
+            event.prevent_default()
+            event.stop()
+        elif event.key == "enter":
+            self.submit_current_selection()
+            event.prevent_default()
+            event.stop()
+        elif event.key == "escape":
+            self.post_message(self.Cancelled())
+            event.prevent_default()
+            event.stop()
 
 
 class SlashSuggest(OptionList):
@@ -1254,12 +1482,16 @@ class SlashSuggest(OptionList):
 
     def __init__(self, id: str | None = None) -> None:  # noqa: A002 - Textual's param name
         super().__init__(id=id)
+        self._specs = SLASH_COMMAND_SPECS
         # spelling → spec, so the highlighted option's id maps back to its command.
-        self._by_command: dict[str, SlashCommandSpec] = {
-            spec.command: spec for spec in SLASH_COMMAND_SPECS
-        }
+        self._by_command: dict[str, SlashCommandSpec] = {spec.command: spec for spec in self._specs}
         self._visible_specs: tuple[SlashCommandSpec, ...] = ()
         self._max_width = self._MAX_WIDTH_CEILING
+
+    def set_catalog(self, catalog: TuiCommandCatalog) -> None:
+        self._specs = catalog.specs
+        self._by_command = {spec.command: spec for spec in self._specs}
+        self.hide()
 
     def on_resize(self, event: events.Resize) -> None:
         # Same `on_resize`-driven pattern as StatusBar (widgets.py, below).
@@ -1283,7 +1515,7 @@ class SlashSuggest(OptionList):
     def matches(self, query: str) -> tuple[SlashCommandSpec, ...]:
         """Specs whose command starts with `query` (prefix match on the spelling)."""
 
-        return tuple(spec for spec in SLASH_COMMAND_SPECS if spec.command.startswith(query))
+        return tuple(spec for spec in self._specs if spec.command.startswith(query))
 
     def show_for(self, value: str) -> int:
         """Filter and display the menu for the current input value.

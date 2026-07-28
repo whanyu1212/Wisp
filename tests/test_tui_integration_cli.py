@@ -3786,7 +3786,7 @@ def test_slash_command_specs_are_valid_slash_commands() -> None:
 
 def test_textual_leading_slash_is_typable_as_text() -> None:
     # THE BUG FIX: a message starting with "/" must be typable literally — the
-    # input is never cleared/hijacked, and no modal palette exists.
+    # input is never cleared or hijacked by either command surface.
     async def scenario() -> str:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
@@ -3800,9 +3800,9 @@ def test_textual_leading_slash_is_typable_as_text() -> None:
     assert anyio.run(scenario) == "/etc/hosts"
 
 
-def test_textual_command_palette_is_disabled() -> None:
-    # The modal palette is gone: "/" is the only command affordance, so Textual's
-    # framework ctrl+p palette must be off (it clashes with terminal history).
+def test_textual_framework_command_palette_is_disabled() -> None:
+    # Wisp owns a typed Ctrl+O palette, so Textual's framework Ctrl+P palette must
+    # remain off (it clashes with terminal history).
     assert TextualTui.ENABLE_COMMAND_PALETTE is False
 
 

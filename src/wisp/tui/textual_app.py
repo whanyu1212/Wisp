@@ -21,6 +21,7 @@ from wisp.events import (
     TrustRequested,
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
+from wisp.tui.commands import DEFAULT_TUI_COMMAND_CATALOG, TuiCommandCatalog
 from wisp.tui.compact_echo import CompactEchoLog
 from wisp.tui.rendering import (
     TuiRenderer,
@@ -31,6 +32,7 @@ from wisp.tui.stream_buffer import StreamCoalescer
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.theme import WISP_THEMES, role_styles
 from wisp.tui.widgets import (
+    CommandPalette,
     DecisionPanel,
     JumpToLatest,
     LineMessage,
@@ -41,6 +43,7 @@ from wisp.tui.widgets import (
     StatusBar,
     ToolCard,
     Transcript,
+    TranscriptViewportState,
     WorkingIndicator,
 )
 
@@ -75,7 +78,7 @@ _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 # returns focus from a card to the input (ToolCard.BINDINGS "leave" action).
 # Textual-only chrome — deliberately not folded into format_tui_footer_lines,
 # which the line/fullscreen renderers also consume.
-_KEYBINDING_HINT = "/ commands   enter expand   esc back"
+_KEYBINDING_HINT = "ctrl+o actions   / commands   enter expand   esc back"
 
 # The input's prompt glyph. The shell hands the Textual renderer a semantic hint
 # (`wisp> `, `wisp(running)> `, `approve? [y/N] `) shared with the line/fullscreen
@@ -106,10 +109,8 @@ def _input_placeholder(hint: str) -> str:
 class TextualTui(App[None]):
     """Minimal Textual shell that adapts Wisp's existing TUI loop."""
 
-    # No modal command palette: `/` is the single command affordance (an inline
-    # SlashSuggest menu). Disabling this turns off Textual's framework ctrl+p
-    # binding at the source — ctrl+p means "previous command" in a terminal, so we
-    # don't want it opening a menu.
+    # Wisp owns a typed, RPC-backed palette. Keep Textual's framework ctrl+p
+    # palette disabled so terminal history remains untouched.
     ENABLE_COMMAND_PALETTE = False
 
     CSS = """
@@ -273,6 +274,7 @@ class TextualTui(App[None]):
     # the transcript. Ctrl+C remains the traditional interrupt; terminal-native
     # selection is still available through the emulator's mouse-bypass modifier.
     BINDINGS = [
+        Binding("ctrl+o", "open_command_palette", "Actions", priority=True),
         Binding("ctrl+c", "interrupt", "Interrupt", priority=True),
         Binding("ctrl+d", "eof", "EOF", priority=True),
         Binding("pageup", "scroll_transcript_page_up", "Scroll up", priority=True, show=False),
@@ -293,12 +295,15 @@ class TextualTui(App[None]):
         self._jump_to_latest: JumpToLatest | None = None
         self._input: PromptEditor | None = None
         self._suggest: SlashSuggest | None = None
+        self._command_palette: CommandPalette | None = None
         self._decision_panel: DecisionPanel | None = None
         self._model_picker: ModelPicker | None = None
         self._session_picker: SessionPicker | None = None
+        self._command_catalog = DEFAULT_TUI_COMMAND_CATALOG
+        self._command_palette_transcript_state: TranscriptViewportState | None = None
         self._session_operation_in_progress = False
-        # Monotonic timestamp of the most recent _prepare_decision_panel() call
-        # (see on_event / _prepare_decision_panel). Any Key/MouseDown/MouseUp/
+        # Monotonic timestamp of the most recent _prepare_overlay() call
+        # (see on_event / _prepare_overlay). Any Key/MouseDown/MouseUp/
         # Paste event timestamped before this barrier is dropped before it
         # reaches whichever widget currently has focus or is at its screen
         # coordinates, closing the race where an event already queued for the
@@ -360,6 +365,7 @@ class TextualTui(App[None]):
             # The slash-command menu floats on the overlay layer anchored near the
             # input; yielded here so it shares the Vertical's coordinate space.
             yield SlashSuggest(id="suggest")
+            yield CommandPalette(id="command-palette")
             yield DecisionPanel(id="decision-panel")
             yield ModelPicker(id="model-picker")
             yield SessionPicker(id="session-picker")
@@ -397,9 +403,11 @@ class TextualTui(App[None]):
         self._status = self.query_one("#status", StatusBar)
         self._input = self.query_one("#input", PromptEditor)
         self._suggest = self.query_one("#suggest", SlashSuggest)
+        self._command_palette = self.query_one("#command-palette", CommandPalette)
         self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
         self._model_picker = self.query_one("#model-picker", ModelPicker)
         self._session_picker = self.query_one("#session-picker", SessionPicker)
+        self.set_command_catalog(self._command_catalog)
         self._input.focus()  # keep the editor as the resting focus
         if self._runner is not None:
             self.run_worker(self._run_and_exit(), exclusive=True)
@@ -620,6 +628,28 @@ class TextualTui(App[None]):
         event.stop()
         self.hide_session_picker()
 
+    def on_command_palette_selected(self, event: CommandPalette.Selected) -> None:
+        event.stop()
+        descriptor = event.descriptor
+        self.hide_command_palette()
+        if any(argument.required for argument in descriptor.arguments):
+            self.prefill_command(f"{descriptor.slash_command} ")
+            return
+        self._submit_decision_line(descriptor.slash_command)
+
+    def on_command_palette_cancelled(self, event: CommandPalette.Cancelled) -> None:
+        event.stop()
+        self.hide_command_palette()
+
+    def set_command_catalog(self, catalog: TuiCommandCatalog) -> None:
+        """Apply one executable catalog to both Textual command surfaces."""
+
+        self._command_catalog = catalog
+        if self._suggest is not None:
+            self._suggest.set_catalog(catalog)
+        if self._command_palette is not None:
+            self._command_palette.set_catalog(catalog)
+
     def prefill_command(self, prefix: str) -> None:
         """Put a command prefix in the editor, cursor at the end, without submitting.
 
@@ -638,7 +668,7 @@ class TextualTui(App[None]):
         # on_key/BINDINGS, and earlier than this app's own on_key below. An
         # event timestamped before _stale_event_barrier was read by the driver
         # before a decision panel opened (or is opening — the barrier is
-        # raised in _prepare_decision_panel before the composer is hidden or
+        # raised in _prepare_overlay before the composer is hidden or
         # focus moves), so it must never reach a focused/hit-tested widget:
         # dropping it here, rather than in DecisionPanel.on_key or
         # PromptEditor.on_key individually, closes the race for every widget
@@ -837,6 +867,23 @@ class TextualTui(App[None]):
     def action_eof(self) -> None:
         self._signal_input(EOFError(), action="EOF")
 
+    def action_open_command_palette(self) -> None:
+        palette = self._command_palette
+        if palette is None:
+            return
+        if palette.is_open:
+            self.hide_command_palette()
+            return
+        if self._input is None or not self._input.display:
+            return
+        self._command_palette_transcript_state = (
+            self._transcript.viewport_state() if self._transcript is not None else None
+        )
+        self._prepare_overlay()
+        composer = self.query_one("#composer")
+        palette.styles.max_height = max(4, composer.region.y)
+        palette.show()
+
     # Scrollback: delegate to the Transcript's own scroll actions. Its scroll
     # watcher derives follow intent for normal movement; End uses return_to_latest
     # to restore that intent atomically before jumping. None-guarded like
@@ -853,6 +900,9 @@ class TextualTui(App[None]):
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_page_up()
             return
+        if self._command_palette is not None and self._command_palette.is_open:
+            self._command_palette.move_highlight_page_up()
+            return
         if self._session_picker is not None and self._session_picker.is_open:
             self._session_picker.move_highlight_page_up()
             return
@@ -863,6 +913,9 @@ class TextualTui(App[None]):
     def action_scroll_transcript_page_down(self) -> None:
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_page_down()
+            return
+        if self._command_palette is not None and self._command_palette.is_open:
+            self._command_palette.move_highlight_page_down()
             return
         if self._session_picker is not None and self._session_picker.is_open:
             self._session_picker.move_highlight_page_down()
@@ -875,6 +928,9 @@ class TextualTui(App[None]):
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_first()
             return
+        if self._command_palette is not None and self._command_palette.is_open:
+            self._command_palette.move_highlight_first()
+            return
         if self._session_picker is not None and self._session_picker.is_open:
             self._session_picker.move_highlight_first()
             return
@@ -885,6 +941,9 @@ class TextualTui(App[None]):
     def action_scroll_transcript_end(self) -> None:
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_last()
+            return
+        if self._command_palette is not None and self._command_palette.is_open:
+            self._command_palette.move_highlight_last()
             return
         if self._session_picker is not None and self._session_picker.is_open:
             self._session_picker.move_highlight_last()
@@ -943,7 +1002,7 @@ class TextualTui(App[None]):
         if self._input is not None:
             self._input.placeholder = _input_placeholder(hint)
 
-    def _prepare_decision_panel(self) -> None:
+    def _prepare_overlay(self) -> None:
         # Shared by every show_*() below. Raises the stale-event barrier (see
         # on_event) before touching focus/visibility, so there is no window
         # where an event already queued for the composer could still land on
@@ -957,28 +1016,45 @@ class TextualTui(App[None]):
             self._model_picker.hide()
         if self._session_picker is not None and self._session_picker.is_open:
             self._session_picker.hide()
+        if self._command_palette is not None and self._command_palette.is_open:
+            self._command_palette.hide()
+            self._command_palette_transcript_state = None
         if self._input is not None:
             self._input.display = False
+
+    def hide_command_palette(self) -> None:
+        palette = self._command_palette
+        if palette is None or not palette.is_open:
+            return
+        palette.hide()
+        if self._input is not None:
+            self._input.display = True
+            self._input.focus()
+        state = self._command_palette_transcript_state
+        self._command_palette_transcript_state = None
+        transcript = self._transcript
+        if state is not None and transcript is not None:
+            self.call_after_refresh(lambda: transcript.restore_viewport_state(state))
 
     def show_approval(self, event: ToolApprovalRequested, *, cwd: str) -> None:
         panel = self._decision_panel
         if panel is None:
             return
-        self._prepare_decision_panel()
+        self._prepare_overlay()
         panel.show_approval(event, cwd=cwd)
 
     def show_approval_all_confirmation(self, event: ToolApprovalRequested) -> None:
         panel = self._decision_panel
         if panel is None:
             return
-        self._prepare_decision_panel()
+        self._prepare_overlay()
         panel.show_all_confirmation(event)
 
     def show_trust(self, event: TrustRequested) -> None:
         panel = self._decision_panel
         if panel is None:
             return
-        self._prepare_decision_panel()
+        self._prepare_overlay()
         panel.show_trust(event)
 
     def hide_decision(self) -> None:
@@ -1001,7 +1077,7 @@ class TextualTui(App[None]):
         picker = self._model_picker
         if picker is None:
             return
-        self._prepare_decision_panel()
+        self._prepare_overlay()
         picker.show(
             entries,
             current_provider=current_provider,
@@ -1028,7 +1104,7 @@ class TextualTui(App[None]):
         picker = self._session_picker
         if picker is None:
             return
-        self._prepare_decision_panel()
+        self._prepare_overlay()
         picker.show(sessions, selected_session_id=selected_session_id)
 
     def hide_session_picker(self, *, restore_input: bool = True) -> None:
@@ -1042,7 +1118,7 @@ class TextualTui(App[None]):
 
     def session_catalog_started(self) -> None:
         self._session_operation_in_progress = True
-        self._prepare_decision_panel()
+        self._prepare_overlay()
 
     def session_catalog_finished(self) -> None:
         self._session_operation_in_progress = False
@@ -1052,7 +1128,7 @@ class TextualTui(App[None]):
 
     def session_switch_started(self) -> None:
         self._session_operation_in_progress = True
-        self._prepare_decision_panel()
+        self._prepare_overlay()
 
     def session_switch_finished(self) -> None:
         self._session_operation_in_progress = False

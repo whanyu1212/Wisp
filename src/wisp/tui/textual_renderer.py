@@ -32,6 +32,7 @@ from wisp.events import (
     TurnStarted,
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
+from wisp.tui.commands import TuiCommandCatalog
 from wisp.tui.history import (
     HistoricalToolCard,
     HistoricalTranscriptEntry,
@@ -351,6 +352,9 @@ class TextualTuiRenderer:
     def trust_request(self, event: TrustRequested) -> None:
         self._suspend_progress()
         self.app.show_trust(event)
+
+    def command_catalog_updated(self, catalog: TuiCommandCatalog) -> None:
+        self.app.set_command_catalog(catalog)
 
     def model_picker_request(
         self,
