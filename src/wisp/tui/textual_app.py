@@ -16,6 +16,7 @@ from textual.widget import Widget
 from textual.widgets import Header, Static, TextArea
 
 from wisp.events import (
+    RpcSessionSummary,
     ToolApprovalRequested,
     TrustRequested,
 )
@@ -35,6 +36,7 @@ from wisp.tui.widgets import (
     LineMessage,
     ModelPicker,
     PromptEditor,
+    SessionPicker,
     SlashSuggest,
     StatusBar,
     ToolCard,
@@ -293,6 +295,8 @@ class TextualTui(App[None]):
         self._suggest: SlashSuggest | None = None
         self._decision_panel: DecisionPanel | None = None
         self._model_picker: ModelPicker | None = None
+        self._session_picker: SessionPicker | None = None
+        self._session_operation_in_progress = False
         # Monotonic timestamp of the most recent _prepare_decision_panel() call
         # (see on_event / _prepare_decision_panel). Any Key/MouseDown/MouseUp/
         # Paste event timestamped before this barrier is dropped before it
@@ -358,6 +362,7 @@ class TextualTui(App[None]):
             yield SlashSuggest(id="suggest")
             yield DecisionPanel(id="decision-panel")
             yield ModelPicker(id="model-picker")
+            yield SessionPicker(id="session-picker")
             # #composer frames the editor and status line as one bordered panel
             # (input above, status below, no divider between them) instead of a
             # borderless underline input floating over a separately-backgrounded
@@ -394,6 +399,7 @@ class TextualTui(App[None]):
         self._suggest = self.query_one("#suggest", SlashSuggest)
         self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
         self._model_picker = self.query_one("#model-picker", ModelPicker)
+        self._session_picker = self.query_one("#session-picker", SessionPicker)
         self._input.focus()  # keep the editor as the resting focus
         if self._runner is not None:
             self.run_worker(self._run_and_exit(), exclusive=True)
@@ -573,18 +579,20 @@ class TextualTui(App[None]):
             self._input.value = ""
         self._submit_line(text)
 
-    def _submit_decision_line(self, text: str) -> None:
+    def _submit_decision_line(self, text: str) -> bool:
         # The decision overlay temporarily hides the composer. Keep its draft
         # untouched so approval never discards a follow-up the user was typing.
-        self._submit_line(text)
+        return self._submit_line(text)
 
-    def _submit_line(self, text: str) -> None:
+    def _submit_line(self, text: str) -> bool:
         if self._on_submit is not None:
             self._on_submit()
         try:
             self._prompt_send.send_nowait(text)
         except anyio.WouldBlock:
             self.write_error("input buffer full; command dropped")
+            return False
+        return True
 
     def on_decision_panel_selected(self, event: DecisionPanel.Selected) -> None:
         event.stop()
@@ -598,6 +606,19 @@ class TextualTui(App[None]):
     def on_model_picker_cancelled(self, event: ModelPicker.Cancelled) -> None:
         event.stop()
         self.hide_model_picker()
+
+    def on_session_picker_selected(self, event: SessionPicker.Selected) -> None:
+        event.stop()
+        # Enter the lifecycle before queueing the typed command: the shell awaits
+        # the RPC transport before it repeats session_switch_started(), so this
+        # closes the interval where Ctrl-C could otherwise clear the hidden draft.
+        self.session_switch_started()
+        if not self._submit_decision_line(f"/resume {event.session_id}"):
+            self.session_switch_finished()
+
+    def on_session_picker_cancelled(self, event: SessionPicker.Cancelled) -> None:
+        event.stop()
+        self.hide_session_picker()
 
     def prefill_command(self, prefix: str) -> None:
         """Put a command prefix in the editor, cursor at the end, without submitting.
@@ -784,6 +805,17 @@ class TextualTui(App[None]):
             self.notify("Copied selection to clipboard.")
 
     def action_interrupt(self) -> None:
+        # The session picker is a transient decision overlay, not active agent
+        # work. Treat ctrl+c as picker cancellation so the hidden composer draft
+        # is restored instead of queueing KeyboardInterrupt and clearing it.
+        if self._session_picker is not None and self._session_picker.is_open:
+            self.hide_session_picker()
+            return
+        # Selection and history hydration are sequential RPC reads, not an agent
+        # command that Ctrl-C can cancel. Keep the hidden composer draft intact
+        # until the shell completes (or fails) the session-switch lifecycle.
+        if self._session_operation_in_progress:
+            return
         # If the prompt editor owns the keystroke AND has selected text, ctrl+c
         # means "copy", not "interrupt". Because this binding is priority=True (so
         # it fires before TextArea's own handler and would otherwise swallow copy),
@@ -821,6 +853,9 @@ class TextualTui(App[None]):
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_page_up()
             return
+        if self._session_picker is not None and self._session_picker.is_open:
+            self._session_picker.move_highlight_page_up()
+            return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_page_up()
@@ -828,6 +863,9 @@ class TextualTui(App[None]):
     def action_scroll_transcript_page_down(self) -> None:
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_page_down()
+            return
+        if self._session_picker is not None and self._session_picker.is_open:
+            self._session_picker.move_highlight_page_down()
             return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
@@ -837,6 +875,9 @@ class TextualTui(App[None]):
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_first()
             return
+        if self._session_picker is not None and self._session_picker.is_open:
+            self._session_picker.move_highlight_first()
+            return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript.action_scroll_home()
@@ -844,6 +885,9 @@ class TextualTui(App[None]):
     def action_scroll_transcript_end(self) -> None:
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_last()
+            return
+        if self._session_picker is not None and self._session_picker.is_open:
+            self._session_picker.move_highlight_last()
             return
         self._scroll_transcript_to_latest()
 
@@ -907,6 +951,12 @@ class TextualTui(App[None]):
         self._stale_event_barrier = time.monotonic()
         if self._suggest is not None:
             self._suggest.hide()
+        if self._decision_panel is not None and self._decision_panel.is_open:
+            self._decision_panel.hide()
+        if self._model_picker is not None and self._model_picker.is_open:
+            self._model_picker.hide()
+        if self._session_picker is not None and self._session_picker.is_open:
+            self._session_picker.hide()
         if self._input is not None:
             self._input.display = False
 
@@ -967,6 +1017,62 @@ class TextualTui(App[None]):
         if self._input is not None:
             self._input.display = True
             self._input.focus()
+
+    def show_session_picker(
+        self,
+        sessions: tuple[RpcSessionSummary, ...],
+        *,
+        selected_session_id: str | None,
+    ) -> None:
+        self._session_operation_in_progress = False
+        picker = self._session_picker
+        if picker is None:
+            return
+        self._prepare_decision_panel()
+        picker.show(sessions, selected_session_id=selected_session_id)
+
+    def hide_session_picker(self, *, restore_input: bool = True) -> None:
+        picker = self._session_picker
+        if picker is None or not picker.is_open:
+            return
+        picker.hide()
+        if restore_input and self._input is not None:
+            self._input.display = True
+            self._input.focus()
+
+    def session_catalog_started(self) -> None:
+        self._session_operation_in_progress = True
+        self._prepare_decision_panel()
+
+    def session_catalog_finished(self) -> None:
+        self._session_operation_in_progress = False
+        if self._input is not None:
+            self._input.display = True
+            self._input.focus()
+
+    def session_switch_started(self) -> None:
+        self._session_operation_in_progress = True
+        self._prepare_decision_panel()
+
+    def session_switch_finished(self) -> None:
+        self._session_operation_in_progress = False
+        self.hide_session_picker(restore_input=False)
+        if self._input is not None:
+            self._input.display = True
+            self._input.focus()
+
+    def replace_transcript(self) -> None:
+        """Drop the previous session's UI-owned transcript bookkeeping."""
+
+        self.hide_working_indicator()
+        self._stream.discard()
+        self._tool_cards.clear()
+        self._unseen_output.clear()
+        self._card_focus_was_following = False
+        self._echo_log.clear()
+        self._clear_unseen_output()
+        if self._transcript is not None:
+            self._transcript.clear_messages()
 
     # --- Main-screen heartbeat (opencode-style) ---
 

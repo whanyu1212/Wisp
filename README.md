@@ -332,13 +332,16 @@ Available slash commands:
 /logout [provider]
 /provider [provider]        switch provider for future prompts (resets model to default)
 /model [model]              switch model for future prompts
+/resume [session-id]        browse or resume a persisted session
 /compact [instructions]     summarize older context while preserving the JSONL audit
 /quit, /exit
 ```
 
 TUI login currently uses the `openai-codex` device-code flow; browser login is available from the
 CLI (`uv run wisp auth login openai-codex`). `/model` with no arguments opens a model picker in
-the Textual TUI and lists every catalog model grouped by provider in line mode.
+the Textual TUI and lists every catalog model grouped by provider in line mode. `/resume` with no
+arguments opens the newest-first session picker in Textual and prints the same RPC-owned catalog
+in line/fullscreen fallback modes; use `/resume <session-id>` there to select one directly.
 
 ### Model catalog
 
@@ -380,6 +383,15 @@ it accepts new input. Text entries are restored as user/assistant transcript lin
 Persisted tool calls/results are restored as resolved tool cards when tool-result
 presentation metadata is available; legacy sessions without that metadata still render a
 generic historical card from the transcript message.
+
+The in-TUI `/resume` flow uses the same typed `get_sessions`, `select_session`, and
+`get_messages` RPC operations. A successful switch replaces the visible transcript instead of
+mixing sessions, preserves any composer draft while the picker is open, and refreshes context and
+cost statistics for the selected session. The catalog prefers durable session names and falls
+back to session IDs. Like startup hydration, transcript restoration is bounded to the newest 500
+active-path messages. This follows Pi's `/resume` picker behavior while keeping Wisp's filesystem
+access and session mutation behind typed RPC events; `/session` remains available for a future
+current-session information command.
 
 The legacy `--mode tui` entrypoint remains for compatibility and honors
 `--tui-renderer line|fullscreen|textual` plus `WISP_TUI_RENDERER`.

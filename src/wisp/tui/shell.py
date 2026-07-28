@@ -29,6 +29,8 @@ from wisp.events import (
     ProviderRetrying,
     RpcCommandFinished,
     RpcMessagesReported,
+    RpcSessionSelected,
+    RpcSessionsReported,
     SessionSaved,
     SessionStatsReported,
     ToolApprovalRequested,
@@ -94,6 +96,19 @@ class TuiController(Protocol):
 
     async def get_session_stats(self, *, command_id: str | None = None) -> str: ...
 
+    async def get_messages(
+        self,
+        *,
+        session_id: str | None = None,
+        limit: int = 200,
+        before_entry_id: str | None = None,
+        command_id: str | None = None,
+    ) -> str: ...
+
+    async def get_sessions(self, *, limit: int = 50, command_id: str | None = None) -> str: ...
+
+    async def select_session(self, session_id: str, *, command_id: str | None = None) -> str: ...
+
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str: ...
 
     async def approve(
@@ -145,6 +160,21 @@ class _PendingConfigure:
     reset_model: bool = False
     effort: str | None = None
     has_effort: bool = False
+
+
+@dataclass
+class _PendingSessionCatalog:
+    command_id: str
+    report: RpcSessionsReported | None = None
+
+
+@dataclass
+class _PendingSessionSwitch:
+    requested_session_id: str
+    select_command_id: str
+    selected: RpcSessionSelected | None = None
+    history_command_id: str | None = None
+    history_report: RpcMessagesReported | None = None
 
 
 def _default_model_for(models: ModelRegistry, provider_name: str) -> str | None:
@@ -200,6 +230,8 @@ class TuiShell:
             effort=effort,
         )
         self.pending_configures: dict[str, _PendingConfigure] = {}
+        self.pending_session_catalog: _PendingSessionCatalog | None = None
+        self.pending_session_switch: _PendingSessionSwitch | None = None
         self.auth_store = JsonAuthStore(auth_path or default_auth_path())
         # Overrides ~/.wisp for /model picker effort persistence in tests; None
         # in production so persist_user_effort resolves the real home dir.
@@ -374,6 +406,12 @@ class TuiShell:
             return False
         if command is not None:
             return await self._handle_slash_command(command)
+        if self._session_operation_active():
+            if has_content:
+                self.renderer.command_error(
+                    f"Cannot submit prompts while {self._session_operation_name()}."
+                )
+            return False
         if (
             self.state.status is TuiStatus.confirming_all_tools
             and self.state.pending_approval is not None
@@ -426,6 +464,11 @@ class TuiShell:
             operation = self._active_operation()
             self.renderer.command_error(f"Cannot run slash commands while {operation} is running.")
             return False
+        if self._session_operation_active():
+            self.renderer.command_error(
+                f"Cannot run slash commands while {self._session_operation_name()}."
+            )
+            return False
         if command.name is TuiSlashCommandName.compact:
             if self.state.status is not TuiStatus.idle:
                 self.renderer.command_error("Cannot compact while another operation is active.")
@@ -447,8 +490,61 @@ class TuiShell:
         if command.name is TuiSlashCommandName.model:
             await self._handle_model_command(command.args)
             return False
+        if command.name is TuiSlashCommandName.resume:
+            await self._handle_resume_command(command.args)
+            return False
         self.renderer.command_error(f"Unknown command: /{command.name.value}")
         return False
+
+    async def _handle_resume_command(self, args: tuple[str, ...]) -> None:
+        if len(args) > 1:
+            self.renderer.command_error("Usage: /resume [session-id]")
+            return
+        if not args:
+            self._call_renderer_optional("session_catalog_started")
+            try:
+                command_id = await self.controller.get_sessions(limit=200)
+            except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
+                self.renderer.send_failed("session catalog", exc)
+                self._call_renderer_optional("session_catalog_finished")
+                return
+            self.pending_session_catalog = _PendingSessionCatalog(command_id=command_id)
+            self._update_view(status="loading sessions")
+            return
+
+        session_id = args[0].strip()
+        if not session_id:
+            self.renderer.command_error("Usage: /resume [session-id]")
+            return
+        # Guard the composer before awaiting a potentially backpressured
+        # transport. Picker selections may already have entered this lifecycle;
+        # renderer implementations intentionally make the repeated start
+        # idempotent.
+        self._call_renderer_optional("session_switch_started", session_id)
+        try:
+            command_id = await self.controller.select_session(session_id)
+        except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
+            self.renderer.send_failed("session selection", exc)
+            self._call_renderer_optional("session_switch_finished")
+            return
+        self.pending_session_switch = _PendingSessionSwitch(
+            requested_session_id=session_id,
+            select_command_id=command_id,
+        )
+        self._update_view(status="switching session")
+
+    def _session_operation_active(self) -> bool:
+        return self.pending_session_catalog is not None or self.pending_session_switch is not None
+
+    def _session_operation_name(self) -> str:
+        if self.pending_session_switch is not None:
+            return "a session switch is in progress"
+        return "the session catalog is loading"
+
+    def _call_renderer_optional(self, method_name: str, *args: object, **kwargs: object) -> None:
+        method = getattr(self.renderer, method_name, None)
+        if callable(method):
+            method(*args, **kwargs)
 
     async def _handle_provider_command(self, args: tuple[str, ...]) -> None:
         if len(args) > 1:
@@ -881,6 +977,30 @@ class TuiShell:
         return True
 
     async def _handle_rpc_event(self, event: KnownWispEvent) -> bool:
+        catalog = self.pending_session_catalog
+        if (
+            isinstance(event, RpcSessionsReported)
+            and catalog is not None
+            and event.command_id == catalog.command_id
+        ):
+            catalog.report = event
+            return False
+
+        session_switch = self.pending_session_switch
+        if session_switch is not None:
+            if (
+                isinstance(event, RpcSessionSelected)
+                and event.command_id == session_switch.select_command_id
+            ):
+                session_switch.selected = event
+                return False
+            if (
+                isinstance(event, RpcMessagesReported)
+                and event.command_id == session_switch.history_command_id
+            ):
+                session_switch.history_report = event
+                return False
+
         context_updated = self.view.update_context_from_event(event)
         if context_updated:
             self._update_view()
@@ -980,6 +1100,15 @@ class TuiShell:
             return False
 
         if isinstance(event, RpcCommandFinished):
+            if catalog is not None and event.command_id == catalog.command_id:
+                await self._finish_session_catalog(event)
+                return False
+            if session_switch is not None and event.command_id in {
+                session_switch.select_command_id,
+                session_switch.history_command_id,
+            }:
+                await self._finish_session_switch(event)
+                return False
             if event.command_id in self.pending_configures:
                 await self._finish_pending_configure(event)
                 return False
@@ -991,6 +1120,112 @@ class TuiShell:
                 return await self._finish_current_prompt(event)
         self._render_event(event)
         return False
+
+    async def _finish_session_catalog(self, event: RpcCommandFinished) -> None:
+        pending = self.pending_session_catalog
+        if pending is None or event.command_id != pending.command_id:
+            return
+        self.pending_session_catalog = None
+        if not event.ok:
+            self.renderer.command_error(event.error or "session catalog failed")
+            self._call_renderer_optional("session_catalog_finished")
+            self._sync_view()
+            return
+        if pending.report is None:
+            self.renderer.command_error("Session catalog completed without a result.")
+            self._call_renderer_optional("session_catalog_finished")
+            self._sync_view()
+            return
+        self._call_renderer_optional("session_catalog_finished")
+        self._call_renderer_optional(
+            "session_picker_request",
+            pending.report.sessions,
+            selected_session_id=pending.report.selected_session_id,
+        )
+        self._sync_view()
+
+    async def _finish_session_switch(self, event: RpcCommandFinished) -> None:
+        pending = self.pending_session_switch
+        if pending is None:
+            return
+        if event.command_id == pending.select_command_id:
+            if not event.ok:
+                self.renderer.command_error(event.error or "session selection failed")
+                self._finish_session_switch_ui()
+                return
+            if pending.selected is None:
+                self._fail_committed_session_hydration(
+                    "session selection completed without a result"
+                )
+                return
+            try:
+                pending.history_command_id = await self.controller.get_messages(
+                    limit=TUI_HISTORY_MESSAGE_LIMIT
+                )
+            except Exception as exc:  # noqa: BLE001 - selection already committed
+                self._fail_committed_session_hydration(
+                    f"failed to request selected session history: {exc}"
+                )
+                return
+            self._update_view(status="loading session history")
+            return
+
+        if event.command_id != pending.history_command_id:
+            return
+        selected = pending.selected
+        if selected is None:
+            self.renderer.command_error("Selected session identity was lost during hydration.")
+            self._finish_session_switch_ui()
+            return
+        if not event.ok or pending.history_report is None:
+            detail = event.error or "session history completed without a result"
+            self._fail_committed_session_hydration(detail)
+            return
+        if pending.history_report.session_id != selected.session_id:
+            self._fail_committed_session_hydration(
+                "session history result did not match the selected session"
+            )
+            return
+
+        label = selected.session_name or _compact_session_path(selected.session_path)
+        entries = history_entries_from_rpc_messages(pending.history_report.messages)
+        self._call_renderer_optional(
+            "replace_history_entries",
+            entries,
+            session_label=label,
+        )
+        self.view.context = None
+        self.view.cost = None
+        self._update_view(last_session=label)
+        self._finish_session_switch_ui()
+        await self._request_session_stats()
+
+    def _fail_committed_session_hydration(self, detail: str) -> None:
+        pending = self.pending_session_switch
+        selected = pending.selected if pending is not None else None
+        if pending is not None:
+            label = (
+                selected.session_name or _compact_session_path(selected.session_path)
+                if selected is not None
+                else pending.requested_session_id
+            )
+            self._call_renderer_optional(
+                "replace_history_entries",
+                (),
+                session_label=label,
+            )
+            self.view.context = None
+            self.view.cost = None
+            self._update_view(last_session=label)
+        self.renderer.command_error(
+            "Session changed, but its transcript could not be loaded: " + detail
+        )
+        self._finish_session_switch_ui()
+
+    def _finish_session_switch_ui(self) -> None:
+        self.pending_session_switch = None
+        self._call_renderer_optional("session_switch_finished")
+        self._sync_view()
 
     async def _finish_pending_configure(self, event: RpcCommandFinished) -> None:
         pending = self.pending_configures.pop(event.command_id)
@@ -1103,6 +1338,14 @@ class TuiShell:
         elif self.pending_configures:
             command_id = next(iter(self.pending_configures))
             self.renderer.rpc_stream_ended_before_command(command_id)
+        elif self.pending_session_switch is not None:
+            command_id = (
+                self.pending_session_switch.history_command_id
+                or self.pending_session_switch.select_command_id
+            )
+            self.renderer.rpc_stream_ended_before_command(command_id)
+        elif self.pending_session_catalog is not None:
+            self.renderer.rpc_stream_ended_before_command(self.pending_session_catalog.command_id)
         elif pending_command_id is not None:
             self.renderer.rpc_stream_ended_before_command(pending_command_id)
         elif self.state.shutdown_command_id is not None:

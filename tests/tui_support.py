@@ -32,6 +32,8 @@ from wisp.events import (
     RpcCommandFinished,
     RpcMessageSnapshot,
     RpcMessagesReported,
+    RpcSessionSelected,
+    RpcSessionsReported,
     SessionSaved,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -107,6 +109,8 @@ class ScriptedController:
         compact_events: list[ScriptedBatch] | None = None,
         configure_events: list[ScriptedBatch] | None = None,
         messages_events: list[ScriptedBatch] | None = None,
+        sessions_events: list[ScriptedBatch] | None = None,
+        select_session_events: list[ScriptedBatch] | None = None,
         session_stats_events: list[ScriptedBatch] | None = None,
         shutdown_events: list[ScriptedBatch] | None = None,
         close_after_prompt: bool = False,
@@ -117,6 +121,8 @@ class ScriptedController:
         self.compact_events = deque(compact_events or [])
         self.configure_events = deque(configure_events or [])
         self.messages_events = deque(messages_events or [])
+        self.sessions_events = deque(sessions_events or [])
+        self.select_session_events = deque(select_session_events or [])
         self.session_stats_events = deque(session_stats_events or [])
         self.shutdown_events = deque(shutdown_events or [])
         self.close_after_prompt = close_after_prompt
@@ -128,6 +134,8 @@ class ScriptedController:
         self.cancelled: list[str] = []
         self.configurations: list[tuple[str | None, str | None, str | None, bool]] = []
         self.messages_requests: list[tuple[str, str | None, int, str | None]] = []
+        self.sessions_requests: list[tuple[str, int]] = []
+        self.selected_sessions: list[tuple[str, str]] = []
         self.session_stats_requests: list[str] = []
         self.shutdown_count = 0
         self.closed = False
@@ -181,6 +189,53 @@ class ScriptedController:
                 RpcCommandFinished(
                     command_id=selected_id,
                     command_type="get_messages",
+                    ok=True,
+                ),
+            ],
+        )
+        return selected_id
+
+    async def get_sessions(
+        self,
+        *,
+        limit: int = 50,
+        command_id: str | None = None,
+    ) -> str:
+        selected_id = command_id or f"sessions-{len(self.sessions_requests) + 1}"
+        self.sessions_requests.append((selected_id, limit))
+        await self._emit_scripted(
+            self.sessions_events,
+            default=[
+                RpcSessionsReported(command_id=selected_id),
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="get_sessions",
+                    ok=True,
+                ),
+            ],
+        )
+        return selected_id
+
+    async def select_session(
+        self,
+        session_id: str,
+        *,
+        command_id: str | None = None,
+    ) -> str:
+        selected_id = command_id or f"select-session-{len(self.selected_sessions) + 1}"
+        self.selected_sessions.append((selected_id, session_id))
+        await self._emit_scripted(
+            self.select_session_events,
+            default=[
+                RpcSessionSelected(
+                    command_id=selected_id,
+                    session_id=session_id,
+                    session_path=Path(f"/tmp/{session_id}.jsonl"),
+                    entry_count=0,
+                ),
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="select_session",
                     ok=True,
                 ),
             ],

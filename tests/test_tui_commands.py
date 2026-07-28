@@ -59,6 +59,20 @@ def test_compact_command_is_available_in_slash_menu() -> None:
     assert "Compact" in spec.description
 
 
+def test_resume_command_parses_and_is_available_in_slash_menu() -> None:
+    bare = parse_tui_slash_command("/resume")
+    selected = parse_tui_slash_command("/resume session-123")
+    spec = next(spec for spec in SLASH_COMMAND_SPECS if spec.command == "/resume")
+
+    assert bare is not None
+    assert bare.name is TuiSlashCommandName.resume
+    assert bare.args == ()
+    assert selected is not None
+    assert selected.name is TuiSlashCommandName.resume
+    assert selected.args == ("session-123",)
+    assert spec.takes_args is True
+
+
 def test_parse_tui_slash_command_aliases_quit() -> None:
     assert parse_tui_slash_command("/exit") is not None
     assert parse_tui_slash_command("/exit").name is TuiSlashCommandName.quit  # type: ignore[union-attr]

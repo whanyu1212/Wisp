@@ -24,6 +24,10 @@ from wisp.events import (
     RpcMessagesReported,
     RpcMessageToolCallSnapshot,
     RpcMessageToolResultSnapshot,
+    RpcSessionSelected,
+    RpcSessionsReported,
+    RpcSessionSummary,
+    SessionCostSummary,
     SessionStatsReported,
     TokenUsage,
     UsageCost,
@@ -82,6 +86,222 @@ def _rpc_message(
         is_error=is_error,
         tool_result=tool_result,
     )
+
+
+def test_tui_shell_resume_catalog_uses_rpc_owned_order_and_selection() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.catalogs: list[tuple[tuple[RpcSessionSummary, ...], str | None]] = []
+            self.catalog_lifecycle: list[str] = []
+
+        def session_catalog_started(self) -> None:
+            self.catalog_lifecycle.append("start")
+
+        def session_catalog_finished(self) -> None:
+            self.catalog_lifecycle.append("finish")
+
+        def session_picker_request(
+            self,
+            sessions: tuple[RpcSessionSummary, ...],
+            *,
+            selected_session_id: str | None,
+        ) -> None:
+            self.catalogs.append((sessions, selected_session_id))
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        newer = RpcSessionSummary(
+            session_id="newer",
+            session_path="/tmp/newer.jsonl",
+            updated_at=datetime(2026, 2, 1, tzinfo=UTC),
+            entry_count=4,
+            name="Newer task",
+        )
+        older = RpcSessionSummary(
+            session_id="older",
+            session_path="/tmp/older.jsonl",
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            entry_count=2,
+        )
+
+        await shell._handle_resume_command(())
+        assert controller.sessions_requests == [("sessions-1", 200)]
+        await shell._handle_rpc_event(
+            RpcSessionsReported(
+                command_id="sessions-1",
+                sessions=(newer, older),
+                selected_session_id="older",
+                selected_session_path="/tmp/older.jsonl",
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id="sessions-1",
+                command_type="get_sessions",
+                ok=True,
+            )
+        )
+
+        assert renderer.catalogs == [((newer, older), "older")]
+        assert renderer.catalog_lifecycle == ["start", "finish"]
+        assert shell.pending_session_catalog is None
+
+    anyio.run(run)
+
+
+def test_tui_shell_resume_replaces_history_after_selection_and_hydration() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.replacements: list[tuple[tuple[HistoricalTranscriptEntry, ...], str]] = []
+            self.switches: list[str] = []
+
+        def session_switch_started(self, session_id: str) -> None:
+            self.switches.append(f"start:{session_id}")
+
+        def session_switch_finished(self) -> None:
+            self.switches.append("finish")
+
+        def replace_history_entries(
+            self,
+            entries: tuple[HistoricalTranscriptEntry, ...],
+            *,
+            session_label: str,
+        ) -> None:
+            self.replacements.append((entries, session_label))
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell.view.context = _context_budget(estimated=100)
+        shell.view.cost = SessionCostSummary()
+
+        await shell._handle_resume_command(("target",))
+        await shell._handle_rpc_event(
+            RpcSessionSelected(
+                command_id="select-session-1",
+                session_id="target",
+                session_path="/tmp/target.jsonl",
+                entry_count=2,
+                session_name="Target task",
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id="select-session-1",
+                command_type="select_session",
+                ok=True,
+            )
+        )
+        assert controller.messages_requests[-1][1:] == (None, 500, None)
+        history_id = controller.messages_requests[-1][0]
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=history_id,
+                session_id="target",
+                session_path="/tmp/target.jsonl",
+                messages=(
+                    _rpc_message("user", "historical prompt", entry_id="message-1"),
+                    _rpc_message("assistant", "historical answer", entry_id="message-2"),
+                ),
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=history_id,
+                command_type="get_messages",
+                ok=True,
+            )
+        )
+
+        entries, label = renderer.replacements[-1]
+        assert label == "Target task"
+        assert entries == (
+            HistoricalTranscriptMessage(role="user", content="historical prompt"),
+            HistoricalTranscriptMessage(role="assistant", content="historical answer"),
+        )
+        assert renderer.switches == ["start:target", "finish"]
+        assert shell.view.last_session == "Target task"
+        assert shell.view.context is None
+        assert shell.view.cost is None
+        assert shell.pending_session_switch is None
+
+    anyio.run(run)
+
+
+def test_tui_shell_resume_selection_failure_preserves_visible_history() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.replacement_count = 0
+
+        def replace_history_entries(
+            self,
+            entries: tuple[HistoricalTranscriptEntry, ...],
+            *,
+            session_label: str,
+        ) -> None:
+            self.replacement_count += 1
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        shell.view.last_session = "original"
+
+        await shell._handle_resume_command(("missing",))
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id="select-session-1",
+                command_type="select_session",
+                ok=False,
+                error="session not found",
+            )
+        )
+
+        assert renderer.replacement_count == 0
+        assert shell.view.last_session == "original"
+        assert shell.pending_session_switch is None
+
+    anyio.run(run)
+
+
+def test_tui_shell_resume_send_failure_finishes_switch_ui() -> None:
+    class FailingSelectionController(ScriptedController):
+        async def select_session(
+            self,
+            session_id: str,
+            *,
+            command_id: str | None = None,
+        ) -> str:
+            raise RuntimeError("RPC transport closed")
+
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.started: list[str] = []
+            self.finished = 0
+
+        def session_switch_started(self, session_id: str) -> None:
+            self.started.append(session_id)
+
+        def session_switch_finished(self) -> None:
+            self.finished += 1
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        shell = TuiShell(FailingSelectionController(), renderer=renderer)
+
+        await shell._handle_resume_command(("target",))
+
+        assert renderer.started == ["target"]
+        assert renderer.finished == 1
+        assert shell.pending_session_switch is None
+
+    anyio.run(run)
 
 
 def test_tui_view_state_updates_context_from_estimate_stats_and_usage() -> None:
