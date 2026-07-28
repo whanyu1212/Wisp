@@ -187,6 +187,43 @@ def test_ctrl_o_palette_preserves_transcript_scroll_position() -> None:
     assert after == before
 
 
+def test_ctrl_o_palette_preserves_near_tail_scroll_with_multiline_draft() -> None:
+    async def scenario() -> tuple[float, float, float, bool, bool]:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            editor = app.query_one("#input", PromptEditor)
+            editor.value = "draft line 1\ndraft line 2\ndraft line 3\ndraft line 4"
+            for index in range(80):
+                app.write_notice(f"historical line {index}")
+            await pilot.pause()
+            transcript = app.query_one("#transcript", Transcript)
+            transcript.return_to_latest()
+            await pilot.pause()
+            target_y = max(0.0, transcript.max_scroll_y - 2.0)
+            transcript.scroll_to(y=target_y, animate=False)
+            await pilot.pause()
+            before = transcript.scroll_y
+            following_before = transcript.is_following
+            max_scroll_y = transcript.max_scroll_y
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            return (
+                max_scroll_y,
+                before,
+                transcript.scroll_y,
+                following_before,
+                transcript.is_following,
+            )
+
+    max_scroll_y, before, after, following_before, following_after = anyio.run(scenario)
+    assert max_scroll_y > 2
+    assert following_before is False
+    assert after == before
+    assert following_after is False
+
+
 def test_palette_selection_submits_existing_command_path_without_clearing_draft() -> None:
     async def scenario() -> tuple[str, str]:
         app = TextualTui()

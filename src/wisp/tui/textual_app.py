@@ -43,6 +43,7 @@ from wisp.tui.widgets import (
     StatusBar,
     ToolCard,
     Transcript,
+    TranscriptViewportState,
     WorkingIndicator,
 )
 
@@ -299,6 +300,7 @@ class TextualTui(App[None]):
         self._model_picker: ModelPicker | None = None
         self._session_picker: SessionPicker | None = None
         self._command_catalog = DEFAULT_TUI_COMMAND_CATALOG
+        self._command_palette_transcript_state: TranscriptViewportState | None = None
         self._session_operation_in_progress = False
         # Monotonic timestamp of the most recent _prepare_overlay() call
         # (see on_event / _prepare_overlay). Any Key/MouseDown/MouseUp/
@@ -874,6 +876,9 @@ class TextualTui(App[None]):
             return
         if self._input is None or not self._input.display:
             return
+        self._command_palette_transcript_state = (
+            self._transcript.viewport_state() if self._transcript is not None else None
+        )
         self._prepare_overlay()
         composer = self.query_one("#composer")
         palette.styles.max_height = max(4, composer.region.y)
@@ -1013,6 +1018,7 @@ class TextualTui(App[None]):
             self._session_picker.hide()
         if self._command_palette is not None and self._command_palette.is_open:
             self._command_palette.hide()
+            self._command_palette_transcript_state = None
         if self._input is not None:
             self._input.display = False
 
@@ -1024,6 +1030,11 @@ class TextualTui(App[None]):
         if self._input is not None:
             self._input.display = True
             self._input.focus()
+        state = self._command_palette_transcript_state
+        self._command_palette_transcript_state = None
+        transcript = self._transcript
+        if state is not None and transcript is not None:
+            self.call_after_refresh(lambda: transcript.restore_viewport_state(state))
 
     def show_approval(self, event: ToolApprovalRequested, *, cwd: str) -> None:
         panel = self._decision_panel

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from textual import events
 from textual.app import ComposeResult
@@ -57,6 +58,12 @@ from wisp.tui.rendering import (
 _TOOL_OUTPUT_PREVIEW_LINES = 8
 _TOOL_OUTPUT_PREVIEW_BYTES = 2_000
 PASTE_DISPLAY_THRESHOLD = 2_000
+
+
+@dataclass(frozen=True)
+class TranscriptViewportState:
+    scroll_y: float
+    following: bool
 
 
 class PromptEditor(TextArea):
@@ -1186,6 +1193,24 @@ class Transcript(VerticalScroll):
         """Whether new output should remain pinned to the transcript tail."""
 
         return self._follow
+
+    def viewport_state(self) -> TranscriptViewportState:
+        """Capture the current viewport offset and tail-follow intent."""
+
+        return TranscriptViewportState(scroll_y=self.scroll_y, following=self._follow)
+
+    def restore_viewport_state(self, state: TranscriptViewportState) -> None:
+        """Restore a viewport snapshot after temporary layout changes."""
+
+        if state.following:
+            self.return_to_latest()
+            return
+        previous = self._follow
+        target_y = min(max(0.0, state.scroll_y), self.max_scroll_y)
+        self.scroll_to(y=target_y, animate=False)
+        self._follow = False
+        if previous:
+            self.post_message(self.FollowChanged(False))
 
     def follow_tail(self) -> None:
         """Scroll to the newest content iff the user hasn't scrolled away."""
