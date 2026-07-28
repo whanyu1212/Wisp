@@ -19,6 +19,7 @@ from wisp.extensions import builtin
 from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.retry import RetryPolicy
 from wisp.runtime.api import ExtensionAPI, WispRuntime
+from wisp.runtime.commands import CommandRegistry
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 
@@ -34,10 +35,18 @@ async def build_runtime(
 
     providers = ProviderRegistry()
     tools = ToolRegistry()
+    commands = CommandRegistry()
     events = EventBus()
-    api = ExtensionAPI(providers=providers, tools=tools, events=events)
+    api = ExtensionAPI(providers=providers, tools=tools, commands=commands, events=events)
     models = ModelRegistry(effective_catalog())
-    runtime = WispRuntime(providers=providers, tools=tools, events=events, api=api, models=models)
+    runtime = WispRuntime(
+        providers=providers,
+        tools=tools,
+        commands=commands,
+        events=events,
+        api=api,
+        models=models,
+    )
     await activate_builtin_extensions(
         api,
         auth_store=JsonAuthStore(auth_path or default_auth_path()),

@@ -337,6 +337,12 @@ Available slash commands:
 /quit, /exit
 ```
 
+Slash command metadata is backed by Wisp's frontend-neutral runtime command descriptors rather
+than a Textual-owned table. This PR-sized slice registers built-in descriptor metadata for shared
+slash suggestions, parsing, and future palette/RPC discovery. It does not yet add extension command
+handlers, dynamic project extension loading, `get_commands`, skills, prompt templates, package
+management, or configurable keybindings.
+
 TUI login currently uses the `openai-codex` device-code flow; browser login is available from the
 CLI (`uv run wisp auth login openai-codex`). `/model` with no arguments opens a model picker in
 the Textual TUI and lists every catalog model grouped by provider in line mode. `/resume` with no

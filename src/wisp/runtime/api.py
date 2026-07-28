@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from wisp.providers.base import Provider
 from wisp.providers.catalog import ModelRegistry
+from wisp.runtime.commands import CommandDescriptor, CommandRegistry
 from wisp.runtime.event_bus import EventBus, EventHandler
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 from wisp.tools.base import Tool
@@ -15,10 +16,16 @@ class ExtensionAPI:
     """Small extension-facing API for registering runtime capabilities."""
 
     def __init__(
-        self, *, providers: ProviderRegistry, tools: ToolRegistry, events: EventBus
+        self,
+        *,
+        providers: ProviderRegistry,
+        tools: ToolRegistry,
+        commands: CommandRegistry | None = None,
+        events: EventBus,
     ) -> None:
         self._providers = providers
         self._tools = tools
+        self._commands = commands or CommandRegistry()
         self._events = events
 
     def register_provider(self, provider: Provider, *, replace: bool = True) -> None:
@@ -30,6 +37,17 @@ class ExtensionAPI:
         """Register a local tool with the runtime."""
 
         self._tools.register(tool, replace=replace)
+
+    def register_command(self, descriptor: CommandDescriptor, *, replace: bool = False) -> None:
+        """Register a frontend-neutral command descriptor with the runtime."""
+
+        self._commands.register(descriptor, replace=replace)
+
+    @property
+    def commands(self) -> CommandRegistry:
+        """Return the command registry connected to this extension API."""
+
+        return self._commands
 
     def on(self, event_type: str, handler: EventHandler) -> None:
         """Subscribe to runtime events emitted by the agent core."""
@@ -46,11 +64,16 @@ class WispRuntime:
     events: EventBus
     api: ExtensionAPI
     models: ModelRegistry
+    commands: CommandRegistry = field(default_factory=CommandRegistry)
     _configured_providers: dict[str, Provider] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        """Treat providers present at direct construction as runtime-configured."""
+        """Normalize shared registries and direct-construction provider state."""
 
+        if self.commands is not self.api.commands:
+            if self.commands.names():
+                raise ValueError("WispRuntime.commands must match ExtensionAPI.commands")
+            object.__setattr__(self, "commands", self.api.commands)
         if not self._configured_providers:
             self.capture_provider_configuration()
 
