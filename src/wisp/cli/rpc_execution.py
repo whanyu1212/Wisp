@@ -25,7 +25,10 @@ from wisp.events import (
     QueueItemsRemoved,
     QueueKind,
     QueueMode,
+    RpcCommandArgument,
+    RpcCommandDescriptor,
     RpcCommandFinished,
+    RpcCommandsReported,
     RpcCommandStarted,
     RpcMessagesReported,
     RpcSessionCloned,
@@ -46,6 +49,7 @@ from wisp.providers.base import Provider, ProviderError
 from wisp.providers.catalog import AmbiguousModelError, UnknownModelError
 from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES, ApprovalScope
 from wisp.runtime.api import WispRuntime
+from wisp.runtime.commands import CommandDescriptor
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.entries import MessageSessionEntry, SessionEntry, SessionInfoSessionEntry
 from wisp.sessions.errors import SessionNavigationCancelledError
@@ -177,6 +181,8 @@ class RpcCommandExecutor:
             return self._dispatch_set_session_name(command)
         if command_type == "get_state":
             return self._dispatch_state(command, running_command)
+        if command_type == "get_commands":
+            return self._dispatch_commands(command, running_command)
         if command_type in QUEUE_RPC_COMMAND_TYPES:
             return self._dispatch_queue(command, running_command)
         return self._dispatch_control(command, running_command)
@@ -371,6 +377,18 @@ class RpcCommandExecutor:
             session_name=self.session_state.name,
             running_command=running_command,
             pending_prompt_queue_commands=tuple(self.coordinator.pending_prompt_queue_commands),
+            write_event=self.write_event,
+        )
+        return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_commands(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        handle_rpc_commands_command(
+            command,
+            runtime=self.runtime,
             write_event=self.write_event,
         )
         return _RpcDispatchResult(running_command=running_command)
@@ -2332,6 +2350,67 @@ def handle_rpc_state_command(
 
     write_event(RpcStateReported(command_id=command_id, state=state))
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def handle_rpc_commands_command(
+    command: dict[str, object],
+    *,
+    runtime: WispRuntime,
+    write_event: RpcEventWriter,
+) -> None:
+    """Return one coherent in-memory command registry snapshot without becoming active."""
+
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return
+
+    try:
+        commands = tuple(
+            _rpc_command_descriptor(descriptor) for descriptor in runtime.commands.all()
+        )
+    except Exception as exc:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=str(exc),
+            write_event=write_event,
+        )
+        return
+
+    write_event(RpcCommandsReported(command_id=command_id, commands=commands))
+    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def _rpc_command_descriptor(descriptor: CommandDescriptor) -> RpcCommandDescriptor:
+    """Convert a runtime command descriptor into its RPC wire shape."""
+
+    return RpcCommandDescriptor(
+        name=descriptor.name,
+        title=descriptor.title,
+        description=descriptor.description,
+        category=str(descriptor.category),
+        aliases=descriptor.aliases,
+        slash_command=descriptor.slash_command,
+        slash_aliases=descriptor.slash_aliases,
+        arguments=tuple(
+            RpcCommandArgument(
+                name=argument.name,
+                description=argument.description,
+                required=argument.required,
+            )
+            for argument in descriptor.arguments
+        ),
+        accepts_arguments=descriptor.accepts_arguments,
+        prefill_on_partial_enter=descriptor.prefill_on_partial_enter,
+        order=descriptor.order,
+    )
 
 
 def _project_buffered_prompt_queue_commands(

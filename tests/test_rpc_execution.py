@@ -31,6 +31,7 @@ from wisp.events import (
     QueueItemsRemoved,
     QueueUpdated,
     RpcCommandFinished,
+    RpcCommandsReported,
     RpcCommandStarted,
     RpcMessagesReported,
     RpcSessionCloned,
@@ -44,6 +45,7 @@ from wisp.events import (
     RpcStateSnapshot,
     WispEvent,
 )
+from wisp.runtime.commands import CommandArgument, CommandCategory, CommandDescriptor
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionTreeNavigation
 
@@ -266,6 +268,107 @@ def test_executor_state_is_idle_safe_and_reports_snapshot_failures(
             ("get_state", True, None),
             ("get_state", False, "RPC command id must be a non-empty string"),
             ("get_state", False, "snapshot failed"),
+        ]
+
+    anyio.run(scenario)
+
+
+def test_executor_reports_commands_from_runtime_registry_without_replacing_running_command(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        fixture.runtime.api.register_command(
+            CommandDescriptor(
+                name="inspect",
+                title="Inspect",
+                description="Inspect command registry metadata",
+                category=CommandCategory.general,
+                aliases=("i", ":inspect"),
+                arguments=(
+                    CommandArgument(
+                        name="target",
+                        description="Optional target",
+                    ),
+                ),
+                accepts_arguments=True,
+                prefill_on_partial_enter=True,
+                order=5,
+            )
+        )
+        running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+
+            result = executor.dispatch({"id": "commands-1", "type": "get_commands"}, running)
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is running
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            RpcCommandsReported,
+            RpcCommandFinished,
+        ]
+        report = fixture.events[1]
+        assert isinstance(report, RpcCommandsReported)
+        assert report.command_id == "commands-1"
+        assert report.commands[0].name == "inspect"
+        inspected = report.commands[0]
+        assert inspected.title == "Inspect"
+        assert inspected.description == "Inspect command registry metadata"
+        assert inspected.category == "general"
+        assert inspected.aliases == ("i", ":inspect")
+        assert inspected.slash_command == "/inspect"
+        assert inspected.slash_aliases == ("/i", ":inspect")
+        assert inspected.arguments[0].name == "target"
+        assert inspected.accepts_arguments is True
+        assert inspected.prefill_on_partial_enter is True
+        assert [descriptor.name for descriptor in report.commands[1:]] == [
+            "help",
+            "compact",
+            "model",
+            "resume",
+            "provider",
+            "auth",
+            "login",
+            "logout",
+            "quit",
+        ]
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.command_id == "commands-1"
+        assert finished.command_type == "get_commands"
+        assert finished.ok is True
+
+    anyio.run(scenario)
+
+
+def test_executor_commands_reports_malformed_id_and_registry_failures(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+
+            malformed = executor.dispatch({"id": [], "type": "get_commands"}, None)
+
+            def fail_commands() -> object:
+                raise RuntimeError("registry failed")
+
+            monkeypatch.setattr(fixture.runtime.commands, "all", fail_commands)
+            failed = executor.dispatch({"id": "commands-1", "type": "get_commands"}, None)
+            task_group.cancel_scope.cancel()
+
+        assert malformed.running_command is None
+        assert failed.running_command is None
+        finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
+        assert [(event.command_type, event.ok, event.error) for event in finished] == [
+            ("get_commands", False, "RPC command id must be a non-empty string"),
+            ("get_commands", False, "registry failed"),
         ]
 
     anyio.run(scenario)

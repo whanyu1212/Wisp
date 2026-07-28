@@ -14,7 +14,10 @@ from wisp.events import (
     ProjectConfigApplied,
     ProviderRetrying,
     QueueItemsRemoved,
+    RpcCommandArgument,
+    RpcCommandDescriptor,
     RpcCommandFinished,
+    RpcCommandsReported,
     RpcCommandStarted,
     RpcMessageSnapshot,
     RpcMessagesReported,
@@ -42,6 +45,7 @@ from wisp.rpc import (
     ConfigureCommand,
     FollowUpCommand,
     ForkSessionCommand,
+    GetCommandsCommand,
     GetMessagesCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
@@ -140,6 +144,16 @@ def test_get_state_command_serializes_as_jsonl_and_parses() -> None:
     assert json.loads(command.to_json_line()) == {
         "id": "state-1",
         "type": "get_state",
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_get_commands_command_serializes_as_jsonl_and_parses() -> None:
+    command = GetCommandsCommand(id="commands-1")
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "commands-1",
+        "type": "get_commands",
     }
     assert rpc_command_from_json(command.to_json_line()) == command
 
@@ -311,6 +325,35 @@ def test_rpc_state_report_round_trips_only_at_schema_v16() -> None:
     assert wisp_event_from_json(event.model_dump_json()) == event
     with pytest.raises(ValueError, match="require schema_version 16"):
         wisp_event_from_json(event.model_copy(update={"schema_version": 15}).model_dump_json())
+
+
+def test_rpc_commands_report_round_trips_only_at_schema_v23() -> None:
+    event = RpcCommandsReported(
+        command_id="commands-1",
+        commands=(
+            RpcCommandDescriptor(
+                name="compact",
+                title="Compact",
+                description="Compact the session context",
+                category="session",
+                aliases=("cx",),
+                slash_command="/compact",
+                slash_aliases=("/cx",),
+                arguments=(
+                    RpcCommandArgument(
+                        name="instructions",
+                        description="Optional compaction guidance",
+                    ),
+                ),
+                accepts_arguments=True,
+                order=20,
+            ),
+        ),
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    with pytest.raises(ValueError, match="require schema_version 23"):
+        wisp_event_from_json(event.model_copy(update={"schema_version": 22}).model_dump_json())
 
 
 def test_rpc_messages_report_round_trips_only_at_schema_v17() -> None:
@@ -1017,6 +1060,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         compact_id = await controller.compact("Keep paths")
         stats_id = await controller.get_session_stats()
         state_id = await controller.get_state()
+        commands_id = await controller.get_commands()
         messages_id = await controller.get_messages(
             session_id="session-1",
             limit=25,
@@ -1050,6 +1094,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             compact_id,
             stats_id,
             state_id,
+            commands_id,
             messages_id,
             sessions_id,
             select_id,
@@ -1073,6 +1118,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             "compact-id",
             "stats-id",
             "state-id",
+            "commands-id",
             "messages-id",
             "sessions-id",
             "select-session-id",
@@ -1097,6 +1143,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             CompactCommand(id="compact-id", instructions="Keep paths"),
             GetSessionStatsCommand(id="stats-id"),
             GetStateCommand(id="state-id"),
+            GetCommandsCommand(id="commands-id"),
             GetMessagesCommand(
                 id="messages-id",
                 session_id="session-1",

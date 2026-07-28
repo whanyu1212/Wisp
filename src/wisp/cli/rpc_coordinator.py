@@ -98,6 +98,7 @@ _MAX_QUEUED_RPC_COMMANDS = 100
 _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
     "approval",
     "cancel",
+    "get_commands",
     "get_state",
     "trust",
 }

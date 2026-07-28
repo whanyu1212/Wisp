@@ -61,6 +61,12 @@ class GetStateCommand(RpcCommandModel):
     type: Literal["get_state"] = "get_state"
 
 
+class GetCommandsCommand(RpcCommandModel):
+    """Return an immediate in-memory command registry snapshot."""
+
+    type: Literal["get_commands"] = "get_commands"
+
+
 class GetMessagesCommand(RpcCommandModel):
     """Return a bounded persisted transcript page."""
 
@@ -217,6 +223,7 @@ type RpcCommand = Annotated[
     | CompactCommand
     | GetSessionStatsCommand
     | GetStateCommand
+    | GetCommandsCommand
     | GetMessagesCommand
     | GetSessionsCommand
     | SelectSessionCommand
