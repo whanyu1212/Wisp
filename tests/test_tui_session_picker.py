@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import anyio
+from textual.content import Content
 from textual.widgets import OptionList
 
 from wisp.events import RpcSessionSummary
@@ -50,6 +51,31 @@ def test_session_picker_preserves_rpc_order_and_highlights_selected_session() ->
     assert labels[0].startswith("  Newer")
     assert labels[1].startswith("● Selected")
     assert highlighted == 1
+
+
+def test_session_picker_renders_persisted_labels_as_plain_text() -> None:
+    sessions = (
+        RpcSessionSummary(
+            session_id="literal",
+            session_path=Path("/tmp/[archive]/literal.jsonl"),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+            entry_count=1,
+            name="[WIP] task",
+        ),
+    )
+
+    async def scenario() -> Content:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            renderer.session_picker_request(sessions, selected_session_id=None)
+            await pilot.pause()
+            options = app.query_one("#session-picker-options", OptionList)
+            return options.get_option_at_index(0).prompt
+
+    prompt = anyio.run(scenario)
+    assert isinstance(prompt, Content)
+    assert "[WIP] task" in prompt.plain
+    assert "/tmp/[archive]/literal.jsonl" in prompt.plain
 
 
 def test_session_picker_selection_uses_resume_command_and_preserves_draft() -> None:

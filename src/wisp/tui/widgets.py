@@ -939,7 +939,10 @@ class SessionPicker(Vertical):
             updated = session.updated_at.isoformat(timespec="minutes")
             path = _truncate_to_cell_width(str(session.session_path), 72)
             label = f"{marker} {name} · {session.entry_count} entries · {updated}\n  {path}"
-            self._options.add_option(Option(label, id=session.session_id))
+            # Persisted names and paths are untrusted display text. Content()
+            # keeps bracket syntax literal instead of letting Option parse it as
+            # Textual markup.
+            self._options.add_option(Option(Content(label), id=session.session_id))
             self._rows.append(session.session_id)
             if current:
                 selected_index = index

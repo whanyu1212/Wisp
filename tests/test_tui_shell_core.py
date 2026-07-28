@@ -261,6 +261,36 @@ def test_tui_shell_resume_selection_failure_preserves_visible_history() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_resume_send_failure_finishes_switch_ui() -> None:
+    class FailingSelectionController(ScriptedController):
+        async def select_session(
+            self,
+            session_id: str,
+            *,
+            command_id: str | None = None,
+        ) -> str:
+            raise RuntimeError("RPC transport closed")
+
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.finished = 0
+
+        def session_switch_finished(self) -> None:
+            self.finished += 1
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        shell = TuiShell(FailingSelectionController(), renderer=renderer)
+
+        await shell._handle_resume_command(("target",))
+
+        assert renderer.finished == 1
+        assert shell.pending_session_switch is None
+
+    anyio.run(run)
+
+
 def test_tui_view_state_updates_context_from_estimate_stats_and_usage() -> None:
     state = TuiViewState()
     estimate = _context_budget(estimated=10_000)
