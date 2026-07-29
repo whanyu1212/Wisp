@@ -117,6 +117,19 @@ class PromptEditor(TextArea):
         if cursor_at_end:
             self.cursor_position = len(text)
 
+    def restore_prompt(self, text: str) -> None:
+        """Restore exact prompt text while keeping large content compact."""
+
+        if len(text) <= PASTE_DISPLAY_THRESHOLD:
+            self.replace_text(text)
+            return
+        self._clear_pending_paste()
+        self._paste_placeholder_counter = 1
+        placeholder = self._large_paste_placeholder(text, self._paste_placeholder_counter)
+        self._pending_pastes.append((placeholder, text))
+        self.text = placeholder
+        self.cursor_position = len(placeholder)
+
     @property
     def cursor_position(self) -> int:
         """Return the cursor as a flat offset for ``Input`` compatibility."""

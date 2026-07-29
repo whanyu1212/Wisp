@@ -659,7 +659,7 @@ class TextualTui(App[None]):
         if not self.hide_prompt_history():
             return
         if self._input is not None:
-            self._input.replace_text(event.prompt)
+            self._input.restore_prompt(event.prompt)
             self._input.focus()
 
     def on_prompt_history_picker_cancelled(self, event: PromptHistoryPicker.Cancelled) -> None:

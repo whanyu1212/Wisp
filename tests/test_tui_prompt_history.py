@@ -17,7 +17,7 @@ from wisp.tui.prompt_history_widget import PromptHistoryPicker
 from wisp.tui.shell import TuiShell
 from wisp.tui.state import _InputLine, _InputMode
 from wisp.tui.textual_app import TextualTui, create_textual_tui
-from wisp.tui.widgets import PromptEditor, Transcript
+from wisp.tui.widgets import PASTE_DISPLAY_THRESHOLD, PromptEditor, Transcript
 
 
 def test_prompt_history_is_bounded_unique_mru_with_exact_text() -> None:
@@ -187,6 +187,31 @@ def test_history_selection_clears_stale_large_paste_backing() -> None:
     restored, submitted = anyio.run(scenario)
     assert restored.startswith("[Pasted content #1:")
     assert submitted == restored
+
+
+def test_history_selection_keeps_large_prompt_compact_and_submits_exact_text() -> None:
+    async def scenario() -> tuple[str, str, str]:
+        app = TextualTui()
+        prompt = "large history prompt\n" + "é" * (PASTE_DISPLAY_THRESHOLD + 1)
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.record_prompt(prompt)
+            await pilot.press("ctrl+r")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            editor = app.query_one("#input", PromptEditor)
+            display = editor.value
+            expanded = editor.text_for_submission()
+            await pilot.press("enter")
+            submitted = await app.read_prompt("wisp> ")
+            return display, expanded, submitted
+
+    display, expanded, submitted = anyio.run(scenario)
+    assert display.startswith("[Pasted content #1:")
+    assert len(display) < PASTE_DISPLAY_THRESHOLD
+    assert expanded == submitted
+    assert submitted.startswith("large history prompt\n")
+    assert len(submitted) > PASTE_DISPLAY_THRESHOLD
 
 
 def test_history_filter_renders_literal_content_and_empty_states() -> None:
@@ -395,6 +420,27 @@ def test_shell_records_real_prompts_but_not_history_or_help_commands() -> None:
         return tuple(entry.prompt for entry in app._prompt_history.entries)
 
     assert anyio.run(scenario) == ("real prompt",)
+
+
+def test_shell_accepts_prompts_with_legacy_renderer_without_history_hook() -> None:
+    class LegacyRenderer:
+        def __init__(self, delegate: object) -> None:
+            self.delegate = delegate
+
+        def __getattr__(self, name: str) -> object:
+            if name == "prompt_accepted":
+                raise AttributeError(name)
+            return getattr(self.delegate, name)
+
+    async def scenario() -> list[str]:
+        app, renderer = create_textual_tui()
+        controller = ScriptedController()
+        shell = TuiShell(controller, renderer=LegacyRenderer(renderer))  # type: ignore[arg-type]
+
+        await shell._handle_input_line(_InputLine("compatible prompt", _InputMode.idle))
+        return controller.prompts
+
+    assert anyio.run(scenario) == ["compatible prompt"]
 
 
 def test_shell_records_queued_prompt_immediately_and_queue_clear_does_not_erase_it() -> None:

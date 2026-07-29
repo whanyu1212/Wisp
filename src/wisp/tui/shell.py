@@ -458,10 +458,17 @@ class TuiShell:
     def _queue_prompt(self, prompt: str) -> None:
         """Retain and queue one accepted follow-up through a single seam."""
 
-        self.renderer.prompt_accepted(prompt)
+        self._record_prompt_acceptance(prompt)
         self.state.queued_prompts.append(prompt)
         self._update_view(queued_follow_ups=len(self.state.queued_prompts))
         self.renderer.queued_follow_up(len(self.state.queued_prompts))
+
+    def _record_prompt_acceptance(self, prompt: str) -> None:
+        """Notify renderers that implement the optional prompt-history hook."""
+
+        prompt_accepted = getattr(self.renderer, "prompt_accepted", None)
+        if callable(prompt_accepted):
+            prompt_accepted(prompt)
 
     async def _handle_input_line(self, signal: _InputLine) -> bool:
         text = signal.text
@@ -507,7 +514,7 @@ class TuiShell:
         if self.state.current_command_id is not None:
             self._queue_prompt(text)
             return False
-        self.renderer.prompt_accepted(text)
+        self._record_prompt_acceptance(text)
         return await self._start_prompt(text)
 
     async def _handle_slash_command(self, command: TuiSlashCommand) -> bool:
