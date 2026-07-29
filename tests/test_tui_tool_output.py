@@ -84,6 +84,29 @@ def test_render_error_synthetic_restatement_does_not_reintroduce_negative_code()
     assert rendered.startswith("killed by signal 15")
 
 
+def test_render_error_strips_synthetic_prefix_but_keeps_command_output() -> None:
+    rendered = render_error(
+        "Command exited with code 2: assertion failed\ntrace detail",
+        exit_code=2,
+    )
+
+    assert rendered == "exit 2\nassertion failed\ntrace detail"
+    assert rendered.count("exit 2") == 1
+    assert "Command exited with code" not in rendered
+
+
+def test_render_error_strips_negative_prefix_but_keeps_truncation_notice() -> None:
+    rendered = render_error(
+        "Command exited with code -9: [output truncated]",
+        exit_code=-9,
+    )
+
+    assert rendered.startswith("killed by signal 9")
+    assert rendered.endswith("[output truncated]")
+    assert "Command exited with code" not in rendered
+    assert "exit -9" not in rendered
+
+
 def test_render_error_keeps_real_output_alongside_exit_line() -> None:
     # Suppression is narrow: real command output is never dropped, even when a
     # status line is present.
@@ -101,6 +124,11 @@ def test_render_error_keeps_genuine_output_resembling_the_fallback() -> None:
     rendered = render_error("Command exited with code 7", exit_code=2)
     assert "Command exited with code 7" in rendered
     assert rendered == "exit 2\nCommand exited with code 7"
+    mismatched_with_output = render_error(
+        "Command exited with code 7: genuine output",
+        exit_code=2,
+    )
+    assert mismatched_with_output == ("exit 2\nCommand exited with code 7: genuine output")
 
 
 def test_render_error_restatement_match_allows_only_trailing_newline() -> None:

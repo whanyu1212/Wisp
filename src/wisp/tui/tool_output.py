@@ -260,15 +260,11 @@ def render_error(output: str, *, exit_code: int | None) -> str:
     if status is not None:
         lines.append(status)
 
-    # When a shell command produces no stdout/stderr, its output is a synthetic
-    # "Command exited with code N" restatement of *this* exit code (see
-    # _format_process_output). With a structured status line already shown, that
-    # tail is pure duplication — and for a signal it would even restate the raw
-    # negative code (`... code -15`), reintroducing the wording the status line
-    # replaces. Drop it in that case, but only when the restated code matches the
-    # promoted exit code, so a command whose genuine output merely resembles the
-    # fallback (with a different number) is preserved.
-    body = "" if status is not None and _is_exit_restatement(output, exit_code) else output
+    # Shell results carry a synthetic "Command exited with code N" prefix so the
+    # model cannot miss the process status (see _format_process_output). The TUI
+    # already promotes that status to its own line, so remove only the matching
+    # synthetic prefix while preserving any stdout/stderr that follows it.
+    body = _without_exit_restatement(output, exit_code) if status is not None else output
     tail = _tail_preview(body, max_lines=_ERROR_TAIL_LINES, max_bytes=_ERROR_TAIL_BYTES)
     if tail:
         lines.append(tail)
@@ -279,29 +275,30 @@ def render_error(output: str, *, exit_code: int | None) -> str:
 _EXIT_RESTATEMENT_PREFIX = "Command exited with code "
 
 
-def _is_exit_restatement(output: str, exit_code: int | None) -> bool:
-    """Whether output is solely the shell's synthetic restatement of exit_code.
+def _without_exit_restatement(output: str, exit_code: int | None) -> str:
+    """Remove the shell's matching synthetic exit prefix from rendered output.
 
     Mirrors the fallback in ``wisp.tools.process._format_process_output``, which
-    emits exactly ``f"Command exited with code {exit_code}"`` when a command has
-    no stdout/stderr. The match is exact except for a trailing newline (the only
-    whitespace ``_tail_preview`` itself normalizes): genuine output that merely
-    resembles the fallback — a different number, surrounding whitespace, or extra
-    content — is never suppressed.
+    emits ``Command exited with code N`` alone or followed by ``: `` and the
+    command's merged output. The exit code must match the promoted scalar and the
+    prefix must start at byte zero; near matches and mismatched codes are kept.
 
-    Known residual ambiguity: a command whose *sole genuine* output is exactly
-    this string while it exits with the matching code is indistinguishable from
-    the synthetic fallback by text alone, so its output is suppressed. Fully
-    resolving this needs an explicit synthetic-output flag propagated from the
-    tool, which is deferred (see the truncation follow-up — same shape of
-    cross-cutting field propagation). The collision is vanishingly rare and the
-    cost is only a duplicated status line, so text matching is the right tradeoff
-    for now.
+    A trailing newline is tolerated for the no-output form because the preview
+    renderer normalizes it. For the output-bearing form, only the synthetic
+    prefix and separator are removed; the command output remains intact.
     """
 
     if exit_code is None:
-        return False
-    return output.rstrip("\n") == f"{_EXIT_RESTATEMENT_PREFIX}{exit_code}"
+        return output
+
+    restatement = f"{_EXIT_RESTATEMENT_PREFIX}{exit_code}"
+    if output.rstrip("\n") == restatement:
+        return ""
+
+    output_prefix = f"{restatement}: "
+    if output.startswith(output_prefix):
+        return output[len(output_prefix) :]
+    return output
 
 
 def _exit_status_line(exit_code: int | None) -> str | None:
