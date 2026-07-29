@@ -3,17 +3,31 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import os
 import signal
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, cast
 
 import anyio
 
 from wisp.tools.result import ToolError
 from wisp.tools.truncation import TruncatedText, truncate_text_tail
+
+_WINDOWS_JOB_HANDLE_ATTR = "_wisp_windows_job_handle"
+
+
+class _WindowsKernel32(Protocol):
+    def CreateJobObjectW(self, attributes: object, name: object) -> object: ...
+
+    def AssignProcessToJobObject(self, job: object, process: object) -> int: ...
+
+    def TerminateJobObject(self, job: object, exit_code: int) -> int: ...
+
+    def CloseHandle(self, handle: object) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -89,6 +103,7 @@ async def _run_shell(
         )
     except OSError as exc:
         raise ToolError(f"Failed to start command: {exc}") from exc
+    _attach_windows_job(process)
 
     budget = _OutputBudget(max_bytes=max_output_bytes, max_lines=max_output_lines)
     try:
@@ -104,6 +119,8 @@ async def _run_shell(
             await _kill_process_tree_and_wait(process)
         raise
 
+    with anyio.CancelScope(shield=True):
+        await _terminate_process_tree(process)
     return ProcessResult(
         exit_code=process.returncode if process.returncode is not None else -1,
         stdout=stdout_bytes.decode("utf-8", errors="replace"),
@@ -157,9 +174,9 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
             except (ProcessLookupError, PermissionError):
                 return
         return
-    if process.returncode is not None:
-        return
     if os.name == "nt":
+        if _terminate_windows_job(process):
+            return
         try:
             completed = subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(process.pid)],
@@ -169,12 +186,94 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
                 timeout=5,
             )
         except (OSError, subprocess.TimeoutExpired):
-            process.kill()
+            _kill_leader_if_running(process)
         else:
             if completed.returncode != 0:
-                process.kill()
+                _kill_leader_if_running(process)
     else:
+        if process.returncode is not None:
+            return
         process.kill()
+
+
+def _kill_leader_if_running(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    try:
+        process.kill()
+    except (ProcessLookupError, PermissionError):
+        return
+
+
+def _attach_windows_job(process: asyncio.subprocess.Process) -> None:
+    if os.name != "nt":
+        return
+    kernel32 = _windows_kernel32()
+    process_handle = _windows_process_handle(process)
+    if kernel32 is None or process_handle is None:
+        return
+
+    try:
+        job_handle = kernel32.CreateJobObjectW(None, None)
+    except (AttributeError, OSError):
+        return
+    if not job_handle:
+        return
+    try:
+        if not kernel32.AssignProcessToJobObject(job_handle, process_handle):
+            _close_windows_handle(kernel32, job_handle)
+            return
+    except (AttributeError, OSError):
+        _close_windows_handle(kernel32, job_handle)
+        return
+    setattr(process, _WINDOWS_JOB_HANDLE_ATTR, job_handle)
+
+
+def _terminate_windows_job(process: asyncio.subprocess.Process) -> bool:
+    job_handle = getattr(process, _WINDOWS_JOB_HANDLE_ATTR, None)
+    if job_handle is None:
+        return False
+    setattr(process, _WINDOWS_JOB_HANDLE_ATTR, None)
+    kernel32 = _windows_kernel32()
+    if kernel32 is None:
+        return False
+    terminated = False
+    try:
+        terminated = bool(kernel32.TerminateJobObject(job_handle, 1))
+    except (AttributeError, OSError):
+        terminated = False
+    finally:
+        _close_windows_handle(kernel32, job_handle)
+    return terminated
+
+
+def _close_windows_handle(kernel32: _WindowsKernel32, handle: object) -> None:
+    try:
+        kernel32.CloseHandle(handle)
+    except (AttributeError, OSError):
+        return
+
+
+def _windows_kernel32() -> _WindowsKernel32 | None:
+    windll_factory = getattr(ctypes, "WinDLL", None)
+    if windll_factory is None:
+        return None
+    try:
+        return cast(_WindowsKernel32, windll_factory("kernel32", use_last_error=True))
+    except (AttributeError, OSError):
+        return None
+
+
+def _windows_process_handle(process: asyncio.subprocess.Process) -> object | None:
+    direct_handle = getattr(process, "_handle", None)
+    if direct_handle is not None:
+        return cast(object, direct_handle)
+    transport = getattr(process, "_transport", None)
+    get_extra_info = getattr(transport, "get_extra_info", None)
+    if get_extra_info is None:
+        return None
+    subprocess_handle = get_extra_info("subprocess")
+    return cast(object | None, getattr(subprocess_handle, "_handle", None))
 
 
 async def _collect_limited_output(

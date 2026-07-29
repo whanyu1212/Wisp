@@ -14,6 +14,7 @@ import anyio
 
 from wisp.tools.process import (
     ProcessResult,
+    _attach_windows_job,
     _collect_limited_output,
     _kill_process_tree_and_wait,
     _OutputBudget,
@@ -297,7 +298,7 @@ class ProcessSupervisor:
         """Spawn while the caller holds the supervisor lock."""
 
         try:
-            return await asyncio.create_subprocess_shell(
+            process = await asyncio.create_subprocess_shell(
                 command,
                 cwd=str(cwd),
                 start_new_session=os.name == "posix",
@@ -306,6 +307,8 @@ class ProcessSupervisor:
             )
         except OSError as exc:
             raise ToolError(f"Failed to start command: {exc}") from exc
+        _attach_windows_job(process)
+        return process
 
     async def _get(self, process_id: str) -> _ManagedProcess:
         async with self._lock:

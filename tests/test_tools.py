@@ -490,6 +490,28 @@ def test_bash_tool_reports_timeout_and_kills_child_processes(tmp_path: Path) -> 
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_bash_completion_kills_background_child_with_redirected_output(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    child_pid_path = tmp_path / "background.pid"
+    command = f"sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(child_pid_path))}"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+    child_pid = int(child_pid_path.read_text())
+
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("background child remained alive after bash completion")
+
+    assert result.data["exit_code"] == 0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
 def test_bash_timeout_kills_background_child_after_shell_exits(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     marker = tmp_path / "background-child-survived.txt"
@@ -562,6 +584,89 @@ def test_bash_tool_uses_taskkill_for_windows_process_tree_cleanup(
     monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
 
     process_tools_module._kill_process_tree(process)  # noqa: SLF001
+
+    assert calls == [["taskkill", "/F", "/T", "/PID", "123"]]
+    assert process.killed is False
+
+
+def test_bash_tool_uses_windows_job_handle_after_shell_leader_exits(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        returncode = 0
+        pid = 123
+        _handle = 456
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 1
+
+        def TerminateJobObject(self, job: int, exit_code: int) -> int:
+            self.calls.append(("terminate", job, exit_code))
+            return 1
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
+            return 1
+
+    taskkill_calls: list[list[str]] = []
+    kernel32 = FakeKernel32()
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+    monkeypatch.setattr(
+        process_tools_module.subprocess,
+        "run",
+        lambda command, **_kwargs: taskkill_calls.append(command),
+    )
+
+    process_tools_module._attach_windows_job(process)  # type: ignore[arg-type]  # noqa: SLF001
+    process_tools_module._kill_process_tree(process)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert kernel32.calls == [
+        ("create",),
+        ("assign", 789, 456),
+        ("terminate", 789, 1),
+        ("close", 789),
+    ]
+    assert taskkill_calls == []
+    assert process.killed is False
+
+
+def test_bash_tool_attempts_taskkill_for_windows_leader_after_exit_without_job(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        returncode = 0
+        pid = 123
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    process_tools_module._kill_process_tree(process)  # type: ignore[arg-type]  # noqa: SLF001
 
     assert calls == [["taskkill", "/F", "/T", "/PID", "123"]]
     assert process.killed is False
