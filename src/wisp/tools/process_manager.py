@@ -121,6 +121,7 @@ class ProcessSupervisor:
 
         async with self._lock:
             self._ensure_open()
+            self._evict_terminals_for_capacity()
             if len(self._managed) + len(self._one_shot) >= self._max_processes:
                 raise ToolError(
                     f"Cannot start command: managed process limit ({self._max_processes}) reached"
@@ -370,16 +371,8 @@ def _bounded_text_tail(text: str, *, max_bytes: int, max_lines: int) -> tuple[st
     if max_bytes <= 0 or max_lines <= 0:
         return "", len(encoded)
 
-    start = 0
-    newline_count = text.count("\n")
-    if newline_count > max_lines:
-        lines_to_drop = newline_count - max_lines
-        position = -1
-        for _ in range(lines_to_drop):
-            position = text.find("\n", position + 1)
-        start = position + 1
-
-    bounded = text[start:]
+    lines = text.splitlines(keepends=True)
+    bounded = "".join(lines[-max_lines:]) if len(lines) > max_lines else text
     bounded_bytes = bounded.encode("utf-8")
     if len(bounded_bytes) > max_bytes:
         bounded_bytes = bounded_bytes[-max_bytes:]

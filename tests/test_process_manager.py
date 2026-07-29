@@ -9,7 +9,7 @@ from pathlib import Path
 import anyio
 import pytest
 
-from wisp.tools.process_manager import ProcessSupervisor, ProcessUpdate
+from wisp.tools.process_manager import ProcessSupervisor, ProcessUpdate, _bounded_text_tail
 from wisp.tools.result import ToolError
 
 
@@ -84,6 +84,20 @@ def test_managed_process_retention_is_bounded_and_utf8_safe(tmp_path: Path) -> N
     assert "\ufffd" not in update.stdout
     assert update.stdout_truncated is True
     assert update.stdout_dropped_bytes > 0
+
+
+@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n", "\u2028"])
+def test_retention_counts_unterminated_trailing_logical_line(separator: str) -> None:
+    text = f"first{separator}second"
+
+    bounded, dropped_bytes = _bounded_text_tail(
+        text,
+        max_bytes=1_000,
+        max_lines=1,
+    )
+
+    assert bounded == "second"
+    assert dropped_bytes == len(f"first{separator}".encode())
 
 
 def test_managed_process_timeout_is_not_an_exit_code(tmp_path: Path) -> None:
@@ -280,6 +294,30 @@ def test_one_shot_commands_share_managed_process_capacity(tmp_path: Path) -> Non
             await supervisor.aclose()
 
     anyio.run(run)
+
+
+def test_one_shot_evicts_observed_terminal_handle_for_capacity(tmp_path: Path) -> None:
+    async def run() -> str:
+        supervisor = ProcessSupervisor(max_processes=1)
+        try:
+            process_id = await supervisor.start(
+                _python_command("print('managed')"),
+                cwd=tmp_path,
+                timeout=2,
+            )
+            await _poll_until_terminal(supervisor, process_id)
+            result = await supervisor.run_to_completion(
+                _python_command("print('one-shot')"),
+                cwd=tmp_path,
+                timeout=2,
+                max_output_bytes=1_000,
+                max_output_lines=100,
+            )
+            return result.stdout
+        finally:
+            await supervisor.aclose()
+
+    assert anyio.run(run) == "one-shot\n"
 
 
 def test_polling_terminal_process_does_not_repeat_output(tmp_path: Path) -> None:
