@@ -265,6 +265,31 @@ def test_render_tool_result_zero_exit_stays_generic() -> None:
     assert via_dispatch == render_generic("ok\ndone")
 
 
+def test_render_tool_result_zero_exit_strips_model_facing_status_prefix() -> None:
+    via_dispatch = render_tool_result(
+        "bash",
+        {},
+        "Command exited with code 0: ok\ndone",
+        is_error=False,
+        exit_code=0,
+    )
+
+    assert via_dispatch == render_generic("ok\ndone")
+    assert "Command exited with code" not in str(via_dispatch)
+
+
+def test_render_tool_result_zero_exit_without_output_stays_empty() -> None:
+    via_dispatch = render_tool_result(
+        "bash",
+        {},
+        "Command exited with code 0",
+        is_error=False,
+        exit_code=0,
+    )
+
+    assert via_dispatch == render_generic("")
+
+
 def test_render_tool_result_shows_summary_in_place_of_output() -> None:
     # A read-type tool carries a promoted one-line summary; the dispatcher returns it
     # instead of a raw dump of the (much longer) output.

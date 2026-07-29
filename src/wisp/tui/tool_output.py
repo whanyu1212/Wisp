@@ -218,7 +218,11 @@ def render_tool_result(
     # It replaces the raw output dump; the full output returns via expand/collapse.
     if summary is not None:
         return summary
-    return render_generic(output)
+    # Successful shell results carry the same model-facing synthetic exit prefix
+    # as failures. Their cards already communicate success, so keep the previous
+    # raw-output presentation by removing only a matching promoted prefix.
+    display_output = _without_exit_restatement(output, exit_code)
+    return render_generic(display_output)
 
 
 def tool_result_failed(is_error: bool, exit_code: int | None) -> bool:

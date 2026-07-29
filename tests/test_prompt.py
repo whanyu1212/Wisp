@@ -51,6 +51,8 @@ def test_default_prompt_requires_evidence_backed_workflow_completion(
     assert "Exit code 0 means a command passed" in prompt
     assert "A timeout is inconclusive, never a pass" in prompt
     assert "report the check as unverified" in prompt
+    assert "run the relevant checks or tests when practical" in prompt
+    assert "follow the project's own verification instructions when present" in prompt
     assert "Always finish change or build tasks with a concise final response" in prompt
     assert "passed, failed, timed out, or were not run" in prompt
     assert len(messages) == 2
