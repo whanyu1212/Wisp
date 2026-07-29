@@ -10,6 +10,7 @@ from pathlib import Path
 import anyio
 import pytest
 
+import wisp.tools.process_manager as process_manager_module
 from wisp.tools.process_manager import ProcessSupervisor, ProcessUpdate, _bounded_text_tail
 from wisp.tools.result import ToolError
 
@@ -403,6 +404,53 @@ def test_cancelling_cancel_call_does_not_cancel_process_finalization(tmp_path: P
 
     assert update.state == "cancelled"
     assert update.exit_code is None
+
+
+def test_aclose_finishes_cleanup_before_propagating_caller_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    async def delayed_terminate(process: asyncio.subprocess.Process) -> None:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        await original_terminate(process)
+
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", delayed_terminate)
+
+    async def run() -> int:
+        supervisor = ProcessSupervisor()
+        process_id = await supervisor.start(
+            _python_command("import time; time.sleep(30)"),
+            cwd=tmp_path,
+            timeout=30,
+        )
+        process = supervisor._managed[process_id].process  # noqa: SLF001
+        assert process.pid is not None
+
+        close_call = asyncio.create_task(supervisor.aclose())
+        await cleanup_started.wait()
+        close_call.cancel()
+        await anyio.sleep(0)
+        assert close_call.done() is False
+
+        close_call.cancel()
+        await anyio.sleep(0)
+        assert close_call.done() is False
+
+        allow_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await close_call
+        assert process.returncode is not None
+        return process.pid
+
+    pid = anyio.run(run)
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")

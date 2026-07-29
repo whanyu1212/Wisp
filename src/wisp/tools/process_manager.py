@@ -235,10 +235,23 @@ class ProcessSupervisor:
                 self._close_task = asyncio.create_task(self._close_owned_processes())
             close_task = self._close_task
 
-        # Cleanup remains owned by a separate task if this caller is cancelled.
-        # A later/repeated aclose awaits that same task instead of returning while
-        # process termination is still in flight.
-        await asyncio.shield(close_task)
+        # Keep shutdown attached to this call even when its caller is cancelled.
+        # Frontends call aclose() from their finalizers and may tear down the event
+        # loop as soon as cancellation propagates, so merely leaving close_task
+        # running in the background is not sufficient.
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            with anyio.CancelScope(shield=True):
+                while not close_task.done():
+                    try:
+                        await asyncio.shield(close_task)
+                    except asyncio.CancelledError:
+                        # A caller may issue more than one direct asyncio
+                        # cancellation while cleanup is in progress.
+                        continue
+                close_task.result()
+            raise
 
     async def _close_owned_processes(self) -> None:
         async with self._lock:
