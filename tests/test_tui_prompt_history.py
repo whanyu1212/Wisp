@@ -8,6 +8,7 @@ from textual.widgets import Input, OptionList
 from tests.tui_support import ScriptedController
 from wisp.events import ToolApprovalRequested
 from wisp.tui import TuiViewSnapshot
+from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.prompt_history import (
     PROMPT_HISTORY_PREVIEW_CHARS,
     PROMPT_HISTORY_SEARCH_CHARS,
@@ -385,7 +386,9 @@ def test_history_cancel_preserves_transcript_viewport() -> None:
                 app.write_notice(f"historical line {index}")
             await pilot.pause()
             transcript = app.query_one("#transcript", Transcript)
-            transcript.scroll_home(animate=False)
+            transcript.restore_viewport_state(
+                TranscriptViewportState(scroll_y=0.0, following=False)
+            )
             await pilot.pause()
             before = transcript.scroll_y
             await pilot.press("ctrl+r")
