@@ -747,6 +747,26 @@ and application event publication. `AgentHarness` owns the in-memory transcript 
 while `run_agent_loop` remains independent of sessions and frontends. CLI and RPC frontends import
 the coding-session coordinator directly; the TUI consumes that same runtime through RPC events.
 
+Within the Textual frontend, transient presentation state has a separate inward-facing boundary:
+
+```text
+TuiShell / RPC state
+        ↓
+TextualTui orchestration
+        ├──→ presentation widgets
+        │            ↓
+        └──→ TextualOverlayController
+```
+
+The shell owns agent, session, and approval decisions. `TextualTui` translates those decisions
+into presentation operations, while `TextualOverlayController` exclusively coordinates overlay
+visibility, composer focus, application-wide stale-input barriers, and temporary transcript
+viewport snapshots.
+Widgets retain their rendered content and local interaction state. The concrete import graph is
+`textual_app → widgets → overlay` plus `textual_app → overlay`: widgets import shared viewport
+state from the controller module, while the controller depends only on structural surface
+protocols and imports neither concrete widgets nor the shell/session runtime.
+
 Providers yield typed events from `wisp.providers`. A stream may emit zero or more
 `ProviderRetrying` events before exactly one `ProviderResponseStarted`, followed by zero or more
 text/thinking deltas and completed tool calls, then exactly one `ProviderResponseCompleted` or

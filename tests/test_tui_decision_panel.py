@@ -438,12 +438,14 @@ def test_app_on_event_drops_key_queued_before_decision_panel_opened() -> None:
             with mock.patch.object(App, "on_event", recording_app_on_event):
                 stale_key = events.Key("enter", None)
                 stale_key.set_sender(app)
-                stale_key.time = app._stale_event_barrier - 1.0
+                assert app._overlay_controller is not None
+                barrier = app._overlay_controller.stale_event_barrier
+                stale_key.time = barrier - 1.0
                 await app.on_event(stale_key)
 
                 fresh_key = events.Key("enter", None)
                 fresh_key.set_sender(app)
-                fresh_key.time = app._stale_event_barrier + 1.0
+                fresh_key.time = barrier + 1.0
                 await app.on_event(fresh_key)
 
             return stale_key not in forwarded, fresh_key in forwarded
@@ -504,12 +506,14 @@ def test_app_on_event_drops_stale_mouse_and_paste_events_too(
             with mock.patch.object(App, "on_event", recording_app_on_event):
                 stale_event = make_event()
                 stale_event.set_sender(app)
-                stale_event.time = app._stale_event_barrier - 1.0
+                assert app._overlay_controller is not None
+                barrier = app._overlay_controller.stale_event_barrier
+                stale_event.time = barrier - 1.0
                 await app.on_event(stale_event)
 
                 fresh_event = make_event()
                 fresh_event.set_sender(app)
-                fresh_event.time = app._stale_event_barrier + 1.0
+                fresh_event.time = barrier + 1.0
                 await app.on_event(fresh_event)
 
             return stale_event not in forwarded, fresh_event in forwarded
@@ -520,7 +524,7 @@ def test_app_on_event_drops_stale_mouse_and_paste_events_too(
 
 
 def test_trust_panel_stale_home_does_not_move_deny_first_highlight() -> None:
-    # Same _stale_event_barrier protects Home/PageUp/PageDown/End too, not just
+    # The same overlay-controller barrier protects Home/PageUp/PageDown/End too, not just
     # Enter/digits: those are app-level priority bindings (see BINDINGS),
     # dispatched via App._check_bindings before DecisionPanel.on_key ever sees
     # them, so a per-widget guard couldn't catch a stale one regardless. The
@@ -544,7 +548,8 @@ def test_trust_panel_stale_home_does_not_move_deny_first_highlight() -> None:
 
             stale_key = events.Key("home", None)
             stale_key.set_sender(app)
-            stale_key.time = app._stale_event_barrier - 1.0
+            assert app._overlay_controller is not None
+            stale_key.time = app._overlay_controller.stale_event_barrier - 1.0
             await app.on_event(stale_key)
             await pilot.pause()
             after_stale = options.highlighted
