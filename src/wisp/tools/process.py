@@ -114,11 +114,20 @@ async def _run_shell(
 
 
 async def _kill_process_tree_and_wait(process: asyncio.subprocess.Process) -> None:
-    _kill_process_tree(process)
+    await _terminate_process_tree(process)
     await process.wait()
     await _drain_process_stream(process.stdout)
     await _drain_process_stream(process.stderr)
     await asyncio.sleep(0)
+
+
+async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
+    """Terminate a process tree without blocking the event loop on Windows."""
+
+    if os.name == "nt":
+        await asyncio.to_thread(_kill_process_tree, process)
+        return
+    _kill_process_tree(process)
 
 
 async def _drain_process_stream(stream: asyncio.StreamReader | None) -> None:
@@ -203,7 +212,7 @@ async def _read_stream_limited(
             chunks.append(accepted)
         if exhausted:
             if await budget.request_kill_once():
-                _kill_process_tree(process)
+                await _terminate_process_tree(process)
             while await stream.read(8192):
                 pass
             break
@@ -267,7 +276,7 @@ async def _run_exec_limited_stdout(
                     if count_line:
                         stdout_count += 1
                     stdout_truncated = True
-                    _kill_process_tree(process)
+                    await _terminate_process_tree(process)
                     break
                 if max_buffered_stdout_bytes is not None:
                     remaining_bytes = max_buffered_stdout_bytes - buffered_stdout_bytes
@@ -275,7 +284,7 @@ async def _run_exec_limited_stdout(
                         if count_line:
                             stdout_count += 1
                         stdout_truncated = True
-                        _kill_process_tree(process)
+                        await _terminate_process_tree(process)
                         break
                     if len(line) > remaining_bytes:
                         stdout_lines.append(line[:remaining_bytes])
@@ -284,7 +293,7 @@ async def _run_exec_limited_stdout(
                         if count_line:
                             stdout_count += 1
                         stdout_truncated = True
-                        _kill_process_tree(process)
+                        await _terminate_process_tree(process)
                         break
                 stdout_lines.append(line)
                 buffered_stdout_lines += 1
@@ -294,7 +303,7 @@ async def _run_exec_limited_stdout(
 
         if stdout_count >= max_stdout_lines:
             stdout_truncated = True
-            _kill_process_tree(process)
+            await _terminate_process_tree(process)
 
         await process.wait()
         stderr_bytes = await stderr_task

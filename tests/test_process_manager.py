@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import shlex
 import signal
@@ -357,6 +358,51 @@ def test_closed_and_unknown_process_handles_fail_deterministically(tmp_path: Pat
             )
 
     anyio.run(run)
+
+
+def test_cancelling_cancel_call_does_not_cancel_process_finalization(tmp_path: Path) -> None:
+    async def run() -> ProcessUpdate:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                _python_command("import time; time.sleep(30)"),
+                cwd=tmp_path,
+                timeout=30,
+            )
+            managed = supervisor._managed[process_id]  # noqa: SLF001
+            assert managed.completion_task is not None
+            managed.completion_task.cancel()
+            await asyncio.gather(managed.completion_task, return_exceptions=True)
+
+            finalization_started = asyncio.Event()
+            allow_finalization = asyncio.Event()
+
+            async def delayed_finalization() -> None:
+                finalization_started.set()
+                await allow_finalization.wait()
+                await managed.process.wait()
+                managed.exit_code = managed.process.returncode
+                managed.state = managed.terminal_override or "completed"
+                managed.changed.set()
+
+            managed.completion_task = asyncio.create_task(delayed_finalization())
+            cancel_call = asyncio.create_task(supervisor.cancel(process_id))
+            await finalization_started.wait()
+            cancel_call.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await cancel_call
+
+            assert managed.completion_task.cancelled() is False
+            allow_finalization.set()
+            await managed.completion_task
+            return await supervisor.poll(process_id)
+        finally:
+            await supervisor.aclose()
+
+    update = anyio.run(run)
+
+    assert update.state == "cancelled"
+    assert update.exit_code is None
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")

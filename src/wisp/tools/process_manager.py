@@ -15,9 +15,9 @@ import anyio
 from wisp.tools.process import (
     ProcessResult,
     _collect_limited_output,
-    _kill_process_tree,
     _kill_process_tree_and_wait,
     _OutputBudget,
+    _terminate_process_tree,
 )
 from wisp.tools.result import ToolError
 
@@ -221,9 +221,9 @@ class ProcessSupervisor:
         async with managed.operation_lock:
             if managed.state == "running":
                 managed.terminal_override = "cancelled"
-                _kill_process_tree(managed.process)
+                await _terminate_process_tree(managed.process)
                 assert managed.completion_task is not None
-                await managed.completion_task
+                await asyncio.shield(managed.completion_task)
             return self._snapshot(managed)
 
     async def aclose(self) -> None:
@@ -247,9 +247,10 @@ class ProcessSupervisor:
         for item in managed:
             if item.state == "running":
                 item.terminal_override = "cancelled"
-                _kill_process_tree(item.process)
-        for process in one_shot:
-            _kill_process_tree(process)
+        await asyncio.gather(
+            *(_terminate_process_tree(item.process) for item in managed if item.state == "running"),
+            *(_terminate_process_tree(process) for process in one_shot),
+        )
 
         await asyncio.gather(
             *(item.completion_task for item in managed if item.completion_task is not None),
@@ -321,7 +322,7 @@ class ProcessSupervisor:
                 await asyncio.wait_for(asyncio.shield(completion), timeout=timeout)
             except TimeoutError:
                 managed.terminal_override = managed.terminal_override or "timed_out"
-                _kill_process_tree(managed.process)
+                await _terminate_process_tree(managed.process)
                 await completion
             managed.exit_code = managed.process.returncode
             managed.state = managed.terminal_override or "completed"

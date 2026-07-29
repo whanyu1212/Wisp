@@ -567,6 +567,36 @@ def test_bash_tool_uses_taskkill_for_windows_process_tree_cleanup(
     assert process.killed is False
 
 
+def test_async_windows_tree_cleanup_does_not_block_event_loop(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+
+    def slow_kill(_process: object) -> None:
+        time.sleep(0.1)
+
+    monkeypatch.setattr(process_tools_module, "_kill_process_tree", slow_kill)
+
+    async def run() -> bool:
+        completed = anyio.Event()
+
+        async def terminate() -> None:
+            await process_tools_module._terminate_process_tree(DummyProcess())  # type: ignore[arg-type]  # noqa: SLF001
+            completed.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(terminate)
+            await anyio.sleep(0.01)
+            event_loop_remained_responsive = not completed.is_set()
+        return event_loop_remained_responsive
+
+    assert anyio.run(run) is True
+
+
 def test_exec_helper_bounds_stderr_before_buffering(tmp_path: Path) -> None:
     async def run() -> process_tools_module.ProcessResult:
         return await process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
