@@ -131,6 +131,7 @@ class ProcessSupervisor:
             self._one_shot.add(process)
 
         budget = _OutputBudget(max_bytes=max_output_bytes, max_lines=max_output_lines)
+        release_ownership = False
         try:
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -138,23 +139,29 @@ class ProcessSupervisor:
                     timeout=timeout,
                 )
             except TimeoutError as exc:
-                await _kill_process_tree_and_wait(process)
-                raise ToolError(f"Command timed out after {timeout:g} seconds") from exc
-            except asyncio.CancelledError:
                 with anyio.CancelScope(shield=True):
                     await _kill_process_tree_and_wait(process)
+                release_ownership = True
+                raise ToolError(f"Command timed out after {timeout:g} seconds") from exc
+            except BaseException:
+                with anyio.CancelScope(shield=True):
+                    await _kill_process_tree_and_wait(process)
+                release_ownership = True
                 raise
 
-            return ProcessResult(
+            result = ProcessResult(
                 exit_code=process.returncode if process.returncode is not None else -1,
                 stdout=stdout_bytes.decode("utf-8", errors="replace"),
                 stderr=stderr_bytes.decode("utf-8", errors="replace"),
                 stdout_truncated=budget.exhausted,
                 stderr_truncated=budget.exhausted,
             )
+            release_ownership = True
+            return result
         finally:
-            async with self._lock:
-                self._one_shot.discard(process)
+            if release_ownership:
+                async with self._lock:
+                    self._one_shot.discard(process)
 
     async def start(
         self,

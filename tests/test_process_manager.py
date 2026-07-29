@@ -399,6 +399,43 @@ def test_one_shot_evicts_observed_terminal_handle_for_capacity(tmp_path: Path) -
     assert anyio.run(run) == "one-shot\n"
 
 
+def test_one_shot_capture_error_terminates_process_before_releasing_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_processes: list[asyncio.subprocess.Process] = []
+
+    async def fail_capture(
+        process: asyncio.subprocess.Process,
+        _budget: object,
+    ) -> tuple[bytes, bytes]:
+        captured_processes.append(process)
+        raise OSError("broken pipe")
+
+    monkeypatch.setattr(process_manager_module, "_collect_limited_output", fail_capture)
+
+    async def run() -> tuple[int | None, int]:
+        supervisor = ProcessSupervisor()
+        try:
+            with pytest.raises(OSError, match="broken pipe"):
+                await supervisor.run_to_completion(
+                    _python_command("import time; time.sleep(30)"),
+                    cwd=tmp_path,
+                    timeout=30,
+                    max_output_bytes=1_000,
+                    max_output_lines=100,
+                )
+            assert len(captured_processes) == 1
+            return captured_processes[0].returncode, len(supervisor._one_shot)  # noqa: SLF001
+        finally:
+            await supervisor.aclose()
+
+    returncode, retained_count = anyio.run(run)
+
+    assert returncode is not None
+    assert retained_count == 0
+
+
 def test_polling_terminal_process_does_not_repeat_output(tmp_path: Path) -> None:
     async def run() -> tuple[tuple[ProcessUpdate, ...], ProcessUpdate]:
         supervisor = ProcessSupervisor()
