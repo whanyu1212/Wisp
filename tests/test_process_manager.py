@@ -283,6 +283,41 @@ def test_close_kills_descendant_after_shell_leader_exits(tmp_path: Path) -> None
         os.kill(child_pid, 0)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_completion_kills_descendant_with_redirected_output(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "background.pid"
+    command = f"sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(child_pid_path))}"
+
+    async def run() -> ProcessUpdate:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                command,
+                cwd=tmp_path,
+                timeout=2,
+            )
+            with anyio.fail_after(3):
+                while not child_pid_path.exists():
+                    await anyio.sleep(0.01)
+            child_pid = int(child_pid_path.read_text())
+            terminal = (await _poll_until_terminal(supervisor, process_id))[-1]
+            with anyio.fail_after(3):
+                while True:
+                    try:
+                        os.kill(child_pid, 0)
+                    except ProcessLookupError:
+                        break
+                    await anyio.sleep(0.01)
+            return terminal
+        finally:
+            await supervisor.aclose()
+
+    update = anyio.run(run)
+
+    assert update.state == "completed"
+    assert update.exit_code == 0
+
+
 def test_managed_process_limit_recovers_after_terminal_result_is_observed(
     tmp_path: Path,
 ) -> None:

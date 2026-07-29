@@ -363,6 +363,11 @@ class ProcessSupervisor:
                 await _terminate_process_tree(managed.process)
                 await self._finish_terminated_io(managed)
                 reader_failure = await completion
+            # A shell can exit after launching descendants whose output is
+            # redirected away from its pipes. The leader and both readers are
+            # then finished even though the owned process group is not. Reap
+            # that remaining group before publishing a terminal handle.
+            await _terminate_process_tree(managed.process)
             managed.exit_code = managed.process.returncode
             if managed.terminal_override is not None:
                 managed.state = managed.terminal_override
