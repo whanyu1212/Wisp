@@ -327,6 +327,7 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
         assert [descriptor.name for descriptor in report.commands[1:]] == [
             "help",
             "compact",
+            "history",
             "model",
             "resume",
             "provider",

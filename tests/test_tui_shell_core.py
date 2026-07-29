@@ -89,6 +89,35 @@ def _rpc_message(
     )
 
 
+def test_tui_shell_history_dispatches_renderer_request_and_rejects_arguments() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.history_requests = 0
+            self.errors: list[str] = []
+
+        def prompt_history_request(self) -> None:
+            self.history_requests += 1
+
+        def command_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+
+        await shell._handle_input_line(_InputLine("/history", _InputMode.idle))
+        await shell._handle_input_line(_InputLine("/history extra", _InputMode.idle))
+        shell.state.current_command_id = "prompt-1"
+        shell.state.current_command_type = "prompt"
+        await shell._handle_input_line(_InputLine("/history", _InputMode.running))
+
+        assert renderer.history_requests == 2
+        assert renderer.errors == ["Usage: /history"]
+
+    anyio.run(run)
+
+
 def test_tui_shell_resume_catalog_uses_rpc_owned_order_and_selection() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:

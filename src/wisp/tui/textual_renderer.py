@@ -225,6 +225,12 @@ class TextualTuiRenderer:
         # received the full expanded text via controller.prompt(prompt).
         self.app.write_user(self.app.compact_echo_for(prompt))
 
+    def prompt_accepted(self, prompt: str) -> None:
+        self.app.record_prompt(prompt)
+
+    def prompt_history_request(self) -> None:
+        self.app.show_prompt_history()
+
     def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
         for message in messages:
             if message.role == "user":

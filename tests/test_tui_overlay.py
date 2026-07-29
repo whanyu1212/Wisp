@@ -72,6 +72,7 @@ class _Harness:
     model: _Overlay = field(default_factory=_Overlay)
     session: _Overlay = field(default_factory=_Overlay)
     palette: _Overlay = field(default_factory=_Overlay)
+    history: _Overlay = field(default_factory=_Overlay)
     deferred: list[object] = field(default_factory=list)
 
     def controller(self, *, clock: Callable[[], float] | None = None) -> TextualOverlayController:
@@ -85,6 +86,7 @@ class _Harness:
                 OverlayKind.model_picker: self.model,
                 OverlayKind.session_picker: self.session,
                 OverlayKind.command_palette: self.palette,
+                OverlayKind.prompt_history: self.history,
             },
             defer_after_refresh=self.deferred.append,
             clock=selected_clock,
@@ -183,6 +185,19 @@ def test_session_picker_interrupt_closes_picker_and_preserves_other_interrupts()
     assert harness.composer.display is True
     assert harness.composer.focus_count == 1
     assert not controller.consume_interrupt()
+
+
+def test_prompt_history_interrupt_closes_overlay_and_restores_viewport() -> None:
+    harness = _Harness()
+    controller = harness.controller()
+
+    controller.open(OverlayKind.prompt_history, preserve_viewport=True)
+    harness.history.open = True
+
+    assert controller.consume_interrupt()
+    assert not harness.history.is_open
+    assert harness.composer.display is True
+    assert len(harness.deferred) == 1
 
 
 def test_real_app_replaces_palette_with_decision_and_restores_draft_focus() -> None:

@@ -123,7 +123,18 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
     assert anyio.run(run) == (
         ("fake", "openai", "openai-codex", "anthropic", "google"),
         ("read", "write", "edit", "bash", "grep", "find", "ls"),
-        ("help", "compact", "model", "resume", "provider", "auth", "login", "logout", "quit"),
+        (
+            "help",
+            "compact",
+            "history",
+            "model",
+            "resume",
+            "provider",
+            "auth",
+            "login",
+            "logout",
+            "quit",
+        ),
     )
 
 
