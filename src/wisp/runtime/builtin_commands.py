@@ -31,6 +31,13 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=20,
         ),
         CommandDescriptor(
+            name="history",
+            title="Prompt history",
+            description="Search prompts submitted in this TUI run",
+            category=CommandCategory.general,
+            order=25,
+        ),
+        CommandDescriptor(
             name="model",
             title="Model",
             description="Show or switch the active model",

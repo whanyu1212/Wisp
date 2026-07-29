@@ -334,6 +334,7 @@ Available slash commands:
 /model [model]              switch model for future prompts
 /resume [session-id]        browse or resume a persisted session
 /compact [instructions]     summarize older context while preserving the JSONL audit
+/history                    search prompts submitted in this TUI run
 /quit, /exit
 ```
 
@@ -342,6 +343,20 @@ than a Textual-owned table. Built-in descriptor metadata now drives shared slash
 parsing, and RPC `get_commands` discovery. It does not yet add extension command handlers, dynamic
 project extension loading, skills, prompt templates, package management, or configurable
 keybindings.
+
+In the Textual TUI, press `Ctrl+R` or run `/history` to search up to 100 unique prompts
+submitted during the current TUI process. Selecting a result restores its exact text to the
+composer for editing and never submits it automatically. Exact duplicates move to the newest
+position, and history remains available across in-process session switches. The history is
+deliberately memory-only: Wisp does not write it to session JSONL, configuration, or a cache, and
+resumed transcript messages are not imported into it. This avoids silently persisting additional
+copies of prompts that may contain secrets. The line and fullscreen fallback renderers report
+that searchable history requires the Textual TUI.
+
+Pi's editor history is the behavioral reference: Pi records submitted user text and supports
+cursor-key recall. Wisp intentionally uses a searchable overlay so Up/Down remain multiline
+cursor controls in the composer. Durable prompt history, draft stashing, deletion controls, and
+configurable retention remain future work.
 
 In the Textual TUI, press `Ctrl+O` to open Wisp's searchable command palette. The palette and
 inline `/` suggestions consume the same executable catalog loaded through RPC `get_commands`.

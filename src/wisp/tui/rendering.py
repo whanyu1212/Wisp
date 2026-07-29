@@ -82,6 +82,8 @@ class TuiRenderer(Protocol):
 
     def prompt_submitted(self, prompt: str) -> None: ...
 
+    def prompt_history_request(self) -> None: ...
+
     def queued_prompts_cleared(self) -> None: ...
 
     def running(self) -> None: ...
@@ -189,6 +191,9 @@ class LineTuiRenderer:
 
     def prompt_submitted(self, prompt: str) -> None:
         pass
+
+    def prompt_history_request(self) -> None:
+        self.notice("Searchable prompt history is available in the Textual TUI.")
 
     def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
         for message in messages:
@@ -526,6 +531,9 @@ class FullscreenTuiRenderer:
 
     def prompt_submitted(self, prompt: str) -> None:
         self._append("user", prompt, style="bold")
+
+    def prompt_history_request(self) -> None:
+        self.notice("Searchable prompt history is available in the Textual TUI.")
 
     def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
         for message in messages:

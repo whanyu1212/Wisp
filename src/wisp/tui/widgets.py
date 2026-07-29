@@ -108,6 +108,15 @@ class PromptEditor(TextArea):
         if not text:
             self._clear_pending_paste()
 
+    def replace_text(self, text: str, *, cursor_at_end: bool = True) -> None:
+        """Replace the editing session without retaining hidden paste backing."""
+
+        self._clear_pending_paste()
+        self._paste_placeholder_counter = 0
+        self.text = text
+        if cursor_at_end:
+            self.cursor_position = len(text)
+
     @property
     def cursor_position(self) -> int:
         """Return the cursor as a flat offset for ``Input`` compatibility."""

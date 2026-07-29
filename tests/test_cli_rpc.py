@@ -1073,6 +1073,7 @@ def test_rpc_mode_reports_commands_before_prompt(tmp_path: Path) -> None:
     assert [command["name"] for command in report["commands"]] == [
         "help",
         "compact",
+        "history",
         "model",
         "resume",
         "provider",

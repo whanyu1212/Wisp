@@ -521,6 +521,17 @@ class TuiShell:
         if self.state.pending_trust is not None:
             self.renderer.command_error("Cannot run slash commands while trust is pending.")
             return False
+        if command.name is TuiSlashCommandName.history:
+            if self._session_operation_active():
+                self.renderer.command_error(
+                    f"Cannot run slash commands while {self._session_operation_name()}."
+                )
+                return False
+            if command.args:
+                self.renderer.command_error("Usage: /history")
+                return False
+            self.renderer.prompt_history_request()
+            return False
         if self.state.current_command_id is not None:
             operation = self._active_operation()
             self.renderer.command_error(f"Cannot run slash commands while {operation} is running.")

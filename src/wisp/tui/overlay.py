@@ -24,6 +24,7 @@ class OverlayKind(StrEnum):
     model_picker = "model_picker"
     session_picker = "session_picker"
     command_palette = "command_palette"
+    prompt_history = "prompt_history"
 
 
 class OverlayOperation(StrEnum):
@@ -170,8 +171,11 @@ class TextualOverlayController:
     def consume_interrupt(self) -> bool:
         """Handle interrupts owned by transient session presentation."""
 
-        if self._active_overlay is OverlayKind.session_picker:
-            self.close(OverlayKind.session_picker)
+        if self._active_overlay in {
+            OverlayKind.session_picker,
+            OverlayKind.prompt_history,
+        }:
+            self.close(self._active_overlay)
             return True
         return self._active_operation is not None
 

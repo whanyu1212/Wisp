@@ -27,6 +27,8 @@ from wisp.tui.overlay import (
     OverlayOperation,
     TextualOverlayController,
 )
+from wisp.tui.prompt_history import PromptHistory
+from wisp.tui.prompt_history_widget import PromptHistoryPicker
 from wisp.tui.rendering import (
     TuiRenderer,
     TuiViewSnapshot,
@@ -81,7 +83,7 @@ _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 # returns focus from a card to the input (ToolCard.BINDINGS "leave" action).
 # Textual-only chrome — deliberately not folded into format_tui_footer_lines,
 # which the line/fullscreen renderers also consume.
-_KEYBINDING_HINT = "ctrl+o actions   / commands   enter expand   esc back"
+_KEYBINDING_HINT = "ctrl+o actions   ctrl+r history   / commands   enter expand   esc back"
 
 # The input's prompt glyph. The shell hands the Textual renderer a semantic hint
 # (`wisp> `, `wisp(running)> `, `approve? [y/N] `) shared with the line/fullscreen
@@ -278,6 +280,7 @@ class TextualTui(App[None]):
     # selection is still available through the emulator's mouse-bypass modifier.
     BINDINGS = [
         Binding("ctrl+o", "open_command_palette", "Actions", priority=True),
+        Binding("ctrl+r", "open_prompt_history", "History", priority=True),
         Binding("ctrl+c", "interrupt", "Interrupt", priority=True),
         Binding("ctrl+d", "eof", "EOF", priority=True),
         Binding("pageup", "scroll_transcript_page_up", "Scroll up", priority=True, show=False),
@@ -299,11 +302,13 @@ class TextualTui(App[None]):
         self._input: PromptEditor | None = None
         self._suggest: SlashSuggest | None = None
         self._command_palette: CommandPalette | None = None
+        self._prompt_history_picker: PromptHistoryPicker | None = None
         self._decision_panel: DecisionPanel | None = None
         self._model_picker: ModelPicker | None = None
         self._session_picker: SessionPicker | None = None
         self._overlay_controller: TextualOverlayController | None = None
         self._command_catalog = DEFAULT_TUI_COMMAND_CATALOG
+        self._prompt_history = PromptHistory()
         self._current_prompt = "wisp> "
         self._runner: Callable[[], Awaitable[None]] | None = None
         self._runner_error: Exception | None = None
@@ -359,6 +364,7 @@ class TextualTui(App[None]):
             # input; yielded here so it shares the Vertical's coordinate space.
             yield SlashSuggest(id="suggest")
             yield CommandPalette(id="command-palette")
+            yield PromptHistoryPicker(id="prompt-history")
             yield DecisionPanel(id="decision-panel")
             yield ModelPicker(id="model-picker")
             yield SessionPicker(id="session-picker")
@@ -397,6 +403,7 @@ class TextualTui(App[None]):
         self._input = self.query_one("#input", PromptEditor)
         self._suggest = self.query_one("#suggest", SlashSuggest)
         self._command_palette = self.query_one("#command-palette", CommandPalette)
+        self._prompt_history_picker = self.query_one("#prompt-history", PromptHistoryPicker)
         self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
         self._model_picker = self.query_one("#model-picker", ModelPicker)
         self._session_picker = self.query_one("#session-picker", SessionPicker)
@@ -409,6 +416,7 @@ class TextualTui(App[None]):
                 OverlayKind.model_picker: self._model_picker,
                 OverlayKind.session_picker: self._session_picker,
                 OverlayKind.command_palette: self._command_palette,
+                OverlayKind.prompt_history: self._prompt_history_picker,
             },
             defer_after_refresh=self._defer_overlay_restore,
         )
@@ -645,6 +653,17 @@ class TextualTui(App[None]):
     def on_command_palette_cancelled(self, event: CommandPalette.Cancelled) -> None:
         event.stop()
         self.hide_command_palette()
+
+    def on_prompt_history_picker_selected(self, event: PromptHistoryPicker.Selected) -> None:
+        event.stop()
+        self.hide_prompt_history()
+        if self._input is not None:
+            self._input.replace_text(event.prompt)
+            self._input.focus()
+
+    def on_prompt_history_picker_cancelled(self, event: PromptHistoryPicker.Cancelled) -> None:
+        event.stop()
+        self.hide_prompt_history()
 
     def set_command_catalog(self, catalog: TuiCommandCatalog) -> None:
         """Apply one executable catalog to both Textual command surfaces."""
@@ -888,6 +907,23 @@ class TextualTui(App[None]):
         palette.styles.max_height = max(4, composer.region.y)
         palette.show()
 
+    def action_open_prompt_history(self) -> None:
+        picker = self._prompt_history_picker
+        if picker is None:
+            return
+        if picker.is_open:
+            self.hide_prompt_history()
+            return
+        if self._input is None or not self._input.display:
+            return
+        overlays = self._overlay_controller
+        if overlays is None:
+            return
+        overlays.open(OverlayKind.prompt_history, preserve_viewport=True)
+        composer = self.query_one("#composer")
+        picker.styles.max_height = max(4, composer.region.y)
+        picker.show(self._prompt_history.entries)
+
     # Scrollback: delegate to the Transcript's own scroll actions. Its scroll
     # watcher derives follow intent for normal movement; End uses return_to_latest
     # to restore that intent atomically before jumping. None-guarded like
@@ -907,6 +943,9 @@ class TextualTui(App[None]):
         if self._command_palette is not None and self._command_palette.is_open:
             self._command_palette.move_highlight_page_up()
             return
+        if self._prompt_history_picker is not None and self._prompt_history_picker.is_open:
+            self._prompt_history_picker.move_highlight_page_up()
+            return
         if self._session_picker is not None and self._session_picker.is_open:
             self._session_picker.move_highlight_page_up()
             return
@@ -920,6 +959,9 @@ class TextualTui(App[None]):
             return
         if self._command_palette is not None and self._command_palette.is_open:
             self._command_palette.move_highlight_page_down()
+            return
+        if self._prompt_history_picker is not None and self._prompt_history_picker.is_open:
+            self._prompt_history_picker.move_highlight_page_down()
             return
         if self._session_picker is not None and self._session_picker.is_open:
             self._session_picker.move_highlight_page_down()
@@ -935,6 +977,9 @@ class TextualTui(App[None]):
         if self._command_palette is not None and self._command_palette.is_open:
             self._command_palette.move_highlight_first()
             return
+        if self._prompt_history_picker is not None and self._prompt_history_picker.is_open:
+            self._prompt_history_picker.move_highlight_first()
+            return
         if self._session_picker is not None and self._session_picker.is_open:
             self._session_picker.move_highlight_first()
             return
@@ -948,6 +993,9 @@ class TextualTui(App[None]):
             return
         if self._command_palette is not None and self._command_palette.is_open:
             self._command_palette.move_highlight_last()
+            return
+        if self._prompt_history_picker is not None and self._prompt_history_picker.is_open:
+            self._prompt_history_picker.move_highlight_last()
             return
         if self._session_picker is not None and self._session_picker.is_open:
             self._session_picker.move_highlight_last()
@@ -1013,6 +1061,19 @@ class TextualTui(App[None]):
         overlays = self._overlay_controller
         if overlays is not None:
             overlays.close(OverlayKind.command_palette)
+
+    def record_prompt(self, prompt: str) -> None:
+        """Retain one exact submitted prompt for this TUI process only."""
+
+        self._prompt_history.record(prompt)
+
+    def show_prompt_history(self) -> None:
+        self.action_open_prompt_history()
+
+    def hide_prompt_history(self) -> None:
+        overlays = self._overlay_controller
+        if overlays is not None:
+            overlays.close(OverlayKind.prompt_history)
 
     def show_approval(self, event: ToolApprovalRequested, *, cwd: str) -> None:
         panel = self._decision_panel
