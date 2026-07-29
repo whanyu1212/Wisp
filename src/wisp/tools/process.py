@@ -13,6 +13,7 @@ from pathlib import Path
 import anyio
 
 from wisp.tools.result import ToolError
+from wisp.tools.truncation import TruncatedText, truncate_text, truncate_text_tail
 
 
 @dataclass(frozen=True)
@@ -308,6 +309,46 @@ async def _run_exec_limited_stdout(
 
 
 def _format_process_output(exit_code: int, stdout: str, stderr: str) -> str:
+    parts = _process_output_parts(stdout, stderr)
+    status = f"Command exited with code {exit_code}"
+    if not parts:
+        return status
+    return f"{status}: {'\n'.join(parts)}"
+
+
+def _format_process_output_bounded(
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    *,
+    max_bytes: int,
+    max_lines: int,
+) -> TruncatedText:
+    """Format process output within its budget while preserving diagnostics."""
+
+    parts = _process_output_parts(stdout, stderr)
+    status = f"Command exited with code {exit_code}"
+    if not parts:
+        return truncate_text(status, max_bytes=max_bytes, max_lines=max_lines)
+
+    prefix = f"{status}: "
+    body_budget = max_bytes - len(prefix.encode("utf-8"))
+    if body_budget <= 0 or max_lines <= 0:
+        bounded_status = truncate_text(status, max_bytes=max_bytes, max_lines=max_lines)
+        return TruncatedText(text=bounded_status.text, truncated=True)
+
+    bounded_body = truncate_text_tail(
+        "\n".join(parts),
+        max_bytes=body_budget,
+        max_lines=max_lines,
+    )
+    return TruncatedText(
+        text=f"{prefix}{bounded_body.text}",
+        truncated=bounded_body.truncated,
+    )
+
+
+def _process_output_parts(stdout: str, stderr: str) -> list[str]:
     parts: list[str] = []
     if stdout:
         stripped_stdout = stdout.rstrip("\n")
@@ -317,7 +358,4 @@ def _format_process_output(exit_code: int, stdout: str, stderr: str) -> str:
         stripped_stderr = stderr.rstrip("\n")
         if stripped_stderr:
             parts.append(stripped_stderr)
-    status = f"Command exited with code {exit_code}"
-    if not parts:
-        return status
-    return f"{status}: {'\n'.join(parts)}"
+    return parts

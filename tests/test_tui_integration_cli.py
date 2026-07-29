@@ -1555,6 +1555,74 @@ def test_textual_tool_card_expands_to_full_output_on_enter() -> None:
     assert "read 30 lines from f.py" in recollapsed
 
 
+def test_textual_bash_card_normalizes_collapsed_and_full_output() -> None:
+    async def scenario() -> tuple[str, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="bash",
+                    arguments={"command": "echo ok"},
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="bash",
+                    output="Command exited with code 0: ok",
+                    is_error=False,
+                    exit_code=0,
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            detail = card._detail
+            assert isinstance(detail, str)
+            return detail, card._full_output, card._can_expand()
+
+    detail, full_output, can_expand = anyio.run(scenario)
+
+    assert detail == "ok"
+    assert full_output == "ok"
+    assert can_expand is False
+
+
+def test_textual_failed_bash_card_normalizes_collapsed_and_full_output() -> None:
+    async def scenario() -> tuple[str, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="bash",
+                    arguments={"command": "failing-command"},
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="bash",
+                    output="Command exited with code 2: diagnostic",
+                    is_error=False,
+                    exit_code=2,
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            detail = card._detail
+            assert isinstance(detail, str)
+            return detail, card._full_output, card._can_expand()
+
+    detail, full_output, can_expand = anyio.run(scenario)
+
+    assert detail == "exit 2\ndiagnostic"
+    assert full_output == detail
+    assert can_expand is False
+
+
 def test_textual_tool_card_expanded_shows_tool_truncation_marker() -> None:
     # When the tool itself capped its output (truncated=True), the expanded card says
     # so — even the full view isn't the whole story.

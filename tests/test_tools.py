@@ -14,9 +14,11 @@ from pytest import MonkeyPatch
 
 from wisp.tools import process as process_tools_module
 from wisp.tools import search as search_tools_module
+from wisp.tools import shell as shell_tools_module
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.truncation import truncate_text_tail
 
 
 def run_tool(tool: object, arguments: dict[str, object], context: ToolContext) -> ToolResult:
@@ -26,6 +28,14 @@ def run_tool(tool: object, arguments: dict[str, object], context: ToolContext) -
         return result
 
     return anyio.run(run)
+
+
+def test_tail_truncation_with_marker_only_budget_stays_bounded() -> None:
+    result = truncate_text_tail("diagnostic tail", max_bytes=12, max_lines=10)
+
+    assert result.text == "[truncated]"
+    assert len(result.text.encode("utf-8")) <= 12
+    assert result.truncated is True
 
 
 def test_read_tool_supports_offset_limit_and_truncation(tmp_path: Path) -> None:
@@ -378,6 +388,30 @@ def test_bash_tool_retruncates_combined_stdout_and_stderr(tmp_path: Path) -> Non
 
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes
     assert result.text.startswith("Command exited with code -9:")
+    assert result.truncated is True
+
+
+def test_bash_tool_reserves_status_space_without_losing_diagnostic_tail(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_run_shell(*args: object, **kwargs: object) -> process_tools_module.ProcessResult:
+        return process_tools_module.ProcessResult(
+            exit_code=2,
+            stdout="setup output " * 8,
+            stderr="traceback final diagnostic 尾",
+            stdout_truncated=True,
+        )
+
+    monkeypatch.setattr(shell_tools_module, "_run_shell", fake_run_shell)
+    context = ToolContext(cwd=tmp_path, max_output_bytes=80, max_output_lines=100)
+
+    result = run_tool(BashTool(), {"command": "ignored"}, context)
+
+    assert len(result.text.encode("utf-8")) <= context.max_output_bytes
+    assert result.text.startswith("Command exited with code 2: [truncated] ")
+    assert result.text.endswith("traceback final diagnostic 尾")
+    assert "\ufffd" not in result.text
     assert result.truncated is True
 
 

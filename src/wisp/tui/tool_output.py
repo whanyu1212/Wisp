@@ -221,7 +221,7 @@ def render_tool_result(
     # Successful shell results carry the same model-facing synthetic exit prefix
     # as failures. Their cards already communicate success, so keep the previous
     # raw-output presentation by removing only a matching promoted prefix.
-    display_output = _without_exit_restatement(output, exit_code)
+    display_output = normalize_tool_output_for_display(output, exit_code)
     return render_generic(display_output)
 
 
@@ -268,7 +268,7 @@ def render_error(output: str, *, exit_code: int | None) -> str:
     # model cannot miss the process status (see _format_process_output). The TUI
     # already promotes that status to its own line, so remove only the matching
     # synthetic prefix while preserving any stdout/stderr that follows it.
-    body = _without_exit_restatement(output, exit_code) if status is not None else output
+    body = normalize_tool_output_for_display(output, exit_code) if status is not None else output
     tail = _tail_preview(body, max_lines=_ERROR_TAIL_LINES, max_bytes=_ERROR_TAIL_BYTES)
     if tail:
         lines.append(tail)
@@ -279,7 +279,7 @@ def render_error(output: str, *, exit_code: int | None) -> str:
 _EXIT_RESTATEMENT_PREFIX = "Command exited with code "
 
 
-def _without_exit_restatement(output: str, exit_code: int | None) -> str:
+def normalize_tool_output_for_display(output: str, exit_code: int | None) -> str:
     """Remove the shell's matching synthetic exit prefix from rendered output.
 
     Mirrors the fallback in ``wisp.tools.process._format_process_output``, which
@@ -303,6 +303,18 @@ def _without_exit_restatement(output: str, exit_code: int | None) -> str:
     if output.startswith(output_prefix):
         return output[len(output_prefix) :]
     return output
+
+
+def full_tool_output_for_display(output: str, exit_code: int | None) -> str:
+    """Return normalized full output with a human-readable failure status."""
+
+    body = normalize_tool_output_for_display(output, exit_code)
+    status = _exit_status_line(exit_code)
+    if status is None:
+        return body
+    if not body:
+        return status
+    return f"{status}\n{body}"
 
 
 def _exit_status_line(exit_code: int | None) -> str | None:
