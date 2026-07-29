@@ -10,6 +10,7 @@ from wisp.runtime.commands import CommandDescriptor, CommandRegistry
 from wisp.runtime.event_bus import EventBus, EventHandler
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 from wisp.tools.base import Tool
+from wisp.tools.process_manager import ProcessSupervisor
 
 
 class ExtensionAPI:
@@ -65,6 +66,10 @@ class WispRuntime:
     api: ExtensionAPI
     models: ModelRegistry
     commands: CommandRegistry = field(default_factory=CommandRegistry)
+    process_supervisor: ProcessSupervisor = field(
+        default_factory=ProcessSupervisor,
+        repr=False,
+    )
     _configured_providers: dict[str, Provider] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -124,3 +129,8 @@ class WispRuntime:
         self.providers.replace_all(providers)
         self._configured_providers.clear()
         self._configured_providers.update(candidate._configured_providers)
+
+    async def aclose(self) -> None:
+        """Release runtime-owned resources, including every managed process."""
+
+        await self.process_supervisor.aclose()

@@ -1,0 +1,332 @@
+from __future__ import annotations
+
+import os
+import shlex
+import signal
+import sys
+from pathlib import Path
+
+import anyio
+import pytest
+
+from wisp.tools.process_manager import ProcessSupervisor, ProcessUpdate
+from wisp.tools.result import ToolError
+
+
+def _python_command(source: str) -> str:
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
+
+
+async def _poll_until_terminal(
+    supervisor: ProcessSupervisor,
+    process_id: str,
+    *,
+    timeout: float = 3,
+) -> tuple[ProcessUpdate, ...]:
+    updates: list[ProcessUpdate] = []
+    with anyio.fail_after(timeout):
+        while True:
+            update = await supervisor.poll(process_id, wait_seconds=0.1)
+            updates.append(update)
+            if update.state != "running":
+                return tuple(updates)
+
+
+def test_managed_process_polling_delivers_incremental_output_once(tmp_path: Path) -> None:
+    async def run() -> tuple[ProcessUpdate, ...]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                _python_command(
+                    "import sys,time;"
+                    "print('first', flush=True);"
+                    "time.sleep(0.15);"
+                    "print('second', flush=True);"
+                    "sys.stderr.write('warning\\n');"
+                    "sys.stderr.flush()"
+                ),
+                cwd=tmp_path,
+                timeout=2,
+            )
+            return await _poll_until_terminal(supervisor, process_id)
+        finally:
+            await supervisor.aclose()
+
+    updates = anyio.run(run)
+
+    assert "".join(update.stdout for update in updates) == "first\nsecond\n"
+    assert "".join(update.stderr for update in updates) == "warning\n"
+    assert updates[-1].state == "completed"
+    assert updates[-1].exit_code == 0
+
+
+def test_managed_process_retention_is_bounded_and_utf8_safe(tmp_path: Path) -> None:
+    async def run() -> ProcessUpdate:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                _python_command("print('🙂' * 50); print('tail')"),
+                cwd=tmp_path,
+                timeout=2,
+                max_retained_bytes=20,
+                max_retained_lines=1,
+            )
+            await anyio.sleep(0.1)
+            return await supervisor.poll(process_id)
+        finally:
+            await supervisor.aclose()
+
+    update = anyio.run(run)
+
+    assert update.state == "completed"
+    assert len(update.stdout.encode("utf-8")) <= 20
+    assert update.stdout.endswith("tail\n")
+    assert "\ufffd" not in update.stdout
+    assert update.stdout_truncated is True
+    assert update.stdout_dropped_bytes > 0
+
+
+def test_managed_process_timeout_is_not_an_exit_code(tmp_path: Path) -> None:
+    async def run() -> ProcessUpdate:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                _python_command("import time; time.sleep(10)"),
+                cwd=tmp_path,
+                timeout=0.05,
+            )
+            return (await _poll_until_terminal(supervisor, process_id))[-1]
+        finally:
+            await supervisor.aclose()
+
+    update = anyio.run(run)
+
+    assert update.state == "timed_out"
+    assert update.exit_code is None
+
+
+def test_managed_process_limit_recovers_after_terminal_result_is_observed(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        supervisor = ProcessSupervisor(max_processes=1)
+        try:
+            first = await supervisor.start(
+                _python_command("import time; time.sleep(10)"),
+                cwd=tmp_path,
+                timeout=2,
+            )
+            with pytest.raises(ToolError, match="managed process limit"):
+                await supervisor.start(
+                    _python_command("print('blocked')"),
+                    cwd=tmp_path,
+                    timeout=2,
+                )
+            cancelled = await supervisor.cancel(first)
+            assert cancelled.state == "cancelled"
+
+            second = await supervisor.start(
+                _python_command("print('accepted')"),
+                cwd=tmp_path,
+                timeout=2,
+            )
+            terminal = (await _poll_until_terminal(supervisor, second))[-1]
+            assert terminal.state == "completed"
+        finally:
+            await supervisor.aclose()
+
+    anyio.run(run)
+
+
+def test_concurrent_starts_cannot_exceed_managed_process_limit(tmp_path: Path) -> None:
+    async def run() -> tuple[int, int]:
+        supervisor = ProcessSupervisor(max_processes=1)
+        started: list[str] = []
+        rejected = 0
+
+        async def start_one() -> None:
+            nonlocal rejected
+            try:
+                started.append(
+                    await supervisor.start(
+                        _python_command("import time; time.sleep(10)"),
+                        cwd=tmp_path,
+                        timeout=2,
+                    )
+                )
+            except ToolError as exc:
+                assert "managed process limit" in str(exc)
+                rejected += 1
+
+        try:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(start_one)
+                task_group.start_soon(start_one)
+            assert len(started) == 1
+            await supervisor.cancel(started[0])
+            return len(started), rejected
+        finally:
+            await supervisor.aclose()
+
+    assert anyio.run(run) == (1, 1)
+
+
+def test_unreported_terminal_handle_is_evicted_for_capacity(tmp_path: Path) -> None:
+    async def run() -> tuple[ProcessUpdate, ...]:
+        supervisor = ProcessSupervisor(max_processes=1)
+        try:
+            await supervisor.start(
+                _python_command("print('unobserved')"),
+                cwd=tmp_path,
+                timeout=2,
+            )
+            with anyio.fail_after(3):
+                while True:
+                    try:
+                        second = await supervisor.start(
+                            _python_command("print('accepted')"),
+                            cwd=tmp_path,
+                            timeout=2,
+                        )
+                    except ToolError:
+                        await anyio.sleep(0.01)
+                    else:
+                        break
+            return await _poll_until_terminal(supervisor, second)
+        finally:
+            await supervisor.aclose()
+
+    updates = anyio.run(run)
+
+    assert updates[-1].state == "completed"
+    assert "".join(update.stdout for update in updates) == "accepted\n"
+
+
+def test_one_shot_commands_share_managed_process_capacity(tmp_path: Path) -> None:
+    async def run() -> None:
+        supervisor = ProcessSupervisor(max_processes=1)
+        try:
+            process_id = await supervisor.start(
+                _python_command("import time; time.sleep(10)"),
+                cwd=tmp_path,
+                timeout=2,
+            )
+            with pytest.raises(ToolError, match="managed process limit"):
+                await supervisor.run_to_completion(
+                    _python_command("print('blocked')"),
+                    cwd=tmp_path,
+                    timeout=2,
+                    max_output_bytes=1_000,
+                    max_output_lines=100,
+                )
+            await supervisor.cancel(process_id)
+        finally:
+            await supervisor.aclose()
+
+    anyio.run(run)
+
+
+def test_polling_terminal_process_does_not_repeat_output(tmp_path: Path) -> None:
+    async def run() -> tuple[tuple[ProcessUpdate, ...], ProcessUpdate]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                _python_command("print('once')"),
+                cwd=tmp_path,
+                timeout=2,
+            )
+            updates = await _poll_until_terminal(supervisor, process_id)
+            repeated = await supervisor.poll(process_id)
+            return updates, repeated
+        finally:
+            await supervisor.aclose()
+
+    updates, repeated = anyio.run(run)
+
+    assert "".join(update.stdout for update in updates) == "once\n"
+    assert repeated.state == "completed"
+    assert repeated.stdout == ""
+    assert repeated.stderr == ""
+
+
+def test_closed_and_unknown_process_handles_fail_deterministically(tmp_path: Path) -> None:
+    async def run() -> None:
+        supervisor = ProcessSupervisor()
+        with pytest.raises(ToolError, match="Unknown managed process: missing"):
+            await supervisor.poll("missing")
+        await supervisor.aclose()
+        with pytest.raises(RuntimeError, match="ProcessSupervisor is closed"):
+            await supervisor.start(
+                _python_command("print('no')"),
+                cwd=tmp_path,
+                timeout=2,
+            )
+
+    anyio.run(run)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_managed_process_cancel_terminates_descendants(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "child.pid"
+    child_source = "import time; time.sleep(30)"
+    parent_source = (
+        "import pathlib,subprocess,sys,time;"
+        f"child=subprocess.Popen([sys.executable,'-c',{child_source!r}]);"
+        f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid));"
+        "time.sleep(30)"
+    )
+
+    async def run() -> int:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                _python_command(parent_source),
+                cwd=tmp_path,
+                timeout=30,
+            )
+            with anyio.fail_after(3):
+                while not child_pid_path.exists():
+                    await anyio.sleep(0.01)
+            child_pid = int(child_pid_path.read_text())
+            update = await supervisor.cancel(process_id)
+            assert update.state == "cancelled"
+            return child_pid
+        finally:
+            await supervisor.aclose()
+
+    child_pid = anyio.run(run)
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_supervisor_close_terminates_abandoned_processes(tmp_path: Path) -> None:
+    pid_path = tmp_path / "process.pid"
+    source = (
+        "import os,pathlib,time;"
+        f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()));"
+        "time.sleep(30)"
+    )
+
+    async def run() -> int:
+        supervisor = ProcessSupervisor()
+        await supervisor.start(
+            _python_command(source),
+            cwd=tmp_path,
+            timeout=30,
+        )
+        with anyio.fail_after(3):
+            while not pid_path.exists():
+                await anyio.sleep(0.01)
+        pid = int(pid_path.read_text())
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(supervisor.aclose)
+            task_group.start_soon(supervisor.aclose)
+        await supervisor.aclose()
+        return pid
+
+    pid = anyio.run(run)
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, signal.SIGCONT)

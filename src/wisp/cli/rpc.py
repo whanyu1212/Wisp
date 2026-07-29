@@ -356,6 +356,40 @@ async def _run_rpc(
     project_context_root: Path | None = None,
 ) -> None:
     runtime = await _build_runtime_for_config(config)
+    try:
+        await _run_rpc_with_runtime(
+            config,
+            runtime,
+            all_tools=all_tools,
+            allow_read_tools=allow_read_tools,
+            allowed_tools=allowed_tools,
+            resume=resume,
+            continue_latest=continue_latest,
+            approve_unsafe_tools=approve_unsafe_tools,
+            max_tool_iterations=max_tool_iterations,
+            startup_trusted=startup_trusted,
+            config_overrides=config_overrides,
+            project_context_root=project_context_root,
+        )
+    finally:
+        await runtime.aclose()
+
+
+async def _run_rpc_with_runtime(
+    config: WispConfig,
+    runtime: WispRuntime,
+    *,
+    all_tools: bool = False,
+    allow_read_tools: bool = False,
+    allowed_tools: tuple[str, ...] = (),
+    resume: str | None = None,
+    continue_latest: bool = False,
+    approve_unsafe_tools: bool = False,
+    max_tool_iterations: int | None = None,
+    startup_trusted: bool = False,
+    config_overrides: _ConfigOverrides | None = None,
+    project_context_root: Path | None = None,
+) -> None:
     sessions = JsonlSessionStore(config.session_dir)
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     session_state = _rpc_session_state(session)

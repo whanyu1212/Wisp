@@ -22,6 +22,7 @@ from wisp.events import (
     MessageDelta,
 )
 from wisp.providers.base import ProviderError
+from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalDecision as ToolApprovalDecision
@@ -532,6 +533,42 @@ async def _run_print(
     project_context_root: Path | None = None,
 ) -> None:
     runtime = await _build_runtime_for_config(config)
+    try:
+        await _run_print_with_runtime(
+            prompt,
+            config,
+            runtime,
+            all_tools=all_tools,
+            allow_read_tools=allow_read_tools,
+            allowed_tools=allowed_tools,
+            resume=resume,
+            continue_latest=continue_latest,
+            approve_unsafe_tools=approve_unsafe_tools,
+            max_tool_iterations=max_tool_iterations,
+            mode=mode,
+            trusted=trusted,
+            project_context_root=project_context_root,
+        )
+    finally:
+        await runtime.aclose()
+
+
+async def _run_print_with_runtime(
+    prompt: str,
+    config: WispConfig,
+    runtime: WispRuntime,
+    *,
+    all_tools: bool = False,
+    allow_read_tools: bool = False,
+    allowed_tools: tuple[str, ...] = (),
+    resume: str | None = None,
+    continue_latest: bool = False,
+    approve_unsafe_tools: bool = False,
+    max_tool_iterations: int | None = None,
+    mode: OutputMode = OutputMode.text,
+    trusted: bool = False,
+    project_context_root: Path | None = None,
+) -> None:
     sessions = JsonlSessionStore(config.session_dir)
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     history = session.read_context_messages() if session is not None else ()

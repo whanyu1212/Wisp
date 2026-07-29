@@ -65,14 +65,17 @@ async def _preflight_tui_options(options: TuiOptions) -> None:
         auth_path=options.config.auth_path,
         retry_policy=options.config.retry_policy,
     )
-    runtime.providers.get(options.config.provider)
-    for tool_name in set(options.allowed_tools):
-        runtime.tools.get(tool_name)
-    sessions = JsonlSessionStore(options.config.session_dir)
-    if options.resume is not None:
-        sessions.load(options.resume)
-    elif options.continue_latest:
-        sessions.latest()
+    try:
+        runtime.providers.get(options.config.provider)
+        for tool_name in set(options.allowed_tools):
+            runtime.tools.get(tool_name)
+        sessions = JsonlSessionStore(options.config.session_dir)
+        if options.resume is not None:
+            sessions.load(options.resume)
+        elif options.continue_latest:
+            sessions.latest()
+    finally:
+        await runtime.aclose()
 
 
 def _rpc_command(options: TuiOptions) -> tuple[str, ...]:
