@@ -981,6 +981,35 @@ def test_textual_tui_renderer_renders_historical_tool_cards() -> None:
     assert "[red]boom[/red]" in rendered
 
 
+def test_textual_tui_renderer_normalizes_historical_bash_full_output() -> None:
+    async def scenario() -> tuple[str, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.render_history_entries(
+                (
+                    HistoricalToolCard(
+                        card_id="history:tool-1",
+                        name="bash",
+                        arguments={"command": "echo ok"},
+                        output="Command exited with code 0: ok",
+                        is_error=False,
+                        exit_code=0,
+                    ),
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            detail = card._detail
+            assert isinstance(detail, str)
+            return detail, card._full_output, card._can_expand()
+
+    detail, full_output, can_expand = anyio.run(scenario)
+
+    assert detail == "ok"
+    assert full_output == "ok"
+    assert can_expand is False
+
+
 def test_textual_tui_renderer_preserves_historical_denied_tool_cards() -> None:
     async def scenario() -> str:
         app_instance, renderer = create_textual_tui()

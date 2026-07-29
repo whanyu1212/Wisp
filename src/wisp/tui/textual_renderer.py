@@ -287,7 +287,10 @@ class TextualTuiRenderer:
                 created=entry.created,
                 summary=entry.summary,
             ),
-            full_output=entry.output,
+            full_output=full_tool_output_for_display(
+                entry.output,
+                entry.exit_code,
+            ),
             truncated=entry.truncated,
         )
 
