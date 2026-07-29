@@ -1891,7 +1891,7 @@ async def run_rpc_unrevert_session_tree_command(
                 (
                     refreshed_entry_count,
                     refreshed_history,
-                    active_leaf_id,
+                    _active_leaf_id,
                     _name,
                 ) = await anyio.to_thread.run_sync(rpc_selected_session_state, session)
             event = RpcSessionTreeUnreverted(
@@ -1900,7 +1900,7 @@ async def run_rpc_unrevert_session_tree_command(
                 session_path=session.path,
                 source_transition_id=unrevert.source_transition_id,
                 previous_active_leaf_id=unrevert.previous_active_leaf_id,
-                active_leaf_id=active_leaf_id,
+                active_leaf_id=unrevert.active_leaf_id,
                 entry_count=refreshed_entry_count,
             )
             post_apply_events = (
