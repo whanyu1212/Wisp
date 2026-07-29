@@ -219,9 +219,8 @@ class ProcessSupervisor:
         managed = await self._get(process_id)
         async with managed.operation_lock:
             if managed.state == "running":
-                if managed.process.returncode is None:
-                    managed.terminal_override = "cancelled"
-                    _kill_process_tree(managed.process)
+                managed.terminal_override = "cancelled"
+                _kill_process_tree(managed.process)
                 assert managed.completion_task is not None
                 await managed.completion_task
             return self._snapshot(managed)
@@ -245,7 +244,7 @@ class ProcessSupervisor:
             managed = tuple(self._managed.values())
             one_shot = tuple(self._one_shot)
         for item in managed:
-            if item.state == "running" and item.process.returncode is None:
+            if item.state == "running":
                 item.terminal_override = "cancelled"
                 _kill_process_tree(item.process)
         for process in one_shot:
@@ -305,14 +304,8 @@ class ProcessSupervisor:
         managed.changed.set()
 
     async def _wait_for_completion(self, managed: _ManagedProcess, timeout: float) -> None:
-        try:
-            try:
-                await asyncio.wait_for(managed.process.wait(), timeout=timeout)
-            except TimeoutError:
-                managed.terminal_override = managed.terminal_override or "timed_out"
-                _kill_process_tree(managed.process)
-                await managed.process.wait()
-
+        async def wait_for_process_and_streams() -> None:
+            await managed.process.wait()
             assert managed.stdout_task is not None
             assert managed.stderr_task is not None
             await asyncio.gather(
@@ -320,9 +313,21 @@ class ProcessSupervisor:
                 managed.stderr_task,
                 return_exceptions=True,
             )
+
+        completion = asyncio.create_task(wait_for_process_and_streams())
+        try:
+            try:
+                await asyncio.wait_for(asyncio.shield(completion), timeout=timeout)
+            except TimeoutError:
+                managed.terminal_override = managed.terminal_override or "timed_out"
+                _kill_process_tree(managed.process)
+                await completion
             managed.exit_code = managed.process.returncode
             managed.state = managed.terminal_override or "completed"
         finally:
+            if not completion.done():
+                completion.cancel()
+                await asyncio.gather(completion, return_exceptions=True)
             managed.changed.set()
 
     def _snapshot(self, managed: _ManagedProcess) -> ProcessUpdate:

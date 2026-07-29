@@ -131,19 +131,26 @@ async def _drain_process_stream(stream: asyncio.StreamReader | None) -> None:
 
 
 def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        return
     if os.name == "posix":
+        # Every process created by this module starts a fresh session whose
+        # process-group id is the leader pid. Descendants can outlive that leader
+        # while still holding its stdout/stderr pipes open, so signal the group
+        # even after asyncio has observed a return code for the leader.
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             return
         except PermissionError:
+            if process.returncode is not None:
+                return
             try:
                 process.kill()
             except (ProcessLookupError, PermissionError):
                 return
-    elif os.name == "nt":
+        return
+    if process.returncode is not None:
+        return
+    if os.name == "nt":
         try:
             completed = subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(process.pid)],

@@ -489,6 +489,19 @@ def test_bash_tool_reports_timeout_and_kills_child_processes(tmp_path: Path) -> 
     assert not marker.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_bash_timeout_kills_background_child_after_shell_exits(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    marker = tmp_path / "background-child-survived.txt"
+    command = f"(sleep 1.5; echo alive > {shlex.quote(str(marker))}) &"
+
+    with pytest.raises(ToolError, match="timed out"):
+        run_tool(BashTool(), {"command": command, "timeout": 1}, context)
+    time.sleep(1.0)
+
+    assert not marker.exists()
+
+
 def test_bash_tool_cancellation_kills_child_processes(tmp_path: Path) -> None:
     if os.name != "posix":
         pytest.skip("POSIX process-group cancellation regression")

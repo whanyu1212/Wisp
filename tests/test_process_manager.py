@@ -105,6 +105,62 @@ def test_managed_process_timeout_is_not_an_exit_code(tmp_path: Path) -> None:
     assert update.exit_code is None
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_timeout_kills_descendant_after_shell_leader_exits(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "background.pid"
+    command = f"sleep 30 & echo $! > {shlex.quote(str(child_pid_path))}"
+
+    async def run() -> tuple[ProcessUpdate, int]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                command,
+                cwd=tmp_path,
+                timeout=0.1,
+            )
+            with anyio.fail_after(3):
+                while not child_pid_path.exists():
+                    await anyio.sleep(0.01)
+            child_pid = int(child_pid_path.read_text())
+            terminal = (await _poll_until_terminal(supervisor, process_id))[-1]
+            return terminal, child_pid
+        finally:
+            await supervisor.aclose()
+
+    update, child_pid = anyio.run(run)
+
+    assert update.state == "timed_out"
+    assert update.exit_code is None
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_close_kills_descendant_after_shell_leader_exits(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "background.pid"
+    command = f"sleep 30 & echo $! > {shlex.quote(str(child_pid_path))}"
+
+    async def run() -> int:
+        supervisor = ProcessSupervisor()
+        await supervisor.start(
+            command,
+            cwd=tmp_path,
+            timeout=30,
+        )
+        with anyio.fail_after(3):
+            while not child_pid_path.exists():
+                await anyio.sleep(0.01)
+        child_pid = int(child_pid_path.read_text())
+        await anyio.sleep(0.05)
+        await supervisor.aclose()
+        return child_pid
+
+    child_pid = anyio.run(run)
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+
 def test_managed_process_limit_recovers_after_terminal_result_is_observed(
     tmp_path: Path,
 ) -> None:
