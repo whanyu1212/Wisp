@@ -463,6 +463,113 @@ def test_one_shot_evicts_observed_terminal_handle_for_capacity(tmp_path: Path) -
     assert anyio.run(run) == "one-shot\n"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_one_shot_completion_kills_descendant_with_redirected_output(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "background.pid"
+    command = f"sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(child_pid_path))}"
+
+    async def run() -> tuple[int, str, int]:
+        supervisor = ProcessSupervisor()
+        try:
+            result = await supervisor.run_to_completion(
+                command,
+                cwd=tmp_path,
+                timeout=2,
+                max_output_bytes=1_000,
+                max_output_lines=100,
+            )
+            child_pid = int(child_pid_path.read_text())
+            with anyio.fail_after(3):
+                while True:
+                    try:
+                        os.kill(child_pid, 0)
+                    except ProcessLookupError:
+                        break
+                    await anyio.sleep(0.01)
+            return result.exit_code, result.stdout, child_pid
+        finally:
+            await supervisor.aclose()
+
+    exit_code, stdout, child_pid = anyio.run(run)
+
+    assert exit_code == 0
+    assert stdout == ""
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+
+def test_one_shot_releases_ownership_inside_cancelled_scope_while_lock_is_contended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
+    terminate_started = anyio.Event()
+    allow_terminate = anyio.Event()
+
+    async def delayed_terminate(process: asyncio.subprocess.Process) -> None:
+        terminate_started.set()
+        await allow_terminate.wait()
+        await original_terminate(process)
+
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", delayed_terminate)
+
+    async def run() -> tuple[int, str]:
+        supervisor = ProcessSupervisor(max_processes=1)
+        cancel_scope: anyio.CancelScope | None = None
+        one_shot_finished = anyio.Event()
+        lock_held = anyio.Event()
+        release_lock = anyio.Event()
+
+        async def hold_lock_during_release() -> None:
+            await terminate_started.wait()
+            async with supervisor._lock:  # noqa: SLF001
+                lock_held.set()
+                await release_lock.wait()
+
+        async def run_one_shot_from_cancelled_scope() -> None:
+            nonlocal cancel_scope
+            with anyio.CancelScope() as scope:
+                cancel_scope = scope
+                await supervisor.run_to_completion(
+                    _python_command("print('first')"),
+                    cwd=tmp_path,
+                    timeout=2,
+                    max_output_bytes=1_000,
+                    max_output_lines=100,
+                )
+            one_shot_finished.set()
+
+        try:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(hold_lock_during_release)
+                task_group.start_soon(run_one_shot_from_cancelled_scope)
+                await lock_held.wait()
+                allow_terminate.set()
+                await anyio.sleep(0.05)
+                assert cancel_scope is not None
+                cancel_scope.cancel()
+                await anyio.sleep(0.05)
+                assert one_shot_finished.is_set() is False
+                release_lock.set()
+
+            retained_count = len(supervisor._one_shot)  # noqa: SLF001
+            result = await supervisor.run_to_completion(
+                _python_command("print('second')"),
+                cwd=tmp_path,
+                timeout=2,
+                max_output_bytes=1_000,
+                max_output_lines=100,
+            )
+            return retained_count, result.stdout
+        finally:
+            await supervisor.aclose()
+
+    retained_count, stdout = anyio.run(run)
+
+    assert retained_count == 0
+    assert stdout == "second\n"
+
+
 def test_one_shot_capture_error_terminates_process_before_releasing_ownership(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

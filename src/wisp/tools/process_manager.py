@@ -151,6 +151,8 @@ class ProcessSupervisor:
                 release_ownership = True
                 raise
 
+            with anyio.CancelScope(shield=True):
+                await _terminate_process_tree(process)
             result = ProcessResult(
                 exit_code=process.returncode if process.returncode is not None else -1,
                 stdout=stdout_bytes.decode("utf-8", errors="replace"),
@@ -162,8 +164,9 @@ class ProcessSupervisor:
             return result
         finally:
             if release_ownership:
-                async with self._lock:
-                    self._one_shot.discard(process)
+                with anyio.CancelScope(shield=True):
+                    async with self._lock:
+                        self._one_shot.discard(process)
 
     async def start(
         self,
