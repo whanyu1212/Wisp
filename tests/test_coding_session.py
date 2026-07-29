@@ -1627,6 +1627,7 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
     assert message_records[4]["tool_result"] == {
         "status": "done",
         "created": False,
+        "output_has_exit_status": False,
         "truncated": False,
     }
     loaded_tool_entry = next(

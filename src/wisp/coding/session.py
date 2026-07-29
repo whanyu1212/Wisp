@@ -1124,6 +1124,7 @@ class CodingSession:
             ToolResultPresentationSnapshot(
                 status=tool_status or _tool_result_status(event),
                 exit_code=event.exit_code,
+                output_has_exit_status=event.output_has_exit_status,
                 before_text=event.before_text,
                 created=event.created,
                 summary=event.summary,

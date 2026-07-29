@@ -1423,6 +1423,7 @@ def _rpc_tool_result_snapshot(
     return RpcMessageToolResultSnapshot(
         status=tool_result.status,
         exit_code=tool_result.exit_code,
+        output_has_exit_status=tool_result.output_has_exit_status,
         before_text=before_text,
         created=tool_result.created,
         summary=summary,

@@ -67,6 +67,7 @@ class ToolResultPresentationSnapshot(BaseModel):
 
     status: ToolPresentationStatus | None = None
     exit_code: int | None = None
+    output_has_exit_status: bool = False
     before_text: str | None = None
     created: bool = False
     summary: str | None = None

@@ -409,6 +409,7 @@ def test_rpc_messages_tool_result_metadata_requires_schema_v22() -> None:
                 is_error=False,
                 tool_result=RpcMessageToolResultSnapshot(
                     exit_code=1,
+                    output_has_exit_status=True,
                     summary="command failed",
                     truncated=True,
                 ),

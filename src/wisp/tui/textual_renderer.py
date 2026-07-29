@@ -46,7 +46,11 @@ from wisp.tui.rendering import (
     _truncate_to_cell_width,
     _tui_help_text,
 )
-from wisp.tui.tool_output import render_tool_result, tool_result_failed
+from wisp.tui.tool_output import (
+    full_tool_output_for_display,
+    render_tool_result,
+    tool_result_failed,
+)
 
 if TYPE_CHECKING:
     from wisp.tui.textual_app import TextualTui
@@ -279,11 +283,16 @@ class TextualTuiRenderer:
                 entry.output,
                 is_error=entry.is_error,
                 exit_code=entry.exit_code,
+                output_has_exit_status=entry.output_has_exit_status,
                 before_text=entry.before_text,
                 created=entry.created,
                 summary=entry.summary,
             ),
-            full_output=entry.output,
+            full_output=full_tool_output_for_display(
+                entry.output,
+                entry.exit_code,
+                output_has_exit_status=entry.output_has_exit_status,
+            ),
             truncated=entry.truncated,
         )
 
@@ -470,6 +479,7 @@ class TextualTuiRenderer:
                     event.output,
                     is_error=event.is_error,
                     exit_code=event.exit_code,
+                    output_has_exit_status=event.output_has_exit_status,
                     before_text=event.before_text,
                     created=event.created,
                     summary=event.summary,
@@ -479,7 +489,11 @@ class TextualTuiRenderer:
                 # the collapsed detail; the card only offers expansion when this adds
                 # something. `truncated` flags that even the full output was capped by
                 # the tool itself.
-                full_output=event.output,
+                full_output=full_tool_output_for_display(
+                    event.output,
+                    event.exit_code,
+                    output_has_exit_status=event.output_has_exit_status,
+                ),
                 truncated=event.truncated,
             )
         elif isinstance(event, AgentCompleted):

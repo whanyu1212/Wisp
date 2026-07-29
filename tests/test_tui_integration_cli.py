@@ -981,6 +981,68 @@ def test_textual_tui_renderer_renders_historical_tool_cards() -> None:
     assert "[red]boom[/red]" in rendered
 
 
+def test_textual_tui_renderer_normalizes_historical_bash_full_output() -> None:
+    async def scenario() -> tuple[str, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.render_history_entries(
+                (
+                    HistoricalToolCard(
+                        card_id="history:tool-1",
+                        name="bash",
+                        arguments={"command": "echo ok"},
+                        output="Command exited with code 0: ok",
+                        is_error=False,
+                        exit_code=0,
+                        output_has_exit_status=True,
+                    ),
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            detail = card._detail
+            assert isinstance(detail, str)
+            return detail, card._full_output, card._can_expand()
+
+    detail, full_output, can_expand = anyio.run(scenario)
+
+    assert detail == "ok"
+    assert full_output == "ok"
+    assert can_expand is False
+
+
+def test_textual_tui_renderer_preserves_matching_legacy_bash_output() -> None:
+    legacy_output = "Command exited with code 0: important"
+
+    async def scenario() -> tuple[str, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.render_history_entries(
+                (
+                    HistoricalToolCard(
+                        card_id="history:tool-1",
+                        name="bash",
+                        arguments={"command": "legacy-command"},
+                        output=legacy_output,
+                        is_error=False,
+                        exit_code=0,
+                        output_has_exit_status=False,
+                    ),
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            detail = card._detail
+            assert isinstance(detail, str)
+            return detail, card._full_output, card._can_expand()
+
+    detail, full_output, can_expand = anyio.run(scenario)
+
+    assert detail == legacy_output
+    assert full_output == legacy_output
+    assert can_expand is False
+
+
 def test_textual_tui_renderer_preserves_historical_denied_tool_cards() -> None:
     async def scenario() -> str:
         app_instance, renderer = create_textual_tui()
@@ -1553,6 +1615,76 @@ def test_textual_tool_card_expands_to_full_output_on_enter() -> None:
     # Re-collapsed: back to the summary.
     assert "line 29" not in recollapsed
     assert "read 30 lines from f.py" in recollapsed
+
+
+def test_textual_bash_card_normalizes_collapsed_and_full_output() -> None:
+    async def scenario() -> tuple[str, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="bash",
+                    arguments={"command": "echo ok"},
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="bash",
+                    output="Command exited with code 0: ok",
+                    is_error=False,
+                    exit_code=0,
+                    output_has_exit_status=True,
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            detail = card._detail
+            assert isinstance(detail, str)
+            return detail, card._full_output, card._can_expand()
+
+    detail, full_output, can_expand = anyio.run(scenario)
+
+    assert detail == "ok"
+    assert full_output == "ok"
+    assert can_expand is False
+
+
+def test_textual_failed_bash_card_normalizes_collapsed_and_full_output() -> None:
+    async def scenario() -> tuple[str, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="bash",
+                    arguments={"command": "failing-command"},
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="bash",
+                    output="Command exited with code 2: diagnostic",
+                    is_error=False,
+                    exit_code=2,
+                    output_has_exit_status=True,
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            detail = card._detail
+            assert isinstance(detail, str)
+            return detail, card._full_output, card._can_expand()
+
+    detail, full_output, can_expand = anyio.run(scenario)
+
+    assert detail == "exit 2\ndiagnostic"
+    assert full_output == detail
+    assert can_expand is False
 
 
 def test_textual_tool_card_expanded_shows_tool_truncation_marker() -> None:

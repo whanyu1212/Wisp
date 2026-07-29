@@ -13,6 +13,7 @@ from pathlib import Path
 import anyio
 
 from wisp.tools.result import ToolError
+from wisp.tools.truncation import TruncatedText, truncate_text_tail
 
 
 @dataclass(frozen=True)
@@ -308,11 +309,57 @@ async def _run_exec_limited_stdout(
 
 
 def _format_process_output(exit_code: int, stdout: str, stderr: str) -> str:
+    parts = _process_output_parts(stdout, stderr)
+    status = f"Command exited with code {exit_code}"
+    if not parts:
+        return status
+    return f"{status}: {'\n'.join(parts)}"
+
+
+def _format_process_output_bounded(
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    *,
+    max_bytes: int,
+    max_lines: int,
+) -> TruncatedText:
+    """Format process output within its budget while preserving diagnostics."""
+
+    parts = _process_output_parts(stdout, stderr)
+    status = f"Command exited with code {exit_code}"
+    if not parts:
+        # Completion evidence is fixed-size metadata, not captured command output.
+        # Keep it intact even when an embedding deliberately selects a tiny body
+        # budget; otherwise the model cannot distinguish success from failure.
+        return TruncatedText(text=status, truncated=False)
+
+    prefix = f"{status}: "
+    if max_bytes <= 0 or max_lines <= 0:
+        return TruncatedText(text=status, truncated=True)
+
+    bounded_body = truncate_text_tail(
+        "\n".join(parts),
+        # The fixed status prefix is bounded metadata outside the configured
+        # captured-output budget. This preserves both the complete exit code and
+        # the diagnostic tail for every positive body budget.
+        max_bytes=max_bytes,
+        max_lines=max_lines,
+    )
+    return TruncatedText(
+        text=f"{prefix}{bounded_body.text}",
+        truncated=bounded_body.truncated,
+    )
+
+
+def _process_output_parts(stdout: str, stderr: str) -> list[str]:
     parts: list[str] = []
     if stdout:
-        parts.append(stdout.rstrip("\n"))
+        stripped_stdout = stdout.rstrip("\n")
+        if stripped_stdout:
+            parts.append(stripped_stdout)
     if stderr:
-        parts.append(stderr.rstrip("\n"))
-    if not parts:
-        return f"Command exited with code {exit_code}"
-    return "\n".join(parts)
+        stripped_stderr = stderr.rstrip("\n")
+        if stripped_stderr:
+            parts.append(stripped_stderr)
+    return parts

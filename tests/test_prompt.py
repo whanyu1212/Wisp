@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
+import pytest
 from pytest import MonkeyPatch
 
 from wisp.agent import prompt as prompt_module
@@ -31,6 +32,30 @@ def test_build_prompt_messages_includes_default_instructions_and_context(tmp_pat
     assert f"cwd: {tmp_path.resolve(strict=False)}" in messages[1].content
     assert "project files:\n  pyproject.toml" in messages[1].content
     assert "allowed tools:\n  - read: Read a UTF-8 text file." in messages[1].content
+
+
+@pytest.mark.parametrize("include_project_context", [True, False])
+def test_default_prompt_requires_evidence_backed_workflow_completion(
+    tmp_path: Path,
+    include_project_context: bool,
+) -> None:
+    messages = build_prompt_messages(
+        cwd=tmp_path,
+        include_project_context=include_project_context,
+    )
+
+    prompt = " ".join(messages[0].content.split())
+    assert "fetch the relevant remote and compare refs before claiming freshness" in prompt
+    assert "report network or authentication failures" in prompt
+    assert "Do not fetch for unrelated local-only or offline work" in prompt
+    assert "Exit code 0 means a command passed" in prompt
+    assert "A timeout is inconclusive, never a pass" in prompt
+    assert "report the check as unverified" in prompt
+    assert "run the relevant checks or tests when practical" in prompt
+    assert "follow the project's own verification instructions when present" in prompt
+    assert "Always finish change or build tasks with a concise final response" in prompt
+    assert "passed, failed, timed out, or were not run" in prompt
+    assert len(messages) == 2
 
 
 def test_build_prompt_messages_can_skip_project_context(tmp_path: Path) -> None:

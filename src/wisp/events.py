@@ -334,6 +334,7 @@ class RpcMessageToolResultSnapshot(BaseModel):
 
     status: ToolPresentationStatus | None = None
     exit_code: int | None = None
+    output_has_exit_status: bool = False
     before_text: str | None = None
     created: bool = False
     summary: str | None = None
@@ -548,6 +549,9 @@ class ToolExecutionEnded(WispEvent):
     # ToolResult. See ToolResultReady.exit_code for why this is a narrow scalar
     # rather than the whole data mapping.
     exit_code: int | None = None
+    # True only when output begins with Wisp's synthetic completion envelope.
+    # Explicit provenance avoids parsing genuine legacy stdout that resembles it.
+    output_has_exit_status: bool = False
     # Pre-write file snapshot for the diff renderer, promoted from ToolResult.data
     # for write-like tools only. None for every other tool and for error paths.
     # See ToolResultReady.before_text for the wire/bounding rationale.
@@ -583,6 +587,9 @@ class ToolResultReady(WispEvent):
     # raw events) — so no schema bump is needed. Set only for tools with genuine
     # exit-code semantics, so a card is never spuriously reddened.
     exit_code: int | None = None
+    # True only for the new Wisp-owned Bash completion envelope. Persisted through
+    # session presentation metadata so legacy raw output is never parsed as one.
+    output_has_exit_status: bool = False
     # The file's contents *before* a write overwrote them, so the renderer can show
     # a before/after diff instead of the flat "Wrote N bytes" summary. Like
     # exit_code, this is a bounded, JSON-safe scalar that must survive the RPC wire:

@@ -14,9 +14,11 @@ from pytest import MonkeyPatch
 
 from wisp.tools import process as process_tools_module
 from wisp.tools import search as search_tools_module
+from wisp.tools import shell as shell_tools_module
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.truncation import truncate_text_tail
 
 
 def run_tool(tool: object, arguments: dict[str, object], context: ToolContext) -> ToolResult:
@@ -26,6 +28,14 @@ def run_tool(tool: object, arguments: dict[str, object], context: ToolContext) -
         return result
 
     return anyio.run(run)
+
+
+def test_tail_truncation_with_marker_only_budget_stays_bounded() -> None:
+    result = truncate_text_tail("diagnostic tail", max_bytes=12, max_lines=10)
+
+    assert result.text == "[truncated]"
+    assert len(result.text.encode("utf-8")) <= 12
+    assert result.truncated is True
 
 
 def test_read_tool_supports_offset_limit_and_truncation(tmp_path: Path) -> None:
@@ -332,8 +342,57 @@ def test_bash_tool_captures_stdout_stderr_and_exit_code(tmp_path: Path) -> None:
     assert result.data["exit_code"] == 3
     assert result.data["stdout"] == "out\n"
     assert result.data["stderr"] == "err\n"
-    assert "out" in result.text
-    assert "err" in result.text
+    assert result.text == "Command exited with code 3: out\nerr"
+
+
+def test_bash_tool_reports_successful_exit_code_with_output(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    python = shlex.quote(sys.executable)
+    command = f"{python} -c \"print('verified')\""
+
+    result = run_tool(BashTool(), {"command": command}, context)
+
+    assert result.text == "Command exited with code 0: verified"
+    assert result.data["exit_code"] == 0
+
+
+def test_bash_tool_reports_successful_exit_code_without_output(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    python = shlex.quote(sys.executable)
+    command = f'{python} -c "pass"'
+
+    result = run_tool(BashTool(), {"command": command}, context)
+
+    assert result.text == "Command exited with code 0"
+    assert result.data["exit_code"] == 0
+
+
+def test_bash_tool_preserves_exit_code_outside_tiny_body_budget(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_run_shell(*args: object, **kwargs: object) -> process_tools_module.ProcessResult:
+        return process_tools_module.ProcessResult(exit_code=7, stdout="", stderr="")
+
+    monkeypatch.setattr(shell_tools_module, "_run_shell", fake_run_shell)
+    context = ToolContext(cwd=tmp_path, max_output_bytes=1, max_output_lines=0)
+
+    result = run_tool(BashTool(), {"command": "ignored"}, context)
+
+    assert result.text == "Command exited with code 7"
+    assert result.data["output_has_exit_status"] is True
+    assert result.truncated is False
+
+
+def test_bash_tool_does_not_add_separator_for_newline_only_output(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    python = shlex.quote(sys.executable)
+    command = f'{python} -c "print()"'
+
+    result = run_tool(BashTool(), {"command": command}, context)
+
+    assert result.text == "Command exited with code 0"
+    assert result.data["stdout"] == "\n"
 
 
 def test_bash_tool_retruncates_combined_stdout_and_stderr(tmp_path: Path) -> None:
@@ -344,7 +403,34 @@ def test_bash_tool_retruncates_combined_stdout_and_stderr(tmp_path: Path) -> Non
 
     result = run_tool(BashTool(), {"command": command}, context)
 
-    assert len(result.text.encode("utf-8")) <= context.max_output_bytes
+    status_overhead = len(b"Command exited with code -9: ")
+    assert len(result.text.encode("utf-8")) <= context.max_output_bytes + status_overhead
+    assert result.text.startswith("Command exited with code -9:")
+    assert result.truncated is True
+
+
+def test_bash_tool_reserves_status_space_without_losing_diagnostic_tail(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_run_shell(*args: object, **kwargs: object) -> process_tools_module.ProcessResult:
+        return process_tools_module.ProcessResult(
+            exit_code=2,
+            stdout="setup output " * 8,
+            stderr="traceback final diagnostic 尾",
+            stdout_truncated=True,
+        )
+
+    monkeypatch.setattr(shell_tools_module, "_run_shell", fake_run_shell)
+    context = ToolContext(cwd=tmp_path, max_output_bytes=80, max_output_lines=100)
+
+    result = run_tool(BashTool(), {"command": "ignored"}, context)
+
+    status_overhead = len(b"Command exited with code 2: ")
+    assert len(result.text.encode("utf-8")) <= context.max_output_bytes + status_overhead
+    assert result.text.startswith("Command exited with code 2: [truncated] ")
+    assert result.text.endswith("traceback final diagnostic 尾")
+    assert "\ufffd" not in result.text
     assert result.truncated is True
 
 

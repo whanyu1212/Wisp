@@ -177,6 +177,7 @@ def render_tool_result(
     *,
     is_error: bool,
     exit_code: int | None,
+    output_has_exit_status: bool = False,
     before_text: str | None = None,
     created: bool = False,
     summary: str | None = None,
@@ -199,7 +200,11 @@ def render_tool_result(
     """
 
     if tool_result_failed(is_error, exit_code):
-        return render_error(output, exit_code=exit_code)
+        return render_error(
+            output,
+            exit_code=exit_code,
+            output_has_exit_status=output_has_exit_status,
+        )
     # A successful edit carries its before/after text in the tool-call arguments
     # (oldText/newText per hunk); a write carries the "after" in its arguments and
     # the "before" in the promoted snapshot. Render either as a colored unified
@@ -218,7 +223,15 @@ def render_tool_result(
     # It replaces the raw output dump; the full output returns via expand/collapse.
     if summary is not None:
         return summary
-    return render_generic(output)
+    # Successful shell results carry the same model-facing synthetic exit prefix
+    # as failures. Their cards already communicate success, so keep the previous
+    # raw-output presentation by removing only a matching promoted prefix.
+    display_output = normalize_tool_output_for_display(
+        output,
+        exit_code,
+        output_has_exit_status=output_has_exit_status,
+    )
+    return render_generic(display_output)
 
 
 def tool_result_failed(is_error: bool, exit_code: int | None) -> bool:
@@ -240,7 +253,12 @@ def tool_result_failed(is_error: bool, exit_code: int | None) -> bool:
     return exit_code is not None and exit_code != 0
 
 
-def render_error(output: str, *, exit_code: int | None) -> str:
+def render_error(
+    output: str,
+    *,
+    exit_code: int | None,
+    output_has_exit_status: bool = False,
+) -> str:
     """Render a failed tool call, surfacing exit status and the output tail.
 
     Errors are the biggest evidence gap today: the transcript shows only the
@@ -260,15 +278,19 @@ def render_error(output: str, *, exit_code: int | None) -> str:
     if status is not None:
         lines.append(status)
 
-    # When a shell command produces no stdout/stderr, its output is a synthetic
-    # "Command exited with code N" restatement of *this* exit code (see
-    # _format_process_output). With a structured status line already shown, that
-    # tail is pure duplication — and for a signal it would even restate the raw
-    # negative code (`... code -15`), reintroducing the wording the status line
-    # replaces. Drop it in that case, but only when the restated code matches the
-    # promoted exit code, so a command whose genuine output merely resembles the
-    # fallback (with a different number) is preserved.
-    body = "" if status is not None and _is_exit_restatement(output, exit_code) else output
+    # Shell results carry a synthetic "Command exited with code N" prefix so the
+    # model cannot miss the process status (see _format_process_output). The TUI
+    # already promotes that status to its own line, so remove only the matching
+    # synthetic prefix while preserving any stdout/stderr that follows it.
+    body = (
+        normalize_tool_output_for_display(
+            output,
+            exit_code,
+            output_has_exit_status=output_has_exit_status,
+        )
+        if status is not None
+        else output
+    )
     tail = _tail_preview(body, max_lines=_ERROR_TAIL_LINES, max_bytes=_ERROR_TAIL_BYTES)
     if tail:
         lines.append(tail)
@@ -279,29 +301,56 @@ def render_error(output: str, *, exit_code: int | None) -> str:
 _EXIT_RESTATEMENT_PREFIX = "Command exited with code "
 
 
-def _is_exit_restatement(output: str, exit_code: int | None) -> bool:
-    """Whether output is solely the shell's synthetic restatement of exit_code.
+def normalize_tool_output_for_display(
+    output: str,
+    exit_code: int | None,
+    *,
+    output_has_exit_status: bool = False,
+) -> str:
+    """Remove the shell's matching synthetic exit prefix from rendered output.
 
     Mirrors the fallback in ``wisp.tools.process._format_process_output``, which
-    emits exactly ``f"Command exited with code {exit_code}"`` when a command has
-    no stdout/stderr. The match is exact except for a trailing newline (the only
-    whitespace ``_tail_preview`` itself normalizes): genuine output that merely
-    resembles the fallback — a different number, surrounding whitespace, or extra
-    content — is never suppressed.
+    emits ``Command exited with code N`` alone or followed by ``: `` and the
+    command's merged output. The exit code must match the promoted scalar and the
+    prefix must start at byte zero; near matches and mismatched codes are kept.
 
-    Known residual ambiguity: a command whose *sole genuine* output is exactly
-    this string while it exits with the matching code is indistinguishable from
-    the synthetic fallback by text alone, so its output is suppressed. Fully
-    resolving this needs an explicit synthetic-output flag propagated from the
-    tool, which is deferred (see the truncation follow-up — same shape of
-    cross-cutting field propagation). The collision is vanishingly rare and the
-    cost is only a duplicated status line, so text matching is the right tradeoff
-    for now.
+    A trailing newline is tolerated for the no-output form because the preview
+    renderer normalizes it. For the output-bearing form, only the synthetic
+    prefix and separator are removed; the command output remains intact.
     """
 
-    if exit_code is None:
-        return False
-    return output.rstrip("\n") == f"{_EXIT_RESTATEMENT_PREFIX}{exit_code}"
+    if exit_code is None or not output_has_exit_status:
+        return output
+
+    restatement = f"{_EXIT_RESTATEMENT_PREFIX}{exit_code}"
+    if output.rstrip("\n") == restatement:
+        return ""
+
+    output_prefix = f"{restatement}: "
+    if output.startswith(output_prefix):
+        return output[len(output_prefix) :]
+    return output
+
+
+def full_tool_output_for_display(
+    output: str,
+    exit_code: int | None,
+    *,
+    output_has_exit_status: bool = False,
+) -> str:
+    """Return normalized full output with a human-readable failure status."""
+
+    body = normalize_tool_output_for_display(
+        output,
+        exit_code,
+        output_has_exit_status=output_has_exit_status,
+    )
+    status = _exit_status_line(exit_code)
+    if status is None:
+        return body
+    if not body:
+        return status
+    return f"{status}\n{body}"
 
 
 def _exit_status_line(exit_code: int | None) -> str | None:

@@ -71,17 +71,50 @@ def test_render_error_suppresses_synthetic_exit_restatement() -> None:
     # A shell command with no stdout/stderr has output "Command exited with code
     # N" (a restatement of the exit code). With a status line already shown, that
     # tail is pure duplication and must be dropped.
-    rendered = render_error("Command exited with code 2", exit_code=2)
+    rendered = render_error(
+        "Command exited with code 2",
+        exit_code=2,
+        output_has_exit_status=True,
+    )
     assert rendered == "exit 2"
 
 
 def test_render_error_synthetic_restatement_does_not_reintroduce_negative_code() -> None:
     # The signal case is why this matters: the synthetic tail would restate the
     # raw negative code (`... code -15`), undoing the signal wording.
-    rendered = render_error("Command exited with code -15", exit_code=-15)
+    rendered = render_error(
+        "Command exited with code -15",
+        exit_code=-15,
+        output_has_exit_status=True,
+    )
     assert "Command exited with code" not in rendered
     assert "-15" not in rendered
     assert rendered.startswith("killed by signal 15")
+
+
+def test_render_error_strips_synthetic_prefix_but_keeps_command_output() -> None:
+    rendered = render_error(
+        "Command exited with code 2: assertion failed\ntrace detail",
+        exit_code=2,
+        output_has_exit_status=True,
+    )
+
+    assert rendered == "exit 2\nassertion failed\ntrace detail"
+    assert rendered.count("exit 2") == 1
+    assert "Command exited with code" not in rendered
+
+
+def test_render_error_strips_negative_prefix_but_keeps_truncation_notice() -> None:
+    rendered = render_error(
+        "Command exited with code -9: [output truncated]",
+        exit_code=-9,
+        output_has_exit_status=True,
+    )
+
+    assert rendered.startswith("killed by signal 9")
+    assert rendered.endswith("[output truncated]")
+    assert "Command exited with code" not in rendered
+    assert "exit -9" not in rendered
 
 
 def test_render_error_keeps_real_output_alongside_exit_line() -> None:
@@ -101,13 +134,26 @@ def test_render_error_keeps_genuine_output_resembling_the_fallback() -> None:
     rendered = render_error("Command exited with code 7", exit_code=2)
     assert "Command exited with code 7" in rendered
     assert rendered == "exit 2\nCommand exited with code 7"
+    mismatched_with_output = render_error(
+        "Command exited with code 7: genuine output",
+        exit_code=2,
+        output_has_exit_status=True,
+    )
+    assert mismatched_with_output == ("exit 2\nCommand exited with code 7: genuine output")
 
 
 def test_render_error_restatement_match_allows_only_trailing_newline() -> None:
     # The synthetic fallback is emitted verbatim (no padding), so the match is
     # exact except for a trailing newline. Output with surrounding whitespace is
     # genuine and preserved; a bare trailing newline is still the fallback.
-    assert render_error("Command exited with code 2\n", exit_code=2) == "exit 2"
+    assert (
+        render_error(
+            "Command exited with code 2\n",
+            exit_code=2,
+            output_has_exit_status=True,
+        )
+        == "exit 2"
+    )
     with_spaces = render_error(" Command exited with code 2 ", exit_code=2)
     assert with_spaces == "exit 2\n Command exited with code 2 "
 
@@ -235,6 +281,33 @@ def test_render_tool_result_zero_exit_stays_generic() -> None:
     # exit 0 is success — it must not trigger the failure path.
     via_dispatch = render_tool_result("bash", {}, "ok\ndone", is_error=False, exit_code=0)
     assert via_dispatch == render_generic("ok\ndone")
+
+
+def test_render_tool_result_zero_exit_strips_model_facing_status_prefix() -> None:
+    via_dispatch = render_tool_result(
+        "bash",
+        {},
+        "Command exited with code 0: ok\ndone",
+        is_error=False,
+        exit_code=0,
+        output_has_exit_status=True,
+    )
+
+    assert via_dispatch == render_generic("ok\ndone")
+    assert "Command exited with code" not in str(via_dispatch)
+
+
+def test_render_tool_result_zero_exit_without_output_stays_empty() -> None:
+    via_dispatch = render_tool_result(
+        "bash",
+        {},
+        "Command exited with code 0",
+        is_error=False,
+        exit_code=0,
+        output_has_exit_status=True,
+    )
+
+    assert via_dispatch == render_generic("")
 
 
 def test_render_tool_result_shows_summary_in_place_of_output() -> None:

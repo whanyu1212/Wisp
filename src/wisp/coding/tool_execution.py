@@ -35,7 +35,7 @@ _MAX_RESULT_COUNT = (1 << 63) - 1
 _MIN_EXIT_CODE = -(1 << 31)
 _MAX_EXIT_CODE = (1 << 31) - 1
 _RESULT_DATA_KEYS = {
-    "bash": ("exit_code",),
+    "bash": ("exit_code", "output_has_exit_status"),
     "write": ("before_text", "created"),
     "read": ("line_count", "selected_count", "path"),
     "grep": ("count",),
@@ -59,6 +59,7 @@ class _ToolRunOutcome:
     output: str
     is_error: bool = False
     exit_code: int | None = None
+    output_has_exit_status: bool = False
     before_text: str | None = None
     created: bool = False
     summary: str | None = None
@@ -173,6 +174,7 @@ class ConfiguredToolExecutor:
             output=outcome.output,
             is_error=outcome.is_error,
             exit_code=outcome.exit_code,
+            output_has_exit_status=outcome.output_has_exit_status,
             before_text=outcome.before_text,
             created=outcome.created,
             summary=outcome.summary,
@@ -206,6 +208,10 @@ class ConfiguredToolExecutor:
             return _ToolRunOutcome(
                 output=snapshot.text,
                 exit_code=_promote_exit_code(tool_name, snapshot.data),
+                output_has_exit_status=_promote_output_has_exit_status(
+                    tool_name,
+                    snapshot.data,
+                ),
                 before_text=_promote_before_text(tool_name, snapshot.data),
                 created=_promote_created(tool_name, snapshot.data),
                 summary=summarize_tool_result(
@@ -250,10 +256,17 @@ def _normalize_tool_result(
         raise _MalformedToolResultError("ToolResult.text must be a string")
     _require_utf8(text, field="ToolResult.text")
     truncated = result.truncated
+    has_exit_status = _promote_output_has_exit_status(tool_name, result.data)
+    status_overhead = len("Command exited with code -2147483648: ") if has_exit_status else 0
     bounded_text = truncate_text(
         text,
-        max_bytes=max(0, context.max_output_bytes),
-        max_lines=max(0, context.max_output_lines),
+        # A Bash result's fixed completion envelope is metadata outside the body
+        # budget. Allow its bounded worst-case size through normalization so a
+        # tiny embedding budget cannot erase the exit code the tool preserved.
+        max_bytes=max(0, context.max_output_bytes) + status_overhead,
+        max_lines=max(1, context.max_output_lines)
+        if has_exit_status
+        else max(0, context.max_output_lines),
     )
     return _ToolResultSnapshot(
         text=bounded_text.text,
@@ -279,6 +292,7 @@ def _snapshot_result_data(
             minimum=_MIN_EXIT_CODE,
             maximum=_MAX_EXIT_CODE,
         )
+        _copy_exact(data, snapshot, "output_has_exit_status", bool)
     elif tool_name == "write":
         before_text = data.get("before_text")
         if type(before_text) is str:
@@ -376,6 +390,14 @@ def _promote_exit_code(name: str, data: Mapping[str, object]) -> int | None:
         return None
     exit_code = data.get("exit_code")
     return exit_code if isinstance(exit_code, int) else None
+
+
+def _promote_output_has_exit_status(name: str, data: Mapping[str, object]) -> bool:
+    """Whether Bash text carries Wisp's synthetic completion envelope."""
+
+    if name not in _EXIT_CODE_TOOLS:
+        return False
+    return data.get("output_has_exit_status") is True
 
 
 def _promote_before_text(name: str, data: Mapping[str, object]) -> str | None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_int, _required_string
 from wisp.tools.context import ToolContext
-from wisp.tools.process import _format_process_output, _run_shell
+from wisp.tools.process import _format_process_output_bounded, _run_shell
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.truncation import truncate_text
 
@@ -15,7 +15,10 @@ class BashTool:
 
     name = "bash"
     safety: ToolSafety = "command"
-    description = "Run a shell command and capture stdout, stderr, and exit code."
+    description = (
+        "Run a shell command and capture stdout, stderr, and an explicit completion exit code. "
+        "A timeout is reported separately and is not a completed command."
+    )
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
@@ -48,16 +51,18 @@ class BashTool:
             max_bytes=context.max_output_bytes,
             max_lines=context.max_output_lines,
         )
-        output = _format_process_output(result.exit_code, stdout.text, stderr.text)
-        truncated_output = truncate_text(
-            output,
+        output = _format_process_output_bounded(
+            result.exit_code,
+            stdout.text,
+            stderr.text,
             max_bytes=context.max_output_bytes,
             max_lines=context.max_output_lines,
         )
         return ToolResult(
-            text=truncated_output.text,
+            text=output.text,
             data={
                 "exit_code": result.exit_code,
+                "output_has_exit_status": True,
                 "stdout": stdout.text,
                 "stderr": stderr.text,
             },
@@ -66,6 +71,6 @@ class BashTool:
                 or result.stderr_truncated
                 or stdout.truncated
                 or stderr.truncated
-                or truncated_output.truncated
+                or output.truncated
             ),
         )

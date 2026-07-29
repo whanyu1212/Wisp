@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import shlex
+import sys
 from collections.abc import AsyncIterator
 from decimal import Decimal
+from pathlib import Path
 
 import anyio
 import pytest
@@ -9,6 +12,7 @@ import pytest
 from wisp.agent.execution import ToolExecutionEvent, ToolExecutionProtocolError, ToolExecutor
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
+from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
     BillableTokenUsage,
     ContextEstimated,
@@ -31,6 +35,13 @@ from wisp.providers.events import (
     ToolCall,
 )
 from wisp.providers.fake import ScriptedProvider
+from wisp.runtime.registry import ToolRegistry
+from wisp.tools import shell as shell_module
+from wisp.tools.approval import ToolApprovalPolicy
+from wisp.tools.builtin import BashTool
+from wisp.tools.context import ToolContext
+from wisp.tools.policy import ToolPolicy
+from wisp.tools.result import ToolError
 
 
 class NeverToolExecutor:
@@ -431,6 +442,95 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
     ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
     assert ended.exit_code == 0
     assert wisp_event_from_json(ended.model_dump_json()).exit_code == 0
+
+
+def _run_bash_loop(
+    tmp_path: Path,
+    *,
+    command: str,
+    timeout: int | None = None,
+) -> tuple[ScriptedProvider, list[object]]:
+    arguments: dict[str, object] = {"command": command}
+    if timeout is not None:
+        arguments["timeout"] = timeout
+    call = ToolCall(
+        call_id="call-1",
+        name="bash",
+        arguments=arguments,
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="done"),
+            ],
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(BashTool())
+    executor = ConfiguredToolExecutor(
+        registry=registry,
+        context=ToolContext(cwd=tmp_path, protected_paths=()),
+        policy=ToolPolicy.allow_all_tools(),
+        approval_policy=ToolApprovalPolicy.approve_all(),
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=executor),
+                messages=(Message(role="user", content="run verification"),),
+            )
+        ]
+
+    return provider, anyio.run(run)
+
+
+@pytest.mark.parametrize("exit_code", [0, 3])
+def test_pure_loop_exposes_bash_exit_code_to_provider(
+    tmp_path: Path,
+    exit_code: int,
+) -> None:
+    python = shlex.quote(sys.executable)
+    command = f"{python} -c \"import sys; print('evidence'); sys.exit({exit_code})\""
+    provider, events = _run_bash_loop(tmp_path, command=command)
+
+    expected = f"Command exited with code {exit_code}: evidence"
+    assert provider.calls[1].tool_results[0].output == expected
+    result = next(event for event in events if isinstance(event, ToolResultReady))
+    assert result.output == expected
+    assert result.exit_code == exit_code
+    assert result.output_has_exit_status is True
+
+
+def test_pure_loop_exposes_bash_timeout_as_inconclusive_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def time_out(*_args: object, **_kwargs: object) -> object:
+        raise ToolError("Command timed out after 30 seconds")
+
+    monkeypatch.setattr(shell_module, "_run_shell", time_out)
+
+    provider, events = _run_bash_loop(tmp_path, command="slow check", timeout=30)
+
+    tool_result = provider.calls[1].tool_results[0]
+    assert tool_result.output == "Command timed out after 30 seconds"
+    assert tool_result.is_error is True
+    result = next(event for event in events if isinstance(event, ToolResultReady))
+    assert result.output == tool_result.output
+    assert result.is_error is True
+    assert result.exit_code is None
 
 
 def test_pure_loop_rejects_executor_without_terminal_result() -> None:
