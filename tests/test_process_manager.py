@@ -121,6 +121,83 @@ def test_managed_process_timeout_is_not_an_exit_code(tmp_path: Path) -> None:
     assert update.exit_code is None
 
 
+def test_managed_timeout_bounds_post_termination_stream_drain(tmp_path: Path) -> None:
+    async def hold_pipe_open() -> None:
+        await asyncio.Event().wait()
+
+    async def run() -> tuple[ProcessUpdate, tuple[asyncio.Task[None], ...]]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                _python_command("import time; time.sleep(30)"),
+                cwd=tmp_path,
+                timeout=0.05,
+            )
+            managed = supervisor._managed[process_id]  # noqa: SLF001
+            assert managed.stdout_task is not None
+            assert managed.stderr_task is not None
+            managed.stdout_task.cancel()
+            managed.stderr_task.cancel()
+            await asyncio.gather(
+                managed.stdout_task,
+                managed.stderr_task,
+                return_exceptions=True,
+            )
+
+            retained_pipe_tasks = (
+                asyncio.create_task(hold_pipe_open()),
+                asyncio.create_task(hold_pipe_open()),
+            )
+            managed.stdout_task, managed.stderr_task = retained_pipe_tasks
+            with anyio.fail_after(2):
+                update = (await _poll_until_terminal(supervisor, process_id))[-1]
+            return update, retained_pipe_tasks
+        finally:
+            await supervisor.aclose()
+
+    update, retained_pipe_tasks = anyio.run(run)
+
+    assert update.state == "timed_out"
+    assert update.exit_code is None
+    assert all(task.cancelled() for task in retained_pipe_tasks)
+
+
+def test_supervisor_close_bounds_post_termination_stream_drain(tmp_path: Path) -> None:
+    async def hold_pipe_open() -> None:
+        await asyncio.Event().wait()
+
+    async def run() -> tuple[asyncio.Task[None], ...]:
+        supervisor = ProcessSupervisor()
+        process_id = await supervisor.start(
+            _python_command("import time; time.sleep(30)"),
+            cwd=tmp_path,
+            timeout=30,
+        )
+        managed = supervisor._managed[process_id]  # noqa: SLF001
+        assert managed.stdout_task is not None
+        assert managed.stderr_task is not None
+        managed.stdout_task.cancel()
+        managed.stderr_task.cancel()
+        await asyncio.gather(
+            managed.stdout_task,
+            managed.stderr_task,
+            return_exceptions=True,
+        )
+
+        retained_pipe_tasks = (
+            asyncio.create_task(hold_pipe_open()),
+            asyncio.create_task(hold_pipe_open()),
+        )
+        managed.stdout_task, managed.stderr_task = retained_pipe_tasks
+        with anyio.fail_after(2):
+            await supervisor.aclose()
+        return retained_pipe_tasks
+
+    retained_pipe_tasks = anyio.run(run)
+
+    assert all(task.cancelled() for task in retained_pipe_tasks)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
 def test_timeout_kills_descendant_after_shell_leader_exits(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "background.pid"

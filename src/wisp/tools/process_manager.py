@@ -26,6 +26,7 @@ ProcessState = Literal["running", "completed", "timed_out", "cancelled"]
 DEFAULT_MAX_MANAGED_PROCESSES = 8
 DEFAULT_MAX_RETAINED_BYTES = 50_000
 DEFAULT_MAX_RETAINED_LINES = 2_000
+POST_TERMINATION_DRAIN_TIMEOUT = 0.25
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,9 +222,7 @@ class ProcessSupervisor:
         async with managed.operation_lock:
             if managed.state == "running":
                 managed.terminal_override = "cancelled"
-                await _terminate_process_tree(managed.process)
-                assert managed.completion_task is not None
-                await asyncio.shield(managed.completion_task)
+                await asyncio.shield(self._terminate_managed(managed))
             return self._snapshot(managed)
 
     async def aclose(self) -> None:
@@ -263,6 +262,9 @@ class ProcessSupervisor:
         await asyncio.gather(
             *(_terminate_process_tree(item.process) for item in managed if item.state == "running"),
             *(_terminate_process_tree(process) for process in one_shot),
+        )
+        await asyncio.gather(
+            *(self._finish_terminated_io(item) for item in managed if item.state == "running")
         )
 
         await asyncio.gather(
@@ -336,6 +338,7 @@ class ProcessSupervisor:
             except TimeoutError:
                 managed.terminal_override = managed.terminal_override or "timed_out"
                 await _terminate_process_tree(managed.process)
+                await self._finish_terminated_io(managed)
                 await completion
             managed.exit_code = managed.process.returncode
             managed.state = managed.terminal_override or "completed"
@@ -344,6 +347,29 @@ class ProcessSupervisor:
                 completion.cancel()
                 await asyncio.gather(completion, return_exceptions=True)
             managed.changed.set()
+
+    async def _finish_terminated_io(self, managed: _ManagedProcess) -> None:
+        """Bound pipe draining after the owned process tree has been terminated."""
+
+        await managed.process.wait()
+        stream_tasks = tuple(
+            task for task in (managed.stdout_task, managed.stderr_task) if task is not None
+        )
+        if not stream_tasks:
+            return
+        _, pending = await asyncio.wait(
+            stream_tasks,
+            timeout=POST_TERMINATION_DRAIN_TIMEOUT,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*stream_tasks, return_exceptions=True)
+
+    async def _terminate_managed(self, managed: _ManagedProcess) -> None:
+        await _terminate_process_tree(managed.process)
+        await self._finish_terminated_io(managed)
+        assert managed.completion_task is not None
+        await managed.completion_task
 
     def _snapshot(self, managed: _ManagedProcess) -> ProcessUpdate:
         stdout, stdout_dropped = managed.stdout.drain()
