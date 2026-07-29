@@ -119,6 +119,9 @@ class PromptHistoryPicker(Vertical):
     def hide(self) -> None:
         self.display = False
         self._submitted = False
+        self._entries = ()
+        self._visible = ()
+        self._options.clear_options()
 
     def _refresh_options(self) -> None:
         self._visible = search_prompt_history(self._entries, self._query.value)

@@ -141,6 +141,30 @@ def test_ctrl_c_closes_history_instead_of_signalling_interrupt() -> None:
     assert draft == "keep me"
 
 
+def test_history_close_releases_exact_prompt_snapshot() -> None:
+    async def scenario() -> tuple[
+        tuple[object, ...],
+        tuple[object, ...],
+        int,
+    ]:
+        app = TextualTui()
+        exact_prompt = "sensitive " + "x" * (PASTE_DISPLAY_THRESHOLD + 1)
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.record_prompt(exact_prompt)
+            await pilot.press("ctrl+r")
+            await pilot.pause()
+            picker = app.query_one("#prompt-history", PromptHistoryPicker)
+            assert picker._entries[0].prompt == exact_prompt
+            await pilot.press("escape")
+            await pilot.pause()
+            return picker._entries, picker._visible, picker._options.option_count
+
+    entries, visible, option_count = anyio.run(scenario)
+    assert entries == ()
+    assert visible == ()
+    assert option_count == 0
+
+
 def test_history_search_restores_exact_prompt_without_submitting() -> None:
     async def scenario() -> tuple[str, bool, str]:
         app = TextualTui()
