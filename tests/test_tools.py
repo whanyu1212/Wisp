@@ -332,8 +332,40 @@ def test_bash_tool_captures_stdout_stderr_and_exit_code(tmp_path: Path) -> None:
     assert result.data["exit_code"] == 3
     assert result.data["stdout"] == "out\n"
     assert result.data["stderr"] == "err\n"
-    assert "out" in result.text
-    assert "err" in result.text
+    assert result.text == "Command exited with code 3: out\nerr"
+
+
+def test_bash_tool_reports_successful_exit_code_with_output(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    python = shlex.quote(sys.executable)
+    command = f"{python} -c \"print('verified')\""
+
+    result = run_tool(BashTool(), {"command": command}, context)
+
+    assert result.text == "Command exited with code 0: verified"
+    assert result.data["exit_code"] == 0
+
+
+def test_bash_tool_reports_successful_exit_code_without_output(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    python = shlex.quote(sys.executable)
+    command = f'{python} -c "pass"'
+
+    result = run_tool(BashTool(), {"command": command}, context)
+
+    assert result.text == "Command exited with code 0"
+    assert result.data["exit_code"] == 0
+
+
+def test_bash_tool_does_not_add_separator_for_newline_only_output(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    python = shlex.quote(sys.executable)
+    command = f'{python} -c "print()"'
+
+    result = run_tool(BashTool(), {"command": command}, context)
+
+    assert result.text == "Command exited with code 0"
+    assert result.data["stdout"] == "\n"
 
 
 def test_bash_tool_retruncates_combined_stdout_and_stderr(tmp_path: Path) -> None:
@@ -345,6 +377,7 @@ def test_bash_tool_retruncates_combined_stdout_and_stderr(tmp_path: Path) -> Non
     result = run_tool(BashTool(), {"command": command}, context)
 
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes
+    assert result.text.startswith("Command exited with code -9:")
     assert result.truncated is True
 
 

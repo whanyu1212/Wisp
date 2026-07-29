@@ -183,6 +183,22 @@ uv run pytest
 
 If a command differs in the repository docs or `pyproject.toml`, follow the repository configuration.
 
+## Repository Workflow Reliability
+
+For Wisp repository work:
+
+- When a user asks for a branch from current or refreshed `main`, fetch `origin`, verify
+  `origin/main`, and base the branch on that verified remote state before describing it as current.
+- If fetching fails because of network, authentication, or remote errors, report the failure rather
+  than silently falling back to stale local refs.
+- Preserve unrelated dirty or untracked files when switching branches or preparing commits.
+- A timed-out verification command is inconclusive. Do not report it as passing; retry with a
+  suitable timeout or focused command when practical, otherwise mark it unverified.
+- Record the completed result before claiming `uv run ruff check .`, the configured mypy command,
+  or `uv run pytest` passed. Partial output is not a successful result.
+- Always finish implementation work with a concise summary of changes, passed/failed/timed-out/not
+  run checks, and any remaining blockers or uncertainty.
+
 ## Tool and Safety Expectations
 
 All built-in tools should have clear behavior and safety classification.

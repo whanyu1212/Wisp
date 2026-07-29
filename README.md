@@ -247,6 +247,14 @@ the user prompt. The context includes the working directory, git branch and capp
 detected root files (`pyproject.toml`, `package.json`, `README.md`, …), tools exposed to the
 model, and trusted project instructions from context files.
 
+The default prompt also defines Wisp's workflow-completion contract. Remote freshness is verified
+only when a task depends on current or refreshed remote state; local-only and offline work does not
+fetch unconditionally. Completed checks are reported from their exit status, while failures,
+timeouts, and checks that were not run remain distinct. A timeout is inconclusive rather than a
+pass. Change and build tasks finish with a summary of the outcome, verification evidence, and
+remaining uncertainty. Completed `bash` results expose their exit code directly to the model;
+resumable polling for commands that outlive their initial execution window remains future work.
+
 Context files are loaded from the trusted context root down to the current working directory, with
 parent instructions before nested ones. In each directory Wisp uses the first Pi-compatible match
 in this order: `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`. Symlinked, protected, or

@@ -310,9 +310,14 @@ async def _run_exec_limited_stdout(
 def _format_process_output(exit_code: int, stdout: str, stderr: str) -> str:
     parts: list[str] = []
     if stdout:
-        parts.append(stdout.rstrip("\n"))
+        stripped_stdout = stdout.rstrip("\n")
+        if stripped_stdout:
+            parts.append(stripped_stdout)
     if stderr:
-        parts.append(stderr.rstrip("\n"))
+        stripped_stderr = stderr.rstrip("\n")
+        if stripped_stderr:
+            parts.append(stripped_stderr)
+    status = f"Command exited with code {exit_code}"
     if not parts:
-        return f"Command exited with code {exit_code}"
-    return "\n".join(parts)
+        return status
+    return f"{status}: {'\n'.join(parts)}"

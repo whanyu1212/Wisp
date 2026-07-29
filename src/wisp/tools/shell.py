@@ -15,7 +15,10 @@ class BashTool:
 
     name = "bash"
     safety: ToolSafety = "command"
-    description = "Run a shell command and capture stdout, stderr, and exit code."
+    description = (
+        "Run a shell command and capture stdout, stderr, and an explicit completion exit code. "
+        "A timeout is reported separately and is not a completed command."
+    )
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
