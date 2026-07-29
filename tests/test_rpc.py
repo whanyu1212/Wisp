@@ -32,6 +32,7 @@ from wisp.events import (
     RpcSessionTreeNavigated,
     RpcSessionTreeNode,
     RpcSessionTreeReported,
+    RpcSessionTreeUnreverted,
     RpcStateReported,
     RpcStateSnapshot,
     TrustRequested,
@@ -60,6 +61,7 @@ from wisp.rpc import (
     SetQueueModeCommand,
     SetSessionNameCommand,
     SteerCommand,
+    UnrevertSessionTreeCommand,
 )
 from wisp.rpc.commands import (
     ApprovalCommand,
@@ -258,6 +260,7 @@ def test_session_tree_commands_serialize_as_jsonl_and_parse() -> None:
         after_entry_id="entry-1",
     )
     navigate = NavigateSessionTreeCommand(id="navigate-1", entry_id="entry-2")
+    unrevert = UnrevertSessionTreeCommand(id="unrevert-1")
 
     assert json.loads(get_tree.to_json_line()) == {
         "id": "tree-1",
@@ -270,8 +273,13 @@ def test_session_tree_commands_serialize_as_jsonl_and_parse() -> None:
         "type": "navigate_session_tree",
         "entry_id": "entry-2",
     }
+    assert json.loads(unrevert.to_json_line()) == {
+        "id": "unrevert-1",
+        "type": "unrevert_session_tree",
+    }
     assert rpc_command_from_json(get_tree.to_json_line()) == get_tree
     assert rpc_command_from_json(navigate.to_json_line()) == navigate
+    assert rpc_command_from_json(unrevert.to_json_line()) == unrevert
 
 
 def test_session_tree_commands_reject_invalid_fields() -> None:
@@ -569,6 +577,22 @@ def test_rpc_session_tree_events_round_trip_only_at_schema_v20() -> None:
     for event in (report, navigated):
         with pytest.raises(ValueError, match="require schema_version 20"):
             wisp_event_from_json(event.model_copy(update={"schema_version": 19}).model_dump_json())
+
+
+def test_rpc_session_tree_unrevert_round_trips_only_at_schema_v24() -> None:
+    event = RpcSessionTreeUnreverted(
+        command_id="unrevert-1",
+        session_id="session-1",
+        session_path=Path("/tmp/session-1.jsonl"),
+        source_transition_id="navigation-1",
+        previous_active_leaf_id="entry-1",
+        active_leaf_id="entry-2",
+        entry_count=5,
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    with pytest.raises(ValueError, match="require schema_version 24"):
+        wisp_event_from_json(event.model_copy(update={"schema_version": 23}).model_dump_json())
 
 
 def test_rpc_session_name_changed_round_trips_only_at_schema_v21() -> None:
@@ -1072,6 +1096,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         fork_id = await controller.fork_session("entry-1")
         tree_id = await controller.get_session_tree(limit=25, after_entry_id="entry-1")
         navigate_id = await controller.navigate_session_tree("entry-2")
+        unrevert_id = await controller.unrevert_session_tree()
         name_id = await controller.set_session_name("Display", session_id="session-1")
         steer_id = await controller.steer("redirect")
         follow_up_id = await controller.follow_up("continue")
@@ -1102,6 +1127,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             fork_id,
             tree_id,
             navigate_id,
+            unrevert_id,
             name_id,
             steer_id,
             follow_up_id,
@@ -1126,6 +1152,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             "fork-session-id",
             "session-tree-id",
             "navigate-session-tree-id",
+            "unrevert-session-tree-id",
             "set-session-name-id",
             "steer-id",
             "follow-up-id",
@@ -1163,6 +1190,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
                 id="navigate-session-tree-id",
                 entry_id="entry-2",
             ),
+            UnrevertSessionTreeCommand(id="unrevert-session-tree-id"),
             SetSessionNameCommand(
                 id="set-session-name-id",
                 name="Display",

@@ -25,6 +25,7 @@ type _SequentialRpcCommandType = Literal[
     "fork_session",
     "get_session_tree",
     "navigate_session_tree",
+    "unrevert_session_tree",
     "set_session_name",
 ]
 

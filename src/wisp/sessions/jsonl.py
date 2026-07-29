@@ -8,7 +8,7 @@ import stat
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -57,6 +57,7 @@ from wisp.sessions.errors import (
     MalformedSessionEntryError,
     SessionError,
     SessionNavigationCancelledError,
+    SessionUnrevertUnavailableError,
     StaleSessionTreeError,
     UnsupportedPersistedEventVersionError,
     UnsupportedSessionEntryVersionError,
@@ -96,6 +97,7 @@ __all__ = [
     "SessionSummary",
     "SessionTreeNavigation",
     "SessionTreeNodeSummary",
+    "SessionTreeUnrevert",
     "SessionTreePage",
     "SessionError",
     "SessionNotFoundError",
@@ -218,6 +220,16 @@ class SessionTreeNavigation:
     entry_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class SessionTreeUnrevert:
+    """The durable result of reversing the latest explicit tree navigation."""
+
+    source_transition_id: str
+    previous_active_leaf_id: str | None
+    active_leaf_id: str | None
+    entry_count: int
+
+
 @dataclass(slots=True)
 class _MessagePageTextBudget:
     remaining: int
@@ -232,6 +244,10 @@ class _SessionSummaryEntryMetadata:
     previous_leaf_id: str | None = None
     active_leaf_id: str | None = None
     name: str | None = None
+    message_role: str | None = None
+    reason: str | None = None
+    selected_entry_id: str | None = None
+    source_transition_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -558,6 +574,23 @@ class JsonlSession:
             return await anyio.to_thread.run_sync(
                 self._navigate_tree_once,
                 entry_id,
+                expected_active_leaf_id,
+                operation_id,
+                cancel_requested,
+            )
+
+    async def unrevert_tree(
+        self,
+        *,
+        expected_active_leaf_id: str | None,
+        operation_id: str | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> SessionTreeUnrevert:
+        """Reverse the latest eligible explicit navigation through append-only state."""
+
+        async with self._append_lock:
+            return await anyio.to_thread.run_sync(
+                self._unrevert_tree_once,
                 expected_active_leaf_id,
                 operation_id,
                 cancel_requested,
@@ -910,6 +943,8 @@ class JsonlSession:
                     previous_leaf_id=previous_active_leaf_id,
                     active_leaf_id=active_leaf_id,
                     operation_id=operation_id,
+                    reason="navigation",
+                    selected_entry_id=entry_id,
                 )
                 replay_session_entries((*entries, selection))
                 _raise_if_navigation_cancelled(cancel_requested)
@@ -921,6 +956,62 @@ class JsonlSession:
                     active_leaf_id=active_leaf_id,
                     editor_text=editor_text,
                     changed=True,
+                    entry_count=len(self._entry_index),
+                )
+
+    def _unrevert_tree_once(
+        self,
+        expected_active_leaf_id: str | None,
+        operation_id: str | None,
+        cancel_requested: Callable[[], bool] | None,
+    ) -> SessionTreeUnrevert:
+        with self._file_state.lock:
+            with self._interprocess_lock():
+                self._refresh_entry_index()
+                assert self._entry_index is not None
+                entries = tuple(self._entry_index.values())
+                tree = resolve_session_tree(entries)
+                if tree.active_leaf_id != expected_active_leaf_id:
+                    raise StaleSessionTreeError(
+                        "Session tree changed: expected active leaf "
+                        f"{expected_active_leaf_id!r}, found {tree.active_leaf_id!r}"
+                    )
+
+                latest_change = next(
+                    (
+                        entry
+                        for entry in reversed(entries)
+                        if not isinstance(entry, SessionInfoSessionEntry)
+                    ),
+                    None,
+                )
+                if not isinstance(latest_change, ActiveLeafSessionEntry) or (
+                    latest_change.reason != "navigation"
+                ):
+                    raise SessionUnrevertUnavailableError(
+                        "No explicit session-tree navigation is available to unrevert"
+                    )
+                if latest_change.active_leaf_id != tree.active_leaf_id:
+                    raise SessionUnrevertUnavailableError(
+                        "The latest session-tree navigation is no longer active"
+                    )
+
+                selection = ActiveLeafSessionEntry(
+                    session_id=self.session_id,
+                    previous_leaf_id=tree.active_leaf_id,
+                    active_leaf_id=latest_change.previous_leaf_id,
+                    operation_id=operation_id,
+                    reason="unrevert",
+                    source_transition_id=latest_change.id,
+                )
+                replay_session_entries((*entries, selection))
+                _raise_if_navigation_cancelled(cancel_requested)
+                persisted = self._append_entry_locked(selection)
+                assert isinstance(persisted, ActiveLeafSessionEntry)
+                return SessionTreeUnrevert(
+                    source_transition_id=latest_change.id,
+                    previous_active_leaf_id=tree.active_leaf_id,
+                    active_leaf_id=persisted.active_leaf_id,
                     entry_count=len(self._entry_index),
                 )
 
@@ -1545,18 +1636,7 @@ def _validate_append_transition(
         return
 
     assert isinstance(entry, ActiveLeafSessionEntry)
-    if entry.previous_leaf_id != active_leaf_id:
-        raise SessionReplayError(
-            f"Active-leaf entry {entry.id} expected previous leaf "
-            f"{entry.previous_leaf_id!r}, found {active_leaf_id!r}"
-        )
-    if entry.active_leaf_id is None:
-        return
-    target = entry_index.get(entry.active_leaf_id)
-    if target is None or not is_session_tree_entry(target):
-        raise SessionReplayError(
-            f"Active-leaf entry {entry.id} references unknown leaf {entry.active_leaf_id}"
-        )
+    resolve_session_tree((*entry_index.values(), entry))
 
 
 def _matches_detached_entry(existing: SessionEntry, candidate: SessionEntry) -> bool:
@@ -1599,6 +1679,9 @@ def _read_session_summary_metadata(path: Path) -> _SessionSummaryMetadata:
     active_leaf_id: str | None = None
     name: str | None = None
     node_ids: set[str] = set()
+    node_metadata: dict[str, _SessionSummaryEntryMetadata] = {}
+    transition_metadata: dict[str, _SessionSummaryEntryMetadata] = {}
+    latest_history_entry_id: str | None = None
     seen_entry_ids: set[str] = set()
     try:
         with path.open("r", encoding="utf-8") as session_file:
@@ -1623,10 +1706,13 @@ def _read_session_summary_metadata(path: Path) -> _SessionSummaryMetadata:
                         f"Duplicate session entry id {entry.id} at {source}"
                     )
                 seen_entry_ids.add(entry.id)
-                active_leaf_id = _resolve_summary_entry(
+                active_leaf_id, latest_history_entry_id = _resolve_summary_entry(
                     entry,
                     active_leaf_id=active_leaf_id,
                     node_ids=node_ids,
+                    node_metadata=node_metadata,
+                    transition_metadata=transition_metadata,
+                    latest_history_entry_id=latest_history_entry_id,
                 )
                 if entry.kind == "session_info":
                     name = entry.name
@@ -1668,16 +1754,29 @@ def _summary_entry_metadata_from_json(
         raise MalformedSessionEntryError(
             f"Session entry schema_version must be an integer{location}"
         )
+    if version in {1, 2, 3, 4}:
+        forbidden = tuple(
+            field
+            for field in ("reason", "selected_entry_id", "source_transition_id")
+            if field in raw
+        )
+        if forbidden:
+            fields = ", ".join(forbidden)
+            raise MalformedSessionEntryError(
+                f"V{version} session entry contains v5 transition field(s) {fields}{location}"
+            )
     if version == 1:
         return _v1_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
     if version == 2:
         return _v2_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
-    if version not in {3, SESSION_ENTRY_SCHEMA_VERSION}:
+    if version in {3, 4}:
+        return _v3_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
+    if version != SESSION_ENTRY_SCHEMA_VERSION:
         raise UnsupportedSessionEntryVersionError(
             f"Unsupported session entry schema_version {version}{location}; "
             f"expected {SESSION_ENTRY_SCHEMA_VERSION}"
         )
-    return _v3_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
+    return _v5_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
 
 
 def _legacy_summary_entry_metadata(
@@ -1700,6 +1799,7 @@ def _legacy_summary_entry_metadata(
         session_id=_required_summary_string(raw, "session_id", location=location),
         kind=kind,
         parent_id=parent_id,
+        message_role=_summary_message_role(raw, kind),
     )
 
 
@@ -1729,6 +1829,7 @@ def _v1_summary_entry_metadata(
         session_id=_required_summary_string(raw, "session_id", location=location),
         kind=kind,
         parent_id=parent_id,
+        message_role=_summary_message_role(raw, kind),
     )
 
 
@@ -1754,6 +1855,7 @@ def _v2_summary_entry_metadata(
                 location=location,
                 default=parent_id,
             ),
+            message_role=_summary_message_role(raw, kind),
         )
     if kind == "active_leaf":
         return _SessionSummaryEntryMetadata(
@@ -1793,6 +1895,46 @@ def _v3_summary_entry_metadata(
     return _v2_summary_entry_metadata(raw, location=location, parent_id=parent_id)
 
 
+def _v5_summary_entry_metadata(
+    raw: JsonObject,
+    *,
+    location: str,
+    parent_id: str | None,
+) -> _SessionSummaryEntryMetadata:
+    base = _v3_summary_entry_metadata(raw, location=location, parent_id=parent_id)
+    if raw.get("kind") == "active_leaf":
+        reason = raw.get("reason")
+        selected_entry_id = raw.get("selected_entry_id")
+        source_transition_id = raw.get("source_transition_id")
+        if reason == "system":
+            valid = selected_entry_id is None and source_transition_id is None
+        elif reason == "navigation":
+            valid = (
+                isinstance(selected_entry_id, str)
+                and bool(selected_entry_id)
+                and source_transition_id is None
+            )
+        elif reason == "unrevert":
+            valid = (
+                isinstance(source_transition_id, str)
+                and bool(source_transition_id)
+                and selected_entry_id is None
+            )
+        else:
+            valid = False
+        if not valid:
+            raise MalformedSessionEntryError(
+                f"Malformed v5 active-leaf transition metadata{location}"
+            )
+        return replace(
+            base,
+            reason=cast(str | None, reason),
+            selected_entry_id=cast(str | None, selected_entry_id),
+            source_transition_id=cast(str | None, source_transition_id),
+        )
+    return base
+
+
 def _require_summary_base_fields(raw: JsonObject, *, location: str) -> None:
     missing = tuple(field for field in ("id", "session_id", "created_at") if field not in raw)
     if missing:
@@ -1800,6 +1942,16 @@ def _require_summary_base_fields(raw: JsonObject, *, location: str) -> None:
         raise MalformedSessionEntryError(
             f"Persisted session entry is missing required field(s) {fields}{location}"
         )
+
+
+def _summary_message_role(raw: JsonObject, kind: object) -> str | None:
+    if kind != "message":
+        return None
+    message = raw.get("message")
+    if not isinstance(message, dict):
+        return None
+    role = message.get("role")
+    return role if isinstance(role, str) else None
 
 
 def _require_summary_event_envelope(raw: JsonObject, *, location: str) -> None:
@@ -1869,7 +2021,10 @@ def _resolve_summary_entry(
     *,
     active_leaf_id: str | None,
     node_ids: set[str],
-) -> str | None:
+    node_metadata: dict[str, _SessionSummaryEntryMetadata],
+    transition_metadata: dict[str, _SessionSummaryEntryMetadata],
+    latest_history_entry_id: str | None,
+) -> tuple[str | None, str | None]:
     if entry.kind in _SESSION_TREE_ENTRY_KINDS:
         parent_id = entry.parent_id
         if parent_id == entry.id:
@@ -1884,9 +2039,10 @@ def _resolve_summary_entry(
                 f"expected active leaf {active_leaf_id!r}"
             )
         node_ids.add(entry.id)
-        return entry.id
+        node_metadata[entry.id] = entry
+        return entry.id, entry.id
     if entry.kind == "session_info":
-        return active_leaf_id
+        return active_leaf_id, latest_history_entry_id
     if entry.previous_leaf_id != active_leaf_id:
         raise SessionReplayError(
             f"Active-leaf entry {entry.id} expected previous leaf "
@@ -1896,7 +2052,46 @@ def _resolve_summary_entry(
         raise SessionReplayError(
             f"Active-leaf entry {entry.id} references unknown leaf {entry.active_leaf_id}"
         )
-    return entry.active_leaf_id
+    if entry.reason == "navigation":
+        selected_entry_id = entry.selected_entry_id
+        assert selected_entry_id is not None
+        selected = node_metadata.get(selected_entry_id)
+        if selected is None:
+            raise SessionReplayError(
+                f"Navigation entry {entry.id} references unknown selected entry {selected_entry_id}"
+            )
+        expected_leaf_id: str | None = selected.id
+        if selected.kind == "message" and selected.message_role == "user":
+            expected_leaf_id = selected.parent_id
+        if entry.active_leaf_id != expected_leaf_id:
+            raise SessionReplayError(
+                f"Navigation entry {entry.id} selects {selected_entry_id} but activates "
+                f"{entry.active_leaf_id!r}, expected {expected_leaf_id!r}"
+            )
+        if entry.active_leaf_id == entry.previous_leaf_id:
+            raise SessionReplayError(f"Navigation entry {entry.id} records a no-op selection")
+    elif entry.reason == "unrevert":
+        source_transition_id = entry.source_transition_id
+        assert source_transition_id is not None
+        source = transition_metadata.get(source_transition_id)
+        if source is None or source.reason != "navigation":
+            raise SessionReplayError(
+                f"Unrevert entry {entry.id} references invalid navigation transition "
+                f"{source_transition_id}"
+            )
+        if latest_history_entry_id != source_transition_id:
+            raise SessionReplayError(
+                f"Unrevert entry {entry.id} does not reverse the latest history change"
+            )
+        if (
+            entry.previous_leaf_id != source.active_leaf_id
+            or entry.active_leaf_id != source.previous_leaf_id
+        ):
+            raise SessionReplayError(
+                f"Unrevert entry {entry.id} is not the inverse of navigation {source_transition_id}"
+            )
+    transition_metadata[entry.id] = entry
+    return entry.active_leaf_id, entry.id
 
 
 def _read_entries(path: Path, *, limit: int | None = None) -> list[SessionEntry]:

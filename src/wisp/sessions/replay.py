@@ -82,8 +82,10 @@ def resolve_session_tree(entries: Sequence[SessionEntry]) -> SessionTreeState:
 
     nodes: list[SessionTreeEntry] = []
     node_by_id: dict[str, SessionTreeEntry] = {}
+    transition_by_id: dict[str, ActiveLeafSessionEntry] = {}
     seen_entry_ids: set[str] = set()
     active_leaf_id: str | None = None
+    latest_history_entry_id: str | None = None
 
     for entry in entries:
         if entry.id in seen_entry_ids:
@@ -105,6 +107,7 @@ def resolve_session_tree(entries: Sequence[SessionEntry]) -> SessionTreeState:
             nodes.append(entry)
             node_by_id[entry.id] = entry
             active_leaf_id = entry.id
+            latest_history_entry_id = entry.id
             continue
 
         if isinstance(entry, SessionInfoSessionEntry):
@@ -120,7 +123,49 @@ def resolve_session_tree(entries: Sequence[SessionEntry]) -> SessionTreeState:
             raise SessionReplayError(
                 f"Active-leaf entry {entry.id} references unknown leaf {entry.active_leaf_id}"
             )
+        if entry.reason == "navigation":
+            selected_entry_id = entry.selected_entry_id
+            assert selected_entry_id is not None
+            selected = node_by_id.get(selected_entry_id)
+            if selected is None:
+                raise SessionReplayError(
+                    f"Navigation entry {entry.id} references unknown selected entry "
+                    f"{selected_entry_id}"
+                )
+            expected_leaf_id: str | None = selected.id
+            if isinstance(selected, MessageSessionEntry) and selected.message.role == "user":
+                expected_leaf_id = selected.parent_id
+            if entry.active_leaf_id != expected_leaf_id:
+                raise SessionReplayError(
+                    f"Navigation entry {entry.id} selects {selected_entry_id} but activates "
+                    f"{entry.active_leaf_id!r}, expected {expected_leaf_id!r}"
+                )
+            if entry.active_leaf_id == entry.previous_leaf_id:
+                raise SessionReplayError(f"Navigation entry {entry.id} records a no-op selection")
+        elif entry.reason == "unrevert":
+            source_transition_id = entry.source_transition_id
+            assert source_transition_id is not None
+            source = transition_by_id.get(source_transition_id)
+            if source is None or source.reason != "navigation":
+                raise SessionReplayError(
+                    f"Unrevert entry {entry.id} references invalid navigation transition "
+                    f"{source_transition_id}"
+                )
+            if latest_history_entry_id != source_transition_id:
+                raise SessionReplayError(
+                    f"Unrevert entry {entry.id} does not reverse the latest history change"
+                )
+            if (
+                entry.previous_leaf_id != source.active_leaf_id
+                or entry.active_leaf_id != source.previous_leaf_id
+            ):
+                raise SessionReplayError(
+                    f"Unrevert entry {entry.id} is not the inverse of navigation "
+                    f"{source_transition_id}"
+                )
         active_leaf_id = entry.active_leaf_id
+        transition_by_id[entry.id] = entry
+        latest_history_entry_id = entry.id
 
     active_path = _path_to_leaf(tuple(nodes), active_leaf_id) if active_leaf_id is not None else ()
     return SessionTreeState(

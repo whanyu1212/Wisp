@@ -47,6 +47,7 @@ from wisp.sessions.errors import (
     MalformedPersistedEventError,
     MalformedSessionEntryError,
     SessionNavigationCancelledError,
+    SessionUnrevertUnavailableError,
     StaleSessionTreeError,
     UnsupportedPersistedEventVersionError,
     UnsupportedSessionEntryVersionError,
@@ -60,6 +61,7 @@ from wisp.sessions.jsonl import (
     SessionNotFoundError,
     SessionSummary,
 )
+from wisp.sessions.replay import SessionReplayError
 
 
 def _message_page_text_bytes(page: SessionMessagePage) -> int:
@@ -202,7 +204,7 @@ def test_session_names_are_normalized_cleared_and_latest_wins(tmp_path: Path) ->
     assert session.read_name() is None
     entries = session.read_entries()
     info_entries = [entry for entry in entries if isinstance(entry, SessionInfoSessionEntry)]
-    assert [entry.schema_version for entry in info_entries] == [4, 4, 4]
+    assert [entry.schema_version for entry in info_entries] == [5, 5, 5]
     assert [entry.name for entry in info_entries] == [
         "alpha beta",
         "alpha beta",
@@ -660,6 +662,122 @@ def test_session_tree_navigation_honors_cancellation_at_commit_boundary(
     assert len(session.read_entries()) == 2
 
 
+def test_session_tree_unrevert_survives_restart_and_ignores_name_metadata(
+    tmp_path: Path,
+) -> None:
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def navigate() -> tuple[str, str, tuple[Message, ...]]:
+        await session.append_message(Message(role="user", content="first"))
+        answer = await session.append_message(Message(role="assistant", content="answer"))
+        selected = await session.append_message(Message(role="user", content="second"))
+        leaf = await session.append_message(Message(role="assistant", content="old answer"))
+        original_messages = session.read_context_messages()
+        await session.navigate_tree(
+            selected.id,
+            expected_active_leaf_id=leaf.id,
+            operation_id="navigate",
+        )
+        await session.set_name("renamed")
+        return answer.id, leaf.id, original_messages
+
+    answer_id, leaf_id, original_messages = anyio.run(navigate)
+    reopened = store.load(session.path)
+
+    async def unrevert() -> None:
+        result = await reopened.unrevert_tree(
+            expected_active_leaf_id=answer_id,
+            operation_id="unrevert",
+        )
+        assert result.previous_active_leaf_id == answer_id
+        assert result.active_leaf_id == leaf_id
+        assert result.entry_count == 7
+
+    anyio.run(unrevert)
+
+    assert reopened.read_active_leaf_id() == leaf_id
+    assert reopened.read_context_messages() == original_messages
+    transitions = [
+        entry for entry in reopened.read_entries() if isinstance(entry, ActiveLeafSessionEntry)
+    ]
+    assert [entry.reason for entry in transitions] == ["navigation", "unrevert"]
+    assert transitions[0].selected_entry_id is not None
+    assert transitions[1].source_transition_id == transitions[0].id
+
+
+def test_session_tree_unrevert_is_invalidated_by_new_history(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def mutate() -> None:
+        selected = await session.append_message(Message(role="user", content="first"))
+        leaf = await session.append_message(Message(role="assistant", content="answer"))
+        await session.navigate_tree(selected.id, expected_active_leaf_id=leaf.id)
+        active_leaf_id = session.read_active_leaf_id()
+        await session.append_message(Message(role="user", content="replacement"))
+        entry_count = len(session.read_entries())
+        with pytest.raises(
+            SessionUnrevertUnavailableError,
+            match="No explicit session-tree navigation",
+        ):
+            await session.unrevert_tree(expected_active_leaf_id=session.read_active_leaf_id())
+        assert len(session.read_entries()) == entry_count
+        assert session.read_active_leaf_id() != active_leaf_id
+
+    anyio.run(mutate)
+
+
+def test_session_tree_unrevert_rejects_system_transition_and_cancellation(
+    tmp_path: Path,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def exercise() -> None:
+        selected = await session.append_message(Message(role="user", content="first"))
+        leaf = await session.append_message(Message(role="assistant", content="answer"))
+        await session.select_active_leaf(
+            selected.id,
+            expected_active_leaf_id=leaf.id,
+            operation_id="system",
+        )
+        with pytest.raises(SessionUnrevertUnavailableError):
+            await session.unrevert_tree(expected_active_leaf_id=selected.id)
+
+        await session.navigate_tree(
+            leaf.id,
+            expected_active_leaf_id=selected.id,
+            operation_id="navigate",
+        )
+        entry_count = len(session.read_entries())
+        with pytest.raises(SessionNavigationCancelledError):
+            await session.unrevert_tree(
+                expected_active_leaf_id=leaf.id,
+                cancel_requested=lambda: True,
+            )
+        assert len(session.read_entries()) == entry_count
+        assert session.read_active_leaf_id() == leaf.id
+
+    anyio.run(exercise)
+
+
+def test_active_leaf_transition_metadata_is_strict() -> None:
+    with pytest.raises(ValidationError, match="require selected_entry_id only"):
+        ActiveLeafSessionEntry(
+            session_id="session",
+            previous_leaf_id="old",
+            active_leaf_id="new",
+            reason="navigation",
+        )
+    with pytest.raises(ValidationError, match="require source_transition_id only"):
+        ActiveLeafSessionEntry(
+            session_id="session",
+            previous_leaf_id="old",
+            active_leaf_id="new",
+            reason="unrevert",
+            selected_entry_id="message",
+        )
+
+
 def test_session_message_page_clips_large_content_and_tool_arguments(
     tmp_path: Path,
 ) -> None:
@@ -1044,7 +1162,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
         "event",
         "compaction",
     ]
-    assert [record["schema_version"] for record in records] == [4, 4, 4, 4, 4]
+    assert [record["schema_version"] for record in records] == [5, 5, 5, 5, 5]
     assert [record["parent_id"] for record in records] == [
         None,
         records[0]["id"],
@@ -1053,7 +1171,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
         records[3]["id"],
     ]
     assert records[3]["event"]["schema_version"] == 1
-    assert records[3]["event"]["payload"]["schema_version"] == 23
+    assert records[3]["event"]["payload"]["schema_version"] == 24
     assert isinstance(session.read_entries()[0], MessageSessionEntry)
     assert isinstance(session.read_entries()[3], EventSessionEntry)
     assert isinstance(session.read_entries()[4], CompactionSessionEntry)
@@ -1153,7 +1271,7 @@ def test_session_upgrades_v1_entries_to_a_parent_chain_without_rewriting(tmp_pat
 
     entries = JsonlSessionStore(tmp_path).load(path).read_entries()
 
-    assert [entry.schema_version for entry in entries] == [4, 4]
+    assert [entry.schema_version for entry in entries] == [5, 5]
     assert [entry.parent_id for entry in entries if isinstance(entry, MessageSessionEntry)] == [
         None,
         "first",
@@ -1215,7 +1333,7 @@ def test_session_upgrades_v3_entries_but_rejects_v4_tool_result_field(
     loaded = JsonlSessionStore(tmp_path).load(legacy_path).read_entries()[0]
 
     assert isinstance(loaded, MessageSessionEntry)
-    assert loaded.schema_version == 4
+    assert loaded.schema_version == 5
     assert loaded.tool_result is None
 
     malformed_path = tmp_path / "v3-tool-result.jsonl"
@@ -1227,6 +1345,206 @@ def test_session_upgrades_v3_entries_but_rejects_v4_tool_result_field(
 
     with pytest.raises(MalformedSessionEntryError, match="cannot include tool_result"):
         JsonlSessionStore(tmp_path).load(malformed_path).read_entries()
+
+
+def test_session_upgrades_v4_active_leaf_as_system_transition(tmp_path: Path) -> None:
+    path = tmp_path / "v4-active-leaf.jsonl"
+    records = (
+        {
+            "schema_version": 4,
+            "id": "message",
+            "session_id": "session",
+            "kind": "message",
+            "parent_id": None,
+            "message": {"role": "user", "content": "hello"},
+            "created_at": "2026-07-11T00:00:00Z",
+        },
+        {
+            "schema_version": 4,
+            "id": "selection",
+            "session_id": "session",
+            "kind": "active_leaf",
+            "previous_leaf_id": "message",
+            "active_leaf_id": None,
+            "created_at": "2026-07-11T00:00:01Z",
+        },
+    )
+    path.write_text("".join(f"{json.dumps(record)}\n" for record in records), encoding="utf-8")
+
+    loaded = JsonlSessionStore(tmp_path).load(path).read_entries()[-1]
+
+    assert isinstance(loaded, ActiveLeafSessionEntry)
+    assert loaded.schema_version == 5
+    assert loaded.reason == "system"
+    assert loaded.selected_entry_id is None
+    assert loaded.source_transition_id is None
+
+
+@pytest.mark.parametrize("schema_version", [2, 3, 4])
+def test_session_rejects_transition_metadata_in_legacy_schemas(
+    tmp_path: Path,
+    schema_version: int,
+) -> None:
+    path = tmp_path / f"v{schema_version}-transition-metadata.jsonl"
+    records = (
+        {
+            "schema_version": schema_version,
+            "id": "message",
+            "session_id": "session",
+            "kind": "message",
+            "parent_id": None,
+            "message": {"role": "user", "content": "hello"},
+            "created_at": "2026-07-11T00:00:00Z",
+        },
+        {
+            "schema_version": schema_version,
+            "id": "selection",
+            "session_id": "session",
+            "kind": "active_leaf",
+            "previous_leaf_id": "message",
+            "active_leaf_id": None,
+            "reason": "navigation",
+            "selected_entry_id": "message",
+            "created_at": "2026-07-11T00:00:01Z",
+        },
+    )
+    path.write_text("".join(f"{json.dumps(record)}\n" for record in records), encoding="utf-8")
+
+    with pytest.raises(MalformedSessionEntryError, match="v5 transition field"):
+        JsonlSessionStore(tmp_path).load(path).read_entries()
+    with pytest.raises(MalformedSessionEntryError, match="v5 transition field"):
+        JsonlSessionStore(tmp_path).summaries()
+
+
+@pytest.mark.parametrize("schema_version", [None, 1])
+def test_session_summaries_validate_navigation_to_legacy_user_messages(
+    tmp_path: Path,
+    schema_version: int | None,
+) -> None:
+    path = tmp_path / f"legacy-v{schema_version or 0}-navigation.jsonl"
+    message = {
+        "id": "message",
+        "session_id": "session",
+        "kind": "message",
+        "message": {"role": "user", "content": "hello"},
+        "created_at": "2026-07-11T00:00:00Z",
+    }
+    if schema_version is not None:
+        message["schema_version"] = schema_version
+    navigation = {
+        "schema_version": 5,
+        "id": "selection",
+        "session_id": "session",
+        "kind": "active_leaf",
+        "previous_leaf_id": "message",
+        "active_leaf_id": None,
+        "reason": "navigation",
+        "selected_entry_id": "message",
+        "created_at": "2026-07-11T00:00:01Z",
+    }
+    path.write_text(
+        f"{json.dumps(message)}\n{json.dumps(navigation)}\n",
+        encoding="utf-8",
+    )
+
+    loaded = JsonlSessionStore(tmp_path).load(path)
+
+    assert loaded.read_active_leaf_id() is None
+    assert JsonlSessionStore(tmp_path).summaries()[0].active_leaf_id is None
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        (
+            {
+                "reason": "navigation",
+                "selected_entry_id": "missing",
+            },
+            "unknown selected entry",
+        ),
+        (
+            {
+                "reason": "navigation",
+                "selected_entry_id": "message",
+                "active_leaf_id": "message",
+            },
+            "expected None",
+        ),
+        (
+            {
+                "reason": "unrevert",
+                "source_transition_id": "missing",
+            },
+            "invalid navigation transition",
+        ),
+    ],
+)
+def test_session_rejects_incoherent_v5_transition_metadata(
+    tmp_path: Path,
+    updates: dict[str, object],
+    message: str,
+) -> None:
+    path = tmp_path / "v5-incoherent-transition.jsonl"
+    records = (
+        {
+            "schema_version": 5,
+            "id": "message",
+            "session_id": "session",
+            "kind": "message",
+            "parent_id": None,
+            "message": {"role": "user", "content": "hello"},
+            "created_at": "2026-07-11T00:00:00Z",
+        },
+        {
+            "schema_version": 5,
+            "id": "selection",
+            "session_id": "session",
+            "kind": "active_leaf",
+            "previous_leaf_id": "message",
+            "active_leaf_id": None,
+            "created_at": "2026-07-11T00:00:01Z",
+            **updates,
+        },
+    )
+    path.write_text("".join(f"{json.dumps(record)}\n" for record in records), encoding="utf-8")
+
+    with pytest.raises(SessionReplayError, match=message):
+        JsonlSessionStore(tmp_path).load(path).read_context()
+    with pytest.raises(SessionReplayError, match=message):
+        JsonlSessionStore(tmp_path).summaries()
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {},
+        {"reason": "navigation"},
+        {"reason": "unrevert", "selected_entry_id": "message"},
+        {"reason": "system", "source_transition_id": "navigation"},
+    ],
+)
+def test_session_rejects_malformed_v5_active_leaf_metadata(
+    tmp_path: Path,
+    updates: dict[str, object],
+) -> None:
+    path = tmp_path / "v5-active-leaf.jsonl"
+    entry = {
+        "schema_version": 5,
+        "id": "selection",
+        "session_id": "session",
+        "kind": "active_leaf",
+        "previous_leaf_id": None,
+        "active_leaf_id": None,
+        "created_at": "2026-07-11T00:00:00Z",
+        **updates,
+    }
+    path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
+
+    with pytest.raises(MalformedSessionEntryError):
+        JsonlSessionStore(tmp_path).load(path)
+    with pytest.raises(MalformedSessionEntryError):
+        JsonlSessionStore(tmp_path).summaries()
 
 
 def test_session_rejects_v2_session_info_entries(tmp_path: Path) -> None:
@@ -1308,7 +1626,7 @@ def test_session_upgrades_legacy_v5_v6_events_only_on_typed_access(
 
 def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path) -> None:
     path = tmp_path / "future-event.jsonl"
-    raw_event = {"type": "future.event", "schema_version": 24, "future": True}
+    raw_event = {"type": "future.event", "schema_version": 25, "future": True}
     legacy = {
         "id": "future-event",
         "session_id": "event-session",
@@ -1320,7 +1638,7 @@ def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path)
     session = JsonlSessionStore(tmp_path).load(path)
 
     assert session.read_events() == (raw_event,)
-    with pytest.raises(UnsupportedPersistedEventVersionError, match="schema_version 24"):
+    with pytest.raises(UnsupportedPersistedEventVersionError, match="schema_version 25"):
         session.read_typed_events()
 
 
@@ -1346,7 +1664,7 @@ def test_session_rejects_malformed_event_only_on_typed_access(tmp_path: Path) ->
     ("schema_version", "error_type", "match"),
     [
         ("1", MalformedSessionEntryError, "must be an integer"),
-        (5, UnsupportedSessionEntryVersionError, "schema_version 5"),
+        (6, UnsupportedSessionEntryVersionError, "schema_version 6"),
     ],
 )
 def test_session_distinguishes_malformed_and_future_entry_versions(

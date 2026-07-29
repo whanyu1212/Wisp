@@ -118,6 +118,12 @@ class NavigateSessionTreeCommand(RpcCommandModel):
     entry_id: str = Field(min_length=1)
 
 
+class UnrevertSessionTreeCommand(RpcCommandModel):
+    """Reverse the selected session's latest explicit tree navigation."""
+
+    type: Literal["unrevert_session_tree"] = "unrevert_session_tree"
+
+
 class SetSessionNameCommand(RpcCommandModel):
     """Set or clear one session's display name."""
 
@@ -231,6 +237,7 @@ type RpcCommand = Annotated[
     | ForkSessionCommand
     | GetSessionTreeCommand
     | NavigateSessionTreeCommand
+    | UnrevertSessionTreeCommand
     | SetSessionNameCommand
     | SteerCommand
     | FollowUpCommand
