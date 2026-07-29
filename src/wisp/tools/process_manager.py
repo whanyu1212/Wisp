@@ -21,7 +21,7 @@ from wisp.tools.process import (
 )
 from wisp.tools.result import ToolError
 
-ProcessState = Literal["running", "completed", "timed_out", "cancelled"]
+ProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
 
 DEFAULT_MAX_MANAGED_PROCESSES = 8
 DEFAULT_MAX_RETAINED_BYTES = 50_000
@@ -42,6 +42,7 @@ class ProcessUpdate:
     stderr_truncated: bool = False
     stdout_dropped_bytes: int = 0
     stderr_dropped_bytes: int = 0
+    error: str | None = None
 
 
 @dataclass
@@ -80,6 +81,7 @@ class _ManagedProcess:
     state: ProcessState = "running"
     exit_code: int | None = None
     terminal_override: ProcessState | None = None
+    error: str | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stdout_task: asyncio.Task[None] | None = None
@@ -235,11 +237,12 @@ class ProcessSupervisor:
     async def aclose(self) -> None:
         """Terminate all owned process trees. Safe to call repeatedly or concurrently."""
 
-        async with self._lock:
-            if self._close_task is None:
-                self._closed = True
-                self._close_task = asyncio.create_task(self._close_owned_processes())
-            close_task = self._close_task
+        with anyio.CancelScope(shield=True):
+            async with self._lock:
+                if self._close_task is None:
+                    self._closed = True
+                    self._close_task = asyncio.create_task(self._close_owned_processes())
+                close_task = self._close_task
 
         # Keep shutdown attached to this call even when its caller is cancelled.
         # Frontends call aclose() from their finalizers and may tear down the event
@@ -328,27 +331,46 @@ class ProcessSupervisor:
         managed.changed.set()
 
     async def _wait_for_completion(self, managed: _ManagedProcess, timeout: float) -> None:
-        async def wait_for_process_and_streams() -> None:
+        async def wait_for_process_and_streams() -> BaseException | None:
             await managed.process.wait()
             assert managed.stdout_task is not None
             assert managed.stderr_task is not None
-            await asyncio.gather(
+            results = await asyncio.gather(
                 managed.stdout_task,
                 managed.stderr_task,
                 return_exceptions=True,
             )
+            return next(
+                (
+                    result
+                    for result in results
+                    if isinstance(result, BaseException)
+                    and not isinstance(result, asyncio.CancelledError)
+                ),
+                None,
+            )
 
         completion = asyncio.create_task(wait_for_process_and_streams())
+        reader_failure: BaseException | None = None
         try:
             try:
-                await asyncio.wait_for(asyncio.shield(completion), timeout=timeout)
+                reader_failure = await asyncio.wait_for(
+                    asyncio.shield(completion),
+                    timeout=timeout,
+                )
             except TimeoutError:
                 managed.terminal_override = managed.terminal_override or "timed_out"
                 await _terminate_process_tree(managed.process)
                 await self._finish_terminated_io(managed)
-                await completion
+                reader_failure = await completion
             managed.exit_code = managed.process.returncode
-            managed.state = managed.terminal_override or "completed"
+            if managed.terminal_override is not None:
+                managed.state = managed.terminal_override
+            elif reader_failure is not None:
+                managed.error = "Failed to read process output"
+                managed.state = "failed"
+            else:
+                managed.state = "completed"
         finally:
             if not completion.done():
                 completion.cancel()
@@ -393,6 +415,7 @@ class ProcessSupervisor:
             stderr_truncated=stderr_dropped > 0,
             stdout_dropped_bytes=stdout_dropped,
             stderr_dropped_bytes=stderr_dropped,
+            error=managed.error,
         )
 
     def _evict_terminals_for_capacity(self) -> None:

@@ -88,6 +88,35 @@ def test_managed_process_retention_is_bounded_and_utf8_safe(tmp_path: Path) -> N
     assert update.stdout_dropped_bytes > 0
 
 
+def test_managed_process_reports_stream_reader_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = ProcessSupervisor()
+
+    async def fail_read(*_args: object) -> None:
+        raise OSError("broken transport")
+
+    monkeypatch.setattr(supervisor, "_read_stream", fail_read)
+
+    async def run() -> ProcessUpdate:
+        try:
+            process_id = await supervisor.start(
+                _python_command("print('unread')"),
+                cwd=tmp_path,
+                timeout=2,
+            )
+            return (await _poll_until_terminal(supervisor, process_id))[-1]
+        finally:
+            await supervisor.aclose()
+
+    update = anyio.run(run)
+
+    assert update.state == "failed"
+    assert update.exit_code is None
+    assert update.error == "Failed to read process output"
+
+
 @pytest.mark.parametrize("separator", ["\n", "\r", "\r\n", "\u2028"])
 def test_retention_counts_unterminated_trailing_logical_line(separator: str) -> None:
     text = f"first{separator}second"
@@ -558,6 +587,52 @@ def test_aclose_finishes_cleanup_before_propagating_caller_cancellation(
         allow_cleanup.set()
         with pytest.raises(asyncio.CancelledError):
             await close_call
+        assert process.returncode is not None
+        return process.pid
+
+    pid = anyio.run(run)
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_aclose_initializes_cleanup_inside_cancelled_scope_while_lock_is_contended(
+    tmp_path: Path,
+) -> None:
+    async def run() -> int:
+        supervisor = ProcessSupervisor()
+        process_id = await supervisor.start(
+            _python_command("import time; time.sleep(30)"),
+            cwd=tmp_path,
+            timeout=30,
+        )
+        process = supervisor._managed[process_id].process  # noqa: SLF001
+        assert process.pid is not None
+
+        lock_held = anyio.Event()
+        release_lock = anyio.Event()
+        close_finished = anyio.Event()
+
+        async def hold_lock() -> None:
+            async with supervisor._lock:  # noqa: SLF001
+                lock_held.set()
+                await release_lock.wait()
+
+        async def close_from_cancelled_scope() -> None:
+            with anyio.CancelScope() as cancel_scope:
+                cancel_scope.cancel()
+                await supervisor.aclose()
+            close_finished.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(hold_lock)
+            await lock_held.wait()
+            task_group.start_soon(close_from_cancelled_scope)
+            await anyio.sleep(0.05)
+            assert close_finished.is_set() is False
+            release_lock.set()
+
+        assert close_finished.is_set() is True
         assert process.returncode is not None
         return process.pid
 
