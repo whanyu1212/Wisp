@@ -241,6 +241,41 @@ def test_history_cannot_displace_an_approval_overlay() -> None:
     assert not history_open
 
 
+def test_displaced_history_selection_cannot_overwrite_or_focus_hidden_draft() -> None:
+    async def scenario() -> tuple[str, bool, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.record_prompt("history replacement")
+            editor = app.query_one("#input", PromptEditor)
+            editor.value = "draft must survive"
+            await pilot.press("ctrl+r")
+            await pilot.pause()
+            stale_selection = PromptHistoryPicker.Selected("history replacement")
+
+            renderer.approval_request(
+                ToolApprovalRequested(
+                    call_id="call-1",
+                    name="write",
+                    arguments={"path": "file.txt", "content": "content"},
+                    safety="mutating",
+                )
+            )
+            await pilot.pause()
+            app.on_prompt_history_picker_selected(stale_selection)
+            await pilot.pause()
+
+            return (
+                editor.value,
+                editor.has_focus,
+                app.query_one("#decision-panel").display,
+            )
+
+    draft, editor_focused, decision_open = anyio.run(scenario)
+    assert draft == "draft must survive"
+    assert not editor_focused
+    assert decision_open
+
+
 def test_history_rejects_selection_event_timestamped_before_open() -> None:
     async def scenario() -> tuple[bool, str]:
         app = TextualTui()

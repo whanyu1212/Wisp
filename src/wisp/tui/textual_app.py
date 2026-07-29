@@ -656,7 +656,8 @@ class TextualTui(App[None]):
 
     def on_prompt_history_picker_selected(self, event: PromptHistoryPicker.Selected) -> None:
         event.stop()
-        self.hide_prompt_history()
+        if not self.hide_prompt_history():
+            return
         if self._input is not None:
             self._input.replace_text(event.prompt)
             self._input.focus()
@@ -1070,10 +1071,11 @@ class TextualTui(App[None]):
     def show_prompt_history(self) -> None:
         self.action_open_prompt_history()
 
-    def hide_prompt_history(self) -> None:
+    def hide_prompt_history(self) -> bool:
         overlays = self._overlay_controller
-        if overlays is not None:
-            overlays.close(OverlayKind.prompt_history)
+        if overlays is None:
+            return False
+        return overlays.close(OverlayKind.prompt_history)
 
     def show_approval(self, event: ToolApprovalRequested, *, cwd: str) -> None:
         panel = self._decision_panel
