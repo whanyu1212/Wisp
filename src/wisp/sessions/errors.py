@@ -33,3 +33,7 @@ class StaleSessionTreeError(SessionError):
 
 class SessionNavigationCancelledError(SessionError):
     """Raised when tree navigation is cancelled before its durable commit."""
+
+
+class SessionUnrevertUnavailableError(SessionError):
+    """Raised when no eligible explicit tree navigation can be unreverted."""

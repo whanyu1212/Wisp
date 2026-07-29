@@ -440,8 +440,13 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 23`; readers also accept legacy schema v5
-through v22 events for compatibility. Schema v23 adds `rpc.commands`, an immediate,
+Every outbound `WispEvent` includes `"schema_version": 24`; readers also accept legacy schema v5
+through v23 events for compatibility. Schema v24 adds `rpc.session.tree.unreverted`, emitted after
+`unrevert_session_tree` durably reverses the latest eligible explicit tree navigation. Session
+entry schema v5 records whether an active-leaf transition came from navigation, unrevert, or
+internal system recovery; v4 and older entries remain readable as system transitions.
+
+Schema v23 adds `rpc.commands`, an immediate,
 non-persisted command-registry snapshot returned by RPC `get_commands`. Each descriptor includes
 stable names, user-facing slash spellings, aliases, category, argument metadata, display order, and
 partial-enter behavior. This is discovery metadata only: command handlers, dynamic enabled state,
@@ -514,6 +519,11 @@ tool-call repair. Cancellation is honored before mutation; once the durable sele
 allowed to finish and reports success. Unlike Pi, this slice uses typed events, explicit optimistic
 leaf validation, and bounded flat pages; it intentionally omits branch summaries, labels, and
 extension lifecycle hooks.
+
+`unrevert_session_tree` reverses only the latest changed `navigate_session_tree` operation. It
+appends another active-leaf transition and remains available after restart. Non-tree session-name
+metadata does not invalidate it, but any later message, event, compaction, system leaf transition,
+or prior unrevert does. An unavailable or stale unrevert appends nothing.
 
 Schema v19 adds `rpc.session.cloned` and `rpc.session.forked` for durable session derivation.
 `clone_session` copies the selected session's complete active path, while `fork_session` copies
@@ -650,6 +660,7 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 | `{"id":"fork-1","type":"fork_session","entry_id":"…"}` | Fork before a user message, select the fork, and return its prompt |
 | `{"id":"tree-1","type":"get_session_tree","limit":200}` | Emit a bounded append-order page of the selected session tree |
 | `{"id":"navigate-1","type":"navigate_session_tree","entry_id":"…"}` | Navigate in-file and optionally restore a user prompt for editing |
+| `{"id":"unrevert-1","type":"unrevert_session_tree"}` | Reverse the latest eligible explicit tree navigation |
 | `{"id":"name-1","type":"set_session_name","name":"Roadmap cleanup"}` | Rename the selected session; empty normalized names clear it |
 | `{"id":"steer-1","type":"steer","content":"Use the other approach"}` | Queue text after the active assistant/tool batch |
 | `{"id":"follow-1","type":"follow_up","content":"Then summarize"}` | Queue text for when the active run would otherwise stop |
@@ -664,8 +675,8 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 
 Each command emits `rpc.command.started` / `rpc.command.finished` so clients can group the events
 between them. Prompts, compactions, statistics reads, transcript reads, session catalog reads,
-session selection, cloning, forking, tree reads, tree navigation, and session renaming run
-sequentially; `get_state`, `get_commands`, queue commands, `cancel`, `approval`, and `trust` are
+session selection, cloning, forking, tree reads, tree navigation, tree unrevert, and session
+renaming run sequentially; `get_state`, `get_commands`, queue commands, `cancel`, `approval`, and `trust` are
 handled while an operation runs. `get_state` and `get_commands`
 preserve the active command and any queued commands, including during prompt startup, compaction,
 statistics reads, transcript reads, session operations, approval/trust waits, and after
@@ -694,7 +705,9 @@ empty snapshot with null session fields before selection and an identified empty
 reserved unpersisted session. `navigate_session_tree` requires a selected persisted session.
 Failures leave the coordinator history and prior active leaf unchanged. Successful navigation
 emits `rpc.session.tree.navigated` only after refreshed history is active, so later `get_messages`
-and prompts immediately use the selected path.
+and prompts immediately use the selected path. `unrevert_session_tree` uses the same selected-
+session, optimistic-leaf, cancellation, replay-refresh, and append-only guarantees. It emits
+`rpc.session.tree.unreverted` with the source navigation transition and restored leaf.
 `get_queue_state` is safe
 while idle. Queue mutations require an active run that is still accepting messages and otherwise
 fail with `CodingSession has no active agent run`. Successful queue commands emit the authoritative

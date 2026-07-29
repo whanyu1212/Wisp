@@ -40,6 +40,7 @@ from wisp.events import (
     RpcSessionTreeNavigated,
     RpcSessionTreeNode,
     RpcSessionTreeReported,
+    RpcSessionTreeUnreverted,
     RpcStateReported,
     RpcStateSnapshot,
     SessionStatsReported,
@@ -177,6 +178,8 @@ class RpcCommandExecutor:
             return self._dispatch_session_tree(command)
         if command_type == "navigate_session_tree":
             return self._dispatch_navigate_session_tree(command)
+        if command_type == "unrevert_session_tree":
+            return self._dispatch_unrevert_session_tree(command)
         if command_type == "set_session_name":
             return self._dispatch_set_session_name(command)
         if command_type == "get_state":
@@ -325,6 +328,22 @@ class RpcCommandExecutor:
     ) -> _RpcDispatchResult:
         return _RpcDispatchResult(
             running_command=start_rpc_navigate_session_tree_command(
+                command,
+                session_state=self.session_state,
+                task_group=self.task_group,
+                send=self.send,
+                write_event=self.write_event,
+                running_command_factory=self.running_command_factory,
+                command_completed_factory=self.command_completed_factory,
+            )
+        )
+
+    def _dispatch_unrevert_session_tree(
+        self,
+        command: dict[str, object],
+    ) -> _RpcDispatchResult:
+        return _RpcDispatchResult(
+            running_command=start_rpc_unrevert_session_tree_command(
                 command,
                 session_state=self.session_state,
                 task_group=self.task_group,
@@ -998,6 +1017,54 @@ def start_rpc_navigate_session_tree_command(
     return running_command_factory(
         command_id=command_id,
         command_type="navigate_session_tree",
+        cancel_scope=cancel_scope,
+    )
+
+
+def start_rpc_unrevert_session_tree_command(
+    command: dict[str, object],
+    *,
+    session_state: _RpcSessionState,
+    task_group: TaskGroup,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    write_event: RpcEventWriter,
+    running_command_factory: RunningCommandFactory = _RpcRunningCommand,
+    command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+) -> _RpcRunningCommand | None:
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return None
+    session = session_state.session
+    if session is None or not session.path.is_file():
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=("RPC unrevert_session_tree command requires an existing persisted session"),
+            write_event=write_event,
+        )
+        return None
+
+    cancel_scope = anyio.CancelScope()
+    task_group.start_soon(
+        run_rpc_unrevert_session_tree_command,
+        session,
+        session_state.entry_count,
+        command_id,
+        cancel_scope,
+        send.clone(),
+        write_event,
+        command_completed_factory,
+    )
+    return running_command_factory(
+        command_id=command_id,
+        command_type="unrevert_session_tree",
         cancel_scope=cancel_scope,
     )
 
@@ -1784,6 +1851,96 @@ async def run_rpc_navigate_session_tree_command(
             command_completed_factory(
                 command_id=command_id,
                 command_type="navigate_session_tree",
+                ok=ok,
+                history=refreshed_history,
+                entry_count=refreshed_entry_count,
+                post_apply_events=post_apply_events,
+            )
+        )
+        await send.aclose()
+
+
+async def run_rpc_unrevert_session_tree_command(
+    session: JsonlSession,
+    selected_entry_count: int,
+    command_id: str,
+    cancel_scope: anyio.CancelScope,
+    send: MemoryObjectSendStream[_RpcControlEvent],
+    write_event: RpcEventWriter,
+    command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+) -> None:
+    ok = False
+    error: str | None = None
+    refreshed_history: tuple[Message, ...] | None = None
+    refreshed_entry_count = selected_entry_count
+    post_apply_events: tuple[WispEvent, ...] = ()
+    finish_in_worker = True
+    try:
+        with cancel_scope:
+            await anyio.sleep(0)
+            expected_active_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
+            await anyio.sleep(0)
+            unrevert = await session.unrevert_tree(
+                expected_active_leaf_id=expected_active_leaf_id,
+                operation_id=command_id,
+                cancel_requested=lambda: cancel_scope.cancel_called,
+            )
+            # The active-leaf append is the durable commit boundary. Publish
+            # refreshed coordinator state even if cancellation arrives afterward.
+            with anyio.CancelScope(shield=True):
+                (
+                    refreshed_entry_count,
+                    refreshed_history,
+                    active_leaf_id,
+                    _name,
+                ) = await anyio.to_thread.run_sync(rpc_selected_session_state, session)
+            event = RpcSessionTreeUnreverted(
+                command_id=command_id,
+                session_id=session.session_id,
+                session_path=session.path,
+                source_transition_id=unrevert.source_transition_id,
+                previous_active_leaf_id=unrevert.previous_active_leaf_id,
+                active_leaf_id=active_leaf_id,
+                entry_count=refreshed_entry_count,
+            )
+            post_apply_events = (
+                event,
+                RpcCommandFinished(
+                    command_id=command_id,
+                    command_type="unrevert_session_tree",
+                    ok=True,
+                ),
+            )
+            finish_in_worker = False
+            ok = True
+        if cancel_scope.cancel_called and not ok:
+            error = "RPC unrevert_session_tree command cancelled"
+    except BaseException as exc:
+        refreshed_history = None
+        refreshed_entry_count = selected_entry_count
+        post_apply_events = ()
+        finish_in_worker = True
+        if isinstance(
+            exc,
+            (anyio.get_cancelled_exc_class(), SessionNavigationCancelledError),
+        ):
+            error = "RPC unrevert_session_tree command cancelled"
+        else:
+            error = str(exc)
+    finally:
+        if finish_in_worker:
+            write_event(
+                RpcCommandFinished(
+                    command_id=command_id,
+                    command_type="unrevert_session_tree",
+                    ok=ok,
+                    error=error,
+                )
+            )
+        await send.send(
+            command_completed_factory(
+                command_id=command_id,
+                command_type="unrevert_session_tree",
                 ok=ok,
                 history=refreshed_history,
                 entry_count=refreshed_entry_count,

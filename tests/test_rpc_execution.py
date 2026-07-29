@@ -41,6 +41,7 @@ from wisp.events import (
     RpcSessionsReported,
     RpcSessionTreeNavigated,
     RpcSessionTreeReported,
+    RpcSessionTreeUnreverted,
     RpcStateReported,
     RpcStateSnapshot,
     WispEvent,
@@ -1623,6 +1624,277 @@ def test_executor_navigation_applies_history_before_reporting_success(
         assert report.editor_text == editable
         assert report.changed is True
         assert report.entry_count == 5
+
+    anyio.run(scenario)
+
+
+def test_executor_unrevert_applies_history_before_reporting_success(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        session = fixture.sessions.create()
+        await session.append_message(Message(role="user", content="first"))
+        answer = await session.append_message(Message(role="assistant", content="answer"))
+        selected = await session.append_message(Message(role="user", content="second"))
+        leaf = await session.append_message(Message(role="assistant", content="old answer"))
+        original_history = session.read_context_messages()
+        await session.navigate_tree(
+            selected.id,
+            expected_active_leaf_id=leaf.id,
+            operation_id="navigate",
+        )
+        fixture.session_state.session = session
+        fixture.session_state.history = session.read_context_messages()
+        fixture.session_state.entry_count = 5
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = executor.dispatch(
+                {"id": "unrevert", "type": "unrevert_session_tree"},
+                None,
+            )
+            completed = await receive.receive()
+            assert not any(isinstance(event, RpcSessionTreeUnreverted) for event in fixture.events)
+            fixture.coordinator.running_command = result.running_command
+            fixture.coordinator.handle_event(
+                completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is not None
+        assert result.running_command.command_type == "unrevert_session_tree"
+        assert completed.ok is True
+        assert fixture.session_state.history == original_history
+        assert fixture.session_state.entry_count == 6
+        assert session.read_active_leaf_id() == leaf.id
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            RpcSessionTreeUnreverted,
+            RpcCommandFinished,
+        ]
+        report = fixture.events[1]
+        assert isinstance(report, RpcSessionTreeUnreverted)
+        assert report.previous_active_leaf_id == answer.id
+        assert report.active_leaf_id == leaf.id
+        assert report.entry_count == 6
+
+    anyio.run(scenario)
+
+
+def test_executor_unrevert_requires_selected_session_and_eligible_navigation(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            assert (
+                executor.dispatch(
+                    {"id": "unrevert-none", "type": "unrevert_session_tree"},
+                    None,
+                ).running_command
+                is None
+            )
+            session = fixture.sessions.create()
+            await session.append_message(Message(role="user", content="first"))
+            fixture.session_state.session = session
+            fixture.session_state.history = session.read_context_messages()
+            fixture.session_state.entry_count = 1
+            result = executor.dispatch(
+                {"id": "unrevert-missing", "type": "unrevert_session_tree"},
+                None,
+            )
+            completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is not None
+        assert completed.ok is False
+        assert fixture.session_state.entry_count == 1
+        assert len(session.read_entries()) == 1
+        finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
+        assert [event.error for event in finished] == [
+            "RPC unrevert_session_tree command requires an existing persisted session",
+            "No explicit session-tree navigation is available to unrevert",
+        ]
+
+    anyio.run(scenario)
+
+
+def test_executor_unrevert_rejects_concurrent_leaf_change(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        session = fixture.sessions.create()
+        await session.append_message(Message(role="user", content="first"))
+        await session.append_message(Message(role="assistant", content="answer"))
+        selected = await session.append_message(Message(role="user", content="second"))
+        leaf = await session.append_message(Message(role="assistant", content="old answer"))
+        await session.navigate_tree(selected.id, expected_active_leaf_id=leaf.id)
+        previous_history = session.read_context_messages()
+        previous_leaf_id = session.read_active_leaf_id()
+        fixture.session_state.session = session
+        fixture.session_state.history = previous_history
+        fixture.session_state.entry_count = 5
+        original_unrevert = session.unrevert_tree
+
+        async def change_before_unrevert(
+            *,
+            expected_active_leaf_id: str | None,
+            operation_id: str | None = None,
+            cancel_requested: Callable[[], bool] | None = None,
+        ) -> object:
+            await session.append_message(Message(role="assistant", content="concurrent"))
+            return await original_unrevert(
+                expected_active_leaf_id=expected_active_leaf_id,
+                operation_id=operation_id,
+                cancel_requested=cancel_requested,
+            )
+
+        monkeypatch.setattr(session, "unrevert_tree", change_before_unrevert)
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = executor.dispatch(
+                {"id": "unrevert", "type": "unrevert_session_tree"},
+                None,
+            )
+            completed = await receive.receive()
+            fixture.coordinator.running_command = result.running_command
+            fixture.coordinator.handle_event(
+                completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok is False
+        assert fixture.session_state.history == previous_history
+        assert fixture.session_state.entry_count == 5
+        assert session.read_active_leaf_id() != previous_leaf_id
+        assert not any(isinstance(event, RpcSessionTreeUnreverted) for event in fixture.events)
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.error is not None
+        assert finished.error.startswith("Session tree changed: expected active leaf")
+
+    anyio.run(scenario)
+
+
+def test_executor_unrevert_cancellation_before_commit_preserves_leaf(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        session = fixture.sessions.create()
+        await session.append_message(Message(role="user", content="first"))
+        answer = await session.append_message(Message(role="assistant", content="answer"))
+        selected = await session.append_message(Message(role="user", content="second"))
+        leaf = await session.append_message(Message(role="assistant", content="old answer"))
+        await session.navigate_tree(selected.id, expected_active_leaf_id=leaf.id)
+        fixture.session_state.session = session
+        fixture.session_state.history = session.read_context_messages()
+        fixture.session_state.entry_count = 5
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            async with session._append_lock:
+                result = executor.dispatch(
+                    {"id": "unrevert", "type": "unrevert_session_tree"},
+                    None,
+                )
+                assert result.running_command is not None
+                while session._append_lock.statistics().tasks_waiting == 0:
+                    await anyio.sleep(0)
+                result.running_command.cancel_scope.cancel()
+            completed = await receive.receive()
+            fixture.coordinator.running_command = result.running_command
+            fixture.coordinator.handle_event(
+                completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok is False
+        assert session.read_active_leaf_id() == answer.id
+        assert fixture.session_state.entry_count == 5
+        assert not any(isinstance(event, RpcSessionTreeUnreverted) for event in fixture.events)
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.error == "RPC unrevert_session_tree command cancelled"
+
+    anyio.run(scenario)
+
+
+def test_executor_unrevert_cancellation_after_commit_reports_success(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        session = fixture.sessions.create()
+        await session.append_message(Message(role="user", content="first"))
+        await session.append_message(Message(role="assistant", content="answer"))
+        selected = await session.append_message(Message(role="user", content="second"))
+        leaf = await session.append_message(Message(role="assistant", content="old answer"))
+        original_history = session.read_context_messages()
+        await session.navigate_tree(selected.id, expected_active_leaf_id=leaf.id)
+        fixture.session_state.session = session
+        fixture.session_state.history = session.read_context_messages()
+        fixture.session_state.entry_count = 5
+        original_selected_state = rpc_execution_module.rpc_selected_session_state
+        committed = threading.Event()
+        release = threading.Event()
+
+        def pause_after_unrevert(selected_session: JsonlSession) -> object:
+            committed.set()
+            assert release.wait(timeout=5)
+            return original_selected_state(selected_session)
+
+        monkeypatch.setattr(
+            rpc_execution_module,
+            "rpc_selected_session_state",
+            pause_after_unrevert,
+        )
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = executor.dispatch(
+                {"id": "unrevert", "type": "unrevert_session_tree"},
+                None,
+            )
+            assert result.running_command is not None
+            assert await anyio.to_thread.run_sync(lambda: committed.wait(timeout=5))
+            result.running_command.cancel_scope.cancel()
+            release.set()
+            completed = await receive.receive()
+            fixture.coordinator.running_command = result.running_command
+            fixture.coordinator.handle_event(
+                completed,
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda _command, _message: None,
+                command_type=lambda command: str(command.get("type")),
+            )
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok is True
+        assert session.read_active_leaf_id() == leaf.id
+        assert fixture.session_state.history == original_history
+        assert fixture.session_state.entry_count == 6
+        assert any(isinstance(event, RpcSessionTreeUnreverted) for event in fixture.events)
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.ok is True
+        assert finished.error is None
 
     anyio.run(scenario)
 

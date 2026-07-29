@@ -40,6 +40,7 @@ from wisp.rpc.commands import (
     ShutdownCommand,
     SteerCommand,
     TrustCommand,
+    UnrevertSessionTreeCommand,
 )
 
 
@@ -186,6 +187,13 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("navigate-session-tree")
         await self._transport.send(NavigateSessionTreeCommand(id=selected_id, entry_id=entry_id))
+        return selected_id
+
+    async def unrevert_session_tree(self, *, command_id: str | None = None) -> str:
+        """Reverse the selected session's latest explicit tree navigation."""
+
+        selected_id = command_id or self._command_id_factory("unrevert-session-tree")
+        await self._transport.send(UnrevertSessionTreeCommand(id=selected_id))
         return selected_id
 
     async def set_session_name(

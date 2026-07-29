@@ -35,7 +35,7 @@ from wisp.sessions.errors import (
     UnsupportedSessionEntryVersionError,
 )
 
-SESSION_ENTRY_SCHEMA_VERSION: Literal[4] = 4
+SESSION_ENTRY_SCHEMA_VERSION: Literal[5] = 5
 PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION: Literal[1] = 1
 _MIN_SUPPORTED_EVENT_SCHEMA_VERSION = 5
 MAX_SESSION_NAME_BYTES = 256
@@ -47,7 +47,7 @@ class SessionEntryBase(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    schema_version: Literal[4] = SESSION_ENTRY_SCHEMA_VERSION
+    schema_version: Literal[5] = SESSION_ENTRY_SCHEMA_VERSION
     id: str = Field(default_factory=lambda: uuid4().hex, min_length=1)
     session_id: str = Field(min_length=1)
     operation_id: str | None = None
@@ -116,6 +116,23 @@ class ActiveLeafSessionEntry(SessionEntryBase):
     kind: Literal["active_leaf"] = "active_leaf"
     previous_leaf_id: str | None
     active_leaf_id: str | None
+    reason: Literal["system", "navigation", "unrevert"] = "system"
+    selected_entry_id: str | None = Field(default=None, min_length=1)
+    source_transition_id: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_transition_metadata(self) -> Self:
+        if self.reason == "system":
+            if self.selected_entry_id is not None or self.source_transition_id is not None:
+                raise ValueError("system active-leaf transitions cannot reference user actions")
+        elif self.reason == "navigation":
+            if self.selected_entry_id is None or self.source_transition_id is not None:
+                raise ValueError(
+                    "navigation active-leaf transitions require selected_entry_id only"
+                )
+        elif self.source_transition_id is None or self.selected_entry_id is not None:
+            raise ValueError("unrevert active-leaf transitions require source_transition_id only")
+        return self
 
 
 class SessionInfoSessionEntry(SessionEntryBase):
@@ -225,6 +242,17 @@ def session_entry_from_dict(
             raise MalformedSessionEntryError(
                 f"Session entry schema_version must be an integer{location}"
             )
+        if version in {1, 2, 3, 4}:
+            forbidden = tuple(
+                field
+                for field in ("reason", "selected_entry_id", "source_transition_id")
+                if field in raw
+            )
+            if forbidden:
+                fields = ", ".join(forbidden)
+                raise MalformedSessionEntryError(
+                    f"V{version} session entry contains v5 transition field(s) {fields}{location}"
+                )
         if version == 1:
             normalized = _upgrade_v1_entry(
                 raw,
@@ -251,6 +279,12 @@ def session_entry_from_dict(
                 parent_id=legacy_parent_id,
             )
             normalized["schema_version"] = SESSION_ENTRY_SCHEMA_VERSION
+        elif version == 4:
+            normalized = _normalize_v2_structural_fields(
+                raw,
+                parent_id=legacy_parent_id,
+            )
+            normalized["schema_version"] = SESSION_ENTRY_SCHEMA_VERSION
         elif version != SESSION_ENTRY_SCHEMA_VERSION:
             raise UnsupportedSessionEntryVersionError(
                 f"Unsupported session entry schema_version {version}{location}; "
@@ -261,6 +295,10 @@ def session_entry_from_dict(
                 raw,
                 parent_id=legacy_parent_id,
             )
+            if normalized.get("kind") == "active_leaf" and "reason" not in normalized:
+                raise MalformedSessionEntryError(
+                    f"V5 active-leaf session entries require reason{location}"
+                )
     _require_persisted_base_fields(normalized, location=location)
     _require_supported_event_envelope(normalized, location=location)
     try:

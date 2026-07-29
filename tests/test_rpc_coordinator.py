@@ -92,6 +92,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcInputCommand(
                     {"id": "navigate", "type": "navigate_session_tree", "entry_id": "entry"}
                 ),
+                _RpcInputCommand({"id": "unrevert", "type": "unrevert_session_tree"}),
                 _RpcInputCommand({"id": "commands", "type": "get_commands"}),
                 _RpcInputCommand({"id": "approval", "type": "approval"}),
                 _RpcInputCommand({"id": "steer", "type": "steer"}),
@@ -110,6 +111,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 _RpcCommandCompleted("fork", "fork_session", True, (), 2),
                 _RpcCommandCompleted("tree", "get_session_tree", True, (), 2),
                 _RpcCommandCompleted("navigate", "navigate_session_tree", True, (), 2),
+                _RpcCommandCompleted("unrevert", "unrevert_session_tree", True, (), 2),
                 _RpcInputClosed(),
             ]
         )
@@ -131,6 +133,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
                 "fork_session",
                 "get_session_tree",
                 "navigate_session_tree",
+                "unrevert_session_tree",
                 "set_session_name",
             }:
                 return _RpcDispatchResult(running)
@@ -163,6 +166,7 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
             "fork",
             "tree",
             "navigate",
+            "unrevert",
         ]
 
     anyio.run(scenario)
@@ -289,6 +293,7 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
                 "fork_session",
                 "get_session_tree",
                 "navigate_session_tree",
+                "unrevert_session_tree",
                 "set_session_name",
             ],
         ) -> None:
@@ -343,6 +348,7 @@ def test_coordinator_state_bypasses_active_read_commands() -> None:
         await assert_bypasses("fork_session")
         await assert_bypasses("get_session_tree")
         await assert_bypasses("navigate_session_tree")
+        await assert_bypasses("unrevert_session_tree")
         await assert_bypasses("set_session_name")
 
     anyio.run(scenario)

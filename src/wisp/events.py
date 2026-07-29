@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 23
+EVENT_SCHEMA_VERSION = 24
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -33,6 +33,7 @@ RPC_SESSION_TREE_SCHEMA_VERSION = 20
 RPC_SESSION_NAME_SCHEMA_VERSION = 21
 RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION = 22
 RPC_COMMANDS_SCHEMA_VERSION = 23
+RPC_SESSION_UNREVERT_SCHEMA_VERSION = 24
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -55,8 +56,8 @@ class WispEvent(BaseModel):
 
     type: str
     schema_version: Literal[
-        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
-    ] = 23
+        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
+    ] = 24
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -1053,6 +1054,30 @@ class RpcSessionTreeNavigated(WispEvent):
         return self
 
 
+class RpcSessionTreeUnreverted(WispEvent):
+    """Confirmation that the latest explicit tree navigation was reversed."""
+
+    type: Literal["rpc.session.tree.unreverted"] = "rpc.session.tree.unreverted"
+    command_id: str
+    session_id: str = Field(min_length=1)
+    session_path: Path
+    source_transition_id: str = Field(min_length=1)
+    previous_active_leaf_id: str | None = Field(default=None, min_length=1)
+    active_leaf_id: str | None = Field(default=None, min_length=1)
+    entry_count: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _validate_unrevert(self) -> Self:
+        if self.schema_version < RPC_SESSION_UNREVERT_SCHEMA_VERSION:
+            raise ValueError(
+                "RPC session tree unrevert events require schema_version "
+                f"{RPC_SESSION_UNREVERT_SCHEMA_VERSION} or newer"
+            )
+        if self.previous_active_leaf_id == self.active_leaf_id:
+            raise ValueError("RPC session tree unrevert must change the active leaf")
+        return self
+
+
 class QueueUpdated(WispEvent):
     """Current harness-owned steering and follow-up queue state."""
 
@@ -1176,6 +1201,7 @@ type KnownWispEvent = Annotated[
     | RpcSessionNameChanged
     | RpcSessionTreeReported
     | RpcSessionTreeNavigated
+    | RpcSessionTreeUnreverted
     | QueueUpdated
     | QueueItemsRemoved
     | QueueMessageInjected
