@@ -455,6 +455,14 @@ class TuiShell:
         self.state.queued_prompts.clear()
         self.renderer.queued_prompts_cleared()
 
+    def _queue_prompt(self, prompt: str) -> None:
+        """Retain and queue one accepted follow-up through a single seam."""
+
+        self.renderer.prompt_accepted(prompt)
+        self.state.queued_prompts.append(prompt)
+        self._update_view(queued_follow_ups=len(self.state.queued_prompts))
+        self.renderer.queued_follow_up(len(self.state.queued_prompts))
+
     async def _handle_input_line(self, signal: _InputLine) -> bool:
         text = signal.text
         has_content = bool(text.strip())
@@ -480,33 +488,26 @@ class TuiShell:
             if signal.mode is _InputMode.all_tools_confirmation:
                 return await self._answer_all_tools_confirmation(text)
             if has_content and self.state.current_command_id is not None:
-                self.state.queued_prompts.append(text)
-                self._update_view(queued_follow_ups=len(self.state.queued_prompts))
-                self.renderer.queued_follow_up(len(self.state.queued_prompts))
+                self._queue_prompt(text)
             return False
         if self.state.pending_trust is not None:
             if signal.mode is _InputMode.trust or _is_trust_answer(text):
                 return await self._answer_pending_trust(text)
             if has_content and self.state.current_command_id is not None:
-                self.state.queued_prompts.append(text)
-                self._update_view(queued_follow_ups=len(self.state.queued_prompts))
-                self.renderer.queued_follow_up(len(self.state.queued_prompts))
+                self._queue_prompt(text)
             return False
         if self.state.pending_approval is not None:
             if signal.mode is _InputMode.approval:
                 return await self._answer_pending_approval(text, exit_after_denial=False)
             if has_content and self.state.current_command_id is not None:
-                self.state.queued_prompts.append(text)
-                self._update_view(queued_follow_ups=len(self.state.queued_prompts))
-                self.renderer.queued_follow_up(len(self.state.queued_prompts))
+                self._queue_prompt(text)
             return False
         if not has_content:
             return False
         if self.state.current_command_id is not None:
-            self.state.queued_prompts.append(text)
-            self._update_view(queued_follow_ups=len(self.state.queued_prompts))
-            self.renderer.queued_follow_up(len(self.state.queued_prompts))
+            self._queue_prompt(text)
             return False
+        self.renderer.prompt_accepted(text)
         return await self._start_prompt(text)
 
     async def _handle_slash_command(self, command: TuiSlashCommand) -> bool:

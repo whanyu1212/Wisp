@@ -351,7 +351,9 @@ position, and history remains available across in-process session switches. The 
 deliberately memory-only: Wisp does not write it to session JSONL, configuration, or a cache, and
 resumed transcript messages are not imported into it. This avoids silently persisting additional
 copies of prompts that may contain secrets. The line and fullscreen fallback renderers report
-that searchable history requires the Textual TUI.
+that searchable history requires the Textual TUI. Exact prompt text remains restorable, while the
+case-insensitive search index is limited to the first 16,384 whitespace-normalized characters of
+each entry so large pasted prompts cannot be rescanned in full on every search keystroke.
 
 Pi's editor history is the behavioral reference: Pi records submitted user text and supports
 cursor-key recall. Wisp intentionally uses a searchable overlay so Up/Down remain multiline

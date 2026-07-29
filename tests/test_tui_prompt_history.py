@@ -10,6 +10,7 @@ from wisp.events import ToolApprovalRequested
 from wisp.tui import TuiViewSnapshot
 from wisp.tui.prompt_history import (
     PROMPT_HISTORY_PREVIEW_CHARS,
+    PROMPT_HISTORY_SEARCH_CHARS,
     PromptHistory,
 )
 from wisp.tui.prompt_history_widget import PromptHistoryPicker
@@ -69,6 +70,30 @@ def test_prompt_history_preview_is_bounded_without_truncating_restored_prompt() 
     assert len(entry.preview) == PROMPT_HISTORY_PREVIEW_CHARS
     assert entry.preview.endswith("…")
     assert entry.prompt == prompt
+
+
+def test_prompt_history_caches_a_bounded_search_prefix_without_rescanning_prompt() -> None:
+    class SplitOncePrompt(str):
+        split_calls = 0
+
+        def split(self, sep: str | None = None, maxsplit: int = -1) -> list[str]:
+            self.split_calls += 1
+            if self.split_calls > 1:
+                raise AssertionError("stored prompt was rescanned")
+            return super().split(sep, maxsplit)
+
+    prefix = "a" * PROMPT_HISTORY_SEARCH_CHARS
+    prompt = SplitOncePrompt(f"{prefix} needle beyond bounded index")
+    history = PromptHistory()
+
+    entry = history.record(prompt)
+
+    assert entry is not None
+    assert entry.prompt == prompt
+    assert len(entry.search_text) == PROMPT_HISTORY_SEARCH_CHARS
+    assert history.search("aaa") == (entry,)
+    assert history.search("needle") == ()
+    assert prompt.split_calls == 0
 
 
 def test_ctrl_r_cancel_preserves_draft_selection_and_focus() -> None:
@@ -348,9 +373,10 @@ def test_textual_renderer_records_only_explicit_prompt_submission_seam() -> None
 
     renderer.render_history(())
     renderer.prompt_history_request()
+    renderer.prompt_submitted("echoed only when execution starts")
     assert app._prompt_history.entries == ()
 
-    renderer.prompt_submitted("real submitted prompt")
+    renderer.prompt_accepted("real submitted prompt")
 
     assert tuple(entry.prompt for entry in app._prompt_history.entries) == (
         "real submitted prompt",
@@ -369,6 +395,26 @@ def test_shell_records_real_prompts_but_not_history_or_help_commands() -> None:
         return tuple(entry.prompt for entry in app._prompt_history.entries)
 
     assert anyio.run(scenario) == ("real prompt",)
+
+
+def test_shell_records_queued_prompt_immediately_and_queue_clear_does_not_erase_it() -> None:
+    async def scenario() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        app, renderer = create_textual_tui()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.current_command_type = "prompt"
+
+        await shell._handle_input_line(_InputLine("submitted follow-up", _InputMode.running))
+        recorded_before_clear = tuple(entry.prompt for entry in app._prompt_history.entries)
+        queued_before_clear = tuple(shell.state.queued_prompts)
+        shell._clear_queued_prompts()
+        recorded_after_clear = tuple(entry.prompt for entry in app._prompt_history.entries)
+        return recorded_before_clear, queued_before_clear, recorded_after_clear
+
+    before, queued, after = anyio.run(scenario)
+    assert before == ("submitted follow-up",)
+    assert queued == ("submitted follow-up",)
+    assert after == before
 
 
 def test_command_palette_history_selection_uses_typed_slash_path() -> None:

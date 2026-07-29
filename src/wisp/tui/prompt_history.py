@@ -2,23 +2,34 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 PROMPT_HISTORY_CAPACITY = 100
 PROMPT_HISTORY_PREVIEW_CHARS = 160
+PROMPT_HISTORY_SEARCH_CHARS = 16_384
 
 
-def _normalized_prompt_text(text: str) -> str:
-    """Collapse display/search whitespace without changing stored prompt text."""
+def _normalized_prompt_prefix(text: str, *, limit: int) -> str:
+    """Collapse whitespace into a bounded prefix without copying the full prompt."""
 
-    return " ".join(text.split())
-
-
-def _prompt_preview(prompt: str) -> str:
-    normalized = _normalized_prompt_text(prompt)
-    if len(normalized) <= PROMPT_HISTORY_PREVIEW_CHARS:
-        return normalized
-    return f"{normalized[: PROMPT_HISTORY_PREVIEW_CHARS - 1]}…"
+    normalized: list[str] = []
+    pending_space = False
+    for character in text:
+        if character.isspace():
+            if normalized:
+                pending_space = True
+            continue
+        if pending_space:
+            if len(normalized) >= limit:
+                break
+            normalized.append(" ")
+            pending_space = False
+        if len(normalized) >= limit:
+            break
+        normalized.append(character)
+        if len(normalized) >= limit:
+            break
+    return "".join(normalized)
 
 
 @dataclass(frozen=True)
@@ -28,6 +39,7 @@ class PromptHistoryEntry:
     sequence: int
     prompt: str
     preview: str
+    search_text: str = field(repr=False)
 
 
 def search_prompt_history(
@@ -36,14 +48,13 @@ def search_prompt_history(
 ) -> tuple[PromptHistoryEntry, ...]:
     """Return deterministic newest-first literal substring matches."""
 
-    normalized_query = _normalized_prompt_text(query).casefold()
+    normalized_query = _normalized_prompt_prefix(
+        query,
+        limit=PROMPT_HISTORY_SEARCH_CHARS,
+    ).casefold()
     if not normalized_query:
         return entries
-    return tuple(
-        entry
-        for entry in entries
-        if normalized_query in _normalized_prompt_text(entry.prompt).casefold()
-    )
+    return tuple(entry for entry in entries if normalized_query in entry.search_text)
 
 
 class PromptHistory:
@@ -65,13 +76,21 @@ class PromptHistory:
     def record(self, prompt: str) -> PromptHistoryEntry | None:
         """Record a non-blank exact prompt, moving duplicates to newest."""
 
-        if not prompt.strip():
+        normalized = _normalized_prompt_prefix(
+            prompt,
+            limit=PROMPT_HISTORY_SEARCH_CHARS,
+        )
+        if not normalized:
             return None
         self._entries = [entry for entry in self._entries if entry.prompt != prompt]
+        preview = normalized
+        if len(preview) > PROMPT_HISTORY_PREVIEW_CHARS:
+            preview = f"{preview[: PROMPT_HISTORY_PREVIEW_CHARS - 1]}…"
         entry = PromptHistoryEntry(
             sequence=self._next_sequence,
             prompt=prompt,
-            preview=_prompt_preview(prompt),
+            preview=preview,
+            search_text=normalized.casefold(),
         )
         self._next_sequence += 1
         self._entries.insert(0, entry)
@@ -89,6 +108,7 @@ class PromptHistory:
 __all__ = [
     "PROMPT_HISTORY_CAPACITY",
     "PROMPT_HISTORY_PREVIEW_CHARS",
+    "PROMPT_HISTORY_SEARCH_CHARS",
     "PromptHistory",
     "PromptHistoryEntry",
     "search_prompt_history",
