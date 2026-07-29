@@ -1799,6 +1799,7 @@ def _legacy_summary_entry_metadata(
         session_id=_required_summary_string(raw, "session_id", location=location),
         kind=kind,
         parent_id=parent_id,
+        message_role=_summary_message_role(raw, kind),
     )
 
 
@@ -1828,6 +1829,7 @@ def _v1_summary_entry_metadata(
         session_id=_required_summary_string(raw, "session_id", location=location),
         kind=kind,
         parent_id=parent_id,
+        message_role=_summary_message_role(raw, kind),
     )
 
 
@@ -1843,14 +1845,6 @@ def _v2_summary_entry_metadata(
         _require_summary_declared_payload(raw, kind, location=location)
         if kind == "event":
             _require_summary_event_envelope(raw, location=location)
-        message = raw.get("message")
-        message_role = (
-            message.get("role")
-            if kind == "message"
-            and isinstance(message, dict)
-            and isinstance(message.get("role"), str)
-            else None
-        )
         return _SessionSummaryEntryMetadata(
             id=_required_summary_string(raw, "id", location=location),
             session_id=_required_summary_string(raw, "session_id", location=location),
@@ -1861,7 +1855,7 @@ def _v2_summary_entry_metadata(
                 location=location,
                 default=parent_id,
             ),
-            message_role=message_role,
+            message_role=_summary_message_role(raw, kind),
         )
     if kind == "active_leaf":
         return _SessionSummaryEntryMetadata(
@@ -1948,6 +1942,16 @@ def _require_summary_base_fields(raw: JsonObject, *, location: str) -> None:
         raise MalformedSessionEntryError(
             f"Persisted session entry is missing required field(s) {fields}{location}"
         )
+
+
+def _summary_message_role(raw: JsonObject, kind: object) -> str | None:
+    if kind != "message":
+        return None
+    message = raw.get("message")
+    if not isinstance(message, dict):
+        return None
+    role = message.get("role")
+    return role if isinstance(role, str) else None
 
 
 def _require_summary_event_envelope(raw: JsonObject, *, location: str) -> None:

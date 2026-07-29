@@ -1416,6 +1416,43 @@ def test_session_rejects_transition_metadata_in_legacy_schemas(
         JsonlSessionStore(tmp_path).summaries()
 
 
+@pytest.mark.parametrize("schema_version", [None, 1])
+def test_session_summaries_validate_navigation_to_legacy_user_messages(
+    tmp_path: Path,
+    schema_version: int | None,
+) -> None:
+    path = tmp_path / f"legacy-v{schema_version or 0}-navigation.jsonl"
+    message = {
+        "id": "message",
+        "session_id": "session",
+        "kind": "message",
+        "message": {"role": "user", "content": "hello"},
+        "created_at": "2026-07-11T00:00:00Z",
+    }
+    if schema_version is not None:
+        message["schema_version"] = schema_version
+    navigation = {
+        "schema_version": 5,
+        "id": "selection",
+        "session_id": "session",
+        "kind": "active_leaf",
+        "previous_leaf_id": "message",
+        "active_leaf_id": None,
+        "reason": "navigation",
+        "selected_entry_id": "message",
+        "created_at": "2026-07-11T00:00:01Z",
+    }
+    path.write_text(
+        f"{json.dumps(message)}\n{json.dumps(navigation)}\n",
+        encoding="utf-8",
+    )
+
+    loaded = JsonlSessionStore(tmp_path).load(path)
+
+    assert loaded.read_active_leaf_id() is None
+    assert JsonlSessionStore(tmp_path).summaries()[0].active_leaf_id is None
+
+
 @pytest.mark.parametrize(
     ("updates", "message"),
     [
