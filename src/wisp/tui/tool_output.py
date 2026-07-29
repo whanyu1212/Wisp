@@ -177,6 +177,7 @@ def render_tool_result(
     *,
     is_error: bool,
     exit_code: int | None,
+    output_has_exit_status: bool = False,
     before_text: str | None = None,
     created: bool = False,
     summary: str | None = None,
@@ -199,7 +200,11 @@ def render_tool_result(
     """
 
     if tool_result_failed(is_error, exit_code):
-        return render_error(output, exit_code=exit_code)
+        return render_error(
+            output,
+            exit_code=exit_code,
+            output_has_exit_status=output_has_exit_status,
+        )
     # A successful edit carries its before/after text in the tool-call arguments
     # (oldText/newText per hunk); a write carries the "after" in its arguments and
     # the "before" in the promoted snapshot. Render either as a colored unified
@@ -221,7 +226,11 @@ def render_tool_result(
     # Successful shell results carry the same model-facing synthetic exit prefix
     # as failures. Their cards already communicate success, so keep the previous
     # raw-output presentation by removing only a matching promoted prefix.
-    display_output = normalize_tool_output_for_display(output, exit_code)
+    display_output = normalize_tool_output_for_display(
+        output,
+        exit_code,
+        output_has_exit_status=output_has_exit_status,
+    )
     return render_generic(display_output)
 
 
@@ -244,7 +253,12 @@ def tool_result_failed(is_error: bool, exit_code: int | None) -> bool:
     return exit_code is not None and exit_code != 0
 
 
-def render_error(output: str, *, exit_code: int | None) -> str:
+def render_error(
+    output: str,
+    *,
+    exit_code: int | None,
+    output_has_exit_status: bool = False,
+) -> str:
     """Render a failed tool call, surfacing exit status and the output tail.
 
     Errors are the biggest evidence gap today: the transcript shows only the
@@ -268,7 +282,15 @@ def render_error(output: str, *, exit_code: int | None) -> str:
     # model cannot miss the process status (see _format_process_output). The TUI
     # already promotes that status to its own line, so remove only the matching
     # synthetic prefix while preserving any stdout/stderr that follows it.
-    body = normalize_tool_output_for_display(output, exit_code) if status is not None else output
+    body = (
+        normalize_tool_output_for_display(
+            output,
+            exit_code,
+            output_has_exit_status=output_has_exit_status,
+        )
+        if status is not None
+        else output
+    )
     tail = _tail_preview(body, max_lines=_ERROR_TAIL_LINES, max_bytes=_ERROR_TAIL_BYTES)
     if tail:
         lines.append(tail)
@@ -279,7 +301,12 @@ def render_error(output: str, *, exit_code: int | None) -> str:
 _EXIT_RESTATEMENT_PREFIX = "Command exited with code "
 
 
-def normalize_tool_output_for_display(output: str, exit_code: int | None) -> str:
+def normalize_tool_output_for_display(
+    output: str,
+    exit_code: int | None,
+    *,
+    output_has_exit_status: bool = False,
+) -> str:
     """Remove the shell's matching synthetic exit prefix from rendered output.
 
     Mirrors the fallback in ``wisp.tools.process._format_process_output``, which
@@ -292,7 +319,7 @@ def normalize_tool_output_for_display(output: str, exit_code: int | None) -> str
     prefix and separator are removed; the command output remains intact.
     """
 
-    if exit_code is None:
+    if exit_code is None or not output_has_exit_status:
         return output
 
     restatement = f"{_EXIT_RESTATEMENT_PREFIX}{exit_code}"
@@ -305,10 +332,19 @@ def normalize_tool_output_for_display(output: str, exit_code: int | None) -> str
     return output
 
 
-def full_tool_output_for_display(output: str, exit_code: int | None) -> str:
+def full_tool_output_for_display(
+    output: str,
+    exit_code: int | None,
+    *,
+    output_has_exit_status: bool = False,
+) -> str:
     """Return normalized full output with a human-readable failure status."""
 
-    body = normalize_tool_output_for_display(output, exit_code)
+    body = normalize_tool_output_for_display(
+        output,
+        exit_code,
+        output_has_exit_status=output_has_exit_status,
+    )
     status = _exit_status_line(exit_code)
     if status is None:
         return body

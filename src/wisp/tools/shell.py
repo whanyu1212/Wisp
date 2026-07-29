@@ -62,6 +62,7 @@ class BashTool:
             text=output.text,
             data={
                 "exit_code": result.exit_code,
+                "output_has_exit_status": True,
                 "stdout": stdout.text,
                 "stderr": stderr.text,
             },

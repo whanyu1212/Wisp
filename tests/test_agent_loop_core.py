@@ -510,6 +510,7 @@ def test_pure_loop_exposes_bash_exit_code_to_provider(
     result = next(event for event in events if isinstance(event, ToolResultReady))
     assert result.output == expected
     assert result.exit_code == exit_code
+    assert result.output_has_exit_status is True
 
 
 def test_pure_loop_exposes_bash_timeout_as_inconclusive_error(

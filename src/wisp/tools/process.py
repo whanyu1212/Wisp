@@ -13,7 +13,7 @@ from pathlib import Path
 import anyio
 
 from wisp.tools.result import ToolError
-from wisp.tools.truncation import TruncatedText, truncate_text, truncate_text_tail
+from wisp.tools.truncation import TruncatedText, truncate_text_tail
 
 
 @dataclass(frozen=True)
@@ -329,17 +329,21 @@ def _format_process_output_bounded(
     parts = _process_output_parts(stdout, stderr)
     status = f"Command exited with code {exit_code}"
     if not parts:
-        return truncate_text(status, max_bytes=max_bytes, max_lines=max_lines)
+        # Completion evidence is fixed-size metadata, not captured command output.
+        # Keep it intact even when an embedding deliberately selects a tiny body
+        # budget; otherwise the model cannot distinguish success from failure.
+        return TruncatedText(text=status, truncated=False)
 
     prefix = f"{status}: "
-    body_budget = max_bytes - len(prefix.encode("utf-8"))
-    if body_budget <= 0 or max_lines <= 0:
-        bounded_status = truncate_text(status, max_bytes=max_bytes, max_lines=max_lines)
-        return TruncatedText(text=bounded_status.text, truncated=True)
+    if max_bytes <= 0 or max_lines <= 0:
+        return TruncatedText(text=status, truncated=True)
 
     bounded_body = truncate_text_tail(
         "\n".join(parts),
-        max_bytes=body_budget,
+        # The fixed status prefix is bounded metadata outside the configured
+        # captured-output budget. This preserves both the complete exit code and
+        # the diagnostic tail for every positive body budget.
+        max_bytes=max_bytes,
         max_lines=max_lines,
     )
     return TruncatedText(

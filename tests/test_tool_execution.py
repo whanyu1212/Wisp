@@ -168,12 +168,16 @@ class _RaisingList(list[object]):
         raise AssertionError("extension list subclass must not be inspected")
 
 
-def _run_executor(tool: object) -> ToolExecutionEnded:
+def _run_executor(
+    tool: object,
+    *,
+    context: ToolContext | None = None,
+) -> ToolExecutionEnded:
     registry = ToolRegistry()
     registry.register(tool)  # type: ignore[arg-type]
     executor = ConfiguredToolExecutor(
         registry=registry,
-        context=ToolContext(cwd=Path.cwd(), protected_paths=()),
+        context=context or ToolContext(cwd=Path.cwd(), protected_paths=()),
         policy=ToolPolicy.allow_all_tools(),
         approval_policy=ToolApprovalPolicy.approve_all(),
     )
@@ -328,6 +332,31 @@ def test_executor_omits_out_of_range_exit_code() -> None:
 
     assert ended.is_error is False
     assert ended.exit_code is None
+
+
+def test_executor_preserves_bash_exit_envelope_outside_tiny_body_budget() -> None:
+    ended = _run_executor(
+        _ResultTool(
+            name="bash",
+            result=ToolResult(
+                text="Command exited with code 2",
+                data={
+                    "exit_code": 2,
+                    "output_has_exit_status": True,
+                },
+            ),
+        ),
+        context=ToolContext(
+            cwd=Path.cwd(),
+            max_output_bytes=1,
+            max_output_lines=0,
+            protected_paths=(),
+        ),
+    )
+
+    assert ended.output == "Command exited with code 2"
+    assert ended.exit_code == 2
+    assert ended.output_has_exit_status is True
 
 
 def test_executor_propagates_wisp_result_processing_failures(

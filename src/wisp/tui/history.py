@@ -36,6 +36,7 @@ class HistoricalToolCard:
     is_error: bool
     status: ToolPresentationStatus | None = None
     exit_code: int | None = None
+    output_has_exit_status: bool = False
     before_text: str | None = None
     created: bool = False
     summary: str | None = None
@@ -117,6 +118,9 @@ def _historical_tool_card(
         is_error=bool(message.is_error),
         status=status,
         exit_code=tool_result.exit_code if tool_result is not None else None,
+        output_has_exit_status=(
+            tool_result.output_has_exit_status if tool_result is not None else False
+        ),
         before_text=tool_result.before_text if tool_result is not None else None,
         created=tool_result.created if tool_result is not None else False,
         summary=tool_result.summary if tool_result is not None else None,

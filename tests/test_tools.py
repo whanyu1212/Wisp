@@ -367,6 +367,23 @@ def test_bash_tool_reports_successful_exit_code_without_output(tmp_path: Path) -
     assert result.data["exit_code"] == 0
 
 
+def test_bash_tool_preserves_exit_code_outside_tiny_body_budget(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_run_shell(*args: object, **kwargs: object) -> process_tools_module.ProcessResult:
+        return process_tools_module.ProcessResult(exit_code=7, stdout="", stderr="")
+
+    monkeypatch.setattr(shell_tools_module, "_run_shell", fake_run_shell)
+    context = ToolContext(cwd=tmp_path, max_output_bytes=1, max_output_lines=0)
+
+    result = run_tool(BashTool(), {"command": "ignored"}, context)
+
+    assert result.text == "Command exited with code 7"
+    assert result.data["output_has_exit_status"] is True
+    assert result.truncated is False
+
+
 def test_bash_tool_does_not_add_separator_for_newline_only_output(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     python = shlex.quote(sys.executable)
@@ -386,7 +403,8 @@ def test_bash_tool_retruncates_combined_stdout_and_stderr(tmp_path: Path) -> Non
 
     result = run_tool(BashTool(), {"command": command}, context)
 
-    assert len(result.text.encode("utf-8")) <= context.max_output_bytes
+    status_overhead = len(b"Command exited with code -9: ")
+    assert len(result.text.encode("utf-8")) <= context.max_output_bytes + status_overhead
     assert result.text.startswith("Command exited with code -9:")
     assert result.truncated is True
 
@@ -408,7 +426,8 @@ def test_bash_tool_reserves_status_space_without_losing_diagnostic_tail(
 
     result = run_tool(BashTool(), {"command": "ignored"}, context)
 
-    assert len(result.text.encode("utf-8")) <= context.max_output_bytes
+    status_overhead = len(b"Command exited with code 2: ")
+    assert len(result.text.encode("utf-8")) <= context.max_output_bytes + status_overhead
     assert result.text.startswith("Command exited with code 2: [truncated] ")
     assert result.text.endswith("traceback final diagnostic 尾")
     assert "\ufffd" not in result.text

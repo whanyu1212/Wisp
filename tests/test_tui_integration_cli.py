@@ -994,6 +994,7 @@ def test_textual_tui_renderer_normalizes_historical_bash_full_output() -> None:
                         output="Command exited with code 0: ok",
                         is_error=False,
                         exit_code=0,
+                        output_has_exit_status=True,
                     ),
                 )
             )
@@ -1007,6 +1008,38 @@ def test_textual_tui_renderer_normalizes_historical_bash_full_output() -> None:
 
     assert detail == "ok"
     assert full_output == "ok"
+    assert can_expand is False
+
+
+def test_textual_tui_renderer_preserves_matching_legacy_bash_output() -> None:
+    legacy_output = "Command exited with code 0: important"
+
+    async def scenario() -> tuple[str, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.render_history_entries(
+                (
+                    HistoricalToolCard(
+                        card_id="history:tool-1",
+                        name="bash",
+                        arguments={"command": "legacy-command"},
+                        output=legacy_output,
+                        is_error=False,
+                        exit_code=0,
+                        output_has_exit_status=False,
+                    ),
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            detail = card._detail
+            assert isinstance(detail, str)
+            return detail, card._full_output, card._can_expand()
+
+    detail, full_output, can_expand = anyio.run(scenario)
+
+    assert detail == legacy_output
+    assert full_output == legacy_output
     assert can_expand is False
 
 
@@ -1603,6 +1636,7 @@ def test_textual_bash_card_normalizes_collapsed_and_full_output() -> None:
                     output="Command exited with code 0: ok",
                     is_error=False,
                     exit_code=0,
+                    output_has_exit_status=True,
                 )
             )
             await pilot.pause()
@@ -1637,6 +1671,7 @@ def test_textual_failed_bash_card_normalizes_collapsed_and_full_output() -> None
                     output="Command exited with code 2: diagnostic",
                     is_error=False,
                     exit_code=2,
+                    output_has_exit_status=True,
                 )
             )
             await pilot.pause()

@@ -901,6 +901,7 @@ def test_session_message_page_projects_tool_result_presentation_metadata(
         ),
         tool_result=ToolResultPresentationSnapshot(
             status="done",
+            output_has_exit_status=True,
             before_text="old\n",
             created=False,
             summary="wrote file",
@@ -920,6 +921,7 @@ def test_session_message_page_projects_tool_result_presentation_metadata(
     page = session.read_message_page()
     assert page.messages[0].tool_result == RpcMessageToolResultSnapshot(
         status="done",
+        output_has_exit_status=True,
         before_text="old\n",
         created=False,
         summary="wrote file",

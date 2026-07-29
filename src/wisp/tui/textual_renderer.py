@@ -283,6 +283,7 @@ class TextualTuiRenderer:
                 entry.output,
                 is_error=entry.is_error,
                 exit_code=entry.exit_code,
+                output_has_exit_status=entry.output_has_exit_status,
                 before_text=entry.before_text,
                 created=entry.created,
                 summary=entry.summary,
@@ -290,6 +291,7 @@ class TextualTuiRenderer:
             full_output=full_tool_output_for_display(
                 entry.output,
                 entry.exit_code,
+                output_has_exit_status=entry.output_has_exit_status,
             ),
             truncated=entry.truncated,
         )
@@ -477,6 +479,7 @@ class TextualTuiRenderer:
                     event.output,
                     is_error=event.is_error,
                     exit_code=event.exit_code,
+                    output_has_exit_status=event.output_has_exit_status,
                     before_text=event.before_text,
                     created=event.created,
                     summary=event.summary,
@@ -489,6 +492,7 @@ class TextualTuiRenderer:
                 full_output=full_tool_output_for_display(
                     event.output,
                     event.exit_code,
+                    output_has_exit_status=event.output_has_exit_status,
                 ),
                 truncated=event.truncated,
             )
