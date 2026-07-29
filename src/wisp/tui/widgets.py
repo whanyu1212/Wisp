@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
 
 from textual import events
 from textual.app import ComposeResult
@@ -49,6 +48,7 @@ from wisp.tui.decision_content import (
     _DecisionContent,
     _trust_content,
 )
+from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.rendering import (
     TuiViewSnapshot,
     _truncate_to_cell_width,
@@ -58,12 +58,6 @@ from wisp.tui.rendering import (
 _TOOL_OUTPUT_PREVIEW_LINES = 8
 _TOOL_OUTPUT_PREVIEW_BYTES = 2_000
 PASTE_DISPLAY_THRESHOLD = 2_000
-
-
-@dataclass(frozen=True)
-class TranscriptViewportState:
-    scroll_y: float
-    following: bool
 
 
 class PromptEditor(TextArea):

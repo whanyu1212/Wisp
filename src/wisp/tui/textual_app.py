@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
@@ -23,6 +22,11 @@ from wisp.events import (
 from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tui.commands import DEFAULT_TUI_COMMAND_CATALOG, TuiCommandCatalog
 from wisp.tui.compact_echo import CompactEchoLog
+from wisp.tui.overlay import (
+    OverlayKind,
+    OverlayOperation,
+    TextualOverlayController,
+)
 from wisp.tui.rendering import (
     TuiRenderer,
     TuiViewSnapshot,
@@ -43,7 +47,6 @@ from wisp.tui.widgets import (
     StatusBar,
     ToolCard,
     Transcript,
-    TranscriptViewportState,
     WorkingIndicator,
 )
 
@@ -299,18 +302,8 @@ class TextualTui(App[None]):
         self._decision_panel: DecisionPanel | None = None
         self._model_picker: ModelPicker | None = None
         self._session_picker: SessionPicker | None = None
+        self._overlay_controller: TextualOverlayController | None = None
         self._command_catalog = DEFAULT_TUI_COMMAND_CATALOG
-        self._command_palette_transcript_state: TranscriptViewportState | None = None
-        self._session_operation_in_progress = False
-        # Monotonic timestamp of the most recent _prepare_overlay() call
-        # (see on_event / _prepare_overlay). Any Key/MouseDown/MouseUp/
-        # Paste event timestamped before this barrier is dropped before it
-        # reaches whichever widget currently has focus or is at its screen
-        # coordinates, closing the race where an event already queued for the
-        # composer would otherwise land on it (still focused, only hidden) or
-        # on the decision panel's OptionList (once Widget.focus()'s deferred
-        # call_later lands) instead of being treated as stale.
-        self._stale_event_barrier = 0.0
         self._current_prompt = "wisp> "
         self._runner: Callable[[], Awaitable[None]] | None = None
         self._runner_error: Exception | None = None
@@ -407,6 +400,18 @@ class TextualTui(App[None]):
         self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
         self._model_picker = self.query_one("#model-picker", ModelPicker)
         self._session_picker = self.query_one("#session-picker", SessionPicker)
+        self._overlay_controller = TextualOverlayController(
+            composer=self._input,
+            suggestion=self._suggest,
+            transcript=self._transcript,
+            overlays={
+                OverlayKind.decision: self._decision_panel,
+                OverlayKind.model_picker: self._model_picker,
+                OverlayKind.session_picker: self._session_picker,
+                OverlayKind.command_palette: self._command_palette,
+            },
+            defer_after_refresh=self._defer_overlay_restore,
+        )
         self.set_command_catalog(self._command_catalog)
         self._input.focus()  # keep the editor as the resting focus
         if self._runner is not None:
@@ -666,9 +671,9 @@ class TextualTui(App[None]):
         # through before Textual forwards it to whatever currently has focus
         # or is at its screen coordinates — earlier than any widget's own
         # on_key/BINDINGS, and earlier than this app's own on_key below. An
-        # event timestamped before _stale_event_barrier was read by the driver
+        # event timestamped before the overlay controller's barrier was read by the driver
         # before a decision panel opened (or is opening — the barrier is
-        # raised in _prepare_overlay before the composer is hidden or
+        # raised before the composer is hidden or
         # focus moves), so it must never reach a focused/hit-tested widget:
         # dropping it here, rather than in DecisionPanel.on_key or
         # PromptEditor.on_key individually, closes the race for every widget
@@ -691,7 +696,12 @@ class TextualTui(App[None]):
         # stale paste could otherwise still reach a focused-but-hidden
         # PromptEditor or an OptionList.
         stale_event_types = (events.Key, events.MouseEvent, events.Paste)
-        if isinstance(event, stale_event_types) and event.time < self._stale_event_barrier:
+        overlays = self._overlay_controller
+        if (
+            overlays is not None
+            and isinstance(event, stale_event_types)
+            and overlays.event_is_stale(event.time)
+        ):
             return
         await super().on_event(event)
 
@@ -835,16 +845,10 @@ class TextualTui(App[None]):
             self.notify("Copied selection to clipboard.")
 
     def action_interrupt(self) -> None:
-        # The session picker is a transient decision overlay, not active agent
-        # work. Treat ctrl+c as picker cancellation so the hidden composer draft
-        # is restored instead of queueing KeyboardInterrupt and clearing it.
-        if self._session_picker is not None and self._session_picker.is_open:
-            self.hide_session_picker()
-            return
-        # Selection and history hydration are sequential RPC reads, not an agent
-        # command that Ctrl-C can cancel. Keep the hidden composer draft intact
-        # until the shell completes (or fails) the session-switch lifecycle.
-        if self._session_operation_in_progress:
+        # Session pickers and their sequential RPC reads own Ctrl-C as a
+        # presentation cancellation/guard, not an agent interruption.
+        overlays = self._overlay_controller
+        if overlays is not None and overlays.consume_interrupt():
             return
         # If the prompt editor owns the keystroke AND has selected text, ctrl+c
         # means "copy", not "interrupt". Because this binding is priority=True (so
@@ -876,10 +880,10 @@ class TextualTui(App[None]):
             return
         if self._input is None or not self._input.display:
             return
-        self._command_palette_transcript_state = (
-            self._transcript.viewport_state() if self._transcript is not None else None
-        )
-        self._prepare_overlay()
+        overlays = self._overlay_controller
+        if overlays is None:
+            return
+        overlays.open(OverlayKind.command_palette, preserve_viewport=True)
         composer = self.query_one("#composer")
         palette.styles.max_height = max(4, composer.region.y)
         palette.show()
@@ -1002,69 +1006,42 @@ class TextualTui(App[None]):
         if self._input is not None:
             self._input.placeholder = _input_placeholder(hint)
 
-    def _prepare_overlay(self) -> None:
-        # Shared by every show_*() below. Raises the stale-event barrier (see
-        # on_event) before touching focus/visibility, so there is no window
-        # where an event already queued for the composer could still land on
-        # it after this method hides it but before the barrier is active.
-        self._stale_event_barrier = time.monotonic()
-        if self._suggest is not None:
-            self._suggest.hide()
-        if self._decision_panel is not None and self._decision_panel.is_open:
-            self._decision_panel.hide()
-        if self._model_picker is not None and self._model_picker.is_open:
-            self._model_picker.hide()
-        if self._session_picker is not None and self._session_picker.is_open:
-            self._session_picker.hide()
-        if self._command_palette is not None and self._command_palette.is_open:
-            self._command_palette.hide()
-            self._command_palette_transcript_state = None
-        if self._input is not None:
-            self._input.display = False
+    def _defer_overlay_restore(self, callback: Callable[[], None]) -> None:
+        self.call_after_refresh(callback)
 
     def hide_command_palette(self) -> None:
-        palette = self._command_palette
-        if palette is None or not palette.is_open:
-            return
-        palette.hide()
-        if self._input is not None:
-            self._input.display = True
-            self._input.focus()
-        state = self._command_palette_transcript_state
-        self._command_palette_transcript_state = None
-        transcript = self._transcript
-        if state is not None and transcript is not None:
-            self.call_after_refresh(lambda: transcript.restore_viewport_state(state))
+        overlays = self._overlay_controller
+        if overlays is not None:
+            overlays.close(OverlayKind.command_palette)
 
     def show_approval(self, event: ToolApprovalRequested, *, cwd: str) -> None:
         panel = self._decision_panel
-        if panel is None:
+        overlays = self._overlay_controller
+        if panel is None or overlays is None:
             return
-        self._prepare_overlay()
+        overlays.open(OverlayKind.decision)
         panel.show_approval(event, cwd=cwd)
 
     def show_approval_all_confirmation(self, event: ToolApprovalRequested) -> None:
         panel = self._decision_panel
-        if panel is None:
+        overlays = self._overlay_controller
+        if panel is None or overlays is None:
             return
-        self._prepare_overlay()
+        overlays.open(OverlayKind.decision)
         panel.show_all_confirmation(event)
 
     def show_trust(self, event: TrustRequested) -> None:
         panel = self._decision_panel
-        if panel is None:
+        overlays = self._overlay_controller
+        if panel is None or overlays is None:
             return
-        self._prepare_overlay()
+        overlays.open(OverlayKind.decision)
         panel.show_trust(event)
 
     def hide_decision(self) -> None:
-        panel = self._decision_panel
-        if panel is None or not panel.is_open:
-            return
-        panel.hide()
-        if self._input is not None:
-            self._input.display = True
-            self._input.focus()
+        overlays = self._overlay_controller
+        if overlays is not None:
+            overlays.close(OverlayKind.decision)
 
     def show_model_picker(
         self,
@@ -1075,9 +1052,10 @@ class TextualTui(App[None]):
         current_effort: str | None,
     ) -> None:
         picker = self._model_picker
-        if picker is None:
+        overlays = self._overlay_controller
+        if picker is None or overlays is None:
             return
-        self._prepare_overlay()
+        overlays.open(OverlayKind.model_picker)
         picker.show(
             entries,
             current_provider=current_provider,
@@ -1086,13 +1064,9 @@ class TextualTui(App[None]):
         )
 
     def hide_model_picker(self) -> None:
-        picker = self._model_picker
-        if picker is None or not picker.is_open:
-            return
-        picker.hide()
-        if self._input is not None:
-            self._input.display = True
-            self._input.focus()
+        overlays = self._overlay_controller
+        if overlays is not None:
+            overlays.close(OverlayKind.model_picker)
 
     def show_session_picker(
         self,
@@ -1100,42 +1074,37 @@ class TextualTui(App[None]):
         *,
         selected_session_id: str | None,
     ) -> None:
-        self._session_operation_in_progress = False
         picker = self._session_picker
-        if picker is None:
+        overlays = self._overlay_controller
+        if picker is None or overlays is None:
             return
-        self._prepare_overlay()
+        overlays.open(OverlayKind.session_picker)
         picker.show(sessions, selected_session_id=selected_session_id)
 
     def hide_session_picker(self, *, restore_input: bool = True) -> None:
-        picker = self._session_picker
-        if picker is None or not picker.is_open:
-            return
-        picker.hide()
-        if restore_input and self._input is not None:
-            self._input.display = True
-            self._input.focus()
+        overlays = self._overlay_controller
+        if overlays is not None:
+            overlays.close(OverlayKind.session_picker, restore_composer=restore_input)
 
     def session_catalog_started(self) -> None:
-        self._session_operation_in_progress = True
-        self._prepare_overlay()
+        overlays = self._overlay_controller
+        if overlays is not None:
+            overlays.start_operation(OverlayOperation.session_catalog)
 
     def session_catalog_finished(self) -> None:
-        self._session_operation_in_progress = False
-        if self._input is not None:
-            self._input.display = True
-            self._input.focus()
+        overlays = self._overlay_controller
+        if overlays is not None:
+            overlays.finish_operation(OverlayOperation.session_catalog)
 
     def session_switch_started(self) -> None:
-        self._session_operation_in_progress = True
-        self._prepare_overlay()
+        overlays = self._overlay_controller
+        if overlays is not None:
+            overlays.start_operation(OverlayOperation.session_switch)
 
     def session_switch_finished(self) -> None:
-        self._session_operation_in_progress = False
-        self.hide_session_picker(restore_input=False)
-        if self._input is not None:
-            self._input.display = True
-            self._input.focus()
+        overlays = self._overlay_controller
+        if overlays is not None:
+            overlays.finish_operation(OverlayOperation.session_switch)
 
     def replace_transcript(self) -> None:
         """Drop the previous session's UI-owned transcript bookkeeping."""

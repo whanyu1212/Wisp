@@ -350,7 +350,7 @@ def test_app_on_event_drops_stale_key_queued_before_model_picker_opened() -> Non
     # Same app-level barrier DecisionPanel relies on (see
     # test_app_on_event_drops_key_queued_before_decision_panel_opened in
     # test_tui_decision_panel.py) -- show_model_picker must also raise
-    # _stale_event_barrier before hiding the composer/moving focus, so a key
+    # overlay-controller barrier before hiding the composer/moving focus, so a key
     # already queued for the composer can't land on it (still focused, only
     # hidden) or on the picker's OptionList once focus lands there.
     async def scenario() -> tuple[bool, bool]:
@@ -373,12 +373,14 @@ def test_app_on_event_drops_stale_key_queued_before_model_picker_opened() -> Non
             with mock.patch.object(App, "on_event", recording_app_on_event):
                 stale_key = events.Key("enter", None)
                 stale_key.set_sender(app)
-                stale_key.time = app._stale_event_barrier - 1.0
+                assert app._overlay_controller is not None
+                barrier = app._overlay_controller.stale_event_barrier
+                stale_key.time = barrier - 1.0
                 await app.on_event(stale_key)
 
                 fresh_key = events.Key("enter", None)
                 fresh_key.set_sender(app)
-                fresh_key.time = app._stale_event_barrier + 1.0
+                fresh_key.time = barrier + 1.0
                 await app.on_event(fresh_key)
 
             return stale_key not in forwarded, fresh_key in forwarded
