@@ -659,6 +659,64 @@ def test_bash_tool_skips_taskkill_after_windows_job_termination(
     assert process.killed is False
 
 
+def test_bash_tool_retains_windows_job_handle_when_termination_fails(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        returncode = 0
+        pid = 123
+        _handle = 456
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 1
+
+        def TerminateJobObject(self, job: int, exit_code: int) -> int:
+            self.calls.append(("terminate", job, exit_code))
+            return 0
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
+            return 1
+
+    taskkill_calls: list[list[str]] = []
+    kernel32 = FakeKernel32()
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        taskkill_calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    process_tools_module._attach_windows_job(process)  # type: ignore[arg-type]  # noqa: SLF001
+    terminated = process_tools_module._kill_process_tree(process)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert terminated is False
+    assert getattr(process, process_tools_module._WINDOWS_JOB_HANDLE_ATTR) == 789  # noqa: SLF001
+    assert kernel32.calls == [
+        ("create",),
+        ("assign", 789, 456),
+        ("terminate", 789, 1),
+    ]
+    assert taskkill_calls == []
+    assert process.killed is False
+
+
 def test_bash_tool_assigns_windows_job_before_resuming_shell(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,

@@ -615,6 +615,35 @@ def test_one_shot_completion_kills_descendant_with_redirected_output(tmp_path: P
         os.kill(child_pid, 0)
 
 
+def test_one_shot_completion_surfaces_process_tree_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_terminate(_process: asyncio.subprocess.Process) -> bool:
+        return False
+
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_terminate)
+
+    async def run() -> int:
+        supervisor = ProcessSupervisor()
+        try:
+            with pytest.raises(ToolError, match="Failed to terminate process tree"):
+                await supervisor.run_to_completion(
+                    _python_command("print('done')"),
+                    cwd=tmp_path,
+                    timeout=2,
+                    max_output_bytes=1_000,
+                    max_output_lines=100,
+                )
+            return len(supervisor._one_shot)  # noqa: SLF001
+        finally:
+            await supervisor.aclose()
+
+    retained_count = anyio.run(run)
+
+    assert retained_count == 1
+
+
 def test_one_shot_releases_ownership_inside_cancelled_scope_while_lock_is_contended(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -623,10 +652,10 @@ def test_one_shot_releases_ownership_inside_cancelled_scope_while_lock_is_conten
     terminate_started = anyio.Event()
     allow_terminate = anyio.Event()
 
-    async def delayed_terminate(process: asyncio.subprocess.Process) -> None:
+    async def delayed_terminate(process: asyncio.subprocess.Process) -> bool:
         terminate_started.set()
         await allow_terminate.wait()
-        await original_terminate(process)
+        return await original_terminate(process)
 
     monkeypatch.setattr(process_manager_module, "_terminate_process_tree", delayed_terminate)
 
@@ -695,10 +724,10 @@ def test_one_shot_releases_ownership_after_raw_task_cancel_while_lock_is_contend
     terminate_started = asyncio.Event()
     allow_terminate = asyncio.Event()
 
-    async def delayed_terminate(process: asyncio.subprocess.Process) -> None:
+    async def delayed_terminate(process: asyncio.subprocess.Process) -> bool:
         terminate_started.set()
         await allow_terminate.wait()
-        await original_terminate(process)
+        return await original_terminate(process)
 
     monkeypatch.setattr(process_manager_module, "_terminate_process_tree", delayed_terminate)
 
@@ -763,10 +792,10 @@ def test_one_shot_releases_ownership_after_raw_task_cancel_during_cleanup(
     terminate_started = asyncio.Event()
     allow_terminate = asyncio.Event()
 
-    async def delayed_terminate(process: asyncio.subprocess.Process) -> None:
+    async def delayed_terminate(process: asyncio.subprocess.Process) -> bool:
         terminate_started.set()
         await allow_terminate.wait()
-        await original_terminate(process)
+        return await original_terminate(process)
 
     monkeypatch.setattr(process_manager_module, "_terminate_process_tree", delayed_terminate)
 
@@ -938,10 +967,10 @@ def test_aclose_finishes_cleanup_before_propagating_caller_cancellation(
     cleanup_started = asyncio.Event()
     allow_cleanup = asyncio.Event()
 
-    async def delayed_terminate(process: asyncio.subprocess.Process) -> None:
+    async def delayed_terminate(process: asyncio.subprocess.Process) -> bool:
         cleanup_started.set()
         await allow_cleanup.wait()
-        await original_terminate(process)
+        return await original_terminate(process)
 
     monkeypatch.setattr(process_manager_module, "_terminate_process_tree", delayed_terminate)
 

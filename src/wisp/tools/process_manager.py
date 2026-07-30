@@ -167,10 +167,14 @@ class ProcessSupervisor:
 
             cleanup_task = asyncio.create_task(_terminate_process_tree(process))
             try:
-                await self._await_task_before_propagating_cancellation(cleanup_task)
+                cleanup_succeeded = await self._await_task_before_propagating_cancellation(
+                    cleanup_task
+                )
             except asyncio.CancelledError:
                 release_ownership = True
                 raise
+            if not cleanup_succeeded:
+                raise ToolError("Failed to terminate process tree")
             result = ProcessResult(
                 exit_code=process.returncode if process.returncode is not None else -1,
                 stdout=stdout_bytes.decode("utf-8", errors="replace"),
@@ -437,6 +441,7 @@ class ProcessSupervisor:
 
         completion = asyncio.create_task(wait_for_process_completion_or_reader_failure())
         reader_failure: BaseException | None = None
+        cleanup_succeeded = True
         try:
             try:
                 reader_failure = await asyncio.wait_for(
@@ -445,23 +450,26 @@ class ProcessSupervisor:
                 )
             except TimeoutError:
                 managed.terminal_override = managed.terminal_override or "timed_out"
-                await _terminate_process_tree(managed.process)
+                cleanup_succeeded = await _terminate_process_tree(managed.process)
                 await self._finish_terminated_io(managed)
                 reader_failure = await completion
             if reader_failure is not None:
-                await _terminate_process_tree(managed.process)
+                cleanup_succeeded = await _terminate_process_tree(managed.process)
                 await self._finish_terminated_io(managed)
             # A shell can exit after launching descendants whose output is
             # redirected away from its pipes. The leader and both readers are
             # then finished even though the owned process group is not. Reap
             # that remaining group before publishing a terminal handle.
             else:
-                await _terminate_process_tree(managed.process)
+                cleanup_succeeded = await _terminate_process_tree(managed.process)
             managed.exit_code = managed.process.returncode
             if managed.terminal_override is not None:
                 managed.state = managed.terminal_override
             elif reader_failure is not None:
                 managed.error = "Failed to read process output"
+                managed.state = "failed"
+            elif not cleanup_succeeded:
+                managed.error = "Failed to terminate process tree"
                 managed.state = "failed"
             else:
                 managed.state = "completed"

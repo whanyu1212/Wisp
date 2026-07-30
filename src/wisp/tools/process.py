@@ -199,21 +199,21 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
     return process
 
 
-async def _kill_process_tree_and_wait(process: asyncio.subprocess.Process) -> None:
-    await _terminate_process_tree(process)
+async def _kill_process_tree_and_wait(process: asyncio.subprocess.Process) -> bool:
+    terminated = await _terminate_process_tree(process)
     await process.wait()
     await _drain_process_stream(process.stdout)
     await _drain_process_stream(process.stderr)
     await asyncio.sleep(0)
+    return terminated
 
 
-async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
+async def _terminate_process_tree(process: asyncio.subprocess.Process) -> bool:
     """Terminate a process tree without blocking the event loop on Windows."""
 
     if os.name == "nt":
-        await asyncio.to_thread(_kill_process_tree, process)
-        return
-    _kill_process_tree(process)
+        return await asyncio.to_thread(_kill_process_tree, process)
+    return _kill_process_tree(process)
 
 
 async def _drain_process_stream(stream: asyncio.StreamReader | None) -> None:
@@ -225,7 +225,7 @@ async def _drain_process_stream(stream: asyncio.StreamReader | None) -> None:
         return
 
 
-def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
+def _kill_process_tree(process: asyncio.subprocess.Process) -> bool:
     if os.name == "posix":
         # Every process created by this module starts a fresh session whose
         # process-group id is the leader pid. Descendants can outlive that leader
@@ -234,24 +234,24 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
-            return
+            return True
         except PermissionError:
             if process.returncode is not None:
-                return
+                return True
             try:
                 process.kill()
             except (ProcessLookupError, PermissionError):
-                return
-        return
+                return False
+        return True
     if os.name == "nt":
+        had_job = getattr(process, _WINDOWS_JOB_HANDLE_ATTR, None) is not None
         if _terminate_windows_job(process):
-            return
+            return True
         leader_running = _windows_process_leader_is_running(process)
         if leader_running is False:
-            return
+            return not had_job
         if leader_running is None:
-            _kill_leader_if_running(process)
-            return
+            return _kill_leader_if_running(process) and not had_job
         try:
             completed = subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(process.pid)],
@@ -261,23 +261,26 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
                 timeout=5,
             )
         except (OSError, subprocess.TimeoutExpired):
-            _kill_leader_if_running(process)
+            return _kill_leader_if_running(process) and not had_job
         else:
             if completed.returncode != 0:
-                _kill_leader_if_running(process)
+                return _kill_leader_if_running(process) and not had_job
+            return True
     else:
         if process.returncode is not None:
-            return
+            return True
         process.kill()
+        return True
 
 
-def _kill_leader_if_running(process: asyncio.subprocess.Process) -> None:
+def _kill_leader_if_running(process: asyncio.subprocess.Process) -> bool:
     if process.returncode is not None:
-        return
+        return True
     try:
         process.kill()
     except (ProcessLookupError, PermissionError):
-        return
+        return False
+    return True
 
 
 async def _cleanup_failed_windows_process_setup(process: asyncio.subprocess.Process) -> None:
@@ -402,7 +405,6 @@ def _terminate_windows_job(process: asyncio.subprocess.Process) -> bool:
     job_handle = getattr(process, _WINDOWS_JOB_HANDLE_ATTR, None)
     if job_handle is None:
         return False
-    setattr(process, _WINDOWS_JOB_HANDLE_ATTR, None)
     kernel32 = _windows_kernel32()
     if kernel32 is None:
         return False
@@ -411,8 +413,10 @@ def _terminate_windows_job(process: asyncio.subprocess.Process) -> bool:
         terminated = bool(kernel32.TerminateJobObject(job_handle, 1))
     except (AttributeError, OSError):
         terminated = False
-    finally:
-        _close_windows_handle(kernel32, job_handle)
+    if not terminated:
+        return False
+    setattr(process, _WINDOWS_JOB_HANDLE_ATTR, None)
+    _close_windows_handle(kernel32, job_handle)
     return terminated
 
 
