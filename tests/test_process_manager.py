@@ -858,6 +858,50 @@ def test_aclose_initializes_cleanup_inside_cancelled_scope_while_lock_is_contend
         os.kill(pid, 0)
 
 
+def test_aclose_initializes_cleanup_after_raw_task_cancel_while_lock_is_contended(
+    tmp_path: Path,
+) -> None:
+    async def run() -> int:
+        supervisor = ProcessSupervisor()
+        process_id = await supervisor.start(
+            _python_command("import time; time.sleep(30)"),
+            cwd=tmp_path,
+            timeout=30,
+        )
+        process = supervisor._managed[process_id].process  # noqa: SLF001
+        assert process.pid is not None
+
+        lock_held = asyncio.Event()
+        release_lock = asyncio.Event()
+
+        async def hold_lock() -> None:
+            async with supervisor._lock:  # noqa: SLF001
+                lock_held.set()
+                await release_lock.wait()
+
+        hold_lock_task = asyncio.create_task(hold_lock())
+        await lock_held.wait()
+
+        close_task = asyncio.create_task(supervisor.aclose())
+        await anyio.sleep(0.05)
+        close_task.cancel()
+        await anyio.sleep(0.05)
+        assert close_task.done() is False
+
+        release_lock.set()
+        await hold_lock_task
+        with anyio.fail_after(3):
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+        assert process.returncode is not None
+        return process.pid
+
+    pid = anyio.run(run)
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
 def test_managed_process_cancel_terminates_descendants(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "child.pid"

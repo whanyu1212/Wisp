@@ -8,7 +8,7 @@ import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 from uuid import uuid4
 
 import anyio
@@ -24,6 +24,7 @@ from wisp.tools.process import (
 from wisp.tools.result import ToolError
 
 ProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
+_T = TypeVar("_T")
 
 DEFAULT_MAX_MANAGED_PROCESSES = 8
 DEFAULT_MAX_RETAINED_BYTES = 50_000
@@ -246,30 +247,44 @@ class ProcessSupervisor:
     async def aclose(self) -> None:
         """Terminate all owned process trees. Safe to call repeatedly or concurrently."""
 
-        with anyio.CancelScope(shield=True):
-            async with self._lock:
-                if self._close_task is None:
-                    self._closed = True
-                    self._close_task = asyncio.create_task(self._close_owned_processes())
-                close_task = self._close_task
-
         # Keep shutdown attached to this call even when its caller is cancelled.
         # Frontends call aclose() from their finalizers and may tear down the event
         # loop as soon as cancellation propagates, so merely leaving close_task
         # running in the background is not sufficient.
+        init_task = asyncio.create_task(self._initialize_close_task())
+        try:
+            close_task = await asyncio.shield(init_task)
+        except asyncio.CancelledError:
+            close_task = await self._await_task_after_cancellation(init_task)
+            await self._await_task_after_cancellation(close_task)
+            raise
+
         try:
             await asyncio.shield(close_task)
         except asyncio.CancelledError:
-            with anyio.CancelScope(shield=True):
-                while not close_task.done():
-                    try:
-                        await asyncio.shield(close_task)
-                    except asyncio.CancelledError:
-                        # A caller may issue more than one direct asyncio
-                        # cancellation while cleanup is in progress.
-                        continue
-                close_task.result()
+            await self._await_task_after_cancellation(close_task)
             raise
+
+    async def _initialize_close_task(self) -> asyncio.Task[None]:
+        async with self._lock:
+            if self._close_task is None:
+                self._closed = True
+                self._close_task = asyncio.create_task(self._close_owned_processes())
+            assert self._close_task is not None
+            return self._close_task
+
+    async def _await_task_after_cancellation(self, task: asyncio.Task[_T]) -> _T:
+        while True:
+            if task.done():
+                return task.result()
+            try:
+                with anyio.CancelScope(shield=True):
+                    result = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # A caller may issue more than one direct asyncio cancellation
+                # while cleanup is in progress.
+                continue
+            return result
 
     async def _close_owned_processes(self) -> None:
         async with self._lock:
