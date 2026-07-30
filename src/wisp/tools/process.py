@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import os
+import shlex
 import signal
 import subprocess
+import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -19,6 +21,7 @@ from wisp.tools.result import ToolError
 from wisp.tools.truncation import TruncatedText, truncate_text_tail
 
 _WINDOWS_JOB_HANDLE_ATTR = "_wisp_windows_job_handle"
+_POSIX_JOBS_FILE_ATTR = "_wisp_posix_jobs_file"
 _WINDOWS_CREATE_SUSPENDED = 0x00000004
 _WINDOWS_INVALID_HANDLE_VALUE = cast(int, ctypes.c_void_p(-1).value)
 _WINDOWS_RESUME_FAILED = 0xFFFFFFFF
@@ -27,6 +30,7 @@ _WINDOWS_THREAD_SUSPEND_RESUME = 0x0002
 _WINDOWS_WAIT_FAILED = 0xFFFFFFFF
 _WINDOWS_WAIT_TIMEOUT = 0x00000102
 _OUTPUT_LIMIT_EXIT_GRACE_SECONDS = 0.1
+_POSIX_TERMINATION_GRACE_SECONDS = 0.05
 
 
 class _WindowsThreadEntry32(ctypes.Structure):
@@ -53,6 +57,7 @@ class _ProcessSupervisor(Protocol):
         process: asyncio.subprocess.Process,
         *,
         wait: bool = False,
+        force: bool = False,
     ) -> bool: ...
 
     async def _release_one_shot(self, process: asyncio.subprocess.Process) -> None: ...
@@ -193,6 +198,11 @@ async def _run_shell(
 
 
 async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subprocess.Process:
+    posix_jobs_file: Path | None = None
+    if os.name == "posix":
+        with tempfile.NamedTemporaryFile(prefix="wisp-jobs-", delete=False) as jobs_file:
+            posix_jobs_file = Path(jobs_file.name)
+        command = _wrap_posix_shell_command(command, posix_jobs_file)
     try:
         if os.name == "nt":
             process = await asyncio.create_subprocess_shell(
@@ -216,7 +226,12 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
                 stderr=asyncio.subprocess.PIPE,
             )
     except OSError as exc:
+        if posix_jobs_file is not None:
+            _remove_posix_jobs_file(posix_jobs_file)
         raise ToolError(f"Failed to start command: {exc}") from exc
+
+    if posix_jobs_file is not None:
+        setattr(process, _POSIX_JOBS_FILE_ATTR, posix_jobs_file)
 
     if os.name == "nt":
         try:
@@ -232,6 +247,22 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
     return process
 
 
+def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
+    quoted_jobs_file = shlex.quote(str(jobs_file))
+    quoted_command = shlex.quote(command)
+    return (
+        "__wisp_record_jobs() { jobs -pr >> "
+        f"{quoted_jobs_file}"
+        " 2>/dev/null || true; }; "
+        "trap '__wisp_record_jobs' HUP INT TERM; "
+        f"eval {quoted_command}; "
+        "__wisp_status=$?; "
+        "trap - HUP INT TERM; "
+        "__wisp_record_jobs; "
+        "exit $__wisp_status"
+    )
+
+
 async def _kill_process_tree_and_wait(process: asyncio.subprocess.Process) -> bool:
     terminated = await _terminate_process_tree(process)
     if not terminated:
@@ -243,12 +274,99 @@ async def _kill_process_tree_and_wait(process: asyncio.subprocess.Process) -> bo
     return terminated
 
 
-async def _terminate_process_tree(process: asyncio.subprocess.Process) -> bool:
+async def _terminate_process_tree(
+    process: asyncio.subprocess.Process,
+    *,
+    force: bool = False,
+) -> bool:
     """Terminate a process tree without blocking the event loop on Windows."""
 
+    if force:
+        if os.name == "nt":
+            return await asyncio.to_thread(_kill_process_tree, process)
+        return _kill_process_tree(process)
     if os.name == "nt":
         return await asyncio.to_thread(_kill_process_tree, process)
+    if os.name == "posix":
+        return await _terminate_posix_process_tree(process)
     return _kill_process_tree(process)
+
+
+async def _terminate_posix_process_tree(process: asyncio.subprocess.Process) -> bool:
+    group_term_succeeded = _signal_posix_process_group(process, signal.SIGTERM)
+    recorded_term_succeeded = _signal_posix_recorded_jobs(process, signal.SIGTERM)
+    if not group_term_succeeded or not recorded_term_succeeded:
+        return False
+    await asyncio.sleep(_POSIX_TERMINATION_GRACE_SECONDS)
+    group_kill_succeeded = _signal_posix_process_group(process, signal.SIGKILL)
+    recorded_kill_succeeded = _signal_posix_recorded_jobs(process, signal.SIGKILL)
+    if group_kill_succeeded and recorded_kill_succeeded:
+        _remove_posix_jobs_file(getattr(process, _POSIX_JOBS_FILE_ATTR, None))
+        return True
+    return False
+
+
+def _signal_posix_process_group(
+    process: asyncio.subprocess.Process,
+    selected_signal: signal.Signals,
+) -> bool:
+    try:
+        os.killpg(process.pid, selected_signal)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        try:
+            if process.returncode is None:
+                process.kill()
+        except (ProcessLookupError, PermissionError):
+            pass
+        return False
+    return True
+
+
+def _signal_posix_recorded_jobs(
+    process: asyncio.subprocess.Process,
+    selected_signal: signal.Signals,
+) -> bool:
+    succeeded = True
+    for pid in _posix_recorded_job_pids(process):
+        try:
+            os.kill(pid, selected_signal)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            succeeded = False
+    return succeeded
+
+
+def _posix_recorded_job_pids(process: asyncio.subprocess.Process) -> tuple[int, ...]:
+    jobs_file = getattr(process, _POSIX_JOBS_FILE_ATTR, None)
+    if not isinstance(jobs_file, Path):
+        return ()
+    try:
+        lines = jobs_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ()
+    pids: list[int] = []
+    for line in lines:
+        try:
+            pid = int(line)
+        except ValueError:
+            continue
+        if pid > 0 and pid != process.pid:
+            pids.append(pid)
+    return tuple(dict.fromkeys(pids))
+
+
+def _remove_posix_jobs_file(jobs_file: object) -> None:
+    if not isinstance(jobs_file, Path):
+        return
+    try:
+        jobs_file.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
 
 
 async def _drain_process_stream(stream: asyncio.StreamReader | None) -> None:
@@ -266,18 +384,12 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> bool:
         # process-group id is the leader pid. Descendants can outlive that leader
         # while still holding its stdout/stderr pipes open, so signal the group
         # even after asyncio has observed a return code for the leader.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        group_succeeded = _signal_posix_process_group(process, signal.SIGKILL)
+        recorded_succeeded = _signal_posix_recorded_jobs(process, signal.SIGKILL)
+        if group_succeeded and recorded_succeeded:
+            _remove_posix_jobs_file(getattr(process, _POSIX_JOBS_FILE_ATTR, None))
             return True
-        except PermissionError:
-            try:
-                if process.returncode is None:
-                    process.kill()
-            except (ProcessLookupError, PermissionError):
-                pass
-            return False
-        return True
+        return False
     if os.name == "nt":
         had_job = getattr(process, _WINDOWS_JOB_HANDLE_ATTR, None) is not None
         if _terminate_windows_job(process):
@@ -603,7 +715,9 @@ async def _terminate_for_output_limit(
     terminate: Callable[[], Awaitable[bool]] | None = None,
 ) -> None:
     cleanup_succeeded = (
-        await terminate() if terminate is not None else await _terminate_process_tree(process)
+        await terminate()
+        if terminate is not None
+        else await _terminate_process_tree(process, force=True)
     )
     if cleanup_succeeded:
         return

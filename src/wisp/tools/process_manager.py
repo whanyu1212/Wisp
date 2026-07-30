@@ -145,7 +145,7 @@ class ProcessSupervisor:
                 _collect_limited_output(
                     process,
                     budget,
-                    terminate=lambda: self._terminate_one_shot(process),
+                    terminate=lambda: self._terminate_one_shot(process, force=True),
                 )
             )
             self._one_shot[process] = capture_task
@@ -370,11 +370,14 @@ class ProcessSupervisor:
         process: asyncio.subprocess.Process,
         *,
         wait: bool = False,
+        force: bool = False,
     ) -> bool:
         cleanup_lock = self._one_shot_locks[process]
         async with cleanup_lock:
             if wait:
                 return await _kill_process_tree_and_wait(process)
+            if force:
+                return await _terminate_process_tree(process, force=True)
             return await _terminate_process_tree(process)
 
     async def _await_task_before_propagating_cancellation(self, task: asyncio.Task[_T]) -> _T:

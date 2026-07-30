@@ -19,6 +19,29 @@ def _python_command(source: str) -> str:
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
 
 
+def _detached_python_background_command(
+    pid_path: Path,
+    *,
+    keep_shell_alive: bool,
+    redirect_output: bool,
+) -> str:
+    child = (
+        "import os,pathlib,time;"
+        "os.setsid();"
+        f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()));"
+        "time.sleep(30)"
+    )
+    redirection = " >/dev/null 2>&1" if redirect_output else ""
+    quoted_pid_path = shlex.quote(str(pid_path))
+    command = (
+        f"{shlex.quote(sys.executable)} -c {shlex.quote(child)}{redirection} & "
+        f"while [ ! -s {quoted_pid_path} ]; do sleep 0.01; done"
+    )
+    if keep_shell_alive:
+        command += "; sleep 30"
+    return command
+
+
 async def _poll_until_terminal(
     supervisor: ProcessSupervisor,
     process_id: str,
@@ -758,6 +781,38 @@ def test_timeout_kills_descendant_after_shell_leader_exits(tmp_path: Path) -> No
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_timeout_kills_detached_background_job(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "detached.pid"
+
+    async def run() -> tuple[ProcessUpdate, int]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                _detached_python_background_command(
+                    child_pid_path,
+                    keep_shell_alive=True,
+                    redirect_output=False,
+                ),
+                cwd=tmp_path,
+                timeout=0.1,
+            )
+            with anyio.fail_after(3):
+                while not child_pid_path.exists():
+                    await anyio.sleep(0.01)
+            child_pid = int(child_pid_path.read_text())
+            terminal = (await _poll_until_terminal(supervisor, process_id))[-1]
+            return terminal, child_pid
+        finally:
+            await supervisor.aclose()
+
+    update, child_pid = anyio.run(run)
+
+    assert update.state == "timed_out"
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
 def test_close_kills_descendant_after_shell_leader_exits(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "background.pid"
     command = f"sleep 30 & echo $! > {shlex.quote(str(child_pid_path))}"
@@ -816,6 +871,39 @@ def test_completion_kills_descendant_with_redirected_output(tmp_path: Path) -> N
 
     assert update.state == "completed"
     assert update.exit_code == 0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_completion_kills_detached_background_job(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "detached.pid"
+
+    async def run() -> tuple[ProcessUpdate, int]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                _detached_python_background_command(
+                    child_pid_path,
+                    keep_shell_alive=False,
+                    redirect_output=True,
+                ),
+                cwd=tmp_path,
+                timeout=2,
+            )
+            with anyio.fail_after(3):
+                while not child_pid_path.exists():
+                    await anyio.sleep(0.01)
+            child_pid = int(child_pid_path.read_text())
+            terminal = (await _poll_until_terminal(supervisor, process_id))[-1]
+            return terminal, child_pid
+        finally:
+            await supervisor.aclose()
+
+    update, child_pid = anyio.run(run)
+
+    assert update.state == "completed"
+    assert update.exit_code == 0
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
 
 
 def test_managed_process_limit_recovers_after_terminal_result_is_observed(
