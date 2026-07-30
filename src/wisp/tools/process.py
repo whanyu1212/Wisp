@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 from collections.abc import Callable, Sequence
+from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -20,14 +21,21 @@ from wisp.tools.truncation import TruncatedText, truncate_text_tail
 _WINDOWS_JOB_HANDLE_ATTR = "_wisp_windows_job_handle"
 
 
+class _CtypesFunction(Protocol):
+    restype: object
+    argtypes: Sequence[object] | None
+
+    def __call__(self, *args: object) -> object: ...
+
+
 class _WindowsKernel32(Protocol):
-    def CreateJobObjectW(self, attributes: object, name: object) -> object: ...
+    CreateJobObjectW: _CtypesFunction
 
-    def AssignProcessToJobObject(self, job: object, process: object) -> int: ...
+    AssignProcessToJobObject: _CtypesFunction
 
-    def TerminateJobObject(self, job: object, exit_code: int) -> int: ...
+    TerminateJobObject: _CtypesFunction
 
-    def CloseHandle(self, handle: object) -> int: ...
+    CloseHandle: _CtypesFunction
 
 
 @dataclass(frozen=True)
@@ -258,9 +266,30 @@ def _windows_kernel32() -> _WindowsKernel32 | None:
     if windll_factory is None:
         return None
     try:
-        return cast(_WindowsKernel32, windll_factory("kernel32", use_last_error=True))
+        return _configure_windows_job_api(windll_factory("kernel32", use_last_error=True))
     except (AttributeError, OSError):
         return None
+
+
+def _configure_windows_job_api(kernel32: object) -> _WindowsKernel32:
+    kernel32_api = cast(_WindowsKernel32, kernel32)
+
+    create_job = kernel32_api.CreateJobObjectW
+    create_job.restype = wintypes.HANDLE
+    create_job.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+
+    assign_process = kernel32_api.AssignProcessToJobObject
+    assign_process.restype = wintypes.BOOL
+    assign_process.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+
+    terminate_job = kernel32_api.TerminateJobObject
+    terminate_job.restype = wintypes.BOOL
+    terminate_job.argtypes = [wintypes.HANDLE, wintypes.UINT]
+
+    close_handle = kernel32_api.CloseHandle
+    close_handle.restype = wintypes.BOOL
+    close_handle.argtypes = [wintypes.HANDLE]
+    return kernel32_api
 
 
 def _windows_process_handle(process: asyncio.subprocess.Process) -> object | None:

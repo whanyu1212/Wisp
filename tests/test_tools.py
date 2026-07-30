@@ -646,6 +646,54 @@ def test_bash_tool_terminates_windows_job_then_taskkill_after_shell_leader_exits
     assert process.killed is False
 
 
+def test_windows_kernel32_configures_pointer_sized_job_api_signatures(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class FakeFunction:
+        def __init__(self, result: int) -> None:
+            self.result = result
+            self.restype: object = None
+            self.argtypes: list[object] | None = None
+
+        def __call__(self, *_args: object) -> int:
+            return self.result
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.CreateJobObjectW = FakeFunction(789)
+            self.AssignProcessToJobObject = FakeFunction(1)
+            self.TerminateJobObject = FakeFunction(1)
+            self.CloseHandle = FakeFunction(1)
+
+    kernel32 = FakeKernel32()
+
+    def fake_windll(name: str, *, use_last_error: bool) -> FakeKernel32:
+        assert name == "kernel32"
+        assert use_last_error is True
+        return kernel32
+
+    monkeypatch.setattr(process_tools_module.ctypes, "WinDLL", fake_windll, raising=False)
+
+    assert process_tools_module._windows_kernel32() is kernel32  # noqa: SLF001
+    assert kernel32.CreateJobObjectW.restype is process_tools_module.wintypes.HANDLE
+    assert kernel32.CreateJobObjectW.argtypes == [
+        process_tools_module.ctypes.c_void_p,
+        process_tools_module.wintypes.LPCWSTR,
+    ]
+    assert kernel32.AssignProcessToJobObject.restype is process_tools_module.wintypes.BOOL
+    assert kernel32.AssignProcessToJobObject.argtypes == [
+        process_tools_module.wintypes.HANDLE,
+        process_tools_module.wintypes.HANDLE,
+    ]
+    assert kernel32.TerminateJobObject.restype is process_tools_module.wintypes.BOOL
+    assert kernel32.TerminateJobObject.argtypes == [
+        process_tools_module.wintypes.HANDLE,
+        process_tools_module.wintypes.UINT,
+    ]
+    assert kernel32.CloseHandle.restype is process_tools_module.wintypes.BOOL
+    assert kernel32.CloseHandle.argtypes == [process_tools_module.wintypes.HANDLE]
+
+
 def test_bash_tool_attempts_taskkill_for_windows_leader_after_exit_without_job(
     monkeypatch: MonkeyPatch,
 ) -> None:
