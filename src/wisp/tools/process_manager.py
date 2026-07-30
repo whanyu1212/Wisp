@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -341,15 +342,11 @@ class ProcessSupervisor:
         managed.changed.set()
 
     async def _wait_for_completion(self, managed: _ManagedProcess, timeout: float) -> None:
-        async def wait_for_process_and_streams() -> BaseException | None:
-            await managed.process.wait()
-            assert managed.stdout_task is not None
-            assert managed.stderr_task is not None
-            results = await asyncio.gather(
-                managed.stdout_task,
-                managed.stderr_task,
-                return_exceptions=True,
-            )
+        assert managed.stdout_task is not None
+        assert managed.stderr_task is not None
+        stream_tasks = (managed.stdout_task, managed.stderr_task)
+
+        def first_reader_failure(results: Iterable[object]) -> BaseException | None:
             return next(
                 (
                     result
@@ -360,7 +357,54 @@ class ProcessSupervisor:
                 None,
             )
 
-        completion = asyncio.create_task(wait_for_process_and_streams())
+        def reader_task_failure(task: asyncio.Task[None]) -> BaseException | None:
+            if task.cancelled():
+                return None
+            failure = task.exception()
+            if failure is not None and not isinstance(failure, asyncio.CancelledError):
+                return failure
+            return None
+
+        async def wait_for_reader_failure() -> BaseException | None:
+            pending = set(stream_tasks)
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                failure = first_reader_failure(reader_task_failure(task) for task in done)
+                if failure is not None:
+                    return failure
+            return None
+
+        async def wait_for_process_and_streams() -> BaseException | None:
+            await managed.process.wait()
+            results = await asyncio.gather(*stream_tasks, return_exceptions=True)
+            return first_reader_failure(results)
+
+        async def wait_for_process_completion_or_reader_failure() -> BaseException | None:
+            process_and_streams = asyncio.create_task(wait_for_process_and_streams())
+            reader_failure = asyncio.create_task(wait_for_reader_failure())
+            try:
+                pending_tasks = {process_and_streams, reader_failure}
+                while True:
+                    done, pending_tasks = await asyncio.wait(
+                        pending_tasks,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if reader_failure in done:
+                        failure = reader_failure.result()
+                        if failure is not None:
+                            return failure
+                    if process_and_streams in done:
+                        return process_and_streams.result()
+            finally:
+                for task in (process_and_streams, reader_failure):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(process_and_streams, reader_failure, return_exceptions=True)
+
+        completion = asyncio.create_task(wait_for_process_completion_or_reader_failure())
         reader_failure: BaseException | None = None
         try:
             try:
@@ -373,11 +417,15 @@ class ProcessSupervisor:
                 await _terminate_process_tree(managed.process)
                 await self._finish_terminated_io(managed)
                 reader_failure = await completion
+            if reader_failure is not None:
+                await _terminate_process_tree(managed.process)
+                await self._finish_terminated_io(managed)
             # A shell can exit after launching descendants whose output is
             # redirected away from its pipes. The leader and both readers are
             # then finished even though the owned process group is not. Reap
             # that remaining group before publishing a terminal handle.
-            await _terminate_process_tree(managed.process)
+            else:
+                await _terminate_process_tree(managed.process)
             managed.exit_code = managed.process.returncode
             if managed.terminal_override is not None:
                 managed.state = managed.terminal_override
