@@ -722,11 +722,16 @@ def test_posix_recorded_jobs_revalidate_after_pidfd_open(
     jobs_file.write_text("234\n", encoding="utf-8")
     process = DummyProcess()
     setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
-    ownership_snapshots = [{234}, set()]
+    events: list[str] = []
     closed_fds: list[int] = []
 
     def current_owned(_process: object) -> set[int]:
-        return ownership_snapshots.pop(0)
+        events.append("snapshot")
+        return set()
+
+    def open_pidfd(_pid: int, _flags: int) -> int:
+        events.append("open")
+        return 789
 
     def fail_pidfd_send_signal(
         _pidfd: int,
@@ -737,9 +742,7 @@ def test_posix_recorded_jobs_revalidate_after_pidfd_open(
         raise AssertionError("stale pidfd must not be signaled")
 
     monkeypatch.setattr(process_tools_module, "_posix_current_owned_pids", current_owned)
-    monkeypatch.setattr(
-        process_tools_module.os, "pidfd_open", lambda _pid, _flags: 789, raising=False
-    )
+    monkeypatch.setattr(process_tools_module.os, "pidfd_open", open_pidfd, raising=False)
     monkeypatch.setattr(
         process_tools_module.signal,
         "pidfd_send_signal",
@@ -754,17 +757,22 @@ def test_posix_recorded_jobs_revalidate_after_pidfd_open(
     )
 
     assert signaled is True
-    assert ownership_snapshots == []
+    assert events == ["open", "snapshot"]
     assert closed_fds == [789]
 
 
 def test_posix_recorded_jobs_fall_back_when_pidfd_open_is_unsupported(
+    tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
     class DummyProcess:
         pid = 123
         returncode = None
 
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("234\n", encoding="utf-8")
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
     kills: list[tuple[int, signal.Signals]] = []
 
     def unsupported_pidfd_open(_pid: int, _flags: int) -> int:
@@ -785,9 +793,8 @@ def test_posix_recorded_jobs_fall_back_when_pidfd_open_is_unsupported(
     )
     monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
 
-    signaled = process_tools_module._signal_verified_posix_pid(  # type: ignore[arg-type]  # noqa: SLF001
-        DummyProcess(),
-        234,
+    signaled = process_tools_module._signal_posix_recorded_jobs(  # type: ignore[arg-type]  # noqa: SLF001
+        process,
         signal.SIGKILL,
     )
 
@@ -796,12 +803,17 @@ def test_posix_recorded_jobs_fall_back_when_pidfd_open_is_unsupported(
 
 
 def test_posix_recorded_jobs_fall_back_when_pidfd_send_signal_is_unsupported(
+    tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
     class DummyProcess:
         pid = 123
         returncode = None
 
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("234\n", encoding="utf-8")
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
     kills: list[tuple[int, signal.Signals]] = []
     closed_fds: list[int] = []
 
@@ -826,15 +838,49 @@ def test_posix_recorded_jobs_fall_back_when_pidfd_send_signal_is_unsupported(
     monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
     monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
 
-    signaled = process_tools_module._signal_verified_posix_pid(  # type: ignore[arg-type]  # noqa: SLF001
-        DummyProcess(),
-        234,
+    signaled = process_tools_module._signal_posix_recorded_jobs(  # type: ignore[arg-type]  # noqa: SLF001
+        process,
         signal.SIGKILL,
     )
 
     assert signaled is True
     assert kills == [(234, signal.SIGKILL)]
     assert closed_fds == [789]
+
+
+def test_posix_recorded_jobs_batch_ownership_before_signaling(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("234\n345\n", encoding="utf-8")
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+    kills: list[tuple[int, signal.Signals]] = []
+    ownership_calls = 0
+
+    def current_owned(_process: object) -> set[int]:
+        nonlocal ownership_calls
+        ownership_calls += 1
+        return {234, 345}
+
+    monkeypatch.setattr(process_tools_module, "_posix_current_owned_pids", current_owned)
+    monkeypatch.setattr(process_tools_module.os, "pidfd_open", None, raising=False)
+    monkeypatch.setattr(process_tools_module.signal, "pidfd_send_signal", None, raising=False)
+    monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    signaled = process_tools_module._signal_posix_recorded_jobs(  # type: ignore[arg-type]  # noqa: SLF001
+        process,
+        signal.SIGKILL,
+    )
+
+    assert signaled is True
+    assert ownership_calls == 1
+    assert kills == [(234, signal.SIGKILL), (345, signal.SIGKILL)]
 
 
 def test_open_posix_jobs_fd_uses_descriptor_below_soft_limit(

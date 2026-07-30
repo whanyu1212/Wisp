@@ -541,58 +541,71 @@ def _signal_posix_recorded_jobs(
     recorded_pids = _posix_recorded_job_pids(process)
     if not recorded_pids:
         return True
-    current_owned_pids = _posix_current_owned_pids(process)
-    if current_owned_pids is None:
-        return False
-    for pid in recorded_pids:
-        if pid not in current_owned_pids:
-            continue
-        if not _signal_verified_posix_pid(process, pid, selected_signal):
-            succeeded = False
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    pidfd_open_fn = cast(Callable[[int, int], int], pidfd_open) if callable(pidfd_open) else None
+    pidfd_send_signal_fn = (
+        cast(Callable[[int, signal.Signals, object | None, int], object], pidfd_send_signal)
+        if callable(pidfd_send_signal)
+        else None
+    )
+    use_pidfd = pidfd_open_fn is not None and pidfd_send_signal_fn is not None
+    pidfds: dict[int, int] = {}
+    stale_pids: set[int] = set()
+    permission_denied_pids: set[int] = set()
+    if use_pidfd:
+        assert pidfd_open_fn is not None
+        for pid in recorded_pids:
+            try:
+                pidfds[pid] = pidfd_open_fn(pid, 0)
+            except (FileNotFoundError, ProcessLookupError):
+                stale_pids.add(pid)
+            except PermissionError:
+                permission_denied_pids.add(pid)
+            except OSError:
+                # Python can expose pidfd APIs even when the kernel/sandbox rejects them.
+                use_pidfd = False
+                break
+
+    try:
+        current_owned_pids = _posix_current_owned_pids(process)
+        if current_owned_pids is None:
+            return False
+        for pid in recorded_pids:
+            if pid not in current_owned_pids or pid in stale_pids:
+                continue
+            if pid in permission_denied_pids:
+                succeeded = False
+                continue
+            if use_pidfd:
+                assert pidfd_send_signal_fn is not None
+                pidfd = pidfds.get(pid)
+                if pidfd is not None:
+                    try:
+                        pidfd_send_signal_fn(pidfd, selected_signal, None, 0)
+                    except (FileNotFoundError, ProcessLookupError):
+                        continue
+                    except PermissionError:
+                        succeeded = False
+                        continue
+                    except OSError:
+                        # Fall back to numeric-PID signaling for this and later jobs.
+                        use_pidfd = False
+                    else:
+                        continue
+            if not _signal_verified_posix_pid(pid, selected_signal, current_owned_pids):
+                succeeded = False
+    finally:
+        for pidfd in pidfds.values():
+            _close_posix_fd(pidfd)
     return succeeded
 
 
 def _signal_verified_posix_pid(
-    process: asyncio.subprocess.Process,
     pid: int,
     selected_signal: signal.Signals,
+    current_owned_pids: set[int],
 ) -> bool:
-    pidfd_open = getattr(os, "pidfd_open", None)
-    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
-    if callable(pidfd_open) and callable(pidfd_send_signal):
-        try:
-            pidfd = pidfd_open(pid, 0)
-        except (FileNotFoundError, ProcessLookupError):
-            return True
-        except PermissionError:
-            return False
-        except OSError:
-            # Python can expose pidfd APIs even when the kernel/sandbox rejects them.
-            pass
-        else:
-            try:
-                current_owned_pids = _posix_current_owned_pids(process)
-                if current_owned_pids is None:
-                    return False
-                if pid not in current_owned_pids:
-                    return True
-                try:
-                    pidfd_send_signal(pidfd, selected_signal, None, 0)
-                except (FileNotFoundError, ProcessLookupError):
-                    return True
-                except PermissionError:
-                    return False
-                except OSError:
-                    # Fall back to revalidated numeric-PID signaling below.
-                    pass
-                else:
-                    return True
-            finally:
-                _close_posix_fd(pidfd)
-
-    current_owned_pids = _posix_current_owned_pids(process)
-    if current_owned_pids is None:
-        return False
     if pid not in current_owned_pids:
         return True
     try:
