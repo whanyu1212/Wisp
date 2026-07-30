@@ -85,6 +85,7 @@ class _ManagedProcess:
     exit_code: int | None = None
     terminal_override: ProcessState | None = None
     error: str | None = None
+    error_after_cleanup: str | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stdout_task: asyncio.Task[None] | None = None
@@ -275,7 +276,8 @@ class ProcessSupervisor:
             if managed.state == "running" or managed.error == PROCESS_TREE_CLEANUP_ERROR:
                 if managed.state == "running":
                     managed.terminal_override = "cancelled"
-                await asyncio.shield(self._terminate_managed(managed))
+                cleanup_task = asyncio.create_task(self._terminate_managed(managed))
+                await self._await_task_before_propagating_cancellation(cleanup_task)
             return self._snapshot(managed)
 
     async def aclose(self) -> None:
@@ -535,6 +537,8 @@ class ProcessSupervisor:
                 cleanup_succeeded = await _terminate_process_tree(managed.process)
             managed.exit_code = managed.process.returncode
             if not cleanup_succeeded:
+                if reader_failure is not None:
+                    managed.error_after_cleanup = "Failed to read process output"
                 managed.error = PROCESS_TREE_CLEANUP_ERROR
                 managed.state = "failed"
             elif managed.terminal_override is not None:
@@ -601,8 +605,12 @@ class ProcessSupervisor:
             managed.state = "failed"
             managed.changed.set()
         elif was_cleanup_failed:
-            managed.error = None
-            if managed.terminal_override is not None:
+            recovered_error = managed.error_after_cleanup
+            managed.error_after_cleanup = None
+            managed.error = recovered_error
+            if recovered_error is not None:
+                managed.state = "failed"
+            elif managed.terminal_override is not None:
                 managed.state = managed.terminal_override
             elif managed.process.returncode is not None:
                 managed.state = "completed"

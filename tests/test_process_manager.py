@@ -146,6 +146,46 @@ def test_managed_process_reports_reader_failure_before_process_exit(
     assert update.error == "Failed to read process output"
 
 
+def test_cleanup_retry_restores_stream_reader_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = ProcessSupervisor()
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
+    cleanup_attempts = 0
+
+    async def fail_read(*_args: object) -> None:
+        raise OSError("broken transport")
+
+    async def fail_first_cleanup(process: asyncio.subprocess.Process) -> bool:
+        nonlocal cleanup_attempts
+        cleanup_attempts += 1
+        await original_terminate(process)
+        return cleanup_attempts > 1
+
+    monkeypatch.setattr(supervisor, "_read_stream", fail_read)
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_first_cleanup)
+
+    async def run() -> tuple[ProcessUpdate, ProcessUpdate]:
+        process_id = await supervisor.start(
+            _python_command("import time; time.sleep(30)"),
+            cwd=tmp_path,
+            timeout=60,
+        )
+        cleanup_failed = (await _poll_until_terminal(supervisor, process_id))[-1]
+        retried = await supervisor.cancel(process_id)
+        await supervisor.aclose()
+        return cleanup_failed, retried
+
+    cleanup_failed, retried = anyio.run(run)
+
+    assert cleanup_failed.state == "failed"
+    assert cleanup_failed.error == "Failed to terminate process tree"
+    assert retried.state == "failed"
+    assert retried.exit_code is None
+    assert retried.error == "Failed to read process output"
+
+
 @pytest.mark.parametrize("separator", ["\n", "\r", "\r\n", "\u2028"])
 def test_retention_counts_unterminated_trailing_logical_line(separator: str) -> None:
     text = f"first{separator}second"
@@ -1295,11 +1335,14 @@ def test_cancelling_cancel_call_does_not_cancel_process_finalization(tmp_path: P
             cancel_call = asyncio.create_task(supervisor.cancel(process_id))
             await finalization_started.wait()
             cancel_call.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await cancel_call
+            await anyio.sleep(0)
 
+            assert cancel_call.done() is False
+            assert managed.operation_lock.locked() is True
             assert managed.completion_task.cancelled() is False
             allow_finalization.set()
+            with pytest.raises(asyncio.CancelledError):
+                await cancel_call
             await managed.completion_task
             return await supervisor.poll(process_id)
         finally:
