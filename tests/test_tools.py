@@ -5,6 +5,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -756,6 +757,84 @@ def test_bash_tool_assigns_windows_job_before_resuming_shell(
             654,
         ),
         ("close", 111),
+        ("resume", 222),
+        ("close", 222),
+    ]
+
+
+def test_bash_tool_runs_windows_resume_setup_off_event_loop(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+        _handle = 456
+
+        async def wait(self) -> int:
+            return 0
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create_job",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 1
+
+        def ResumeThread(self, thread: int) -> int:
+            self.calls.append(("resume", thread))
+            return 1
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
+            return 1
+
+    process = DummyProcess()
+    kernel32 = FakeKernel32()
+    open_thread_ids: list[int] = []
+
+    async def fake_create_subprocess_shell(
+        _command: str,
+        **_kwargs: object,
+    ) -> DummyProcess:
+        return process
+
+    def fake_open_windows_process_thread(
+        _process: object,
+        _kernel32: object,
+    ) -> int:
+        open_thread_ids.append(threading.get_ident())
+        return 222
+
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(
+        process_tools_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
+    )
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+    monkeypatch.setattr(
+        process_tools_module,
+        "_open_windows_process_thread",
+        fake_open_windows_process_thread,
+    )
+
+    async def run() -> tuple[DummyProcess, int]:
+        event_loop_thread_id = threading.get_ident()
+        result = await process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # type: ignore[return-value]  # noqa: SLF001
+        return result, event_loop_thread_id
+
+    result, event_loop_thread_id = anyio.run(run)
+
+    assert result is process
+    assert open_thread_ids
+    assert all(thread_id != event_loop_thread_id for thread_id in open_thread_ids)
+    assert kernel32.calls == [
+        ("create_job",),
+        ("assign", 789, 456),
         ("resume", 222),
         ("close", 222),
     ]

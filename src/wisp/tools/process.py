@@ -187,18 +187,15 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
 
     if os.name == "nt":
         try:
-            job_attached = _attach_windows_job(process)
-            if not job_attached:
-                raise ToolError("Failed to attach command process to Windows job")
-            resumed = _resume_windows_process(process)
+            setup_error = await _run_windows_process_setup(process)
         except Exception:
             with anyio.CancelScope(shield=True):
                 await _cleanup_failed_windows_process_setup(process)
             raise
-        if not resumed:
+        if setup_error is not None:
             with anyio.CancelScope(shield=True):
                 await _cleanup_failed_windows_process_setup(process)
-            raise ToolError("Failed to resume command after Windows process setup")
+            raise ToolError(setup_error)
     return process
 
 
@@ -290,6 +287,41 @@ async def _cleanup_failed_windows_process_setup(process: asyncio.subprocess.Proc
         await asyncio.wait_for(process.wait(), timeout=1)
     except (OSError, RuntimeError, TimeoutError):
         return
+
+
+async def _run_windows_process_setup(process: asyncio.subprocess.Process) -> str | None:
+    setup_task = asyncio.create_task(asyncio.to_thread(_prepare_windows_process_setup, process))
+    try:
+        return await asyncio.shield(setup_task)
+    except asyncio.CancelledError:
+        with anyio.CancelScope(shield=True):
+            try:
+                await _await_windows_process_setup_after_cancellation(setup_task)
+            except Exception:
+                pass
+            await _cleanup_failed_windows_process_setup(process)
+        raise
+
+
+async def _await_windows_process_setup_after_cancellation(
+    task: asyncio.Task[str | None],
+) -> str | None:
+    while True:
+        if task.done():
+            return task.result()
+        try:
+            with anyio.CancelScope(shield=True):
+                return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+
+
+def _prepare_windows_process_setup(process: asyncio.subprocess.Process) -> str | None:
+    if not _attach_windows_job(process):
+        return "Failed to attach command process to Windows job"
+    if not _resume_windows_process(process):
+        return "Failed to resume command after Windows process setup"
+    return None
 
 
 def _attach_windows_job(process: asyncio.subprocess.Process) -> bool:
