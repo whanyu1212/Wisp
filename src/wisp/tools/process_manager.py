@@ -29,6 +29,7 @@ DEFAULT_MAX_MANAGED_PROCESSES = 8
 DEFAULT_MAX_RETAINED_BYTES = 50_000
 DEFAULT_MAX_RETAINED_LINES = 2_000
 POST_TERMINATION_DRAIN_TIMEOUT = 0.25
+PROCESS_TREE_CLEANUP_ERROR = "Failed to terminate process tree"
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,7 +300,13 @@ class ProcessSupervisor:
 
     async def _initialize_close_task(self) -> asyncio.Task[None]:
         async with self._lock:
-            if self._close_task is None:
+            close_failed = (
+                self._close_task is not None
+                and self._close_task.done()
+                and not self._close_task.cancelled()
+                and self._close_task.exception() is not None
+            )
+            if self._close_task is None or close_failed:
                 self._closed = True
                 self._close_task = asyncio.create_task(self._close_owned_processes())
             assert self._close_task is not None
@@ -333,31 +340,79 @@ class ProcessSupervisor:
         async with self._lock:
             managed = tuple(self._managed.values())
             one_shot = tuple(self._one_shot.items())
-        for item in managed:
+        managed_to_cleanup = tuple(
+            item
+            for item in managed
+            if item.state == "running" or item.error == PROCESS_TREE_CLEANUP_ERROR
+        )
+        for item in managed_to_cleanup:
             if item.state == "running":
                 item.terminal_override = "cancelled"
-        await asyncio.gather(
-            *(_terminate_process_tree(item.process) for item in managed if item.state == "running"),
-            *(_terminate_process_tree(process) for process, _capture_task in one_shot),
+        managed_results = await asyncio.gather(
+            *(_terminate_process_tree(item.process) for item in managed_to_cleanup),
+            return_exceptions=True,
         )
+        one_shot_results = await asyncio.gather(
+            *(_terminate_process_tree(process) for process, _capture_task in one_shot),
+            return_exceptions=True,
+        )
+        failed_managed_ids = {
+            item.process_id
+            for item, result in zip(managed_to_cleanup, managed_results, strict=True)
+            if result is not True
+        }
+        failed_one_shot_processes = {
+            process
+            for (process, _capture_task), result in zip(one_shot, one_shot_results, strict=True)
+            if result is not True
+        }
         await asyncio.gather(
-            *(self._finish_terminated_io(item) for item in managed if item.state == "running")
+            *(
+                self._finish_terminated_io(item)
+                for item in managed_to_cleanup
+                if item.process_id not in failed_managed_ids
+            )
         )
         await asyncio.gather(
             *(
                 self._finish_one_shot_capture(process, capture_task)
                 for process, capture_task in one_shot
+                if process not in failed_one_shot_processes
             )
         )
 
         await asyncio.gather(
-            *(item.completion_task for item in managed if item.completion_task is not None),
+            *(
+                item.completion_task
+                for item in managed
+                if item.completion_task is not None and item.process_id not in failed_managed_ids
+            ),
             return_exceptions=True,
         )
 
         async with self._lock:
-            self._managed.clear()
-            self._one_shot.clear()
+            if failed_managed_ids or failed_one_shot_processes:
+                self._managed = {
+                    process_id: item
+                    for process_id, item in self._managed.items()
+                    if process_id in failed_managed_ids
+                }
+                self._one_shot = {
+                    process: capture_task
+                    for process, capture_task in self._one_shot.items()
+                    if process in failed_one_shot_processes
+                }
+            else:
+                self._managed.clear()
+                self._one_shot.clear()
+
+        if failed_managed_ids or failed_one_shot_processes:
+            for item in managed_to_cleanup:
+                if item.process_id in failed_managed_ids:
+                    item.error = PROCESS_TREE_CLEANUP_ERROR
+                    item.state = "failed"
+                    item.changed.set()
+            raise ToolError(PROCESS_TREE_CLEANUP_ERROR)
 
     async def _spawn(self, command: str, *, cwd: Path) -> asyncio.subprocess.Process:
         """Spawn while the caller holds the supervisor lock."""
@@ -478,7 +533,7 @@ class ProcessSupervisor:
                 cleanup_succeeded = await _terminate_process_tree(managed.process)
             managed.exit_code = managed.process.returncode
             if not cleanup_succeeded:
-                managed.error = "Failed to terminate process tree"
+                managed.error = PROCESS_TREE_CLEANUP_ERROR
                 managed.state = "failed"
             elif managed.terminal_override is not None:
                 managed.state = managed.terminal_override

@@ -201,13 +201,101 @@ def test_managed_timeout_reports_process_tree_cleanup_failure(
             )
             return (await _poll_until_terminal(supervisor, process_id))[-1]
         finally:
-            await supervisor.aclose()
+            try:
+                await supervisor.aclose()
+            except ToolError as exc:
+                assert str(exc) == "Failed to terminate process tree"
+                pass
 
     update = anyio.run(run)
 
     assert update.state == "failed"
     assert update.exit_code is None
     assert update.error == "Failed to terminate process tree"
+
+
+def test_aclose_retries_cleanup_failed_managed_process_before_discarding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_attempts = 0
+
+    async def fail_once(process: asyncio.subprocess.Process) -> bool:
+        nonlocal cleanup_attempts
+        cleanup_attempts += 1
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        return cleanup_attempts > 2
+
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_once)
+
+    async def run() -> tuple[ProcessUpdate, int, int]:
+        supervisor = ProcessSupervisor()
+        process_id = await supervisor.start(
+            _python_command("import time; time.sleep(30)"),
+            cwd=tmp_path,
+            timeout=0.05,
+        )
+        update = (await _poll_until_terminal(supervisor, process_id))[-1]
+        retained_before_close = len(supervisor._managed)  # noqa: SLF001
+        await supervisor.aclose()
+        return update, retained_before_close, len(supervisor._managed)  # noqa: SLF001
+
+    update, retained_before_close, retained_after_close = anyio.run(run)
+
+    assert update.state == "failed"
+    assert update.error == "Failed to terminate process tree"
+    assert retained_before_close == 1
+    assert retained_after_close == 0
+    assert cleanup_attempts == 3
+
+
+def test_aclose_surfaces_and_retains_cleanup_failed_managed_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_attempts = 0
+    cleanup_succeeds = False
+
+    async def fail_cleanup(process: asyncio.subprocess.Process) -> bool:
+        nonlocal cleanup_attempts
+        cleanup_attempts += 1
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        return cleanup_succeeds
+
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_cleanup)
+
+    async def run() -> tuple[ProcessUpdate, int, int, int]:
+        nonlocal cleanup_succeeds
+        supervisor = ProcessSupervisor()
+        process_id = await supervisor.start(
+            _python_command("import time; time.sleep(30)"),
+            cwd=tmp_path,
+            timeout=0.05,
+        )
+        update = (await _poll_until_terminal(supervisor, process_id))[-1]
+        with pytest.raises(ToolError, match="Failed to terminate process tree"):
+            await supervisor.aclose()
+        retained_after_failed_close = len(supervisor._managed)  # noqa: SLF001
+        cleanup_succeeds = True
+        await supervisor.aclose()
+        return (
+            update,
+            cleanup_attempts,
+            retained_after_failed_close,
+            len(supervisor._managed),  # noqa: SLF001
+        )
+
+    update, attempts, retained_after_failed_close, retained_after_retry = anyio.run(run)
+
+    assert update.state == "failed"
+    assert update.error == "Failed to terminate process tree"
+    assert attempts == 4
+    assert retained_after_failed_close == 1
+    assert retained_after_retry == 0
 
 
 def test_managed_timeout_bounds_post_termination_stream_drain(tmp_path: Path) -> None:
@@ -668,7 +756,11 @@ def test_one_shot_completion_surfaces_process_tree_cleanup_failure(
                 )
             return len(supervisor._one_shot)  # noqa: SLF001
         finally:
-            await supervisor.aclose()
+            try:
+                await supervisor.aclose()
+            except ToolError as exc:
+                assert str(exc) == "Failed to terminate process tree"
+                pass
 
     retained_count = anyio.run(run)
 
