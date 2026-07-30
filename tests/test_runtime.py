@@ -22,6 +22,7 @@ from wisp.runtime import (
 )
 from wisp.runtime.extensions import activate_extensions, build_runtime
 from wisp.tools.builtin import ReadTool
+from wisp.tools.search import FindTool, GrepTool
 from wisp.tools.shell import BashTool
 
 
@@ -141,13 +142,19 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
     )
 
 
-def test_build_runtime_wires_bash_to_runtime_supervisor_and_closes_it() -> None:
+def test_build_runtime_wires_process_tools_to_runtime_supervisor_and_closes_it() -> None:
     async def run() -> None:
         runtime = await build_runtime()
         bash = runtime.tools.get("bash")
+        grep = runtime.tools.get("grep")
+        find = runtime.tools.get("find")
 
         assert isinstance(bash, BashTool)
+        assert isinstance(grep, GrepTool)
+        assert isinstance(find, FindTool)
         assert bash._process_supervisor is runtime.process_supervisor  # noqa: SLF001
+        assert grep._process_supervisor is runtime.process_supervisor  # noqa: SLF001
+        assert find._process_supervisor is runtime.process_supervisor  # noqa: SLF001
 
         await runtime.aclose()
         await runtime.aclose()

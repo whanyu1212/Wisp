@@ -7,7 +7,7 @@ import codecs
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Any, Literal, TypeVar
 from uuid import uuid4
 
 import anyio
@@ -88,6 +88,7 @@ class _ManagedProcess:
     error_after_cleanup: str | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stdout_task: asyncio.Task[None] | None = None
     stderr_task: asyncio.Task[None] | None = None
     completion_task: asyncio.Task[None] | None = None
@@ -112,8 +113,9 @@ class ProcessSupervisor:
         self._managed: dict[str, _ManagedProcess] = {}
         self._one_shot: dict[
             asyncio.subprocess.Process,
-            asyncio.Task[tuple[bytes, bytes]],
+            asyncio.Task[Any],
         ] = {}
+        self._one_shot_locks: dict[asyncio.subprocess.Process, asyncio.Lock] = {}
         self._closed = False
         self._lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
@@ -138,7 +140,14 @@ class ProcessSupervisor:
                 )
             budget = _OutputBudget(max_bytes=max_output_bytes, max_lines=max_output_lines)
             process = await self._spawn(command, cwd=cwd)
-            capture_task = asyncio.create_task(_collect_limited_output(process, budget))
+            self._one_shot_locks[process] = asyncio.Lock()
+            capture_task = asyncio.create_task(
+                _collect_limited_output(
+                    process,
+                    budget,
+                    terminate=lambda: self._terminate_one_shot(process),
+                )
+            )
             self._one_shot[process] = capture_task
 
         release_ownership = False
@@ -149,7 +158,7 @@ class ProcessSupervisor:
                     timeout=timeout,
                 )
             except TimeoutError as exc:
-                cleanup_task = asyncio.create_task(_kill_process_tree_and_wait(process))
+                cleanup_task = asyncio.create_task(self._terminate_one_shot(process, wait=True))
                 try:
                     cleanup_succeeded = await self._await_task_before_propagating_cancellation(
                         cleanup_task
@@ -164,7 +173,7 @@ class ProcessSupervisor:
                 release_ownership = cleanup_succeeded
                 raise ToolError(f"Command timed out after {timeout:g} seconds") from exc
             except BaseException:
-                cleanup_task = asyncio.create_task(_kill_process_tree_and_wait(process))
+                cleanup_task = asyncio.create_task(self._terminate_one_shot(process, wait=True))
                 try:
                     cleanup_succeeded = await self._await_task_before_propagating_cancellation(
                         cleanup_task
@@ -179,7 +188,7 @@ class ProcessSupervisor:
                 release_ownership = cleanup_succeeded
                 raise
 
-            cleanup_task = asyncio.create_task(_terminate_process_tree(process))
+            cleanup_task = asyncio.create_task(self._terminate_one_shot(process))
             try:
                 cleanup_succeeded = await self._await_task_before_propagating_cancellation(
                     cleanup_task
@@ -317,7 +326,41 @@ class ProcessSupervisor:
 
     async def _release_one_shot(self, process: asyncio.subprocess.Process) -> None:
         async with self._lock:
+            if self._closed:
+                return
             self._one_shot.pop(process, None)
+            self._one_shot_locks.pop(process, None)
+
+    async def _track_one_shot(
+        self,
+        process: asyncio.subprocess.Process,
+        task: asyncio.Task[Any],
+    ) -> None:
+        async with self._lock:
+            self._ensure_open()
+            self._evict_terminals_for_capacity()
+            over_capacity = len(self._managed) + len(self._one_shot) >= self._max_processes
+            self._one_shot[process] = task
+            self._one_shot_locks[process] = asyncio.Lock()
+        if over_capacity:
+            cleanup_succeeded = await self._terminate_one_shot(process, wait=True)
+            if cleanup_succeeded:
+                await self._release_one_shot(process)
+            raise ToolError(
+                f"Cannot start command: managed process limit ({self._max_processes}) reached"
+            )
+
+    async def _terminate_one_shot(
+        self,
+        process: asyncio.subprocess.Process,
+        *,
+        wait: bool = False,
+    ) -> bool:
+        cleanup_lock = self._one_shot_locks[process]
+        async with cleanup_lock:
+            if wait:
+                return await _kill_process_tree_and_wait(process)
+            return await _terminate_process_tree(process)
 
     async def _await_task_before_propagating_cancellation(self, task: asyncio.Task[_T]) -> _T:
         try:
@@ -353,7 +396,7 @@ class ProcessSupervisor:
             return_exceptions=True,
         )
         one_shot_results = await asyncio.gather(
-            *(_terminate_process_tree(process) for process, _capture_task in one_shot),
+            *(self._terminate_one_shot(process) for process, _capture_task in one_shot),
             return_exceptions=True,
         )
         failed_managed_ids = {
@@ -395,9 +438,15 @@ class ProcessSupervisor:
                     for process, capture_task in self._one_shot.items()
                     if process in failed_one_shot_processes
                 }
+                self._one_shot_locks = {
+                    process: cleanup_lock
+                    for process, cleanup_lock in self._one_shot_locks.items()
+                    if process in failed_one_shot_processes
+                }
             else:
                 self._managed.clear()
                 self._one_shot.clear()
+                self._one_shot_locks.clear()
 
         if failed_managed_ids or failed_one_shot_processes:
             for item in managed_to_cleanup:
@@ -521,12 +570,12 @@ class ProcessSupervisor:
                 )
             except TimeoutError:
                 managed.terminal_override = managed.terminal_override or "timed_out"
-                cleanup_succeeded = await _terminate_process_tree(managed.process)
+                cleanup_succeeded = await self._terminate_managed_tree(managed)
                 if cleanup_succeeded:
                     await self._finish_terminated_io(managed)
                     reader_failure = await completion
             if cleanup_succeeded and reader_failure is not None:
-                cleanup_succeeded = await _terminate_process_tree(managed.process)
+                cleanup_succeeded = await self._terminate_managed_tree(managed)
                 if cleanup_succeeded:
                     await self._finish_terminated_io(managed)
             # A shell can exit after launching descendants whose output is
@@ -534,7 +583,7 @@ class ProcessSupervisor:
             # then finished even though the owned process group is not. Reap
             # that remaining group before publishing a terminal handle.
             elif cleanup_succeeded:
-                cleanup_succeeded = await _terminate_process_tree(managed.process)
+                cleanup_succeeded = await self._terminate_managed_tree(managed)
             managed.exit_code = managed.process.returncode
             if not cleanup_succeeded:
                 if reader_failure is not None:
@@ -574,7 +623,7 @@ class ProcessSupervisor:
     async def _finish_one_shot_capture(
         self,
         process: asyncio.subprocess.Process,
-        capture_task: asyncio.Task[tuple[bytes, bytes]],
+        capture_task: asyncio.Task[Any],
     ) -> None:
         """Bound one-shot pipe draining after the owned process tree has been terminated."""
 
@@ -590,7 +639,7 @@ class ProcessSupervisor:
 
     async def _terminate_managed(self, managed: _ManagedProcess) -> None:
         was_cleanup_failed = managed.error == PROCESS_TREE_CLEANUP_ERROR
-        cleanup_succeeded = await _terminate_process_tree(managed.process)
+        cleanup_succeeded = await self._terminate_managed_tree(managed)
         if cleanup_succeeded:
             await self._finish_terminated_io(managed)
         assert managed.completion_task is not None
@@ -617,6 +666,10 @@ class ProcessSupervisor:
             else:
                 managed.state = "cancelled"
             managed.changed.set()
+
+    async def _terminate_managed_tree(self, managed: _ManagedProcess) -> bool:
+        async with managed.cleanup_lock:
+            return await _terminate_process_tree(managed.process)
 
     def _snapshot(self, managed: _ManagedProcess) -> ProcessUpdate:
         stdout, stdout_dropped = managed.stdout.drain()

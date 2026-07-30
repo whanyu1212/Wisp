@@ -7,11 +7,11 @@ import ctypes
 import os
 import signal
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import anyio
 
@@ -39,6 +39,23 @@ class _WindowsThreadEntry32(ctypes.Structure):
         ("tpDeltaPri", wintypes.LONG),
         ("dwFlags", wintypes.DWORD),
     ]
+
+
+class _ProcessSupervisor(Protocol):
+    async def _track_one_shot(
+        self,
+        process: asyncio.subprocess.Process,
+        task: asyncio.Task[Any],
+    ) -> None: ...
+
+    async def _terminate_one_shot(
+        self,
+        process: asyncio.subprocess.Process,
+        *,
+        wait: bool = False,
+    ) -> bool: ...
+
+    async def _release_one_shot(self, process: asyncio.subprocess.Process) -> None: ...
 
 
 class _CtypesFunction(Protocol):
@@ -522,12 +539,18 @@ def _windows_process_handle(process: asyncio.subprocess.Process) -> object | Non
 async def _collect_limited_output(
     process: asyncio.subprocess.Process,
     budget: _OutputBudget,
+    *,
+    terminate: Callable[[], Awaitable[bool]] | None = None,
 ) -> tuple[bytes, bytes]:
     assert process.stdout is not None
     assert process.stderr is not None
 
-    stdout_task = asyncio.create_task(_read_stream_limited(process.stdout, budget, process))
-    stderr_task = asyncio.create_task(_read_stream_limited(process.stderr, budget, process))
+    stdout_task = asyncio.create_task(
+        _read_stream_limited(process.stdout, budget, process, terminate=terminate)
+    )
+    stderr_task = asyncio.create_task(
+        _read_stream_limited(process.stderr, budget, process, terminate=terminate)
+    )
     try:
         stdout_bytes, stderr_bytes = await asyncio.gather(stdout_task, stderr_task)
         await process.wait()
@@ -543,6 +566,8 @@ async def _read_stream_limited(
     stream: asyncio.StreamReader,
     budget: _OutputBudget,
     process: asyncio.subprocess.Process,
+    *,
+    terminate: Callable[[], Awaitable[bool]] | None = None,
 ) -> bytes:
     chunks: list[bytes] = []
     while True:
@@ -554,15 +579,22 @@ async def _read_stream_limited(
             chunks.append(accepted)
         if exhausted:
             if await budget.request_kill_once():
-                await _terminate_for_output_limit(process)
+                await _terminate_for_output_limit(process, terminate=terminate)
             while await stream.read(8192):
                 pass
             break
     return b"".join(chunks)
 
 
-async def _terminate_for_output_limit(process: asyncio.subprocess.Process) -> None:
-    if await _terminate_process_tree(process):
+async def _terminate_for_output_limit(
+    process: asyncio.subprocess.Process,
+    *,
+    terminate: Callable[[], Awaitable[bool]] | None = None,
+) -> None:
+    cleanup_succeeded = (
+        await terminate() if terminate is not None else await _terminate_process_tree(process)
+    )
+    if cleanup_succeeded:
         return
     try:
         await asyncio.wait_for(process.wait(), timeout=_OUTPUT_LIMIT_EXIT_GRACE_SECONDS)
@@ -574,6 +606,7 @@ async def _run_exec_limited_stdout(
     command: Sequence[str],
     *,
     cwd: Path,
+    process_supervisor: _ProcessSupervisor,
     max_stdout_lines: int,
     stdout_line_filter: Callable[[str], bool] | None = None,
     stdout_count_filter: Callable[[str], bool] | None = None,
@@ -593,6 +626,14 @@ async def _run_exec_limited_stdout(
     except OSError as exc:
         raise ToolError(f"Failed to start command: {exc}") from exc
 
+    owner_task = asyncio.current_task()
+    assert owner_task is not None
+    await process_supervisor._track_one_shot(process, owner_task)
+    release_ownership = False
+
+    async def terminate() -> bool:
+        return await process_supervisor._terminate_one_shot(process)
+
     assert process.stdout is not None
     assert process.stderr is not None
     stdout_stream = process.stdout
@@ -604,7 +645,7 @@ async def _run_exec_limited_stdout(
             max_lines=max_buffered_stderr_lines if max_buffered_stderr_lines is not None else 2**63,
         )
         stderr_task = asyncio.create_task(
-            _read_stream_limited(process.stderr, stderr_budget, process)
+            _read_stream_limited(process.stderr, stderr_budget, process, terminate=terminate)
         )
     else:
         stderr_task = asyncio.create_task(process.stderr.read())
@@ -651,7 +692,7 @@ async def _run_exec_limited_stdout(
                     if count_line:
                         stdout_count += 1
                     stdout_truncated = True
-                    await _terminate_for_output_limit(process)
+                    await _terminate_for_output_limit(process, terminate=terminate)
                     break
                 if max_buffered_stdout_bytes is not None:
                     remaining_bytes = max_buffered_stdout_bytes - buffered_stdout_bytes
@@ -659,7 +700,7 @@ async def _run_exec_limited_stdout(
                         if count_line:
                             stdout_count += 1
                         stdout_truncated = True
-                        await _terminate_for_output_limit(process)
+                        await _terminate_for_output_limit(process, terminate=terminate)
                         break
                     if len(line) > remaining_bytes:
                         stdout_lines.append(line[:remaining_bytes])
@@ -668,7 +709,7 @@ async def _run_exec_limited_stdout(
                         if count_line:
                             stdout_count += 1
                         stdout_truncated = True
-                        await _terminate_for_output_limit(process)
+                        await _terminate_for_output_limit(process, terminate=terminate)
                         break
                 stdout_lines.append(line)
                 buffered_stdout_lines += 1
@@ -678,30 +719,40 @@ async def _run_exec_limited_stdout(
 
         if stdout_count >= max_stdout_lines:
             stdout_truncated = True
-            await _terminate_for_output_limit(process)
+            await _terminate_for_output_limit(process, terminate=terminate)
 
         await process.wait()
         stderr_bytes = await stderr_task
+        if not await process_supervisor._terminate_one_shot(process):
+            raise ToolError("Failed to terminate process tree")
     except asyncio.CancelledError:
         with anyio.CancelScope(shield=True):
             if not stderr_task.done():
                 stderr_task.cancel()
             await asyncio.gather(stderr_task, return_exceptions=True)
-            await _kill_process_tree_and_wait(process)
+            release_ownership = await process_supervisor._terminate_one_shot(process, wait=True)
         raise
     except BaseException:
         if not stderr_task.done():
             stderr_task.cancel()
         await asyncio.gather(stderr_task, return_exceptions=True)
+        with anyio.CancelScope(shield=True):
+            release_ownership = await process_supervisor._terminate_one_shot(process, wait=True)
         raise
-    return ProcessResult(
-        exit_code=process.returncode if process.returncode is not None else -1,
-        stdout=b"".join(stdout_lines).decode("utf-8", errors="replace"),
-        stderr=stderr_bytes.decode("utf-8", errors="replace"),
-        stdout_truncated=stdout_truncated,
-        stderr_truncated=stderr_budget.exhausted if stderr_budget is not None else False,
-        stdout_count=stdout_count,
-    )
+    else:
+        release_ownership = True
+        return ProcessResult(
+            exit_code=process.returncode if process.returncode is not None else -1,
+            stdout=b"".join(stdout_lines).decode("utf-8", errors="replace"),
+            stderr=stderr_bytes.decode("utf-8", errors="replace"),
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_budget.exhausted if stderr_budget is not None else False,
+            stdout_count=stdout_count,
+        )
+    finally:
+        if release_ownership:
+            with anyio.CancelScope(shield=True):
+                await process_supervisor._release_one_shot(process)
 
 
 def _format_process_output(exit_code: int, stdout: str, stderr: str) -> str:

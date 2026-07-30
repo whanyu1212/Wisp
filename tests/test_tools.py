@@ -1182,6 +1182,7 @@ def test_async_windows_tree_cleanup_does_not_block_event_loop(
 
 def test_exec_helper_bounds_stderr_before_buffering(tmp_path: Path) -> None:
     async def run() -> process_tools_module.ProcessResult:
+        supervisor = process_manager_module.ProcessSupervisor()
         return await process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
             [
                 sys.executable,
@@ -1189,6 +1190,7 @@ def test_exec_helper_bounds_stderr_before_buffering(tmp_path: Path) -> None:
                 "import sys; sys.stderr.write('e' * 10000)",
             ],
             cwd=tmp_path,
+            process_supervisor=supervisor,
             max_stdout_lines=1,
             max_buffered_stderr_bytes=20,
             max_buffered_stderr_lines=100,
@@ -1215,6 +1217,8 @@ def test_exec_helper_reports_failed_output_limit_termination(
 
         async def wait(self) -> int:
             self.wait_called = True
+            if self.returncode is not None:
+                return self.returncode
             await asyncio.Event().wait()
             raise AssertionError("unreachable")
 
@@ -1225,26 +1229,45 @@ def test_exec_helper_reports_failed_output_limit_termination(
         process = DummyProcess()
         return process
 
+    cleanup_succeeds = False
+
     async def fail_terminate(_process: object) -> bool:
+        if cleanup_succeeds:
+            assert process is not None
+            process.returncode = -9
+            return True
         return False
 
     monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", fake_spawn)
     monkeypatch.setattr(process_tools_module, "_terminate_process_tree", fail_terminate)
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_terminate)
 
-    async def run() -> None:
+    async def run() -> int:
+        nonlocal cleanup_succeeds
+        supervisor = process_manager_module.ProcessSupervisor()
+
+        async def execute() -> None:
+            await process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                ["command"],
+                cwd=tmp_path,
+                process_supervisor=supervisor,
+                max_stdout_lines=10,
+                max_buffered_stdout_lines=1,
+            )
+
         with anyio.fail_after(1):
             with pytest.raises(ToolError, match="Failed to terminate process tree"):
-                await process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
-                    ["command"],
-                    cwd=tmp_path,
-                    max_stdout_lines=10,
-                    max_buffered_stdout_lines=1,
-                )
+                await asyncio.create_task(execute())
+        retained = len(supervisor._one_shot)  # noqa: SLF001
+        cleanup_succeeds = True
+        await supervisor.aclose()
+        return retained
 
-    anyio.run(run)
+    retained = anyio.run(run)
 
     assert process is not None
     assert process.wait_called is True
+    assert retained == 1
 
 
 def test_grep_tool_python_fallback_supports_literal_ignore_case_and_glob(
@@ -1313,6 +1336,7 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
         command: list[str],
         *,
         cwd: Path,
+        process_supervisor: object,
         max_stdout_lines: int,
         stdout_line_filter: object = None,
         stdout_count_filter: object = None,
@@ -1322,6 +1346,7 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
         max_buffered_stderr_lines: int | None = None,
     ) -> search_tools_module.ProcessResult:
         assert cwd == tmp_path
+        assert isinstance(process_supervisor, process_manager_module.ProcessSupervisor)
         assert callable(stdout_count_filter)
         calls.append(
             (
@@ -1499,6 +1524,7 @@ def test_grep_tool_ripgrep_drops_context_for_omitted_merged_match(
         command: list[str],
         *,
         cwd: Path,
+        process_supervisor: object,
         max_stdout_lines: int,
         stdout_line_filter: object = None,
         stdout_count_filter: object = None,
@@ -1508,6 +1534,7 @@ def test_grep_tool_ripgrep_drops_context_for_omitted_merged_match(
         max_buffered_stderr_lines: int | None = None,
     ) -> search_tools_module.ProcessResult:
         assert cwd == tmp_path
+        assert isinstance(process_supervisor, process_manager_module.ProcessSupervisor)
         assert max_stdout_lines == 2
         assert callable(stdout_count_filter)
         assert max_buffered_stdout_bytes == 50000
@@ -1914,12 +1941,14 @@ def test_find_tool_ripgrep_bounds_stdout_before_buffering(
         command: list[str],
         *,
         cwd: Path,
+        process_supervisor: object,
         max_stdout_lines: int,
         stdout_line_filter: object = None,
         max_buffered_stderr_bytes: int | None = None,
         max_buffered_stderr_lines: int | None = None,
     ) -> search_tools_module.ProcessResult:
         assert cwd == tmp_path
+        assert isinstance(process_supervisor, process_manager_module.ProcessSupervisor)
         assert callable(stdout_line_filter)
         calls.append(
             (command, max_stdout_lines, max_buffered_stderr_bytes, max_buffered_stderr_lines)

@@ -219,6 +219,51 @@ def test_managed_process_timeout_is_not_an_exit_code(tmp_path: Path) -> None:
     assert update.exit_code is None
 
 
+def test_managed_timeout_serializes_with_explicit_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    active_cleanups = 0
+    max_active_cleanups = 0
+
+    async def delayed_terminate(process: asyncio.subprocess.Process) -> bool:
+        nonlocal active_cleanups, max_active_cleanups
+        active_cleanups += 1
+        max_active_cleanups = max(max_active_cleanups, active_cleanups)
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        try:
+            await original_terminate(process)
+            return True
+        finally:
+            active_cleanups -= 1
+
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", delayed_terminate)
+
+    async def run() -> None:
+        supervisor = ProcessSupervisor()
+        process_id = await supervisor.start(
+            _python_command("import time; time.sleep(30)"),
+            cwd=tmp_path,
+            timeout=0.01,
+        )
+        await cleanup_started.wait()
+        cancel_call = asyncio.create_task(supervisor.cancel(process_id))
+        await anyio.sleep(0.05)
+        assert max_active_cleanups == 1
+
+        allow_cleanup.set()
+        await cancel_call
+        await supervisor.aclose()
+
+    anyio.run(run)
+
+    assert max_active_cleanups == 1
+
+
 def test_managed_timeout_reports_process_tree_cleanup_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -582,7 +627,10 @@ def test_supervisor_close_bounds_one_shot_capture_drain(
     async def hold_capture(
         _process: asyncio.subprocess.Process,
         _budget: object,
+        *,
+        terminate: object,
     ) -> tuple[bytes, bytes]:
+        assert callable(terminate)
         capture_started.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
@@ -614,6 +662,69 @@ def test_supervisor_close_bounds_one_shot_capture_drain(
 
     assert capture_cancelled is True
     assert retained_count == 0
+
+
+def test_one_shot_cleanup_serializes_with_supervisor_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_cleanup = process_manager_module._kill_process_tree_and_wait  # type: ignore[attr-defined]
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    active_cleanups = 0
+    max_active_cleanups = 0
+
+    async def enter_cleanup() -> None:
+        nonlocal active_cleanups, max_active_cleanups
+        active_cleanups += 1
+        max_active_cleanups = max(max_active_cleanups, active_cleanups)
+        cleanup_started.set()
+        await allow_cleanup.wait()
+
+    async def delayed_cleanup(process: asyncio.subprocess.Process) -> bool:
+        nonlocal active_cleanups
+        await enter_cleanup()
+        try:
+            return await original_cleanup(process)
+        finally:
+            active_cleanups -= 1
+
+    async def delayed_terminate(process: asyncio.subprocess.Process) -> bool:
+        nonlocal active_cleanups
+        await enter_cleanup()
+        try:
+            return await original_terminate(process)
+        finally:
+            active_cleanups -= 1
+
+    monkeypatch.setattr(process_manager_module, "_kill_process_tree_and_wait", delayed_cleanup)
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", delayed_terminate)
+
+    async def run() -> None:
+        supervisor = ProcessSupervisor()
+        run_task = asyncio.create_task(
+            supervisor.run_to_completion(
+                _python_command("import time; time.sleep(30)"),
+                cwd=tmp_path,
+                timeout=0.01,
+                max_output_bytes=1_000,
+                max_output_lines=100,
+            )
+        )
+        await cleanup_started.wait()
+        close_task = asyncio.create_task(supervisor.aclose())
+        await anyio.sleep(0.05)
+        assert max_active_cleanups == 1
+
+        allow_cleanup.set()
+        with pytest.raises(ToolError, match="timed out"):
+            await run_task
+        await close_task
+
+    anyio.run(run)
+
+    assert max_active_cleanups == 1
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
@@ -1004,7 +1115,10 @@ def test_one_shot_capture_error_retains_ownership_when_cleanup_fails(
     async def fail_capture(
         _process: asyncio.subprocess.Process,
         _budget: object,
+        *,
+        terminate: object,
     ) -> tuple[bytes, bytes]:
+        assert callable(terminate)
         raise OSError("broken pipe")
 
     async def fail_cleanup(process: asyncio.subprocess.Process) -> bool:
@@ -1239,7 +1353,10 @@ def test_one_shot_capture_error_terminates_process_before_releasing_ownership(
     async def fail_capture(
         process: asyncio.subprocess.Process,
         _budget: object,
+        *,
+        terminate: object,
     ) -> tuple[bytes, bytes]:
+        assert callable(terminate)
         captured_processes.append(process)
         raise OSError("broken pipe")
 
