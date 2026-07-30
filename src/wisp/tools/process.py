@@ -35,6 +35,14 @@ _LINUX_PR_SET_CHILD_SUBREAPER = 36
 _POSIX_JOBS_FD_MIN = 100
 _OUTPUT_LIMIT_EXIT_GRACE_SECONDS = 0.1
 _POSIX_TERMINATION_GRACE_SECONDS = 0.05
+_POSIX_SUBREAPER_HELPER = (
+    "import ctypes, os, sys\n"
+    "try:\n"
+    f"    ctypes.CDLL(None, use_errno=True).prctl({_LINUX_PR_SET_CHILD_SUBREAPER}, 1, 0, 0, 0)\n"
+    "except Exception:\n"
+    "    pass\n"
+    "os.execl('/bin/sh', 'sh', '-c', sys.argv[1])\n"
+)
 
 
 class _WindowsThreadEntry32(ctypes.Structure):
@@ -191,7 +199,9 @@ async def _run_shell(
         raise ToolError(f"Command timed out after {timeout:g} seconds") from exc
     except asyncio.CancelledError:
         cleanup_task = asyncio.create_task(_kill_process_tree_and_wait(process))
-        await _await_task_after_cancellation(cleanup_task)
+        cleanup_succeeded = await _await_task_after_cancellation(cleanup_task)
+        if not cleanup_succeeded:
+            raise ToolError("Failed to terminate process tree") from None
         raise
     except Exception as exc:
         cleanup_succeeded = await _await_process_cleanup(_kill_process_tree_and_wait(process))
@@ -240,17 +250,29 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
         else:
             process_kwargs: dict[str, Any] = {}
             if os.name == "posix":
-                process_kwargs["preexec_fn"] = _prepare_posix_shell_child
                 if posix_jobs_fd is not None:
                     process_kwargs["pass_fds"] = (posix_jobs_fd,)
-            process = await asyncio.create_subprocess_shell(
-                command,
-                cwd=str(cwd),
-                start_new_session=os.name == "posix",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **process_kwargs,
-            )
+            if os.name == "posix" and sys.platform.startswith("linux"):
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-c",
+                    _POSIX_SUBREAPER_HELPER,
+                    command,
+                    cwd=str(cwd),
+                    start_new_session=True,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    **process_kwargs,
+                )
+            else:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    cwd=str(cwd),
+                    start_new_session=os.name == "posix",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    **process_kwargs,
+                )
     except OSError as exc:
         if posix_jobs_fd is not None:
             _close_posix_fd(posix_jobs_fd)
@@ -392,17 +414,6 @@ def _close_posix_fd(fd: int) -> None:
     try:
         os.close(fd)
     except OSError:
-        return
-
-
-def _prepare_posix_shell_child() -> None:
-    if not sys.platform.startswith("linux"):
-        return
-    try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        prctl = libc.prctl
-        prctl(_LINUX_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
-    except Exception:
         return
 
 

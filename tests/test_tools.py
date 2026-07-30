@@ -1047,6 +1047,7 @@ def test_posix_shell_uses_hidden_high_jobs_fd(
         return process
 
     monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module.sys, "platform", "darwin")
     monkeypatch.setattr(process_tools_module, "_open_posix_jobs_fd", lambda _path: 123)
     monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
     monkeypatch.setattr(
@@ -1067,6 +1068,53 @@ def test_posix_shell_uses_hidden_high_jobs_fd(
     )
 
 
+def test_linux_posix_shell_startup_uses_exec_helper_instead_of_preexec(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class DummyProcess:
+        pass
+
+    process = DummyProcess()
+    exec_calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    closed_fds: list[int] = []
+
+    async def create_exec(*command: str, **kwargs: object) -> DummyProcess:
+        exec_calls.append((command, kwargs))
+        return process
+
+    async def fail_shell(*_args: object, **_kwargs: object) -> DummyProcess:
+        raise AssertionError("Linux POSIX startup should use exec helper")
+
+    monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module.sys, "platform", "linux")
+    monkeypatch.setattr(process_tools_module, "_open_posix_jobs_fd", lambda _path: 123)
+    monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", create_exec)
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_shell", fail_shell)
+
+    async def run() -> DummyProcess:
+        return await process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # type: ignore[return-value]  # noqa: SLF001
+
+    result = anyio.run(run)
+    jobs_file = getattr(result, process_tools_module._POSIX_JOBS_FILE_ATTR)  # noqa: SLF001
+    jobs_file.unlink(missing_ok=True)
+
+    assert result is process
+    assert len(exec_calls) == 1
+    command, kwargs = exec_calls[0]
+    assert command[:3] == (
+        process_tools_module.sys.executable,
+        "-c",
+        process_tools_module._POSIX_SUBREAPER_HELPER,  # noqa: SLF001
+    )
+    assert "echo hi" in command[3]
+    assert "preexec_fn" not in kwargs
+    assert kwargs["pass_fds"] == (123,)
+    assert kwargs["start_new_session"] is True
+    assert closed_fds == [123]
+
+
 def test_posix_shell_spawn_cancellation_cleans_tracking_resources(
     monkeypatch: MonkeyPatch,
     tmp_path: Path,
@@ -1074,13 +1122,17 @@ def test_posix_shell_spawn_cancellation_cleans_tracking_resources(
     closed_fds: list[int] = []
     removed_files: list[object] = []
 
-    async def cancelled_create_subprocess_shell(
-        _command: str,
+    async def cancelled_create_subprocess_exec(
+        *_command: str,
         **_kwargs: object,
     ) -> object:
         raise asyncio.CancelledError
 
+    async def fail_create_subprocess_shell(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Linux POSIX startup should use exec helper")
+
     monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module.sys, "platform", "linux")
     monkeypatch.setattr(process_tools_module, "_open_posix_jobs_fd", lambda _path: 123)
     monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
     monkeypatch.setattr(
@@ -1088,8 +1140,13 @@ def test_posix_shell_spawn_cancellation_cleans_tracking_resources(
     )
     monkeypatch.setattr(
         process_tools_module.asyncio,
+        "create_subprocess_exec",
+        cancelled_create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        process_tools_module.asyncio,
         "create_subprocess_shell",
-        cancelled_create_subprocess_shell,
+        fail_create_subprocess_shell,
     )
 
     async def run() -> None:
@@ -1151,6 +1208,52 @@ def test_bash_tool_cancellation_kills_child_processes(tmp_path: Path) -> None:
     time.sleep(1.3)
 
     assert not marker.exists()
+
+
+def test_direct_bash_cancellation_surfaces_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pass
+
+    process = DummyProcess()
+
+    async def create_process(_command: str, *, cwd: Path) -> DummyProcess:
+        assert cwd == tmp_path
+        return process
+
+    async def fail_cleanup(captured_process: object) -> bool:
+        assert captured_process is process
+        return False
+
+    monkeypatch.setattr(process_tools_module, "_create_shell_process", create_process)
+    monkeypatch.setattr(process_tools_module, "_kill_process_tree_and_wait", fail_cleanup)
+
+    async def run_and_cancel() -> None:
+        collect_started = asyncio.Event()
+
+        async def collect_output(*_args: object, **_kwargs: object) -> tuple[bytes, bytes]:
+            collect_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(process_tools_module, "_collect_limited_output", collect_output)
+        task = asyncio.create_task(
+            process_tools_module._run_shell(  # noqa: SLF001
+                "ignored",
+                cwd=tmp_path,
+                timeout=10,
+                max_output_bytes=100,
+                max_output_lines=100,
+            )
+        )
+        await collect_started.wait()
+        task.cancel()
+        with pytest.raises(ToolError, match="Failed to terminate process tree"):
+            await task
+
+    anyio.run(run_and_cancel)
 
 
 def test_direct_bash_cleanup_finishes_before_raw_task_cancellation(
