@@ -644,6 +644,74 @@ def test_one_shot_releases_ownership_inside_cancelled_scope_while_lock_is_conten
     assert stdout == "second\n"
 
 
+def test_one_shot_releases_ownership_after_raw_task_cancel_while_lock_is_contended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
+    terminate_started = asyncio.Event()
+    allow_terminate = asyncio.Event()
+
+    async def delayed_terminate(process: asyncio.subprocess.Process) -> None:
+        terminate_started.set()
+        await allow_terminate.wait()
+        await original_terminate(process)
+
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", delayed_terminate)
+
+    async def run() -> tuple[int, str]:
+        supervisor = ProcessSupervisor(max_processes=1)
+        lock_held = asyncio.Event()
+        release_lock = asyncio.Event()
+
+        async def hold_lock_during_release() -> None:
+            await terminate_started.wait()
+            async with supervisor._lock:  # noqa: SLF001
+                lock_held.set()
+                await release_lock.wait()
+
+        try:
+            hold_lock_task = asyncio.create_task(hold_lock_during_release())
+            run_task = asyncio.create_task(
+                supervisor.run_to_completion(
+                    _python_command("print('first')"),
+                    cwd=tmp_path,
+                    timeout=2,
+                    max_output_bytes=1_000,
+                    max_output_lines=100,
+                )
+            )
+            await lock_held.wait()
+            allow_terminate.set()
+            await anyio.sleep(0.05)
+
+            run_task.cancel()
+            await anyio.sleep(0.05)
+            assert run_task.done() is False
+
+            release_lock.set()
+            await hold_lock_task
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
+
+            retained_count = len(supervisor._one_shot)  # noqa: SLF001
+            result = await supervisor.run_to_completion(
+                _python_command("print('second')"),
+                cwd=tmp_path,
+                timeout=2,
+                max_output_bytes=1_000,
+                max_output_lines=100,
+            )
+            return retained_count, result.stdout
+        finally:
+            await supervisor.aclose()
+
+    retained_count, stdout = anyio.run(run)
+
+    assert retained_count == 0
+    assert stdout == "second\n"
+
+
 def test_one_shot_capture_error_terminates_process_before_releasing_ownership(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

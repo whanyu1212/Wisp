@@ -167,9 +167,12 @@ class ProcessSupervisor:
             return result
         finally:
             if release_ownership:
-                with anyio.CancelScope(shield=True):
-                    async with self._lock:
-                        self._one_shot.discard(process)
+                release_task = asyncio.create_task(self._release_one_shot(process))
+                try:
+                    await asyncio.shield(release_task)
+                except asyncio.CancelledError:
+                    await self._await_task_after_cancellation(release_task)
+                    raise
 
     async def start(
         self,
@@ -272,6 +275,10 @@ class ProcessSupervisor:
                 self._close_task = asyncio.create_task(self._close_owned_processes())
             assert self._close_task is not None
             return self._close_task
+
+    async def _release_one_shot(self, process: asyncio.subprocess.Process) -> None:
+        async with self._lock:
+            self._one_shot.discard(process)
 
     async def _await_task_after_cancellation(self, task: asyncio.Task[_T]) -> _T:
         while True:
