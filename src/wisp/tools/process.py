@@ -267,6 +267,13 @@ async def _await_process_cleanup(cleanup: Awaitable[bool]) -> bool:
         raise
 
 
+async def _cancel_one_shot_start_after_cancellation(
+    process_supervisor: _ProcessSupervisor,
+) -> None:
+    cancel_task = asyncio.create_task(process_supervisor._cancel_one_shot_start())
+    await _await_task_after_cancellation(cancel_task)
+
+
 def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
     quoted_jobs_file = shlex.quote(str(jobs_file))
     quoted_command = shlex.quote(command)
@@ -282,10 +289,10 @@ def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
         "awk -v __wisp_ppid=$$ '$2 == __wisp_ppid { print $1 }' >> "
         f"{quoted_jobs_file}"
         " 2>/dev/null || true; fi; }; "
-        "trap '__wisp_record_jobs' HUP INT TERM; "
+        "trap '__wisp_record_jobs' EXIT HUP INT TERM; "
         f"eval {quoted_command}; "
         "__wisp_status=$?; "
-        "trap - HUP INT TERM; "
+        "trap - EXIT HUP INT TERM; "
         "__wisp_record_jobs; "
         "exit $__wisp_status"
     )
@@ -324,7 +331,9 @@ async def _terminate_process_tree(
         if os.name == "nt":
             return await asyncio.to_thread(_kill_process_tree, process)
         if os.name == "posix":
-            _record_posix_descendant_pids(process)
+            descendants_recorded = await asyncio.to_thread(_record_posix_descendant_pids, process)
+            if not descendants_recorded:
+                return False
         return _kill_process_tree(process)
     if os.name == "nt":
         return await asyncio.to_thread(_kill_process_tree, process)
@@ -338,7 +347,9 @@ async def _terminate_posix_process_tree(process: asyncio.subprocess.Process) -> 
     if not group_term_succeeded:
         return False
     await asyncio.sleep(_POSIX_TERMINATION_GRACE_SECONDS)
-    _record_posix_descendant_pids(process)
+    descendants_recorded = await asyncio.to_thread(_record_posix_descendant_pids, process)
+    if not descendants_recorded:
+        return False
     group_kill_succeeded = _signal_posix_process_group(process, signal.SIGKILL)
     recorded_kill_succeeded = _signal_posix_recorded_jobs(process, signal.SIGKILL)
     if group_kill_succeeded and recorded_kill_succeeded:
@@ -399,33 +410,38 @@ def _posix_recorded_job_pids(process: asyncio.subprocess.Process) -> tuple[int, 
     return tuple(dict.fromkeys(pids))
 
 
-def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> None:
+def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> bool:
     jobs_file = getattr(process, _POSIX_JOBS_FILE_ATTR, None)
     if not isinstance(jobs_file, Path):
-        return
+        return True
     descendant_pids = _posix_descendant_pids(process.pid)
+    if descendant_pids is None:
+        return False
     if not descendant_pids:
-        return
+        return True
     try:
         with jobs_file.open("a", encoding="utf-8") as file:
             for pid in descendant_pids:
                 file.write(f"{pid}\n")
     except OSError:
-        return
+        return False
+    return True
 
 
-def _posix_descendant_pids(root_pid: int) -> tuple[int, ...]:
+def _posix_descendant_pids(root_pid: int) -> tuple[int, ...] | None:
     descendants: list[int] = []
     pending = [root_pid]
     while pending:
         parent_pid = pending.pop()
         child_pids = _posix_child_pids(parent_pid)
+        if child_pids is None:
+            return None
         descendants.extend(child_pids)
         pending.extend(child_pids)
     return tuple(dict.fromkeys(pid for pid in descendants if pid != root_pid))
 
 
-def _posix_child_pids(parent_pid: int) -> tuple[int, ...]:
+def _posix_child_pids(parent_pid: int) -> tuple[int, ...] | None:
     try:
         completed = subprocess.run(
             ["pgrep", "-P", str(parent_pid)],
@@ -442,7 +458,7 @@ def _posix_child_pids(parent_pid: int) -> tuple[int, ...]:
     return _parse_posix_pid_lines(completed.stdout.splitlines())
 
 
-def _posix_child_pids_from_ps(parent_pid: int) -> tuple[int, ...]:
+def _posix_child_pids_from_ps(parent_pid: int) -> tuple[int, ...] | None:
     try:
         completed = subprocess.run(
             ["ps", "-eo", "pid=,ppid="],
@@ -453,9 +469,9 @@ def _posix_child_pids_from_ps(parent_pid: int) -> tuple[int, ...]:
             timeout=1,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return ()
+        return None
     if completed.returncode != 0:
-        return ()
+        return None
     child_pids: list[int] = []
     for line in completed.stdout.splitlines():
         parts = line.split()
@@ -876,10 +892,10 @@ async def _run_exec_limited_stdout(
             stderr=asyncio.subprocess.PIPE,
         )
     except OSError as exc:
-        await process_supervisor._cancel_one_shot_start()
+        await _cancel_one_shot_start_after_cancellation(process_supervisor)
         raise ToolError(f"Failed to start command: {exc}") from exc
     except BaseException:
-        await process_supervisor._cancel_one_shot_start()
+        await _cancel_one_shot_start_after_cancellation(process_supervisor)
         raise
     assert process is not None
 

@@ -932,6 +932,35 @@ def test_completion_kills_detached_background_job(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_exit_command_records_and_kills_detached_background_job(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "detached-before-exit.pid"
+    command = (
+        _detached_python_background_command(
+            child_pid_path,
+            keep_shell_alive=False,
+            redirect_output=True,
+        )
+        + "; exit 0"
+    )
+
+    async def run() -> tuple[ProcessUpdate, int]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(command, cwd=tmp_path, timeout=2)
+            child_pid = await _wait_for_pid_file(child_pid_path)
+            terminal = (await _poll_until_terminal(supervisor, process_id))[-1]
+            return terminal, child_pid
+        finally:
+            await supervisor.aclose()
+
+    update, child_pid = anyio.run(run)
+
+    assert update.state == "completed"
+    assert update.exit_code == 0
+    _assert_process_gone(child_pid)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
 def test_output_limit_kills_detached_background_job(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "detached-output-limit.pid"
     command = (

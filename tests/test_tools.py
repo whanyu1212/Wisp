@@ -571,6 +571,28 @@ def test_kill_process_tree_and_wait_returns_failure_without_waiting(
     assert process.wait_called is False
 
 
+def test_posix_descendant_discovery_failure_reports_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, tmp_path / "jobs")  # noqa: SLF001
+    monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module, "_posix_descendant_pids", lambda _pid: None)
+
+    async def run() -> bool:
+        return await process_tools_module._terminate_process_tree(  # type: ignore[arg-type]  # noqa: SLF001
+            process,
+            force=True,
+        )
+
+    assert anyio.run(run) is False
+
+
 def test_posix_permission_error_reports_cleanup_failure_for_exited_leader(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -1405,6 +1427,46 @@ def test_exec_helper_cleans_process_when_registration_finds_closed_supervisor(
 
     assert process is None
     assert retained == 0
+
+
+def test_exec_helper_finishes_reservation_rollback_after_repeated_cancel(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    spawn_started = asyncio.Event()
+
+    async def pending_spawn(*_args: object, **_kwargs: object) -> asyncio.subprocess.Process:
+        spawn_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", pending_spawn)
+
+    async def run() -> int:
+        supervisor = process_manager_module.ProcessSupervisor()
+        execute = asyncio.create_task(
+            process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                [sys.executable, "-c", "pass"],
+                cwd=tmp_path,
+                process_supervisor=supervisor,
+                max_stdout_lines=10,
+            )
+        )
+        await spawn_started.wait()
+        async with supervisor._lock:  # noqa: SLF001
+            execute.cancel()
+            await anyio.sleep(0)
+            execute.cancel()
+            await anyio.sleep(0)
+            assert execute.done() is False
+
+        with pytest.raises(asyncio.CancelledError):
+            await execute
+        with anyio.fail_after(1):
+            await supervisor.aclose()
+        return supervisor._pending_one_shot_starts  # noqa: SLF001
+
+    assert anyio.run(run) == 0
 
 
 def test_aclose_waits_for_one_shot_reserved_before_close(
