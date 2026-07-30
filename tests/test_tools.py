@@ -705,6 +705,54 @@ def test_posix_recorded_jobs_skip_descendant_scan_after_leader_exit(
     assert kills == [(345, signal.SIGKILL)]
 
 
+def test_posix_recorded_jobs_revalidate_after_pidfd_open(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("234\n", encoding="utf-8")
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+    ownership_snapshots = [{234}, set()]
+    closed_fds: list[int] = []
+
+    def current_owned(_process: object) -> set[int]:
+        return ownership_snapshots.pop(0)
+
+    def fail_pidfd_send_signal(
+        _pidfd: int,
+        _selected_signal: signal.Signals,
+        _siginfo: object,
+        _flags: int,
+    ) -> None:
+        raise AssertionError("stale pidfd must not be signaled")
+
+    monkeypatch.setattr(process_tools_module, "_posix_current_owned_pids", current_owned)
+    monkeypatch.setattr(
+        process_tools_module.os, "pidfd_open", lambda _pid, _flags: 789, raising=False
+    )
+    monkeypatch.setattr(
+        process_tools_module.signal,
+        "pidfd_send_signal",
+        fail_pidfd_send_signal,
+        raising=False,
+    )
+    monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
+
+    signaled = process_tools_module._signal_posix_recorded_jobs(  # type: ignore[arg-type]  # noqa: SLF001
+        process,
+        signal.SIGKILL,
+    )
+
+    assert signaled is True
+    assert ownership_snapshots == []
+    assert closed_fds == [789]
+
+
 def test_posix_recorded_job_verification_runs_off_event_loop(
     monkeypatch: MonkeyPatch,
 ) -> None:

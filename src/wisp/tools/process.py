@@ -409,7 +409,11 @@ async def _terminate_process_tree(
 
 
 async def _terminate_posix_process_tree(process: asyncio.subprocess.Process) -> bool:
-    group_term_succeeded = _signal_posix_process_group(process, signal.SIGTERM)
+    group_term_succeeded = await asyncio.to_thread(
+        _signal_posix_process_group,
+        process,
+        signal.SIGTERM,
+    )
     if not group_term_succeeded:
         return False
     await asyncio.sleep(_POSIX_TERMINATION_GRACE_SECONDS)
@@ -439,7 +443,9 @@ def _signal_posix_process_group(
     process: asyncio.subprocess.Process,
     selected_signal: signal.Signals,
 ) -> bool:
-    if process.returncode is not None:
+    if process.returncode is not None and not _posix_group_has_members_without_live_leader(
+        process.pid
+    ):
         return True
     try:
         os.killpg(process.pid, selected_signal)
@@ -453,6 +459,38 @@ def _signal_posix_process_group(
             pass
         return False
     return True
+
+
+def _posix_group_has_members_without_live_leader(pgid: int) -> bool:
+    try:
+        completed = subprocess.run(
+            ["ps", "-eo", "pid=,pgid="],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if completed.returncode != 0:
+        return False
+    has_member = False
+    for line in completed.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+            selected_pgid = int(parts[1])
+        except ValueError:
+            continue
+        if selected_pgid != pgid:
+            continue
+        if pid == pgid:
+            return False
+        has_member = True
+    return has_member
 
 
 def _signal_posix_recorded_jobs(
@@ -469,13 +507,53 @@ def _signal_posix_recorded_jobs(
     for pid in recorded_pids:
         if pid not in current_owned_pids:
             continue
-        try:
-            os.kill(pid, selected_signal)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
+        if not _signal_verified_posix_pid(process, pid, selected_signal):
             succeeded = False
     return succeeded
+
+
+def _signal_verified_posix_pid(
+    process: asyncio.subprocess.Process,
+    pid: int,
+    selected_signal: signal.Signals,
+) -> bool:
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    if callable(pidfd_open) and callable(pidfd_send_signal):
+        try:
+            pidfd = pidfd_open(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        try:
+            current_owned_pids = _posix_current_owned_pids(process)
+            if current_owned_pids is None:
+                return False
+            if pid not in current_owned_pids:
+                return True
+            try:
+                pidfd_send_signal(pidfd, selected_signal, None, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                return False
+            return True
+        finally:
+            _close_posix_fd(pidfd)
+
+    current_owned_pids = _posix_current_owned_pids(process)
+    if current_owned_pids is None:
+        return False
+    if pid not in current_owned_pids:
+        return True
+    try:
+        os.kill(pid, selected_signal)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return True
 
 
 def _posix_recorded_job_pids(process: asyncio.subprocess.Process) -> tuple[int, ...]:
