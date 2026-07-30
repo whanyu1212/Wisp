@@ -144,18 +144,30 @@ class ProcessSupervisor:
                     timeout=timeout,
                 )
             except TimeoutError as exc:
-                with anyio.CancelScope(shield=True):
-                    await _kill_process_tree_and_wait(process)
+                cleanup_task = asyncio.create_task(_kill_process_tree_and_wait(process))
+                try:
+                    await self._await_task_before_propagating_cancellation(cleanup_task)
+                except asyncio.CancelledError:
+                    release_ownership = True
+                    raise
                 release_ownership = True
                 raise ToolError(f"Command timed out after {timeout:g} seconds") from exc
             except BaseException:
-                with anyio.CancelScope(shield=True):
-                    await _kill_process_tree_and_wait(process)
+                cleanup_task = asyncio.create_task(_kill_process_tree_and_wait(process))
+                try:
+                    await self._await_task_before_propagating_cancellation(cleanup_task)
+                except asyncio.CancelledError:
+                    release_ownership = True
+                    raise
                 release_ownership = True
                 raise
 
-            with anyio.CancelScope(shield=True):
-                await _terminate_process_tree(process)
+            cleanup_task = asyncio.create_task(_terminate_process_tree(process))
+            try:
+                await self._await_task_before_propagating_cancellation(cleanup_task)
+            except asyncio.CancelledError:
+                release_ownership = True
+                raise
             result = ProcessResult(
                 exit_code=process.returncode if process.returncode is not None else -1,
                 stdout=stdout_bytes.decode("utf-8", errors="replace"),
@@ -168,11 +180,7 @@ class ProcessSupervisor:
         finally:
             if release_ownership:
                 release_task = asyncio.create_task(self._release_one_shot(process))
-                try:
-                    await asyncio.shield(release_task)
-                except asyncio.CancelledError:
-                    await self._await_task_after_cancellation(release_task)
-                    raise
+                await self._await_task_before_propagating_cancellation(release_task)
 
     async def start(
         self,
@@ -279,6 +287,13 @@ class ProcessSupervisor:
     async def _release_one_shot(self, process: asyncio.subprocess.Process) -> None:
         async with self._lock:
             self._one_shot.discard(process)
+
+    async def _await_task_before_propagating_cancellation(self, task: asyncio.Task[_T]) -> _T:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await self._await_task_after_cancellation(task)
+            raise
 
     async def _await_task_after_cancellation(self, task: asyncio.Task[_T]) -> _T:
         while True:
