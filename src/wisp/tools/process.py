@@ -141,7 +141,9 @@ async def _run_shell(
             timeout=timeout,
         )
     except TimeoutError as exc:
-        await _kill_process_tree_and_wait(process)
+        cleanup_succeeded = await _kill_process_tree_and_wait(process)
+        if not cleanup_succeeded:
+            raise ToolError("Failed to terminate process tree") from exc
         raise ToolError(f"Command timed out after {timeout:g} seconds") from exc
     except asyncio.CancelledError:
         with anyio.CancelScope(shield=True):
@@ -149,7 +151,9 @@ async def _run_shell(
         raise
 
     with anyio.CancelScope(shield=True):
-        await _terminate_process_tree(process)
+        cleanup_succeeded = await _terminate_process_tree(process)
+    if not cleanup_succeeded:
+        raise ToolError("Failed to terminate process tree")
     return ProcessResult(
         exit_code=process.returncode if process.returncode is not None else -1,
         stdout=stdout_bytes.decode("utf-8", errors="replace"),

@@ -149,20 +149,32 @@ class ProcessSupervisor:
             except TimeoutError as exc:
                 cleanup_task = asyncio.create_task(_kill_process_tree_and_wait(process))
                 try:
-                    await self._await_task_before_propagating_cancellation(cleanup_task)
+                    cleanup_succeeded = await self._await_task_before_propagating_cancellation(
+                        cleanup_task
+                    )
                 except asyncio.CancelledError:
-                    release_ownership = True
+                    release_ownership = bool(
+                        cleanup_task.done()
+                        and not cleanup_task.cancelled()
+                        and cleanup_task.result()
+                    )
                     raise
-                release_ownership = True
+                release_ownership = cleanup_succeeded
                 raise ToolError(f"Command timed out after {timeout:g} seconds") from exc
             except BaseException:
                 cleanup_task = asyncio.create_task(_kill_process_tree_and_wait(process))
                 try:
-                    await self._await_task_before_propagating_cancellation(cleanup_task)
+                    cleanup_succeeded = await self._await_task_before_propagating_cancellation(
+                        cleanup_task
+                    )
                 except asyncio.CancelledError:
-                    release_ownership = True
+                    release_ownership = bool(
+                        cleanup_task.done()
+                        and not cleanup_task.cancelled()
+                        and cleanup_task.result()
+                    )
                     raise
-                release_ownership = True
+                release_ownership = cleanup_succeeded
                 raise
 
             cleanup_task = asyncio.create_task(_terminate_process_tree(process))
@@ -171,7 +183,9 @@ class ProcessSupervisor:
                     cleanup_task
                 )
             except asyncio.CancelledError:
-                release_ownership = True
+                release_ownership = bool(
+                    cleanup_task.done() and not cleanup_task.cancelled() and cleanup_task.result()
+                )
                 raise
             if not cleanup_succeeded:
                 raise ToolError("Failed to terminate process tree")
@@ -463,13 +477,13 @@ class ProcessSupervisor:
             else:
                 cleanup_succeeded = await _terminate_process_tree(managed.process)
             managed.exit_code = managed.process.returncode
-            if managed.terminal_override is not None:
+            if not cleanup_succeeded:
+                managed.error = "Failed to terminate process tree"
+                managed.state = "failed"
+            elif managed.terminal_override is not None:
                 managed.state = managed.terminal_override
             elif reader_failure is not None:
                 managed.error = "Failed to read process output"
-                managed.state = "failed"
-            elif not cleanup_succeeded:
-                managed.error = "Failed to terminate process tree"
                 managed.state = "failed"
             else:
                 managed.state = "completed"

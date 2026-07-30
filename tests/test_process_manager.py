@@ -179,6 +179,37 @@ def test_managed_process_timeout_is_not_an_exit_code(tmp_path: Path) -> None:
     assert update.exit_code is None
 
 
+def test_managed_timeout_reports_process_tree_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_terminate(process: asyncio.subprocess.Process) -> bool:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        return False
+
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_terminate)
+
+    async def run() -> ProcessUpdate:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                _python_command("import time; time.sleep(30)"),
+                cwd=tmp_path,
+                timeout=0.05,
+            )
+            return (await _poll_until_terminal(supervisor, process_id))[-1]
+        finally:
+            await supervisor.aclose()
+
+    update = anyio.run(run)
+
+    assert update.state == "failed"
+    assert update.exit_code is None
+    assert update.error == "Failed to terminate process tree"
+
+
 def test_managed_timeout_bounds_post_termination_stream_drain(tmp_path: Path) -> None:
     async def hold_pipe_open() -> None:
         await asyncio.Event().wait()
@@ -632,6 +663,77 @@ def test_one_shot_completion_surfaces_process_tree_cleanup_failure(
                     _python_command("print('done')"),
                     cwd=tmp_path,
                     timeout=2,
+                    max_output_bytes=1_000,
+                    max_output_lines=100,
+                )
+            return len(supervisor._one_shot)  # noqa: SLF001
+        finally:
+            await supervisor.aclose()
+
+    retained_count = anyio.run(run)
+
+    assert retained_count == 1
+
+
+def test_one_shot_timeout_retains_ownership_when_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_cleanup(process: asyncio.subprocess.Process) -> bool:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        return False
+
+    monkeypatch.setattr(process_manager_module, "_kill_process_tree_and_wait", fail_cleanup)
+
+    async def run() -> int:
+        supervisor = ProcessSupervisor()
+        try:
+            with pytest.raises(ToolError, match="timed out"):
+                await supervisor.run_to_completion(
+                    _python_command("import time; time.sleep(30)"),
+                    cwd=tmp_path,
+                    timeout=0.05,
+                    max_output_bytes=1_000,
+                    max_output_lines=100,
+                )
+            return len(supervisor._one_shot)  # noqa: SLF001
+        finally:
+            await supervisor.aclose()
+
+    retained_count = anyio.run(run)
+
+    assert retained_count == 1
+
+
+def test_one_shot_capture_error_retains_ownership_when_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_capture(
+        _process: asyncio.subprocess.Process,
+        _budget: object,
+    ) -> tuple[bytes, bytes]:
+        raise OSError("broken pipe")
+
+    async def fail_cleanup(process: asyncio.subprocess.Process) -> bool:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        return False
+
+    monkeypatch.setattr(process_manager_module, "_collect_limited_output", fail_capture)
+    monkeypatch.setattr(process_manager_module, "_kill_process_tree_and_wait", fail_cleanup)
+
+    async def run() -> int:
+        supervisor = ProcessSupervisor()
+        try:
+            with pytest.raises(OSError, match="broken pipe"):
+                await supervisor.run_to_completion(
+                    _python_command("import time; time.sleep(30)"),
+                    cwd=tmp_path,
+                    timeout=30,
                     max_output_bytes=1_000,
                     max_output_lines=100,
                 )

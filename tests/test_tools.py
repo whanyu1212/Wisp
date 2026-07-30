@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import shlex
 import shutil
@@ -510,6 +511,26 @@ def test_bash_completion_kills_background_child_with_redirected_output(tmp_path:
         pytest.fail("background child remained alive after bash completion")
 
     assert result.data["exit_code"] == 0
+
+
+def test_bash_tool_reports_process_tree_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fail_terminate(process: asyncio.subprocess.Process) -> bool:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        return False
+
+    monkeypatch.setattr(process_tools_module, "_terminate_process_tree", fail_terminate)
+
+    context = ToolContext(cwd=tmp_path)
+    source = "print('done')"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
+
+    with pytest.raises(ToolError, match="Failed to terminate process tree"):
+        run_tool(BashTool(), {"command": command, "timeout": 5}, context)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
