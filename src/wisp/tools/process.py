@@ -531,21 +531,29 @@ def _signal_verified_posix_pid(
             return True
         except PermissionError:
             return False
-        try:
-            current_owned_pids = _posix_current_owned_pids(process)
-            if current_owned_pids is None:
-                return False
-            if pid not in current_owned_pids:
-                return True
+        except OSError:
+            # Python can expose pidfd APIs even when the kernel/sandbox rejects them.
+            pass
+        else:
             try:
-                pidfd_send_signal(pidfd, selected_signal, None, 0)
-            except (FileNotFoundError, ProcessLookupError):
-                return True
-            except PermissionError:
-                return False
-            return True
-        finally:
-            _close_posix_fd(pidfd)
+                current_owned_pids = _posix_current_owned_pids(process)
+                if current_owned_pids is None:
+                    return False
+                if pid not in current_owned_pids:
+                    return True
+                try:
+                    pidfd_send_signal(pidfd, selected_signal, None, 0)
+                except (FileNotFoundError, ProcessLookupError):
+                    return True
+                except PermissionError:
+                    return False
+                except OSError:
+                    # Fall back to revalidated numeric-PID signaling below.
+                    pass
+                else:
+                    return True
+            finally:
+                _close_posix_fd(pidfd)
 
     current_owned_pids = _posix_current_owned_pids(process)
     if current_owned_pids is None:

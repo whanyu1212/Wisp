@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import shlex
 import shutil
@@ -754,6 +755,85 @@ def test_posix_recorded_jobs_revalidate_after_pidfd_open(
 
     assert signaled is True
     assert ownership_snapshots == []
+    assert closed_fds == [789]
+
+
+def test_posix_recorded_jobs_fall_back_when_pidfd_open_is_unsupported(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    kills: list[tuple[int, signal.Signals]] = []
+
+    def unsupported_pidfd_open(_pid: int, _flags: int) -> int:
+        raise OSError(errno.ENOSYS, "pidfd_open unavailable")
+
+    def fail_pidfd_send_signal(*_args: object) -> None:
+        raise AssertionError("pidfd_send_signal should not run after pidfd_open fails")
+
+    monkeypatch.setattr(process_tools_module, "_posix_current_owned_pids", lambda _process: {234})
+    monkeypatch.setattr(
+        process_tools_module.os, "pidfd_open", unsupported_pidfd_open, raising=False
+    )
+    monkeypatch.setattr(
+        process_tools_module.signal,
+        "pidfd_send_signal",
+        fail_pidfd_send_signal,
+        raising=False,
+    )
+    monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    signaled = process_tools_module._signal_verified_posix_pid(  # type: ignore[arg-type]  # noqa: SLF001
+        DummyProcess(),
+        234,
+        signal.SIGKILL,
+    )
+
+    assert signaled is True
+    assert kills == [(234, signal.SIGKILL)]
+
+
+def test_posix_recorded_jobs_fall_back_when_pidfd_send_signal_is_unsupported(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    kills: list[tuple[int, signal.Signals]] = []
+    closed_fds: list[int] = []
+
+    def unsupported_pidfd_send_signal(
+        _pidfd: int,
+        _selected_signal: signal.Signals,
+        _siginfo: object,
+        _flags: int,
+    ) -> None:
+        raise OSError(errno.ENOSYS, "pidfd_send_signal unavailable")
+
+    monkeypatch.setattr(process_tools_module, "_posix_current_owned_pids", lambda _process: {234})
+    monkeypatch.setattr(
+        process_tools_module.os, "pidfd_open", lambda _pid, _flags: 789, raising=False
+    )
+    monkeypatch.setattr(
+        process_tools_module.signal,
+        "pidfd_send_signal",
+        unsupported_pidfd_send_signal,
+        raising=False,
+    )
+    monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
+    monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    signaled = process_tools_module._signal_verified_posix_pid(  # type: ignore[arg-type]  # noqa: SLF001
+        DummyProcess(),
+        234,
+        signal.SIGKILL,
+    )
+
+    assert signaled is True
+    assert kills == [(234, signal.SIGKILL)]
     assert closed_fds == [789]
 
 
