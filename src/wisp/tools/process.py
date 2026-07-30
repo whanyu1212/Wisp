@@ -31,6 +31,7 @@ _WINDOWS_THREAD_SUSPEND_RESUME = 0x0002
 _WINDOWS_WAIT_FAILED = 0xFFFFFFFF
 _WINDOWS_WAIT_TIMEOUT = 0x00000102
 _LINUX_PR_SET_CHILD_SUBREAPER = 36
+_POSIX_JOBS_FD_MIN = 100
 _OUTPUT_LIMIT_EXIT_GRACE_SECONDS = 0.1
 _POSIX_TERMINATION_GRACE_SECONDS = 0.05
 
@@ -206,9 +207,15 @@ async def _run_shell(
 
 async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subprocess.Process:
     posix_jobs_file: Path | None = None
+    posix_jobs_fd: int | None = None
     if os.name == "posix":
         with tempfile.NamedTemporaryFile(prefix="wisp-jobs-", delete=False) as jobs_file:
             posix_jobs_file = Path(jobs_file.name)
+        try:
+            posix_jobs_fd = _open_posix_jobs_fd(posix_jobs_file)
+        except OSError as exc:
+            _remove_posix_jobs_file(posix_jobs_file)
+            raise ToolError(f"Failed to start command: {exc}") from exc
         command = _wrap_posix_shell_command(command, posix_jobs_file)
     try:
         if os.name == "nt":
@@ -228,6 +235,8 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
             process_kwargs: dict[str, Any] = {}
             if os.name == "posix":
                 process_kwargs["preexec_fn"] = _prepare_posix_shell_child
+                if posix_jobs_fd is not None:
+                    process_kwargs["pass_fds"] = (posix_jobs_fd,)
             process = await asyncio.create_subprocess_shell(
                 command,
                 cwd=str(cwd),
@@ -237,9 +246,14 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
                 **process_kwargs,
             )
     except OSError as exc:
+        if posix_jobs_fd is not None:
+            _close_posix_fd(posix_jobs_fd)
         if posix_jobs_file is not None:
             _remove_posix_jobs_file(posix_jobs_file)
         raise ToolError(f"Failed to start command: {exc}") from exc
+
+    if posix_jobs_fd is not None:
+        _close_posix_fd(posix_jobs_fd)
 
     if posix_jobs_file is not None:
         setattr(process, _POSIX_JOBS_FILE_ATTR, posix_jobs_file)
@@ -283,7 +297,6 @@ def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
     quoted_command = shlex.quote(command)
     return (
         "__wisp_shell_pid=$$; "
-        f"exec 9>>{quoted_jobs_file}; "
         "__wisp_recorded_pids=; "
         '__wisp_record_pid() { [ -n "$1" ] || return; '
         'case " $__wisp_recorded_pids " in *" $1 "*) return;; esac; '
@@ -325,9 +338,26 @@ def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
         "wait $__wisp_recorder_pid 2>/dev/null || true; "
         "trap - EXIT HUP INT TERM; "
         "__wisp_record_jobs; "
-        "exec 9>&-; "
         "exit $__wisp_status"
     )
+
+
+def _open_posix_jobs_fd(jobs_file: Path) -> int:
+    import fcntl
+
+    fd = os.open(jobs_file, os.O_WRONLY | os.O_APPEND)
+    try:
+        jobs_fd = fcntl.fcntl(fd, fcntl.F_DUPFD, _POSIX_JOBS_FD_MIN)
+    finally:
+        _close_posix_fd(fd)
+    return int(jobs_fd)
+
+
+def _close_posix_fd(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        return
 
 
 def _prepare_posix_shell_child() -> None:
@@ -496,6 +526,9 @@ def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> bool:
 
 
 def _posix_jobs_file_holder_pids(jobs_file: Path) -> tuple[int, ...] | None:
+    pids = _posix_jobs_file_holder_pids_from_proc(jobs_file)
+    if pids is not None:
+        return pids
     pids = _posix_jobs_file_holder_pids_from_lsof(jobs_file)
     if pids is not None:
         return pids
@@ -503,6 +536,42 @@ def _posix_jobs_file_holder_pids(jobs_file: Path) -> tuple[int, ...] | None:
     if pids is not None:
         return pids
     return None
+
+
+def _posix_jobs_file_holder_pids_from_proc(jobs_file: Path) -> tuple[int, ...] | None:
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return None
+    try:
+        jobs_file_path = str(jobs_file.resolve(strict=False))
+    except OSError:
+        jobs_file_path = str(jobs_file)
+    pids: list[int] = []
+    try:
+        entries = tuple(proc.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.isdecimal():
+            continue
+        try:
+            pid = int(entry.name)
+        except ValueError:
+            continue
+        fd_dir = entry / "fd"
+        try:
+            fds = tuple(fd_dir.iterdir())
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target == jobs_file_path:
+                pids.append(pid)
+                break
+    return tuple(pids)
 
 
 def _posix_jobs_file_holder_pids_from_lsof(jobs_file: Path) -> tuple[int, ...] | None:
@@ -713,7 +782,9 @@ async def _run_windows_process_setup(process: asyncio.subprocess.Process) -> str
                 await _await_windows_process_setup_after_cancellation(setup_task)
             except Exception:
                 pass
-            await _cleanup_failed_windows_process_setup(process)
+            cleanup_succeeded = await _cleanup_failed_windows_process_setup(process)
+        if not cleanup_succeeded:
+            raise ToolError("Failed to start command and terminate process tree") from None
         raise
 
 

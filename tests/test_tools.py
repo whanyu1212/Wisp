@@ -718,10 +718,30 @@ def test_posix_jobs_file_holder_pids_uses_lsof(
         calls.append(command)
         return subprocess.CompletedProcess(command, 0, stdout="234\nnot-a-pid\n345\n")
 
+    monkeypatch.setattr(
+        process_tools_module, "_posix_jobs_file_holder_pids_from_proc", lambda _path: None
+    )
     monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
 
     assert process_tools_module._posix_jobs_file_holder_pids(jobs_file) == (234, 345)  # noqa: SLF001
     assert calls == [["lsof", "-t", "--", str(jobs_file)]]
+
+
+def test_posix_jobs_file_holder_pids_uses_proc_before_external_tools(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    jobs_file = tmp_path / "jobs"
+
+    def fail_run(_command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("external holder probe should not run")
+
+    monkeypatch.setattr(
+        process_tools_module, "_posix_jobs_file_holder_pids_from_proc", lambda _path: (234,)
+    )
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fail_run)
+
+    assert process_tools_module._posix_jobs_file_holder_pids(jobs_file) == (234,)  # noqa: SLF001
 
 
 def test_posix_jobs_file_holder_pids_falls_back_to_fuser(
@@ -742,6 +762,9 @@ def test_posix_jobs_file_holder_pids_falls_back_to_fuser(
             stderr="",
         )
 
+    monkeypatch.setattr(
+        process_tools_module, "_posix_jobs_file_holder_pids_from_proc", lambda _path: None
+    )
     monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
 
     assert process_tools_module._posix_jobs_file_holder_pids(jobs_file) == (234, 345)  # noqa: SLF001
@@ -757,6 +780,9 @@ def test_posix_jobs_file_holder_pids_reports_probe_failure(
     def fake_run(_command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         raise OSError
 
+    monkeypatch.setattr(
+        process_tools_module, "_posix_jobs_file_holder_pids_from_proc", lambda _path: None
+    )
     monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
 
     assert process_tools_module._posix_jobs_file_holder_pids(jobs_file) is None  # noqa: SLF001
@@ -782,6 +808,46 @@ def test_posix_permission_error_reports_cleanup_failure_for_exited_leader(
 
     assert process_tools_module._kill_process_tree(process) is False  # type: ignore[arg-type]  # noqa: SLF001
     assert process.killed is False
+
+
+def test_posix_shell_uses_hidden_high_jobs_fd(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class DummyProcess:
+        returncode = 0
+
+    creation_calls: list[dict[str, object]] = []
+    closed_fds: list[int] = []
+    process = DummyProcess()
+
+    async def fake_create_subprocess_shell(
+        command: str,
+        **kwargs: object,
+    ) -> DummyProcess:
+        assert "exec 9" not in command
+        creation_calls.append(kwargs)
+        return process
+
+    monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module, "_open_posix_jobs_fd", lambda _path: 123)
+    monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
+    monkeypatch.setattr(
+        process_tools_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
+    )
+
+    async def run() -> DummyProcess:
+        return await process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # type: ignore[return-value]  # noqa: SLF001
+
+    result = anyio.run(run)
+
+    assert result is process
+    assert creation_calls[0]["pass_fds"] == (123,)
+    assert creation_calls[0]["start_new_session"] is True
+    assert closed_fds == [123]
+    process_tools_module._remove_posix_jobs_file(  # noqa: SLF001
+        getattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR),  # noqa: SLF001
+    )
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
@@ -1415,6 +1481,40 @@ def test_bash_tool_cleans_windows_job_after_resume_setup_failure(
         ("wait", 456, 0),
         ("close", 789),
     ]
+
+
+def test_bash_tool_surfaces_windows_setup_cleanup_failure_after_cancellation(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pass
+
+    async def run() -> None:
+        setup_started = asyncio.Event()
+        allow_setup_finish = asyncio.Event()
+
+        async def fake_to_thread(_function: object, _process: object) -> None:
+            setup_started.set()
+            await allow_setup_finish.wait()
+
+        async def fail_cleanup(_process: object) -> bool:
+            return False
+
+        monkeypatch.setattr(process_tools_module.asyncio, "to_thread", fake_to_thread)
+        monkeypatch.setattr(
+            process_tools_module, "_cleanup_failed_windows_process_setup", fail_cleanup
+        )
+
+        setup_task = asyncio.create_task(
+            process_tools_module._run_windows_process_setup(DummyProcess())  # type: ignore[arg-type]  # noqa: SLF001
+        )
+        await setup_started.wait()
+        setup_task.cancel()
+        allow_setup_finish.set()
+        with pytest.raises(ToolError, match="terminate process tree"):
+            await setup_task
+
+    anyio.run(run)
 
 
 def test_windows_kernel32_configures_pointer_sized_job_api_signatures(
