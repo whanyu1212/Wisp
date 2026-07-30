@@ -19,6 +19,10 @@ from wisp.tools.result import ToolError
 from wisp.tools.truncation import TruncatedText, truncate_text_tail
 
 _WINDOWS_JOB_HANDLE_ATTR = "_wisp_windows_job_handle"
+_WINDOWS_CREATE_SUSPENDED = 0x00000004
+_WINDOWS_RESUME_FAILED = 0xFFFFFFFF
+_WINDOWS_WAIT_FAILED = 0xFFFFFFFF
+_WINDOWS_WAIT_TIMEOUT = 0x00000102
 
 
 class _CtypesFunction(Protocol):
@@ -36,6 +40,10 @@ class _WindowsKernel32(Protocol):
     TerminateJobObject: _CtypesFunction
 
     CloseHandle: _CtypesFunction
+
+    ResumeThread: _CtypesFunction
+
+    WaitForSingleObject: _CtypesFunction
 
 
 @dataclass(frozen=True)
@@ -101,17 +109,7 @@ async def _run_shell(
     max_output_bytes: int,
     max_output_lines: int,
 ) -> ProcessResult:
-    try:
-        process = await asyncio.create_subprocess_shell(
-            command,
-            cwd=str(cwd),
-            start_new_session=os.name == "posix",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except OSError as exc:
-        raise ToolError(f"Failed to start command: {exc}") from exc
-    _attach_windows_job(process)
+    process = await _create_shell_process(command, cwd=cwd)
 
     budget = _OutputBudget(max_bytes=max_output_bytes, max_lines=max_output_lines)
     try:
@@ -136,6 +134,47 @@ async def _run_shell(
         stdout_truncated=budget.exhausted,
         stderr_truncated=budget.exhausted,
     )
+
+
+async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subprocess.Process:
+    try:
+        if os.name == "nt":
+            process = await asyncio.create_subprocess_shell(
+                command,
+                cwd=str(cwd),
+                start_new_session=False,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                creationflags=getattr(
+                    subprocess,
+                    "CREATE_SUSPENDED",
+                    _WINDOWS_CREATE_SUSPENDED,
+                ),
+            )
+        else:
+            process = await asyncio.create_subprocess_shell(
+                command,
+                cwd=str(cwd),
+                start_new_session=os.name == "posix",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+    except OSError as exc:
+        raise ToolError(f"Failed to start command: {exc}") from exc
+
+    if os.name == "nt":
+        try:
+            _attach_windows_job(process)
+            resumed = _resume_windows_process(process)
+        except Exception:
+            with anyio.CancelScope(shield=True):
+                await _cleanup_failed_windows_process_setup(process)
+            raise
+        if not resumed:
+            with anyio.CancelScope(shield=True):
+                await _cleanup_failed_windows_process_setup(process)
+            raise ToolError("Failed to resume command after Windows process setup")
+    return process
 
 
 async def _kill_process_tree_and_wait(process: asyncio.subprocess.Process) -> None:
@@ -183,7 +222,14 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
                 return
         return
     if os.name == "nt":
-        _terminate_windows_job(process)
+        if _terminate_windows_job(process):
+            return
+        leader_running = _windows_process_leader_is_running(process)
+        if leader_running is False:
+            return
+        if leader_running is None:
+            _kill_leader_if_running(process)
+            return
         try:
             completed = subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(process.pid)],
@@ -212,6 +258,15 @@ def _kill_leader_if_running(process: asyncio.subprocess.Process) -> None:
         return
 
 
+async def _cleanup_failed_windows_process_setup(process: asyncio.subprocess.Process) -> None:
+    _terminate_windows_job(process)
+    _kill_leader_if_running(process)
+    try:
+        await asyncio.wait_for(process.wait(), timeout=1)
+    except (OSError, RuntimeError, TimeoutError):
+        return
+
+
 def _attach_windows_job(process: asyncio.subprocess.Process) -> None:
     if os.name != "nt":
         return
@@ -236,6 +291,19 @@ def _attach_windows_job(process: asyncio.subprocess.Process) -> None:
     setattr(process, _WINDOWS_JOB_HANDLE_ATTR, job_handle)
 
 
+def _resume_windows_process(process: asyncio.subprocess.Process) -> bool:
+    if os.name != "nt":
+        return True
+    kernel32 = _windows_kernel32()
+    thread_handle = _windows_process_thread_handle(process)
+    if kernel32 is None or thread_handle is None:
+        return False
+    try:
+        return kernel32.ResumeThread(thread_handle) != _WINDOWS_RESUME_FAILED
+    except (AttributeError, OSError):
+        return False
+
+
 def _terminate_windows_job(process: asyncio.subprocess.Process) -> bool:
     job_handle = getattr(process, _WINDOWS_JOB_HANDLE_ATTR, None)
     if job_handle is None:
@@ -252,6 +320,24 @@ def _terminate_windows_job(process: asyncio.subprocess.Process) -> bool:
     finally:
         _close_windows_handle(kernel32, job_handle)
     return terminated
+
+
+def _windows_process_leader_is_running(process: asyncio.subprocess.Process) -> bool | None:
+    if process.returncode is not None:
+        return False
+    kernel32 = _windows_kernel32()
+    process_handle = _windows_process_handle(process)
+    if kernel32 is None or process_handle is None:
+        return None
+    try:
+        result = kernel32.WaitForSingleObject(process_handle, 0)
+    except (AttributeError, OSError):
+        return None
+    if result == _WINDOWS_WAIT_TIMEOUT:
+        return True
+    if result == _WINDOWS_WAIT_FAILED:
+        return None
+    return False
 
 
 def _close_windows_handle(kernel32: _WindowsKernel32, handle: object) -> None:
@@ -289,6 +375,14 @@ def _configure_windows_job_api(kernel32: object) -> _WindowsKernel32:
     close_handle = kernel32_api.CloseHandle
     close_handle.restype = wintypes.BOOL
     close_handle.argtypes = [wintypes.HANDLE]
+
+    resume_thread = kernel32_api.ResumeThread
+    resume_thread.restype = wintypes.DWORD
+    resume_thread.argtypes = [wintypes.HANDLE]
+
+    wait_for_single_object = kernel32_api.WaitForSingleObject
+    wait_for_single_object.restype = wintypes.DWORD
+    wait_for_single_object.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     return kernel32_api
 
 
@@ -302,6 +396,18 @@ def _windows_process_handle(process: asyncio.subprocess.Process) -> object | Non
         return None
     subprocess_handle = get_extra_info("subprocess")
     return cast(object | None, getattr(subprocess_handle, "_handle", None))
+
+
+def _windows_process_thread_handle(process: asyncio.subprocess.Process) -> object | None:
+    direct_thread = getattr(process, "_thread", None)
+    if direct_thread is not None:
+        return cast(object, direct_thread)
+    transport = getattr(process, "_transport", None)
+    get_extra_info = getattr(transport, "get_extra_info", None)
+    if get_extra_info is None:
+        return None
+    subprocess_handle = get_extra_info("subprocess")
+    return cast(object | None, getattr(subprocess_handle, "_thread", None))
 
 
 async def _collect_limited_output(

@@ -568,10 +568,19 @@ def test_bash_tool_uses_taskkill_for_windows_process_tree_cleanup(
     class DummyProcess:
         returncode = None
         pid = 123
+        _handle = 456
         killed = False
 
         def kill(self) -> None:
             self.killed = True
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def WaitForSingleObject(self, process: int, milliseconds: int) -> int:
+            self.calls.append(("wait", process, milliseconds))
+            return process_tools_module._WINDOWS_WAIT_TIMEOUT  # noqa: SLF001
 
     calls: list[list[str]] = []
 
@@ -579,17 +588,20 @@ def test_bash_tool_uses_taskkill_for_windows_process_tree_cleanup(
         calls.append(command)
         return subprocess.CompletedProcess(command, 0)
 
+    kernel32 = FakeKernel32()
     process = DummyProcess()
     monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
     monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
 
     process_tools_module._kill_process_tree(process)  # noqa: SLF001
 
+    assert kernel32.calls == [("wait", 456, 0)]
     assert calls == [["taskkill", "/F", "/T", "/PID", "123"]]
     assert process.killed is False
 
 
-def test_bash_tool_terminates_windows_job_then_taskkill_after_shell_leader_exits(
+def test_bash_tool_skips_taskkill_after_windows_job_termination(
     monkeypatch: MonkeyPatch,
 ) -> None:
     class DummyProcess:
@@ -642,8 +654,76 @@ def test_bash_tool_terminates_windows_job_then_taskkill_after_shell_leader_exits
         ("terminate", 789, 1),
         ("close", 789),
     ]
-    assert taskkill_calls == [["taskkill", "/F", "/T", "/PID", "123"]]
+    assert taskkill_calls == []
     assert process.killed is False
+
+
+def test_bash_tool_assigns_windows_job_before_resuming_shell(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+        _handle = 456
+        _thread = 654
+
+        async def wait(self) -> int:
+            return 0
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create_job",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 1
+
+        def ResumeThread(self, thread: int) -> int:
+            self.calls.append(("resume", thread))
+            return 1
+
+    creation_calls: list[dict[str, object]] = []
+    process = DummyProcess()
+    kernel32 = FakeKernel32()
+
+    async def fake_create_subprocess_shell(
+        _command: str,
+        **kwargs: object,
+    ) -> DummyProcess:
+        creation_calls.append(kwargs)
+        return process
+
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(
+        process_tools_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
+    )
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+
+    async def run() -> DummyProcess:
+        return await process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # type: ignore[return-value]  # noqa: SLF001
+
+    result = anyio.run(run)
+
+    assert result is process
+    assert creation_calls == [
+        {
+            "cwd": str(tmp_path),
+            "start_new_session": False,
+            "stdout": process_tools_module.asyncio.subprocess.PIPE,
+            "stderr": process_tools_module.asyncio.subprocess.PIPE,
+            "creationflags": process_tools_module._WINDOWS_CREATE_SUSPENDED,  # noqa: SLF001
+        }
+    ]
+    assert kernel32.calls == [
+        ("create_job",),
+        ("assign", 789, 456),
+        ("resume", 654),
+    ]
 
 
 def test_windows_kernel32_configures_pointer_sized_job_api_signatures(
@@ -664,6 +744,8 @@ def test_windows_kernel32_configures_pointer_sized_job_api_signatures(
             self.AssignProcessToJobObject = FakeFunction(1)
             self.TerminateJobObject = FakeFunction(1)
             self.CloseHandle = FakeFunction(1)
+            self.ResumeThread = FakeFunction(1)
+            self.WaitForSingleObject = FakeFunction(process_tools_module._WINDOWS_WAIT_TIMEOUT)  # noqa: SLF001
 
     kernel32 = FakeKernel32()
 
@@ -692,9 +774,16 @@ def test_windows_kernel32_configures_pointer_sized_job_api_signatures(
     ]
     assert kernel32.CloseHandle.restype is process_tools_module.wintypes.BOOL
     assert kernel32.CloseHandle.argtypes == [process_tools_module.wintypes.HANDLE]
+    assert kernel32.ResumeThread.restype is process_tools_module.wintypes.DWORD
+    assert kernel32.ResumeThread.argtypes == [process_tools_module.wintypes.HANDLE]
+    assert kernel32.WaitForSingleObject.restype is process_tools_module.wintypes.DWORD
+    assert kernel32.WaitForSingleObject.argtypes == [
+        process_tools_module.wintypes.HANDLE,
+        process_tools_module.wintypes.DWORD,
+    ]
 
 
-def test_bash_tool_attempts_taskkill_for_windows_leader_after_exit_without_job(
+def test_bash_tool_skips_taskkill_for_exited_windows_leader_without_job(
     monkeypatch: MonkeyPatch,
 ) -> None:
     class DummyProcess:
@@ -717,7 +806,7 @@ def test_bash_tool_attempts_taskkill_for_windows_leader_after_exit_without_job(
 
     process_tools_module._kill_process_tree(process)  # type: ignore[arg-type]  # noqa: SLF001
 
-    assert calls == [["taskkill", "/F", "/T", "/PID", "123"]]
+    assert calls == []
     assert process.killed is False
 
 

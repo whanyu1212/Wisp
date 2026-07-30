@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import codecs
-import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,8 +14,8 @@ import anyio
 
 from wisp.tools.process import (
     ProcessResult,
-    _attach_windows_job,
     _collect_limited_output,
+    _create_shell_process,
     _kill_process_tree_and_wait,
     _OutputBudget,
     _terminate_process_tree,
@@ -339,18 +338,7 @@ class ProcessSupervisor:
     async def _spawn(self, command: str, *, cwd: Path) -> asyncio.subprocess.Process:
         """Spawn while the caller holds the supervisor lock."""
 
-        try:
-            process = await asyncio.create_subprocess_shell(
-                command,
-                cwd=str(cwd),
-                start_new_session=os.name == "posix",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except OSError as exc:
-            raise ToolError(f"Failed to start command: {exc}") from exc
-        _attach_windows_job(process)
-        return process
+        return await _create_shell_process(command, cwd=cwd)
 
     async def _get(self, process_id: str) -> _ManagedProcess:
         async with self._lock:
