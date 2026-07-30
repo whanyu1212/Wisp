@@ -406,9 +406,9 @@ def test_bash_tool_retruncates_combined_stdout_and_stderr(tmp_path: Path) -> Non
 
     result = run_tool(BashTool(), {"command": command}, context)
 
-    status_overhead = len(b"Command exited with code -9: ")
+    status_overhead = len(f"Command exited with code {result.data['exit_code']}: ".encode())
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes + status_overhead
-    assert result.text.startswith("Command exited with code -9:")
+    assert result.text.startswith(f"Command exited with code {result.data['exit_code']}:")
     assert result.truncated is True
 
 

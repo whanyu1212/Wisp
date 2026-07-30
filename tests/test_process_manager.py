@@ -12,6 +12,7 @@ import anyio
 import pytest
 
 import wisp.tools.process_manager as process_manager_module
+from wisp.tools.process import ProcessResult
 from wisp.tools.process_manager import ProcessSupervisor, ProcessUpdate, _bounded_text_tail
 from wisp.tools.result import ToolError
 
@@ -927,6 +928,39 @@ def test_completion_kills_detached_background_job(tmp_path: Path) -> None:
 
     assert update.state == "completed"
     assert update.exit_code == 0
+    _assert_process_gone(child_pid)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_output_limit_kills_detached_background_job(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "detached-output-limit.pid"
+    command = (
+        _detached_python_background_command(
+            child_pid_path,
+            keep_shell_alive=False,
+            redirect_output=True,
+        )
+        + "; yes x"
+    )
+
+    async def run() -> tuple[ProcessResult, int]:
+        supervisor = ProcessSupervisor()
+        try:
+            result = await supervisor.run_to_completion(
+                command,
+                cwd=tmp_path,
+                timeout=5,
+                max_output_bytes=20,
+                max_output_lines=100,
+            )
+            child_pid = await _wait_for_pid_file(child_pid_path)
+            return result, child_pid
+        finally:
+            await supervisor.aclose()
+
+    result, child_pid = anyio.run(run)
+
+    assert result.stdout_truncated is True
     _assert_process_gone(child_pid)
 
 

@@ -323,6 +323,8 @@ async def _terminate_process_tree(
     if force:
         if os.name == "nt":
             return await asyncio.to_thread(_kill_process_tree, process)
+        if os.name == "posix":
+            _record_posix_descendant_pids(process)
         return _kill_process_tree(process)
     if os.name == "nt":
         return await asyncio.to_thread(_kill_process_tree, process)
@@ -336,6 +338,7 @@ async def _terminate_posix_process_tree(process: asyncio.subprocess.Process) -> 
     if not group_term_succeeded:
         return False
     await asyncio.sleep(_POSIX_TERMINATION_GRACE_SECONDS)
+    _record_posix_descendant_pids(process)
     group_kill_succeeded = _signal_posix_process_group(process, signal.SIGKILL)
     recorded_kill_succeeded = _signal_posix_recorded_jobs(process, signal.SIGKILL)
     if group_kill_succeeded and recorded_kill_succeeded:
@@ -394,6 +397,90 @@ def _posix_recorded_job_pids(process: asyncio.subprocess.Process) -> tuple[int, 
         if pid > 0 and pid != process.pid:
             pids.append(pid)
     return tuple(dict.fromkeys(pids))
+
+
+def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> None:
+    jobs_file = getattr(process, _POSIX_JOBS_FILE_ATTR, None)
+    if not isinstance(jobs_file, Path):
+        return
+    descendant_pids = _posix_descendant_pids(process.pid)
+    if not descendant_pids:
+        return
+    try:
+        with jobs_file.open("a", encoding="utf-8") as file:
+            for pid in descendant_pids:
+                file.write(f"{pid}\n")
+    except OSError:
+        return
+
+
+def _posix_descendant_pids(root_pid: int) -> tuple[int, ...]:
+    descendants: list[int] = []
+    pending = [root_pid]
+    while pending:
+        parent_pid = pending.pop()
+        child_pids = _posix_child_pids(parent_pid)
+        descendants.extend(child_pids)
+        pending.extend(child_pids)
+    return tuple(dict.fromkeys(pid for pid in descendants if pid != root_pid))
+
+
+def _posix_child_pids(parent_pid: int) -> tuple[int, ...]:
+    try:
+        completed = subprocess.run(
+            ["pgrep", "-P", str(parent_pid)],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=0.2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return _posix_child_pids_from_ps(parent_pid)
+    if completed.returncode not in (0, 1):
+        return _posix_child_pids_from_ps(parent_pid)
+    return _parse_posix_pid_lines(completed.stdout.splitlines())
+
+
+def _posix_child_pids_from_ps(parent_pid: int) -> tuple[int, ...]:
+    try:
+        completed = subprocess.run(
+            ["ps", "-eo", "pid=,ppid="],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ()
+    if completed.returncode != 0:
+        return ()
+    child_pids: list[int] = []
+    for line in completed.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        if ppid == parent_pid and pid > 0:
+            child_pids.append(pid)
+    return tuple(child_pids)
+
+
+def _parse_posix_pid_lines(lines: Sequence[str]) -> tuple[int, ...]:
+    pids: list[int] = []
+    for line in lines:
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid > 0:
+            pids.append(pid)
+    return tuple(pids)
 
 
 def _remove_posix_jobs_file(jobs_file: object) -> None:
