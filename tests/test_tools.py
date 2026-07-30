@@ -1313,6 +1313,87 @@ def test_exec_helper_cleans_process_when_cancelled_during_registration(
     assert retained == 0
 
 
+def test_exec_helper_cleans_process_when_registration_finds_closed_supervisor(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    original_spawn = process_tools_module.asyncio.create_subprocess_exec
+    process: asyncio.subprocess.Process | None = None
+
+    async def record_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        nonlocal process
+        process = await original_spawn(*args, **kwargs)
+        return process
+
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", record_spawn)
+
+    async def run() -> int:
+        supervisor = process_manager_module.ProcessSupervisor()
+        await supervisor.aclose()
+        with pytest.raises(RuntimeError, match="ProcessSupervisor is closed"):
+            await process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=tmp_path,
+                process_supervisor=supervisor,
+                max_stdout_lines=10,
+            )
+        return len(supervisor._one_shot)  # noqa: SLF001
+
+    retained = anyio.run(run)
+
+    assert process is not None
+    assert process.returncode is not None
+    assert retained == 0
+
+
+def test_exec_helper_delays_repeated_cancellation_until_cleanup_finishes(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    supervisor = process_manager_module.ProcessSupervisor()
+    original_terminate = supervisor._terminate_one_shot  # noqa: SLF001
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    async def delayed_terminate(
+        process: asyncio.subprocess.Process,
+        *,
+        wait: bool = False,
+    ) -> bool:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        return await original_terminate(process, wait=wait)
+
+    monkeypatch.setattr(supervisor, "_terminate_one_shot", delayed_terminate)
+
+    async def run() -> int:
+        execute = asyncio.create_task(
+            process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=tmp_path,
+                process_supervisor=supervisor,
+                max_stdout_lines=10,
+            )
+        )
+        with anyio.fail_after(1):
+            while not supervisor._one_shot:  # noqa: SLF001
+                await anyio.sleep(0)
+        execute.cancel()
+        await cleanup_started.wait()
+        execute.cancel()
+        await anyio.sleep(0)
+        assert execute.done() is False
+
+        allow_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await execute
+        return len(supervisor._one_shot)  # noqa: SLF001
+
+    retained = anyio.run(run)
+
+    assert retained == 0
+
+
 def test_grep_tool_python_fallback_supports_literal_ignore_case_and_glob(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

@@ -58,7 +58,7 @@ class _ProcessSupervisor(Protocol):
     async def _release_one_shot(self, process: asyncio.subprocess.Process) -> None: ...
 
 
-async def _await_task_after_cancellation(task: asyncio.Task[Any]) -> Any:
+async def _await_task_after_cancellation(task: asyncio.Future[Any]) -> Any:
     while True:
         if task.done():
             return task.result()
@@ -661,6 +661,16 @@ async def _run_exec_limited_stdout(
     async def terminate() -> bool:
         return await process_supervisor._terminate_one_shot(process)
 
+    async def finish_failed_execution() -> bool:
+        if not stderr_task.done():
+            stderr_task.cancel()
+        drain_task = asyncio.ensure_future(asyncio.gather(stderr_task, return_exceptions=True))
+        await _await_task_after_cancellation(drain_task)
+        cleanup_task = asyncio.create_task(
+            process_supervisor._terminate_one_shot(process, wait=True)
+        )
+        return bool(await _await_task_after_cancellation(cleanup_task))
+
     assert process.stdout is not None
     assert process.stderr is not None
     stdout_stream = process.stdout
@@ -753,18 +763,10 @@ async def _run_exec_limited_stdout(
         if not await process_supervisor._terminate_one_shot(process):
             raise ToolError("Failed to terminate process tree")
     except asyncio.CancelledError:
-        with anyio.CancelScope(shield=True):
-            if not stderr_task.done():
-                stderr_task.cancel()
-            await asyncio.gather(stderr_task, return_exceptions=True)
-            release_ownership = await process_supervisor._terminate_one_shot(process, wait=True)
+        release_ownership = await finish_failed_execution()
         raise
     except BaseException:
-        if not stderr_task.done():
-            stderr_task.cancel()
-        await asyncio.gather(stderr_task, return_exceptions=True)
-        with anyio.CancelScope(shield=True):
-            release_ownership = await process_supervisor._terminate_one_shot(process, wait=True)
+        release_ownership = await finish_failed_execution()
         raise
     else:
         release_ownership = True
@@ -778,8 +780,8 @@ async def _run_exec_limited_stdout(
         )
     finally:
         if release_ownership:
-            with anyio.CancelScope(shield=True):
-                await process_supervisor._release_one_shot(process)
+            release_task = asyncio.create_task(process_supervisor._release_one_shot(process))
+            await _await_task_after_cancellation(release_task)
 
 
 def _format_process_output(exit_code: int, stdout: str, stderr: str) -> str:

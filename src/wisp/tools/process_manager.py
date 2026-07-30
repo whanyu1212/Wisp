@@ -318,7 +318,12 @@ class ProcessSupervisor:
                 and not self._close_task.cancelled()
                 and self._close_task.exception() is not None
             )
-            if self._close_task is None or close_failed:
+            closed_with_owned_processes = bool(
+                self._close_task is not None
+                and self._close_task.done()
+                and (self._managed or self._one_shot)
+            )
+            if self._close_task is None or close_failed or closed_with_owned_processes:
                 self._closed = True
                 self._close_task = asyncio.create_task(self._close_owned_processes())
             assert self._close_task is not None
@@ -328,8 +333,11 @@ class ProcessSupervisor:
         async with self._lock:
             if self._closed:
                 return
-            self._one_shot.pop(process, None)
-            self._one_shot_locks.pop(process, None)
+            self._remove_one_shot(process)
+
+    def _remove_one_shot(self, process: asyncio.subprocess.Process) -> None:
+        self._one_shot.pop(process, None)
+        self._one_shot_locks.pop(process, None)
 
     async def _track_one_shot(
         self,
@@ -337,15 +345,22 @@ class ProcessSupervisor:
         task: asyncio.Task[Any],
     ) -> None:
         async with self._lock:
-            self._ensure_open()
-            self._evict_terminals_for_capacity()
-            over_capacity = len(self._managed) + len(self._one_shot) >= self._max_processes
+            supervisor_closed = self._closed
+            if not supervisor_closed:
+                self._evict_terminals_for_capacity()
+            over_capacity = (
+                not supervisor_closed
+                and len(self._managed) + len(self._one_shot) >= self._max_processes
+            )
             self._one_shot[process] = task
             self._one_shot_locks[process] = asyncio.Lock()
-        if over_capacity:
+        if supervisor_closed or over_capacity:
             cleanup_succeeded = await self._terminate_one_shot(process, wait=True)
             if cleanup_succeeded:
-                await self._release_one_shot(process)
+                async with self._lock:
+                    self._remove_one_shot(process)
+            if supervisor_closed:
+                raise RuntimeError("ProcessSupervisor is closed")
             raise ToolError(
                 f"Cannot start command: managed process limit ({self._max_processes}) reached"
             )
