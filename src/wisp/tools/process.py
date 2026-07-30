@@ -175,8 +175,7 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
                 return
         return
     if os.name == "nt":
-        if _terminate_windows_job(process):
-            return
+        _terminate_windows_job(process)
         try:
             completed = subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(process.pid)],

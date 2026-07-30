@@ -589,7 +589,7 @@ def test_bash_tool_uses_taskkill_for_windows_process_tree_cleanup(
     assert process.killed is False
 
 
-def test_bash_tool_uses_windows_job_handle_after_shell_leader_exits(
+def test_bash_tool_terminates_windows_job_then_taskkill_after_shell_leader_exits(
     monkeypatch: MonkeyPatch,
 ) -> None:
     class DummyProcess:
@@ -626,11 +626,12 @@ def test_bash_tool_uses_windows_job_handle_after_shell_leader_exits(
     process = DummyProcess()
     monkeypatch.setattr(process_tools_module.os, "name", "nt")
     monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
-    monkeypatch.setattr(
-        process_tools_module.subprocess,
-        "run",
-        lambda command, **_kwargs: taskkill_calls.append(command),
-    )
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        taskkill_calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
 
     process_tools_module._attach_windows_job(process)  # type: ignore[arg-type]  # noqa: SLF001
     process_tools_module._kill_process_tree(process)  # type: ignore[arg-type]  # noqa: SLF001
@@ -641,7 +642,7 @@ def test_bash_tool_uses_windows_job_handle_after_shell_leader_exits(
         ("terminate", 789, 1),
         ("close", 789),
     ]
-    assert taskkill_calls == []
+    assert taskkill_calls == [["taskkill", "/F", "/T", "/PID", "123"]]
     assert process.killed is False
 
 
