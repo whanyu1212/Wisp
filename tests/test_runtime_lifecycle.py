@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, cast
 
 import anyio
 import pytest
 from pytest import MonkeyPatch
+from typer.testing import CliRunner
 
 import wisp.cli as cli_module
 import wisp.cli.rpc as rpc_module
@@ -15,6 +17,7 @@ from wisp.config import WispConfig
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.tools.process_manager import ProcessSupervisor
+from wisp.tools.result import ToolError
 from wisp.tui.launch import TuiOptions
 
 
@@ -28,6 +31,48 @@ class _RecordingRuntime:
 
     async def aclose(self) -> None:
         self.close_count += 1
+
+
+@pytest.mark.parametrize("output_mode", ["text", "json"])
+def test_cli_renders_runtime_cleanup_failure(
+    output_mode: str,
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class CleanupFailRuntime:
+        async def aclose(self) -> None:
+            raise ToolError("Failed to terminate process tree")
+
+    async def fake_build(_config: WispConfig) -> CleanupFailRuntime:
+        return CleanupFailRuntime()
+
+    async def succeed(*_args: object, **_kwargs: object) -> None:
+        pass
+
+    monkeypatch.setattr(cli_module, "_build_runtime_for_config", fake_build)
+    monkeypatch.setattr(cli_module, "_run_print_with_runtime", succeed)
+
+    result = CliRunner().invoke(
+        cli_module.app,
+        [
+            "-p",
+            "hello",
+            "--mode",
+            output_mode,
+            "--session-dir",
+            str(tmp_path),
+        ],
+        env={"WISP_PROVIDER": "fake", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 1
+    if output_mode == "json":
+        assert result.stderr == ""
+        record = json.loads(result.stdout)
+        assert record["type"] == "error"
+        assert record["message"] == "Failed to terminate process tree"
+    else:
+        assert "error: Failed to terminate process tree" in result.stderr
 
 
 @pytest.mark.parametrize("frontend", ["print", "rpc"])

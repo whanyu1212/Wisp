@@ -1270,6 +1270,49 @@ def test_exec_helper_reports_failed_output_limit_termination(
     assert retained == 1
 
 
+def test_exec_helper_cleans_process_when_cancelled_during_registration(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    original_spawn = process_tools_module.asyncio.create_subprocess_exec
+    process: asyncio.subprocess.Process | None = None
+    spawned = asyncio.Event()
+
+    async def record_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        nonlocal process
+        process = await original_spawn(*args, **kwargs)
+        spawned.set()
+        return process
+
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", record_spawn)
+
+    async def run() -> tuple[int | None, int]:
+        supervisor = process_manager_module.ProcessSupervisor()
+        async with supervisor._lock:  # noqa: SLF001
+            execute = asyncio.create_task(
+                process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    cwd=tmp_path,
+                    process_supervisor=supervisor,
+                    max_stdout_lines=10,
+                )
+            )
+            await spawned.wait()
+            execute.cancel()
+            await anyio.sleep(0)
+            assert execute.done() is False
+
+        with pytest.raises(asyncio.CancelledError):
+            await execute
+        assert process is not None
+        return process.returncode, len(supervisor._one_shot)  # noqa: SLF001
+
+    returncode, retained = anyio.run(run)
+
+    assert returncode is not None
+    assert retained == 0
+
+
 def test_grep_tool_python_fallback_supports_literal_ignore_case_and_glob(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

@@ -26,6 +26,7 @@ from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore, SessionError
 from wisp.tools.approval import ToolApprovalDecision as ToolApprovalDecision
+from wisp.tools.result import ToolError
 from wisp.tui.rendering import TuiRendererKind
 
 from . import options as _cli_options
@@ -335,7 +336,7 @@ def cli_callback(
             )
     except _JsonOutputModeError as exc:
         raise typer.Exit(1) from exc
-    except (ProviderError, SessionError, UnknownProviderError, UnknownToolError) as exc:
+    except (ProviderError, SessionError, ToolError, UnknownProviderError, UnknownToolError) as exc:
         if isinstance(exc, _RenderedPrintError):
             pass
         elif _writes_json_events(resolved_mode):
@@ -443,7 +444,14 @@ def tui_command(
             user_session_dir=session_dir,
             user_auth_file=auth_file,
         )
-    except (ProviderError, SessionError, UnknownProviderError, UnknownToolError, ValueError) as exc:
+    except (
+        ProviderError,
+        SessionError,
+        ToolError,
+        UnknownProviderError,
+        UnknownToolError,
+        ValueError,
+    ) as exc:
         console.print(f"[red]error:[/red] {exc}")
         raise typer.Exit(1) from exc
 

@@ -58,6 +58,17 @@ class _ProcessSupervisor(Protocol):
     async def _release_one_shot(self, process: asyncio.subprocess.Process) -> None: ...
 
 
+async def _await_task_after_cancellation(task: asyncio.Task[Any]) -> Any:
+    while True:
+        if task.done():
+            return task.result()
+        try:
+            with anyio.CancelScope(shield=True):
+                return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+
+
 class _CtypesFunction(Protocol):
     restype: object
     argtypes: Sequence[object] | None
@@ -628,8 +639,24 @@ async def _run_exec_limited_stdout(
 
     owner_task = asyncio.current_task()
     assert owner_task is not None
-    await process_supervisor._track_one_shot(process, owner_task)
     release_ownership = False
+    track_task = asyncio.create_task(process_supervisor._track_one_shot(process, owner_task))
+    try:
+        await asyncio.shield(track_task)
+    except asyncio.CancelledError:
+        try:
+            await _await_task_after_cancellation(track_task)
+        except BaseException:
+            pass
+        else:
+            cleanup_task = asyncio.create_task(
+                process_supervisor._terminate_one_shot(process, wait=True)
+            )
+            release_ownership = bool(await _await_task_after_cancellation(cleanup_task))
+            if release_ownership:
+                release_task = asyncio.create_task(process_supervisor._release_one_shot(process))
+                await _await_task_after_cancellation(release_task)
+        raise
 
     async def terminate() -> bool:
         return await process_supervisor._terminate_one_shot(process)
