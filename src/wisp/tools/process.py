@@ -183,17 +183,16 @@ async def _run_shell(
             timeout=timeout,
         )
     except TimeoutError as exc:
-        cleanup_succeeded = await _kill_process_tree_and_wait(process)
+        cleanup_succeeded = await _await_process_cleanup(_kill_process_tree_and_wait(process))
         if not cleanup_succeeded:
             raise ToolError("Failed to terminate process tree") from exc
         raise ToolError(f"Command timed out after {timeout:g} seconds") from exc
     except asyncio.CancelledError:
-        with anyio.CancelScope(shield=True):
-            await _kill_process_tree_and_wait(process)
+        cleanup_task = asyncio.create_task(_kill_process_tree_and_wait(process))
+        await _await_task_after_cancellation(cleanup_task)
         raise
 
-    with anyio.CancelScope(shield=True):
-        cleanup_succeeded = await _terminate_process_tree(process)
+    cleanup_succeeded = await _await_process_cleanup(_terminate_process_tree(process))
     if not cleanup_succeeded:
         raise ToolError("Failed to terminate process tree")
     return ProcessResult(
@@ -257,6 +256,15 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
                 await _cleanup_failed_windows_process_setup(process)
             raise ToolError(setup_error)
     return process
+
+
+async def _await_process_cleanup(cleanup: Awaitable[bool]) -> bool:
+    cleanup_task = asyncio.ensure_future(cleanup)
+    try:
+        return await asyncio.shield(cleanup_task)
+    except asyncio.CancelledError:
+        await _await_task_after_cancellation(cleanup_task)
+        raise
 
 
 def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:

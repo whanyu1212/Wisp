@@ -644,6 +644,52 @@ def test_bash_tool_cancellation_kills_child_processes(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
+def test_direct_bash_cleanup_finishes_before_raw_task_cancellation(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    context = ToolContext(cwd=tmp_path)
+    python = shlex.quote(sys.executable)
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    cleanup_finished = False
+    original_terminate = process_tools_module._terminate_process_tree  # type: ignore[attr-defined]
+
+    async def delayed_terminate(
+        process: asyncio.subprocess.Process,
+        *,
+        force: bool = False,
+    ) -> bool:
+        nonlocal cleanup_finished
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        cleanup_succeeded = await original_terminate(process, force=force)
+        cleanup_finished = True
+        return cleanup_succeeded
+
+    monkeypatch.setattr(process_tools_module, "_terminate_process_tree", delayed_terminate)
+
+    async def run_and_cancel() -> None:
+        task = asyncio.create_task(
+            BashTool(None).run(
+                {"command": f"{python} -c {shlex.quote("print('done')")}", "timeout": 10},
+                context,
+            )
+        )
+        await cleanup_started.wait()
+        task.cancel()
+        await anyio.sleep(0)
+        assert task.done() is False
+
+        allow_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    anyio.run(run_and_cancel)
+
+    assert cleanup_finished is True
+
+
 def test_bash_tool_uses_taskkill_for_windows_process_tree_cleanup(
     monkeypatch: MonkeyPatch,
 ) -> None:
