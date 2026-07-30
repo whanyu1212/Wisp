@@ -183,10 +183,10 @@ def test_managed_timeout_reports_process_tree_cleanup_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
+
     async def fail_terminate(process: asyncio.subprocess.Process) -> bool:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
+        await original_terminate(process)
         return False
 
     monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_terminate)
@@ -218,14 +218,13 @@ def test_aclose_retries_cleanup_failed_managed_process_before_discarding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
     cleanup_attempts = 0
 
     async def fail_once(process: asyncio.subprocess.Process) -> bool:
         nonlocal cleanup_attempts
         cleanup_attempts += 1
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
+        await original_terminate(process)
         return cleanup_attempts > 2
 
     monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_once)
@@ -255,15 +254,14 @@ def test_aclose_surfaces_and_retains_cleanup_failed_managed_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
     cleanup_attempts = 0
     cleanup_succeeds = False
 
     async def fail_cleanup(process: asyncio.subprocess.Process) -> bool:
         nonlocal cleanup_attempts
         cleanup_attempts += 1
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
+        await original_terminate(process)
         return cleanup_succeeds
 
     monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_cleanup)
