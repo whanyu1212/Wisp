@@ -249,11 +249,15 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
             setup_error = await _run_windows_process_setup(process)
         except Exception:
             with anyio.CancelScope(shield=True):
-                await _cleanup_failed_windows_process_setup(process)
+                cleanup_succeeded = await _cleanup_failed_windows_process_setup(process)
+            if not cleanup_succeeded:
+                raise ToolError("Failed to start command and terminate process tree") from None
             raise
         if setup_error is not None:
             with anyio.CancelScope(shield=True):
-                await _cleanup_failed_windows_process_setup(process)
+                cleanup_succeeded = await _cleanup_failed_windows_process_setup(process)
+            if not cleanup_succeeded:
+                raise ToolError(f"{setup_error}; failed to terminate process tree")
             raise ToolError(setup_error)
     return process
 
@@ -280,6 +284,11 @@ def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
     return (
         "__wisp_shell_pid=$$; "
         f"exec 9>>{quoted_jobs_file}; "
+        "__wisp_recorded_pids=; "
+        '__wisp_record_pid() { [ -n "$1" ] || return; '
+        'case " $__wisp_recorded_pids " in *" $1 "*) return;; esac; '
+        f"printf '%s\\n' \"$1\" >> {quoted_jobs_file} 2>/dev/null "
+        '&& __wisp_recorded_pids="$__wisp_recorded_pids $1" || true; }; '
         "__wisp_child_pids() { "
         "if command -v pgrep >/dev/null 2>&1; then "
         'pgrep -P "$1" 2>/dev/null || true; '
@@ -293,16 +302,20 @@ def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
         "for __wisp_parent in $__wisp_pending; do "
         '__wisp_children=$(__wisp_child_pids "$__wisp_parent"); '
         'if [ -n "$__wisp_children" ]; then '
-        f"printf '%s\\n' $__wisp_children >> {quoted_jobs_file} 2>/dev/null || true; "
+        "for __wisp_child in $__wisp_children; do "
+        '__wisp_record_pid "$__wisp_child"; '
+        "done; "
         '__wisp_next="$__wisp_next $__wisp_children"; '
         "fi; "
         "done; "
         '__wisp_pending="$__wisp_next"; '
         "done; }; "
-        "__wisp_record_jobs() { jobs -pr >> "
-        f"{quoted_jobs_file}"
-        ' 2>/dev/null || true; __wisp_record_descendants "$__wisp_shell_pid"; }; '
-        "__wisp_record_loop() { while :; do __wisp_record_jobs; sleep 0.01; done; }; "
+        "__wisp_record_jobs() { "
+        "for __wisp_job in $(jobs -pr 2>/dev/null || true); do "
+        '__wisp_record_pid "$__wisp_job"; '
+        "done; "
+        '__wisp_record_descendants "$__wisp_shell_pid"; }; '
+        "__wisp_record_loop() { while :; do __wisp_record_jobs; sleep 0.25; done; }; "
         "__wisp_record_loop & __wisp_recorder_pid=$!; "
         "trap '__wisp_record_jobs' EXIT HUP INT TERM; "
         "( trap '__wisp_record_jobs' EXIT HUP INT TERM; "
@@ -350,9 +363,7 @@ async def _terminate_process_tree(
         if os.name == "nt":
             return await asyncio.to_thread(_kill_process_tree, process)
         if os.name == "posix":
-            descendants_recorded = await asyncio.to_thread(_record_posix_descendant_pids, process)
-            if not descendants_recorded:
-                return False
+            return await asyncio.to_thread(_force_kill_posix_process_tree, process)
         return _kill_process_tree(process)
     if os.name == "nt":
         return await asyncio.to_thread(_kill_process_tree, process)
@@ -366,7 +377,18 @@ async def _terminate_posix_process_tree(process: asyncio.subprocess.Process) -> 
     if not group_term_succeeded:
         return False
     await asyncio.sleep(_POSIX_TERMINATION_GRACE_SECONDS)
-    descendants_recorded = await asyncio.to_thread(_record_posix_descendant_pids, process)
+    return await asyncio.to_thread(_finish_posix_process_tree_termination, process)
+
+
+def _force_kill_posix_process_tree(process: asyncio.subprocess.Process) -> bool:
+    descendants_recorded = _record_posix_descendant_pids(process)
+    if not descendants_recorded:
+        return False
+    return _kill_process_tree(process)
+
+
+def _finish_posix_process_tree_termination(process: asyncio.subprocess.Process) -> bool:
+    descendants_recorded = _record_posix_descendant_pids(process)
     if not descendants_recorded:
         return False
     group_kill_succeeded = _signal_posix_process_group(process, signal.SIGKILL)
@@ -400,8 +422,13 @@ def _signal_posix_recorded_jobs(
     selected_signal: signal.Signals,
 ) -> bool:
     succeeded = True
-    current_owned_pids = set(_posix_current_owned_pids(process))
-    for pid in _posix_recorded_job_pids(process):
+    recorded_pids = _posix_recorded_job_pids(process)
+    if not recorded_pids:
+        return True
+    current_owned_pids = _posix_current_owned_pids(process)
+    if current_owned_pids is None:
+        return False
+    for pid in recorded_pids:
         if pid not in current_owned_pids:
             continue
         try:
@@ -432,15 +459,18 @@ def _posix_recorded_job_pids(process: asyncio.subprocess.Process) -> tuple[int, 
     return tuple(dict.fromkeys(pids))
 
 
-def _posix_current_owned_pids(process: asyncio.subprocess.Process) -> tuple[int, ...]:
+def _posix_current_owned_pids(process: asyncio.subprocess.Process) -> set[int] | None:
     pids: list[int] = []
     descendant_pids = _posix_descendant_pids(process.pid)
     if descendant_pids is not None:
         pids.extend(descendant_pids)
     jobs_file = getattr(process, _POSIX_JOBS_FILE_ATTR, None)
     if isinstance(jobs_file, Path):
-        pids.extend(_posix_jobs_file_holder_pids(jobs_file))
-    return tuple(dict.fromkeys(pid for pid in pids if pid > 0 and pid != process.pid))
+        holder_pids = _posix_jobs_file_holder_pids(jobs_file)
+        if holder_pids is None:
+            return None
+        pids.extend(holder_pids)
+    return {pid for pid in pids if pid > 0 and pid != process.pid}
 
 
 def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> bool:
@@ -451,6 +481,8 @@ def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> bool:
     if descendant_pids is None:
         return False
     holder_pids = _posix_jobs_file_holder_pids(jobs_file)
+    if holder_pids is None:
+        return False
     pids = tuple(dict.fromkeys((*descendant_pids, *holder_pids)))
     if not pids:
         return True
@@ -463,14 +495,14 @@ def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> bool:
     return True
 
 
-def _posix_jobs_file_holder_pids(jobs_file: Path) -> tuple[int, ...]:
+def _posix_jobs_file_holder_pids(jobs_file: Path) -> tuple[int, ...] | None:
     pids = _posix_jobs_file_holder_pids_from_lsof(jobs_file)
     if pids is not None:
         return pids
     pids = _posix_jobs_file_holder_pids_from_fuser(jobs_file)
     if pids is not None:
         return pids
-    return ()
+    return None
 
 
 def _posix_jobs_file_holder_pids_from_lsof(jobs_file: Path) -> tuple[int, ...] | None:
@@ -660,13 +692,15 @@ def _kill_leader_if_running(process: asyncio.subprocess.Process) -> bool:
     return True
 
 
-async def _cleanup_failed_windows_process_setup(process: asyncio.subprocess.Process) -> None:
-    _terminate_windows_job(process)
-    _kill_leader_if_running(process)
+async def _cleanup_failed_windows_process_setup(process: asyncio.subprocess.Process) -> bool:
+    cleanup_succeeded = await asyncio.to_thread(_kill_process_tree, process)
+    if not cleanup_succeeded:
+        return False
     try:
         await asyncio.wait_for(process.wait(), timeout=1)
     except (OSError, RuntimeError, TimeoutError):
-        return
+        return False
+    return True
 
 
 async def _run_windows_process_setup(process: asyncio.subprocess.Process) -> str | None:

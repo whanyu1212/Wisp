@@ -631,6 +631,22 @@ def test_posix_records_jobs_file_holder_pids(
     assert jobs_file.read_text(encoding="utf-8").splitlines() == ["234", "345"]
 
 
+def test_posix_holder_discovery_failure_reports_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+
+    jobs_file = tmp_path / "jobs"
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+    monkeypatch.setattr(process_tools_module, "_posix_descendant_pids", lambda _pid: ())
+    monkeypatch.setattr(process_tools_module, "_posix_jobs_file_holder_pids", lambda _path: None)
+
+    assert process_tools_module._record_posix_descendant_pids(process) is False  # type: ignore[arg-type]  # noqa: SLF001
+
+
 def test_posix_recorded_jobs_prune_stale_pids(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -654,6 +670,41 @@ def test_posix_recorded_jobs_prune_stale_pids(
 
     assert signaled is True
     assert kills == [(234, signal.SIGKILL), (345, signal.SIGKILL)]
+
+
+def test_posix_recorded_job_verification_runs_off_event_loop(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    worker_thread_ids: list[int] = []
+
+    def fake_record(_process: object) -> bool:
+        return True
+
+    def fake_signal_group(_process: object, _selected_signal: signal.Signals) -> bool:
+        return True
+
+    def fake_signal_recorded(_process: object, _selected_signal: signal.Signals) -> bool:
+        worker_thread_ids.append(threading.get_ident())
+        return True
+
+    monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module, "_record_posix_descendant_pids", fake_record)
+    monkeypatch.setattr(process_tools_module, "_signal_posix_process_group", fake_signal_group)
+    monkeypatch.setattr(process_tools_module, "_signal_posix_recorded_jobs", fake_signal_recorded)
+
+    async def run() -> int:
+        event_loop_thread_id = threading.get_ident()
+        assert await process_tools_module._terminate_process_tree(DummyProcess()) is True  # type: ignore[arg-type]  # noqa: SLF001
+        return event_loop_thread_id
+
+    event_loop_thread_id = anyio.run(run)
+
+    assert worker_thread_ids
+    assert all(thread_id != event_loop_thread_id for thread_id in worker_thread_ids)
 
 
 def test_posix_jobs_file_holder_pids_uses_lsof(
@@ -695,6 +746,20 @@ def test_posix_jobs_file_holder_pids_falls_back_to_fuser(
 
     assert process_tools_module._posix_jobs_file_holder_pids(jobs_file) == (234, 345)  # noqa: SLF001
     assert calls == [["lsof", "-t", "--", str(jobs_file)], ["fuser", str(jobs_file)]]
+
+
+def test_posix_jobs_file_holder_pids_reports_probe_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    jobs_file = tmp_path / "jobs"
+
+    def fake_run(_command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError
+
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    assert process_tools_module._posix_jobs_file_holder_pids(jobs_file) is None  # noqa: SLF001
 
 
 def test_posix_permission_error_reports_cleanup_failure_for_exited_leader(
@@ -1280,6 +1345,76 @@ def test_bash_tool_aborts_suspended_windows_shell_when_job_assignment_fails(
         ("close", 789),
     ]
     assert process.killed is True
+
+
+def test_bash_tool_cleans_windows_job_after_resume_setup_failure(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+        _handle = 456
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+        async def wait(self) -> int:
+            self.returncode = 1
+            return 1
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 1
+
+        def TerminateJobObject(self, job: int, exit_code: int) -> int:
+            self.calls.append(("terminate", job, exit_code))
+            return 0
+
+        def WaitForSingleObject(self, process: int, milliseconds: int) -> int:
+            self.calls.append(("wait", process, milliseconds))
+            return process_tools_module._WINDOWS_WAIT_TIMEOUT  # noqa: SLF001
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
+            return 1
+
+    taskkill_calls: list[list[str]] = []
+    kernel32 = FakeKernel32()
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        taskkill_calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    process_tools_module._attach_windows_job(process)  # type: ignore[arg-type]  # noqa: SLF001
+    cleanup_succeeded = anyio.run(
+        process_tools_module._cleanup_failed_windows_process_setup,  # type: ignore[arg-type]  # noqa: SLF001
+        process,
+    )
+
+    assert cleanup_succeeded is True
+    assert getattr(process, process_tools_module._WINDOWS_JOB_HANDLE_ATTR) is None  # noqa: SLF001
+    assert taskkill_calls == [["taskkill", "/F", "/T", "/PID", "123"]]
+    assert kernel32.calls == [
+        ("create",),
+        ("assign", 789, 456),
+        ("terminate", 789, 1),
+        ("wait", 456, 0),
+        ("close", 789),
+    ]
 
 
 def test_windows_kernel32_configures_pointer_sized_job_api_signatures(
