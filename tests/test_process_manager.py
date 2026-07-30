@@ -296,6 +296,51 @@ def test_aclose_surfaces_and_retains_cleanup_failed_managed_process(
     assert retained_after_retry == 0
 
 
+def test_cleanup_failed_managed_process_is_not_evicted_after_poll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
+    cleanup_succeeds = False
+
+    async def fail_until_shutdown_retry(process: asyncio.subprocess.Process) -> bool:
+        await original_terminate(process)
+        return cleanup_succeeds
+
+    monkeypatch.setattr(
+        process_manager_module,
+        "_terminate_process_tree",
+        fail_until_shutdown_retry,
+    )
+
+    async def run() -> tuple[ProcessUpdate, int, int]:
+        nonlocal cleanup_succeeds
+        supervisor = ProcessSupervisor(max_processes=1)
+        process_id = await supervisor.start(
+            _python_command("import time; time.sleep(30)"),
+            cwd=tmp_path,
+            timeout=0.05,
+        )
+        update = (await _poll_until_terminal(supervisor, process_id))[-1]
+        with pytest.raises(ToolError, match="managed process limit"):
+            await supervisor.start(
+                _python_command("print('blocked')"),
+                cwd=tmp_path,
+                timeout=2,
+            )
+        retained_before_retry = len(supervisor._managed)  # noqa: SLF001
+        cleanup_succeeds = True
+        await supervisor.aclose()
+        return update, retained_before_retry, len(supervisor._managed)  # noqa: SLF001
+
+    update, retained_before_retry, retained_after_retry = anyio.run(run)
+
+    assert update.state == "failed"
+    assert update.error == "Failed to terminate process tree"
+    assert retained_before_retry == 1
+    assert retained_after_retry == 0
+
+
 def test_managed_timeout_bounds_post_termination_stream_drain(tmp_path: Path) -> None:
     async def hold_pipe_open() -> None:
         await asyncio.Event().wait()
