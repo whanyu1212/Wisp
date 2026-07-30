@@ -837,6 +837,37 @@ def test_posix_recorded_jobs_fall_back_when_pidfd_send_signal_is_unsupported(
     assert closed_fds == [789]
 
 
+def test_open_posix_jobs_fd_uses_descriptor_below_soft_limit(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    import fcntl
+    import resource
+
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("", encoding="utf-8")
+    closed_fds: list[int] = []
+    minimum_fds: list[int] = []
+
+    def fake_fcntl(_fd: int, command: int, minimum_fd: int) -> int:
+        assert command == fcntl.F_DUPFD
+        minimum_fds.append(minimum_fd)
+        if minimum_fd >= 64:
+            raise OSError(errno.EINVAL, "minimum fd is above soft limit")
+        return 63
+
+    monkeypatch.setattr(process_tools_module.os, "open", lambda _path, _flags: 3)
+    monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
+    monkeypatch.setattr(resource, "getrlimit", lambda _limit: (64, 64))
+    monkeypatch.setattr(fcntl, "fcntl", fake_fcntl)
+
+    jobs_fd = process_tools_module._open_posix_jobs_fd(jobs_file)  # noqa: SLF001
+
+    assert jobs_fd == 63
+    assert minimum_fds == [63]
+    assert closed_fds == [3]
+
+
 def test_posix_recorded_job_verification_runs_off_event_loop(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -1829,6 +1860,57 @@ def test_bash_tool_finishes_windows_setup_cleanup_after_repeated_cancellation(
         await setup_started.wait()
         setup_task.cancel()
         allow_setup_finish.set()
+        await cleanup_started.wait()
+        setup_task.cancel()
+        await asyncio.sleep(0)
+        assert not setup_task.done()
+        allow_cleanup_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await setup_task
+        return cleanup_finished
+
+    assert anyio.run(run) is True
+
+
+def test_bash_tool_delays_cancellation_during_windows_setup_error_cleanup(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class DummyProcess:
+        pass
+
+    async def run() -> bool:
+        cleanup_started = asyncio.Event()
+        allow_cleanup_finish = asyncio.Event()
+        cleanup_finished = False
+        process = DummyProcess()
+
+        async def fake_create_subprocess_shell(
+            _command: str,
+            **_kwargs: object,
+        ) -> DummyProcess:
+            return process
+
+        async def setup(_process: object) -> str:
+            return "Failed to resume command process"
+
+        async def cleanup(_process: object) -> bool:
+            nonlocal cleanup_finished
+            cleanup_started.set()
+            await allow_cleanup_finish.wait()
+            cleanup_finished = True
+            return True
+
+        monkeypatch.setattr(process_tools_module.os, "name", "nt")
+        monkeypatch.setattr(
+            process_tools_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
+        )
+        monkeypatch.setattr(process_tools_module, "_run_windows_process_setup", setup)
+        monkeypatch.setattr(process_tools_module, "_cleanup_failed_windows_process_setup", cleanup)
+
+        setup_task = asyncio.create_task(
+            process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # noqa: SLF001
+        )
         await cleanup_started.wait()
         setup_task.cancel()
         await asyncio.sleep(0)

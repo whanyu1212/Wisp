@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import errno
 import os
 import shlex
 import signal
@@ -273,14 +274,12 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
         try:
             setup_error = await _run_windows_process_setup(process)
         except Exception:
-            with anyio.CancelScope(shield=True):
-                cleanup_succeeded = await _cleanup_failed_windows_process_setup(process)
+            cleanup_succeeded = await _cleanup_failed_windows_process_setup_after_failure(process)
             if not cleanup_succeeded:
                 raise ToolError("Failed to start command and terminate process tree") from None
             raise
         if setup_error is not None:
-            with anyio.CancelScope(shield=True):
-                cleanup_succeeded = await _cleanup_failed_windows_process_setup(process)
+            cleanup_succeeded = await _cleanup_failed_windows_process_setup_after_failure(process)
             if not cleanup_succeeded:
                 raise ToolError(f"{setup_error}; failed to terminate process tree")
             raise ToolError(setup_error)
@@ -358,10 +357,35 @@ def _open_posix_jobs_fd(jobs_file: Path) -> int:
 
     fd = os.open(jobs_file, os.O_WRONLY | os.O_APPEND)
     try:
-        jobs_fd = fcntl.fcntl(fd, fcntl.F_DUPFD, _POSIX_JOBS_FD_MIN)
+        last_error: OSError | None = None
+        for minimum_fd in _posix_jobs_fd_minimums():
+            try:
+                jobs_fd = fcntl.fcntl(fd, fcntl.F_DUPFD, minimum_fd)
+            except OSError as exc:
+                if exc.errno not in (errno.EINVAL, errno.EMFILE):
+                    raise
+                last_error = exc
+                continue
+            return int(jobs_fd)
+        if last_error is not None:
+            raise last_error
+        raise OSError(errno.EMFILE, "no file descriptor available for POSIX job tracking")
     finally:
         _close_posix_fd(fd)
-    return int(jobs_fd)
+
+
+def _posix_jobs_fd_minimums() -> range:
+    maximum_fd = _POSIX_JOBS_FD_MIN
+    try:
+        import resource
+
+        soft_limit, _hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (ImportError, OSError, ValueError):
+        pass
+    else:
+        if soft_limit != resource.RLIM_INFINITY:
+            maximum_fd = min(maximum_fd, max(0, int(soft_limit) - 1))
+    return range(maximum_fd, 2, -1)
 
 
 def _close_posix_fd(fd: int) -> None:
@@ -873,6 +897,19 @@ async def _cleanup_failed_windows_process_setup(process: asyncio.subprocess.Proc
     except (OSError, RuntimeError, TimeoutError):
         return False
     return True
+
+
+async def _cleanup_failed_windows_process_setup_after_failure(
+    process: asyncio.subprocess.Process,
+) -> bool:
+    cleanup_task = asyncio.create_task(_cleanup_failed_windows_process_setup(process))
+    try:
+        return bool(await asyncio.shield(cleanup_task))
+    except asyncio.CancelledError:
+        cleanup_succeeded = bool(await _await_task_after_cancellation(cleanup_task))
+        if not cleanup_succeeded:
+            raise ToolError("Failed to start command and terminate process tree") from None
+        raise
 
 
 async def _run_windows_process_setup(process: asyncio.subprocess.Process) -> str | None:
