@@ -821,12 +821,12 @@ def test_posix_jobs_file_holder_pids_reports_probe_failure(
     assert process_tools_module._posix_jobs_file_holder_pids(jobs_file) is None  # noqa: SLF001
 
 
-def test_posix_permission_error_reports_cleanup_failure_for_exited_leader(
+def test_posix_permission_error_reports_cleanup_failure_for_running_leader(
     monkeypatch: MonkeyPatch,
 ) -> None:
     class DummyProcess:
         pid = 123
-        returncode = 0
+        returncode = None
         killed = False
 
         def kill(self) -> None:
@@ -840,7 +840,28 @@ def test_posix_permission_error_reports_cleanup_failure_for_exited_leader(
     monkeypatch.setattr(process_tools_module.os, "killpg", fail_killpg)
 
     assert process_tools_module._kill_process_tree(process) is False  # type: ignore[arg-type]  # noqa: SLF001
-    assert process.killed is False
+    assert process.killed is True
+
+
+def test_posix_group_signal_skips_exited_leader_pid(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = 0
+
+    def fail_killpg(_pid: int, _signal: int) -> None:
+        raise AssertionError("exited leader pid must not be signaled as a process group")
+
+    monkeypatch.setattr(process_tools_module.os, "killpg", fail_killpg)
+
+    assert (
+        process_tools_module._signal_posix_process_group(  # type: ignore[arg-type]  # noqa: SLF001
+            DummyProcess(),
+            signal.SIGKILL,
+        )
+        is True
+    )
 
 
 def test_posix_shell_uses_hidden_high_jobs_fd(
@@ -1583,6 +1604,51 @@ def test_bash_tool_surfaces_windows_setup_cleanup_failure_after_cancellation(
             await setup_task
 
     anyio.run(run)
+
+
+def test_bash_tool_finishes_windows_setup_cleanup_after_repeated_cancellation(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pass
+
+    async def run() -> bool:
+        setup_started = asyncio.Event()
+        allow_setup_finish = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        allow_cleanup_finish = asyncio.Event()
+        cleanup_finished = False
+
+        async def fake_to_thread(_function: object, _process: object) -> None:
+            setup_started.set()
+            await allow_setup_finish.wait()
+
+        async def cleanup(_process: object) -> bool:
+            nonlocal cleanup_finished
+            cleanup_started.set()
+            await allow_cleanup_finish.wait()
+            cleanup_finished = True
+            return True
+
+        monkeypatch.setattr(process_tools_module.asyncio, "to_thread", fake_to_thread)
+        monkeypatch.setattr(process_tools_module, "_cleanup_failed_windows_process_setup", cleanup)
+
+        setup_task = asyncio.create_task(
+            process_tools_module._run_windows_process_setup(DummyProcess())  # type: ignore[arg-type]  # noqa: SLF001
+        )
+        await setup_started.wait()
+        setup_task.cancel()
+        allow_setup_finish.set()
+        await cleanup_started.wait()
+        setup_task.cancel()
+        await asyncio.sleep(0)
+        assert not setup_task.done()
+        allow_cleanup_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await setup_task
+        return cleanup_finished
+
+    assert anyio.run(run) is True
 
 
 def test_windows_kernel32_configures_pointer_sized_job_api_signatures(

@@ -924,6 +924,7 @@ def test_textual_tui_preserves_brackets_in_streamed_output() -> None:
             app_instance.append_stream("code has [brackets] and [/close] tags")
             app_instance.flush_stream()
             await pilot.pause()
+            await pilot.pause()
             # Streamed assistant text renders as Markdown; bracketed text must
             # survive intact (Markdown source is not Rich-markup-interpreted).
             return "\n".join(_transcript_texts(app_instance))

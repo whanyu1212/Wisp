@@ -439,6 +439,8 @@ def _signal_posix_process_group(
     process: asyncio.subprocess.Process,
     selected_signal: signal.Signals,
 ) -> bool:
+    if process.returncode is not None:
+        return True
     try:
         os.killpg(process.pid, selected_signal)
     except ProcessLookupError:
@@ -792,7 +794,8 @@ async def _run_windows_process_setup(process: asyncio.subprocess.Process) -> str
                 await _await_windows_process_setup_after_cancellation(setup_task)
             except Exception:
                 pass
-            cleanup_succeeded = await _cleanup_failed_windows_process_setup(process)
+            cleanup_task = asyncio.create_task(_cleanup_failed_windows_process_setup(process))
+            cleanup_succeeded = await _await_task_after_cancellation(cleanup_task)
         if not cleanup_succeeded:
             raise ToolError("Failed to start command and terminate process tree") from None
         raise
