@@ -663,6 +663,8 @@ def test_posix_recorded_jobs_prune_stale_pids(
     setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
     monkeypatch.setattr(process_tools_module, "_posix_descendant_pids", lambda _pid: (234,))
     monkeypatch.setattr(process_tools_module, "_posix_jobs_file_holder_pids", lambda _path: (345,))
+    monkeypatch.setattr(process_tools_module.os, "pidfd_open", None, raising=False)
+    monkeypatch.setattr(process_tools_module.signal, "pidfd_send_signal", None, raising=False)
     kills: list[tuple[int, signal.Signals]] = []
     monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
 
@@ -693,6 +695,8 @@ def test_posix_recorded_jobs_skip_descendant_scan_after_leader_exit(
 
     monkeypatch.setattr(process_tools_module, "_posix_descendant_pids", fail_descendant_scan)
     monkeypatch.setattr(process_tools_module, "_posix_jobs_file_holder_pids", lambda _path: (345,))
+    monkeypatch.setattr(process_tools_module.os, "pidfd_open", None, raising=False)
+    monkeypatch.setattr(process_tools_module.signal, "pidfd_send_signal", None, raising=False)
     kills: list[tuple[int, signal.Signals]] = []
     monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
 

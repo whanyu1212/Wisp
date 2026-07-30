@@ -522,7 +522,7 @@ def _signal_verified_posix_pid(
     if callable(pidfd_open) and callable(pidfd_send_signal):
         try:
             pidfd = pidfd_open(pid, 0)
-        except ProcessLookupError:
+        except (FileNotFoundError, ProcessLookupError):
             return True
         except PermissionError:
             return False
@@ -534,7 +534,7 @@ def _signal_verified_posix_pid(
                 return True
             try:
                 pidfd_send_signal(pidfd, selected_signal, None, 0)
-            except ProcessLookupError:
+            except (FileNotFoundError, ProcessLookupError):
                 return True
             except PermissionError:
                 return False
