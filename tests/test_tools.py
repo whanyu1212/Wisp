@@ -539,7 +539,7 @@ def test_bash_tool_reports_process_tree_cleanup_failure(
     supervisor = tool._process_supervisor  # noqa: SLF001
     assert supervisor is not None
     assert len(supervisor._one_shot) == 1  # noqa: SLF001
-    anyio.run(supervisor.aclose)
+    anyio.run(tool.aclose)
     assert len(supervisor._one_shot) == 0  # noqa: SLF001
     assert cleanup_attempts == 2
 
@@ -591,6 +591,66 @@ def test_posix_descendant_discovery_failure_reports_cleanup_failure(
         )
 
     assert anyio.run(run) is False
+
+
+def test_posix_records_jobs_file_holder_pids(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+
+    jobs_file = tmp_path / "jobs"
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+    monkeypatch.setattr(process_tools_module, "_posix_descendant_pids", lambda _pid: (234,))
+    monkeypatch.setattr(process_tools_module, "_posix_jobs_file_holder_pids", lambda _path: (345,))
+
+    recorded = process_tools_module._record_posix_descendant_pids(process)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert recorded is True
+    assert jobs_file.read_text(encoding="utf-8").splitlines() == ["234", "345"]
+
+
+def test_posix_jobs_file_holder_pids_uses_lsof(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    jobs_file = tmp_path / "jobs"
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="234\nnot-a-pid\n345\n")
+
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    assert process_tools_module._posix_jobs_file_holder_pids(jobs_file) == (234, 345)  # noqa: SLF001
+    assert calls == [["lsof", "-t", "--", str(jobs_file)]]
+
+
+def test_posix_jobs_file_holder_pids_falls_back_to_fuser(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    jobs_file = tmp_path / "jobs"
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[0] == "lsof":
+            raise OSError
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"{jobs_file}: 234 345\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    assert process_tools_module._posix_jobs_file_holder_pids(jobs_file) == (234, 345)  # noqa: SLF001
+    assert calls == [["lsof", "-t", "--", str(jobs_file)], ["fuser", str(jobs_file)]]
 
 
 def test_posix_permission_error_reports_cleanup_failure_for_exited_leader(
@@ -812,7 +872,7 @@ def test_bash_tool_retains_windows_job_handle_when_termination_fails(
     monkeypatch: MonkeyPatch,
 ) -> None:
     class DummyProcess:
-        returncode = 0
+        returncode = None
         pid = 123
         _handle = 456
         killed = False
@@ -836,6 +896,73 @@ def test_bash_tool_retains_windows_job_handle_when_termination_fails(
             self.calls.append(("terminate", job, exit_code))
             return 0
 
+        def WaitForSingleObject(self, process: int, milliseconds: int) -> int:
+            self.calls.append(("wait", process, milliseconds))
+            return process_tools_module._WINDOWS_WAIT_TIMEOUT  # noqa: SLF001
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
+            return 1
+
+    taskkill_calls: list[list[str]] = []
+    kernel32 = FakeKernel32()
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        taskkill_calls.append(command)
+        return subprocess.CompletedProcess(command, 1)
+
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    process_tools_module._attach_windows_job(process)  # type: ignore[arg-type]  # noqa: SLF001
+    terminated = process_tools_module._kill_process_tree(process)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert terminated is False
+    assert getattr(process, process_tools_module._WINDOWS_JOB_HANDLE_ATTR) == 789  # noqa: SLF001
+    assert kernel32.calls == [
+        ("create",),
+        ("assign", 789, 456),
+        ("terminate", 789, 1),
+        ("wait", 456, 0),
+    ]
+    assert taskkill_calls == [["taskkill", "/F", "/T", "/PID", "123"]]
+    assert process.killed is True
+
+
+def test_bash_tool_closes_windows_job_handle_after_taskkill_fallback(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+        _handle = 456
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 1
+
+        def TerminateJobObject(self, job: int, exit_code: int) -> int:
+            self.calls.append(("terminate", job, exit_code))
+            return 0
+
+        def WaitForSingleObject(self, process: int, milliseconds: int) -> int:
+            self.calls.append(("wait", process, milliseconds))
+            return process_tools_module._WINDOWS_WAIT_TIMEOUT  # noqa: SLF001
+
         def CloseHandle(self, handle: int) -> int:
             self.calls.append(("close", handle))
             return 1
@@ -855,14 +982,16 @@ def test_bash_tool_retains_windows_job_handle_when_termination_fails(
     process_tools_module._attach_windows_job(process)  # type: ignore[arg-type]  # noqa: SLF001
     terminated = process_tools_module._kill_process_tree(process)  # type: ignore[arg-type]  # noqa: SLF001
 
-    assert terminated is False
-    assert getattr(process, process_tools_module._WINDOWS_JOB_HANDLE_ATTR) == 789  # noqa: SLF001
+    assert terminated is True
+    assert getattr(process, process_tools_module._WINDOWS_JOB_HANDLE_ATTR) is None  # noqa: SLF001
+    assert taskkill_calls == [["taskkill", "/F", "/T", "/PID", "123"]]
     assert kernel32.calls == [
         ("create",),
         ("assign", 789, 456),
         ("terminate", 789, 1),
+        ("wait", 456, 0),
+        ("close", 789),
     ]
-    assert taskkill_calls == []
     assert process.killed is False
 
 

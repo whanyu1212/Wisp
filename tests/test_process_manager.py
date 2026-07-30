@@ -1028,8 +1028,8 @@ def test_output_limit_kills_detached_background_job(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="Linux child-subreaper assertion",
+    os.name != "posix",
+    reason="POSIX detached process assertion",
 )
 def test_completion_kills_nested_shell_detached_background_job(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "nested-detached.pid"
@@ -1317,10 +1317,10 @@ def test_one_shot_timeout_retains_ownership_when_cleanup_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    original_cleanup = process_manager_module._kill_process_tree_and_wait  # type: ignore[attr-defined]
+
     async def fail_cleanup(process: asyncio.subprocess.Process) -> bool:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
+        await original_cleanup(process)
         return False
 
     monkeypatch.setattr(process_manager_module, "_kill_process_tree_and_wait", fail_cleanup)
@@ -1349,6 +1349,8 @@ def test_one_shot_capture_error_retains_ownership_when_cleanup_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    original_cleanup = process_manager_module._kill_process_tree_and_wait  # type: ignore[attr-defined]
+
     async def fail_capture(
         _process: asyncio.subprocess.Process,
         _budget: object,
@@ -1359,9 +1361,7 @@ def test_one_shot_capture_error_retains_ownership_when_cleanup_fails(
         raise OSError("broken pipe")
 
     async def fail_cleanup(process: asyncio.subprocess.Process) -> bool:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
+        await original_cleanup(process)
         return False
 
     monkeypatch.setattr(process_manager_module, "_collect_limited_output", fail_capture)

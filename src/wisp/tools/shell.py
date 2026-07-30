@@ -47,6 +47,12 @@ class BashTool:
             process_supervisor = ProcessSupervisor(max_processes=1)
         self._process_supervisor = cast(ProcessSupervisor | None, process_supervisor)
 
+    async def aclose(self) -> None:
+        """Retry and release any retained default-supervisor process cleanup."""
+
+        if self._process_supervisor is not None:
+            await self._process_supervisor.aclose()
+
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         command = _required_string(arguments, "command")
         timeout = _optional_int(arguments, "timeout", default=30)

@@ -278,23 +278,41 @@ def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
     quoted_jobs_file = shlex.quote(str(jobs_file))
     quoted_command = shlex.quote(command)
     return (
+        "__wisp_shell_pid=$$; "
+        f"exec 9>>{quoted_jobs_file}; "
+        "__wisp_child_pids() { "
+        "if command -v pgrep >/dev/null 2>&1; then "
+        'pgrep -P "$1" 2>/dev/null || true; '
+        "else ps -eo pid=,ppid= 2>/dev/null | "
+        "awk -v __wisp_ppid=\"$1\" '$2 == __wisp_ppid { print $1 }' "
+        "2>/dev/null || true; fi; }; "
+        "__wisp_record_descendants() { "
+        "__wisp_pending=$1; "
+        'while [ -n "$__wisp_pending" ]; do '
+        "__wisp_next=; "
+        "for __wisp_parent in $__wisp_pending; do "
+        '__wisp_children=$(__wisp_child_pids "$__wisp_parent"); '
+        'if [ -n "$__wisp_children" ]; then '
+        f"printf '%s\\n' $__wisp_children >> {quoted_jobs_file} 2>/dev/null || true; "
+        '__wisp_next="$__wisp_next $__wisp_children"; '
+        "fi; "
+        "done; "
+        '__wisp_pending="$__wisp_next"; '
+        "done; }; "
         "__wisp_record_jobs() { jobs -pr >> "
         f"{quoted_jobs_file}"
-        " 2>/dev/null || true; "
-        "if command -v pgrep >/dev/null 2>&1; then "
-        "pgrep -P $$ >> "
-        f"{quoted_jobs_file}"
-        " 2>/dev/null || true; else "
-        "ps -eo pid=,ppid= 2>/dev/null | "
-        "awk -v __wisp_ppid=$$ '$2 == __wisp_ppid { print $1 }' >> "
-        f"{quoted_jobs_file}"
-        " 2>/dev/null || true; fi; }; "
+        ' 2>/dev/null || true; __wisp_record_descendants "$__wisp_shell_pid"; }; '
+        "__wisp_record_loop() { while :; do __wisp_record_jobs; sleep 0.01; done; }; "
+        "__wisp_record_loop & __wisp_recorder_pid=$!; "
         "trap '__wisp_record_jobs' EXIT HUP INT TERM; "
         "( trap '__wisp_record_jobs' EXIT HUP INT TERM; "
         f"eval {quoted_command} ); "
         "__wisp_status=$?; "
+        "kill $__wisp_recorder_pid 2>/dev/null || true; "
+        "wait $__wisp_recorder_pid 2>/dev/null || true; "
         "trap - EXIT HUP INT TERM; "
         "__wisp_record_jobs; "
+        "exec 9>&-; "
         "exit $__wisp_status"
     )
 
@@ -418,15 +436,60 @@ def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> bool:
     descendant_pids = _posix_descendant_pids(process.pid)
     if descendant_pids is None:
         return False
-    if not descendant_pids:
+    holder_pids = _posix_jobs_file_holder_pids(jobs_file)
+    pids = tuple(dict.fromkeys((*descendant_pids, *holder_pids)))
+    if not pids:
         return True
     try:
         with jobs_file.open("a", encoding="utf-8") as file:
-            for pid in descendant_pids:
+            for pid in pids:
                 file.write(f"{pid}\n")
     except OSError:
         return False
     return True
+
+
+def _posix_jobs_file_holder_pids(jobs_file: Path) -> tuple[int, ...]:
+    pids = _posix_jobs_file_holder_pids_from_lsof(jobs_file)
+    if pids is not None:
+        return pids
+    pids = _posix_jobs_file_holder_pids_from_fuser(jobs_file)
+    if pids is not None:
+        return pids
+    return ()
+
+
+def _posix_jobs_file_holder_pids_from_lsof(jobs_file: Path) -> tuple[int, ...] | None:
+    try:
+        completed = subprocess.run(
+            ["lsof", "-t", "--", str(jobs_file)],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode not in (0, 1):
+        return None
+    return _parse_posix_pid_lines(completed.stdout.splitlines())
+
+
+def _posix_jobs_file_holder_pids_from_fuser(jobs_file: Path) -> tuple[int, ...] | None:
+    try:
+        completed = subprocess.run(
+            ["fuser", str(jobs_file)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode not in (0, 1):
+        return None
+    return _parse_posix_pid_tokens(f"{completed.stdout}\n{completed.stderr}".split())
 
 
 def _posix_descendant_pids(root_pid: int) -> tuple[int, ...] | None:
@@ -500,6 +563,17 @@ def _parse_posix_pid_lines(lines: Sequence[str]) -> tuple[int, ...]:
     return tuple(pids)
 
 
+def _parse_posix_pid_tokens(tokens: Sequence[str]) -> tuple[int, ...]:
+    pids: list[int] = []
+    for token in tokens:
+        if not token.isdecimal():
+            continue
+        pid = int(token)
+        if pid > 0:
+            pids.append(pid)
+    return tuple(pids)
+
+
 def _remove_posix_jobs_file(jobs_file: object) -> None:
     if not isinstance(jobs_file, Path):
         return
@@ -554,7 +628,7 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> bool:
         else:
             if completed.returncode != 0:
                 return _kill_leader_if_running(process) and not had_job
-            return True
+            return _close_windows_job_handle(process)
     else:
         if process.returncode is not None:
             return True
@@ -707,6 +781,18 @@ def _terminate_windows_job(process: asyncio.subprocess.Process) -> bool:
     setattr(process, _WINDOWS_JOB_HANDLE_ATTR, None)
     _close_windows_handle(kernel32, job_handle)
     return terminated
+
+
+def _close_windows_job_handle(process: asyncio.subprocess.Process) -> bool:
+    job_handle = getattr(process, _WINDOWS_JOB_HANDLE_ATTR, None)
+    if job_handle is None:
+        return True
+    kernel32 = _windows_kernel32()
+    if kernel32 is None:
+        return False
+    setattr(process, _WINDOWS_JOB_HANDLE_ATTR, None)
+    _close_windows_handle(kernel32, job_handle)
+    return True
 
 
 def _windows_process_leader_is_running(process: asyncio.subprocess.Process) -> bool | None:
