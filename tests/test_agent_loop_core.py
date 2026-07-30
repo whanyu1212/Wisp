@@ -449,6 +449,7 @@ def _run_bash_loop(
     *,
     command: str,
     timeout: int | None = None,
+    bash_tool: BashTool | None = None,
 ) -> tuple[ScriptedProvider, list[object]]:
     arguments: dict[str, object] = {"command": command}
     if timeout is not None:
@@ -476,7 +477,7 @@ def _run_bash_loop(
         ]
     )
     registry = ToolRegistry()
-    registry.register(BashTool())
+    registry.register(bash_tool or BashTool())
     executor = ConfiguredToolExecutor(
         registry=registry,
         context=ToolContext(cwd=tmp_path, protected_paths=()),
@@ -522,7 +523,12 @@ def test_pure_loop_exposes_bash_timeout_as_inconclusive_error(
 
     monkeypatch.setattr(shell_module, "_run_shell", time_out)
 
-    provider, events = _run_bash_loop(tmp_path, command="slow check", timeout=30)
+    provider, events = _run_bash_loop(
+        tmp_path,
+        command="slow check",
+        timeout=30,
+        bash_tool=BashTool(None),
+    )
 
     tool_result = provider.calls[1].tool_results[0]
     assert tool_result.output == "Command timed out after 30 seconds"

@@ -15,6 +15,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from wisp.tools import process as process_tools_module
+from wisp.tools import process_manager as process_manager_module
 from wisp.tools import search as search_tools_module
 from wisp.tools import shell as shell_tools_module
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
@@ -379,7 +380,7 @@ def test_bash_tool_preserves_exit_code_outside_tiny_body_budget(
     monkeypatch.setattr(shell_tools_module, "_run_shell", fake_run_shell)
     context = ToolContext(cwd=tmp_path, max_output_bytes=1, max_output_lines=0)
 
-    result = run_tool(BashTool(), {"command": "ignored"}, context)
+    result = run_tool(BashTool(None), {"command": "ignored"}, context)
 
     assert result.text == "Command exited with code 7"
     assert result.data["output_has_exit_status"] is True
@@ -426,7 +427,7 @@ def test_bash_tool_reserves_status_space_without_losing_diagnostic_tail(
     monkeypatch.setattr(shell_tools_module, "_run_shell", fake_run_shell)
     context = ToolContext(cwd=tmp_path, max_output_bytes=80, max_output_lines=100)
 
-    result = run_tool(BashTool(), {"command": "ignored"}, context)
+    result = run_tool(BashTool(None), {"command": "ignored"}, context)
 
     status_overhead = len(b"Command exited with code 2: ")
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes + status_overhead
@@ -517,20 +518,79 @@ def test_bash_tool_reports_process_tree_cleanup_failure(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    async def fail_terminate(process: asyncio.subprocess.Process) -> bool:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-        return False
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
+    cleanup_attempts = 0
 
-    monkeypatch.setattr(process_tools_module, "_terminate_process_tree", fail_terminate)
+    async def fail_terminate(process: asyncio.subprocess.Process) -> bool:
+        nonlocal cleanup_attempts
+        cleanup_attempts += 1
+        await original_terminate(process)
+        return cleanup_attempts > 1
+
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_terminate)
 
     context = ToolContext(cwd=tmp_path)
     source = "print('done')"
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
+    tool = BashTool()
 
     with pytest.raises(ToolError, match="Failed to terminate process tree"):
-        run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+        run_tool(tool, {"command": command, "timeout": 5}, context)
+    supervisor = tool._process_supervisor  # noqa: SLF001
+    assert supervisor is not None
+    assert len(supervisor._one_shot) == 1  # noqa: SLF001
+    anyio.run(supervisor.aclose)
+    assert len(supervisor._one_shot) == 0  # noqa: SLF001
+    assert cleanup_attempts == 2
+
+
+def test_kill_process_tree_and_wait_returns_failure_without_waiting(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fail_terminate(_process: asyncio.subprocess.Process) -> bool:
+        return False
+
+    class DummyProcess:
+        stdout = None
+        stderr = None
+        wait_called = False
+
+        async def wait(self) -> int:
+            self.wait_called = True
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module, "_terminate_process_tree", fail_terminate)
+
+    async def run() -> bool:
+        with anyio.fail_after(0.1):
+            return await process_tools_module._kill_process_tree_and_wait(process)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert anyio.run(run) is False
+    assert process.wait_called is False
+
+
+def test_posix_permission_error_reports_cleanup_failure_for_exited_leader(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = 0
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    def fail_killpg(_pid: int, _signal: int) -> None:
+        raise PermissionError
+
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module.os, "killpg", fail_killpg)
+
+    assert process_tools_module._kill_process_tree(process) is False  # type: ignore[arg-type]  # noqa: SLF001
+    assert process.killed is False
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")

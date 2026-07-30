@@ -205,6 +205,8 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
 
 async def _kill_process_tree_and_wait(process: asyncio.subprocess.Process) -> bool:
     terminated = await _terminate_process_tree(process)
+    if not terminated:
+        return False
     await process.wait()
     await _drain_process_stream(process.stdout)
     await _drain_process_stream(process.stderr)
@@ -240,12 +242,12 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> bool:
         except ProcessLookupError:
             return True
         except PermissionError:
-            if process.returncode is not None:
-                return True
             try:
-                process.kill()
+                if process.returncode is None:
+                    process.kill()
             except (ProcessLookupError, PermissionError):
-                return False
+                pass
+            return False
         return True
     if os.name == "nt":
         had_job = getattr(process, _WINDOWS_JOB_HANDLE_ATTR, None) is not None

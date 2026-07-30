@@ -17,7 +17,7 @@ def builtin_tools(*, process_supervisor: ProcessSupervisor | None = None) -> tup
         ReadTool(),
         WriteTool(),
         EditTool(),
-        BashTool(process_supervisor),
+        BashTool() if process_supervisor is None else BashTool(process_supervisor),
         GrepTool(),
         FindTool(),
         LsTool(),

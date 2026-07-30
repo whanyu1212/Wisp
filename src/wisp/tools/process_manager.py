@@ -520,16 +520,18 @@ class ProcessSupervisor:
             except TimeoutError:
                 managed.terminal_override = managed.terminal_override or "timed_out"
                 cleanup_succeeded = await _terminate_process_tree(managed.process)
-                await self._finish_terminated_io(managed)
-                reader_failure = await completion
-            if reader_failure is not None:
+                if cleanup_succeeded:
+                    await self._finish_terminated_io(managed)
+                    reader_failure = await completion
+            if cleanup_succeeded and reader_failure is not None:
                 cleanup_succeeded = await _terminate_process_tree(managed.process)
-                await self._finish_terminated_io(managed)
+                if cleanup_succeeded:
+                    await self._finish_terminated_io(managed)
             # A shell can exit after launching descendants whose output is
             # redirected away from its pipes. The leader and both readers are
             # then finished even though the owned process group is not. Reap
             # that remaining group before publishing a terminal handle.
-            else:
+            elif cleanup_succeeded:
                 cleanup_succeeded = await _terminate_process_tree(managed.process)
             managed.exit_code = managed.process.returncode
             if not cleanup_succeeded:

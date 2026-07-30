@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Final, cast, overload
+
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_int, _required_string
 from wisp.tools.context import ToolContext
@@ -9,6 +11,8 @@ from wisp.tools.process import _format_process_output_bounded, _run_shell
 from wisp.tools.process_manager import ProcessSupervisor
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.truncation import truncate_text
+
+_DEFAULT_PROCESS_SUPERVISOR: Final = object()
 
 
 class BashTool:
@@ -29,8 +33,19 @@ class BashTool:
         "required": ["command"],
     }
 
-    def __init__(self, process_supervisor: ProcessSupervisor | None = None) -> None:
-        self._process_supervisor = process_supervisor
+    @overload
+    def __init__(self) -> None: ...
+
+    @overload
+    def __init__(self, process_supervisor: ProcessSupervisor | None) -> None: ...
+
+    def __init__(
+        self,
+        process_supervisor: ProcessSupervisor | None | object = _DEFAULT_PROCESS_SUPERVISOR,
+    ) -> None:
+        if process_supervisor is _DEFAULT_PROCESS_SUPERVISOR:
+            process_supervisor = ProcessSupervisor(max_processes=1)
+        self._process_supervisor = cast(ProcessSupervisor | None, process_supervisor)
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         command = _required_string(arguments, "command")

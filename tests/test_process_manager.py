@@ -225,7 +225,7 @@ def test_aclose_retries_cleanup_failed_managed_process_before_discarding(
         nonlocal cleanup_attempts
         cleanup_attempts += 1
         await original_terminate(process)
-        return cleanup_attempts > 2
+        return cleanup_attempts > 1
 
     monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_once)
 
@@ -247,7 +247,7 @@ def test_aclose_retries_cleanup_failed_managed_process_before_discarding(
     assert update.error == "Failed to terminate process tree"
     assert retained_before_close == 1
     assert retained_after_close == 0
-    assert cleanup_attempts == 3
+    assert cleanup_attempts == 2
 
 
 def test_aclose_surfaces_and_retains_cleanup_failed_managed_process(
@@ -291,7 +291,7 @@ def test_aclose_surfaces_and_retains_cleanup_failed_managed_process(
 
     assert update.state == "failed"
     assert update.error == "Failed to terminate process tree"
-    assert attempts == 4
+    assert attempts == 3
     assert retained_after_failed_close == 1
     assert retained_after_retry == 0
 
