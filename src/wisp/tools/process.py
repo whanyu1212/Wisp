@@ -192,6 +192,11 @@ async def _run_shell(
         cleanup_task = asyncio.create_task(_kill_process_tree_and_wait(process))
         await _await_task_after_cancellation(cleanup_task)
         raise
+    except Exception as exc:
+        cleanup_succeeded = await _await_process_cleanup(_kill_process_tree_and_wait(process))
+        if not cleanup_succeeded:
+            raise ToolError("Failed to terminate process tree") from exc
+        raise
 
     cleanup_succeeded = await _await_process_cleanup(_terminate_process_tree(process))
     if not cleanup_succeeded:

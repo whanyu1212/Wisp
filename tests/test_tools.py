@@ -1088,6 +1088,64 @@ def test_direct_bash_cleanup_finishes_before_raw_task_cancellation(
     assert cleanup_finished is True
 
 
+def test_direct_bash_cleans_process_after_capture_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyStream:
+        def at_eof(self) -> bool:
+            return True
+
+    class DummyProcess:
+        returncode: int | None = None
+        stdout = DummyStream()
+        stderr = DummyStream()
+        wait_count = 0
+
+        async def wait(self) -> None:
+            self.wait_count += 1
+            self.returncode = -15
+
+    process = DummyProcess()
+    cleanup_calls = 0
+
+    async def create_process(_command: str, *, cwd: Path) -> DummyProcess:
+        assert cwd == tmp_path
+        return process
+
+    async def fail_collect(*_args: object, **_kwargs: object) -> tuple[bytes, bytes]:
+        raise ToolError("capture failed")
+
+    async def terminate_process(
+        captured_process: object,
+        *,
+        force: bool = False,
+    ) -> bool:
+        nonlocal cleanup_calls
+        assert captured_process is process
+        assert force is False
+        cleanup_calls += 1
+        return True
+
+    monkeypatch.setattr(process_tools_module, "_create_shell_process", create_process)
+    monkeypatch.setattr(process_tools_module, "_collect_limited_output", fail_collect)
+    monkeypatch.setattr(process_tools_module, "_terminate_process_tree", terminate_process)
+
+    async def run() -> None:
+        await process_tools_module._run_shell(  # noqa: SLF001
+            "ignored",
+            cwd=tmp_path,
+            timeout=5,
+            max_output_bytes=100,
+            max_output_lines=100,
+        )
+
+    with pytest.raises(ToolError, match="capture failed"):
+        anyio.run(run)
+    assert cleanup_calls == 1
+    assert process.wait_count == 1
+
+
 def test_bash_tool_uses_taskkill_for_windows_process_tree_cleanup(
     monkeypatch: MonkeyPatch,
 ) -> None:
