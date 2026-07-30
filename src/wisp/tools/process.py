@@ -20,9 +20,24 @@ from wisp.tools.truncation import TruncatedText, truncate_text_tail
 
 _WINDOWS_JOB_HANDLE_ATTR = "_wisp_windows_job_handle"
 _WINDOWS_CREATE_SUSPENDED = 0x00000004
+_WINDOWS_INVALID_HANDLE_VALUE = cast(int, ctypes.c_void_p(-1).value)
 _WINDOWS_RESUME_FAILED = 0xFFFFFFFF
+_WINDOWS_TH32CS_SNAPTHREAD = 0x00000004
+_WINDOWS_THREAD_SUSPEND_RESUME = 0x0002
 _WINDOWS_WAIT_FAILED = 0xFFFFFFFF
 _WINDOWS_WAIT_TIMEOUT = 0x00000102
+
+
+class _WindowsThreadEntry32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ThreadID", wintypes.DWORD),
+        ("th32OwnerProcessID", wintypes.DWORD),
+        ("tpBasePri", wintypes.LONG),
+        ("tpDeltaPri", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+    ]
 
 
 class _CtypesFunction(Protocol):
@@ -41,7 +56,15 @@ class _WindowsKernel32(Protocol):
 
     CloseHandle: _CtypesFunction
 
+    CreateToolhelp32Snapshot: _CtypesFunction
+
+    OpenThread: _CtypesFunction
+
     ResumeThread: _CtypesFunction
+
+    Thread32First: _CtypesFunction
+
+    Thread32Next: _CtypesFunction
 
     WaitForSingleObject: _CtypesFunction
 
@@ -164,7 +187,9 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
 
     if os.name == "nt":
         try:
-            _attach_windows_job(process)
+            job_attached = _attach_windows_job(process)
+            if not job_attached:
+                raise ToolError("Failed to attach command process to Windows job")
             resumed = _resume_windows_process(process)
         except Exception:
             with anyio.CancelScope(shield=True):
@@ -267,41 +292,78 @@ async def _cleanup_failed_windows_process_setup(process: asyncio.subprocess.Proc
         return
 
 
-def _attach_windows_job(process: asyncio.subprocess.Process) -> None:
+def _attach_windows_job(process: asyncio.subprocess.Process) -> bool:
     if os.name != "nt":
-        return
+        return True
     kernel32 = _windows_kernel32()
     process_handle = _windows_process_handle(process)
     if kernel32 is None or process_handle is None:
-        return
+        return False
 
     try:
         job_handle = kernel32.CreateJobObjectW(None, None)
     except (AttributeError, OSError):
-        return
+        return False
     if not job_handle:
-        return
+        return False
     try:
         if not kernel32.AssignProcessToJobObject(job_handle, process_handle):
             _close_windows_handle(kernel32, job_handle)
-            return
+            return False
     except (AttributeError, OSError):
         _close_windows_handle(kernel32, job_handle)
-        return
+        return False
     setattr(process, _WINDOWS_JOB_HANDLE_ATTR, job_handle)
+    return True
 
 
 def _resume_windows_process(process: asyncio.subprocess.Process) -> bool:
     if os.name != "nt":
         return True
     kernel32 = _windows_kernel32()
-    thread_handle = _windows_process_thread_handle(process)
-    if kernel32 is None or thread_handle is None:
+    if kernel32 is None:
+        return False
+    thread_handle = _open_windows_process_thread(process, kernel32)
+    if thread_handle is None:
         return False
     try:
-        return kernel32.ResumeThread(thread_handle) != _WINDOWS_RESUME_FAILED
+        try:
+            return kernel32.ResumeThread(thread_handle) != _WINDOWS_RESUME_FAILED
+        except (AttributeError, OSError):
+            return False
+    finally:
+        _close_windows_handle(kernel32, thread_handle)
+
+
+def _open_windows_process_thread(
+    process: asyncio.subprocess.Process,
+    kernel32: _WindowsKernel32,
+) -> object | None:
+    try:
+        snapshot = kernel32.CreateToolhelp32Snapshot(_WINDOWS_TH32CS_SNAPTHREAD, 0)
     except (AttributeError, OSError):
-        return False
+        return None
+    if not snapshot or snapshot == _WINDOWS_INVALID_HANDLE_VALUE:
+        return None
+    try:
+        entry = _WindowsThreadEntry32()
+        entry.dwSize = ctypes.sizeof(_WindowsThreadEntry32)
+        has_entry = bool(kernel32.Thread32First(snapshot, ctypes.pointer(entry)))
+        while has_entry:
+            if int(entry.th32OwnerProcessID) == process.pid:
+                thread_handle = kernel32.OpenThread(
+                    _WINDOWS_THREAD_SUSPEND_RESUME,
+                    False,
+                    entry.th32ThreadID,
+                )
+                if thread_handle:
+                    return thread_handle
+            has_entry = bool(kernel32.Thread32Next(snapshot, ctypes.pointer(entry)))
+    except (AttributeError, OSError):
+        return None
+    finally:
+        _close_windows_handle(kernel32, snapshot)
+    return None
 
 
 def _terminate_windows_job(process: asyncio.subprocess.Process) -> bool:
@@ -376,9 +438,25 @@ def _configure_windows_job_api(kernel32: object) -> _WindowsKernel32:
     close_handle.restype = wintypes.BOOL
     close_handle.argtypes = [wintypes.HANDLE]
 
+    create_snapshot = kernel32_api.CreateToolhelp32Snapshot
+    create_snapshot.restype = wintypes.HANDLE
+    create_snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+
+    open_thread = kernel32_api.OpenThread
+    open_thread.restype = wintypes.HANDLE
+    open_thread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+
     resume_thread = kernel32_api.ResumeThread
     resume_thread.restype = wintypes.DWORD
     resume_thread.argtypes = [wintypes.HANDLE]
+
+    thread32_first = kernel32_api.Thread32First
+    thread32_first.restype = wintypes.BOOL
+    thread32_first.argtypes = [wintypes.HANDLE, ctypes.POINTER(_WindowsThreadEntry32)]
+
+    thread32_next = kernel32_api.Thread32Next
+    thread32_next.restype = wintypes.BOOL
+    thread32_next.argtypes = [wintypes.HANDLE, ctypes.POINTER(_WindowsThreadEntry32)]
 
     wait_for_single_object = kernel32_api.WaitForSingleObject
     wait_for_single_object.restype = wintypes.DWORD
@@ -396,18 +474,6 @@ def _windows_process_handle(process: asyncio.subprocess.Process) -> object | Non
         return None
     subprocess_handle = get_extra_info("subprocess")
     return cast(object | None, getattr(subprocess_handle, "_handle", None))
-
-
-def _windows_process_thread_handle(process: asyncio.subprocess.Process) -> object | None:
-    direct_thread = getattr(process, "_thread", None)
-    if direct_thread is not None:
-        return cast(object, direct_thread)
-    transport = getattr(process, "_transport", None)
-    get_extra_info = getattr(transport, "get_extra_info", None)
-    if get_extra_info is None:
-        return None
-    subprocess_handle = get_extra_info("subprocess")
-    return cast(object | None, getattr(subprocess_handle, "_thread", None))
 
 
 async def _collect_limited_output(

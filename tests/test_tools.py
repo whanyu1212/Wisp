@@ -666,7 +666,6 @@ def test_bash_tool_assigns_windows_job_before_resuming_shell(
         returncode = None
         pid = 123
         _handle = 456
-        _thread = 654
 
         async def wait(self) -> int:
             return 0
@@ -683,8 +682,34 @@ def test_bash_tool_assigns_windows_job_before_resuming_shell(
             self.calls.append(("assign", job, process))
             return 1
 
+        def CreateToolhelp32Snapshot(self, flags: int, process_id: int) -> int:
+            self.calls.append(("snapshot", flags, process_id))
+            return 111
+
+        def Thread32First(
+            self,
+            snapshot: int,
+            entry: object,
+        ) -> int:
+            self.calls.append(("thread_first", snapshot))
+            entry.contents.th32OwnerProcessID = 123  # type: ignore[attr-defined]
+            entry.contents.th32ThreadID = 654  # type: ignore[attr-defined]
+            return 1
+
+        def Thread32Next(self, snapshot: int, _entry: object) -> int:
+            self.calls.append(("thread_next", snapshot))
+            return 0
+
+        def OpenThread(self, access: int, inherit: bool, thread_id: int) -> int:
+            self.calls.append(("open_thread", access, inherit, thread_id))
+            return 222
+
         def ResumeThread(self, thread: int) -> int:
             self.calls.append(("resume", thread))
+            return 1
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
             return 1
 
     creation_calls: list[dict[str, object]] = []
@@ -722,8 +747,80 @@ def test_bash_tool_assigns_windows_job_before_resuming_shell(
     assert kernel32.calls == [
         ("create_job",),
         ("assign", 789, 456),
-        ("resume", 654),
+        ("snapshot", process_tools_module._WINDOWS_TH32CS_SNAPTHREAD, 0),  # noqa: SLF001
+        ("thread_first", 111),
+        (
+            "open_thread",
+            process_tools_module._WINDOWS_THREAD_SUSPEND_RESUME,  # noqa: SLF001
+            False,
+            654,
+        ),
+        ("close", 111),
+        ("resume", 222),
+        ("close", 222),
     ]
+
+
+def test_bash_tool_aborts_suspended_windows_shell_when_job_assignment_fails(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+        _handle = 456
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+        async def wait(self) -> int:
+            self.returncode = 1
+            return 1
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create_job",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 0
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
+            return 1
+
+    process = DummyProcess()
+    kernel32 = FakeKernel32()
+
+    async def fake_create_subprocess_shell(
+        _command: str,
+        **_kwargs: object,
+    ) -> DummyProcess:
+        return process
+
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(
+        process_tools_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
+    )
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+
+    async def run() -> None:
+        await process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # noqa: SLF001
+
+    with pytest.raises(ToolError, match="Failed to attach command process to Windows job"):
+        anyio.run(run)
+
+    assert kernel32.calls == [
+        ("create_job",),
+        ("assign", 789, 456),
+        ("close", 789),
+    ]
+    assert process.killed is True
 
 
 def test_windows_kernel32_configures_pointer_sized_job_api_signatures(
@@ -744,7 +841,11 @@ def test_windows_kernel32_configures_pointer_sized_job_api_signatures(
             self.AssignProcessToJobObject = FakeFunction(1)
             self.TerminateJobObject = FakeFunction(1)
             self.CloseHandle = FakeFunction(1)
+            self.CreateToolhelp32Snapshot = FakeFunction(1)
+            self.OpenThread = FakeFunction(1)
             self.ResumeThread = FakeFunction(1)
+            self.Thread32First = FakeFunction(1)
+            self.Thread32Next = FakeFunction(0)
             self.WaitForSingleObject = FakeFunction(process_tools_module._WINDOWS_WAIT_TIMEOUT)  # noqa: SLF001
 
     kernel32 = FakeKernel32()
@@ -774,8 +875,29 @@ def test_windows_kernel32_configures_pointer_sized_job_api_signatures(
     ]
     assert kernel32.CloseHandle.restype is process_tools_module.wintypes.BOOL
     assert kernel32.CloseHandle.argtypes == [process_tools_module.wintypes.HANDLE]
+    assert kernel32.CreateToolhelp32Snapshot.restype is process_tools_module.wintypes.HANDLE
+    assert kernel32.CreateToolhelp32Snapshot.argtypes == [
+        process_tools_module.wintypes.DWORD,
+        process_tools_module.wintypes.DWORD,
+    ]
+    assert kernel32.OpenThread.restype is process_tools_module.wintypes.HANDLE
+    assert kernel32.OpenThread.argtypes == [
+        process_tools_module.wintypes.DWORD,
+        process_tools_module.wintypes.BOOL,
+        process_tools_module.wintypes.DWORD,
+    ]
     assert kernel32.ResumeThread.restype is process_tools_module.wintypes.DWORD
     assert kernel32.ResumeThread.argtypes == [process_tools_module.wintypes.HANDLE]
+    assert kernel32.Thread32First.restype is process_tools_module.wintypes.BOOL
+    assert kernel32.Thread32First.argtypes == [
+        process_tools_module.wintypes.HANDLE,
+        process_tools_module.ctypes.POINTER(process_tools_module._WindowsThreadEntry32),  # noqa: SLF001
+    ]
+    assert kernel32.Thread32Next.restype is process_tools_module.wintypes.BOOL
+    assert kernel32.Thread32Next.argtypes == [
+        process_tools_module.wintypes.HANDLE,
+        process_tools_module.ctypes.POINTER(process_tools_module._WindowsThreadEntry32),  # noqa: SLF001
+    ]
     assert kernel32.WaitForSingleObject.restype is process_tools_module.wintypes.DWORD
     assert kernel32.WaitForSingleObject.argtypes == [
         process_tools_module.wintypes.HANDLE,
