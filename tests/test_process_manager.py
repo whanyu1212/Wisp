@@ -364,6 +364,52 @@ def test_managed_timeout_reports_process_tree_cleanup_failure(
     assert update.error == "Failed to terminate process tree"
 
 
+def test_one_shot_timeout_reports_process_tree_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_cleanup(_process: asyncio.subprocess.Process) -> bool:
+        return False
+
+    monkeypatch.setattr(process_manager_module, "_kill_process_tree_and_wait", fail_cleanup)
+
+    async def run() -> tuple[str, int, int]:
+        supervisor = ProcessSupervisor(max_processes=1)
+        closed = False
+        try:
+            with pytest.raises(ToolError) as exc_info:
+                await supervisor.run_to_completion(
+                    _python_command("import time; time.sleep(30)"),
+                    cwd=tmp_path,
+                    timeout=0.05,
+                    max_output_bytes=1_000,
+                    max_output_lines=100,
+                )
+            retained_before_close = len(supervisor._one_shot)  # noqa: SLF001
+
+            with pytest.raises(ToolError, match="managed process limit"):
+                await supervisor.run_to_completion(
+                    _python_command("print('next')"),
+                    cwd=tmp_path,
+                    timeout=1,
+                    max_output_bytes=1_000,
+                    max_output_lines=100,
+                )
+
+            await supervisor.aclose()
+            closed = True
+            return str(exc_info.value), retained_before_close, len(supervisor._one_shot)  # noqa: SLF001
+        finally:
+            if not closed:
+                await supervisor.aclose()
+
+    error, retained_before_close, retained_after_close = anyio.run(run)
+
+    assert error == "Failed to terminate process tree"
+    assert retained_before_close == 1
+    assert retained_after_close == 0
+
+
 def test_aclose_retries_cleanup_failed_managed_process_before_discarding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1328,7 +1374,7 @@ def test_one_shot_timeout_retains_ownership_when_cleanup_fails(
     async def run() -> int:
         supervisor = ProcessSupervisor()
         try:
-            with pytest.raises(ToolError, match="timed out"):
+            with pytest.raises(ToolError, match="Failed to terminate process tree"):
                 await supervisor.run_to_completion(
                     _python_command("import time; time.sleep(30)"),
                     cwd=tmp_path,
