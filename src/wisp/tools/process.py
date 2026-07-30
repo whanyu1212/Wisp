@@ -400,7 +400,10 @@ def _signal_posix_recorded_jobs(
     selected_signal: signal.Signals,
 ) -> bool:
     succeeded = True
+    current_owned_pids = set(_posix_current_owned_pids(process))
     for pid in _posix_recorded_job_pids(process):
+        if pid not in current_owned_pids:
+            continue
         try:
             os.kill(pid, selected_signal)
         except ProcessLookupError:
@@ -427,6 +430,17 @@ def _posix_recorded_job_pids(process: asyncio.subprocess.Process) -> tuple[int, 
         if pid > 0 and pid != process.pid:
             pids.append(pid)
     return tuple(dict.fromkeys(pids))
+
+
+def _posix_current_owned_pids(process: asyncio.subprocess.Process) -> tuple[int, ...]:
+    pids: list[int] = []
+    descendant_pids = _posix_descendant_pids(process.pid)
+    if descendant_pids is not None:
+        pids.extend(descendant_pids)
+    jobs_file = getattr(process, _POSIX_JOBS_FILE_ATTR, None)
+    if isinstance(jobs_file, Path):
+        pids.extend(_posix_jobs_file_holder_pids(jobs_file))
+    return tuple(dict.fromkeys(pid for pid in pids if pid > 0 and pid != process.pid))
 
 
 def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> bool:

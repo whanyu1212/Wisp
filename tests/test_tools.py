@@ -4,6 +4,7 @@ import asyncio
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -544,6 +545,24 @@ def test_bash_tool_reports_process_tree_cleanup_failure(
     assert cleanup_attempts == 2
 
 
+def test_search_tools_expose_process_cleanup() -> None:
+    class DummySupervisor:
+        def __init__(self) -> None:
+            self.close_count = 0
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+
+    async def run() -> tuple[int, int]:
+        grep_supervisor = DummySupervisor()
+        find_supervisor = DummySupervisor()
+        await GrepTool(grep_supervisor).aclose()  # type: ignore[arg-type]
+        await FindTool(find_supervisor).aclose()  # type: ignore[arg-type]
+        return grep_supervisor.close_count, find_supervisor.close_count
+
+    assert anyio.run(run) == (1, 1)
+
+
 def test_kill_process_tree_and_wait_returns_failure_without_waiting(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -610,6 +629,31 @@ def test_posix_records_jobs_file_holder_pids(
 
     assert recorded is True
     assert jobs_file.read_text(encoding="utf-8").splitlines() == ["234", "345"]
+
+
+def test_posix_recorded_jobs_prune_stale_pids(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("234\n345\n456\n", encoding="utf-8")
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+    monkeypatch.setattr(process_tools_module, "_posix_descendant_pids", lambda _pid: (234,))
+    monkeypatch.setattr(process_tools_module, "_posix_jobs_file_holder_pids", lambda _path: (345,))
+    kills: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    signaled = process_tools_module._signal_posix_recorded_jobs(  # type: ignore[arg-type]  # noqa: SLF001
+        process,
+        signal.SIGKILL,
+    )
+
+    assert signaled is True
+    assert kills == [(234, signal.SIGKILL), (345, signal.SIGKILL)]
 
 
 def test_posix_jobs_file_holder_pids_uses_lsof(

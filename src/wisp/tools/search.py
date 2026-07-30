@@ -62,6 +62,11 @@ class GrepTool:
     def __init__(self, process_supervisor: ProcessSupervisor | None = None) -> None:
         self._process_supervisor = process_supervisor or ProcessSupervisor()
 
+    async def aclose(self) -> None:
+        """Retry and release any retained search-process cleanup."""
+
+        await self._process_supervisor.aclose()
+
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         pattern = _required_string(arguments, "pattern", allow_whitespace=True)
         path = resolve_tool_path(_optional_string(arguments, "path"), context)
@@ -119,6 +124,11 @@ class FindTool:
 
     def __init__(self, process_supervisor: ProcessSupervisor | None = None) -> None:
         self._process_supervisor = process_supervisor or ProcessSupervisor()
+
+    async def aclose(self) -> None:
+        """Retry and release any retained search-process cleanup."""
+
+        await self._process_supervisor.aclose()
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         path = resolve_tool_path(_optional_string(arguments, "path"), context)
