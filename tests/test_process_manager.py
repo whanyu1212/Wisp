@@ -384,6 +384,51 @@ def test_concurrent_starts_cannot_exceed_managed_process_limit(tmp_path: Path) -
     assert anyio.run(run) == (1, 1)
 
 
+def test_poll_wait_releases_operation_lock_for_cancel(tmp_path: Path) -> None:
+    class InstrumentedChange:
+        def __init__(self) -> None:
+            self._event = asyncio.Event()
+            self.wait_started = asyncio.Event()
+
+        def clear(self) -> None:
+            self._event.clear()
+
+        def set(self) -> None:
+            self._event.set()
+
+        async def wait(self) -> None:
+            self.wait_started.set()
+            await self._event.wait()
+
+    async def run() -> tuple[ProcessUpdate, ProcessUpdate]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                _python_command("import time; time.sleep(30)"),
+                cwd=tmp_path,
+                timeout=60,
+            )
+            managed = supervisor._managed[process_id]  # noqa: SLF001
+            changed = InstrumentedChange()
+            managed.changed = changed  # type: ignore[assignment]
+
+            poll_task = asyncio.create_task(supervisor.poll(process_id, wait_seconds=30))
+            await changed.wait_started.wait()
+
+            with anyio.fail_after(2):
+                cancel_update = await supervisor.cancel(process_id)
+            with anyio.fail_after(2):
+                poll_update = await poll_task
+            return cancel_update, poll_update
+        finally:
+            await supervisor.aclose()
+
+    cancel_update, poll_update = anyio.run(run)
+
+    assert cancel_update.state == "cancelled"
+    assert poll_update.state == "cancelled"
+
+
 def test_unreported_terminal_handle_is_evicted_for_capacity(tmp_path: Path) -> None:
     async def run() -> tuple[ProcessUpdate, ...]:
         supervisor = ProcessSupervisor(max_processes=1)

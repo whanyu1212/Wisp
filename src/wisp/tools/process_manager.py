@@ -218,14 +218,18 @@ class ProcessSupervisor:
         if wait_seconds < 0:
             raise ValueError("wait_seconds must be non-negative")
         managed = await self._get(process_id)
-        async with managed.operation_lock:
-            if wait_seconds > 0 and managed.state == "running" and not managed.has_pending_output():
-                managed.changed.clear()
+        if wait_seconds > 0:
+            should_wait = False
+            async with managed.operation_lock:
                 if managed.state == "running" and not managed.has_pending_output():
-                    try:
-                        await asyncio.wait_for(managed.changed.wait(), timeout=wait_seconds)
-                    except TimeoutError:
-                        pass
+                    managed.changed.clear()
+                    should_wait = managed.state == "running" and not managed.has_pending_output()
+            if should_wait:
+                try:
+                    await asyncio.wait_for(managed.changed.wait(), timeout=wait_seconds)
+                except TimeoutError:
+                    pass
+        async with managed.operation_lock:
             return self._snapshot(managed)
 
     async def cancel(self, process_id: str) -> ProcessUpdate:
