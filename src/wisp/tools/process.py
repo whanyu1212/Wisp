@@ -251,6 +251,12 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
         if posix_jobs_file is not None:
             _remove_posix_jobs_file(posix_jobs_file)
         raise ToolError(f"Failed to start command: {exc}") from exc
+    except BaseException:
+        if posix_jobs_fd is not None:
+            _close_posix_fd(posix_jobs_fd)
+        if posix_jobs_file is not None:
+            _remove_posix_jobs_file(posix_jobs_file)
+        raise
 
     if posix_jobs_fd is not None:
         _close_posix_fd(posix_jobs_fd)
@@ -491,9 +497,10 @@ def _posix_recorded_job_pids(process: asyncio.subprocess.Process) -> tuple[int, 
 
 def _posix_current_owned_pids(process: asyncio.subprocess.Process) -> set[int] | None:
     pids: list[int] = []
-    descendant_pids = _posix_descendant_pids(process.pid)
-    if descendant_pids is not None:
-        pids.extend(descendant_pids)
+    if process.returncode is None:
+        descendant_pids = _posix_descendant_pids(process.pid)
+        if descendant_pids is not None:
+            pids.extend(descendant_pids)
     jobs_file = getattr(process, _POSIX_JOBS_FILE_ATTR, None)
     if isinstance(jobs_file, Path):
         holder_pids = _posix_jobs_file_holder_pids(jobs_file)
@@ -507,9 +514,12 @@ def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> bool:
     jobs_file = getattr(process, _POSIX_JOBS_FILE_ATTR, None)
     if not isinstance(jobs_file, Path):
         return True
-    descendant_pids = _posix_descendant_pids(process.pid)
-    if descendant_pids is None:
-        return False
+    if process.returncode is None:
+        descendant_pids = _posix_descendant_pids(process.pid)
+        if descendant_pids is None:
+            return False
+    else:
+        descendant_pids = ()
     holder_pids = _posix_jobs_file_holder_pids(jobs_file)
     if holder_pids is None:
         return False

@@ -618,6 +618,7 @@ def test_posix_records_jobs_file_holder_pids(
 ) -> None:
     class DummyProcess:
         pid = 123
+        returncode = None
 
     jobs_file = tmp_path / "jobs"
     process = DummyProcess()
@@ -637,6 +638,7 @@ def test_posix_holder_discovery_failure_reports_cleanup_failure(
 ) -> None:
     class DummyProcess:
         pid = 123
+        returncode = None
 
     jobs_file = tmp_path / "jobs"
     process = DummyProcess()
@@ -653,6 +655,7 @@ def test_posix_recorded_jobs_prune_stale_pids(
 ) -> None:
     class DummyProcess:
         pid = 123
+        returncode = None
 
     jobs_file = tmp_path / "jobs"
     jobs_file.write_text("234\n345\n456\n", encoding="utf-8")
@@ -670,6 +673,36 @@ def test_posix_recorded_jobs_prune_stale_pids(
 
     assert signaled is True
     assert kills == [(234, signal.SIGKILL), (345, signal.SIGKILL)]
+
+
+def test_posix_recorded_jobs_skip_descendant_scan_after_leader_exit(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = 0
+
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("234\n345\n", encoding="utf-8")
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+
+    def fail_descendant_scan(_pid: int) -> tuple[int, ...]:
+        raise AssertionError("exited leader pid must not be traversed")
+
+    monkeypatch.setattr(process_tools_module, "_posix_descendant_pids", fail_descendant_scan)
+    monkeypatch.setattr(process_tools_module, "_posix_jobs_file_holder_pids", lambda _path: (345,))
+    kills: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    signaled = process_tools_module._signal_posix_recorded_jobs(  # type: ignore[arg-type]  # noqa: SLF001
+        process,
+        signal.SIGKILL,
+    )
+
+    assert signaled is True
+    assert kills == [(345, signal.SIGKILL)]
 
 
 def test_posix_recorded_job_verification_runs_off_event_loop(
@@ -848,6 +881,41 @@ def test_posix_shell_uses_hidden_high_jobs_fd(
     process_tools_module._remove_posix_jobs_file(  # noqa: SLF001
         getattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR),  # noqa: SLF001
     )
+
+
+def test_posix_shell_spawn_cancellation_cleans_tracking_resources(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    closed_fds: list[int] = []
+    removed_files: list[object] = []
+
+    async def cancelled_create_subprocess_shell(
+        _command: str,
+        **_kwargs: object,
+    ) -> object:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module, "_open_posix_jobs_fd", lambda _path: 123)
+    monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
+    monkeypatch.setattr(
+        process_tools_module, "_remove_posix_jobs_file", lambda path: removed_files.append(path)
+    )
+    monkeypatch.setattr(
+        process_tools_module.asyncio,
+        "create_subprocess_shell",
+        cancelled_create_subprocess_shell,
+    )
+
+    async def run() -> None:
+        await process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # noqa: SLF001
+
+    with pytest.raises(asyncio.CancelledError):
+        anyio.run(run)
+
+    assert closed_fds == [123]
+    assert len(removed_files) == 1
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
