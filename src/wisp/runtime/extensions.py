@@ -39,7 +39,13 @@ async def build_runtime(
     commands = CommandRegistry()
     events = EventBus()
     process_supervisor = ProcessSupervisor()
-    api = ExtensionAPI(providers=providers, tools=tools, commands=commands, events=events)
+    api = ExtensionAPI(
+        providers=providers,
+        tools=tools,
+        commands=commands,
+        events=events,
+        process_supervisor=process_supervisor,
+    )
     models = ModelRegistry(effective_catalog())
     runtime = WispRuntime(
         providers=providers,
@@ -73,11 +79,12 @@ async def activate_builtin_extensions(
 ) -> None:
     """Activate extensions that ship with Wisp."""
 
+    supervisor = process_supervisor if process_supervisor is not None else api.process_supervisor
     builtin.activate(
         api,
         auth_store=auth_store,
         retry_policy=retry_policy,
-        process_supervisor=process_supervisor,
+        process_supervisor=supervisor,
     )
 
 
