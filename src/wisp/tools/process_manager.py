@@ -591,8 +591,8 @@ class ProcessSupervisor:
         if cleanup_succeeded:
             await self._finish_terminated_io(managed)
         assert managed.completion_task is not None
-        if cleanup_succeeded:
-            await managed.completion_task
+        if cleanup_succeeded and not managed.completion_task.cancelled():
+            await asyncio.gather(managed.completion_task, return_exceptions=True)
         elif not managed.completion_task.done():
             managed.completion_task.cancel()
             await asyncio.gather(managed.completion_task, return_exceptions=True)

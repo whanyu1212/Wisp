@@ -397,6 +397,65 @@ def test_cancel_retries_cleanup_failed_managed_process(
     assert attempts == 3
 
 
+def test_cancel_retries_after_failed_running_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
+    cleanup_attempts = 0
+    cleanup_succeeds = False
+
+    async def fail_until_second_cancel(process: asyncio.subprocess.Process) -> bool:
+        nonlocal cleanup_attempts
+        cleanup_attempts += 1
+        await original_terminate(process)
+        return cleanup_succeeds
+
+    monkeypatch.setattr(
+        process_manager_module,
+        "_terminate_process_tree",
+        fail_until_second_cancel,
+    )
+
+    async def run() -> tuple[ProcessUpdate, ProcessUpdate, ProcessUpdate, str, int]:
+        nonlocal cleanup_succeeds
+        supervisor = ProcessSupervisor(max_processes=1)
+        try:
+            process_id = await supervisor.start(
+                _python_command("import time; time.sleep(30)"),
+                cwd=tmp_path,
+                timeout=60,
+            )
+            failed_cancel = await supervisor.cancel(process_id)
+            cleanup_succeeds = True
+            retried_cancel = await supervisor.cancel(process_id)
+            second_id = await supervisor.start(
+                _python_command("print('accepted')"),
+                cwd=tmp_path,
+                timeout=2,
+            )
+            second_updates = await _poll_until_terminal(supervisor, second_id)
+            return (
+                failed_cancel,
+                retried_cancel,
+                second_updates[-1],
+                "".join(update.stdout for update in second_updates),
+                cleanup_attempts,
+            )
+        finally:
+            await supervisor.aclose()
+
+    failed_cancel, retried_cancel, second, second_stdout, attempts = anyio.run(run)
+
+    assert failed_cancel.state == "failed"
+    assert failed_cancel.error == "Failed to terminate process tree"
+    assert retried_cancel.state == "cancelled"
+    assert retried_cancel.error is None
+    assert second.state == "completed"
+    assert second_stdout == "accepted\n"
+    assert attempts == 3
+
+
 def test_managed_timeout_bounds_post_termination_stream_drain(tmp_path: Path) -> None:
     async def hold_pipe_open() -> None:
         await asyncio.Event().wait()
