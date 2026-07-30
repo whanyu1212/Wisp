@@ -1200,6 +1200,53 @@ def test_exec_helper_bounds_stderr_before_buffering(tmp_path: Path) -> None:
     assert result.stderr_truncated is True
 
 
+def test_exec_helper_reports_failed_output_limit_termination(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        def __init__(self) -> None:
+            self.stdout = asyncio.StreamReader()
+            self.stdout.feed_data(b"first\nsecond\n")
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_eof()
+            self.returncode = None
+            self.wait_called = False
+
+        async def wait(self) -> int:
+            self.wait_called = True
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    process: DummyProcess | None = None
+
+    async def fake_spawn(*_args: object, **_kwargs: object) -> DummyProcess:
+        nonlocal process
+        process = DummyProcess()
+        return process
+
+    async def fail_terminate(_process: object) -> bool:
+        return False
+
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr(process_tools_module, "_terminate_process_tree", fail_terminate)
+
+    async def run() -> None:
+        with anyio.fail_after(1):
+            with pytest.raises(ToolError, match="Failed to terminate process tree"):
+                await process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                    ["command"],
+                    cwd=tmp_path,
+                    max_stdout_lines=10,
+                    max_buffered_stdout_lines=1,
+                )
+
+    anyio.run(run)
+
+    assert process is not None
+    assert process.wait_called is True
+
+
 def test_grep_tool_python_fallback_supports_literal_ignore_case_and_glob(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

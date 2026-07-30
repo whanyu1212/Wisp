@@ -1358,6 +1358,63 @@ def test_aclose_finishes_cleanup_before_propagating_caller_cancellation(
         os.kill(pid, 0)
 
 
+def test_aclose_serializes_cleanup_with_managed_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    active_cleanups = 0
+    max_active_cleanups = 0
+
+    async def delayed_terminate(process: asyncio.subprocess.Process) -> bool:
+        nonlocal active_cleanups, max_active_cleanups
+        active_cleanups += 1
+        max_active_cleanups = max(max_active_cleanups, active_cleanups)
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        try:
+            return await original_terminate(process)
+        finally:
+            active_cleanups -= 1
+
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", delayed_terminate)
+
+    async def run() -> None:
+        supervisor = ProcessSupervisor()
+        process_id = await supervisor.start(
+            _python_command("import time; time.sleep(30)"),
+            cwd=tmp_path,
+            timeout=30,
+        )
+        managed = supervisor._managed[process_id]  # noqa: SLF001
+        assert managed.completion_task is not None
+        managed.completion_task.cancel()
+        await asyncio.gather(managed.completion_task, return_exceptions=True)
+
+        async def finalize() -> None:
+            await managed.process.wait()
+            managed.exit_code = managed.process.returncode
+            managed.state = managed.terminal_override or "completed"
+            managed.changed.set()
+
+        managed.completion_task = asyncio.create_task(finalize())
+        cancel_call = asyncio.create_task(supervisor.cancel(process_id))
+        await cleanup_started.wait()
+        close_call = asyncio.create_task(supervisor.aclose())
+        await anyio.sleep(0.05)
+        assert max_active_cleanups == 1
+
+        allow_cleanup.set()
+        await cancel_call
+        await close_call
+
+    anyio.run(run)
+
+    assert max_active_cleanups == 1
+
+
 def test_aclose_initializes_cleanup_inside_cancelled_scope_while_lock_is_contended(
     tmp_path: Path,
 ) -> None:

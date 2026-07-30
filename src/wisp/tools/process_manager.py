@@ -346,11 +346,8 @@ class ProcessSupervisor:
             for item in managed
             if item.state == "running" or item.error == PROCESS_TREE_CLEANUP_ERROR
         )
-        for item in managed_to_cleanup:
-            if item.state == "running":
-                item.terminal_override = "cancelled"
         managed_results = await asyncio.gather(
-            *(_terminate_process_tree(item.process) for item in managed_to_cleanup),
+            *(self._close_managed_process(item) for item in managed_to_cleanup),
             return_exceptions=True,
         )
         one_shot_results = await asyncio.gather(
@@ -367,13 +364,6 @@ class ProcessSupervisor:
             for (process, _capture_task), result in zip(one_shot, one_shot_results, strict=True)
             if result is not True
         }
-        await asyncio.gather(
-            *(
-                self._finish_terminated_io(item)
-                for item in managed_to_cleanup
-                if item.process_id not in failed_managed_ids
-            )
-        )
         await asyncio.gather(
             *(
                 self._finish_one_shot_capture(process, capture_task)
@@ -414,6 +404,15 @@ class ProcessSupervisor:
                     item.state = "failed"
                     item.changed.set()
             raise ToolError(PROCESS_TREE_CLEANUP_ERROR)
+
+    async def _close_managed_process(self, managed: _ManagedProcess) -> bool:
+        async with managed.operation_lock:
+            if managed.state != "running" and managed.error != PROCESS_TREE_CLEANUP_ERROR:
+                return True
+            if managed.state == "running":
+                managed.terminal_override = "cancelled"
+            await self._terminate_managed(managed)
+            return managed.error != PROCESS_TREE_CLEANUP_ERROR
 
     async def _spawn(self, command: str, *, cwd: Path) -> asyncio.subprocess.Process:
         """Spawn while the caller holds the supervisor lock."""

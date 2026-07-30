@@ -26,6 +26,7 @@ _WINDOWS_TH32CS_SNAPTHREAD = 0x00000004
 _WINDOWS_THREAD_SUSPEND_RESUME = 0x0002
 _WINDOWS_WAIT_FAILED = 0xFFFFFFFF
 _WINDOWS_WAIT_TIMEOUT = 0x00000102
+_OUTPUT_LIMIT_EXIT_GRACE_SECONDS = 0.1
 
 
 class _WindowsThreadEntry32(ctypes.Structure):
@@ -553,11 +554,20 @@ async def _read_stream_limited(
             chunks.append(accepted)
         if exhausted:
             if await budget.request_kill_once():
-                await _terminate_process_tree(process)
+                await _terminate_for_output_limit(process)
             while await stream.read(8192):
                 pass
             break
     return b"".join(chunks)
+
+
+async def _terminate_for_output_limit(process: asyncio.subprocess.Process) -> None:
+    if await _terminate_process_tree(process):
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=_OUTPUT_LIMIT_EXIT_GRACE_SECONDS)
+    except TimeoutError as exc:
+        raise ToolError("Failed to terminate process tree") from exc
 
 
 async def _run_exec_limited_stdout(
@@ -585,6 +595,7 @@ async def _run_exec_limited_stdout(
 
     assert process.stdout is not None
     assert process.stderr is not None
+    stdout_stream = process.stdout
 
     stderr_budget: _OutputBudget | None = None
     if max_buffered_stderr_bytes is not None or max_buffered_stderr_lines is not None:
@@ -602,9 +613,32 @@ async def _run_exec_limited_stdout(
     buffered_stdout_bytes = 0
     buffered_stdout_lines = 0
     stdout_truncated = False
+
+    async def read_stdout_line() -> bytes:
+        if stderr_budget is None:
+            return await stdout_stream.readline()
+        if stderr_task.done():
+            failure = stderr_task.exception()
+            if failure is not None:
+                raise failure
+            return await stdout_stream.readline()
+
+        stdout_task = asyncio.create_task(stdout_stream.readline())
+        done, _pending = await asyncio.wait(
+            (stdout_task, stderr_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if stderr_task in done:
+            failure = stderr_task.exception()
+            if failure is not None:
+                stdout_task.cancel()
+                await asyncio.gather(stdout_task, return_exceptions=True)
+                raise failure
+        return await stdout_task
+
     try:
         while stdout_count < max_stdout_lines:
-            line = await process.stdout.readline()
+            line = await read_stdout_line()
             if not line:
                 break
             decoded_line = line.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -617,7 +651,7 @@ async def _run_exec_limited_stdout(
                     if count_line:
                         stdout_count += 1
                     stdout_truncated = True
-                    await _terminate_process_tree(process)
+                    await _terminate_for_output_limit(process)
                     break
                 if max_buffered_stdout_bytes is not None:
                     remaining_bytes = max_buffered_stdout_bytes - buffered_stdout_bytes
@@ -625,7 +659,7 @@ async def _run_exec_limited_stdout(
                         if count_line:
                             stdout_count += 1
                         stdout_truncated = True
-                        await _terminate_process_tree(process)
+                        await _terminate_for_output_limit(process)
                         break
                     if len(line) > remaining_bytes:
                         stdout_lines.append(line[:remaining_bytes])
@@ -634,7 +668,7 @@ async def _run_exec_limited_stdout(
                         if count_line:
                             stdout_count += 1
                         stdout_truncated = True
-                        await _terminate_process_tree(process)
+                        await _terminate_for_output_limit(process)
                         break
                 stdout_lines.append(line)
                 buffered_stdout_lines += 1
@@ -644,7 +678,7 @@ async def _run_exec_limited_stdout(
 
         if stdout_count >= max_stdout_lines:
             stdout_truncated = True
-            await _terminate_process_tree(process)
+            await _terminate_for_output_limit(process)
 
         await process.wait()
         stderr_bytes = await stderr_task
@@ -654,6 +688,11 @@ async def _run_exec_limited_stdout(
                 stderr_task.cancel()
             await asyncio.gather(stderr_task, return_exceptions=True)
             await _kill_process_tree_and_wait(process)
+        raise
+    except BaseException:
+        if not stderr_task.done():
+            stderr_task.cancel()
+        await asyncio.gather(stderr_task, return_exceptions=True)
         raise
     return ProcessResult(
         exit_code=process.returncode if process.returncode is not None else -1,
