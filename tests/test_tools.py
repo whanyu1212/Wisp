@@ -372,6 +372,25 @@ def test_bash_tool_reports_successful_exit_code_without_output(tmp_path: Path) -
     assert result.data["exit_code"] == 0
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell signal assertion")
+@pytest.mark.parametrize(("signal_name", "exit_code"), [("HUP", 129), ("INT", 130), ("TERM", 143)])
+def test_bash_tool_preserves_posix_shell_signal_exit(
+    tmp_path: Path,
+    signal_name: str,
+    exit_code: int,
+) -> None:
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        BashTool(),
+        {"command": f"kill -{signal_name} $$; echo survived"},
+        context,
+    )
+
+    assert result.data["exit_code"] == exit_code
+    assert result.data["stdout"] == ""
+
+
 def test_bash_tool_preserves_exit_code_outside_tiny_body_budget(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

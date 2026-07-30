@@ -325,8 +325,29 @@ async def _cancel_one_shot_start_after_cancellation(
 
 
 def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
+    recorder_prelude = _posix_job_recorder_prelude(jobs_file)
+    signal_traps = _posix_signal_traps()
+    child_command = f"{recorder_prelude}{signal_traps}eval {shlex.quote(command)}"
+    quoted_child_command = shlex.quote(child_command)
+    return "".join(
+        (
+            recorder_prelude,
+            "__wisp_record_loop() { while :; do __wisp_record_jobs; sleep 0.25; done; }; ",
+            "__wisp_record_loop & __wisp_recorder_pid=$!; ",
+            signal_traps,
+            f"/bin/sh -c {quoted_child_command}; ",
+            "__wisp_status=$?; ",
+            "kill $__wisp_recorder_pid 2>/dev/null || true; ",
+            "wait $__wisp_recorder_pid 2>/dev/null || true; ",
+            "trap - EXIT HUP INT TERM; ",
+            "__wisp_record_jobs; ",
+            "exit $__wisp_status",
+        )
+    )
+
+
+def _posix_job_recorder_prelude(jobs_file: Path) -> str:
     quoted_jobs_file = shlex.quote(str(jobs_file))
-    quoted_command = shlex.quote(command)
     return (
         "__wisp_shell_pid=$$; "
         "__wisp_recorded_pids=; "
@@ -360,17 +381,19 @@ def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
         '__wisp_record_pid "$__wisp_job"; '
         "done; "
         '__wisp_record_descendants "$__wisp_shell_pid"; }; '
-        "__wisp_record_loop() { while :; do __wisp_record_jobs; sleep 0.25; done; }; "
-        "__wisp_record_loop & __wisp_recorder_pid=$!; "
-        "trap '__wisp_record_jobs' EXIT HUP INT TERM; "
-        "( trap '__wisp_record_jobs' EXIT HUP INT TERM; "
-        f"eval {quoted_command} ); "
-        "__wisp_status=$?; "
-        "kill $__wisp_recorder_pid 2>/dev/null || true; "
-        "wait $__wisp_recorder_pid 2>/dev/null || true; "
-        "trap - EXIT HUP INT TERM; "
+    )
+
+
+def _posix_signal_traps() -> str:
+    return (
+        "__wisp_signal_exit() { "
         "__wisp_record_jobs; "
-        "exit $__wisp_status"
+        'trap - "$1"; '
+        'kill -s "$1" "$$"; }; '
+        "trap '__wisp_record_jobs' EXIT; "
+        "trap '__wisp_signal_exit HUP' HUP; "
+        "trap '__wisp_signal_exit INT' INT; "
+        "trap '__wisp_signal_exit TERM' TERM; "
     )
 
 
