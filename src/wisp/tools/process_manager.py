@@ -108,7 +108,10 @@ class ProcessSupervisor:
             raise ValueError("max_processes must be greater than or equal to 1")
         self._max_processes = max_processes
         self._managed: dict[str, _ManagedProcess] = {}
-        self._one_shot: set[asyncio.subprocess.Process] = set()
+        self._one_shot: dict[
+            asyncio.subprocess.Process,
+            asyncio.Task[tuple[bytes, bytes]],
+        ] = {}
         self._closed = False
         self._lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
@@ -131,15 +134,16 @@ class ProcessSupervisor:
                 raise ToolError(
                     f"Cannot start command: managed process limit ({self._max_processes}) reached"
                 )
+            budget = _OutputBudget(max_bytes=max_output_bytes, max_lines=max_output_lines)
             process = await self._spawn(command, cwd=cwd)
-            self._one_shot.add(process)
+            capture_task = asyncio.create_task(_collect_limited_output(process, budget))
+            self._one_shot[process] = capture_task
 
-        budget = _OutputBudget(max_bytes=max_output_bytes, max_lines=max_output_lines)
         release_ownership = False
         try:
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    _collect_limited_output(process, budget),
+                    capture_task,
                     timeout=timeout,
                 )
             except TimeoutError as exc:
@@ -285,7 +289,7 @@ class ProcessSupervisor:
 
     async def _release_one_shot(self, process: asyncio.subprocess.Process) -> None:
         async with self._lock:
-            self._one_shot.discard(process)
+            self._one_shot.pop(process, None)
 
     async def _await_task_before_propagating_cancellation(self, task: asyncio.Task[_T]) -> _T:
         try:
@@ -310,24 +314,26 @@ class ProcessSupervisor:
     async def _close_owned_processes(self) -> None:
         async with self._lock:
             managed = tuple(self._managed.values())
-            one_shot = tuple(self._one_shot)
+            one_shot = tuple(self._one_shot.items())
         for item in managed:
             if item.state == "running":
                 item.terminal_override = "cancelled"
         await asyncio.gather(
             *(_terminate_process_tree(item.process) for item in managed if item.state == "running"),
-            *(_terminate_process_tree(process) for process in one_shot),
+            *(_terminate_process_tree(process) for process, _capture_task in one_shot),
         )
         await asyncio.gather(
             *(self._finish_terminated_io(item) for item in managed if item.state == "running")
         )
+        await asyncio.gather(
+            *(
+                self._finish_one_shot_capture(process, capture_task)
+                for process, capture_task in one_shot
+            )
+        )
 
         await asyncio.gather(
             *(item.completion_task for item in managed if item.completion_task is not None),
-            return_exceptions=True,
-        )
-        await asyncio.gather(
-            *(process.wait() for process in one_shot),
             return_exceptions=True,
         )
 
@@ -481,6 +487,23 @@ class ProcessSupervisor:
         for task in pending:
             task.cancel()
         await asyncio.gather(*stream_tasks, return_exceptions=True)
+
+    async def _finish_one_shot_capture(
+        self,
+        process: asyncio.subprocess.Process,
+        capture_task: asyncio.Task[tuple[bytes, bytes]],
+    ) -> None:
+        """Bound one-shot pipe draining after the owned process tree has been terminated."""
+
+        await process.wait()
+        if not capture_task.done():
+            _, pending = await asyncio.wait(
+                (capture_task,),
+                timeout=POST_TERMINATION_DRAIN_TIMEOUT,
+            )
+            for task in pending:
+                task.cancel()
+        await asyncio.gather(capture_task, return_exceptions=True)
 
     async def _terminate_managed(self, managed: _ManagedProcess) -> None:
         await _terminate_process_tree(managed.process)

@@ -256,6 +256,49 @@ def test_supervisor_close_bounds_post_termination_stream_drain(tmp_path: Path) -
     assert all(task.cancelled() for task in retained_pipe_tasks)
 
 
+def test_supervisor_close_bounds_one_shot_capture_drain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture_started = asyncio.Event()
+
+    async def hold_capture(
+        _process: asyncio.subprocess.Process,
+        _budget: object,
+    ) -> tuple[bytes, bytes]:
+        capture_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(process_manager_module, "_collect_limited_output", hold_capture)
+
+    async def run() -> tuple[bool, int]:
+        supervisor = ProcessSupervisor()
+        run_task = asyncio.create_task(
+            supervisor.run_to_completion(
+                _python_command("import time; time.sleep(30)"),
+                cwd=tmp_path,
+                timeout=30,
+                max_output_bytes=1_000,
+                max_output_lines=100,
+            )
+        )
+        await capture_started.wait()
+        capture_tasks = tuple(supervisor._one_shot.values())  # noqa: SLF001
+        assert len(capture_tasks) == 1
+
+        with anyio.fail_after(2):
+            await supervisor.aclose()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+        return capture_tasks[0].cancelled(), len(supervisor._one_shot)  # noqa: SLF001
+
+    capture_cancelled, retained_count = anyio.run(run)
+
+    assert capture_cancelled is True
+    assert retained_count == 0
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
 def test_timeout_kills_descendant_after_shell_leader_exits(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "background.pid"
