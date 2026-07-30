@@ -272,8 +272,9 @@ class ProcessSupervisor:
 
         managed = await self._get(process_id)
         async with managed.operation_lock:
-            if managed.state == "running":
-                managed.terminal_override = "cancelled"
+            if managed.state == "running" or managed.error == PROCESS_TREE_CLEANUP_ERROR:
+                if managed.state == "running":
+                    managed.terminal_override = "cancelled"
                 await asyncio.shield(self._terminate_managed(managed))
             return self._snapshot(managed)
 
@@ -585,10 +586,30 @@ class ProcessSupervisor:
         await asyncio.gather(capture_task, return_exceptions=True)
 
     async def _terminate_managed(self, managed: _ManagedProcess) -> None:
-        await _terminate_process_tree(managed.process)
-        await self._finish_terminated_io(managed)
+        was_cleanup_failed = managed.error == PROCESS_TREE_CLEANUP_ERROR
+        cleanup_succeeded = await _terminate_process_tree(managed.process)
+        if cleanup_succeeded:
+            await self._finish_terminated_io(managed)
         assert managed.completion_task is not None
-        await managed.completion_task
+        if cleanup_succeeded:
+            await managed.completion_task
+        elif not managed.completion_task.done():
+            managed.completion_task.cancel()
+            await asyncio.gather(managed.completion_task, return_exceptions=True)
+
+        if not cleanup_succeeded:
+            managed.error = PROCESS_TREE_CLEANUP_ERROR
+            managed.state = "failed"
+            managed.changed.set()
+        elif was_cleanup_failed:
+            managed.error = None
+            if managed.terminal_override is not None:
+                managed.state = managed.terminal_override
+            elif managed.process.returncode is not None:
+                managed.state = "completed"
+            else:
+                managed.state = "cancelled"
+            managed.changed.set()
 
     def _snapshot(self, managed: _ManagedProcess) -> ProcessUpdate:
         stdout, stdout_dropped = managed.stdout.drain()
