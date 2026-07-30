@@ -1277,6 +1277,8 @@ def test_exec_helper_cleans_process_when_cancelled_during_registration(
     original_spawn = process_tools_module.asyncio.create_subprocess_exec
     process: asyncio.subprocess.Process | None = None
     spawned = asyncio.Event()
+    registration_started = asyncio.Event()
+    allow_registration = asyncio.Event()
 
     async def record_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
         nonlocal process
@@ -1288,20 +1290,34 @@ def test_exec_helper_cleans_process_when_cancelled_during_registration(
 
     async def run() -> tuple[int | None, int]:
         supervisor = process_manager_module.ProcessSupervisor()
-        async with supervisor._lock:  # noqa: SLF001
-            execute = asyncio.create_task(
-                process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
-                    [sys.executable, "-c", "import time; time.sleep(30)"],
-                    cwd=tmp_path,
-                    process_supervisor=supervisor,
-                    max_stdout_lines=10,
-                )
-            )
-            await spawned.wait()
-            execute.cancel()
-            await anyio.sleep(0)
-            assert execute.done() is False
+        original_track = supervisor._track_one_shot  # noqa: SLF001
 
+        async def delayed_track(
+            tracked_process: asyncio.subprocess.Process,
+            task: asyncio.Task[object],
+            *,
+            reserved: bool = False,
+        ) -> None:
+            registration_started.set()
+            await allow_registration.wait()
+            await original_track(tracked_process, task, reserved=reserved)
+
+        monkeypatch.setattr(supervisor, "_track_one_shot", delayed_track)
+        execute = asyncio.create_task(
+            process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=tmp_path,
+                process_supervisor=supervisor,
+                max_stdout_lines=10,
+            )
+        )
+        await spawned.wait()
+        await registration_started.wait()
+        execute.cancel()
+        await anyio.sleep(0)
+        assert execute.done() is False
+
+        allow_registration.set()
         with pytest.raises(asyncio.CancelledError):
             await execute
         assert process is not None
@@ -1341,8 +1357,53 @@ def test_exec_helper_cleans_process_when_registration_finds_closed_supervisor(
 
     retained = anyio.run(run)
 
-    assert process is not None
-    assert process.returncode is not None
+    assert process is None
+    assert retained == 0
+
+
+def test_aclose_waits_for_one_shot_reserved_before_close(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    original_spawn = process_tools_module.asyncio.create_subprocess_exec
+    process: asyncio.subprocess.Process | None = None
+    spawn_started = asyncio.Event()
+    allow_spawn = asyncio.Event()
+
+    async def delayed_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        nonlocal process
+        spawn_started.set()
+        await allow_spawn.wait()
+        process = await original_spawn(*args, **kwargs)
+        return process
+
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", delayed_spawn)
+
+    async def run() -> int:
+        supervisor = process_manager_module.ProcessSupervisor()
+        execute = asyncio.create_task(
+            process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=tmp_path,
+                process_supervisor=supervisor,
+                max_stdout_lines=10,
+            )
+        )
+        await spawn_started.wait()
+        close_task = asyncio.create_task(supervisor.aclose())
+        await anyio.sleep(0.05)
+        assert close_task.done() is False
+
+        allow_spawn.set()
+        with pytest.raises(RuntimeError, match="ProcessSupervisor is closed"):
+            await execute
+        await close_task
+        assert process is not None
+        assert process.returncode is not None
+        return len(supervisor._one_shot)  # noqa: SLF001
+
+    retained = anyio.run(run)
+
     assert retained == 0
 
 

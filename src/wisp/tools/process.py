@@ -8,6 +8,7 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from ctypes import wintypes
@@ -29,6 +30,7 @@ _WINDOWS_TH32CS_SNAPTHREAD = 0x00000004
 _WINDOWS_THREAD_SUSPEND_RESUME = 0x0002
 _WINDOWS_WAIT_FAILED = 0xFFFFFFFF
 _WINDOWS_WAIT_TIMEOUT = 0x00000102
+_LINUX_PR_SET_CHILD_SUBREAPER = 36
 _OUTPUT_LIMIT_EXIT_GRACE_SECONDS = 0.1
 _POSIX_TERMINATION_GRACE_SECONDS = 0.05
 
@@ -46,10 +48,16 @@ class _WindowsThreadEntry32(ctypes.Structure):
 
 
 class _ProcessSupervisor(Protocol):
+    async def _reserve_one_shot_start(self) -> None: ...
+
+    async def _cancel_one_shot_start(self) -> None: ...
+
     async def _track_one_shot(
         self,
         process: asyncio.subprocess.Process,
         task: asyncio.Task[Any],
+        *,
+        reserved: bool = False,
     ) -> None: ...
 
     async def _terminate_one_shot(
@@ -218,12 +226,16 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
                 ),
             )
         else:
+            process_kwargs: dict[str, Any] = {}
+            if os.name == "posix":
+                process_kwargs["preexec_fn"] = _prepare_posix_shell_child
             process = await asyncio.create_subprocess_shell(
                 command,
                 cwd=str(cwd),
                 start_new_session=os.name == "posix",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **process_kwargs,
             )
     except OSError as exc:
         if posix_jobs_file is not None:
@@ -271,6 +283,17 @@ def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
     )
 
 
+def _prepare_posix_shell_child() -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        prctl = libc.prctl
+        prctl(_LINUX_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+    except Exception:
+        return
+
+
 async def _kill_process_tree_and_wait(process: asyncio.subprocess.Process) -> bool:
     terminated = await _terminate_process_tree(process)
     if not terminated:
@@ -302,8 +325,7 @@ async def _terminate_process_tree(
 
 async def _terminate_posix_process_tree(process: asyncio.subprocess.Process) -> bool:
     group_term_succeeded = _signal_posix_process_group(process, signal.SIGTERM)
-    recorded_term_succeeded = _signal_posix_recorded_jobs(process, signal.SIGTERM)
-    if not group_term_succeeded or not recorded_term_succeeded:
+    if not group_term_succeeded:
         return False
     await asyncio.sleep(_POSIX_TERMINATION_GRACE_SECONDS)
     group_kill_succeeded = _signal_posix_process_group(process, signal.SIGKILL)
@@ -748,6 +770,8 @@ async def _run_exec_limited_stdout(
     max_buffered_stderr_bytes: int | None = None,
     max_buffered_stderr_lines: int | None = None,
 ) -> ProcessResult:
+    await process_supervisor._reserve_one_shot_start()
+    process: asyncio.subprocess.Process | None = None
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -757,12 +781,19 @@ async def _run_exec_limited_stdout(
             stderr=asyncio.subprocess.PIPE,
         )
     except OSError as exc:
+        await process_supervisor._cancel_one_shot_start()
         raise ToolError(f"Failed to start command: {exc}") from exc
+    except BaseException:
+        await process_supervisor._cancel_one_shot_start()
+        raise
+    assert process is not None
 
     owner_task = asyncio.current_task()
     assert owner_task is not None
     release_ownership = False
-    track_task = asyncio.create_task(process_supervisor._track_one_shot(process, owner_task))
+    track_task = asyncio.create_task(
+        process_supervisor._track_one_shot(process, owner_task, reserved=True)
+    )
     try:
         await asyncio.shield(track_task)
     except asyncio.CancelledError:

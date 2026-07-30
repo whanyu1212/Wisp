@@ -5,6 +5,7 @@ import os
 import shlex
 import signal
 import sys
+import time
 from pathlib import Path
 
 import anyio
@@ -40,6 +41,41 @@ def _detached_python_background_command(
     if keep_shell_alive:
         command += "; sleep 30"
     return command
+
+
+def _nested_detached_python_background_command(pid_path: Path) -> str:
+    child = (
+        "import os,pathlib,time;"
+        "os.setsid();"
+        f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()));"
+        "time.sleep(30)"
+    )
+    nested = f"{shlex.quote(sys.executable)} -c {shlex.quote(child)} >/dev/null 2>&1 &"
+    quoted_pid_path = shlex.quote(str(pid_path))
+    return f"sh -c {shlex.quote(nested)}; while [ ! -s {quoted_pid_path} ]; do sleep 0.01; done"
+
+
+def _assert_process_gone(pid: int) -> None:
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.01)
+    pytest.fail(f"process {pid} remained alive")
+
+
+async def _wait_for_pid_file(path: Path) -> int:
+    with anyio.fail_after(3):
+        while True:
+            try:
+                text = path.read_text().strip()
+            except FileNotFoundError:
+                text = ""
+            if text:
+                return int(text)
+            await anyio.sleep(0.01)
 
 
 async def _poll_until_terminal(
@@ -86,7 +122,7 @@ def test_managed_process_polling_delivers_incremental_output_once(tmp_path: Path
 
 
 def test_managed_process_retention_is_bounded_and_utf8_safe(tmp_path: Path) -> None:
-    async def run() -> ProcessUpdate:
+    async def run() -> tuple[ProcessUpdate, str, bool, int]:
         supervisor = ProcessSupervisor()
         try:
             process_id = await supervisor.start(
@@ -96,19 +132,24 @@ def test_managed_process_retention_is_bounded_and_utf8_safe(tmp_path: Path) -> N
                 max_retained_bytes=20,
                 max_retained_lines=1,
             )
-            await anyio.sleep(0.1)
-            return await supervisor.poll(process_id)
+            updates = await _poll_until_terminal(supervisor, process_id)
+            return (
+                updates[-1],
+                "".join(update.stdout for update in updates),
+                any(update.stdout_truncated for update in updates),
+                sum(update.stdout_dropped_bytes for update in updates),
+            )
         finally:
             await supervisor.aclose()
 
-    update = anyio.run(run)
+    update, stdout, stdout_truncated, stdout_dropped_bytes = anyio.run(run)
 
     assert update.state == "completed"
-    assert len(update.stdout.encode("utf-8")) <= 20
-    assert update.stdout.endswith("tail\n")
-    assert "\ufffd" not in update.stdout
-    assert update.stdout_truncated is True
-    assert update.stdout_dropped_bytes > 0
+    assert len(stdout.encode("utf-8")) <= 20
+    assert stdout.endswith("tail\n")
+    assert "\ufffd" not in stdout
+    assert stdout_truncated is True
+    assert stdout_dropped_bytes > 0
 
 
 def test_managed_process_reports_stream_reader_failures(
@@ -763,10 +804,7 @@ def test_timeout_kills_descendant_after_shell_leader_exits(tmp_path: Path) -> No
                 cwd=tmp_path,
                 timeout=0.1,
             )
-            with anyio.fail_after(3):
-                while not child_pid_path.exists():
-                    await anyio.sleep(0.01)
-            child_pid = int(child_pid_path.read_text())
+            child_pid = await _wait_for_pid_file(child_pid_path)
             terminal = (await _poll_until_terminal(supervisor, process_id))[-1]
             return terminal, child_pid
         finally:
@@ -796,10 +834,7 @@ def test_timeout_kills_detached_background_job(tmp_path: Path) -> None:
                 cwd=tmp_path,
                 timeout=0.1,
             )
-            with anyio.fail_after(3):
-                while not child_pid_path.exists():
-                    await anyio.sleep(0.01)
-            child_pid = int(child_pid_path.read_text())
+            child_pid = await _wait_for_pid_file(child_pid_path)
             terminal = (await _poll_until_terminal(supervisor, process_id))[-1]
             return terminal, child_pid
         finally:
@@ -808,8 +843,7 @@ def test_timeout_kills_detached_background_job(tmp_path: Path) -> None:
     update, child_pid = anyio.run(run)
 
     assert update.state == "timed_out"
-    with pytest.raises(ProcessLookupError):
-        os.kill(child_pid, 0)
+    _assert_process_gone(child_pid)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
@@ -824,10 +858,7 @@ def test_close_kills_descendant_after_shell_leader_exits(tmp_path: Path) -> None
             cwd=tmp_path,
             timeout=30,
         )
-        with anyio.fail_after(3):
-            while not child_pid_path.exists():
-                await anyio.sleep(0.01)
-        child_pid = int(child_pid_path.read_text())
+        child_pid = await _wait_for_pid_file(child_pid_path)
         await anyio.sleep(0.05)
         await supervisor.aclose()
         return child_pid
@@ -851,10 +882,7 @@ def test_completion_kills_descendant_with_redirected_output(tmp_path: Path) -> N
                 cwd=tmp_path,
                 timeout=2,
             )
-            with anyio.fail_after(3):
-                while not child_pid_path.exists():
-                    await anyio.sleep(0.01)
-            child_pid = int(child_pid_path.read_text())
+            child_pid = await _wait_for_pid_file(child_pid_path)
             terminal = (await _poll_until_terminal(supervisor, process_id))[-1]
             with anyio.fail_after(3):
                 while True:
@@ -889,10 +917,7 @@ def test_completion_kills_detached_background_job(tmp_path: Path) -> None:
                 cwd=tmp_path,
                 timeout=2,
             )
-            with anyio.fail_after(3):
-                while not child_pid_path.exists():
-                    await anyio.sleep(0.01)
-            child_pid = int(child_pid_path.read_text())
+            child_pid = await _wait_for_pid_file(child_pid_path)
             terminal = (await _poll_until_terminal(supervisor, process_id))[-1]
             return terminal, child_pid
         finally:
@@ -902,8 +927,35 @@ def test_completion_kills_detached_background_job(tmp_path: Path) -> None:
 
     assert update.state == "completed"
     assert update.exit_code == 0
-    with pytest.raises(ProcessLookupError):
-        os.kill(child_pid, 0)
+    _assert_process_gone(child_pid)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="Linux child-subreaper assertion",
+)
+def test_completion_kills_nested_shell_detached_background_job(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "nested-detached.pid"
+
+    async def run() -> tuple[ProcessUpdate, int]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                _nested_detached_python_background_command(child_pid_path),
+                cwd=tmp_path,
+                timeout=2,
+            )
+            child_pid = await _wait_for_pid_file(child_pid_path)
+            terminal = (await _poll_until_terminal(supervisor, process_id))[-1]
+            return terminal, child_pid
+        finally:
+            await supervisor.aclose()
+
+    update, child_pid = anyio.run(run)
+
+    assert update.state == "completed"
+    assert update.exit_code == 0
+    _assert_process_gone(child_pid)
 
 
 def test_managed_process_limit_recovers_after_terminal_result_is_observed(
@@ -1111,7 +1163,7 @@ def test_one_shot_completion_kills_descendant_with_redirected_output(tmp_path: P
                 max_output_bytes=1_000,
                 max_output_lines=100,
             )
-            child_pid = int(child_pid_path.read_text())
+            child_pid = await _wait_for_pid_file(child_pid_path)
             with anyio.fail_after(3):
                 while True:
                     try:
@@ -1772,10 +1824,7 @@ def test_managed_process_cancel_terminates_descendants(tmp_path: Path) -> None:
                 cwd=tmp_path,
                 timeout=30,
             )
-            with anyio.fail_after(3):
-                while not child_pid_path.exists():
-                    await anyio.sleep(0.01)
-            child_pid = int(child_pid_path.read_text())
+            child_pid = await _wait_for_pid_file(child_pid_path)
             update = await supervisor.cancel(process_id)
             assert update.state == "cancelled"
             return child_pid
@@ -1804,10 +1853,7 @@ def test_supervisor_close_terminates_abandoned_processes(tmp_path: Path) -> None
             cwd=tmp_path,
             timeout=30,
         )
-        with anyio.fail_after(3):
-            while not pid_path.exists():
-                await anyio.sleep(0.01)
-        pid = int(pid_path.read_text())
+        pid = await _wait_for_pid_file(pid_path)
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(supervisor.aclose)
             task_group.start_soon(supervisor.aclose)
