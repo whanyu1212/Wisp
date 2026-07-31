@@ -848,20 +848,23 @@ def _decode_utf8_units(data: bytes, *, final: bool) -> tuple[tuple[_TextUnit, ..
         if index + expected > len(data):
             if not final:
                 return tuple(units), data[index:]
-            units.append(
-                _TextUnit(
-                    text="\ufffd",
-                    source_bytes=len(data) - index,
-                )
-            )
+            try:
+                text = data[index:].decode("utf-8")
+            except UnicodeDecodeError as exc:
+                invalid_bytes = max(1, exc.end)
+                units.append(_TextUnit(text="\ufffd", source_bytes=invalid_bytes))
+                index += invalid_bytes
+                continue
+            units.append(_TextUnit(text=text, source_bytes=len(data) - index))
             return tuple(units), b""
 
         sequence = data[index : index + expected]
         try:
             text = sequence.decode("utf-8")
-        except UnicodeDecodeError:
-            units.append(_TextUnit(text="\ufffd", source_bytes=1))
-            index += 1
+        except UnicodeDecodeError as exc:
+            invalid_bytes = max(1, exc.end)
+            units.append(_TextUnit(text="\ufffd", source_bytes=invalid_bytes))
+            index += invalid_bytes
             continue
 
         units.append(_TextUnit(text=text, source_bytes=expected))

@@ -184,6 +184,37 @@ def test_managed_process_counts_source_bytes_when_utf8_tail_decodes_replacement(
     assert stdout_retained_bytes == 1
 
 
+def test_managed_process_preserves_valid_suffix_after_incomplete_utf8_lead(
+    tmp_path: Path,
+) -> None:
+    async def run() -> tuple[str, int, int]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                _python_command(
+                    "import sys; sys.stdout.buffer.write(bytes([0xe2, 0x41])); sys.stdout.flush()"
+                ),
+                cwd=tmp_path,
+                timeout=2,
+                max_retained_bytes=10,
+                max_retained_lines=100,
+            )
+            updates = await _poll_until_terminal(supervisor, process_id)
+            return (
+                "".join(update.stdout for update in updates),
+                sum(update.stdout_dropped_bytes for update in updates),
+                sum(update.stdout_retained_bytes or 0 for update in updates),
+            )
+        finally:
+            await supervisor.aclose()
+
+    stdout, stdout_dropped_bytes, stdout_retained_bytes = anyio.run(run)
+
+    assert stdout == "\ufffdA"
+    assert stdout_dropped_bytes == 0
+    assert stdout_retained_bytes == 2
+
+
 def test_managed_process_reports_stream_reader_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
