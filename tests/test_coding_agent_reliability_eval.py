@@ -121,7 +121,11 @@ def test_coding_agent_reliability_workflow_handles_branch_timeout_and_completion
     tmp_path: Path,
 ) -> None:
     fetch = _bash_call("fetch", "git fetch origin --prune")
-    compare_refs = _bash_call("compare-refs", "git rev-parse main origin/main")
+    compare_refs = _bash_call(
+        "compare-refs",
+        "git merge-base --is-ancestor main origin/main && "
+        "git rev-list --left-right --count main...origin/main",
+    )
     create_branch = _bash_call(
         "create-branch",
         f"git switch -c {_BRANCH_NAME} origin/main",
@@ -151,14 +155,12 @@ def test_coding_agent_reliability_workflow_handles_branch_timeout_and_completion
             exit_code=0,
         ),
         compare_refs.call_id: _BashOutcome(
-            command="git rev-parse main origin/main",
-            timeout=None,
-            output=(
-                "Command exited with code 0\n"
-                "1111111 local main\n"
-                "2222222 origin/main\n"
-                "local main is behind origin/main"
+            command=(
+                "git merge-base --is-ancestor main origin/main && "
+                "git rev-list --left-right --count main...origin/main"
             ),
+            timeout=None,
+            output="Command exited with code 0\n0\t2",
             is_error=False,
             exit_code=0,
         ),
@@ -244,6 +246,8 @@ def test_coding_agent_reliability_workflow_handles_branch_timeout_and_completion
         (full_test_retry.call_id, False),
     ]
     assert provider_results[3].output == "Command timed out after 30 seconds"
+    # Left/right counts are main-only then origin/main-only commits, proving main is behind.
+    assert provider_results[1].output == "Command exited with code 0\n0\t2"
 
     final_message = [event for event in events if isinstance(event, MessageCompleted)][-1]
     assert final_message.content == _FINAL_SUMMARY
