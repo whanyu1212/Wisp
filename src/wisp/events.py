@@ -34,6 +34,7 @@ RPC_SESSION_NAME_SCHEMA_VERSION = 21
 RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION = 22
 RPC_COMMANDS_SCHEMA_VERSION = 23
 RPC_SESSION_UNREVERT_SCHEMA_VERSION = 24
+PROCESS_METADATA_SCHEMA_VERSION = 25
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -44,6 +45,20 @@ QueueMode = Literal["one_at_a_time", "all"]
 QueueKind = Literal["steering", "follow_up"]
 ToolPresentationStatus = Literal["done", "error", "denied", "cancelled"]
 ManagedProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
+_PROCESS_METADATA_EVENT_TYPES = frozenset({"tool.result", "tool.execution.ended"})
+_PROCESS_METADATA_FIELDS = frozenset(
+    {
+        "process_id",
+        "process_state",
+        "process_error",
+        "stdout",
+        "stderr",
+        "stdout_truncated",
+        "stderr_truncated",
+        "stdout_dropped_bytes",
+        "stderr_dropped_bytes",
+    }
+)
 
 
 def utc_now() -> datetime:
@@ -1251,6 +1266,7 @@ def _require_current_schema(data: JsonObject) -> None:
             f"{version!r}; expected 5 through {EVENT_SCHEMA_VERSION}"
         )
     _reject_legacy_session_name_fields(data, version=version)
+    _reject_legacy_process_metadata(data, version=version)
     if data.get("type") in {"compaction.started", "compaction.completed"}:
         if not 8 <= version <= EVENT_SCHEMA_VERSION:
             raise ValueError(
@@ -1406,6 +1422,18 @@ def _reject_legacy_session_name_fields(data: JsonObject, *, version: int) -> Non
             "RPC session name fields require schema_version "
             f"{RPC_SESSION_NAME_SCHEMA_VERSION} or newer"
         )
+
+
+def _reject_legacy_process_metadata(data: JsonObject, *, version: int) -> None:
+    if version >= PROCESS_METADATA_SCHEMA_VERSION:
+        return
+    if data.get("type") not in _PROCESS_METADATA_EVENT_TYPES:
+        return
+    if not any(field in data for field in _PROCESS_METADATA_FIELDS):
+        return
+    raise ValueError(
+        f"Bash process metadata requires schema_version {PROCESS_METADATA_SCHEMA_VERSION} or newer"
+    )
 
 
 def wisp_event_from_json(line: str) -> KnownWispEvent:
