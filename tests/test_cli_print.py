@@ -14,7 +14,9 @@ from wisp.events import (
     ContextBudget,
     ContextEstimate,
     ErrorEvent,
+    ManagedProcessState,
     MessageCompleted,
+    ToolResultReady,
     UsageCost,
     UsageCostRates,
     WispEvent,
@@ -563,6 +565,40 @@ def test_print_mode_skips_approval_events_for_preapproved_tools(
     assert "approved danger" not in result.stderr
     assert "✓ tool danger: changed file.txt" in result.stderr
     assert "session saved:" in result.stderr
+
+
+def test_print_event_line_uses_shared_tool_result_status() -> None:
+    states: tuple[tuple[ManagedProcessState, str], ...] = (
+        ("failed", "✗"),
+        ("timed_out", "✗"),
+        ("cancelled", "⊘"),
+    )
+    for process_state, glyph in states:
+        assert (
+            _print_event_line(
+                ToolResultReady(
+                    call_id="call-1",
+                    name="bash",
+                    output=f"Process proc-1 {process_state}",
+                    is_error=False,
+                    process_state=process_state,
+                )
+            )
+            == f"{glyph} tool bash: Process proc-1 {process_state}"
+        )
+
+    assert (
+        _print_event_line(
+            ToolResultReady(
+                call_id="call-1",
+                name="bash",
+                output="Command exited with code 2",
+                is_error=False,
+                exit_code=2,
+            )
+        )
+        == "✗ tool bash: Command exited with code 2"
+    )
 
 
 def test_print_mode_enforces_explicit_tool_iteration_cap(
