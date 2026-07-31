@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import codecs
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +45,14 @@ class ProcessUpdate:
     stdout_dropped_bytes: int = 0
     stderr_dropped_bytes: int = 0
     error: str | None = None
+    stdout_retained_bytes: int | None = None
+    stderr_retained_bytes: int | None = None
+
+
+@dataclass
+class _TextUnit:
+    text: str
+    source_bytes: int
 
 
 @dataclass
@@ -54,25 +61,58 @@ class _PendingText:
     max_lines: int
     text: str = ""
     dropped_bytes: int = 0
+    _source_byte_lengths: list[int] = field(default_factory=list)
+    _pending_utf8: bytes = b""
+
+    @property
+    def retained_source_bytes(self) -> int:
+        return sum(self._source_byte_lengths)
 
     def append(self, value: str) -> None:
         if not value:
             return
-        combined = f"{self.text}{value}"
-        bounded, dropped = _bounded_text_tail(
+        self._append_units(
+            _TextUnit(text=character, source_bytes=len(character.encode("utf-8")))
+            for character in value
+        )
+
+    def append_bytes(self, value: bytes, *, final: bool = False) -> None:
+        units, pending = _decode_utf8_units(self._pending_utf8 + value, final=final)
+        self._pending_utf8 = pending
+        self._append_units(units)
+
+    def _append_units(self, units: Iterable[_TextUnit]) -> None:
+        new_units = tuple(units)
+        if not new_units:
+            return
+        combined = f"{self.text}{''.join(unit.text for unit in new_units)}"
+        source_byte_lengths = [
+            *self._source_byte_lengths,
+            *(unit.source_bytes for unit in new_units),
+        ]
+        bounded, _ = _bounded_text_tail(
             combined,
             max_bytes=self.max_bytes,
             max_lines=self.max_lines,
         )
+        if bounded:
+            self._source_byte_lengths = source_byte_lengths[-len(bounded) :]
+        else:
+            self._source_byte_lengths = []
         self.text = bounded
-        self.dropped_bytes += dropped
+        self.dropped_bytes += max(
+            0,
+            sum(source_byte_lengths) - self.retained_source_bytes,
+        )
 
-    def drain(self) -> tuple[str, int]:
+    def drain(self) -> tuple[str, int, int]:
         text = self.text
         dropped_bytes = self.dropped_bytes
+        retained_source_bytes = self.retained_source_bytes
         self.text = ""
         self.dropped_bytes = 0
-        return text, dropped_bytes
+        self._source_byte_lengths = []
+        return text, dropped_bytes, retained_source_bytes
 
 
 @dataclass
@@ -552,14 +592,13 @@ class ProcessSupervisor:
     ) -> None:
         if stream is None:
             return
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         while True:
             chunk = await stream.read(8192)
             if not chunk:
                 break
-            output.append(decoder.decode(chunk))
+            output.append_bytes(chunk)
             managed.changed.set()
-        output.append(decoder.decode(b"", final=True))
+        output.append_bytes(b"", final=True)
         managed.changed.set()
 
     async def _wait_for_completion(self, managed: _ManagedProcess, timeout: float) -> None:
@@ -738,8 +777,8 @@ class ProcessSupervisor:
             return await _terminate_process_tree(managed.process)
 
     def _snapshot(self, managed: _ManagedProcess) -> ProcessUpdate:
-        stdout, stdout_dropped = managed.stdout.drain()
-        stderr, stderr_dropped = managed.stderr.drain()
+        stdout, stdout_dropped, stdout_retained = managed.stdout.drain()
+        stderr, stderr_dropped, stderr_retained = managed.stderr.drain()
         if managed.state != "running":
             managed.terminal_reported = True
         return ProcessUpdate(
@@ -753,6 +792,8 @@ class ProcessSupervisor:
             stdout_dropped_bytes=stdout_dropped,
             stderr_dropped_bytes=stderr_dropped,
             error=managed.error,
+            stdout_retained_bytes=stdout_retained,
+            stderr_retained_bytes=stderr_retained,
         )
 
     def _evict_terminals_for_capacity(self) -> None:
@@ -786,6 +827,57 @@ def _bounded_text_tail(text: str, *, max_bytes: int, max_lines: int) -> tuple[st
 
     kept_bytes = len(bounded.encode("utf-8"))
     return bounded, len(encoded) - kept_bytes
+
+
+def _decode_utf8_units(data: bytes, *, final: bool) -> tuple[tuple[_TextUnit, ...], bytes]:
+    units: list[_TextUnit] = []
+    index = 0
+    while index < len(data):
+        first = data[index]
+        if first < 0x80:
+            units.append(_TextUnit(text=chr(first), source_bytes=1))
+            index += 1
+            continue
+
+        expected = _utf8_sequence_length(first)
+        if expected is None:
+            units.append(_TextUnit(text="\ufffd", source_bytes=1))
+            index += 1
+            continue
+
+        if index + expected > len(data):
+            if not final:
+                return tuple(units), data[index:]
+            units.append(
+                _TextUnit(
+                    text="\ufffd",
+                    source_bytes=len(data) - index,
+                )
+            )
+            return tuple(units), b""
+
+        sequence = data[index : index + expected]
+        try:
+            text = sequence.decode("utf-8")
+        except UnicodeDecodeError:
+            units.append(_TextUnit(text="\ufffd", source_bytes=1))
+            index += 1
+            continue
+
+        units.append(_TextUnit(text=text, source_bytes=expected))
+        index += expected
+
+    return tuple(units), b""
+
+
+def _utf8_sequence_length(first: int) -> int | None:
+    if 0xC2 <= first <= 0xDF:
+        return 2
+    if 0xE0 <= first <= 0xEF:
+        return 3
+    if 0xF0 <= first <= 0xF4:
+        return 4
+    return None
 
 
 __all__ = [

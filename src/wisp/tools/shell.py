@@ -287,10 +287,12 @@ def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> To
     stdout_dropped_bytes = update.stdout_dropped_bytes + _additional_dropped_bytes(
         update.stdout,
         stdout,
+        retained_source_bytes=update.stdout_retained_bytes,
     )
     stderr_dropped_bytes = update.stderr_dropped_bytes + _additional_dropped_bytes(
         update.stderr,
         stderr,
+        retained_source_bytes=update.stderr_retained_bytes,
     )
     data: dict[str, object] = {
         "process_id": update.process_id,

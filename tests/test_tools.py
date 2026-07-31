@@ -859,6 +859,54 @@ def test_bash_tool_counts_source_bytes_when_utf8_clip_decodes_replacement(
     assert result.truncated is True
 
 
+def test_bash_tool_counts_managed_source_bytes_when_utf8_clip_decodes_replacement(
+    tmp_path: Path,
+) -> None:
+    async def run() -> tuple[str, int, bool]:
+        context = ToolContext(cwd=tmp_path, max_output_bytes=1, max_output_lines=100)
+        tool = BashTool()
+        python = shlex.quote(sys.executable)
+        code = "import sys; sys.stdout.buffer.write(bytes([0xff, 0x61])); sys.stdout.flush()"
+        command = f"{python} -c {shlex.quote(code)}"
+        try:
+            result = await tool.run(
+                {
+                    "operation": "start",
+                    "command": command,
+                    "yield_seconds": 0.2,
+                    "lifetime_seconds": 5,
+                },
+                context,
+            )
+            process_id = str(result.data["process_id"])
+            results = [result]
+            for _ in range(20):
+                if result.data["process_state"] == "completed":
+                    break
+                result = await tool.run(
+                    {
+                        "operation": "poll",
+                        "process_id": process_id,
+                        "wait_seconds": 0.2,
+                    },
+                    context,
+                )
+                results.append(result)
+            return (
+                "".join(str(item.data["stdout"]) for item in results),
+                sum(int(item.data["stdout_dropped_bytes"]) for item in results),
+                any(item.truncated for item in results),
+            )
+        finally:
+            await tool.aclose()
+
+    stdout, stdout_dropped_bytes, truncated = anyio.run(run)
+
+    assert stdout == "a"
+    assert stdout_dropped_bytes == 1
+    assert truncated is True
+
+
 def test_bash_tool_does_not_kill_process_at_exact_output_limit(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path, max_output_bytes=100, max_output_lines=1)
     python = shlex.quote(sys.executable)
