@@ -213,6 +213,8 @@ class ProcessSupervisor:
                 stderr_truncated=stderr_result.truncated,
                 stdout_dropped_bytes=stdout_result.dropped_bytes,
                 stderr_dropped_bytes=stderr_result.dropped_bytes,
+                stdout_retained_bytes=len(stdout_result.output),
+                stderr_retained_bytes=len(stderr_result.output),
             )
             release_ownership = True
             return result

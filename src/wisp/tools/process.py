@@ -130,9 +130,11 @@ class ProcessResult:
     stderr: str
     stdout_truncated: bool = False
     stderr_truncated: bool = False
+    stdout_count: int = 0
     stdout_dropped_bytes: int = 0
     stderr_dropped_bytes: int = 0
-    stdout_count: int = 0
+    stdout_retained_bytes: int | None = None
+    stderr_retained_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -229,6 +231,8 @@ async def _run_shell(
         stderr_truncated=stderr_result.truncated,
         stdout_dropped_bytes=stdout_result.dropped_bytes,
         stderr_dropped_bytes=stderr_result.dropped_bytes,
+        stdout_retained_bytes=len(stdout_result.output),
+        stderr_retained_bytes=len(stderr_result.output),
     )
 
 
@@ -1466,6 +1470,8 @@ async def _run_exec_limited_stdout(
             stderr_truncated=stderr_truncated,
             stderr_dropped_bytes=stderr_dropped_bytes,
             stdout_count=stdout_count,
+            stdout_retained_bytes=len(b"".join(stdout_lines)),
+            stderr_retained_bytes=len(stderr_bytes),
         )
     finally:
         if release_ownership:

@@ -20,7 +20,16 @@ from wisp.tools import process as process_tools_module
 from wisp.tools import process_manager as process_manager_module
 from wisp.tools import search as search_tools_module
 from wisp.tools import shell as shell_tools_module
-from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
+from wisp.tools.builtin import (
+    BashTool,
+    EditTool,
+    FindTool,
+    GrepTool,
+    LsTool,
+    ProcessResult,
+    ReadTool,
+    WriteTool,
+)
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.truncation import truncate_text_tail
@@ -41,6 +50,14 @@ def test_tail_truncation_with_marker_only_budget_stays_bounded() -> None:
     assert result.text == "[truncated]"
     assert len(result.text.encode("utf-8")) <= 12
     assert result.truncated is True
+
+
+def test_process_result_preserves_public_positional_stdout_count_slot() -> None:
+    result = ProcessResult(0, "out", "err", False, False, 7)
+
+    assert result.stdout_count == 7
+    assert result.stdout_dropped_bytes == 0
+    assert result.stderr_dropped_bytes == 0
 
 
 def test_read_tool_supports_offset_limit_and_truncation(tmp_path: Path) -> None:
@@ -823,6 +840,22 @@ def test_bash_tool_counts_marker_only_output_as_dropped_bytes(
     assert result.data["stdout"] == "[trun"
     assert result.data["stdout_truncated"] is True
     assert result.data["stdout_dropped_bytes"] == 5
+    assert result.truncated is True
+
+
+def test_bash_tool_counts_source_bytes_when_utf8_clip_decodes_replacement(
+    tmp_path: Path,
+) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=1, max_output_lines=100)
+    python = shlex.quote(sys.executable)
+    code = "import sys; sys.stdout.buffer.write(bytes([0xc3, 0xa9]))"
+    command = f"{python} -c {shlex.quote(code)}"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+
+    assert result.data["stdout"] == "["
+    assert result.data["stdout_truncated"] is True
+    assert result.data["stdout_dropped_bytes"] == 2
     assert result.truncated is True
 
 

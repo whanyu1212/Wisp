@@ -162,10 +162,12 @@ class BashTool:
         stdout_dropped_bytes = result.stdout_dropped_bytes + _additional_dropped_bytes(
             result.stdout,
             stdout,
+            retained_source_bytes=result.stdout_retained_bytes,
         )
         stderr_dropped_bytes = result.stderr_dropped_bytes + _additional_dropped_bytes(
             result.stderr,
             stderr,
+            retained_source_bytes=result.stderr_retained_bytes,
         )
         return ToolResult(
             text=output.text,
@@ -311,11 +313,23 @@ def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> To
     )
 
 
-def _additional_dropped_bytes(original: str, bounded: TruncatedText) -> int:
+def _additional_dropped_bytes(
+    original: str,
+    bounded: TruncatedText,
+    *,
+    retained_source_bytes: int | None = None,
+) -> int:
     if not bounded.truncated:
         return 0
+    original_bytes = (
+        retained_source_bytes
+        if retained_source_bytes is not None
+        else len(original.encode("utf-8"))
+    )
     retained_bytes = _retained_source_bytes_after_truncation(original, bounded.text)
-    return max(0, len(original.encode("utf-8")) - retained_bytes)
+    if retained_source_bytes is not None:
+        retained_bytes = min(retained_bytes, retained_source_bytes)
+    return max(0, original_bytes - retained_bytes)
 
 
 def _retained_source_bytes_after_truncation(original: str, bounded_text: str) -> int:
