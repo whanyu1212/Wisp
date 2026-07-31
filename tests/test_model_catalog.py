@@ -369,11 +369,23 @@ def test_builtin_catalog_defaults_match_provider_implementations() -> None:
             assert entry.default_model == defaults[entry.name]
 
 
-def test_builtin_codex_default_exposes_documented_reasoning_effort_levels() -> None:
-    registry = ModelRegistry(builtin_catalog())
+def test_builtin_codex_models_expose_documented_reasoning_effort_levels() -> None:
+    catalog = builtin_catalog()
+    registry = ModelRegistry(catalog)
+    codex = next(entry for entry in catalog.providers if entry.name == "openai-codex")
 
-    assert registry.supports_effort("openai-codex", "gpt-5.6-sol", "high") is True
-    assert registry.supports_effort("openai-codex", "gpt-5.6-sol", "max") is True
+    assert codex.effort_levels == {
+        "gpt-5.6-sol": ("low", "medium", "high", "xhigh", "max"),
+        "gpt-5.6-terra": ("low", "medium", "high", "xhigh", "max"),
+        "gpt-5.6-luna": ("low", "medium", "high", "xhigh", "max"),
+        "gpt-5.5": ("low", "medium", "high", "xhigh"),
+        "gpt-5.4": ("low", "medium", "high", "xhigh"),
+        "gpt-5.4-mini": ("low", "medium", "high", "xhigh"),
+    }
+    assert set(codex.effort_levels) == set(codex.models)
+    assert registry.supports_effort("openai-codex", "gpt-5.6-terra", "max") is True
+    assert registry.supports_effort("openai-codex", "gpt-5.4", "xhigh") is True
+    assert registry.supports_effort("openai-codex", "gpt-5.4", "max") is False
     assert registry.supports_effort("openai-codex", "gpt-5.6-sol", "ultra") is False
 
 

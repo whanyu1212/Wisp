@@ -7,7 +7,7 @@ from textual import events
 from textual.app import App
 from textual.widgets import OptionList, Static
 
-from wisp.providers.catalog import ModelCatalogProviderEntry
+from wisp.providers.catalog import ModelCatalogProviderEntry, builtin_catalog
 from wisp.tui.textual_app import create_textual_tui
 from wisp.tui.widgets import ModelPicker
 from wisp.tui.widgets import PromptEditor as Input
@@ -227,6 +227,32 @@ def test_model_picker_arrow_keys_cycle_effort_and_submit_it() -> None:
     assert "(default)" in before
     assert "[low]" in after_one_right
     assert answer == "/model anthropic::claude-opus-4-8 low"
+
+
+def test_model_picker_displays_effort_for_every_builtin_codex_model() -> None:
+    codex = next(entry for entry in builtin_catalog().providers if entry.name == "openai-codex")
+
+    async def scenario() -> dict[str, str]:
+        app, renderer = create_textual_tui()
+        rendered: dict[str, str] = {}
+        async with app.run_test(size=(80, 24)) as pilot:
+            for model in codex.models:
+                renderer.model_picker_request(
+                    (codex,),
+                    current_provider="openai-codex",
+                    current_model=model,
+                    current_effort=None,
+                )
+                await pilot.pause()
+                effort_line = app.query_one("#model-picker-effort", Static)
+                rendered[model] = str(effort_line.render())
+        return rendered
+
+    rendered = anyio.run(scenario)
+    assert set(rendered) == set(codex.models)
+    assert all(line.startswith("effort:") and "(default)" in line for line in rendered.values())
+    assert "max" in rendered["gpt-5.6-terra"]
+    assert "max" not in rendered["gpt-5.4"]
 
 
 def test_model_picker_left_right_ignored_for_model_without_effort_levels() -> None:
