@@ -372,6 +372,168 @@ def test_bash_tool_reports_successful_exit_code_without_output(tmp_path: Path) -
     assert result.data["exit_code"] == 0
 
 
+def test_bash_tool_starts_polls_and_completes_resumable_process(tmp_path: Path) -> None:
+    async def run() -> None:
+        context = ToolContext(cwd=tmp_path)
+        tool = BashTool()
+        python = shlex.quote(sys.executable)
+        code = (
+            "import time; print('first', flush=True); time.sleep(0.2); print('second', flush=True)"
+        )
+        command = f"{python} -u -c {shlex.quote(code)}"
+
+        try:
+            start = await tool.run(
+                {
+                    "operation": "start",
+                    "command": command,
+                    "yield_seconds": 0,
+                    "lifetime_seconds": 5,
+                },
+                context,
+            )
+            process_id = str(start.data["process_id"])
+            chunks = [str(start.data["stdout"])]
+            final: ToolResult | None = start if start.data["process_state"] == "completed" else None
+
+            for _ in range(20):
+                if final is not None:
+                    break
+                poll = await tool.run(
+                    {
+                        "operation": "poll",
+                        "process_id": process_id,
+                        "wait_seconds": 0.2,
+                    },
+                    context,
+                )
+                chunks.append(str(poll.data["stdout"]))
+                if poll.data["process_state"] == "completed":
+                    final = poll
+
+            assert final is not None
+            assert final.text.startswith(f"Process {process_id} completed with exit code 0")
+            assert final.data["process_id"] == process_id
+            assert final.data["process_state"] == "completed"
+            assert final.data["exit_code"] == 0
+            assert final.data["output_has_exit_status"] is False
+            assert final.data["stdout_truncated"] is False
+            assert final.data["stderr_truncated"] is False
+            combined = "".join(chunks)
+            assert combined.count("first\n") == 1
+            assert combined.count("second\n") == 1
+        finally:
+            await tool.aclose()
+
+    anyio.run(run)
+
+
+def test_bash_tool_cancels_resumable_process(tmp_path: Path) -> None:
+    async def run() -> None:
+        context = ToolContext(cwd=tmp_path)
+        tool = BashTool()
+        python = shlex.quote(sys.executable)
+        command = f'{python} -c "import time; time.sleep(30)"'
+
+        try:
+            start = await tool.run(
+                {
+                    "operation": "start",
+                    "command": command,
+                    "yield_seconds": 0,
+                    "lifetime_seconds": 30,
+                },
+                context,
+            )
+            process_id = str(start.data["process_id"])
+
+            cancelled = await tool.run(
+                {"operation": "cancel", "process_id": process_id},
+                context,
+            )
+
+            assert cancelled.text == f"Process {process_id} cancelled"
+            assert cancelled.data["process_id"] == process_id
+            assert cancelled.data["process_state"] == "cancelled"
+            assert "exit_code" not in cancelled.data
+        finally:
+            await tool.aclose()
+
+    anyio.run(run)
+
+
+def test_bash_tool_reports_resumable_timeout_as_terminal_state(tmp_path: Path) -> None:
+    async def run() -> None:
+        context = ToolContext(cwd=tmp_path)
+        tool = BashTool()
+        python = shlex.quote(sys.executable)
+        command = f'{python} -c "import time; time.sleep(5)"'
+
+        try:
+            result = await tool.run(
+                {
+                    "operation": "start",
+                    "command": command,
+                    "yield_seconds": 1,
+                    "lifetime_seconds": 0.1,
+                },
+                context,
+            )
+            process_id = str(result.data["process_id"])
+            for _ in range(20):
+                if result.data["process_state"] == "timed_out":
+                    break
+                result = await tool.run(
+                    {
+                        "operation": "poll",
+                        "process_id": process_id,
+                        "wait_seconds": 0.1,
+                    },
+                    context,
+                )
+
+            assert result.text.startswith(f"Process {process_id} timed out")
+            assert result.data["process_state"] == "timed_out"
+            assert result.data["output_has_exit_status"] is False
+            assert "exit_code" not in result.data
+        finally:
+            await tool.aclose()
+
+    anyio.run(run)
+
+
+def test_bash_tool_requires_supervisor_for_resumable_operations(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+
+    with pytest.raises(ToolError, match="bash.operation=poll requires a process supervisor"):
+        run_tool(BashTool(None), {"operation": "poll", "process_id": "p1"}, context)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"operation": "bogus"}, "bash.operation must be one of"),
+        (
+            {"operation": "start", "command": "pwd", "yield_seconds": -1},
+            "bash.yield_seconds must be greater than or equal to zero",
+        ),
+        (
+            {"operation": "poll", "process_id": "p1", "wait_seconds": float("inf")},
+            "bash.wait_seconds must be finite",
+        ),
+    ],
+)
+def test_bash_tool_validates_resumable_arguments(
+    tmp_path: Path,
+    arguments: dict[str, object],
+    message: str,
+) -> None:
+    context = ToolContext(cwd=tmp_path)
+
+    with pytest.raises(ToolError, match=message):
+        run_tool(BashTool(), arguments, context)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell signal assertion")
 @pytest.mark.parametrize(("signal_name", "exit_code"), [("HUP", 129), ("INT", 130), ("TERM", 143)])
 def test_bash_tool_preserves_posix_shell_signal_exit(

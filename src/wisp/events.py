@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 24
+EVENT_SCHEMA_VERSION: Literal[25] = 25
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -43,6 +43,7 @@ CompactionReason = Literal["manual", "threshold", "overflow"]
 QueueMode = Literal["one_at_a_time", "all"]
 QueueKind = Literal["steering", "follow_up"]
 ToolPresentationStatus = Literal["done", "error", "denied", "cancelled"]
+ManagedProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
 
 
 def utc_now() -> datetime:
@@ -56,8 +57,8 @@ class WispEvent(BaseModel):
 
     type: str
     schema_version: Literal[
-        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
-    ] = 24
+        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25
+    ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -568,6 +569,17 @@ class ToolExecutionEnded(WispEvent):
     # dropped content never leaves the tool, so this bool is the only signal that an
     # expanded card is still not the whole story. See ToolResultReady.truncated.
     truncated: bool = False
+    # Resumable Bash metadata promoted from ToolResult.data for live JSON/RPC
+    # consumers. These are bounded scalars/chunks, not the raw result mapping.
+    process_id: str | None = None
+    process_state: ManagedProcessState | None = None
+    process_error: str | None = None
+    stdout: str | None = None
+    stderr: str | None = None
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    stdout_dropped_bytes: int = Field(default=0, ge=0)
+    stderr_dropped_bytes: int = Field(default=0, ge=0)
 
 
 class ToolResultReady(WispEvent):
@@ -621,6 +633,17 @@ class ToolResultReady(WispEvent):
     # scalar like the others; False for tools that returned everything and for error
     # paths that produced no ToolResult.
     truncated: bool = False
+    # Resumable Bash metadata promoted from ToolResult.data for live JSON/RPC
+    # consumers. These are bounded scalars/chunks, not the raw result mapping.
+    process_id: str | None = None
+    process_state: ManagedProcessState | None = None
+    process_error: str | None = None
+    stdout: str | None = None
+    stderr: str | None = None
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    stdout_dropped_bytes: int = Field(default=0, ge=0)
+    stderr_dropped_bytes: int = Field(default=0, ge=0)
 
 
 class TurnCompleted(WispEvent):

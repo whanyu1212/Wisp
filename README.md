@@ -99,6 +99,12 @@ default, and tools are exposed to the model only when enabled.
 | **Mutating** | `write` · `edit` |
 | **Command** | `bash` |
 
+`bash` defaults to one-shot execution and reports stdout, stderr, truncation state, and exit code.
+It also accepts `operation=start|poll|cancel` for commands that need a retained process handle;
+those resumable updates return a `process_id`, terminal/running process state, incremental stdout
+and stderr chunks, and stream-specific truncation metadata. The resumable controls remain under the
+same command-tool safety category and approval policy.
+
 **Print mode exposes no tools to the model unless you ask.** Read tools are enabled as a group;
 mutating and command tools require per-tool opt-in:
 
@@ -252,8 +258,9 @@ only when a task depends on current or refreshed remote state; local-only and of
 fetch unconditionally. Completed checks are reported from their exit status, while failures,
 timeouts, and checks that were not run remain distinct. A timeout is inconclusive rather than a
 pass. Change and build tasks finish with a summary of the outcome, verification evidence, and
-remaining uncertainty. Completed `bash` results expose their exit code directly to the model;
-resumable polling for commands that outlive their initial execution window remains future work.
+remaining uncertainty. Completed one-shot `bash` results expose their exit code directly to the
+model; resumable `bash` operations expose their process handle and incremental output in typed
+tool events while keeping the provider-visible result as ordinary tool output text.
 
 Context files are loaded from the trusted context root down to the current working directory, with
 parent instructions before nested ones. In each directory Wisp uses the first Pi-compatible match
@@ -448,8 +455,12 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 24`; readers also accept legacy schema v5
-through v23 events for compatibility. Schema v24 adds `rpc.session.tree.unreverted`, emitted after
+Every outbound `WispEvent` includes `"schema_version": 25`; readers also accept legacy schema v5
+through v24 events for compatibility. Schema v25 adds resumable `bash` process metadata to
+`tool.execution.ended` and `tool.result`: `process_id`, `process_state`, `process_error`,
+incremental `stdout`/`stderr`, per-stream truncation flags, and dropped-byte counts.
+
+Schema v24 adds `rpc.session.tree.unreverted`, emitted after
 `unrevert_session_tree` durably reverses the latest eligible explicit tree navigation. Session
 entry schema v5 records whether an active-leaf transition came from navigation, unrevert, or
 internal system recovery; v4 and older entries remain readable as system transitions.

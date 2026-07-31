@@ -74,6 +74,14 @@ class RecordingToolExecutor:
             output="tool output",
             is_error=False,
             exit_code=0,
+            process_id="proc-1",
+            process_state="completed",
+            stdout="tool stdout\n",
+            stderr="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            stdout_dropped_bytes=0,
+            stderr_dropped_bytes=0,
         )
 
 
@@ -438,10 +446,23 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
     # renderer only sees events after they are serialized (agent subprocess →
     # JSON → client), so the presentation signal must survive round-tripping.
     assert result.exit_code == 0
-    assert wisp_event_from_json(result.model_dump_json()).exit_code == 0
+    assert result.process_id == "proc-1"
+    assert result.process_state == "completed"
+    assert result.stdout == "tool stdout\n"
+    result_round_tripped = wisp_event_from_json(result.model_dump_json())
+    assert isinstance(result_round_tripped, ToolResultReady)
+    assert result_round_tripped.exit_code == 0
+    assert result_round_tripped.process_id == "proc-1"
+    assert result_round_tripped.process_state == "completed"
+    assert result_round_tripped.stdout == "tool stdout\n"
     ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
     assert ended.exit_code == 0
-    assert wisp_event_from_json(ended.model_dump_json()).exit_code == 0
+    ended_round_tripped = wisp_event_from_json(ended.model_dump_json())
+    assert isinstance(ended_round_tripped, ToolExecutionEnded)
+    assert ended_round_tripped.exit_code == 0
+    assert ended_round_tripped.process_id == "proc-1"
+    assert ended_round_tripped.process_state == "completed"
+    assert ended_round_tripped.stdout == "tool stdout\n"
 
 
 def _run_bash_loop(
