@@ -13,6 +13,7 @@ from wisp.retry import RetryPolicy
 from wisp.runtime.api import ExtensionAPI
 from wisp.runtime.builtin_commands import builtin_command_descriptors
 from wisp.tools.builtin import builtin_tools
+from wisp.tools.process_manager import ProcessSupervisor
 
 
 def activate(
@@ -20,6 +21,7 @@ def activate(
     *,
     auth_store: JsonAuthStore | None = None,
     retry_policy: RetryPolicy | None = None,
+    process_supervisor: ProcessSupervisor | None = None,
 ) -> None:
     """Register Wisp's baseline capabilities."""
 
@@ -35,7 +37,7 @@ def activate(
     )
     api.register_provider(AnthropicProvider(retry_policy=retry_policy))
     api.register_provider(GoogleProvider(retry_policy=retry_policy))
-    for tool in builtin_tools():
+    for tool in builtin_tools(process_supervisor=process_supervisor):
         api.register_tool(tool)
     for command in builtin_command_descriptors():
         api.register_command(command)

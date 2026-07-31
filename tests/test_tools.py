@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import errno
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -13,6 +17,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from wisp.tools import process as process_tools_module
+from wisp.tools import process_manager as process_manager_module
 from wisp.tools import search as search_tools_module
 from wisp.tools import shell as shell_tools_module
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
@@ -367,6 +372,25 @@ def test_bash_tool_reports_successful_exit_code_without_output(tmp_path: Path) -
     assert result.data["exit_code"] == 0
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell signal assertion")
+@pytest.mark.parametrize(("signal_name", "exit_code"), [("HUP", 129), ("INT", 130), ("TERM", 143)])
+def test_bash_tool_preserves_posix_shell_signal_exit(
+    tmp_path: Path,
+    signal_name: str,
+    exit_code: int,
+) -> None:
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        BashTool(),
+        {"command": f"kill -{signal_name} $$; echo survived"},
+        context,
+    )
+
+    assert result.data["exit_code"] == exit_code
+    assert result.data["stdout"] == ""
+
+
 def test_bash_tool_preserves_exit_code_outside_tiny_body_budget(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -377,7 +401,7 @@ def test_bash_tool_preserves_exit_code_outside_tiny_body_budget(
     monkeypatch.setattr(shell_tools_module, "_run_shell", fake_run_shell)
     context = ToolContext(cwd=tmp_path, max_output_bytes=1, max_output_lines=0)
 
-    result = run_tool(BashTool(), {"command": "ignored"}, context)
+    result = run_tool(BashTool(None), {"command": "ignored"}, context)
 
     assert result.text == "Command exited with code 7"
     assert result.data["output_has_exit_status"] is True
@@ -403,9 +427,9 @@ def test_bash_tool_retruncates_combined_stdout_and_stderr(tmp_path: Path) -> Non
 
     result = run_tool(BashTool(), {"command": command}, context)
 
-    status_overhead = len(b"Command exited with code -9: ")
+    status_overhead = len(f"Command exited with code {result.data['exit_code']}: ".encode())
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes + status_overhead
-    assert result.text.startswith("Command exited with code -9:")
+    assert result.text.startswith(f"Command exited with code {result.data['exit_code']}:")
     assert result.truncated is True
 
 
@@ -424,7 +448,7 @@ def test_bash_tool_reserves_status_space_without_losing_diagnostic_tail(
     monkeypatch.setattr(shell_tools_module, "_run_shell", fake_run_shell)
     context = ToolContext(cwd=tmp_path, max_output_bytes=80, max_output_lines=100)
 
-    result = run_tool(BashTool(), {"command": "ignored"}, context)
+    result = run_tool(BashTool(None), {"command": "ignored"}, context)
 
     status_overhead = len(b"Command exited with code 2: ")
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes + status_overhead
@@ -489,6 +513,730 @@ def test_bash_tool_reports_timeout_and_kills_child_processes(tmp_path: Path) -> 
     assert not marker.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_bash_completion_kills_background_child_with_redirected_output(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    child_pid_path = tmp_path / "background.pid"
+    command = f"sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(child_pid_path))}"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+    child_pid = int(child_pid_path.read_text())
+
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("background child remained alive after bash completion")
+
+    assert result.data["exit_code"] == 0
+
+
+def test_bash_tool_reports_process_tree_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
+    cleanup_attempts = 0
+
+    async def fail_terminate(process: asyncio.subprocess.Process) -> bool:
+        nonlocal cleanup_attempts
+        cleanup_attempts += 1
+        await original_terminate(process)
+        return cleanup_attempts > 1
+
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_terminate)
+
+    context = ToolContext(cwd=tmp_path)
+    source = "print('done')"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
+    tool = BashTool()
+
+    with pytest.raises(ToolError, match="Failed to terminate process tree"):
+        run_tool(tool, {"command": command, "timeout": 5}, context)
+    supervisor = tool._process_supervisor  # noqa: SLF001
+    assert supervisor is not None
+    assert len(supervisor._one_shot) == 1  # noqa: SLF001
+    anyio.run(tool.aclose)
+    assert len(supervisor._one_shot) == 0  # noqa: SLF001
+    assert cleanup_attempts == 2
+
+
+def test_search_tools_expose_process_cleanup() -> None:
+    class DummySupervisor:
+        def __init__(self) -> None:
+            self.close_count = 0
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+
+    async def run() -> tuple[int, int]:
+        grep_supervisor = DummySupervisor()
+        find_supervisor = DummySupervisor()
+        await GrepTool(grep_supervisor).aclose()  # type: ignore[arg-type]
+        await FindTool(find_supervisor).aclose()  # type: ignore[arg-type]
+        return grep_supervisor.close_count, find_supervisor.close_count
+
+    assert anyio.run(run) == (1, 1)
+
+
+def test_kill_process_tree_and_wait_returns_failure_without_waiting(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fail_terminate(_process: asyncio.subprocess.Process) -> bool:
+        return False
+
+    class DummyProcess:
+        stdout = None
+        stderr = None
+        wait_called = False
+
+        async def wait(self) -> int:
+            self.wait_called = True
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module, "_terminate_process_tree", fail_terminate)
+
+    async def run() -> bool:
+        with anyio.fail_after(0.1):
+            return await process_tools_module._kill_process_tree_and_wait(process)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert anyio.run(run) is False
+    assert process.wait_called is False
+
+
+def test_posix_descendant_discovery_failure_reports_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, tmp_path / "jobs")  # noqa: SLF001
+    monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module, "_posix_descendant_pids", lambda _pid: None)
+
+    async def run() -> bool:
+        return await process_tools_module._terminate_process_tree(  # type: ignore[arg-type]  # noqa: SLF001
+            process,
+            force=True,
+        )
+
+    assert anyio.run(run) is False
+
+
+def test_posix_records_jobs_file_holder_pids(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    jobs_file = tmp_path / "jobs"
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+    monkeypatch.setattr(process_tools_module, "_posix_descendant_pids", lambda _pid: (234,))
+    monkeypatch.setattr(process_tools_module, "_posix_jobs_file_holder_pids", lambda _path: (345,))
+
+    recorded = process_tools_module._record_posix_descendant_pids(process)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert recorded is True
+    assert jobs_file.read_text(encoding="utf-8").splitlines() == ["234", "345"]
+
+
+def test_posix_holder_discovery_failure_reports_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    jobs_file = tmp_path / "jobs"
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+    monkeypatch.setattr(process_tools_module, "_posix_descendant_pids", lambda _pid: ())
+    monkeypatch.setattr(process_tools_module, "_posix_jobs_file_holder_pids", lambda _path: None)
+
+    assert process_tools_module._record_posix_descendant_pids(process) is False  # type: ignore[arg-type]  # noqa: SLF001
+
+
+def test_posix_recorded_jobs_prune_stale_pids(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("234\n345\n456\n", encoding="utf-8")
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+    monkeypatch.setattr(process_tools_module, "_posix_descendant_pids", lambda _pid: (234,))
+    monkeypatch.setattr(process_tools_module, "_posix_jobs_file_holder_pids", lambda _path: (345,))
+    monkeypatch.setattr(process_tools_module.os, "pidfd_open", None, raising=False)
+    monkeypatch.setattr(process_tools_module.signal, "pidfd_send_signal", None, raising=False)
+    kills: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    signaled = process_tools_module._signal_posix_recorded_jobs(  # type: ignore[arg-type]  # noqa: SLF001
+        process,
+        signal.SIGKILL,
+    )
+
+    assert signaled is True
+    assert kills == [(234, signal.SIGKILL), (345, signal.SIGKILL)]
+
+
+def test_posix_recorded_jobs_skip_descendant_scan_after_leader_exit(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = 0
+
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("234\n345\n", encoding="utf-8")
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+
+    def fail_descendant_scan(_pid: int) -> tuple[int, ...]:
+        raise AssertionError("exited leader pid must not be traversed")
+
+    monkeypatch.setattr(process_tools_module, "_posix_descendant_pids", fail_descendant_scan)
+    monkeypatch.setattr(process_tools_module, "_posix_jobs_file_holder_pids", lambda _path: (345,))
+    monkeypatch.setattr(process_tools_module.os, "pidfd_open", None, raising=False)
+    monkeypatch.setattr(process_tools_module.signal, "pidfd_send_signal", None, raising=False)
+    kills: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    signaled = process_tools_module._signal_posix_recorded_jobs(  # type: ignore[arg-type]  # noqa: SLF001
+        process,
+        signal.SIGKILL,
+    )
+
+    assert signaled is True
+    assert kills == [(345, signal.SIGKILL)]
+
+
+def test_posix_recorded_jobs_revalidate_after_pidfd_open(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("234\n", encoding="utf-8")
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+    events: list[str] = []
+    closed_fds: list[int] = []
+
+    def current_owned(_process: object) -> set[int]:
+        events.append("snapshot")
+        return set()
+
+    def open_pidfd(_pid: int, _flags: int) -> int:
+        events.append("open")
+        return 789
+
+    def fail_pidfd_send_signal(
+        _pidfd: int,
+        _selected_signal: signal.Signals,
+        _siginfo: object,
+        _flags: int,
+    ) -> None:
+        raise AssertionError("stale pidfd must not be signaled")
+
+    monkeypatch.setattr(process_tools_module, "_posix_current_owned_pids", current_owned)
+    monkeypatch.setattr(process_tools_module.os, "pidfd_open", open_pidfd, raising=False)
+    monkeypatch.setattr(
+        process_tools_module.signal,
+        "pidfd_send_signal",
+        fail_pidfd_send_signal,
+        raising=False,
+    )
+    monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
+
+    signaled = process_tools_module._signal_posix_recorded_jobs(  # type: ignore[arg-type]  # noqa: SLF001
+        process,
+        signal.SIGKILL,
+    )
+
+    assert signaled is True
+    assert events == ["open", "snapshot"]
+    assert closed_fds == [789]
+
+
+def test_posix_recorded_jobs_fall_back_when_pidfd_open_is_unsupported(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("234\n", encoding="utf-8")
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+    kills: list[tuple[int, signal.Signals]] = []
+
+    def unsupported_pidfd_open(_pid: int, _flags: int) -> int:
+        raise OSError(errno.ENOSYS, "pidfd_open unavailable")
+
+    def fail_pidfd_send_signal(*_args: object) -> None:
+        raise AssertionError("pidfd_send_signal should not run after pidfd_open fails")
+
+    monkeypatch.setattr(process_tools_module, "_posix_current_owned_pids", lambda _process: {234})
+    monkeypatch.setattr(
+        process_tools_module.os, "pidfd_open", unsupported_pidfd_open, raising=False
+    )
+    monkeypatch.setattr(
+        process_tools_module.signal,
+        "pidfd_send_signal",
+        fail_pidfd_send_signal,
+        raising=False,
+    )
+    monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    signaled = process_tools_module._signal_posix_recorded_jobs(  # type: ignore[arg-type]  # noqa: SLF001
+        process,
+        signal.SIGKILL,
+    )
+
+    assert signaled is True
+    assert kills == [(234, signal.SIGKILL)]
+
+
+def test_posix_recorded_jobs_fall_back_when_pidfd_send_signal_is_unsupported(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("234\n", encoding="utf-8")
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+    kills: list[tuple[int, signal.Signals]] = []
+    closed_fds: list[int] = []
+
+    def unsupported_pidfd_send_signal(
+        _pidfd: int,
+        _selected_signal: signal.Signals,
+        _siginfo: object,
+        _flags: int,
+    ) -> None:
+        raise OSError(errno.ENOSYS, "pidfd_send_signal unavailable")
+
+    monkeypatch.setattr(process_tools_module, "_posix_current_owned_pids", lambda _process: {234})
+    monkeypatch.setattr(
+        process_tools_module.os, "pidfd_open", lambda _pid, _flags: 789, raising=False
+    )
+    monkeypatch.setattr(
+        process_tools_module.signal,
+        "pidfd_send_signal",
+        unsupported_pidfd_send_signal,
+        raising=False,
+    )
+    monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
+    monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    signaled = process_tools_module._signal_posix_recorded_jobs(  # type: ignore[arg-type]  # noqa: SLF001
+        process,
+        signal.SIGKILL,
+    )
+
+    assert signaled is True
+    assert kills == [(234, signal.SIGKILL)]
+    assert closed_fds == [789]
+
+
+def test_posix_recorded_jobs_batch_ownership_before_signaling(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("234\n345\n", encoding="utf-8")
+    process = DummyProcess()
+    setattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR, jobs_file)  # noqa: SLF001
+    kills: list[tuple[int, signal.Signals]] = []
+    ownership_calls = 0
+
+    def current_owned(_process: object) -> set[int]:
+        nonlocal ownership_calls
+        ownership_calls += 1
+        return {234, 345}
+
+    monkeypatch.setattr(process_tools_module, "_posix_current_owned_pids", current_owned)
+    monkeypatch.setattr(process_tools_module.os, "pidfd_open", None, raising=False)
+    monkeypatch.setattr(process_tools_module.signal, "pidfd_send_signal", None, raising=False)
+    monkeypatch.setattr(process_tools_module.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+    signaled = process_tools_module._signal_posix_recorded_jobs(  # type: ignore[arg-type]  # noqa: SLF001
+        process,
+        signal.SIGKILL,
+    )
+
+    assert signaled is True
+    assert ownership_calls == 1
+    assert kills == [(234, signal.SIGKILL), (345, signal.SIGKILL)]
+
+
+def test_open_posix_jobs_fd_uses_descriptor_below_soft_limit(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    import fcntl
+    import resource
+
+    jobs_file = tmp_path / "jobs"
+    jobs_file.write_text("", encoding="utf-8")
+    closed_fds: list[int] = []
+    minimum_fds: list[int] = []
+
+    def fake_fcntl(_fd: int, command: int, minimum_fd: int) -> int:
+        assert command == fcntl.F_DUPFD
+        minimum_fds.append(minimum_fd)
+        if minimum_fd >= 64:
+            raise OSError(errno.EINVAL, "minimum fd is above soft limit")
+        return 63
+
+    monkeypatch.setattr(process_tools_module.os, "open", lambda _path, _flags: 3)
+    monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
+    monkeypatch.setattr(resource, "getrlimit", lambda _limit: (64, 64))
+    monkeypatch.setattr(fcntl, "fcntl", fake_fcntl)
+
+    jobs_fd = process_tools_module._open_posix_jobs_fd(jobs_file)  # noqa: SLF001
+
+    assert jobs_fd == 63
+    assert minimum_fds == [63]
+    assert closed_fds == [3]
+
+
+def test_posix_recorded_job_verification_runs_off_event_loop(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+
+    worker_thread_ids: list[int] = []
+
+    def fake_record(_process: object) -> bool:
+        return True
+
+    def fake_signal_group(_process: object, _selected_signal: signal.Signals) -> bool:
+        return True
+
+    def fake_signal_recorded(_process: object, _selected_signal: signal.Signals) -> bool:
+        worker_thread_ids.append(threading.get_ident())
+        return True
+
+    monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module, "_record_posix_descendant_pids", fake_record)
+    monkeypatch.setattr(process_tools_module, "_signal_posix_process_group", fake_signal_group)
+    monkeypatch.setattr(process_tools_module, "_signal_posix_recorded_jobs", fake_signal_recorded)
+
+    async def run() -> int:
+        event_loop_thread_id = threading.get_ident()
+        assert await process_tools_module._terminate_process_tree(DummyProcess()) is True  # type: ignore[arg-type]  # noqa: SLF001
+        return event_loop_thread_id
+
+    event_loop_thread_id = anyio.run(run)
+
+    assert worker_thread_ids
+    assert all(thread_id != event_loop_thread_id for thread_id in worker_thread_ids)
+
+
+def test_posix_jobs_file_holder_pids_uses_lsof(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    jobs_file = tmp_path / "jobs"
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="234\nnot-a-pid\n345\n")
+
+    monkeypatch.setattr(
+        process_tools_module, "_posix_jobs_file_holder_pids_from_proc", lambda _path: None
+    )
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    assert process_tools_module._posix_jobs_file_holder_pids(jobs_file) == (234, 345)  # noqa: SLF001
+    assert calls == [["lsof", "-t", "--", str(jobs_file)]]
+
+
+def test_posix_jobs_file_holder_pids_uses_proc_before_external_tools(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    jobs_file = tmp_path / "jobs"
+
+    def fail_run(_command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("external holder probe should not run")
+
+    monkeypatch.setattr(
+        process_tools_module, "_posix_jobs_file_holder_pids_from_proc", lambda _path: (234,)
+    )
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fail_run)
+
+    assert process_tools_module._posix_jobs_file_holder_pids(jobs_file) == (234,)  # noqa: SLF001
+
+
+def test_posix_jobs_file_holder_pids_falls_back_to_fuser(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    jobs_file = tmp_path / "jobs"
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[0] == "lsof":
+            raise OSError
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"{jobs_file}: 234 345\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        process_tools_module, "_posix_jobs_file_holder_pids_from_proc", lambda _path: None
+    )
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    assert process_tools_module._posix_jobs_file_holder_pids(jobs_file) == (234, 345)  # noqa: SLF001
+    assert calls == [["lsof", "-t", "--", str(jobs_file)], ["fuser", str(jobs_file)]]
+
+
+def test_posix_jobs_file_holder_pids_reports_probe_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    jobs_file = tmp_path / "jobs"
+
+    def fake_run(_command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError
+
+    monkeypatch.setattr(
+        process_tools_module, "_posix_jobs_file_holder_pids_from_proc", lambda _path: None
+    )
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    assert process_tools_module._posix_jobs_file_holder_pids(jobs_file) is None  # noqa: SLF001
+
+
+def test_posix_permission_error_reports_cleanup_failure_for_running_leader(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = None
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    def fail_killpg(_pid: int, _signal: int) -> None:
+        raise PermissionError
+
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module.os, "killpg", fail_killpg)
+
+    assert process_tools_module._kill_process_tree(process) is False  # type: ignore[arg-type]  # noqa: SLF001
+    assert process.killed is True
+
+
+def test_posix_group_signal_skips_exited_leader_pid(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = 0
+
+    def fail_killpg(_pid: int, _signal: int) -> None:
+        raise AssertionError("exited leader pid must not be signaled as a process group")
+
+    monkeypatch.setattr(process_tools_module.os, "killpg", fail_killpg)
+
+    assert (
+        process_tools_module._signal_posix_process_group(  # type: ignore[arg-type]  # noqa: SLF001
+            DummyProcess(),
+            signal.SIGKILL,
+        )
+        is True
+    )
+
+
+def test_posix_shell_uses_hidden_high_jobs_fd(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class DummyProcess:
+        returncode = 0
+
+    creation_calls: list[dict[str, object]] = []
+    closed_fds: list[int] = []
+    process = DummyProcess()
+
+    async def fake_create_subprocess_shell(
+        command: str,
+        **kwargs: object,
+    ) -> DummyProcess:
+        assert "exec 9" not in command
+        creation_calls.append(kwargs)
+        return process
+
+    monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module.sys, "platform", "darwin")
+    monkeypatch.setattr(process_tools_module, "_open_posix_jobs_fd", lambda _path: 123)
+    monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
+    monkeypatch.setattr(
+        process_tools_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
+    )
+
+    async def run() -> DummyProcess:
+        return await process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # type: ignore[return-value]  # noqa: SLF001
+
+    result = anyio.run(run)
+
+    assert result is process
+    assert creation_calls[0]["pass_fds"] == (123,)
+    assert creation_calls[0]["start_new_session"] is True
+    assert closed_fds == [123]
+    process_tools_module._remove_posix_jobs_file(  # noqa: SLF001
+        getattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR),  # noqa: SLF001
+    )
+
+
+def test_linux_posix_shell_startup_uses_exec_helper_instead_of_preexec(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class DummyProcess:
+        pass
+
+    process = DummyProcess()
+    exec_calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    closed_fds: list[int] = []
+
+    async def create_exec(*command: str, **kwargs: object) -> DummyProcess:
+        exec_calls.append((command, kwargs))
+        return process
+
+    async def fail_shell(*_args: object, **_kwargs: object) -> DummyProcess:
+        raise AssertionError("Linux POSIX startup should use exec helper")
+
+    monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module.sys, "platform", "linux")
+    monkeypatch.setattr(process_tools_module, "_open_posix_jobs_fd", lambda _path: 123)
+    monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", create_exec)
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_shell", fail_shell)
+
+    async def run() -> DummyProcess:
+        return await process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # type: ignore[return-value]  # noqa: SLF001
+
+    result = anyio.run(run)
+    jobs_file = getattr(result, process_tools_module._POSIX_JOBS_FILE_ATTR)  # noqa: SLF001
+    jobs_file.unlink(missing_ok=True)
+
+    assert result is process
+    assert len(exec_calls) == 1
+    command, kwargs = exec_calls[0]
+    assert command[:3] == (
+        process_tools_module.sys.executable,
+        "-c",
+        process_tools_module._POSIX_SUBREAPER_HELPER,  # noqa: SLF001
+    )
+    assert "echo hi" in command[3]
+    assert "preexec_fn" not in kwargs
+    assert kwargs["pass_fds"] == (123,)
+    assert kwargs["start_new_session"] is True
+    assert closed_fds == [123]
+
+
+def test_posix_shell_spawn_cancellation_cleans_tracking_resources(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    closed_fds: list[int] = []
+    removed_files: list[object] = []
+
+    async def cancelled_create_subprocess_exec(
+        *_command: str,
+        **_kwargs: object,
+    ) -> object:
+        raise asyncio.CancelledError
+
+    async def fail_create_subprocess_shell(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Linux POSIX startup should use exec helper")
+
+    monkeypatch.setattr(process_tools_module.os, "name", "posix")
+    monkeypatch.setattr(process_tools_module.sys, "platform", "linux")
+    monkeypatch.setattr(process_tools_module, "_open_posix_jobs_fd", lambda _path: 123)
+    monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
+    monkeypatch.setattr(
+        process_tools_module, "_remove_posix_jobs_file", lambda path: removed_files.append(path)
+    )
+    monkeypatch.setattr(
+        process_tools_module.asyncio,
+        "create_subprocess_exec",
+        cancelled_create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        process_tools_module.asyncio,
+        "create_subprocess_shell",
+        fail_create_subprocess_shell,
+    )
+
+    async def run() -> None:
+        await process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # noqa: SLF001
+
+    with pytest.raises(asyncio.CancelledError):
+        anyio.run(run)
+
+    assert closed_fds == [123]
+    assert len(removed_files) == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
+def test_bash_timeout_kills_background_child_after_shell_exits(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    marker = tmp_path / "background-child-survived.txt"
+    command = f"(sleep 1.5; echo alive > {shlex.quote(str(marker))}) &"
+
+    with pytest.raises(ToolError, match="timed out"):
+        run_tool(BashTool(), {"command": command, "timeout": 1}, context)
+    time.sleep(1.0)
+
+    assert not marker.exists()
+
+
 def test_bash_tool_cancellation_kills_child_processes(tmp_path: Path) -> None:
     if os.name != "posix":
         pytest.skip("POSIX process-group cancellation regression")
@@ -527,11 +1275,909 @@ def test_bash_tool_cancellation_kills_child_processes(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
+def test_direct_bash_cancellation_surfaces_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pass
+
+    process = DummyProcess()
+
+    async def create_process(_command: str, *, cwd: Path) -> DummyProcess:
+        assert cwd == tmp_path
+        return process
+
+    async def fail_cleanup(captured_process: object) -> bool:
+        assert captured_process is process
+        return False
+
+    monkeypatch.setattr(process_tools_module, "_create_shell_process", create_process)
+    monkeypatch.setattr(process_tools_module, "_kill_process_tree_and_wait", fail_cleanup)
+
+    async def run_and_cancel() -> None:
+        collect_started = asyncio.Event()
+
+        async def collect_output(*_args: object, **_kwargs: object) -> tuple[bytes, bytes]:
+            collect_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(process_tools_module, "_collect_limited_output", collect_output)
+        task = asyncio.create_task(
+            process_tools_module._run_shell(  # noqa: SLF001
+                "ignored",
+                cwd=tmp_path,
+                timeout=10,
+                max_output_bytes=100,
+                max_output_lines=100,
+            )
+        )
+        await collect_started.wait()
+        task.cancel()
+        with pytest.raises(ToolError, match="Failed to terminate process tree"):
+            await task
+
+    anyio.run(run_and_cancel)
+
+
+def test_direct_bash_cleanup_finishes_before_raw_task_cancellation(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    context = ToolContext(cwd=tmp_path)
+    python = shlex.quote(sys.executable)
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    cleanup_finished = False
+    original_terminate = process_tools_module._terminate_process_tree  # type: ignore[attr-defined]
+
+    async def delayed_terminate(
+        process: asyncio.subprocess.Process,
+        *,
+        force: bool = False,
+    ) -> bool:
+        nonlocal cleanup_finished
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        cleanup_succeeded = await original_terminate(process, force=force)
+        cleanup_finished = True
+        return cleanup_succeeded
+
+    monkeypatch.setattr(process_tools_module, "_terminate_process_tree", delayed_terminate)
+
+    async def run_and_cancel() -> None:
+        task = asyncio.create_task(
+            BashTool(None).run(
+                {"command": f"{python} -c {shlex.quote("print('done')")}", "timeout": 10},
+                context,
+            )
+        )
+        await cleanup_started.wait()
+        task.cancel()
+        await anyio.sleep(0)
+        assert task.done() is False
+
+        allow_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    anyio.run(run_and_cancel)
+
+    assert cleanup_finished is True
+
+
+def test_direct_bash_cleans_process_after_capture_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyStream:
+        def at_eof(self) -> bool:
+            return True
+
+    class DummyProcess:
+        returncode: int | None = None
+        stdout = DummyStream()
+        stderr = DummyStream()
+        wait_count = 0
+
+        async def wait(self) -> None:
+            self.wait_count += 1
+            self.returncode = -15
+
+    process = DummyProcess()
+    cleanup_calls = 0
+
+    async def create_process(_command: str, *, cwd: Path) -> DummyProcess:
+        assert cwd == tmp_path
+        return process
+
+    async def fail_collect(*_args: object, **_kwargs: object) -> tuple[bytes, bytes]:
+        raise ToolError("capture failed")
+
+    async def terminate_process(
+        captured_process: object,
+        *,
+        force: bool = False,
+    ) -> bool:
+        nonlocal cleanup_calls
+        assert captured_process is process
+        assert force is False
+        cleanup_calls += 1
+        return True
+
+    monkeypatch.setattr(process_tools_module, "_create_shell_process", create_process)
+    monkeypatch.setattr(process_tools_module, "_collect_limited_output", fail_collect)
+    monkeypatch.setattr(process_tools_module, "_terminate_process_tree", terminate_process)
+
+    async def run() -> None:
+        await process_tools_module._run_shell(  # noqa: SLF001
+            "ignored",
+            cwd=tmp_path,
+            timeout=5,
+            max_output_bytes=100,
+            max_output_lines=100,
+        )
+
+    with pytest.raises(ToolError, match="capture failed"):
+        anyio.run(run)
+    assert cleanup_calls == 1
+    assert process.wait_count == 1
+
+
 def test_bash_tool_uses_taskkill_for_windows_process_tree_cleanup(
     monkeypatch: MonkeyPatch,
 ) -> None:
     class DummyProcess:
         returncode = None
+        pid = 123
+        _handle = 456
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def WaitForSingleObject(self, process: int, milliseconds: int) -> int:
+            self.calls.append(("wait", process, milliseconds))
+            return process_tools_module._WINDOWS_WAIT_TIMEOUT  # noqa: SLF001
+
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    kernel32 = FakeKernel32()
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    process_tools_module._kill_process_tree(process)  # noqa: SLF001
+
+    assert kernel32.calls == [("wait", 456, 0)]
+    assert calls == [["taskkill", "/F", "/T", "/PID", "123"]]
+    assert process.killed is False
+
+
+def test_bash_tool_skips_taskkill_after_windows_job_termination(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        returncode = 0
+        pid = 123
+        _handle = 456
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 1
+
+        def TerminateJobObject(self, job: int, exit_code: int) -> int:
+            self.calls.append(("terminate", job, exit_code))
+            return 1
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
+            return 1
+
+    taskkill_calls: list[list[str]] = []
+    kernel32 = FakeKernel32()
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        taskkill_calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    process_tools_module._attach_windows_job(process)  # type: ignore[arg-type]  # noqa: SLF001
+    process_tools_module._kill_process_tree(process)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert kernel32.calls == [
+        ("create",),
+        ("assign", 789, 456),
+        ("terminate", 789, 1),
+        ("close", 789),
+    ]
+    assert taskkill_calls == []
+    assert process.killed is False
+
+
+def test_bash_tool_retains_windows_job_handle_when_termination_fails(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+        _handle = 456
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 1
+
+        def TerminateJobObject(self, job: int, exit_code: int) -> int:
+            self.calls.append(("terminate", job, exit_code))
+            return 0
+
+        def WaitForSingleObject(self, process: int, milliseconds: int) -> int:
+            self.calls.append(("wait", process, milliseconds))
+            return process_tools_module._WINDOWS_WAIT_TIMEOUT  # noqa: SLF001
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
+            return 1
+
+    taskkill_calls: list[list[str]] = []
+    kernel32 = FakeKernel32()
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        taskkill_calls.append(command)
+        return subprocess.CompletedProcess(command, 1)
+
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    process_tools_module._attach_windows_job(process)  # type: ignore[arg-type]  # noqa: SLF001
+    terminated = process_tools_module._kill_process_tree(process)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert terminated is False
+    assert getattr(process, process_tools_module._WINDOWS_JOB_HANDLE_ATTR) == 789  # noqa: SLF001
+    assert kernel32.calls == [
+        ("create",),
+        ("assign", 789, 456),
+        ("terminate", 789, 1),
+        ("wait", 456, 0),
+    ]
+    assert taskkill_calls == [["taskkill", "/F", "/T", "/PID", "123"]]
+    assert process.killed is True
+
+
+def test_bash_tool_closes_windows_job_handle_after_taskkill_fallback(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+        _handle = 456
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 1
+
+        def TerminateJobObject(self, job: int, exit_code: int) -> int:
+            self.calls.append(("terminate", job, exit_code))
+            return 0
+
+        def WaitForSingleObject(self, process: int, milliseconds: int) -> int:
+            self.calls.append(("wait", process, milliseconds))
+            return process_tools_module._WINDOWS_WAIT_TIMEOUT  # noqa: SLF001
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
+            return 1
+
+    taskkill_calls: list[list[str]] = []
+    kernel32 = FakeKernel32()
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        taskkill_calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    process_tools_module._attach_windows_job(process)  # type: ignore[arg-type]  # noqa: SLF001
+    terminated = process_tools_module._kill_process_tree(process)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert terminated is True
+    assert getattr(process, process_tools_module._WINDOWS_JOB_HANDLE_ATTR) is None  # noqa: SLF001
+    assert taskkill_calls == [["taskkill", "/F", "/T", "/PID", "123"]]
+    assert kernel32.calls == [
+        ("create",),
+        ("assign", 789, 456),
+        ("terminate", 789, 1),
+        ("wait", 456, 0),
+        ("close", 789),
+    ]
+    assert process.killed is False
+
+
+def test_bash_tool_assigns_windows_job_before_resuming_shell(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+        _handle = 456
+
+        async def wait(self) -> int:
+            return 0
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create_job",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 1
+
+        def CreateToolhelp32Snapshot(self, flags: int, process_id: int) -> int:
+            self.calls.append(("snapshot", flags, process_id))
+            return 111
+
+        def Thread32First(
+            self,
+            snapshot: int,
+            entry: object,
+        ) -> int:
+            self.calls.append(("thread_first", snapshot))
+            entry.contents.th32OwnerProcessID = 123  # type: ignore[attr-defined]
+            entry.contents.th32ThreadID = 654  # type: ignore[attr-defined]
+            return 1
+
+        def Thread32Next(self, snapshot: int, _entry: object) -> int:
+            self.calls.append(("thread_next", snapshot))
+            return 0
+
+        def OpenThread(self, access: int, inherit: bool, thread_id: int) -> int:
+            self.calls.append(("open_thread", access, inherit, thread_id))
+            return 222
+
+        def ResumeThread(self, thread: int) -> int:
+            self.calls.append(("resume", thread))
+            return 1
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
+            return 1
+
+    creation_calls: list[dict[str, object]] = []
+    process = DummyProcess()
+    kernel32 = FakeKernel32()
+
+    async def fake_create_subprocess_shell(
+        _command: str,
+        **kwargs: object,
+    ) -> DummyProcess:
+        creation_calls.append(kwargs)
+        return process
+
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(
+        process_tools_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
+    )
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+
+    async def run() -> DummyProcess:
+        return await process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # type: ignore[return-value]  # noqa: SLF001
+
+    result = anyio.run(run)
+
+    assert result is process
+    assert creation_calls == [
+        {
+            "cwd": str(tmp_path),
+            "start_new_session": False,
+            "stdout": process_tools_module.asyncio.subprocess.PIPE,
+            "stderr": process_tools_module.asyncio.subprocess.PIPE,
+            "creationflags": process_tools_module._WINDOWS_CREATE_SUSPENDED,  # noqa: SLF001
+        }
+    ]
+    assert kernel32.calls == [
+        ("create_job",),
+        ("assign", 789, 456),
+        ("snapshot", process_tools_module._WINDOWS_TH32CS_SNAPTHREAD, 0),  # noqa: SLF001
+        ("thread_first", 111),
+        (
+            "open_thread",
+            process_tools_module._WINDOWS_THREAD_SUSPEND_RESUME,  # noqa: SLF001
+            False,
+            654,
+        ),
+        ("close", 111),
+        ("resume", 222),
+        ("close", 222),
+    ]
+
+
+def test_bash_tool_runs_windows_resume_setup_off_event_loop(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+        _handle = 456
+
+        async def wait(self) -> int:
+            return 0
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create_job",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 1
+
+        def ResumeThread(self, thread: int) -> int:
+            self.calls.append(("resume", thread))
+            return 1
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
+            return 1
+
+    process = DummyProcess()
+    kernel32 = FakeKernel32()
+    open_thread_ids: list[int] = []
+
+    async def fake_create_subprocess_shell(
+        _command: str,
+        **_kwargs: object,
+    ) -> DummyProcess:
+        return process
+
+    def fake_open_windows_process_thread(
+        _process: object,
+        _kernel32: object,
+    ) -> int:
+        open_thread_ids.append(threading.get_ident())
+        return 222
+
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(
+        process_tools_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
+    )
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+    monkeypatch.setattr(
+        process_tools_module,
+        "_open_windows_process_thread",
+        fake_open_windows_process_thread,
+    )
+
+    async def run() -> tuple[DummyProcess, int]:
+        event_loop_thread_id = threading.get_ident()
+        result = await process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # type: ignore[return-value]  # noqa: SLF001
+        return result, event_loop_thread_id
+
+    result, event_loop_thread_id = anyio.run(run)
+
+    assert result is process
+    assert open_thread_ids
+    assert all(thread_id != event_loop_thread_id for thread_id in open_thread_ids)
+    assert kernel32.calls == [
+        ("create_job",),
+        ("assign", 789, 456),
+        ("resume", 222),
+        ("close", 222),
+    ]
+
+
+def test_bash_tool_aborts_suspended_windows_shell_when_job_assignment_fails(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+        _handle = 456
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+        async def wait(self) -> int:
+            self.returncode = 1
+            return 1
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create_job",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 0
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
+            return 1
+
+    process = DummyProcess()
+    kernel32 = FakeKernel32()
+
+    async def fake_create_subprocess_shell(
+        _command: str,
+        **_kwargs: object,
+    ) -> DummyProcess:
+        return process
+
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(
+        process_tools_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
+    )
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+
+    async def run() -> None:
+        await process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # noqa: SLF001
+
+    with pytest.raises(ToolError, match="Failed to attach command process to Windows job"):
+        anyio.run(run)
+
+    assert kernel32.calls == [
+        ("create_job",),
+        ("assign", 789, 456),
+        ("close", 789),
+    ]
+    assert process.killed is True
+
+
+def test_bash_tool_cleans_windows_job_after_resume_setup_failure(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+        _handle = 456
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+        async def wait(self) -> int:
+            self.returncode = 1
+            return 1
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def CreateJobObjectW(self, _attributes: object, _name: object) -> int:
+            self.calls.append(("create",))
+            return 789
+
+        def AssignProcessToJobObject(self, job: int, process: int) -> int:
+            self.calls.append(("assign", job, process))
+            return 1
+
+        def TerminateJobObject(self, job: int, exit_code: int) -> int:
+            self.calls.append(("terminate", job, exit_code))
+            return 0
+
+        def WaitForSingleObject(self, process: int, milliseconds: int) -> int:
+            self.calls.append(("wait", process, milliseconds))
+            return process_tools_module._WINDOWS_WAIT_TIMEOUT  # noqa: SLF001
+
+        def CloseHandle(self, handle: int) -> int:
+            self.calls.append(("close", handle))
+            return 1
+
+    taskkill_calls: list[list[str]] = []
+    kernel32 = FakeKernel32()
+    process = DummyProcess()
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+    monkeypatch.setattr(process_tools_module, "_windows_kernel32", lambda: kernel32)
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        taskkill_calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
+
+    process_tools_module._attach_windows_job(process)  # type: ignore[arg-type]  # noqa: SLF001
+    cleanup_succeeded = anyio.run(
+        process_tools_module._cleanup_failed_windows_process_setup,  # type: ignore[arg-type]  # noqa: SLF001
+        process,
+    )
+
+    assert cleanup_succeeded is True
+    assert getattr(process, process_tools_module._WINDOWS_JOB_HANDLE_ATTR) is None  # noqa: SLF001
+    assert taskkill_calls == [["taskkill", "/F", "/T", "/PID", "123"]]
+    assert kernel32.calls == [
+        ("create",),
+        ("assign", 789, 456),
+        ("terminate", 789, 1),
+        ("wait", 456, 0),
+        ("close", 789),
+    ]
+
+
+def test_bash_tool_surfaces_windows_setup_cleanup_failure_after_cancellation(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pass
+
+    async def run() -> None:
+        setup_started = asyncio.Event()
+        allow_setup_finish = asyncio.Event()
+
+        async def fake_to_thread(_function: object, _process: object) -> None:
+            setup_started.set()
+            await allow_setup_finish.wait()
+
+        async def fail_cleanup(_process: object) -> bool:
+            return False
+
+        monkeypatch.setattr(process_tools_module.asyncio, "to_thread", fake_to_thread)
+        monkeypatch.setattr(
+            process_tools_module, "_cleanup_failed_windows_process_setup", fail_cleanup
+        )
+
+        setup_task = asyncio.create_task(
+            process_tools_module._run_windows_process_setup(DummyProcess())  # type: ignore[arg-type]  # noqa: SLF001
+        )
+        await setup_started.wait()
+        setup_task.cancel()
+        allow_setup_finish.set()
+        with pytest.raises(ToolError, match="terminate process tree"):
+            await setup_task
+
+    anyio.run(run)
+
+
+def test_bash_tool_finishes_windows_setup_cleanup_after_repeated_cancellation(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pass
+
+    async def run() -> bool:
+        setup_started = asyncio.Event()
+        allow_setup_finish = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        allow_cleanup_finish = asyncio.Event()
+        cleanup_finished = False
+
+        async def fake_to_thread(_function: object, _process: object) -> None:
+            setup_started.set()
+            await allow_setup_finish.wait()
+
+        async def cleanup(_process: object) -> bool:
+            nonlocal cleanup_finished
+            cleanup_started.set()
+            await allow_cleanup_finish.wait()
+            cleanup_finished = True
+            return True
+
+        monkeypatch.setattr(process_tools_module.asyncio, "to_thread", fake_to_thread)
+        monkeypatch.setattr(process_tools_module, "_cleanup_failed_windows_process_setup", cleanup)
+
+        setup_task = asyncio.create_task(
+            process_tools_module._run_windows_process_setup(DummyProcess())  # type: ignore[arg-type]  # noqa: SLF001
+        )
+        await setup_started.wait()
+        setup_task.cancel()
+        allow_setup_finish.set()
+        await cleanup_started.wait()
+        setup_task.cancel()
+        await asyncio.sleep(0)
+        assert not setup_task.done()
+        allow_cleanup_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await setup_task
+        return cleanup_finished
+
+    assert anyio.run(run) is True
+
+
+def test_bash_tool_delays_cancellation_during_windows_setup_error_cleanup(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class DummyProcess:
+        pass
+
+    async def run() -> bool:
+        cleanup_started = asyncio.Event()
+        allow_cleanup_finish = asyncio.Event()
+        cleanup_finished = False
+        process = DummyProcess()
+
+        async def fake_create_subprocess_shell(
+            _command: str,
+            **_kwargs: object,
+        ) -> DummyProcess:
+            return process
+
+        async def setup(_process: object) -> str:
+            return "Failed to resume command process"
+
+        async def cleanup(_process: object) -> bool:
+            nonlocal cleanup_finished
+            cleanup_started.set()
+            await allow_cleanup_finish.wait()
+            cleanup_finished = True
+            return True
+
+        monkeypatch.setattr(process_tools_module.os, "name", "nt")
+        monkeypatch.setattr(
+            process_tools_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
+        )
+        monkeypatch.setattr(process_tools_module, "_run_windows_process_setup", setup)
+        monkeypatch.setattr(process_tools_module, "_cleanup_failed_windows_process_setup", cleanup)
+
+        setup_task = asyncio.create_task(
+            process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # noqa: SLF001
+        )
+        await cleanup_started.wait()
+        setup_task.cancel()
+        await asyncio.sleep(0)
+        assert not setup_task.done()
+        allow_cleanup_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await setup_task
+        return cleanup_finished
+
+    assert anyio.run(run) is True
+
+
+def test_windows_kernel32_configures_pointer_sized_job_api_signatures(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class FakeFunction:
+        def __init__(self, result: int) -> None:
+            self.result = result
+            self.restype: object = None
+            self.argtypes: list[object] | None = None
+
+        def __call__(self, *_args: object) -> int:
+            return self.result
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.CreateJobObjectW = FakeFunction(789)
+            self.AssignProcessToJobObject = FakeFunction(1)
+            self.TerminateJobObject = FakeFunction(1)
+            self.CloseHandle = FakeFunction(1)
+            self.CreateToolhelp32Snapshot = FakeFunction(1)
+            self.OpenThread = FakeFunction(1)
+            self.ResumeThread = FakeFunction(1)
+            self.Thread32First = FakeFunction(1)
+            self.Thread32Next = FakeFunction(0)
+            self.WaitForSingleObject = FakeFunction(process_tools_module._WINDOWS_WAIT_TIMEOUT)  # noqa: SLF001
+
+    kernel32 = FakeKernel32()
+
+    def fake_windll(name: str, *, use_last_error: bool) -> FakeKernel32:
+        assert name == "kernel32"
+        assert use_last_error is True
+        return kernel32
+
+    monkeypatch.setattr(process_tools_module.ctypes, "WinDLL", fake_windll, raising=False)
+
+    assert process_tools_module._windows_kernel32() is kernel32  # noqa: SLF001
+    assert kernel32.CreateJobObjectW.restype is process_tools_module.wintypes.HANDLE
+    assert kernel32.CreateJobObjectW.argtypes == [
+        process_tools_module.ctypes.c_void_p,
+        process_tools_module.wintypes.LPCWSTR,
+    ]
+    assert kernel32.AssignProcessToJobObject.restype is process_tools_module.wintypes.BOOL
+    assert kernel32.AssignProcessToJobObject.argtypes == [
+        process_tools_module.wintypes.HANDLE,
+        process_tools_module.wintypes.HANDLE,
+    ]
+    assert kernel32.TerminateJobObject.restype is process_tools_module.wintypes.BOOL
+    assert kernel32.TerminateJobObject.argtypes == [
+        process_tools_module.wintypes.HANDLE,
+        process_tools_module.wintypes.UINT,
+    ]
+    assert kernel32.CloseHandle.restype is process_tools_module.wintypes.BOOL
+    assert kernel32.CloseHandle.argtypes == [process_tools_module.wintypes.HANDLE]
+    assert kernel32.CreateToolhelp32Snapshot.restype is process_tools_module.wintypes.HANDLE
+    assert kernel32.CreateToolhelp32Snapshot.argtypes == [
+        process_tools_module.wintypes.DWORD,
+        process_tools_module.wintypes.DWORD,
+    ]
+    assert kernel32.OpenThread.restype is process_tools_module.wintypes.HANDLE
+    assert kernel32.OpenThread.argtypes == [
+        process_tools_module.wintypes.DWORD,
+        process_tools_module.wintypes.BOOL,
+        process_tools_module.wintypes.DWORD,
+    ]
+    assert kernel32.ResumeThread.restype is process_tools_module.wintypes.DWORD
+    assert kernel32.ResumeThread.argtypes == [process_tools_module.wintypes.HANDLE]
+    assert kernel32.Thread32First.restype is process_tools_module.wintypes.BOOL
+    assert kernel32.Thread32First.argtypes == [
+        process_tools_module.wintypes.HANDLE,
+        process_tools_module.ctypes.POINTER(process_tools_module._WindowsThreadEntry32),  # noqa: SLF001
+    ]
+    assert kernel32.Thread32Next.restype is process_tools_module.wintypes.BOOL
+    assert kernel32.Thread32Next.argtypes == [
+        process_tools_module.wintypes.HANDLE,
+        process_tools_module.ctypes.POINTER(process_tools_module._WindowsThreadEntry32),  # noqa: SLF001
+    ]
+    assert kernel32.WaitForSingleObject.restype is process_tools_module.wintypes.DWORD
+    assert kernel32.WaitForSingleObject.argtypes == [
+        process_tools_module.wintypes.HANDLE,
+        process_tools_module.wintypes.DWORD,
+    ]
+
+
+def test_bash_tool_skips_taskkill_for_exited_windows_leader_without_job(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        returncode = 0
         pid = 123
         killed = False
 
@@ -548,14 +2194,45 @@ def test_bash_tool_uses_taskkill_for_windows_process_tree_cleanup(
     monkeypatch.setattr(process_tools_module.os, "name", "nt")
     monkeypatch.setattr(process_tools_module.subprocess, "run", fake_run)
 
-    process_tools_module._kill_process_tree(process)  # noqa: SLF001
+    process_tools_module._kill_process_tree(process)  # type: ignore[arg-type]  # noqa: SLF001
 
-    assert calls == [["taskkill", "/F", "/T", "/PID", "123"]]
+    assert calls == []
     assert process.killed is False
+
+
+def test_async_windows_tree_cleanup_does_not_block_event_loop(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        returncode = None
+        pid = 123
+
+    monkeypatch.setattr(process_tools_module.os, "name", "nt")
+
+    def slow_kill(_process: object) -> None:
+        time.sleep(0.1)
+
+    monkeypatch.setattr(process_tools_module, "_kill_process_tree", slow_kill)
+
+    async def run() -> bool:
+        completed = anyio.Event()
+
+        async def terminate() -> None:
+            await process_tools_module._terminate_process_tree(DummyProcess())  # type: ignore[arg-type]  # noqa: SLF001
+            completed.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(terminate)
+            await anyio.sleep(0.01)
+            event_loop_remained_responsive = not completed.is_set()
+        return event_loop_remained_responsive
+
+    assert anyio.run(run) is True
 
 
 def test_exec_helper_bounds_stderr_before_buffering(tmp_path: Path) -> None:
     async def run() -> process_tools_module.ProcessResult:
+        supervisor = process_manager_module.ProcessSupervisor()
         return await process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
             [
                 sys.executable,
@@ -563,6 +2240,7 @@ def test_exec_helper_bounds_stderr_before_buffering(tmp_path: Path) -> None:
                 "import sys; sys.stderr.write('e' * 10000)",
             ],
             cwd=tmp_path,
+            process_supervisor=supervisor,
             max_stdout_lines=1,
             max_buffered_stderr_bytes=20,
             max_buffered_stderr_lines=100,
@@ -572,6 +2250,299 @@ def test_exec_helper_bounds_stderr_before_buffering(tmp_path: Path) -> None:
 
     assert len(result.stderr.encode("utf-8")) <= 20
     assert result.stderr_truncated is True
+
+
+def test_exec_helper_reports_failed_output_limit_termination(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        def __init__(self) -> None:
+            self.stdout = asyncio.StreamReader()
+            self.stdout.feed_data(b"first\nsecond\n")
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_eof()
+            self.returncode = None
+            self.wait_called = False
+
+        async def wait(self) -> int:
+            self.wait_called = True
+            if self.returncode is not None:
+                return self.returncode
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    process: DummyProcess | None = None
+
+    async def fake_spawn(*_args: object, **_kwargs: object) -> DummyProcess:
+        nonlocal process
+        process = DummyProcess()
+        return process
+
+    cleanup_succeeds = False
+
+    async def fail_terminate(_process: object) -> bool:
+        if cleanup_succeeds:
+            assert process is not None
+            process.returncode = -9
+            return True
+        return False
+
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr(process_tools_module, "_terminate_process_tree", fail_terminate)
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_terminate)
+
+    async def run() -> int:
+        nonlocal cleanup_succeeds
+        supervisor = process_manager_module.ProcessSupervisor()
+
+        async def execute() -> None:
+            await process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                ["command"],
+                cwd=tmp_path,
+                process_supervisor=supervisor,
+                max_stdout_lines=10,
+                max_buffered_stdout_lines=1,
+            )
+
+        with anyio.fail_after(1):
+            with pytest.raises(ToolError, match="Failed to terminate process tree"):
+                await asyncio.create_task(execute())
+        retained = len(supervisor._one_shot)  # noqa: SLF001
+        cleanup_succeeds = True
+        await supervisor.aclose()
+        return retained
+
+    retained = anyio.run(run)
+
+    assert process is not None
+    assert process.wait_called is True
+    assert retained == 1
+
+
+def test_exec_helper_cleans_process_when_cancelled_during_registration(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    original_spawn = process_tools_module.asyncio.create_subprocess_exec
+    process: asyncio.subprocess.Process | None = None
+    spawned = asyncio.Event()
+    registration_started = asyncio.Event()
+    allow_registration = asyncio.Event()
+
+    async def record_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        nonlocal process
+        process = await original_spawn(*args, **kwargs)
+        spawned.set()
+        return process
+
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", record_spawn)
+
+    async def run() -> tuple[int | None, int]:
+        supervisor = process_manager_module.ProcessSupervisor()
+        original_track = supervisor._track_one_shot  # noqa: SLF001
+
+        async def delayed_track(
+            tracked_process: asyncio.subprocess.Process,
+            task: asyncio.Task[object],
+            *,
+            reserved: bool = False,
+        ) -> None:
+            registration_started.set()
+            await allow_registration.wait()
+            await original_track(tracked_process, task, reserved=reserved)
+
+        monkeypatch.setattr(supervisor, "_track_one_shot", delayed_track)
+        execute = asyncio.create_task(
+            process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=tmp_path,
+                process_supervisor=supervisor,
+                max_stdout_lines=10,
+            )
+        )
+        await spawned.wait()
+        await registration_started.wait()
+        execute.cancel()
+        await anyio.sleep(0)
+        assert execute.done() is False
+
+        allow_registration.set()
+        with pytest.raises(asyncio.CancelledError):
+            await execute
+        assert process is not None
+        return process.returncode, len(supervisor._one_shot)  # noqa: SLF001
+
+    returncode, retained = anyio.run(run)
+
+    assert returncode is not None
+    assert retained == 0
+
+
+def test_exec_helper_cleans_process_when_registration_finds_closed_supervisor(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    original_spawn = process_tools_module.asyncio.create_subprocess_exec
+    process: asyncio.subprocess.Process | None = None
+
+    async def record_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        nonlocal process
+        process = await original_spawn(*args, **kwargs)
+        return process
+
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", record_spawn)
+
+    async def run() -> int:
+        supervisor = process_manager_module.ProcessSupervisor()
+        await supervisor.aclose()
+        with pytest.raises(RuntimeError, match="ProcessSupervisor is closed"):
+            await process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=tmp_path,
+                process_supervisor=supervisor,
+                max_stdout_lines=10,
+            )
+        return len(supervisor._one_shot)  # noqa: SLF001
+
+    retained = anyio.run(run)
+
+    assert process is None
+    assert retained == 0
+
+
+def test_exec_helper_finishes_reservation_rollback_after_repeated_cancel(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    spawn_started = asyncio.Event()
+
+    async def pending_spawn(*_args: object, **_kwargs: object) -> asyncio.subprocess.Process:
+        spawn_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", pending_spawn)
+
+    async def run() -> int:
+        supervisor = process_manager_module.ProcessSupervisor()
+        execute = asyncio.create_task(
+            process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                [sys.executable, "-c", "pass"],
+                cwd=tmp_path,
+                process_supervisor=supervisor,
+                max_stdout_lines=10,
+            )
+        )
+        await spawn_started.wait()
+        async with supervisor._lock:  # noqa: SLF001
+            execute.cancel()
+            await anyio.sleep(0)
+            execute.cancel()
+            await anyio.sleep(0)
+            assert execute.done() is False
+
+        with pytest.raises(asyncio.CancelledError):
+            await execute
+        with anyio.fail_after(1):
+            await supervisor.aclose()
+        return supervisor._pending_one_shot_starts  # noqa: SLF001
+
+    assert anyio.run(run) == 0
+
+
+def test_aclose_waits_for_one_shot_reserved_before_close(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    original_spawn = process_tools_module.asyncio.create_subprocess_exec
+    process: asyncio.subprocess.Process | None = None
+    spawn_started = asyncio.Event()
+    allow_spawn = asyncio.Event()
+
+    async def delayed_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        nonlocal process
+        spawn_started.set()
+        await allow_spawn.wait()
+        process = await original_spawn(*args, **kwargs)
+        return process
+
+    monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", delayed_spawn)
+
+    async def run() -> int:
+        supervisor = process_manager_module.ProcessSupervisor()
+        execute = asyncio.create_task(
+            process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=tmp_path,
+                process_supervisor=supervisor,
+                max_stdout_lines=10,
+            )
+        )
+        await spawn_started.wait()
+        close_task = asyncio.create_task(supervisor.aclose())
+        await anyio.sleep(0.05)
+        assert close_task.done() is False
+
+        allow_spawn.set()
+        with pytest.raises(RuntimeError, match="ProcessSupervisor is closed"):
+            await execute
+        await close_task
+        assert process is not None
+        assert process.returncode is not None
+        return len(supervisor._one_shot)  # noqa: SLF001
+
+    retained = anyio.run(run)
+
+    assert retained == 0
+
+
+def test_exec_helper_delays_repeated_cancellation_until_cleanup_finishes(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    supervisor = process_manager_module.ProcessSupervisor()
+    original_terminate = supervisor._terminate_one_shot  # noqa: SLF001
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+
+    async def delayed_terminate(
+        process: asyncio.subprocess.Process,
+        *,
+        wait: bool = False,
+    ) -> bool:
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        return await original_terminate(process, wait=wait)
+
+    monkeypatch.setattr(supervisor, "_terminate_one_shot", delayed_terminate)
+
+    async def run() -> int:
+        execute = asyncio.create_task(
+            process_tools_module._run_exec_limited_stdout(  # noqa: SLF001
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=tmp_path,
+                process_supervisor=supervisor,
+                max_stdout_lines=10,
+            )
+        )
+        with anyio.fail_after(1):
+            while not supervisor._one_shot:  # noqa: SLF001
+                await anyio.sleep(0)
+        execute.cancel()
+        await cleanup_started.wait()
+        execute.cancel()
+        await anyio.sleep(0)
+        assert execute.done() is False
+
+        allow_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await execute
+        return len(supervisor._one_shot)  # noqa: SLF001
+
+    retained = anyio.run(run)
+
+    assert retained == 0
 
 
 def test_grep_tool_python_fallback_supports_literal_ignore_case_and_glob(
@@ -640,6 +2611,7 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
         command: list[str],
         *,
         cwd: Path,
+        process_supervisor: object,
         max_stdout_lines: int,
         stdout_line_filter: object = None,
         stdout_count_filter: object = None,
@@ -649,6 +2621,7 @@ def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
         max_buffered_stderr_lines: int | None = None,
     ) -> search_tools_module.ProcessResult:
         assert cwd == tmp_path
+        assert isinstance(process_supervisor, process_manager_module.ProcessSupervisor)
         assert callable(stdout_count_filter)
         calls.append(
             (
@@ -826,6 +2799,7 @@ def test_grep_tool_ripgrep_drops_context_for_omitted_merged_match(
         command: list[str],
         *,
         cwd: Path,
+        process_supervisor: object,
         max_stdout_lines: int,
         stdout_line_filter: object = None,
         stdout_count_filter: object = None,
@@ -835,6 +2809,7 @@ def test_grep_tool_ripgrep_drops_context_for_omitted_merged_match(
         max_buffered_stderr_lines: int | None = None,
     ) -> search_tools_module.ProcessResult:
         assert cwd == tmp_path
+        assert isinstance(process_supervisor, process_manager_module.ProcessSupervisor)
         assert max_stdout_lines == 2
         assert callable(stdout_count_filter)
         assert max_buffered_stdout_bytes == 50000
@@ -1241,12 +3216,14 @@ def test_find_tool_ripgrep_bounds_stdout_before_buffering(
         command: list[str],
         *,
         cwd: Path,
+        process_supervisor: object,
         max_stdout_lines: int,
         stdout_line_filter: object = None,
         max_buffered_stderr_bytes: int | None = None,
         max_buffered_stderr_lines: int | None = None,
     ) -> search_tools_module.ProcessResult:
         assert cwd == tmp_path
+        assert isinstance(process_supervisor, process_manager_module.ProcessSupervisor)
         assert callable(stdout_line_filter)
         calls.append(
             (command, max_stdout_lines, max_buffered_stderr_bytes, max_buffered_stderr_lines)

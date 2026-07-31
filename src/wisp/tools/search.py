@@ -15,6 +15,7 @@ from wisp.tools.context import ToolContext
 from wisp.tools.paths import display_tool_path, is_protected_path, resolve_tool_path
 from wisp.tools.process import ProcessResult as ProcessResult
 from wisp.tools.process import _run_exec_limited_stdout
+from wisp.tools.process_manager import ProcessSupervisor
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.truncation import truncate_text
 
@@ -58,6 +59,14 @@ class GrepTool:
         "required": ["pattern"],
     }
 
+    def __init__(self, process_supervisor: ProcessSupervisor | None = None) -> None:
+        self._process_supervisor = process_supervisor or ProcessSupervisor()
+
+    async def aclose(self) -> None:
+        """Retry and release any retained search-process cleanup."""
+
+        await self._process_supervisor.aclose()
+
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         pattern = _required_string(arguments, "pattern", allow_whitespace=True)
         path = resolve_tool_path(_optional_string(arguments, "path"), context)
@@ -83,6 +92,7 @@ class GrepTool:
                 context_lines=context_lines,
                 max_results=max_results,
                 context=context,
+                process_supervisor=self._process_supervisor,
             )
 
         return _python_grep(
@@ -112,6 +122,14 @@ class FindTool:
         },
     }
 
+    def __init__(self, process_supervisor: ProcessSupervisor | None = None) -> None:
+        self._process_supervisor = process_supervisor or ProcessSupervisor()
+
+    async def aclose(self) -> None:
+        """Retry and release any retained search-process cleanup."""
+
+        await self._process_supervisor.aclose()
+
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         path = resolve_tool_path(_optional_string(arguments, "path"), context)
         pattern = _optional_string(arguments, "pattern") or "*"
@@ -127,6 +145,7 @@ class FindTool:
                 pattern=pattern,
                 max_results=max_results,
                 context=context,
+                process_supervisor=self._process_supervisor,
             )
 
         return _python_find(path=path, pattern=pattern, max_results=max_results, context=context)
@@ -180,6 +199,7 @@ async def _run_rg_grep(
     context_lines: int,
     max_results: int,
     context: ToolContext,
+    process_supervisor: ProcessSupervisor,
 ) -> ToolResult:
     effective_context_lines = _bounded_rg_context_lines(context_lines, context)
     context_truncated = effective_context_lines < context_lines
@@ -239,6 +259,7 @@ async def _run_rg_grep(
     result = await _run_exec_limited_stdout(
         command,
         cwd=context.cwd,
+        process_supervisor=process_supervisor,
         max_stdout_lines=max_results + 1,
         stdout_line_filter=_keep_line,
         stdout_count_filter=_is_reportable_match,
@@ -305,6 +326,7 @@ async def _run_rg_find(
     pattern: str,
     max_results: int,
     context: ToolContext,
+    process_supervisor: ProcessSupervisor,
 ) -> ToolResult:
     if path.is_file():
         candidates = [path]
@@ -323,6 +345,7 @@ async def _run_rg_find(
         result = await _run_exec_limited_stdout(
             [rg_path, *_rg_sandbox_args(context), "--files", "--", _command_path(path, context)],
             cwd=context.cwd,
+            process_supervisor=process_supervisor,
             max_stdout_lines=max_results + 1,
             stdout_line_filter=_reportable_file,
             max_buffered_stderr_bytes=max(0, context.max_output_bytes),

@@ -102,20 +102,23 @@ class RpcProjectConfiguration:
             )
         else:
             trusted_runtime = await self.runtime_builder(trusted_config)
-            staged_providers = ProviderRegistry()
-            staged_providers.replace_all(runtime.providers_for_configuration(trusted_runtime))
-            configuration = resolve_coding_session_configuration(
-                trusted_config,
-                providers=staged_providers,
-                models=runtime.models,
-                trusted=True,
-                provider_name=effective_provider,
-                model=effective_model,
-                has_model=overrides.has_model,
-                effort=overrides.effort,
-                has_effort=overrides.has_effort,
-            )
-            runtime.adopt_provider_configuration(trusted_runtime)
+            try:
+                staged_providers = ProviderRegistry()
+                staged_providers.replace_all(runtime.providers_for_configuration(trusted_runtime))
+                configuration = resolve_coding_session_configuration(
+                    trusted_config,
+                    providers=staged_providers,
+                    models=runtime.models,
+                    trusted=True,
+                    provider_name=effective_provider,
+                    model=effective_model,
+                    has_model=overrides.has_model,
+                    effort=overrides.effort,
+                    has_effort=overrides.has_effort,
+                )
+                runtime.adopt_provider_configuration(trusted_runtime)
+            finally:
+                await trusted_runtime.aclose()
         agent.reconfigure(configuration)
         if trusted_config == self.startup_config:
             return None

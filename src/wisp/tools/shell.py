@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from typing import Final, cast, overload
+
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_int, _required_string
 from wisp.tools.context import ToolContext
 from wisp.tools.process import _format_process_output_bounded, _run_shell
+from wisp.tools.process_manager import ProcessSupervisor
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.truncation import truncate_text
+
+_DEFAULT_PROCESS_SUPERVISOR: Final = object()
 
 
 class BashTool:
@@ -28,19 +33,51 @@ class BashTool:
         "required": ["command"],
     }
 
+    @overload
+    def __init__(self) -> None: ...
+
+    @overload
+    def __init__(self, process_supervisor: ProcessSupervisor | None) -> None: ...
+
+    def __init__(
+        self,
+        process_supervisor: ProcessSupervisor | None | object = _DEFAULT_PROCESS_SUPERVISOR,
+    ) -> None:
+        if process_supervisor is _DEFAULT_PROCESS_SUPERVISOR:
+            process_supervisor = ProcessSupervisor(max_processes=1)
+        self._process_supervisor = cast(ProcessSupervisor | None, process_supervisor)
+
+    async def aclose(self) -> None:
+        """Retry and release any retained default-supervisor process cleanup."""
+
+        if self._process_supervisor is not None:
+            await self._process_supervisor.aclose()
+
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         command = _required_string(arguments, "command")
         timeout = _optional_int(arguments, "timeout", default=30)
         if timeout is None or timeout < 1:
             raise ToolError("bash.timeout must be greater than or equal to 1")
 
-        result = await _run_shell(
-            command,
-            cwd=context.cwd,
-            timeout=float(timeout),
-            max_output_bytes=context.max_output_bytes,
-            max_output_lines=context.max_output_lines,
-        )
+        if self._process_supervisor is None:
+            # Preserve the direct-construction and monkeypatch seam used by
+            # embeddings and focused tool tests. Runtime-built Bash tools receive
+            # the shared supervisor below.
+            result = await _run_shell(
+                command,
+                cwd=context.cwd,
+                timeout=float(timeout),
+                max_output_bytes=context.max_output_bytes,
+                max_output_lines=context.max_output_lines,
+            )
+        else:
+            result = await self._process_supervisor.run_to_completion(
+                command,
+                cwd=context.cwd,
+                timeout=float(timeout),
+                max_output_bytes=context.max_output_bytes,
+                max_output_lines=context.max_output_lines,
+            )
         stdout = truncate_text(
             result.stdout,
             max_bytes=context.max_output_bytes,

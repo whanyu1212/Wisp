@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import anyio
 import pytest
 
 from wisp.events import AgentStarted
+from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.providers.fake import FakeProvider
 from wisp.providers.openai import OpenAIProvider
 from wisp.retry import RetryPolicy
@@ -18,8 +21,10 @@ from wisp.runtime import (
     UnknownToolError,
     WispRuntime,
 )
-from wisp.runtime.extensions import activate_extensions, build_runtime
+from wisp.runtime.extensions import activate_builtin_extensions, activate_extensions, build_runtime
 from wisp.tools.builtin import ReadTool
+from wisp.tools.search import FindTool, GrepTool
+from wisp.tools.shell import BashTool
 
 
 def test_provider_registry_registers_and_resolves_provider() -> None:
@@ -138,6 +143,28 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
     )
 
 
+def test_build_runtime_wires_process_tools_to_runtime_supervisor_and_closes_it() -> None:
+    async def run() -> None:
+        runtime = await build_runtime()
+        bash = runtime.tools.get("bash")
+        grep = runtime.tools.get("grep")
+        find = runtime.tools.get("find")
+
+        assert isinstance(bash, BashTool)
+        assert isinstance(grep, GrepTool)
+        assert isinstance(find, FindTool)
+        assert bash._process_supervisor is runtime.process_supervisor  # noqa: SLF001
+        assert grep._process_supervisor is runtime.process_supervisor  # noqa: SLF001
+        assert find._process_supervisor is runtime.process_supervisor  # noqa: SLF001
+
+        await runtime.aclose()
+        await runtime.aclose()
+        with pytest.raises(RuntimeError, match="ProcessSupervisor is closed"):
+            await runtime.process_supervisor.start("true", cwd=Path.cwd(), timeout=1)
+
+    anyio.run(run)
+
+
 def test_direct_runtime_construction_uses_extension_api_command_registry() -> None:
     async def run() -> tuple[str, ...]:
         template = await build_runtime()
@@ -163,6 +190,39 @@ def test_direct_runtime_construction_uses_extension_api_command_registry() -> No
         return runtime.commands.names()
 
     assert anyio.run(run) == ("help",)
+
+
+def test_direct_runtime_activation_wires_process_tools_to_runtime_supervisor() -> None:
+    async def run() -> None:
+        providers = ProviderRegistry()
+        tools = ToolRegistry()
+        events = EventBus()
+        api = ExtensionAPI(providers=providers, tools=tools, events=events)
+        runtime = WispRuntime(
+            providers=providers,
+            tools=tools,
+            events=events,
+            api=api,
+            models=ModelRegistry(effective_catalog()),
+        )
+
+        await activate_builtin_extensions(runtime.api)
+        bash = runtime.tools.get("bash")
+        grep = runtime.tools.get("grep")
+        find = runtime.tools.get("find")
+
+        assert isinstance(bash, BashTool)
+        assert isinstance(grep, GrepTool)
+        assert isinstance(find, FindTool)
+        assert bash._process_supervisor is runtime.process_supervisor  # noqa: SLF001
+        assert grep._process_supervisor is runtime.process_supervisor  # noqa: SLF001
+        assert find._process_supervisor is runtime.process_supervisor  # noqa: SLF001
+
+        await runtime.aclose()
+        with pytest.raises(RuntimeError, match="ProcessSupervisor is closed"):
+            await runtime.process_supervisor.start("true", cwd=Path.cwd(), timeout=1)
+
+    anyio.run(run)
 
 
 def test_build_runtime_passes_retry_policy_to_builtin_providers() -> None:

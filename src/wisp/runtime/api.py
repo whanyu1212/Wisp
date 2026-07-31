@@ -10,6 +10,7 @@ from wisp.runtime.commands import CommandDescriptor, CommandRegistry
 from wisp.runtime.event_bus import EventBus, EventHandler
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 from wisp.tools.base import Tool
+from wisp.tools.process_manager import ProcessSupervisor
 
 
 class ExtensionAPI:
@@ -22,11 +23,13 @@ class ExtensionAPI:
         tools: ToolRegistry,
         commands: CommandRegistry | None = None,
         events: EventBus,
+        process_supervisor: ProcessSupervisor | None = None,
     ) -> None:
         self._providers = providers
         self._tools = tools
         self._commands = commands or CommandRegistry()
         self._events = events
+        self._process_supervisor = process_supervisor
 
     def register_provider(self, provider: Provider, *, replace: bool = True) -> None:
         """Register a model provider with the runtime."""
@@ -49,6 +52,24 @@ class ExtensionAPI:
 
         return self._commands
 
+    @property
+    def process_supervisor(self) -> ProcessSupervisor | None:
+        """Return the runtime process supervisor, if the API is runtime-bound."""
+
+        return self._process_supervisor
+
+    def bind_process_supervisor(self, process_supervisor: ProcessSupervisor) -> None:
+        """Bind this API to the runtime-owned process supervisor."""
+
+        if (
+            self._process_supervisor is not None
+            and self._process_supervisor is not process_supervisor
+        ):
+            raise ValueError(
+                "ExtensionAPI.process_supervisor must match WispRuntime.process_supervisor"
+            )
+        self._process_supervisor = process_supervisor
+
     def on(self, event_type: str, handler: EventHandler) -> None:
         """Subscribe to runtime events emitted by the agent core."""
 
@@ -65,11 +86,16 @@ class WispRuntime:
     api: ExtensionAPI
     models: ModelRegistry
     commands: CommandRegistry = field(default_factory=CommandRegistry)
+    process_supervisor: ProcessSupervisor = field(
+        default_factory=ProcessSupervisor,
+        repr=False,
+    )
     _configured_providers: dict[str, Provider] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         """Normalize shared registries and direct-construction provider state."""
 
+        self.api.bind_process_supervisor(self.process_supervisor)
         if self.commands is not self.api.commands:
             if self.commands.names():
                 raise ValueError("WispRuntime.commands must match ExtensionAPI.commands")
@@ -124,3 +150,8 @@ class WispRuntime:
         self.providers.replace_all(providers)
         self._configured_providers.clear()
         self._configured_providers.update(candidate._configured_providers)
+
+    async def aclose(self) -> None:
+        """Release runtime-owned resources, including every managed process."""
+
+        await self.process_supervisor.aclose()
