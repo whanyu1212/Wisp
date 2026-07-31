@@ -596,6 +596,13 @@ class ToolExecutionEnded(WispEvent):
     stdout_dropped_bytes: int = Field(default=0, ge=0)
     stderr_dropped_bytes: int = Field(default=0, ge=0)
 
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < PROCESS_METADATA_SCHEMA_VERSION:
+            _strip_process_metadata_fields(data)
+        return data
+
 
 class ToolResultReady(WispEvent):
     type: Literal["tool.result"] = "tool.result"
@@ -659,6 +666,13 @@ class ToolResultReady(WispEvent):
     stderr_truncated: bool = False
     stdout_dropped_bytes: int = Field(default=0, ge=0)
     stderr_dropped_bytes: int = Field(default=0, ge=0)
+
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < PROCESS_METADATA_SCHEMA_VERSION:
+            _strip_process_metadata_fields(data)
+        return data
 
 
 class TurnCompleted(WispEvent):
@@ -1434,6 +1448,11 @@ def _reject_legacy_process_metadata(data: JsonObject, *, version: int) -> None:
     raise ValueError(
         f"Bash process metadata requires schema_version {PROCESS_METADATA_SCHEMA_VERSION} or newer"
     )
+
+
+def _strip_process_metadata_fields(data: dict[str, object]) -> None:
+    for field in _PROCESS_METADATA_FIELDS:
+        data.pop(field, None)
 
 
 def wisp_event_from_json(line: str) -> KnownWispEvent:

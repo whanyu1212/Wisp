@@ -279,6 +279,14 @@ def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> To
     output = _format_managed_update(update, stdout=stdout.text, stderr=stderr.text, context=context)
     stdout_truncated = update.stdout_truncated or stdout.truncated
     stderr_truncated = update.stderr_truncated or stderr.truncated
+    stdout_dropped_bytes = update.stdout_dropped_bytes + _additional_dropped_bytes(
+        update.stdout,
+        stdout,
+    )
+    stderr_dropped_bytes = update.stderr_dropped_bytes + _additional_dropped_bytes(
+        update.stderr,
+        stderr,
+    )
     data: dict[str, object] = {
         "process_id": update.process_id,
         "process_state": update.state,
@@ -287,8 +295,8 @@ def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> To
         "stderr": stderr.text,
         "stdout_truncated": stdout_truncated,
         "stderr_truncated": stderr_truncated,
-        "stdout_dropped_bytes": update.stdout_dropped_bytes,
-        "stderr_dropped_bytes": update.stderr_dropped_bytes,
+        "stdout_dropped_bytes": stdout_dropped_bytes,
+        "stderr_dropped_bytes": stderr_dropped_bytes,
         "output_has_exit_status": False,
     }
     if update.exit_code is not None:

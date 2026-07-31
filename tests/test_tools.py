@@ -466,6 +466,25 @@ def test_bash_managed_update_preserves_retained_stdout_after_label(tmp_path: Pat
     assert result.truncated is False
 
 
+def test_bash_managed_update_adds_poll_time_dropped_bytes(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=20, max_output_lines=100)
+    update = process_manager_module.ProcessUpdate(
+        process_id="p123",
+        state="running",
+        stdout="x" * 100,
+        stdout_dropped_bytes=3,
+    )
+
+    result = shell_tools_module._managed_update_result(update, context=context)
+    stdout = str(result.data["stdout"])
+
+    assert result.data["stdout_truncated"] is True
+    assert result.data["stdout_dropped_bytes"] == 3 + len(update.stdout.encode("utf-8")) - len(
+        stdout.encode("utf-8")
+    )
+    assert result.truncated is True
+
+
 def test_bash_tool_cancels_resumable_process(tmp_path: Path) -> None:
     async def run() -> None:
         context = ToolContext(cwd=tmp_path)

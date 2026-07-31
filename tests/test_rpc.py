@@ -35,6 +35,8 @@ from wisp.events import (
     RpcSessionTreeUnreverted,
     RpcStateReported,
     RpcStateSnapshot,
+    ToolExecutionEnded,
+    ToolResultReady,
     TrustRequested,
     TrustResolved,
     wisp_event_from_json,
@@ -631,6 +633,61 @@ def test_bash_process_metadata_requires_schema_v25(
 
     payload["schema_version"] = 25
     assert wisp_event_from_json(json.dumps(payload)).schema_version == 25
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        ToolResultReady(
+            schema_version=24,
+            call_id="call-1",
+            name="bash",
+            output="Process p123 is still running",
+            is_error=False,
+            process_id="p123",
+            process_state="running",
+            stdout="out",
+            stderr="err",
+            stdout_truncated=True,
+            stderr_truncated=True,
+            stdout_dropped_bytes=1,
+            stderr_dropped_bytes=2,
+        ),
+        ToolExecutionEnded(
+            schema_version=24,
+            call_id="call-1",
+            name="bash",
+            output="Process p123 is still running",
+            is_error=False,
+            process_id="p123",
+            process_state="running",
+            stdout="out",
+            stderr="err",
+            stdout_truncated=True,
+            stderr_truncated=True,
+            stdout_dropped_bytes=1,
+            stderr_dropped_bytes=2,
+        ),
+    ],
+)
+def test_bash_process_metadata_is_stripped_for_legacy_serialized_events(
+    event: ToolResultReady | ToolExecutionEnded,
+) -> None:
+    payload = json.loads(event.model_dump_json())
+
+    for field in (
+        "process_id",
+        "process_state",
+        "process_error",
+        "stdout",
+        "stderr",
+        "stdout_truncated",
+        "stderr_truncated",
+        "stdout_dropped_bytes",
+        "stderr_dropped_bytes",
+    ):
+        assert field not in payload
+    assert wisp_event_from_json(json.dumps(payload)).schema_version == 24
 
 
 def test_rpc_session_name_changed_round_trips_only_at_schema_v21() -> None:
