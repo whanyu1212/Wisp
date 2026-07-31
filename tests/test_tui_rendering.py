@@ -276,6 +276,42 @@ def test_line_and_fullscreen_renderers_render_historical_tool_entries() -> None:
     ]
 
 
+def test_historical_cancelled_tool_result_renders_stored_output() -> None:
+    entries = (
+        HistoricalToolCard(
+            card_id="history:cancelled",
+            name="bash",
+            arguments={"operation": "cancel", "process_id": "p123"},
+            output="Process p123 cancelled\nstdout:\ntail\n",
+            is_error=False,
+            status="cancelled",
+        ),
+        HistoricalToolCard(
+            card_id="history:missing",
+            name="bash",
+            arguments={"operation": "start", "command": "sleep 30"},
+            output="No persisted tool result.",
+            is_error=True,
+            status="cancelled",
+            missing_result=True,
+        ),
+    )
+    console, output = _console()
+    line = LineTuiRenderer(console)
+    fullscreen = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+
+    line.render_history_entries(entries)
+    fullscreen.render_history_entries(entries)
+
+    rendered = output.getvalue()
+    assert "⊘ historical tool bash: Process p123 cancelled" in rendered
+    assert "⊘ historical tool bash: no persisted result" in rendered
+    assert [(entry.role, entry.content) for entry in fullscreen.state.transcript] == [
+        ("tool", "bash: Process p123 cancelled"),
+        ("tool", "bash: no persisted result"),
+    ]
+
+
 def test_fullscreen_renderers_retain_the_full_hydrated_page_by_default() -> None:
     messages = tuple(
         HistoricalTranscriptMessage(role="user", content=f"message {index}")

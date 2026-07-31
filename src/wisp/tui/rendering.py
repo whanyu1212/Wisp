@@ -1333,7 +1333,12 @@ def _first_line(text: str) -> str:
 def _historical_tool_line(entry: HistoricalToolCard) -> str:
     status = historical_tool_status(entry)
     if status == "cancelled":
-        return "no persisted result"
+        if entry.missing_result or not entry.output.strip():
+            return "no persisted result"
+        first_line = _first_line(entry.output)
+        if entry.truncated:
+            return f"{first_line} [truncated]"
+        return first_line
     if status == "denied":
         return _first_line(entry.output)
     if entry.summary:
