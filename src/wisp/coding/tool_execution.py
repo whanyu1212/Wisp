@@ -40,6 +40,7 @@ _MAX_RESULT_COUNT = (1 << 63) - 1
 _MIN_EXIT_CODE = -(1 << 31)
 _MAX_EXIT_CODE = (1 << 31) - 1
 _MAX_PROCESS_ID_BYTES = 256
+_MAX_PROCESS_ERROR_BYTES = 2_000
 _TRUNCATION_SUFFIX_WITH_SEPARATOR_BYTES = len("\n[truncated]")
 _PROCESS_STATES: frozenset[ManagedProcessState] = frozenset(
     ("running", "completed", "failed", "timed_out", "cancelled")
@@ -411,7 +412,12 @@ def _copy_bash_process_data(
     state = source.get("process_state")
     if type(state) is str and state in _PROCESS_STATES:
         target["process_state"] = state
-    _copy_bounded_output_text(source, target, "process_error", context=context)
+    _copy_bounded_metadata_text(
+        source,
+        target,
+        "process_error",
+        max_bytes=_MAX_PROCESS_ERROR_BYTES,
+    )
     _copy_exact(source, target, "stdout_truncated", bool)
     _copy_exact(source, target, "stderr_truncated", bool)
     if _copy_bounded_output_text(source, target, "stdout", context=context):
@@ -440,12 +446,33 @@ def _bash_managed_process_text_overhead(
     elif state == "cancelled":
         header = f"Process {process_id} cancelled"
     else:
-        header = f"Process {process_id} failed: "
+        error = _promote_process_error(tool_name, data)
+        header = (
+            f"Process {process_id} failed: {error}" if error else f"Process {process_id} failed: "
+        )
     return (
         len(header.encode("utf-8"))
         + _bash_managed_stream_label_byte_overhead(data)
         + _TRUNCATION_SUFFIX_WITH_SEPARATOR_BYTES
     )
+
+
+def _copy_bounded_metadata_text(
+    source: Mapping[str, object],
+    target: dict[str, object],
+    key: str,
+    *,
+    max_bytes: int,
+) -> bool:
+    value = source.get(key)
+    if type(value) is not str:
+        return False
+    _require_utf8(value, field=f"ToolResult.data[{key!r}]")
+    lines = value.splitlines()
+    first_line = lines[0] if lines else value
+    bounded = truncate_text(first_line, max_bytes=max_bytes, max_lines=1)
+    target[key] = bounded.text
+    return bounded.truncated or first_line != value
 
 
 def _bash_managed_process_line_overhead(

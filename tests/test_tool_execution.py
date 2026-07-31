@@ -551,6 +551,36 @@ def test_executor_preserves_bash_managed_output_after_labels() -> None:
     assert ended.truncated is False
 
 
+def test_executor_preserves_bash_managed_failure_detail_outside_tiny_body_budget() -> None:
+    process_error = "Failed to terminate process tree"
+    ended = _run_executor(
+        _ResultTool(
+            name="bash",
+            result=ToolResult(
+                text=f"Process p123 failed: {process_error}",
+                data={
+                    "process_id": "p123",
+                    "process_state": "failed",
+                    "process_error": process_error,
+                    "stdout": "",
+                    "stderr": "",
+                    "output_has_exit_status": False,
+                },
+            ),
+        ),
+        context=ToolContext(
+            cwd=Path.cwd(),
+            max_output_bytes=1,
+            max_output_lines=0,
+            protected_paths=(),
+        ),
+    )
+
+    assert ended.output == f"Process p123 failed: {process_error}"
+    assert ended.process_error == process_error
+    assert ended.truncated is False
+
+
 def test_executor_propagates_wisp_result_processing_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
