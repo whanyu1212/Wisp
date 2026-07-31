@@ -757,14 +757,6 @@ class ProcessSupervisor:
         for process_id, managed in tuple(self._managed.items()):
             if managed.terminal_reported and managed.error != PROCESS_TREE_CLEANUP_ERROR:
                 del self._managed[process_id]
-        managed_capacity = self._max_processes - len(self._one_shot)
-        if len(self._managed) < managed_capacity:
-            return
-        for process_id, managed in tuple(self._managed.items()):
-            if managed.state != "running" and managed.error != PROCESS_TREE_CLEANUP_ERROR:
-                del self._managed[process_id]
-                if len(self._managed) < managed_capacity:
-                    return
 
     def _ensure_open(self) -> None:
         if self._closed:

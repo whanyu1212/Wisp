@@ -1212,15 +1212,57 @@ def test_poll_wait_releases_operation_lock_for_cancel(tmp_path: Path) -> None:
     assert poll_update.state == "cancelled"
 
 
-def test_unreported_terminal_handle_is_evicted_for_capacity(tmp_path: Path) -> None:
-    async def run() -> tuple[ProcessUpdate, ...]:
+def test_unreported_terminal_handle_blocks_capacity_until_polled(tmp_path: Path) -> None:
+    async def run() -> tuple[ProcessUpdate, tuple[ProcessUpdate, ...]]:
         supervisor = ProcessSupervisor(max_processes=1)
         try:
-            await supervisor.start(
+            first = await supervisor.start(
                 _python_command("print('unobserved')"),
                 cwd=tmp_path,
                 timeout=2,
             )
+            with anyio.fail_after(3):
+                while (
+                    supervisor._managed[first].state == "running"  # noqa: SLF001
+                    or not supervisor._managed[first].stdout.text  # noqa: SLF001
+                ):
+                    await anyio.sleep(0.01)
+
+            with pytest.raises(ToolError, match="managed process limit"):
+                await supervisor.start(
+                    _python_command("print('blocked')"),
+                    cwd=tmp_path,
+                    timeout=2,
+                )
+
+            first_update = await supervisor.poll(first)
+            second = await supervisor.start(
+                _python_command("print('accepted')"),
+                cwd=tmp_path,
+                timeout=2,
+            )
+            return first_update, await _poll_until_terminal(supervisor, second)
+        finally:
+            await supervisor.aclose()
+
+    first_update, second_updates = anyio.run(run)
+
+    assert first_update.state == "completed"
+    assert first_update.stdout == "unobserved\n"
+    assert second_updates[-1].state == "completed"
+    assert "".join(update.stdout for update in second_updates) == "accepted\n"
+
+
+def test_reported_terminal_handle_is_evicted_for_capacity(tmp_path: Path) -> None:
+    async def run() -> tuple[ProcessUpdate, ...]:
+        supervisor = ProcessSupervisor(max_processes=1)
+        try:
+            first = await supervisor.start(
+                _python_command("print('observed')"),
+                cwd=tmp_path,
+                timeout=2,
+            )
+            await _poll_until_terminal(supervisor, first)
             with anyio.fail_after(3):
                 while True:
                     try:
