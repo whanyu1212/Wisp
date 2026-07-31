@@ -23,8 +23,16 @@ from wisp.events import (
     UsageCost,
     WispEvent,
 )
+from wisp.tool_presentation import tool_result_status
 
 from .types import OutputMode, _JsonOutputModeError
+
+_PRINT_TOOL_GLYPHS = {
+    "done": "✓",
+    "error": "✗",
+    "denied": "!",
+    "cancelled": "⊘",
+}
 
 
 def _exit_with_error(message: str, *, mode: OutputMode, console: Console) -> NoReturn:
@@ -103,8 +111,13 @@ def _print_event_line(event: WispEvent) -> str | None:
         reason = f": {event.reason}" if event.reason else ""
         return f"! denied {event.name}{reason}"
     if isinstance(event, ToolResultReady):
-        status = "✗" if event.is_error else "✓"
-        return f"{status} tool {event.name}: {_format_event_output(event.output)}"
+        presentation_status = tool_result_status(
+            event.is_error,
+            event.exit_code,
+            process_state=event.process_state,
+        )
+        glyph = _PRINT_TOOL_GLYPHS[presentation_status]
+        return f"{glyph} tool {event.name}: {_format_event_output(event.output)}"
     if isinstance(event, SessionSaved):
         return f"session saved: {event.path}"
     return None

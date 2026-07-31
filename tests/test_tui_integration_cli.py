@@ -25,6 +25,7 @@ from wisp.trust_flow import TrustDecision
 from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.compact_echo import MAX_PENDING_ECHOES as _MAX_PENDING_ECHOES
 from wisp.tui.history import HistoricalToolCard, HistoricalTranscriptMessage
+from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.textual_app import (
     TextualTui,
     TextualTuiRenderer,
@@ -1273,6 +1274,28 @@ def test_textual_tool_card_nonzero_exit_renders_as_failure() -> None:
     assert "line-39" in rendered
 
 
+def test_textual_tool_card_timed_out_process_state_renders_as_failure() -> None:
+    rendered = _render_events_to_transcript(
+        [
+            ToolCallRequested(
+                call_id="c1",
+                name="bash",
+                arguments={"operation": "poll", "process_id": "proc-1"},
+            ),
+            ToolResultReady(
+                call_id="c1",
+                name="bash",
+                output="Process proc-1 timed out",
+                is_error=False,
+                process_state="timed_out",
+            ),
+        ]
+    )
+
+    assert "✗ bash" in rendered
+    assert "Process proc-1 timed out" in rendered
+
+
 def test_textual_tool_card_edit_renders_colored_diff() -> None:
     # Issue #74 PR B1: a successful `edit` renders a colored unified diff built
     # from the request's oldText/newText hunks — which reach the renderer on
@@ -1834,8 +1857,15 @@ def test_textual_tool_card_expand_repins_tail_when_focus_scrolled_a_tall_card() 
             card = _first_tool_card(app_instance)
             card.focus()
             await pilot.pause()
-            # Focusing a card taller than the viewport center-scrolls it, which drops
-            # follow-tail before the expand.
+            # Focusing a card taller than the viewport center-scrolls it on some
+            # Textual/platform combinations. If the driver keeps the tail pinned,
+            # force the same precondition directly so this test verifies the
+            # acceptance criterion, not Textual's focus-scroll implementation.
+            if transcript.is_following:
+                transcript.restore_viewport_state(
+                    TranscriptViewportState(scroll_y=0, following=False)
+                )
+                await pilot.pause()
             following_after_focus = transcript.is_following
             await pilot.press("enter")
             await pilot.pause()

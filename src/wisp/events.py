@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION = 24
+EVENT_SCHEMA_VERSION: Literal[25] = 25
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -34,6 +34,7 @@ RPC_SESSION_NAME_SCHEMA_VERSION = 21
 RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION = 22
 RPC_COMMANDS_SCHEMA_VERSION = 23
 RPC_SESSION_UNREVERT_SCHEMA_VERSION = 24
+PROCESS_METADATA_SCHEMA_VERSION = 25
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -43,6 +44,21 @@ CompactionReason = Literal["manual", "threshold", "overflow"]
 QueueMode = Literal["one_at_a_time", "all"]
 QueueKind = Literal["steering", "follow_up"]
 ToolPresentationStatus = Literal["done", "error", "denied", "cancelled"]
+ManagedProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
+_PROCESS_METADATA_EVENT_TYPES = frozenset({"tool.result", "tool.execution.ended"})
+_PROCESS_METADATA_FIELDS = frozenset(
+    {
+        "process_id",
+        "process_state",
+        "process_error",
+        "stdout",
+        "stderr",
+        "stdout_truncated",
+        "stderr_truncated",
+        "stdout_dropped_bytes",
+        "stderr_dropped_bytes",
+    }
+)
 
 
 def utc_now() -> datetime:
@@ -56,8 +72,8 @@ class WispEvent(BaseModel):
 
     type: str
     schema_version: Literal[
-        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
-    ] = 24
+        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25
+    ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
     @field_validator("schema_version", mode="before")
@@ -568,6 +584,24 @@ class ToolExecutionEnded(WispEvent):
     # dropped content never leaves the tool, so this bool is the only signal that an
     # expanded card is still not the whole story. See ToolResultReady.truncated.
     truncated: bool = False
+    # Resumable Bash metadata promoted from ToolResult.data for live JSON/RPC
+    # consumers. These are bounded scalars/chunks, not the raw result mapping.
+    process_id: str | None = None
+    process_state: ManagedProcessState | None = None
+    process_error: str | None = None
+    stdout: str | None = None
+    stderr: str | None = None
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    stdout_dropped_bytes: int = Field(default=0, ge=0)
+    stderr_dropped_bytes: int = Field(default=0, ge=0)
+
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < PROCESS_METADATA_SCHEMA_VERSION:
+            _strip_process_metadata_fields(data)
+        return data
 
 
 class ToolResultReady(WispEvent):
@@ -621,6 +655,24 @@ class ToolResultReady(WispEvent):
     # scalar like the others; False for tools that returned everything and for error
     # paths that produced no ToolResult.
     truncated: bool = False
+    # Resumable Bash metadata promoted from ToolResult.data for live JSON/RPC
+    # consumers. These are bounded scalars/chunks, not the raw result mapping.
+    process_id: str | None = None
+    process_state: ManagedProcessState | None = None
+    process_error: str | None = None
+    stdout: str | None = None
+    stderr: str | None = None
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    stdout_dropped_bytes: int = Field(default=0, ge=0)
+    stderr_dropped_bytes: int = Field(default=0, ge=0)
+
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < PROCESS_METADATA_SCHEMA_VERSION:
+            _strip_process_metadata_fields(data)
+        return data
 
 
 class TurnCompleted(WispEvent):
@@ -1228,6 +1280,7 @@ def _require_current_schema(data: JsonObject) -> None:
             f"{version!r}; expected 5 through {EVENT_SCHEMA_VERSION}"
         )
     _reject_legacy_session_name_fields(data, version=version)
+    _reject_legacy_process_metadata(data, version=version)
     if data.get("type") in {"compaction.started", "compaction.completed"}:
         if not 8 <= version <= EVENT_SCHEMA_VERSION:
             raise ValueError(
@@ -1383,6 +1436,23 @@ def _reject_legacy_session_name_fields(data: JsonObject, *, version: int) -> Non
             "RPC session name fields require schema_version "
             f"{RPC_SESSION_NAME_SCHEMA_VERSION} or newer"
         )
+
+
+def _reject_legacy_process_metadata(data: JsonObject, *, version: int) -> None:
+    if version >= PROCESS_METADATA_SCHEMA_VERSION:
+        return
+    if data.get("type") not in _PROCESS_METADATA_EVENT_TYPES:
+        return
+    if not any(field in data for field in _PROCESS_METADATA_FIELDS):
+        return
+    raise ValueError(
+        f"Bash process metadata requires schema_version {PROCESS_METADATA_SCHEMA_VERSION} or newer"
+    )
+
+
+def _strip_process_metadata_fields(data: dict[str, object]) -> None:
+    for field in _PROCESS_METADATA_FIELDS:
+        data.pop(field, None)
 
 
 def wisp_event_from_json(line: str) -> KnownWispEvent:

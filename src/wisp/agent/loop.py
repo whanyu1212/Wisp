@@ -212,6 +212,15 @@ async def _execute_tool_call(
         created=terminal.created,
         summary=terminal.summary,
         truncated=terminal.truncated,
+        process_id=terminal.process_id,
+        process_state=terminal.process_state,
+        process_error=terminal.process_error,
+        stdout=terminal.stdout,
+        stderr=terminal.stderr,
+        stdout_truncated=terminal.stdout_truncated,
+        stderr_truncated=terminal.stderr_truncated,
+        stdout_dropped_bytes=terminal.stdout_dropped_bytes,
+        stderr_dropped_bytes=terminal.stderr_dropped_bytes,
     )
 
 

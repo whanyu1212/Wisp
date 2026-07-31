@@ -12,11 +12,12 @@ import wisp.coding.tool_execution as tool_execution
 from wisp.agent.execution import ToolResultProcessingError
 from wisp.agent.messages import Message
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
-from wisp.coding.session import CodingSession
+from wisp.coding.session import CodingSession, _tool_result_status
 from wisp.events import (
     AgentCompleted,
     AgentStarted,
     ErrorEvent,
+    ManagedProcessState,
     MessageCompleted,
     MessageDelta,
     QueueKind,
@@ -1640,6 +1641,31 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
     assert final_message["content"] == "final answer"
     assert final_message["finish_reason"] == "stop"
     assert final_message["tool_calls"] == []
+
+
+@pytest.mark.parametrize(
+    ("process_state", "expected"),
+    [
+        ("timed_out", "error"),
+        ("failed", "error"),
+        ("cancelled", "cancelled"),
+        ("completed", "done"),
+        ("running", "done"),
+    ],
+)
+def test_tool_result_status_uses_managed_process_state(
+    process_state: ManagedProcessState,
+    expected: str,
+) -> None:
+    event = ToolExecutionEnded(
+        call_id="call-1",
+        name="bash",
+        output=f"Process proc-1 {process_state}",
+        is_error=False,
+        process_state=process_state,
+    )
+
+    assert _tool_result_status(event) == expected
 
 
 def test_coding_session_returns_error_result_when_tool_result_text_raises(tmp_path: Path) -> None:

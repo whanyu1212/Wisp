@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import codecs
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +20,7 @@ from wisp.tools.process import (
     _terminate_process_tree,
 )
 from wisp.tools.result import ToolError
+from wisp.tools.utf8 import DecodedTextUnit, decode_utf8_units, decode_utf8_with_source_byte_lengths
 
 ProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
 _T = TypeVar("_T")
@@ -46,6 +46,10 @@ class ProcessUpdate:
     stdout_dropped_bytes: int = 0
     stderr_dropped_bytes: int = 0
     error: str | None = None
+    stdout_retained_bytes: int | None = None
+    stderr_retained_bytes: int | None = None
+    stdout_source_byte_lengths: tuple[int, ...] | None = None
+    stderr_source_byte_lengths: tuple[int, ...] | None = None
 
 
 @dataclass
@@ -54,25 +58,59 @@ class _PendingText:
     max_lines: int
     text: str = ""
     dropped_bytes: int = 0
+    _source_byte_lengths: list[int] = field(default_factory=list)
+    _pending_utf8: bytes = b""
+
+    @property
+    def retained_source_bytes(self) -> int:
+        return sum(self._source_byte_lengths)
 
     def append(self, value: str) -> None:
         if not value:
             return
-        combined = f"{self.text}{value}"
-        bounded, dropped = _bounded_text_tail(
+        self._append_units(
+            DecodedTextUnit(text=character, source_bytes=len(character.encode("utf-8")))
+            for character in value
+        )
+
+    def append_bytes(self, value: bytes, *, final: bool = False) -> None:
+        units, pending = decode_utf8_units(self._pending_utf8 + value, final=final)
+        self._pending_utf8 = pending
+        self._append_units(units)
+
+    def _append_units(self, units: Iterable[DecodedTextUnit]) -> None:
+        new_units = tuple(units)
+        if not new_units:
+            return
+        combined = f"{self.text}{''.join(unit.text for unit in new_units)}"
+        source_byte_lengths = [
+            *self._source_byte_lengths,
+            *(unit.source_bytes for unit in new_units),
+        ]
+        bounded, _ = _bounded_text_tail(
             combined,
             max_bytes=self.max_bytes,
             max_lines=self.max_lines,
         )
+        if bounded:
+            self._source_byte_lengths = source_byte_lengths[-len(bounded) :]
+        else:
+            self._source_byte_lengths = []
         self.text = bounded
-        self.dropped_bytes += dropped
+        self.dropped_bytes += max(
+            0,
+            sum(source_byte_lengths) - self.retained_source_bytes,
+        )
 
-    def drain(self) -> tuple[str, int]:
+    def drain(self) -> tuple[str, int, int, tuple[int, ...]]:
         text = self.text
         dropped_bytes = self.dropped_bytes
+        retained_source_bytes = self.retained_source_bytes
+        source_byte_lengths = tuple(self._source_byte_lengths)
         self.text = ""
         self.dropped_bytes = 0
-        return text, dropped_bytes
+        self._source_byte_lengths = []
+        return text, dropped_bytes, retained_source_bytes, source_byte_lengths
 
 
 @dataclass
@@ -156,7 +194,7 @@ class ProcessSupervisor:
         release_ownership = False
         try:
             try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                stdout_result, stderr_result = await asyncio.wait_for(
                     capture_task,
                     timeout=timeout,
                 )
@@ -205,12 +243,24 @@ class ProcessSupervisor:
                 raise
             if not cleanup_succeeded:
                 raise ToolError("Failed to terminate process tree")
+            stdout, stdout_source_byte_lengths = decode_utf8_with_source_byte_lengths(
+                stdout_result.output
+            )
+            stderr, stderr_source_byte_lengths = decode_utf8_with_source_byte_lengths(
+                stderr_result.output
+            )
             result = ProcessResult(
                 exit_code=process.returncode if process.returncode is not None else -1,
-                stdout=stdout_bytes.decode("utf-8", errors="replace"),
-                stderr=stderr_bytes.decode("utf-8", errors="replace"),
-                stdout_truncated=budget.exhausted,
-                stderr_truncated=budget.exhausted,
+                stdout=stdout,
+                stderr=stderr,
+                stdout_truncated=stdout_result.truncated,
+                stderr_truncated=stderr_result.truncated,
+                stdout_dropped_bytes=stdout_result.dropped_bytes,
+                stderr_dropped_bytes=stderr_result.dropped_bytes,
+                stdout_retained_bytes=len(stdout_result.output),
+                stderr_retained_bytes=len(stderr_result.output),
+                stdout_source_byte_lengths=stdout_source_byte_lengths,
+                stderr_source_byte_lengths=stderr_source_byte_lengths,
             )
             release_ownership = True
             return result
@@ -548,14 +598,13 @@ class ProcessSupervisor:
     ) -> None:
         if stream is None:
             return
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         while True:
             chunk = await stream.read(8192)
             if not chunk:
                 break
-            output.append(decoder.decode(chunk))
+            output.append_bytes(chunk)
             managed.changed.set()
-        output.append(decoder.decode(b"", final=True))
+        output.append_bytes(b"", final=True)
         managed.changed.set()
 
     async def _wait_for_completion(self, managed: _ManagedProcess, timeout: float) -> None:
@@ -734,8 +783,8 @@ class ProcessSupervisor:
             return await _terminate_process_tree(managed.process)
 
     def _snapshot(self, managed: _ManagedProcess) -> ProcessUpdate:
-        stdout, stdout_dropped = managed.stdout.drain()
-        stderr, stderr_dropped = managed.stderr.drain()
+        stdout, stdout_dropped, stdout_retained, stdout_source_byte_lengths = managed.stdout.drain()
+        stderr, stderr_dropped, stderr_retained, stderr_source_byte_lengths = managed.stderr.drain()
         if managed.state != "running":
             managed.terminal_reported = True
         return ProcessUpdate(
@@ -749,20 +798,16 @@ class ProcessSupervisor:
             stdout_dropped_bytes=stdout_dropped,
             stderr_dropped_bytes=stderr_dropped,
             error=managed.error,
+            stdout_retained_bytes=stdout_retained,
+            stderr_retained_bytes=stderr_retained,
+            stdout_source_byte_lengths=stdout_source_byte_lengths,
+            stderr_source_byte_lengths=stderr_source_byte_lengths,
         )
 
     def _evict_terminals_for_capacity(self) -> None:
         for process_id, managed in tuple(self._managed.items()):
             if managed.terminal_reported and managed.error != PROCESS_TREE_CLEANUP_ERROR:
                 del self._managed[process_id]
-        managed_capacity = self._max_processes - len(self._one_shot)
-        if len(self._managed) < managed_capacity:
-            return
-        for process_id, managed in tuple(self._managed.items()):
-            if managed.state != "running" and managed.error != PROCESS_TREE_CLEANUP_ERROR:
-                del self._managed[process_id]
-                if len(self._managed) < managed_capacity:
-                    return
 
     def _ensure_open(self) -> None:
         if self._closed:

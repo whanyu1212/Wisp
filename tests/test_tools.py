@@ -20,7 +20,16 @@ from wisp.tools import process as process_tools_module
 from wisp.tools import process_manager as process_manager_module
 from wisp.tools import search as search_tools_module
 from wisp.tools import shell as shell_tools_module
-from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
+from wisp.tools.builtin import (
+    BashTool,
+    EditTool,
+    FindTool,
+    GrepTool,
+    LsTool,
+    ProcessResult,
+    ReadTool,
+    WriteTool,
+)
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.truncation import truncate_text_tail
@@ -41,6 +50,14 @@ def test_tail_truncation_with_marker_only_budget_stays_bounded() -> None:
     assert result.text == "[truncated]"
     assert len(result.text.encode("utf-8")) <= 12
     assert result.truncated is True
+
+
+def test_process_result_preserves_public_positional_stdout_count_slot() -> None:
+    result = ProcessResult(0, "out", "err", False, False, 7)
+
+    assert result.stdout_count == 7
+    assert result.stdout_dropped_bytes == 0
+    assert result.stderr_dropped_bytes == 0
 
 
 def test_read_tool_supports_offset_limit_and_truncation(tmp_path: Path) -> None:
@@ -286,6 +303,29 @@ def test_builtin_tools_have_safety_metadata() -> None:
     assert BashTool().safety == "command"
 
 
+def test_bash_tool_schema_requires_operation_specific_arguments() -> None:
+    schema = BashTool.input_schema
+
+    assert schema["oneOf"] == [
+        {
+            "properties": {"operation": {"enum": ["run"]}},
+            "required": ["command"],
+        },
+        {
+            "properties": {"operation": {"enum": ["start"]}},
+            "required": ["operation", "command"],
+        },
+        {
+            "properties": {"operation": {"enum": ["poll"]}},
+            "required": ["operation", "process_id"],
+        },
+        {
+            "properties": {"operation": {"enum": ["cancel"]}},
+            "required": ["operation", "process_id"],
+        },
+    ]
+
+
 def test_edit_tool_applies_unique_replacements_from_original(tmp_path: Path) -> None:
     path = tmp_path / "story.txt"
     path.write_text("hello brave world\n", encoding="utf-8")
@@ -370,6 +410,302 @@ def test_bash_tool_reports_successful_exit_code_without_output(tmp_path: Path) -
 
     assert result.text == "Command exited with code 0"
     assert result.data["exit_code"] == 0
+
+
+def test_bash_tool_starts_polls_and_completes_resumable_process(tmp_path: Path) -> None:
+    async def run() -> None:
+        context = ToolContext(cwd=tmp_path)
+        tool = BashTool()
+        python = shlex.quote(sys.executable)
+        code = (
+            "import time; print('first', flush=True); time.sleep(0.2); print('second', flush=True)"
+        )
+        command = f"{python} -u -c {shlex.quote(code)}"
+
+        try:
+            start = await tool.run(
+                {
+                    "operation": "start",
+                    "command": command,
+                    "yield_seconds": 0,
+                    "lifetime_seconds": 5,
+                },
+                context,
+            )
+            process_id = str(start.data["process_id"])
+            chunks = [str(start.data["stdout"])]
+            final: ToolResult | None = start if start.data["process_state"] == "completed" else None
+
+            for _ in range(20):
+                if final is not None:
+                    break
+                poll = await tool.run(
+                    {
+                        "operation": "poll",
+                        "process_id": process_id,
+                        "wait_seconds": 0.2,
+                    },
+                    context,
+                )
+                chunks.append(str(poll.data["stdout"]))
+                if poll.data["process_state"] == "completed":
+                    final = poll
+
+            assert final is not None
+            assert final.text.startswith(f"Process {process_id} completed with exit code 0")
+            assert final.data["process_id"] == process_id
+            assert final.data["process_state"] == "completed"
+            assert final.data["exit_code"] == 0
+            assert final.data["output_has_exit_status"] is False
+            assert final.data["stdout_truncated"] is False
+            assert final.data["stderr_truncated"] is False
+            combined = "".join(chunks)
+            assert combined.count("first\n") == 1
+            assert combined.count("second\n") == 1
+        finally:
+            await tool.aclose()
+
+    anyio.run(run)
+
+
+def test_bash_managed_update_preserves_retained_stdout_after_label(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=5, max_output_lines=1)
+    update = process_manager_module.ProcessUpdate(
+        process_id="p123",
+        state="running",
+        stdout="tail\n",
+    )
+
+    result = shell_tools_module._managed_update_result(update, context=context)
+
+    assert result.text == "Process p123 is still running\nstdout:\ntail\n"
+    assert result.data["stdout"] == "tail\n"
+    assert result.truncated is False
+
+
+def test_bash_managed_update_adds_poll_time_dropped_bytes(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=20, max_output_lines=100)
+    update = process_manager_module.ProcessUpdate(
+        process_id="p123",
+        state="running",
+        stdout="x" * 100,
+        stdout_dropped_bytes=3,
+    )
+
+    result = shell_tools_module._managed_update_result(update, context=context)
+    stdout = str(result.data["stdout"])
+
+    assert result.data["stdout_truncated"] is True
+    retained_tail_bytes = len(stdout.removeprefix("[truncated] ").encode("utf-8"))
+    assert (
+        result.data["stdout_dropped_bytes"]
+        == 3 + len(update.stdout.encode("utf-8")) - retained_tail_bytes
+    )
+    assert result.truncated is True
+
+
+def test_bash_managed_update_counts_marker_only_output_as_dropped_bytes(
+    tmp_path: Path,
+) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=5, max_output_lines=0)
+    update = process_manager_module.ProcessUpdate(
+        process_id="p123",
+        state="running",
+        stdout="abcde",
+    )
+
+    result = shell_tools_module._managed_update_result(update, context=context)
+
+    assert result.data["stdout"] == "[trun"
+    assert result.data["stdout_truncated"] is True
+    assert result.data["stdout_dropped_bytes"] == len(update.stdout.encode("utf-8"))
+    assert result.truncated is True
+
+
+def test_bash_tool_cancels_resumable_process(tmp_path: Path) -> None:
+    async def run() -> None:
+        context = ToolContext(cwd=tmp_path)
+        tool = BashTool()
+        python = shlex.quote(sys.executable)
+        command = f'{python} -c "import time; time.sleep(30)"'
+
+        try:
+            start = await tool.run(
+                {
+                    "operation": "start",
+                    "command": command,
+                    "yield_seconds": 0,
+                    "lifetime_seconds": 30,
+                },
+                context,
+            )
+            process_id = str(start.data["process_id"])
+
+            cancelled = await tool.run(
+                {"operation": "cancel", "process_id": process_id},
+                context,
+            )
+
+            assert cancelled.text == f"Process {process_id} cancelled"
+            assert cancelled.data["process_id"] == process_id
+            assert cancelled.data["process_state"] == "cancelled"
+            assert "exit_code" not in cancelled.data
+        finally:
+            await tool.aclose()
+
+    anyio.run(run)
+
+
+def test_bash_tool_cancels_started_process_when_initial_poll_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        context = ToolContext(cwd=tmp_path)
+        tool = BashTool()
+        python = shlex.quote(sys.executable)
+        command = f'{python} -c "import time; time.sleep(30)"'
+
+        try:
+            start_task = asyncio.create_task(
+                tool.run(
+                    {
+                        "operation": "start",
+                        "command": command,
+                        "yield_seconds": 30,
+                        "lifetime_seconds": 60,
+                    },
+                    context,
+                )
+            )
+            supervisor = tool._process_supervisor  # noqa: SLF001
+            assert supervisor is not None
+            with anyio.fail_after(5):
+                while not supervisor._managed:  # noqa: SLF001
+                    await asyncio.sleep(0.01)
+            process_id = next(iter(supervisor._managed))  # noqa: SLF001
+
+            start_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await start_task
+
+            update = await supervisor.poll(process_id)
+            assert update.state == "cancelled"
+        finally:
+            await tool.aclose()
+
+    anyio.run(run)
+
+
+def test_bash_tool_shields_initial_poll_cleanup_under_anyio_cancellation(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        context = ToolContext(cwd=tmp_path)
+        tool = BashTool()
+        python = shlex.quote(sys.executable)
+        command = f'{python} -c "import time; time.sleep(30)"'
+
+        try:
+            supervisor = tool._process_supervisor  # noqa: SLF001
+            assert supervisor is not None
+
+            async def start() -> None:
+                await tool.run(
+                    {
+                        "operation": "start",
+                        "command": command,
+                        "yield_seconds": 30,
+                        "lifetime_seconds": 60,
+                    },
+                    context,
+                )
+
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(start)
+                with anyio.fail_after(5):
+                    while not supervisor._managed:  # noqa: SLF001
+                        await anyio.sleep(0.01)
+                process_id = next(iter(supervisor._managed))  # noqa: SLF001
+                task_group.cancel_scope.cancel()
+
+            update = await supervisor.poll(process_id)
+            assert update.state == "cancelled"
+        finally:
+            await tool.aclose()
+
+    anyio.run(run)
+
+
+def test_bash_tool_reports_resumable_timeout_as_terminal_state(tmp_path: Path) -> None:
+    async def run() -> None:
+        context = ToolContext(cwd=tmp_path)
+        tool = BashTool()
+        python = shlex.quote(sys.executable)
+        command = f'{python} -c "import time; time.sleep(5)"'
+
+        try:
+            result = await tool.run(
+                {
+                    "operation": "start",
+                    "command": command,
+                    "yield_seconds": 1,
+                    "lifetime_seconds": 0.1,
+                },
+                context,
+            )
+            process_id = str(result.data["process_id"])
+            for _ in range(20):
+                if result.data["process_state"] == "timed_out":
+                    break
+                result = await tool.run(
+                    {
+                        "operation": "poll",
+                        "process_id": process_id,
+                        "wait_seconds": 0.1,
+                    },
+                    context,
+                )
+
+            assert result.text.startswith(f"Process {process_id} timed out")
+            assert result.data["process_state"] == "timed_out"
+            assert result.data["output_has_exit_status"] is False
+            assert "exit_code" not in result.data
+        finally:
+            await tool.aclose()
+
+    anyio.run(run)
+
+
+def test_bash_tool_requires_supervisor_for_resumable_operations(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+
+    with pytest.raises(ToolError, match="bash.operation=poll requires a process supervisor"):
+        run_tool(BashTool(None), {"operation": "poll", "process_id": "p1"}, context)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"operation": "bogus"}, "bash.operation must be one of"),
+        (
+            {"operation": "start", "command": "pwd", "yield_seconds": -1},
+            "bash.yield_seconds must be greater than or equal to zero",
+        ),
+        (
+            {"operation": "poll", "process_id": "p1", "wait_seconds": float("inf")},
+            "bash.wait_seconds must be finite",
+        ),
+    ],
+)
+def test_bash_tool_validates_resumable_arguments(
+    tmp_path: Path,
+    arguments: dict[str, object],
+    message: str,
+) -> None:
+    context = ToolContext(cwd=tmp_path)
+
+    with pytest.raises(ToolError, match=message):
+        run_tool(BashTool(), arguments, context)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell signal assertion")
@@ -472,6 +808,119 @@ def test_bash_tool_bounds_output_before_buffering(tmp_path: Path) -> None:
 
     assert len(str(result.data["stdout"]).encode("utf-8")) <= context.max_output_bytes
     assert result.truncated is True
+
+
+def test_bash_tool_reports_one_shot_stream_truncation_metadata(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=80, max_output_lines=1000)
+    python = shlex.quote(sys.executable)
+    code = "import sys; sys.stdout.write('x' * 10000)"
+    command = f"{python} -u -c {shlex.quote(code)}"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+
+    assert result.data["stdout_truncated"] is True
+    assert result.data["stderr_truncated"] is False
+    assert result.data["stdout_dropped_bytes"] > 0
+    assert result.data["stderr_dropped_bytes"] == 0
+    assert result.truncated is True
+
+
+def test_bash_tool_counts_marker_only_output_as_dropped_bytes(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_run_shell(*args: object, **kwargs: object) -> process_tools_module.ProcessResult:
+        return process_tools_module.ProcessResult(exit_code=0, stdout="abcde", stderr="")
+
+    monkeypatch.setattr(shell_tools_module, "_run_shell", fake_run_shell)
+    context = ToolContext(cwd=tmp_path, max_output_bytes=5, max_output_lines=0)
+
+    result = run_tool(BashTool(None), {"command": "ignored"}, context)
+
+    assert result.data["stdout"] == "[trun"
+    assert result.data["stdout_truncated"] is True
+    assert result.data["stdout_dropped_bytes"] == 5
+    assert result.truncated is True
+
+
+def test_bash_tool_counts_source_bytes_when_utf8_clip_decodes_replacement(
+    tmp_path: Path,
+) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=1, max_output_lines=100)
+    python = shlex.quote(sys.executable)
+    code = "import sys; sys.stdout.buffer.write(bytes([0xc3, 0xa9]))"
+    command = f"{python} -c {shlex.quote(code)}"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+
+    assert result.data["stdout"] == "["
+    assert result.data["stdout_truncated"] is True
+    assert result.data["stdout_dropped_bytes"] == 2
+    assert result.truncated is True
+
+
+def test_bash_tool_counts_retruncated_replacement_source_bytes(
+    tmp_path: Path,
+) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=15, max_output_lines=100)
+    python = shlex.quote(sys.executable)
+    code = "import sys; sys.stdout.buffer.write(bytes([0xff] * 15))"
+    command = f"{python} -c {shlex.quote(code)}"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+
+    assert result.data["stdout"] == "\ufffd\n[truncated]"
+    assert result.data["stdout_truncated"] is True
+    assert result.data["stdout_dropped_bytes"] == 14
+    assert result.truncated is True
+
+
+def test_bash_tool_counts_managed_source_bytes_when_utf8_clip_decodes_replacement(
+    tmp_path: Path,
+) -> None:
+    async def run() -> tuple[str, int, bool]:
+        context = ToolContext(cwd=tmp_path, max_output_bytes=1, max_output_lines=100)
+        tool = BashTool()
+        python = shlex.quote(sys.executable)
+        code = "import sys; sys.stdout.buffer.write(bytes([0xff, 0x61])); sys.stdout.flush()"
+        command = f"{python} -c {shlex.quote(code)}"
+        try:
+            result = await tool.run(
+                {
+                    "operation": "start",
+                    "command": command,
+                    "yield_seconds": 0.2,
+                    "lifetime_seconds": 5,
+                },
+                context,
+            )
+            process_id = str(result.data["process_id"])
+            results = [result]
+            for _ in range(20):
+                if result.data["process_state"] == "completed":
+                    break
+                result = await tool.run(
+                    {
+                        "operation": "poll",
+                        "process_id": process_id,
+                        "wait_seconds": 0.2,
+                    },
+                    context,
+                )
+                results.append(result)
+            return (
+                "".join(str(item.data["stdout"]) for item in results),
+                sum(int(item.data["stdout_dropped_bytes"]) for item in results),
+                any(item.truncated for item in results),
+            )
+        finally:
+            await tool.aclose()
+
+    stdout, stdout_dropped_bytes, truncated = anyio.run(run)
+
+    assert stdout == "a"
+    assert stdout_dropped_bytes == 1
+    assert truncated is True
 
 
 def test_bash_tool_does_not_kill_process_at_exact_output_limit(tmp_path: Path) -> None:

@@ -23,7 +23,7 @@ from wisp.coding.tool_execution import (
     _promote_exit_code,
     _promote_truncated,
 )
-from wisp.events import ToolExecutionEnded
+from wisp.events import ToolExecutionEnded, wisp_event_from_json
 from wisp.providers.events import ToolCall
 from wisp.runtime.registry import ToolRegistry
 from wisp.tools.approval import ToolApprovalPolicy
@@ -334,6 +334,139 @@ def test_executor_omits_out_of_range_exit_code() -> None:
     assert ended.exit_code is None
 
 
+def test_executor_promotes_bash_process_metadata_and_round_trips() -> None:
+    ended = _run_executor(
+        _ResultTool(
+            name="bash",
+            result=ToolResult(
+                text="Process p1 completed with exit code 0\nstdout:\nready\n",
+                data={
+                    "process_id": "p1",
+                    "process_state": "completed",
+                    "process_error": "",
+                    "stdout": "ready\n",
+                    "stderr": "",
+                    "stdout_truncated": False,
+                    "stderr_truncated": False,
+                    "stdout_dropped_bytes": 0,
+                    "stderr_dropped_bytes": 0,
+                    "exit_code": 0,
+                    "output_has_exit_status": False,
+                },
+            ),
+        )
+    )
+
+    assert ended.is_error is False
+    assert ended.process_id == "p1"
+    assert ended.process_state == "completed"
+    assert ended.process_error == ""
+    assert ended.stdout == "ready\n"
+    assert ended.stderr == ""
+    assert ended.stdout_truncated is False
+    assert ended.stderr_truncated is False
+    assert ended.stdout_dropped_bytes == 0
+    assert ended.stderr_dropped_bytes == 0
+    assert ended.exit_code == 0
+    assert ended.output_has_exit_status is False
+    round_tripped = wisp_event_from_json(ended.model_dump_json())
+    assert isinstance(round_tripped, ToolExecutionEnded)
+    assert round_tripped.process_id == "p1"
+    assert round_tripped.process_state == "completed"
+    assert round_tripped.stdout == "ready\n"
+
+
+def test_executor_bounds_bash_process_output_metadata() -> None:
+    ended = _run_executor(
+        _ResultTool(
+            name="bash",
+            result=ToolResult(
+                text="Process running",
+                data={
+                    "process_id": "bad\nid",
+                    "process_state": "running",
+                    "stdout": "alpha\nbeta\n",
+                    "stderr": "e" * 100,
+                    "stdout_truncated": False,
+                    "stderr_truncated": False,
+                    "stdout_dropped_bytes": 7,
+                    "stderr_dropped_bytes": 11,
+                },
+            ),
+        ),
+        context=ToolContext(
+            cwd=Path.cwd(),
+            max_output_bytes=32,
+            max_output_lines=1,
+            protected_paths=(),
+        ),
+    )
+
+    assert ended.is_error is False
+    assert ended.process_id is None
+    assert ended.process_state == "running"
+    assert ended.stdout == "alpha\n[truncated]"
+    assert ended.stderr == "eeeeeeeeeeeeeeeeeeee\n[truncated]"
+    assert ended.stdout_truncated is True
+    assert ended.stderr_truncated is True
+    assert ended.stdout_dropped_bytes == 7
+    assert ended.stderr_dropped_bytes == 11
+
+
+def test_executor_promotes_one_shot_bash_stream_truncation_metadata() -> None:
+    ended = _run_executor(
+        _ResultTool(
+            name="bash",
+            result=ToolResult(
+                text="Command exited with code 0: x\n[truncated]",
+                data={
+                    "exit_code": 0,
+                    "output_has_exit_status": True,
+                    "stdout": "x\n[truncated]",
+                    "stderr": "",
+                    "stdout_truncated": True,
+                    "stderr_truncated": False,
+                    "stdout_dropped_bytes": 128,
+                    "stderr_dropped_bytes": 0,
+                },
+                truncated=True,
+            ),
+        )
+    )
+
+    assert ended.process_id is None
+    assert ended.process_state is None
+    assert ended.stdout == "x\n[truncated]"
+    assert ended.stderr == ""
+    assert ended.stdout_truncated is True
+    assert ended.stderr_truncated is False
+    assert ended.stdout_dropped_bytes == 128
+    assert ended.stderr_dropped_bytes == 0
+
+
+def test_executor_ignores_malformed_bash_process_metadata() -> None:
+    ended = _run_executor(
+        _ResultTool(
+            name="bash",
+            result=ToolResult(
+                text="Process running",
+                data={
+                    "process_id": "p1",
+                    "process_state": ["running"],
+                    "stdout_dropped_bytes": -1,
+                    "stderr_dropped_bytes": "many",
+                },
+            ),
+        )
+    )
+
+    assert ended.is_error is False
+    assert ended.process_id == "p1"
+    assert ended.process_state is None
+    assert ended.stdout_dropped_bytes == 0
+    assert ended.stderr_dropped_bytes == 0
+
+
 def test_executor_preserves_bash_exit_envelope_outside_tiny_body_budget() -> None:
     ended = _run_executor(
         _ResultTool(
@@ -357,6 +490,95 @@ def test_executor_preserves_bash_exit_envelope_outside_tiny_body_budget() -> Non
     assert ended.output == "Command exited with code 2"
     assert ended.exit_code == 2
     assert ended.output_has_exit_status is True
+
+
+def test_executor_preserves_bash_managed_header_outside_tiny_body_budget() -> None:
+    ended = _run_executor(
+        _ResultTool(
+            name="bash",
+            result=ToolResult(
+                text="Process p123 is still running\nstdout:\nchunk\n",
+                data={
+                    "process_id": "p123",
+                    "process_state": "running",
+                    "stdout": "chunk\n",
+                    "stderr": "",
+                    "output_has_exit_status": False,
+                },
+            ),
+        ),
+        context=ToolContext(
+            cwd=Path.cwd(),
+            max_output_bytes=1,
+            max_output_lines=0,
+            protected_paths=(),
+        ),
+    )
+
+    assert ended.output.startswith("Process p123 is still running")
+    assert "p123" in ended.output
+    assert ended.truncated is True
+    assert ended.process_id == "p123"
+    assert ended.process_state == "running"
+
+
+def test_executor_preserves_bash_managed_output_after_labels() -> None:
+    ended = _run_executor(
+        _ResultTool(
+            name="bash",
+            result=ToolResult(
+                text="Process p123 is still running\nstdout:\ntail\n",
+                data={
+                    "process_id": "p123",
+                    "process_state": "running",
+                    "stdout": "tail\n",
+                    "stderr": "",
+                    "output_has_exit_status": False,
+                },
+            ),
+        ),
+        context=ToolContext(
+            cwd=Path.cwd(),
+            max_output_bytes=5,
+            max_output_lines=1,
+            protected_paths=(),
+        ),
+    )
+
+    assert ended.output == "Process p123 is still running\nstdout:\ntail\n"
+    assert ended.process_id == "p123"
+    assert ended.stdout == "tail\n"
+    assert ended.truncated is False
+
+
+def test_executor_preserves_bash_managed_failure_detail_outside_tiny_body_budget() -> None:
+    process_error = "Failed to terminate process tree"
+    ended = _run_executor(
+        _ResultTool(
+            name="bash",
+            result=ToolResult(
+                text=f"Process p123 failed: {process_error}",
+                data={
+                    "process_id": "p123",
+                    "process_state": "failed",
+                    "process_error": process_error,
+                    "stdout": "",
+                    "stderr": "",
+                    "output_has_exit_status": False,
+                },
+            ),
+        ),
+        context=ToolContext(
+            cwd=Path.cwd(),
+            max_output_bytes=1,
+            max_output_lines=0,
+            protected_paths=(),
+        ),
+    )
+
+    assert ended.output == f"Process p123 failed: {process_error}"
+    assert ended.process_error == process_error
+    assert ended.truncated is False
 
 
 def test_executor_propagates_wisp_result_processing_failures(

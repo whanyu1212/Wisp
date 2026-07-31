@@ -21,6 +21,7 @@ import anyio
 
 from wisp.tools.result import ToolError
 from wisp.tools.truncation import TruncatedText, truncate_text_tail
+from wisp.tools.utf8 import decode_utf8_with_source_byte_lengths
 
 _WINDOWS_JOB_HANDLE_ATTR = "_wisp_windows_job_handle"
 _POSIX_JOBS_FILE_ATTR = "_wisp_posix_jobs_file"
@@ -131,6 +132,19 @@ class ProcessResult:
     stdout_truncated: bool = False
     stderr_truncated: bool = False
     stdout_count: int = 0
+    stdout_dropped_bytes: int = 0
+    stderr_dropped_bytes: int = 0
+    stdout_retained_bytes: int | None = None
+    stderr_retained_bytes: int | None = None
+    stdout_source_byte_lengths: tuple[int, ...] | None = None
+    stderr_source_byte_lengths: tuple[int, ...] | None = None
+
+
+@dataclass(frozen=True)
+class _LimitedStreamResult:
+    output: bytes
+    truncated: bool = False
+    dropped_bytes: int = 0
 
 
 class _OutputBudget:
@@ -188,7 +202,7 @@ async def _run_shell(
 
     budget = _OutputBudget(max_bytes=max_output_bytes, max_lines=max_output_lines)
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+        stdout_result, stderr_result = await asyncio.wait_for(
             _collect_limited_output(process, budget),
             timeout=timeout,
         )
@@ -212,12 +226,24 @@ async def _run_shell(
     cleanup_succeeded = await _await_process_cleanup(_terminate_process_tree(process))
     if not cleanup_succeeded:
         raise ToolError("Failed to terminate process tree")
+    stdout_text, stdout_source_byte_lengths = decode_utf8_with_source_byte_lengths(
+        stdout_result.output
+    )
+    stderr_text, stderr_source_byte_lengths = decode_utf8_with_source_byte_lengths(
+        stderr_result.output
+    )
     return ProcessResult(
         exit_code=process.returncode if process.returncode is not None else -1,
-        stdout=stdout_bytes.decode("utf-8", errors="replace"),
-        stderr=stderr_bytes.decode("utf-8", errors="replace"),
-        stdout_truncated=budget.exhausted,
-        stderr_truncated=budget.exhausted,
+        stdout=stdout_text,
+        stderr=stderr_text,
+        stdout_truncated=stdout_result.truncated,
+        stderr_truncated=stderr_result.truncated,
+        stdout_dropped_bytes=stdout_result.dropped_bytes,
+        stderr_dropped_bytes=stderr_result.dropped_bytes,
+        stdout_retained_bytes=len(stdout_result.output),
+        stderr_retained_bytes=len(stderr_result.output),
+        stdout_source_byte_lengths=stdout_source_byte_lengths,
+        stderr_source_byte_lengths=stderr_source_byte_lengths,
     )
 
 
@@ -1199,7 +1225,7 @@ async def _collect_limited_output(
     budget: _OutputBudget,
     *,
     terminate: Callable[[], Awaitable[bool]] | None = None,
-) -> tuple[bytes, bytes]:
+) -> tuple[_LimitedStreamResult, _LimitedStreamResult]:
     assert process.stdout is not None
     assert process.stderr is not None
 
@@ -1226,8 +1252,10 @@ async def _read_stream_limited(
     process: asyncio.subprocess.Process,
     *,
     terminate: Callable[[], Awaitable[bool]] | None = None,
-) -> bytes:
+) -> _LimitedStreamResult:
     chunks: list[bytes] = []
+    dropped_bytes = 0
+    truncated = False
     while True:
         chunk = await stream.read(8192)
         if not chunk:
@@ -1235,13 +1263,21 @@ async def _read_stream_limited(
         accepted, exhausted = await budget.take(chunk)
         if accepted:
             chunks.append(accepted)
+        if len(accepted) < len(chunk):
+            truncated = True
+            dropped_bytes += len(chunk) - len(accepted)
         if exhausted:
             if await budget.request_kill_once():
                 await _terminate_for_output_limit(process, terminate=terminate)
-            while await stream.read(8192):
-                pass
+            while overflow := await stream.read(8192):
+                truncated = True
+                dropped_bytes += len(overflow)
             break
-    return b"".join(chunks)
+    return _LimitedStreamResult(
+        output=b"".join(chunks),
+        truncated=truncated,
+        dropped_bytes=dropped_bytes,
+    )
 
 
 async def _terminate_for_output_limit(
@@ -1333,6 +1369,7 @@ async def _run_exec_limited_stdout(
     assert process.stderr is not None
     stdout_stream = process.stdout
 
+    stderr_task: asyncio.Task[Any]
     stderr_budget: _OutputBudget | None = None
     if max_buffered_stderr_bytes is not None or max_buffered_stderr_lines is not None:
         stderr_budget = _OutputBudget(
@@ -1417,7 +1454,15 @@ async def _run_exec_limited_stdout(
             await _terminate_for_output_limit(process, terminate=terminate)
 
         await process.wait()
-        stderr_bytes = await stderr_task
+        stderr_result = await stderr_task
+        if isinstance(stderr_result, _LimitedStreamResult):
+            stderr_bytes = stderr_result.output
+            stderr_truncated = stderr_result.truncated
+            stderr_dropped_bytes = stderr_result.dropped_bytes
+        else:
+            stderr_bytes = stderr_result
+            stderr_truncated = False
+            stderr_dropped_bytes = 0
         if not await process_supervisor._terminate_one_shot(process):
             raise ToolError("Failed to terminate process tree")
     except asyncio.CancelledError:
@@ -1428,13 +1473,21 @@ async def _run_exec_limited_stdout(
         raise
     else:
         release_ownership = True
+        stdout_bytes = b"".join(stdout_lines)
+        stdout, stdout_source_byte_lengths = decode_utf8_with_source_byte_lengths(stdout_bytes)
+        stderr, stderr_source_byte_lengths = decode_utf8_with_source_byte_lengths(stderr_bytes)
         return ProcessResult(
             exit_code=process.returncode if process.returncode is not None else -1,
-            stdout=b"".join(stdout_lines).decode("utf-8", errors="replace"),
-            stderr=stderr_bytes.decode("utf-8", errors="replace"),
+            stdout=stdout,
+            stderr=stderr,
             stdout_truncated=stdout_truncated,
-            stderr_truncated=stderr_budget.exhausted if stderr_budget is not None else False,
+            stderr_truncated=stderr_truncated,
+            stderr_dropped_bytes=stderr_dropped_bytes,
             stdout_count=stdout_count,
+            stdout_retained_bytes=len(stdout_bytes),
+            stderr_retained_bytes=len(stderr_bytes),
+            stdout_source_byte_lengths=stdout_source_byte_lengths,
+            stderr_source_byte_lengths=stderr_source_byte_lengths,
         )
     finally:
         if release_ownership:
