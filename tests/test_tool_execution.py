@@ -522,6 +522,35 @@ def test_executor_preserves_bash_managed_header_outside_tiny_body_budget() -> No
     assert ended.process_state == "running"
 
 
+def test_executor_preserves_bash_managed_output_after_labels() -> None:
+    ended = _run_executor(
+        _ResultTool(
+            name="bash",
+            result=ToolResult(
+                text="Process p123 is still running\nstdout:\ntail\n",
+                data={
+                    "process_id": "p123",
+                    "process_state": "running",
+                    "stdout": "tail\n",
+                    "stderr": "",
+                    "output_has_exit_status": False,
+                },
+            ),
+        ),
+        context=ToolContext(
+            cwd=Path.cwd(),
+            max_output_bytes=5,
+            max_output_lines=1,
+            protected_paths=(),
+        ),
+    )
+
+    assert ended.output == "Process p123 is still running\nstdout:\ntail\n"
+    assert ended.process_id == "p123"
+    assert ended.stdout == "tail\n"
+    assert ended.truncated is False
+
+
 def test_executor_propagates_wisp_result_processing_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

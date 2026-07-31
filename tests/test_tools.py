@@ -451,6 +451,21 @@ def test_bash_tool_starts_polls_and_completes_resumable_process(tmp_path: Path) 
     anyio.run(run)
 
 
+def test_bash_managed_update_preserves_retained_stdout_after_label(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=5, max_output_lines=1)
+    update = process_manager_module.ProcessUpdate(
+        process_id="p123",
+        state="running",
+        stdout="tail\n",
+    )
+
+    result = shell_tools_module._managed_update_result(update, context=context)
+
+    assert result.text == "Process p123 is still running\nstdout:\ntail\n"
+    assert result.data["stdout"] == "tail\n"
+    assert result.truncated is False
+
+
 def test_bash_tool_cancels_resumable_process(tmp_path: Path) -> None:
     async def run() -> None:
         context = ToolContext(cwd=tmp_path)

@@ -324,16 +324,21 @@ def _normalize_tool_result(
     data = _snapshot_result_data(tool_name, result.data, context=context)
     has_exit_status = _promote_output_has_exit_status(tool_name, data)
     status_overhead = len("Command exited with code -2147483648: ") if has_exit_status else 0
-    managed_header_overhead = _bash_managed_process_header_overhead(tool_name, data)
-    metadata_overhead = max(status_overhead, managed_header_overhead)
+    managed_text_overhead = _bash_managed_process_text_overhead(tool_name, data)
+    metadata_overhead = max(status_overhead, managed_text_overhead)
+    metadata_line_overhead = max(
+        1 if has_exit_status else 0,
+        _bash_managed_process_line_overhead(tool_name, data),
+    )
     preserves_status_line = metadata_overhead > 0
     bounded_text = truncate_text(
         text,
-        # Bash fixed status lines are metadata outside the body budget. Allow
-        # their bounded worst-case size through normalization so a tiny
-        # embedding budget cannot erase the exit code or managed process id.
+        # Bash fixed status lines and stream labels are metadata outside the
+        # body budget. Allow their bounded worst-case size through normalization
+        # so a tiny embedding budget cannot erase the exit code, managed process
+        # id, or the retained output line that follows a label.
         max_bytes=max(0, context.max_output_bytes) + metadata_overhead,
-        max_lines=max(1, context.max_output_lines)
+        max_lines=max(0, context.max_output_lines) + metadata_line_overhead
         if preserves_status_line
         else max(0, context.max_output_lines),
     )
@@ -417,7 +422,7 @@ def _copy_bash_process_data(
     _copy_result_count(source, target, "stderr_dropped_bytes")
 
 
-def _bash_managed_process_header_overhead(
+def _bash_managed_process_text_overhead(
     tool_name: str,
     data: Mapping[str, object],
 ) -> int:
@@ -436,7 +441,41 @@ def _bash_managed_process_header_overhead(
         header = f"Process {process_id} cancelled"
     else:
         header = f"Process {process_id} failed: "
-    return len(header.encode("utf-8")) + _TRUNCATION_SUFFIX_WITH_SEPARATOR_BYTES
+    return (
+        len(header.encode("utf-8"))
+        + _bash_managed_stream_label_byte_overhead(data)
+        + _TRUNCATION_SUFFIX_WITH_SEPARATOR_BYTES
+    )
+
+
+def _bash_managed_process_line_overhead(
+    tool_name: str,
+    data: Mapping[str, object],
+) -> int:
+    if _promote_process_id(tool_name, data) is None:
+        return 0
+    if _promote_process_state(tool_name, data) is None:
+        return 0
+    return 1 + _bash_managed_stream_count(data)
+
+
+def _bash_managed_stream_label_byte_overhead(data: Mapping[str, object]) -> int:
+    has_stdout = bool(_promote_process_output("bash", data, "stdout"))
+    has_stderr = bool(_promote_process_output("bash", data, "stderr"))
+    byte_overhead = 0
+    if has_stdout:
+        byte_overhead += len(b"stdout:\n")
+    if has_stderr:
+        byte_overhead += len(b"stderr:\n")
+    if has_stdout and has_stderr:
+        byte_overhead += len(b"\n")
+    return byte_overhead
+
+
+def _bash_managed_stream_count(data: Mapping[str, object]) -> int:
+    return int(bool(_promote_process_output("bash", data, "stdout"))) + int(
+        bool(_promote_process_output("bash", data, "stderr"))
+    )
 
 
 def _copy_bounded_scalar_text(

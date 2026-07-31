@@ -12,7 +12,7 @@ from wisp.tools.context import ToolContext
 from wisp.tools.process import _format_process_output_bounded, _run_shell
 from wisp.tools.process_manager import ProcessSupervisor, ProcessUpdate
 from wisp.tools.result import ToolError, ToolResult
-from wisp.tools.truncation import TruncatedText, truncate_text
+from wisp.tools.truncation import TruncatedText, truncate_text, truncate_text_tail
 
 _DEFAULT_PROCESS_SUPERVISOR: Final = object()
 _DEFAULT_BASH_TIMEOUT_SECONDS = 30
@@ -266,12 +266,12 @@ def _optional_number(
 
 
 def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> ToolResult:
-    stdout = truncate_text(
+    stdout = truncate_text_tail(
         update.stdout,
         max_bytes=context.max_output_bytes,
         max_lines=context.max_output_lines,
     )
-    stderr = truncate_text(
+    stderr = truncate_text_tail(
         update.stderr,
         max_bytes=context.max_output_bytes,
         max_lines=context.max_output_lines,
@@ -321,13 +321,33 @@ def _format_managed_update(
         parts.append(f"stderr:\n{stderr}")
     if not parts:
         return TruncatedText(header, truncated=False)
+    if context.max_output_bytes <= 0 or context.max_output_lines <= 0:
+        return TruncatedText(header, truncated=True)
 
-    body = truncate_text(
+    label_bytes, label_lines = _managed_output_label_overhead(
+        has_stdout=bool(stdout),
+        has_stderr=bool(stderr),
+    )
+    body = truncate_text_tail(
         "\n".join(parts),
-        max_bytes=context.max_output_bytes,
-        max_lines=context.max_output_lines,
+        max_bytes=context.max_output_bytes + label_bytes,
+        max_lines=context.max_output_lines + label_lines,
     )
     return TruncatedText(f"{header}\n{body.text}", truncated=body.truncated)
+
+
+def _managed_output_label_overhead(*, has_stdout: bool, has_stderr: bool) -> tuple[int, int]:
+    byte_overhead = 0
+    line_overhead = 0
+    if has_stdout:
+        byte_overhead += len(b"stdout:\n")
+        line_overhead += 1
+    if has_stderr:
+        byte_overhead += len(b"stderr:\n")
+        line_overhead += 1
+    if has_stdout and has_stderr:
+        byte_overhead += len(b"\n")
+    return byte_overhead, line_overhead
 
 
 def _managed_update_header(update: ProcessUpdate) -> str:
