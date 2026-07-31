@@ -1273,6 +1273,28 @@ def test_textual_tool_card_nonzero_exit_renders_as_failure() -> None:
     assert "line-39" in rendered
 
 
+def test_textual_tool_card_timed_out_process_state_renders_as_failure() -> None:
+    rendered = _render_events_to_transcript(
+        [
+            ToolCallRequested(
+                call_id="c1",
+                name="bash",
+                arguments={"operation": "poll", "process_id": "proc-1"},
+            ),
+            ToolResultReady(
+                call_id="c1",
+                name="bash",
+                output="Process proc-1 timed out",
+                is_error=False,
+                process_state="timed_out",
+            ),
+        ]
+    )
+
+    assert "✗ bash" in rendered
+    assert "Process proc-1 timed out" in rendered
+
+
 def test_textual_tool_card_edit_renders_colored_diff() -> None:
     # Issue #74 PR B1: a successful `edit` renders a colored unified diff built
     # from the request's oldText/newText hunks — which reach the renderer on

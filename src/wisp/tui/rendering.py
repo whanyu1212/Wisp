@@ -33,6 +33,7 @@ from wisp.events import (
     TrustRequested,
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
+from wisp.tool_presentation import tool_result_status
 from wisp.tui.commands import TuiCommandCatalog
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
@@ -400,7 +401,12 @@ class LineTuiRenderer:
                 reason = f": {_markup_escape(event.reason)}" if event.reason else ""
                 self.console.print(f"[red]! denied[/red] {_markup_escape(event.name)}{reason}")
         elif isinstance(event, ToolResultReady):
-            status = "[red]✗[/red]" if event.is_error else "[green]✓[/green]"
+            presentation_status = tool_result_status(
+                event.is_error,
+                event.exit_code,
+                process_state=event.process_state,
+            )
+            status = _LIVE_TOOL_MARKUP[presentation_status]
             tool_name = _markup_escape(event.name)
             output = _markup_escape(_first_line(event.output))
             self.console.print(f"{status} tool {tool_name}: {output}")
@@ -804,9 +810,17 @@ class FullscreenTuiRenderer:
                 reason = f": {event.reason}" if event.reason else ""
                 self._append("approval", f"! denied {event.name}{reason}", style="red")
         elif isinstance(event, ToolResultReady):
-            status = "✗" if event.is_error else "✓"
+            presentation_status = tool_result_status(
+                event.is_error,
+                event.exit_code,
+                process_state=event.process_state,
+            )
+            status = _LIVE_TOOL_GLYPHS[presentation_status]
+            style = _LIVE_TOOL_STYLES[presentation_status]
             self._append(
-                "tool", f"{status} tool {event.name}: {_first_line(event.output)}", style="blue"
+                "tool",
+                f"{status} tool {event.name}: {_first_line(event.output)}",
+                style=style,
             )
         elif isinstance(event, ErrorEvent):
             if not (
@@ -1331,6 +1345,28 @@ def _historical_tool_line(entry: HistoricalToolCard) -> str:
     if entry.truncated:
         return f"{first_line} [truncated]"
     return first_line
+
+
+_LIVE_TOOL_MARKUP = {
+    "done": "[green]✓[/green]",
+    "error": "[red]✗[/red]",
+    "denied": "[yellow]⊘[/yellow]",
+    "cancelled": "[yellow]⊘[/yellow]",
+}
+
+_LIVE_TOOL_GLYPHS = {
+    "done": "✓",
+    "error": "✗",
+    "denied": "⊘",
+    "cancelled": "⊘",
+}
+
+_LIVE_TOOL_STYLES = {
+    "done": "blue",
+    "error": "red",
+    "denied": "yellow",
+    "cancelled": "yellow",
+}
 
 
 _HISTORICAL_TOOL_GLYPHS = {

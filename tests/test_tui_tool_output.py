@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import signal
 
+from wisp.tool_presentation import tool_result_status
 from wisp.tui.tool_output import (
     _ERROR_TAIL_BYTES,
     _ERROR_TAIL_LINES,
@@ -239,11 +240,25 @@ def test_render_error_completely_empty_is_no_output() -> None:
 
 def test_tool_result_failed_judgment() -> None:
     # is_error always fails; a nonzero exit fails without is_error; zero and None
-    # do not. This single predicate drives both the glyph and the detail body.
+    # do not. Managed timed-out/failed states also fail even without exit codes.
+    # This single predicate drives both the glyph and the detail body.
     assert tool_result_failed(is_error=True, exit_code=None) is True
     assert tool_result_failed(is_error=False, exit_code=2) is True
+    assert tool_result_failed(is_error=False, exit_code=None, process_state="timed_out") is True
+    assert tool_result_failed(is_error=False, exit_code=None, process_state="failed") is True
     assert tool_result_failed(is_error=False, exit_code=0) is False
     assert tool_result_failed(is_error=False, exit_code=None) is False
+    assert tool_result_failed(is_error=False, exit_code=None, process_state="cancelled") is False
+
+
+def test_tool_result_status_maps_managed_process_states() -> None:
+    assert tool_result_status(is_error=False, exit_code=None, process_state="timed_out") == "error"
+    assert tool_result_status(is_error=False, exit_code=None, process_state="failed") == "error"
+    assert (
+        tool_result_status(is_error=False, exit_code=None, process_state="cancelled") == "cancelled"
+    )
+    assert tool_result_status(is_error=False, exit_code=0, process_state="completed") == "done"
+    assert tool_result_status(is_error=False, exit_code=None, process_state="running") == "done"
 
 
 def test_render_generic_matches_widget_default_bounds() -> None:
@@ -275,6 +290,34 @@ def test_render_tool_result_treats_nonzero_exit_as_failure() -> None:
     assert via_dispatch == render_error(output, exit_code=2)
     assert "exit 2" in via_dispatch
     assert "line-39" in via_dispatch  # the tail (the failure) is shown
+
+
+def test_render_tool_result_treats_timed_out_process_as_failure() -> None:
+    output = "Process proc-1 timed out"
+    via_dispatch = render_tool_result(
+        "bash",
+        {},
+        output,
+        is_error=False,
+        exit_code=None,
+        process_state="timed_out",
+    )
+
+    assert via_dispatch == render_error(output, exit_code=None)
+
+
+def test_render_tool_result_cancelled_process_stays_generic() -> None:
+    output = "Process proc-1 cancelled"
+    via_dispatch = render_tool_result(
+        "bash",
+        {},
+        output,
+        is_error=False,
+        exit_code=None,
+        process_state="cancelled",
+    )
+
+    assert via_dispatch == render_generic(output)
 
 
 def test_render_tool_result_zero_exit_stays_generic() -> None:

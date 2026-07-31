@@ -86,6 +86,45 @@ def test_bash_approval_content_summarizes_command_context() -> None:
     assert content.detail == "$ uv run pytest\n  echo done\ntimeout: 30s"
 
 
+def test_bash_approval_content_summarizes_resumable_operations() -> None:
+    start = _approval_content(
+        _approval(
+            "bash",
+            {
+                "operation": "start",
+                "command": "uv run pytest",
+                "lifetime_seconds": 300,
+                "yield_seconds": 1,
+            },
+            safety="command",
+        ),
+        cwd="/work/project",
+    )
+    poll = _approval_content(
+        _approval(
+            "bash",
+            {"operation": "poll", "process_id": "proc-1", "wait_seconds": 2},
+            safety="command",
+        ),
+        cwd="/work/project",
+    )
+    cancel = _approval_content(
+        _approval(
+            "bash",
+            {"operation": "cancel", "process_id": "proc-1"},
+            safety="command",
+        ),
+        cwd="/work/project",
+    )
+
+    assert start.title == "Start command?"
+    assert start.detail == "$ uv run pytest\nlifetime_seconds: 300s\nyield_seconds: 1s"
+    assert poll.title == "Poll process?"
+    assert poll.detail == "operation: poll\nprocess_id: proc-1\nwait_seconds: 2s"
+    assert cancel.title == "Cancel process?"
+    assert cancel.detail == "operation: cancel\nprocess_id: proc-1"
+
+
 def test_write_and_edit_approval_content_are_bounded_and_structured() -> None:
     write = _approval_content(
         _approval("write", {"path": "notes.txt", "content": "a\nb\nc\nd\ne\nf"}),

@@ -18,6 +18,12 @@ from wisp.tui.rendering import _format_cwd_for_footer
 
 _DECISION_PREVIEW_LINES = 5
 _DECISION_PREVIEW_CHARS = 320
+_BASH_OPERATION_TITLES = {
+    "run": "Run command?",
+    "start": "Start command?",
+    "poll": "Poll process?",
+    "cancel": "Cancel process?",
+}
 
 
 @dataclass(frozen=True)
@@ -113,17 +119,36 @@ def _approval_content(event: ToolApprovalRequested, *, cwd: str) -> _DecisionCon
     safety = _safety_label(event.safety)
 
     if event.name == "bash":
-        command = arguments.get("command")
-        command_text = command if isinstance(command, str) else ""
-        lines = [
-            f"$ {line}" if index == 0 else f"  {line}"
-            for index, line in enumerate(command_text.splitlines() or [""])
-        ]
-        timeout = arguments.get("timeout")
-        if timeout is not None:
-            lines.append(f"timeout: {timeout}s")
+        operation_value = arguments.get("operation")
+        operation = operation_value if isinstance(operation_value, str) else "run"
+        title = _BASH_OPERATION_TITLES.get(operation, "Run bash operation?")
+        if operation in {"poll", "cancel"}:
+            lines = [f"operation: {operation}"]
+            process_id = arguments.get("process_id")
+            process_id_text = process_id if isinstance(process_id, str) else "<missing>"
+            lines.append(f"process_id: {process_id_text}")
+            wait_seconds = arguments.get("wait_seconds")
+            if operation == "poll" and wait_seconds is not None:
+                lines.append(f"wait_seconds: {wait_seconds}s")
+        else:
+            command = arguments.get("command")
+            command_text = command if isinstance(command, str) else ""
+            lines = [
+                f"$ {line}" if index == 0 else f"  {line}"
+                for index, line in enumerate(command_text.splitlines() or [""])
+            ]
+            timeout = arguments.get("timeout")
+            if timeout is not None:
+                lines.append(f"timeout: {timeout}s")
+            if operation == "start":
+                lifetime_seconds = arguments.get("lifetime_seconds")
+                if lifetime_seconds is not None:
+                    lines.append(f"lifetime_seconds: {lifetime_seconds}s")
+                yield_seconds = arguments.get("yield_seconds")
+                if yield_seconds is not None:
+                    lines.append(f"yield_seconds: {yield_seconds}s")
         return _DecisionContent(
-            title="Run command?",
+            title=title,
             meta=f"bash - {safety}\ncwd: {cwd_text}",
             detail=_bounded_decision_preview(lines),
         )

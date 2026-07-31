@@ -73,6 +73,7 @@ from wisp.sessions.entries import (
 )
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import SessionReplay, replay_session_entries
+from wisp.tool_presentation import tool_result_status
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
@@ -1194,9 +1195,11 @@ class CodingSession:
 
 
 def _tool_result_status(event: ToolExecutionEnded) -> ToolPresentationStatus:
-    if event.is_error or event.exit_code not in {None, 0}:
-        return "error"
-    return "done"
+    return tool_result_status(
+        event.is_error,
+        event.exit_code,
+        process_state=event.process_state,
+    )
 
 
 __all__ = ["CodingSession", "PERSISTED_SESSION_EVENT_TYPES"]

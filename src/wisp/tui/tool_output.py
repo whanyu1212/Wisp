@@ -42,6 +42,8 @@ from collections.abc import Mapping, Sequence
 
 from textual.content import Content
 
+from wisp.events import ManagedProcessState
+from wisp.tool_presentation import tool_result_failed
 from wisp.tui.widgets import (
     _TOOL_OUTPUT_PREVIEW_BYTES,
     _TOOL_OUTPUT_PREVIEW_LINES,
@@ -181,6 +183,7 @@ def render_tool_result(
     before_text: str | None = None,
     created: bool = False,
     summary: str | None = None,
+    process_state: ManagedProcessState | None = None,
 ) -> str | Content:
     """Render terminal tool output into bounded card detail.
 
@@ -190,7 +193,8 @@ def render_tool_result(
     file snapshot for the write tool, or None; ``created`` says whether that write
     made a new file, which disambiguates a None snapshot (create vs. uncapturable
     overwrite). ``summary`` is the promoted one-line success summary for read-type
-    tools (read/grep/find/ls), or None.
+    tools (read/grep/find/ls), or None. ``process_state`` is the promoted managed
+    Bash state; terminal failure states use the error path even without an exit code.
 
     Returns a plain ``str`` for the error/generic/summary paths (the widget escapes
     it as untrusted markup) or a Textual ``Content`` for a colored diff (already
@@ -199,7 +203,7 @@ def render_tool_result(
     :func:`render_generic`.
     """
 
-    if tool_result_failed(is_error, exit_code):
+    if tool_result_failed(is_error, exit_code, process_state=process_state):
         return render_error(
             output,
             exit_code=exit_code,
@@ -232,25 +236,6 @@ def render_tool_result(
         output_has_exit_status=output_has_exit_status,
     )
     return render_generic(display_output)
-
-
-def tool_result_failed(is_error: bool, exit_code: int | None) -> bool:
-    """Whether a tool result should be presented as a failure.
-
-    This is a presentation judgment, distinct from the event's ``is_error`` flag,
-    and the renderer uses it for *both* the card status glyph and the detail body
-    so the two never disagree. ``is_error`` means the tool mechanism failed
-    (denied, raised, unknown tool); a command that ran fine but exited nonzero (a
-    failing ``bash``) is *not* an ``is_error`` — that stays a normal,
-    model-visible result on the wire. But its card should still read as a failure
-    and surface the exit status, so a nonzero ``exit_code`` counts as failed here
-    without touching ``is_error``. ``exit_code`` is already gated to shell-like
-    tools by the executor, so this never spuriously reddens an unrelated tool.
-    """
-
-    if is_error:
-        return True
-    return exit_code is not None and exit_code != 0
 
 
 def render_error(

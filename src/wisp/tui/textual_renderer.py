@@ -32,6 +32,7 @@ from wisp.events import (
     TurnStarted,
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
+from wisp.tool_presentation import tool_result_status
 from wisp.tui.commands import TuiCommandCatalog
 from wisp.tui.history import (
     HistoricalToolCard,
@@ -49,7 +50,6 @@ from wisp.tui.rendering import (
 from wisp.tui.tool_output import (
     full_tool_output_for_display,
     render_tool_result,
-    tool_result_failed,
 )
 
 if TYPE_CHECKING:
@@ -464,8 +464,11 @@ class TextualTuiRenderer:
             # A nonzero-exit command is is_error=False on the wire (a normal
             # model-visible result) but should still present as a failure; drive
             # the glyph and the detail from the same judgment so they agree.
-            failed = tool_result_failed(event.is_error, event.exit_code)
-            status = "error" if failed else "done"
+            status = tool_result_status(
+                event.is_error,
+                event.exit_code,
+                process_state=event.process_state,
+            )
             # Consume the retained arguments for this call (empty if the request
             # was never seen, e.g. a resumed session) so tool-aware renderers can
             # use them; pop so the map doesn't grow across the session.
@@ -483,6 +486,7 @@ class TextualTuiRenderer:
                     before_text=event.before_text,
                     created=event.created,
                     summary=event.summary,
+                    process_state=event.process_state,
                 ),
                 elapsed=self._tool_elapsed(event.call_id, event.timestamp),
                 # Retain the full (tool-bounded) output so the card can expand past
