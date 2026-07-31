@@ -6,6 +6,8 @@ import asyncio
 import math
 from typing import Final, Literal, cast, overload
 
+import anyio
+
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_int, _required_string
 from wisp.tools.context import ToolContext
@@ -208,7 +210,8 @@ class BashTool:
         try:
             update = await supervisor.poll(process_id, wait_seconds=yield_seconds)
         except asyncio.CancelledError:
-            await supervisor.cancel(process_id)
+            with anyio.CancelScope(shield=True):
+                await supervisor.cancel(process_id)
             raise
         return _managed_update_result(update, context=context)
 
@@ -311,7 +314,35 @@ def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> To
 def _additional_dropped_bytes(original: str, bounded: TruncatedText) -> int:
     if not bounded.truncated:
         return 0
-    return max(0, len(original.encode("utf-8")) - len(bounded.text.encode("utf-8")))
+    retained_bytes = _retained_source_bytes_after_truncation(original, bounded.text)
+    return max(0, len(original.encode("utf-8")) - retained_bytes)
+
+
+def _retained_source_bytes_after_truncation(original: str, bounded_text: str) -> int:
+    marker = "[truncated]"
+    if marker.startswith(bounded_text):
+        return 0
+
+    candidates: list[tuple[str, Literal["prefix", "suffix"]]] = []
+    if bounded_text.startswith(marker):
+        tail = bounded_text.removeprefix(marker)
+        candidates.append((tail.removeprefix(" "), "suffix"))
+    if bounded_text.endswith(marker):
+        prefix = bounded_text.removesuffix(marker)
+        candidates.append((prefix, "prefix"))
+        if prefix.endswith("\n"):
+            candidates.append((prefix.removesuffix("\n"), "prefix"))
+    if not candidates:
+        candidates.append((bounded_text, "prefix"))
+        candidates.append((bounded_text, "suffix"))
+
+    retained_bytes = 0
+    for candidate, position in candidates:
+        if position == "prefix" and original.startswith(candidate):
+            retained_bytes = max(retained_bytes, len(candidate.encode("utf-8")))
+        if position == "suffix" and original.endswith(candidate):
+            retained_bytes = max(retained_bytes, len(candidate.encode("utf-8")))
+    return retained_bytes
 
 
 def _format_managed_update(

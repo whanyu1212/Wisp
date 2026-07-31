@@ -479,9 +479,29 @@ def test_bash_managed_update_adds_poll_time_dropped_bytes(tmp_path: Path) -> Non
     stdout = str(result.data["stdout"])
 
     assert result.data["stdout_truncated"] is True
-    assert result.data["stdout_dropped_bytes"] == 3 + len(update.stdout.encode("utf-8")) - len(
-        stdout.encode("utf-8")
+    retained_tail_bytes = len(stdout.removeprefix("[truncated] ").encode("utf-8"))
+    assert (
+        result.data["stdout_dropped_bytes"]
+        == 3 + len(update.stdout.encode("utf-8")) - retained_tail_bytes
     )
+    assert result.truncated is True
+
+
+def test_bash_managed_update_counts_marker_only_output_as_dropped_bytes(
+    tmp_path: Path,
+) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=5, max_output_lines=0)
+    update = process_manager_module.ProcessUpdate(
+        process_id="p123",
+        state="running",
+        stdout="abcde",
+    )
+
+    result = shell_tools_module._managed_update_result(update, context=context)
+
+    assert result.data["stdout"] == "[trun"
+    assert result.data["stdout_truncated"] is True
+    assert result.data["stdout_dropped_bytes"] == len(update.stdout.encode("utf-8"))
     assert result.truncated is True
 
 
@@ -550,6 +570,46 @@ def test_bash_tool_cancels_started_process_when_initial_poll_is_cancelled(
             start_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await start_task
+
+            update = await supervisor.poll(process_id)
+            assert update.state == "cancelled"
+        finally:
+            await tool.aclose()
+
+    anyio.run(run)
+
+
+def test_bash_tool_shields_initial_poll_cleanup_under_anyio_cancellation(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        context = ToolContext(cwd=tmp_path)
+        tool = BashTool()
+        python = shlex.quote(sys.executable)
+        command = f'{python} -c "import time; time.sleep(30)"'
+
+        try:
+            supervisor = tool._process_supervisor  # noqa: SLF001
+            assert supervisor is not None
+
+            async def start() -> None:
+                await tool.run(
+                    {
+                        "operation": "start",
+                        "command": command,
+                        "yield_seconds": 30,
+                        "lifetime_seconds": 60,
+                    },
+                    context,
+                )
+
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(start)
+                with anyio.fail_after(5):
+                    while not supervisor._managed:  # noqa: SLF001
+                        await anyio.sleep(0.01)
+                process_id = next(iter(supervisor._managed))  # noqa: SLF001
+                task_group.cancel_scope.cancel()
 
             update = await supervisor.poll(process_id)
             assert update.state == "cancelled"
@@ -745,6 +805,24 @@ def test_bash_tool_reports_one_shot_stream_truncation_metadata(tmp_path: Path) -
     assert result.data["stderr_truncated"] is False
     assert result.data["stdout_dropped_bytes"] > 0
     assert result.data["stderr_dropped_bytes"] == 0
+    assert result.truncated is True
+
+
+def test_bash_tool_counts_marker_only_output_as_dropped_bytes(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_run_shell(*args: object, **kwargs: object) -> process_tools_module.ProcessResult:
+        return process_tools_module.ProcessResult(exit_code=0, stdout="abcde", stderr="")
+
+    monkeypatch.setattr(shell_tools_module, "_run_shell", fake_run_shell)
+    context = ToolContext(cwd=tmp_path, max_output_bytes=5, max_output_lines=0)
+
+    result = run_tool(BashTool(None), {"command": "ignored"}, context)
+
+    assert result.data["stdout"] == "[trun"
+    assert result.data["stdout_truncated"] is True
+    assert result.data["stdout_dropped_bytes"] == 5
     assert result.truncated is True
 
 
