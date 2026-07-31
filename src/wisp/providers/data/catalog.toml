@@ -175,9 +175,16 @@ models = [
 "gpt-5.4-mini" = "legacy"
 
 [providers.effort_levels]
-# The Codex model guide documents these request-level choices for its default
-# GPT-5.6 Sol model. Ultra is agent orchestration, not a provider effort tier.
+# Codex subscription models all expose request-level reasoning effort. GPT-5.6
+# adds max; older models top out at xhigh. Minimal is omitted because Codex maps
+# it to low rather than accepting it as a distinct provider effort. Ultra is
+# agent orchestration, not a provider effort tier.
 "gpt-5.6-sol" = ["low", "medium", "high", "xhigh", "max"]
+"gpt-5.6-terra" = ["low", "medium", "high", "xhigh", "max"]
+"gpt-5.6-luna" = ["low", "medium", "high", "xhigh", "max"]
+"gpt-5.5" = ["low", "medium", "high", "xhigh"]
+"gpt-5.4" = ["low", "medium", "high", "xhigh"]
+"gpt-5.4-mini" = ["low", "medium", "high", "xhigh"]
 
 [[providers]]
 name = "anthropic"
