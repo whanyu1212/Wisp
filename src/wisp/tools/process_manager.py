@@ -20,6 +20,7 @@ from wisp.tools.process import (
     _terminate_process_tree,
 )
 from wisp.tools.result import ToolError
+from wisp.tools.utf8 import DecodedTextUnit, decode_utf8_units, decode_utf8_with_source_byte_lengths
 
 ProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
 _T = TypeVar("_T")
@@ -47,12 +48,8 @@ class ProcessUpdate:
     error: str | None = None
     stdout_retained_bytes: int | None = None
     stderr_retained_bytes: int | None = None
-
-
-@dataclass
-class _TextUnit:
-    text: str
-    source_bytes: int
+    stdout_source_byte_lengths: tuple[int, ...] | None = None
+    stderr_source_byte_lengths: tuple[int, ...] | None = None
 
 
 @dataclass
@@ -72,16 +69,16 @@ class _PendingText:
         if not value:
             return
         self._append_units(
-            _TextUnit(text=character, source_bytes=len(character.encode("utf-8")))
+            DecodedTextUnit(text=character, source_bytes=len(character.encode("utf-8")))
             for character in value
         )
 
     def append_bytes(self, value: bytes, *, final: bool = False) -> None:
-        units, pending = _decode_utf8_units(self._pending_utf8 + value, final=final)
+        units, pending = decode_utf8_units(self._pending_utf8 + value, final=final)
         self._pending_utf8 = pending
         self._append_units(units)
 
-    def _append_units(self, units: Iterable[_TextUnit]) -> None:
+    def _append_units(self, units: Iterable[DecodedTextUnit]) -> None:
         new_units = tuple(units)
         if not new_units:
             return
@@ -105,14 +102,15 @@ class _PendingText:
             sum(source_byte_lengths) - self.retained_source_bytes,
         )
 
-    def drain(self) -> tuple[str, int, int]:
+    def drain(self) -> tuple[str, int, int, tuple[int, ...]]:
         text = self.text
         dropped_bytes = self.dropped_bytes
         retained_source_bytes = self.retained_source_bytes
+        source_byte_lengths = tuple(self._source_byte_lengths)
         self.text = ""
         self.dropped_bytes = 0
         self._source_byte_lengths = []
-        return text, dropped_bytes, retained_source_bytes
+        return text, dropped_bytes, retained_source_bytes, source_byte_lengths
 
 
 @dataclass
@@ -245,16 +243,24 @@ class ProcessSupervisor:
                 raise
             if not cleanup_succeeded:
                 raise ToolError("Failed to terminate process tree")
+            stdout, stdout_source_byte_lengths = decode_utf8_with_source_byte_lengths(
+                stdout_result.output
+            )
+            stderr, stderr_source_byte_lengths = decode_utf8_with_source_byte_lengths(
+                stderr_result.output
+            )
             result = ProcessResult(
                 exit_code=process.returncode if process.returncode is not None else -1,
-                stdout=stdout_result.output.decode("utf-8", errors="replace"),
-                stderr=stderr_result.output.decode("utf-8", errors="replace"),
+                stdout=stdout,
+                stderr=stderr,
                 stdout_truncated=stdout_result.truncated,
                 stderr_truncated=stderr_result.truncated,
                 stdout_dropped_bytes=stdout_result.dropped_bytes,
                 stderr_dropped_bytes=stderr_result.dropped_bytes,
                 stdout_retained_bytes=len(stdout_result.output),
                 stderr_retained_bytes=len(stderr_result.output),
+                stdout_source_byte_lengths=stdout_source_byte_lengths,
+                stderr_source_byte_lengths=stderr_source_byte_lengths,
             )
             release_ownership = True
             return result
@@ -777,8 +783,8 @@ class ProcessSupervisor:
             return await _terminate_process_tree(managed.process)
 
     def _snapshot(self, managed: _ManagedProcess) -> ProcessUpdate:
-        stdout, stdout_dropped, stdout_retained = managed.stdout.drain()
-        stderr, stderr_dropped, stderr_retained = managed.stderr.drain()
+        stdout, stdout_dropped, stdout_retained, stdout_source_byte_lengths = managed.stdout.drain()
+        stderr, stderr_dropped, stderr_retained, stderr_source_byte_lengths = managed.stderr.drain()
         if managed.state != "running":
             managed.terminal_reported = True
         return ProcessUpdate(
@@ -794,6 +800,8 @@ class ProcessSupervisor:
             error=managed.error,
             stdout_retained_bytes=stdout_retained,
             stderr_retained_bytes=stderr_retained,
+            stdout_source_byte_lengths=stdout_source_byte_lengths,
+            stderr_source_byte_lengths=stderr_source_byte_lengths,
         )
 
     def _evict_terminals_for_capacity(self) -> None:
@@ -827,62 +835,6 @@ def _bounded_text_tail(text: str, *, max_bytes: int, max_lines: int) -> tuple[st
 
     kept_bytes = len(bounded.encode("utf-8"))
     return bounded, len(encoded) - kept_bytes
-
-
-def _decode_utf8_units(data: bytes, *, final: bool) -> tuple[tuple[_TextUnit, ...], bytes]:
-    units: list[_TextUnit] = []
-    index = 0
-    while index < len(data):
-        first = data[index]
-        if first < 0x80:
-            units.append(_TextUnit(text=chr(first), source_bytes=1))
-            index += 1
-            continue
-
-        expected = _utf8_sequence_length(first)
-        if expected is None:
-            units.append(_TextUnit(text="\ufffd", source_bytes=1))
-            index += 1
-            continue
-
-        if index + expected > len(data):
-            try:
-                text = data[index:].decode("utf-8")
-            except UnicodeDecodeError as exc:
-                if not final and exc.reason == "unexpected end of data":
-                    return tuple(units), data[index:]
-                invalid_bytes = max(1, exc.end)
-                units.append(_TextUnit(text="\ufffd", source_bytes=invalid_bytes))
-                index += invalid_bytes
-                continue
-            if final:
-                units.append(_TextUnit(text=text, source_bytes=len(data) - index))
-                return tuple(units), b""
-            return tuple(units), data[index:]
-
-        sequence = data[index : index + expected]
-        try:
-            text = sequence.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            invalid_bytes = max(1, exc.end)
-            units.append(_TextUnit(text="\ufffd", source_bytes=invalid_bytes))
-            index += invalid_bytes
-            continue
-
-        units.append(_TextUnit(text=text, source_bytes=expected))
-        index += expected
-
-    return tuple(units), b""
-
-
-def _utf8_sequence_length(first: int) -> int | None:
-    if 0xC2 <= first <= 0xDF:
-        return 2
-    if 0xE0 <= first <= 0xEF:
-        return 3
-    if 0xF0 <= first <= 0xF4:
-        return 4
-    return None
 
 
 __all__ = [

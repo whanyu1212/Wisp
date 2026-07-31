@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from collections.abc import Sequence
 from typing import Final, Literal, cast, overload
 
 import anyio
@@ -163,11 +164,13 @@ class BashTool:
             result.stdout,
             stdout,
             retained_source_bytes=result.stdout_retained_bytes,
+            source_byte_lengths=result.stdout_source_byte_lengths,
         )
         stderr_dropped_bytes = result.stderr_dropped_bytes + _additional_dropped_bytes(
             result.stderr,
             stderr,
             retained_source_bytes=result.stderr_retained_bytes,
+            source_byte_lengths=result.stderr_source_byte_lengths,
         )
         return ToolResult(
             text=output.text,
@@ -288,11 +291,13 @@ def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> To
         update.stdout,
         stdout,
         retained_source_bytes=update.stdout_retained_bytes,
+        source_byte_lengths=update.stdout_source_byte_lengths,
     )
     stderr_dropped_bytes = update.stderr_dropped_bytes + _additional_dropped_bytes(
         update.stderr,
         stderr,
         retained_source_bytes=update.stderr_retained_bytes,
+        source_byte_lengths=update.stderr_source_byte_lengths,
     )
     data: dict[str, object] = {
         "process_id": update.process_id,
@@ -320,6 +325,7 @@ def _additional_dropped_bytes(
     bounded: TruncatedText,
     *,
     retained_source_bytes: int | None = None,
+    source_byte_lengths: Sequence[int] | None = None,
 ) -> int:
     if not bounded.truncated:
         return 0
@@ -328,16 +334,27 @@ def _additional_dropped_bytes(
         if retained_source_bytes is not None
         else len(original.encode("utf-8"))
     )
-    retained_bytes = _retained_source_bytes_after_truncation(original, bounded.text)
+    retained_bytes = _retained_source_bytes_after_truncation(
+        original,
+        bounded.text,
+        source_byte_lengths=source_byte_lengths,
+    )
     if retained_source_bytes is not None:
         retained_bytes = min(retained_bytes, retained_source_bytes)
     return max(0, original_bytes - retained_bytes)
 
 
-def _retained_source_bytes_after_truncation(original: str, bounded_text: str) -> int:
+def _retained_source_bytes_after_truncation(
+    original: str,
+    bounded_text: str,
+    *,
+    source_byte_lengths: Sequence[int] | None = None,
+) -> int:
     marker = "[truncated]"
     if marker.startswith(bounded_text):
         return 0
+    if source_byte_lengths is not None and len(source_byte_lengths) != len(original):
+        source_byte_lengths = None
 
     candidates: list[tuple[str, Literal["prefix", "suffix"]]] = []
     if bounded_text.startswith(marker):
@@ -355,10 +372,37 @@ def _retained_source_bytes_after_truncation(original: str, bounded_text: str) ->
     retained_bytes = 0
     for candidate, position in candidates:
         if position == "prefix" and original.startswith(candidate):
-            retained_bytes = max(retained_bytes, len(candidate.encode("utf-8")))
+            retained_bytes = max(
+                retained_bytes,
+                _candidate_source_bytes(
+                    candidate,
+                    source_byte_lengths=source_byte_lengths,
+                    position=position,
+                ),
+            )
         if position == "suffix" and original.endswith(candidate):
-            retained_bytes = max(retained_bytes, len(candidate.encode("utf-8")))
+            retained_bytes = max(
+                retained_bytes,
+                _candidate_source_bytes(
+                    candidate,
+                    source_byte_lengths=source_byte_lengths,
+                    position=position,
+                ),
+            )
     return retained_bytes
+
+
+def _candidate_source_bytes(
+    candidate: str,
+    *,
+    source_byte_lengths: Sequence[int] | None,
+    position: Literal["prefix", "suffix"],
+) -> int:
+    if source_byte_lengths is None:
+        return len(candidate.encode("utf-8"))
+    if position == "prefix":
+        return sum(source_byte_lengths[: len(candidate)])
+    return sum(source_byte_lengths[-len(candidate) :]) if candidate else 0
 
 
 def _format_managed_update(

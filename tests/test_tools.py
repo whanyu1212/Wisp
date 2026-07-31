@@ -859,6 +859,22 @@ def test_bash_tool_counts_source_bytes_when_utf8_clip_decodes_replacement(
     assert result.truncated is True
 
 
+def test_bash_tool_counts_retruncated_replacement_source_bytes(
+    tmp_path: Path,
+) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=15, max_output_lines=100)
+    python = shlex.quote(sys.executable)
+    code = "import sys; sys.stdout.buffer.write(bytes([0xff] * 15))"
+    command = f"{python} -c {shlex.quote(code)}"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+
+    assert result.data["stdout"] == "\ufffd\n[truncated]"
+    assert result.data["stdout_truncated"] is True
+    assert result.data["stdout_dropped_bytes"] == 14
+    assert result.truncated is True
+
+
 def test_bash_tool_counts_managed_source_bytes_when_utf8_clip_decodes_replacement(
     tmp_path: Path,
 ) -> None:
