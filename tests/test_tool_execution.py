@@ -413,6 +413,37 @@ def test_executor_bounds_bash_process_output_metadata() -> None:
     assert ended.stderr_dropped_bytes == 11
 
 
+def test_executor_promotes_one_shot_bash_stream_truncation_metadata() -> None:
+    ended = _run_executor(
+        _ResultTool(
+            name="bash",
+            result=ToolResult(
+                text="Command exited with code 0: x\n[truncated]",
+                data={
+                    "exit_code": 0,
+                    "output_has_exit_status": True,
+                    "stdout": "x\n[truncated]",
+                    "stderr": "",
+                    "stdout_truncated": True,
+                    "stderr_truncated": False,
+                    "stdout_dropped_bytes": 128,
+                    "stderr_dropped_bytes": 0,
+                },
+                truncated=True,
+            ),
+        )
+    )
+
+    assert ended.process_id is None
+    assert ended.process_state is None
+    assert ended.stdout == "x\n[truncated]"
+    assert ended.stderr == ""
+    assert ended.stdout_truncated is True
+    assert ended.stderr_truncated is False
+    assert ended.stdout_dropped_bytes == 128
+    assert ended.stderr_dropped_bytes == 0
+
+
 def test_executor_ignores_malformed_bash_process_metadata() -> None:
     ended = _run_executor(
         _ResultTool(

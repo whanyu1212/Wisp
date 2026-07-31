@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from typing import Final, Literal, cast, overload
 
@@ -136,6 +137,16 @@ class BashTool:
             max_bytes=context.max_output_bytes,
             max_lines=context.max_output_lines,
         )
+        stdout_truncated = result.stdout_truncated or stdout.truncated
+        stderr_truncated = result.stderr_truncated or stderr.truncated
+        stdout_dropped_bytes = result.stdout_dropped_bytes + _additional_dropped_bytes(
+            result.stdout,
+            stdout,
+        )
+        stderr_dropped_bytes = result.stderr_dropped_bytes + _additional_dropped_bytes(
+            result.stderr,
+            stderr,
+        )
         return ToolResult(
             text=output.text,
             data={
@@ -143,14 +154,12 @@ class BashTool:
                 "output_has_exit_status": True,
                 "stdout": stdout.text,
                 "stderr": stderr.text,
+                "stdout_truncated": stdout_truncated,
+                "stderr_truncated": stderr_truncated,
+                "stdout_dropped_bytes": stdout_dropped_bytes,
+                "stderr_dropped_bytes": stderr_dropped_bytes,
             },
-            truncated=(
-                result.stdout_truncated
-                or result.stderr_truncated
-                or stdout.truncated
-                or stderr.truncated
-                or output.truncated
-            ),
+            truncated=(stdout_truncated or stderr_truncated or output.truncated),
         )
 
     async def _start(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
@@ -178,7 +187,11 @@ class BashTool:
             max_retained_bytes=context.max_output_bytes,
             max_retained_lines=context.max_output_lines,
         )
-        update = await supervisor.poll(process_id, wait_seconds=yield_seconds)
+        try:
+            update = await supervisor.poll(process_id, wait_seconds=yield_seconds)
+        except asyncio.CancelledError:
+            await supervisor.cancel(process_id)
+            raise
         return _managed_update_result(update, context=context)
 
     async def _poll(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
@@ -267,6 +280,12 @@ def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> To
         data=data,
         truncated=stdout_truncated or stderr_truncated or output.truncated,
     )
+
+
+def _additional_dropped_bytes(original: str, bounded: TruncatedText) -> int:
+    if not bounded.truncated:
+        return 0
+    return max(0, len(original.encode("utf-8")) - len(bounded.text.encode("utf-8")))
 
 
 def _format_managed_update(

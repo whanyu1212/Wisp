@@ -156,7 +156,7 @@ class ProcessSupervisor:
         release_ownership = False
         try:
             try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                stdout_result, stderr_result = await asyncio.wait_for(
                     capture_task,
                     timeout=timeout,
                 )
@@ -207,10 +207,12 @@ class ProcessSupervisor:
                 raise ToolError("Failed to terminate process tree")
             result = ProcessResult(
                 exit_code=process.returncode if process.returncode is not None else -1,
-                stdout=stdout_bytes.decode("utf-8", errors="replace"),
-                stderr=stderr_bytes.decode("utf-8", errors="replace"),
-                stdout_truncated=budget.exhausted,
-                stderr_truncated=budget.exhausted,
+                stdout=stdout_result.output.decode("utf-8", errors="replace"),
+                stderr=stderr_result.output.decode("utf-8", errors="replace"),
+                stdout_truncated=stdout_result.truncated,
+                stderr_truncated=stderr_result.truncated,
+                stdout_dropped_bytes=stdout_result.dropped_bytes,
+                stderr_dropped_bytes=stderr_result.dropped_bytes,
             )
             release_ownership = True
             return result

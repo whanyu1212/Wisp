@@ -462,6 +462,46 @@ def test_bash_tool_cancels_resumable_process(tmp_path: Path) -> None:
     anyio.run(run)
 
 
+def test_bash_tool_cancels_started_process_when_initial_poll_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        context = ToolContext(cwd=tmp_path)
+        tool = BashTool()
+        python = shlex.quote(sys.executable)
+        command = f'{python} -c "import time; time.sleep(30)"'
+
+        try:
+            start_task = asyncio.create_task(
+                tool.run(
+                    {
+                        "operation": "start",
+                        "command": command,
+                        "yield_seconds": 30,
+                        "lifetime_seconds": 60,
+                    },
+                    context,
+                )
+            )
+            supervisor = tool._process_supervisor  # noqa: SLF001
+            assert supervisor is not None
+            with anyio.fail_after(5):
+                while not supervisor._managed:  # noqa: SLF001
+                    await asyncio.sleep(0.01)
+            process_id = next(iter(supervisor._managed))  # noqa: SLF001
+
+            start_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await start_task
+
+            update = await supervisor.poll(process_id)
+            assert update.state == "cancelled"
+        finally:
+            await tool.aclose()
+
+    anyio.run(run)
+
+
 def test_bash_tool_reports_resumable_timeout_as_terminal_state(tmp_path: Path) -> None:
     async def run() -> None:
         context = ToolContext(cwd=tmp_path)
@@ -633,6 +673,21 @@ def test_bash_tool_bounds_output_before_buffering(tmp_path: Path) -> None:
     result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
 
     assert len(str(result.data["stdout"]).encode("utf-8")) <= context.max_output_bytes
+    assert result.truncated is True
+
+
+def test_bash_tool_reports_one_shot_stream_truncation_metadata(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=80, max_output_lines=1000)
+    python = shlex.quote(sys.executable)
+    code = "import sys; sys.stdout.write('x' * 10000)"
+    command = f"{python} -u -c {shlex.quote(code)}"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+
+    assert result.data["stdout_truncated"] is True
+    assert result.data["stderr_truncated"] is False
+    assert result.data["stdout_dropped_bytes"] > 0
+    assert result.data["stderr_dropped_bytes"] == 0
     assert result.truncated is True
 
 

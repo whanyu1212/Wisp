@@ -662,7 +662,7 @@ def test_managed_timeout_bounds_post_termination_stream_drain(tmp_path: Path) ->
             process_id = await supervisor.start(
                 _python_command("import time; time.sleep(30)"),
                 cwd=tmp_path,
-                timeout=0.05,
+                timeout=0.5,
             )
             managed = supervisor._managed[process_id]  # noqa: SLF001
             assert managed.stdout_task is not None
@@ -879,7 +879,7 @@ def test_timeout_kills_detached_background_job(tmp_path: Path) -> None:
                     redirect_output=False,
                 ),
                 cwd=tmp_path,
-                timeout=0.1,
+                timeout=1,
             )
             child_pid = await _wait_for_pid_file(child_pid_path)
             terminal = (await _poll_until_terminal(supervisor, process_id))[-1]
