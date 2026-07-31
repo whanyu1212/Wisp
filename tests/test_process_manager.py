@@ -215,6 +215,43 @@ def test_managed_process_preserves_valid_suffix_after_incomplete_utf8_lead(
     assert stdout_retained_bytes == 2
 
 
+def test_managed_process_surfaces_established_malformed_utf8_before_exit(
+    tmp_path: Path,
+) -> None:
+    async def run() -> ProcessUpdate:
+        supervisor = ProcessSupervisor()
+        process_id: str | None = None
+        try:
+            process_id = await supervisor.start(
+                _python_command(
+                    "import sys,time; "
+                    "sys.stdout.buffer.write(bytes([0xe2, 0x41])); "
+                    "sys.stdout.flush(); "
+                    "time.sleep(5)"
+                ),
+                cwd=tmp_path,
+                timeout=10,
+                max_retained_bytes=10,
+                max_retained_lines=100,
+            )
+            with anyio.fail_after(2):
+                while True:
+                    update = await supervisor.poll(process_id, wait_seconds=0.1)
+                    if update.stdout:
+                        return update
+        finally:
+            if process_id is not None:
+                await supervisor.cancel(process_id)
+            await supervisor.aclose()
+
+    update = anyio.run(run)
+
+    assert update.state == "running"
+    assert update.stdout == "\ufffdA"
+    assert update.stdout_dropped_bytes == 0
+    assert update.stdout_retained_bytes == 2
+
+
 def test_managed_process_reports_stream_reader_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
