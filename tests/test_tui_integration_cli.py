@@ -25,6 +25,7 @@ from wisp.trust_flow import TrustDecision
 from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.compact_echo import MAX_PENDING_ECHOES as _MAX_PENDING_ECHOES
 from wisp.tui.history import HistoricalToolCard, HistoricalTranscriptMessage
+from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.textual_app import (
     TextualTui,
     TextualTuiRenderer,
@@ -1856,8 +1857,15 @@ def test_textual_tool_card_expand_repins_tail_when_focus_scrolled_a_tall_card() 
             card = _first_tool_card(app_instance)
             card.focus()
             await pilot.pause()
-            # Focusing a card taller than the viewport center-scrolls it, which drops
-            # follow-tail before the expand.
+            # Focusing a card taller than the viewport center-scrolls it on some
+            # Textual/platform combinations. If the driver keeps the tail pinned,
+            # force the same precondition directly so this test verifies the
+            # acceptance criterion, not Textual's focus-scroll implementation.
+            if transcript.is_following:
+                transcript.restore_viewport_state(
+                    TranscriptViewportState(scroll_y=0, following=False)
+                )
+                await pilot.pause()
             following_after_focus = transcript.is_following
             await pilot.press("enter")
             await pilot.pause()
