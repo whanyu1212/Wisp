@@ -61,6 +61,24 @@ class BashTool:
                 "default": 0,
             },
         },
+        "oneOf": [
+            {
+                "properties": {"operation": {"enum": ["run"]}},
+                "required": ["command"],
+            },
+            {
+                "properties": {"operation": {"enum": ["start"]}},
+                "required": ["operation", "command"],
+            },
+            {
+                "properties": {"operation": {"enum": ["poll"]}},
+                "required": ["operation", "process_id"],
+            },
+            {
+                "properties": {"operation": {"enum": ["cancel"]}},
+                "required": ["operation", "process_id"],
+            },
+        ],
     }
 
     @overload

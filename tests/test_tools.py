@@ -286,6 +286,29 @@ def test_builtin_tools_have_safety_metadata() -> None:
     assert BashTool().safety == "command"
 
 
+def test_bash_tool_schema_requires_operation_specific_arguments() -> None:
+    schema = BashTool.input_schema
+
+    assert schema["oneOf"] == [
+        {
+            "properties": {"operation": {"enum": ["run"]}},
+            "required": ["command"],
+        },
+        {
+            "properties": {"operation": {"enum": ["start"]}},
+            "required": ["operation", "command"],
+        },
+        {
+            "properties": {"operation": {"enum": ["poll"]}},
+            "required": ["operation", "process_id"],
+        },
+        {
+            "properties": {"operation": {"enum": ["cancel"]}},
+            "required": ["operation", "process_id"],
+        },
+    ]
+
+
 def test_edit_tool_applies_unique_replacements_from_original(tmp_path: Path) -> None:
     path = tmp_path / "story.txt"
     path.write_text("hello brave world\n", encoding="utf-8")
