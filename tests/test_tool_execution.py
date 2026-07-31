@@ -492,6 +492,36 @@ def test_executor_preserves_bash_exit_envelope_outside_tiny_body_budget() -> Non
     assert ended.output_has_exit_status is True
 
 
+def test_executor_preserves_bash_managed_header_outside_tiny_body_budget() -> None:
+    ended = _run_executor(
+        _ResultTool(
+            name="bash",
+            result=ToolResult(
+                text="Process p123 is still running\nstdout:\nchunk\n",
+                data={
+                    "process_id": "p123",
+                    "process_state": "running",
+                    "stdout": "chunk\n",
+                    "stderr": "",
+                    "output_has_exit_status": False,
+                },
+            ),
+        ),
+        context=ToolContext(
+            cwd=Path.cwd(),
+            max_output_bytes=1,
+            max_output_lines=0,
+            protected_paths=(),
+        ),
+    )
+
+    assert ended.output.startswith("Process p123 is still running")
+    assert "p123" in ended.output
+    assert ended.truncated is True
+    assert ended.process_id == "p123"
+    assert ended.process_state == "running"
+
+
 def test_executor_propagates_wisp_result_processing_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

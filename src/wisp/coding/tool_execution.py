@@ -40,6 +40,7 @@ _MAX_RESULT_COUNT = (1 << 63) - 1
 _MIN_EXIT_CODE = -(1 << 31)
 _MAX_EXIT_CODE = (1 << 31) - 1
 _MAX_PROCESS_ID_BYTES = 256
+_TRUNCATION_SUFFIX_WITH_SEPARATOR_BYTES = len("\n[truncated]")
 _PROCESS_STATES: frozenset[ManagedProcessState] = frozenset(
     ("running", "completed", "failed", "timed_out", "cancelled")
 )
@@ -320,21 +321,25 @@ def _normalize_tool_result(
         raise _MalformedToolResultError("ToolResult.text must be a string")
     _require_utf8(text, field="ToolResult.text")
     truncated = result.truncated
-    has_exit_status = _promote_output_has_exit_status(tool_name, result.data)
+    data = _snapshot_result_data(tool_name, result.data, context=context)
+    has_exit_status = _promote_output_has_exit_status(tool_name, data)
     status_overhead = len("Command exited with code -2147483648: ") if has_exit_status else 0
+    managed_header_overhead = _bash_managed_process_header_overhead(tool_name, data)
+    metadata_overhead = max(status_overhead, managed_header_overhead)
+    preserves_status_line = metadata_overhead > 0
     bounded_text = truncate_text(
         text,
-        # A Bash result's fixed completion envelope is metadata outside the body
-        # budget. Allow its bounded worst-case size through normalization so a
-        # tiny embedding budget cannot erase the exit code the tool preserved.
-        max_bytes=max(0, context.max_output_bytes) + status_overhead,
+        # Bash fixed status lines are metadata outside the body budget. Allow
+        # their bounded worst-case size through normalization so a tiny
+        # embedding budget cannot erase the exit code or managed process id.
+        max_bytes=max(0, context.max_output_bytes) + metadata_overhead,
         max_lines=max(1, context.max_output_lines)
-        if has_exit_status
+        if preserves_status_line
         else max(0, context.max_output_lines),
     )
     return _ToolResultSnapshot(
         text=bounded_text.text,
-        data=_snapshot_result_data(tool_name, result.data, context=context),
+        data=data,
         truncated=(truncated if type(truncated) is bool else False) or bounded_text.truncated,
     )
 
@@ -410,6 +415,28 @@ def _copy_bash_process_data(
         target["stderr_truncated"] = True
     _copy_result_count(source, target, "stdout_dropped_bytes")
     _copy_result_count(source, target, "stderr_dropped_bytes")
+
+
+def _bash_managed_process_header_overhead(
+    tool_name: str,
+    data: Mapping[str, object],
+) -> int:
+    process_id = _promote_process_id(tool_name, data)
+    state = _promote_process_state(tool_name, data)
+    if process_id is None or state is None:
+        return 0
+
+    if state == "running":
+        header = f"Process {process_id} is still running"
+    elif state == "completed":
+        header = f"Process {process_id} completed with exit code {_MIN_EXIT_CODE}"
+    elif state == "timed_out":
+        header = f"Process {process_id} timed out"
+    elif state == "cancelled":
+        header = f"Process {process_id} cancelled"
+    else:
+        header = f"Process {process_id} failed: "
+    return len(header.encode("utf-8")) + _TRUNCATION_SUFFIX_WITH_SEPARATOR_BYTES
 
 
 def _copy_bounded_scalar_text(
