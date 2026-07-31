@@ -26,6 +26,41 @@ from pathlib import Path
 
 GLOBAL_TRUST_PATH = Path("~/.wisp/trust.json")
 
+_TRUSTY_ENV_VALUES = frozenset({"1", "true", "yes", "on", "trust"})
+_FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off", "untrust"})
+
+
+def trust_override_from_env() -> bool | None:
+    """Return the explicit, process-environment trust override, if present.
+
+    This is deliberately defined at the trust boundary rather than in a frontend
+    module so RPC and in-process integrations apply identical safe startup rules.
+    """
+
+    raw = os.environ.get("WISP_TRUST")
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if value in _TRUSTY_ENV_VALUES:
+        return True
+    if value in _FALSY_ENV_VALUES:
+        return False
+    return None
+
+
+def trusted_noninteractive(project_path: Path, *, trust_path: Path | None = None) -> bool:
+    """Return a safe startup trust decision without prompting.
+
+    Only an explicit environment override or an existing global trust record can
+    grant trust. An undecided project fails closed until an integration answers a
+    ``trust.requested`` event.
+    """
+
+    override = trust_override_from_env()
+    if override is not None:
+        return override
+    return is_trusted(project_path, trust_path=trust_path) is True
+
 
 def _default_trust_path() -> Path:
     """Return the location of the global trust store.

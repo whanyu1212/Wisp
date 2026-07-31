@@ -5,6 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 from wisp.providers.base import ProviderError
+from wisp.rpc.errors import RpcOutputAlreadyReportedError
 
 
 class OutputMode(StrEnum):
@@ -16,8 +17,9 @@ class OutputMode(StrEnum):
     tui = "tui"
 
 
-class _JsonOutputModeError(ProviderError):
-    """Raised after JSONL output has already emitted a model-visible error event."""
+# Compatibility name retained for CLI renderers.  RPC execution uses the
+# transport-neutral class directly.
+_JsonOutputModeError = RpcOutputAlreadyReportedError
 
 
 class _RenderedPrintError(ProviderError):

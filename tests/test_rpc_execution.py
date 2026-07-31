@@ -13,16 +13,6 @@ from pytest import MonkeyPatch
 from tests.rpc_support import build_rpc_executor_fixture
 from wisp.agent.harness import QueuedMessages
 from wisp.agent.messages import Message
-from wisp.cli import rpc_execution as rpc_execution_module
-from wisp.cli.rpc_configuration import _RpcConfigureOverrides
-from wisp.cli.rpc_coordinator import (
-    RpcCoordinator,
-    _RpcCommandCompleted,
-    _RpcDispatchResult,
-    _RpcRunningCommand,
-    _RpcSessionState,
-)
-from wisp.cli.rpc_execution import RpcCommandExecutor, rpc_selected_session_state
 from wisp.coding import CodingSession
 from wisp.coding.session import _RetainedQueueState
 from wisp.config import WispConfig
@@ -46,6 +36,16 @@ from wisp.events import (
     RpcStateSnapshot,
     WispEvent,
 )
+from wisp.rpc import execution as rpc_execution_module
+from wisp.rpc.configuration import _RpcConfigureOverrides
+from wisp.rpc.coordinator import (
+    RpcCoordinator,
+    _RpcCommandCompleted,
+    _RpcDispatchResult,
+    _RpcRunningCommand,
+    _RpcSessionState,
+)
+from wisp.rpc.execution import RpcCommandExecutor, rpc_selected_session_state
 from wisp.runtime.commands import CommandArgument, CommandCategory, CommandDescriptor
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionTreeNavigation

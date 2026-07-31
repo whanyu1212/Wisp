@@ -10,7 +10,6 @@ gates the project-local settings file on it.
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -18,11 +17,19 @@ from typing import Annotated
 import typer
 
 from wisp.agent.prompt import resolve_project_context_root
-from wisp.trust import _canonical_key, forget_trust, is_trusted, record_trust
+from wisp.trust import (
+    _canonical_key,
+    forget_trust,
+    is_trusted,
+    record_trust,
+)
+from wisp.trust import (
+    trust_override_from_env as _trust_override_from_env,
+)
+from wisp.trust import (
+    trusted_noninteractive as _trusted_noninteractive,
+)
 from wisp.trust_flow import TrustDecision, resolve_trust
-
-_TRUTHY = {"1", "true", "yes", "on", "trust"}
-_FALSY = {"0", "false", "no", "off", "untrust"}
 
 trust_app = typer.Typer(help="Manage Wisp project trust decisions.")
 
@@ -108,15 +115,7 @@ def trust_override_from_env() -> bool | None:
     (``WISP_TRUST=0``) without a prompt. Unrecognized values are ignored.
     """
 
-    raw = os.environ.get("WISP_TRUST")
-    if raw is None:
-        return None
-    value = raw.strip().lower()
-    if value in _TRUTHY:
-        return True
-    if value in _FALSY:
-        return False
-    return None
+    return _trust_override_from_env()
 
 
 def trusted_noninteractive(project_path: Path, *, trust_path: Path | None = None) -> bool:
@@ -131,10 +130,7 @@ def trusted_noninteractive(project_path: Path, *, trust_path: Path | None = None
     governs project-local resource loading for the rest of the session.
     """
 
-    override = trust_override_from_env()
-    if override is not None:
-        return override
-    return is_trusted(project_path, trust_path=trust_path) is True
+    return _trusted_noninteractive(project_path, trust_path=trust_path)
 
 
 def resolve_cli_trust(project_path: Path, *, trust_path: Path | None = None) -> TrustDecision:

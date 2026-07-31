@@ -6,9 +6,9 @@ from pathlib import Path
 import anyio
 import pytest
 
-from wisp.cli.rpc_configuration import RpcProjectConfiguration, _ConfigOverrides
 from wisp.coding import CodingSession
 from wisp.config import WispConfig
+from wisp.rpc.configuration import RpcProjectConfiguration, _ConfigOverrides
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownProviderError

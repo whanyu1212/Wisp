@@ -8,7 +8,8 @@ from typing import Literal
 import anyio
 
 from wisp.agent.messages import Message
-from wisp.cli.rpc_coordinator import (
+from wisp.events import RpcSessionSelected, WispEvent
+from wisp.rpc.coordinator import (
     RpcCoordinator,
     _RpcCommandCompleted,
     _RpcDispatchResult,
@@ -18,7 +19,6 @@ from wisp.cli.rpc_coordinator import (
     _RpcRunningCommand,
     _RpcSessionState,
 )
-from wisp.events import RpcSessionSelected, WispEvent
 from wisp.sessions.jsonl import JsonlSessionStore
 
 
