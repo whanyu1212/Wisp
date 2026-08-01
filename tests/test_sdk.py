@@ -781,6 +781,21 @@ def test_in_process_sdk_relays_events_when_consumer_falls_behind(
             isinstance(event, RpcCommandFinished) and event.command_id == state_id and event.ok
             for event in events
         )
+        assert state_id is not None
+        state_started_index = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, RpcCommandStarted) and event.command_id == state_id
+        )
+        state_finished_index = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, RpcCommandFinished) and event.command_id == state_id
+        )
+        assert not any(
+            event.type == "message.delta"
+            for event in events[state_started_index : state_finished_index + 1]
+        )
 
     anyio.run(scenario)
 

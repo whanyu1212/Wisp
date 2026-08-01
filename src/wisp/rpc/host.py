@@ -357,6 +357,7 @@ class RpcHost:
         self.coordinator = coordinator
         self._write_event = write_event
         self._render_events = render_events
+        self._event_render_lock = anyio.Lock()
 
     @classmethod
     async def create(
@@ -493,13 +494,14 @@ class RpcHost:
                 configure_overrides=self.configure_overrides,
                 coordinator=self.coordinator,
                 write_event=write_event,
-                render_events=self._render_events,
+                render_events=self._render_event_stream,
                 defer_until_after_flush=after_flush.append,
             )
             try:
                 result = executor.dispatch(command, running_command)
-                while buffered_events:
-                    await self._render_event(buffered_events.pop(0))
+                if buffered_events:
+                    await self._render_event_batch(tuple(buffered_events))
+                    buffered_events.clear()
                 capturing = False
                 for release in after_flush:
                     release()
@@ -521,11 +523,12 @@ class RpcHost:
                 configure_overrides=self.configure_overrides,
                 coordinator=self.coordinator,
                 write_event=buffered_events.append,
-                render_events=self._render_events,
+                render_events=self._render_event_stream,
             )
             executor.reject(command, message)
-            while buffered_events:
-                await self._render_event(buffered_events.pop(0))
+            if buffered_events:
+                await self._render_event_batch(tuple(buffered_events))
+                buffered_events.clear()
 
         return await self.coordinator.run_async(
             receive,
@@ -534,11 +537,25 @@ class RpcHost:
             command_type=rpc_command_type,
         )
 
-    async def _render_event(self, event: WispEvent) -> None:
-        async def events() -> AsyncIterator[WispEvent]:
-            yield event
+    async def _render_event_stream(self, events: AsyncIterator[WispEvent]) -> None:
+        async def serialized_events() -> AsyncIterator[WispEvent]:
+            async for event in events:
+                with anyio.CancelScope(shield=True):
+                    async with self._event_render_lock:
+                        yield event
 
-        await self._render_events(events())
+        await self._render_events(serialized_events())
+
+    async def _render_event(self, event: WispEvent) -> None:
+        await self._render_event_batch((event,))
+
+    async def _render_event_batch(self, batch: tuple[WispEvent, ...]) -> None:
+        async def events() -> AsyncIterator[WispEvent]:
+            for event in batch:
+                yield event
+
+        async with self._event_render_lock:
+            await self._render_events(events())
 
 
 async def build_runtime_for_config(config: WispConfig) -> WispRuntime:
