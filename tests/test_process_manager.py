@@ -7,6 +7,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -19,6 +20,21 @@ from wisp.tools.result import ToolError
 
 def _python_command(source: str) -> str:
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
+
+
+def test_aclose_without_processes_does_not_schedule_asyncio_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def unexpected_create_task(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("empty ProcessSupervisor cleanup must not create an asyncio task")
+
+    async def scenario() -> None:
+        supervisor = ProcessSupervisor()
+        await supervisor.aclose()
+
+    process_asyncio = cast(Any, process_manager_module).asyncio
+    monkeypatch.setattr(process_asyncio, "create_task", unexpected_create_task)
+    anyio.run(scenario)
 
 
 def _detached_python_background_command(

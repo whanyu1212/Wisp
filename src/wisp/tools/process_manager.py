@@ -347,6 +347,14 @@ class ProcessSupervisor:
     async def aclose(self) -> None:
         """Terminate all owned process trees. Safe to call repeatedly or concurrently."""
 
+        # A runtime that never launched a process needs no asyncio task. Besides
+        # avoiding needless scheduling, this keeps resource-only runtimes usable
+        # from an AnyIO backend that has no asyncio loop. This synchronous check
+        # intentionally precedes the cancellation-sensitive cleanup lock below.
+        if not self._managed and not self._one_shot and self._pending_one_shot_starts == 0:
+            self._closed = True
+            return
+
         # Keep shutdown attached to this call even when its caller is cancelled.
         # Frontends call aclose() from their finalizers and may tear down the event
         # loop as soon as cancellation propagates, so merely leaving close_task
