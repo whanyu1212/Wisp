@@ -253,6 +253,10 @@ class _InProcessTransport(RpcTransport):
         self._finished = anyio.Event()
         self._close_finished = anyio.Event()
         self._close_lock = anyio.Lock()
+        self._send_lock = anyio.Lock()
+        self._pending_sends: set[anyio.CancelScope] = set()
+        self._pending_sends_drained = anyio.Event()
+        self._pending_sends_drained.set()
         self._closed = False
         self._runtime_closed = False
         self._events_claimed = False
@@ -308,10 +312,25 @@ class _InProcessTransport(RpcTransport):
     async def send(self, command: RpcCommand) -> None:
         """Submit one already-validated typed command to the shared host."""
 
-        if self._closed or self._finished.is_set():
-            raise RuntimeError("In-process Wisp controller is closed")
         raw_command = cast(dict[str, object], command.model_dump(exclude_none=True))
-        await self._control_send.send(_RpcInputCommand(command=raw_command))
+        send_cancel_scope = anyio.CancelScope()
+        try:
+            with send_cancel_scope:
+                async with self._send_lock:
+                    if self._closed or self._finished.is_set():
+                        raise RuntimeError("In-process Wisp controller is closed")
+                    if not self._pending_sends:
+                        self._pending_sends_drained = anyio.Event()
+                    self._pending_sends.add(send_cancel_scope)
+                await self._control_send.send(_RpcInputCommand(command=raw_command))
+        finally:
+            with anyio.CancelScope(shield=True):
+                async with self._send_lock:
+                    self._pending_sends.discard(send_cancel_scope)
+                    if not self._pending_sends:
+                        self._pending_sends_drained.set()
+        if send_cancel_scope.cancel_called:
+            raise RuntimeError("In-process Wisp controller is closed")
 
     def events(self) -> AsyncIterator[KnownWispEvent]:
         """Yield the one ordered event stream produced by the host."""
@@ -367,6 +386,7 @@ class _InProcessTransport(RpcTransport):
                         raise self._close_error
                     return
                 self._closed = True
+                await self._cancel_pending_sends()
                 self._close_finished = anyio.Event()
                 close_error: BaseException | None = None
                 try:
@@ -399,6 +419,15 @@ class _InProcessTransport(RpcTransport):
                     raise
                 finally:
                     self._close_finished.set()
+
+    async def _cancel_pending_sends(self) -> None:
+        """Cancel submissions that were blocked while shutdown began."""
+
+        async with self._send_lock:
+            for send_cancel_scope in tuple(self._pending_sends):
+                send_cancel_scope.cancel()
+            pending_sends_drained = self._pending_sends_drained
+        await pending_sends_drained.wait()
 
     async def _abort_start(self) -> None:
         """Stop a partially started owner before surfacing a startup failure."""

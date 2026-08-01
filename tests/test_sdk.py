@@ -552,6 +552,45 @@ def test_in_process_sdk_close_abandons_blocked_trust_store_read(
         release_read.set()
 
 
+def test_in_process_sdk_rejects_command_racing_with_close(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        command_send_started = anyio.Event()
+        command_failed = anyio.Event()
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        transport = controller._in_process_transport
+        original_control_send = transport._control_send
+
+        class DelayedCommandSend:
+            async def send(self, event: object) -> None:
+                if event.__class__.__name__ == "_RpcInputCommand":
+                    command_send_started.set()
+                    await anyio.Event().wait()
+                await original_control_send.send(cast(Any, event))
+
+            async def aclose(self) -> None:
+                await original_control_send.aclose()
+
+        transport._control_send = cast(Any, DelayedCommandSend())
+
+        async def submit_command() -> None:
+            with pytest.raises(RuntimeError, match="controller is closed"):
+                await controller.prompt("racing command", command_id="racing-prompt")
+            command_failed.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(submit_command)
+            await command_send_started.wait()
+            with anyio.fail_after(0.5):
+                await controller.aclose()
+            with anyio.fail_after(0.5):
+                await command_failed.wait()
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_allows_one_event_consumer_and_idempotent_cleanup(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
