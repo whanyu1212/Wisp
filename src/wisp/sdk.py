@@ -9,7 +9,6 @@ callers render events and answer approval/trust requests themselves.
 from __future__ import annotations
 
 import asyncio
-import math
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from importlib import import_module
@@ -33,6 +32,9 @@ from wisp.trust import trusted_noninteractive
 
 _EVENT_BUFFER_CAPACITY = 1_024
 _CONTROL_BUFFER_CAPACITY = 100
+_SYNC_EVENT_RESERVE = _CONTROL_BUFFER_CAPACITY * 3 + 16
+_STREAM_EVENT_BUFFER_CAPACITY = _EVENT_BUFFER_CAPACITY - _SYNC_EVENT_RESERVE
+_OUTPUT_THROTTLE_BYPASS_COMMANDS = frozenset({"approval", "cancel", "trust"})
 _CLOSE_TIMEOUT_SECONDS = 2
 
 
@@ -138,6 +140,76 @@ class InProcessWisp(RpcController):
         await self.aclose()
 
 
+class _BoundedEventOutput:
+    """Ordered bounded event output with backpressure for streamed events."""
+
+    def __init__(
+        self,
+        send: MemoryObjectSendStream[KnownWispEvent],
+        receive: MemoryObjectReceiveStream[KnownWispEvent],
+    ) -> None:
+        self._send = send
+        self._receive = receive
+        self._drained = anyio.Event()
+
+    def write_event(self, event: WispEvent) -> None:
+        """Write one bounded synchronous command event.
+
+        The SDK reserves enough output slots for every control command accepted
+        by its bounded input stream. Streamed provider events use
+        :meth:`render_events`, which awaits capacity instead.
+        """
+
+        try:
+            self._send.send_nowait(cast(KnownWispEvent, event))
+        except anyio.WouldBlock as exc:  # pragma: no cover - guarded by reservation
+            raise RuntimeError("In-process event output reservation was exhausted") from exc
+
+    async def render_events(self, events: AsyncIterator[WispEvent]) -> None:
+        """Deliver streamed events with real frontend backpressure."""
+
+        async for event in events:
+            await self._wait_for_stream_capacity()
+            await self._send.send(cast(KnownWispEvent, event))
+
+    async def wait_for_command_capacity(self, command: RpcCommand) -> None:
+        """Throttle ordinary command input while output reserves are in use."""
+
+        if command.type not in _OUTPUT_THROTTLE_BYPASS_COMMANDS:
+            await self._wait_for_stream_capacity()
+
+    def events(self) -> AsyncIterator[KnownWispEvent]:
+        """Yield the event stream and notify blocked producers after each read."""
+
+        return self._iter_events()
+
+    async def aclose_send(self) -> None:
+        """Close producer output after the owner stops."""
+
+        await self._send.aclose()
+
+    async def aclose_receive(self) -> None:
+        """Close the consumer side during controller cleanup."""
+
+        await self._receive.aclose()
+
+    async def _wait_for_stream_capacity(self) -> None:
+        while self._buffered_event_count() >= _STREAM_EVENT_BUFFER_CAPACITY:
+            drained = self._drained
+            await drained.wait()
+
+    def _buffered_event_count(self) -> int:
+        return self._send.statistics().current_buffer_used
+
+    async def _iter_events(self) -> AsyncIterator[KnownWispEvent]:
+        async for event in self._receive:
+            # Replace the notification before yielding so a producer that wakes
+            # immediately observes the current buffer size before sending again.
+            self._drained.set()
+            self._drained = anyio.Event()
+            yield event
+
+
 class _InProcessTransport(RpcTransport):
     """Memory transport that adapts the shared host to ``RpcController``.
 
@@ -153,23 +225,16 @@ class _InProcessTransport(RpcTransport):
         control_send: MemoryObjectSendStream[_RpcControlEvent],
         host_control_send: MemoryObjectSendStream[_RpcControlEvent],
         control_receive: MemoryObjectReceiveStream[_RpcControlEvent],
-        pending_event_send: MemoryObjectSendStream[KnownWispEvent],
-        pending_event_receive: MemoryObjectReceiveStream[KnownWispEvent],
-        event_send: MemoryObjectSendStream[KnownWispEvent],
-        event_receive: MemoryObjectReceiveStream[KnownWispEvent],
+        event_output: _BoundedEventOutput,
     ) -> None:
         self._host = host
         self._control_send = control_send
         self._host_control_send = host_control_send
         self._control_receive = control_receive
-        self._pending_event_send = pending_event_send
-        self._pending_event_receive = pending_event_receive
-        self._event_send = event_send
-        self._event_receive = event_receive
+        self._event_output = event_output
         self._asyncio_owner_task: asyncio.Task[None] | None = None
         self._owner_cancel_scope: anyio.CancelScope | None = None
         self._owner_started = anyio.Event()
-        self._relay_finished = anyio.Event()
         self._finished = anyio.Event()
         self._closed = False
         self._events_claimed = False
@@ -187,35 +252,20 @@ class _InProcessTransport(RpcTransport):
         event_send, event_receive = anyio.create_memory_object_stream[KnownWispEvent](
             _EVENT_BUFFER_CAPACITY
         )
-        pending_event_send, pending_event_receive = anyio.create_memory_object_stream[
-            KnownWispEvent
-        ](math.inf)
-
-        def write_event(event: WispEvent) -> None:
-            # RPC command dispatch contains synchronous paths, so it cannot await
-            # the bounded frontend stream. The relay below preserves event order
-            # and applies backpressure at that boundary instead of dropping a run
-            # when a frontend is temporarily slower than a provider.
-            pending_event_send.send_nowait(cast(KnownWispEvent, event))
-
-        async def render_events(events: AsyncIterator[WispEvent]) -> None:
-            async for event in events:
-                write_event(event)
+        event_output = _BoundedEventOutput(event_send, event_receive)
 
         try:
             host = await RpcHost.create(
                 config,
                 runtime,
                 options=options,
-                write_event=write_event,
-                render_events=render_events,
+                write_event=event_output.write_event,
+                render_events=event_output.render_events,
                 config_overrides=config_overrides,
             )
         except BaseException:
-            await pending_event_send.aclose()
-            await pending_event_receive.aclose()
-            await event_send.aclose()
-            await event_receive.aclose()
+            await event_output.aclose_send()
+            await event_output.aclose_receive()
             raise
 
         control_send, control_receive = anyio.create_memory_object_stream[_RpcControlEvent](
@@ -226,10 +276,7 @@ class _InProcessTransport(RpcTransport):
             control_send=control_send,
             host_control_send=control_send.clone(),
             control_receive=control_receive,
-            pending_event_send=pending_event_send,
-            pending_event_receive=pending_event_receive,
-            event_send=event_send,
-            event_receive=event_receive,
+            event_output=event_output,
         )
         try:
             transport._spawn_owner_task()
@@ -244,6 +291,7 @@ class _InProcessTransport(RpcTransport):
 
         if self._closed or self._finished.is_set():
             raise RuntimeError("In-process Wisp controller is closed")
+        await self._event_output.wait_for_command_capacity(command)
         raw_command = cast(dict[str, object], command.model_dump(exclude_none=True))
         await self._control_send.send(_RpcInputCommand(command=raw_command))
 
@@ -253,14 +301,7 @@ class _InProcessTransport(RpcTransport):
         if self._events_claimed:
             raise RuntimeError("In-process Wisp events may only be consumed once")
         self._events_claimed = True
-        return self._iter_events()
-
-    async def _iter_events(self) -> AsyncIterator[KnownWispEvent]:
-        # The transport owns this receive stream. Do not close it when a caller
-        # breaks from ``async for``: the host may still need to publish its
-        # cancellation/trust-completion events while ``aclose()`` drains safely.
-        async for event in self._event_receive:
-            yield event
+        return self._event_output.events()
 
     def _spawn_owner_task(self) -> None:
         """Start an owner task using the active AnyIO backend's native API."""
@@ -276,7 +317,7 @@ class _InProcessTransport(RpcTransport):
         raise RuntimeError(f"Unsupported AnyIO backend for in-process Wisp: {backend}")
 
     async def _run_owner(self) -> None:
-        """Own the task groups and relay for all host command operations."""
+        """Own the task group for all host command operations."""
 
         try:
             with anyio.CancelScope() as owner_cancel_scope:
@@ -284,40 +325,23 @@ class _InProcessTransport(RpcTransport):
                 self._owner_started.set()
                 try:
                     async with self._control_receive, self._host_control_send:
-                        async with anyio.create_task_group() as relay_group:
-                            relay_group.start_soon(self._relay_events)
-                            try:
-                                async with anyio.create_task_group() as task_group:
-                                    await self._host.run_with_streams(
-                                        self._control_receive,
-                                        send=self._host_control_send,
-                                        task_group=task_group,
-                                    )
-                                    # An explicit shutdown returns immediately
-                                    # even if a command is active, matching CLI.
-                                    task_group.cancel_scope.cancel()
-                            finally:
-                                await self._pending_event_send.aclose()
-                            await self._relay_finished.wait()
+                        async with anyio.create_task_group() as task_group:
+                            await self._host.run_with_streams(
+                                self._control_receive,
+                                send=self._host_control_send,
+                                task_group=task_group,
+                            )
+                            # An explicit shutdown returns immediately even if a
+                            # command is active, matching the CLI adapter.
+                            task_group.cancel_scope.cancel()
                 finally:
                     self._owner_cancel_scope = None
         except BaseException as exc:
             if not isinstance(exc, anyio.get_cancelled_exc_class()):
                 self._run_error = exc
         finally:
-            await self._pending_event_send.aclose()
-            await self._event_send.aclose()
+            await self._event_output.aclose_send()
             self._finished.set()
-
-    async def _relay_events(self) -> None:
-        """Deliver every queued event to the bounded consumer stream in order."""
-
-        try:
-            async with self._pending_event_receive:
-                async for event in self._pending_event_receive:
-                    await self._event_send.send(event)
-        finally:
-            self._relay_finished.set()
 
     async def close(self) -> None:
         """Safely stop the owner task and release runtime-owned resources."""
@@ -344,9 +368,9 @@ class _InProcessTransport(RpcTransport):
                     raise self._run_error
             finally:
                 await self._control_send.aclose()
-                await self._event_receive.aclose()
+                await self._event_output.aclose_receive()
                 await self._host.runtime.aclose()
-                await self._event_send.aclose()
+                await self._event_output.aclose_send()
 
     async def _abort_start(self) -> None:
         """Stop a partially started owner before surfacing a startup failure."""
@@ -359,10 +383,8 @@ class _InProcessTransport(RpcTransport):
             await self._control_send.aclose()
             await self._host_control_send.aclose()
             await self._control_receive.aclose()
-            await self._pending_event_send.aclose()
-            await self._pending_event_receive.aclose()
-            await self._event_send.aclose()
-            await self._event_receive.aclose()
+            await self._event_output.aclose_send()
+            await self._event_output.aclose_receive()
 
 
 __all__ = ["InProcessOptions", "InProcessWisp"]
