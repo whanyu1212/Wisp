@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import get_ident
+from threading import Event, get_ident
 from typing import Any, cast
 
 import anyio
@@ -312,6 +312,38 @@ def test_in_process_sdk_close_denies_pending_trust_without_hanging(
             await controller.aclose()
 
     anyio.run(scenario)
+
+
+def test_in_process_sdk_close_abandons_blocked_trust_store_read(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    read_started = Event()
+    release_read = Event()
+
+    def check_trust(_project_path: Path) -> None:
+        read_started.set()
+        release_read.wait()
+        return None
+
+    monkeypatch.setattr(rpc_host_module, "is_trusted", check_trust)
+    monkeypatch.setattr(sdk_module, "_CLOSE_TIMEOUT_SECONDS", 0.01)
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(project_context_root=tmp_path),
+        )
+        await controller.prompt("hello", command_id="prompt-1")
+        while not read_started.is_set():
+            await anyio.sleep(0)
+        with anyio.fail_after(0.5):
+            await controller.aclose()
+
+    try:
+        anyio.run(scenario)
+    finally:
+        release_read.set()
 
 
 def test_in_process_sdk_allows_one_event_consumer_and_idempotent_cleanup(

@@ -218,7 +218,11 @@ class RpcTrustGate:
         if override is not None:
             return await self._finish(override)
         input_closed_before_store = self._input_closed
-        stored = await anyio.to_thread.run_sync(is_trusted, self._project_path)
+        stored = await anyio.to_thread.run_sync(
+            is_trusted,
+            self._project_path,
+            abandon_on_cancel=True,
+        )
         if stored is not None:
             return await self._finish(stored)
         if input_closed_before_store:
