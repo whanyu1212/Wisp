@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -33,7 +34,8 @@ def test_in_process_sdk_rejects_non_asyncio_backends_before_startup(
     monkeypatch: MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
-        monkeypatch.setattr(sdk_module.sniffio, "current_async_library", lambda: "trio")
+        sdk_sniffio = cast(Any, sdk_module).sniffio
+        monkeypatch.setattr(sdk_sniffio, "current_async_library", lambda: "trio")
         with pytest.raises(RuntimeError, match="requires AnyIO's asyncio backend"):
             await InProcessWisp.start(WispConfig(provider="fake", session_dir=tmp_path))
 
@@ -145,7 +147,10 @@ def test_in_process_sdk_close_denies_pending_trust_without_hanging(
     anyio.run(scenario)
 
 
-def test_in_process_sdk_allows_one_event_consumer_and_idempotent_cleanup(tmp_path: Path) -> None:
+def test_in_process_sdk_allows_one_event_consumer_and_idempotent_cleanup(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
     async def scenario() -> None:
         controller = await InProcessWisp.start(
             WispConfig(provider="fake", session_dir=tmp_path),
@@ -156,6 +161,37 @@ def test_in_process_sdk_allows_one_event_consumer_and_idempotent_cleanup(tmp_pat
             controller.events()
         await controller.aclose()
         await controller.aclose()
+
+        concurrent_controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path / "concurrent"),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        original_aclose = WispRuntime.aclose
+        close_started = anyio.Event()
+        release_close = anyio.Event()
+        second_close_finished = anyio.Event()
+
+        async def delayed_aclose(runtime: WispRuntime) -> None:
+            close_started.set()
+            await release_close.wait()
+            await original_aclose(runtime)
+
+        monkeypatch.setattr(WispRuntime, "aclose", delayed_aclose)
+
+        async def first_close() -> None:
+            await concurrent_controller.aclose()
+
+        async def second_close() -> None:
+            await concurrent_controller.aclose()
+            second_close_finished.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(first_close)
+            await close_started.wait()
+            task_group.start_soon(second_close)
+            await anyio.sleep(0)
+            assert second_close_finished.is_set() is False
+            release_close.set()
 
     anyio.run(scenario)
 

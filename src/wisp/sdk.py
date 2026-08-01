@@ -239,6 +239,7 @@ class _InProcessTransport(RpcTransport):
         self._owner_cancel_scope: anyio.CancelScope | None = None
         self._owner_started = anyio.Event()
         self._finished = anyio.Event()
+        self._close_finished = anyio.Event()
         self._closed = False
         self._events_claimed = False
         self._run_error: BaseException | None = None
@@ -345,30 +346,35 @@ class _InProcessTransport(RpcTransport):
         """Safely stop the owner task and release runtime-owned resources."""
 
         if self._closed:
+            with anyio.CancelScope(shield=True):
+                await self._close_finished.wait()
             return
         self._closed = True
         with anyio.CancelScope(shield=True):
-            if not self._finished.is_set():
-                with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS):
-                    try:
-                        await self._control_send.send(_RpcInputClosed())
-                    except (anyio.BrokenResourceError, anyio.ClosedResourceError):
-                        pass
-                with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS) as scope:
-                    await self._finished.wait()
-                if scope.cancel_called:
-                    owner_cancel_scope = self._owner_cancel_scope
-                    if owner_cancel_scope is not None:
-                        owner_cancel_scope.cancel()
-                await self._finished.wait()
             try:
+                if not self._finished.is_set():
+                    with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS):
+                        try:
+                            await self._control_send.send(_RpcInputClosed())
+                        except (anyio.BrokenResourceError, anyio.ClosedResourceError):
+                            pass
+                    with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS) as scope:
+                        await self._finished.wait()
+                    if scope.cancel_called:
+                        owner_cancel_scope = self._owner_cancel_scope
+                        if owner_cancel_scope is not None:
+                            owner_cancel_scope.cancel()
+                    await self._finished.wait()
                 if self._run_error is not None:
                     raise self._run_error
             finally:
-                await self._control_send.aclose()
-                await self._event_output.aclose_receive()
-                await self._host.runtime.aclose()
-                await self._event_output.aclose_send()
+                try:
+                    await self._control_send.aclose()
+                    await self._event_output.aclose_receive()
+                    await self._host.runtime.aclose()
+                    await self._event_output.aclose_send()
+                finally:
+                    self._close_finished.set()
 
     async def _abort_start(self) -> None:
         """Stop a partially started owner before surfacing a startup failure."""
