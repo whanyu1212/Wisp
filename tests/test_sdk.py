@@ -624,10 +624,7 @@ def test_in_process_sdk_cancelled_shutdown_keeps_command_admission_open(
 
         class DelayedShutdownSend:
             async def send(self, event: _RpcInputCommand | _RpcInputClosed) -> None:
-                if (
-                    isinstance(event, _RpcInputCommand)
-                    and event.command.get("type") == "shutdown"
-                ):
+                if isinstance(event, _RpcInputCommand) and event.command.get("type") == "shutdown":
                     shutdown_send_started.set()
                     await anyio.Event().wait()
                 await original_control_send.send(event)
