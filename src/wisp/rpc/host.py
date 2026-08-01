@@ -403,10 +403,19 @@ class RpcHost:
     ) -> bool:
         """Serve a bidirectional control stream until it is closed or shut down."""
 
-        def dispatch(
+        async def dispatch(
             command: dict[str, object],
             running_command: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
+            buffered_events: list[WispEvent] = []
+            capturing = True
+
+            def write_event(event: WispEvent) -> None:
+                if capturing:
+                    buffered_events.append(event)
+                else:
+                    self._write_event(event)
+
             executor = RpcCommandExecutor(
                 agent=self.agent,
                 runtime=self.runtime,
@@ -418,15 +427,18 @@ class RpcHost:
                 trust_gate=self.trust_gate,
                 configure_overrides=self.configure_overrides,
                 coordinator=self.coordinator,
-                write_event=self._write_event,
+                write_event=write_event,
                 render_events=self._render_events,
             )
-            return executor.dispatch(command, running_command)
+            result = executor.dispatch(command, running_command)
+            while buffered_events:
+                await self._render_event(buffered_events.pop(0))
+            capturing = False
+            return result
 
-        return await self.coordinator.run(
-            receive,
-            dispatch=dispatch,
-            reject=lambda command, message: RpcCommandExecutor(
+        async def reject(command: dict[str, object], message: str) -> None:
+            buffered_events: list[WispEvent] = []
+            executor = RpcCommandExecutor(
                 agent=self.agent,
                 runtime=self.runtime,
                 sessions=self.sessions,
@@ -437,11 +449,25 @@ class RpcHost:
                 trust_gate=self.trust_gate,
                 configure_overrides=self.configure_overrides,
                 coordinator=self.coordinator,
-                write_event=self._write_event,
+                write_event=buffered_events.append,
                 render_events=self._render_events,
-            ).reject(command, message),
+            )
+            executor.reject(command, message)
+            while buffered_events:
+                await self._render_event(buffered_events.pop(0))
+
+        return await self.coordinator.run_async(
+            receive,
+            dispatch=dispatch,
+            reject=reject,
             command_type=rpc_command_type,
         )
+
+    async def _render_event(self, event: WispEvent) -> None:
+        async def events() -> AsyncIterator[WispEvent]:
+            yield event
+
+        await self._render_events(events())
 
 
 async def build_runtime_for_config(config: WispConfig) -> WispRuntime:

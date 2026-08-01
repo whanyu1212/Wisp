@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
@@ -294,6 +294,161 @@ class RpcCoordinator:
         queued_count = len(self.pending_prompt_queue_commands) + len(self.queued_commands)
         if queued_count >= self._max_queued_commands:
             reject(command, "RPC command queue is full while another RPC command is running")
+            return
+        queue.append(command)
+
+    async def run_async(
+        self,
+        receive: RpcControlReceiver,
+        *,
+        dispatch: Callable[
+            [dict[str, object], _RpcRunningCommand | None], Awaitable[_RpcDispatchResult]
+        ],
+        reject: Callable[[dict[str, object], str], Awaitable[None]],
+        command_type: RpcCommandType,
+    ) -> bool:
+        """Async-dispatch variant used when event delivery applies backpressure."""
+
+        while True:
+            if self.running_command is None and self.pending_prompt_queue_commands:
+                if await self._dispatch_async(
+                    self.pending_prompt_queue_commands.popleft(), dispatch=dispatch
+                ):
+                    return True
+                continue
+            if self.running_command is None and self.queued_commands:
+                if await self._dispatch_async(self.queued_commands.popleft(), dispatch=dispatch):
+                    return True
+                continue
+            if (
+                self.input_closed
+                and self.running_command is None
+                and not self.pending_prompt_queue_commands
+                and not self.queued_commands
+            ):
+                return False
+            event = await receive.receive()
+            if await self.handle_event_async(
+                event,
+                dispatch=dispatch,
+                reject=reject,
+                command_type=command_type,
+            ):
+                return True
+
+    async def handle_event_async(
+        self,
+        event: _RpcControlEvent,
+        *,
+        dispatch: Callable[
+            [dict[str, object], _RpcRunningCommand | None], Awaitable[_RpcDispatchResult]
+        ],
+        reject: Callable[[dict[str, object], str], Awaitable[None]],
+        command_type: RpcCommandType,
+    ) -> bool:
+        """Apply one event while allowing dispatch to await output capacity."""
+
+        if isinstance(event, self._input_closed_type):
+            if not self.input_closed:
+                self.input_closed = True
+                for handler in self._input_closed_handlers:
+                    handler()
+            return False
+        if isinstance(event, self._command_completed_type):
+            completed = cast(_RpcCommandCompleted, event)
+            running = self.running_command
+            if (
+                running is not None
+                and completed.command_id == running.command_id
+                and completed.command_type == running.command_type
+            ):
+                self.running_command = None
+                self._prompt_queue_ready = False
+                self.session_state.entry_count = completed.entry_count
+                if completed.history is not None:
+                    self.session_state.history = completed.history
+                if getattr(completed, "session_name_updated", False):
+                    self.session_state.name = getattr(completed, "session_name", None)
+                selected_session = getattr(completed, "selected_session", None)
+                if completed.ok and selected_session is not None:
+                    self.session_state.session = selected_session
+                if self._completion_event_writer is not None:
+                    for queued_event in getattr(completed, "post_apply_events", ()):
+                        self._completion_event_writer(queued_event)
+            return False
+        if isinstance(event, self._prompt_ready_type):
+            ready = cast(_RpcPromptReady, event)
+            running = self.running_command
+            if (
+                running is not None
+                and running.command_type == "prompt"
+                and ready.command_id == running.command_id
+            ):
+                self._prompt_queue_ready = True
+                return await self._dispatch_pending_queue_commands_async(dispatch=dispatch)
+            return False
+
+        command = cast(_RpcInputCommand, event).command
+        selected_type = command_type(command)
+        running = self.running_command
+        prompt_queue_not_ready = (
+            running is not None
+            and running.command_type == "prompt"
+            and selected_type in QUEUE_RPC_COMMAND_TYPES
+            and not self._prompt_queue_ready
+        )
+        if prompt_queue_not_ready:
+            await self._enqueue_command_async(
+                command,
+                queue=self.pending_prompt_queue_commands,
+                reject=reject,
+            )
+            return False
+        if running is not None and (selected_type not in _ACTIVE_COMMAND_BYPASS_COMMANDS):
+            await self._enqueue_command_async(command, queue=self.queued_commands, reject=reject)
+            return False
+        return await self._dispatch_async(command, dispatch=dispatch)
+
+    async def _dispatch_async(
+        self,
+        command: dict[str, object],
+        *,
+        dispatch: Callable[
+            [dict[str, object], _RpcRunningCommand | None], Awaitable[_RpcDispatchResult]
+        ],
+    ) -> bool:
+        previous_running = self.running_command
+        result = await dispatch(command, previous_running)
+        self.running_command = result.running_command
+        if result.running_command is not previous_running:
+            self._prompt_queue_ready = False
+        if result.selected_session is not None:
+            self.session_state.session = result.selected_session
+        return result.should_shutdown
+
+    async def _dispatch_pending_queue_commands_async(
+        self,
+        *,
+        dispatch: Callable[
+            [dict[str, object], _RpcRunningCommand | None], Awaitable[_RpcDispatchResult]
+        ],
+    ) -> bool:
+        while self.pending_prompt_queue_commands:
+            command = self.pending_prompt_queue_commands.popleft()
+            if await self._dispatch_async(command, dispatch=dispatch):
+                return True
+        return False
+
+    async def _enqueue_command_async(
+        self,
+        command: dict[str, object],
+        *,
+        queue: deque[dict[str, object]],
+        reject: Callable[[dict[str, object], str], Awaitable[None]],
+    ) -> None:
+        queued_count = len(self.pending_prompt_queue_commands) + len(self.queued_commands)
+        if queued_count >= self._max_queued_commands:
+            await reject(command, "RPC command queue is full while another RPC command is running")
             return
         queue.append(command)
 

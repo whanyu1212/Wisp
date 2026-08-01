@@ -28,6 +28,18 @@ from wisp.runtime.extensions import build_runtime
 from wisp.sdk import InProcessOptions, InProcessWisp
 
 
+def test_in_process_sdk_rejects_non_asyncio_backends_before_startup(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(sdk_module.sniffio, "current_async_library", lambda: "trio")
+        with pytest.raises(RuntimeError, match="requires AnyIO's asyncio backend"):
+            await InProcessWisp.start(WispConfig(provider="fake", session_dir=tmp_path))
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_runs_the_shared_command_event_contract(tmp_path: Path) -> None:
     async def scenario() -> None:
         controller = await InProcessWisp.start(

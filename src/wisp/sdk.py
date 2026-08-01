@@ -11,9 +11,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from importlib import import_module
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import Self, cast
 
 import anyio
 import sniffio
@@ -114,6 +113,7 @@ class InProcessWisp(RpcController):
         options: InProcessOptions,
         config_overrides: _ConfigOverrides | None = None,
     ) -> Self:
+        _require_asyncio_backend()
         runtime = await build_runtime_for_config(config)
         try:
             transport = await _InProcessTransport.start(
@@ -137,6 +137,17 @@ class InProcessWisp(RpcController):
 
     async def __aexit__(self, *_args: object) -> None:
         await self.aclose()
+
+
+def _require_asyncio_backend() -> None:
+    """Reject unsupported backends before constructing runtime resources."""
+
+    backend = sniffio.current_async_library()
+    if backend != "asyncio":
+        raise RuntimeError(
+            "In-process Wisp currently requires AnyIO's asyncio backend because built-in "
+            "process tools use asyncio subprocesses; use JSONL RPC from other backends"
+        )
 
 
 class _BoundedEventOutput:
@@ -301,11 +312,7 @@ class _InProcessTransport(RpcTransport):
         if backend == "asyncio":
             self._asyncio_owner_task = asyncio.create_task(self._run_owner())
             return
-        if backend == "trio":
-            trio = cast(Any, import_module("trio"))
-            trio.lowlevel.spawn_system_task(self._run_owner)
-            return
-        raise RuntimeError(f"Unsupported AnyIO backend for in-process Wisp: {backend}")
+        raise AssertionError(f"Unsupported in-process Wisp backend: {backend}")
 
     async def _run_owner(self) -> None:
         """Own the task group for all host command operations."""

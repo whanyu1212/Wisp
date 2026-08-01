@@ -813,9 +813,11 @@ finally:
 `InProcessWisp` has the same typed command methods and `WispEvent` stream as `RpcController`; it
 uses the same command host, agent loop, JSONL sessions, approval policy, project-trust gate, and
 runtime cleanup as RPC. It does not import terminal/TUI code or expose mutable `CodingSession`
-internals. Consume `events()` from exactly one task and drain it while commands run. Tools are not
-exposed by default; `allow_read_tools`, `allowed_tools`, or `all_tools` control exposure, while
-mutating/command tools still require `approve()` unless `approve_unsafe_tools=True` is selected.
+internals. It currently requires AnyIO's `asyncio` backend because built-in process tools use
+asyncio subprocesses; use JSONL RPC from other async backends. Consume `events()` from exactly one
+task and drain it while commands run. Tools are not exposed by default; `allow_read_tools`,
+`allowed_tools`, or `all_tools` control exposure, while mutating/command tools still require
+`approve()` unless `approve_unsafe_tools=True` is selected.
 
 For normal environment/settings resolution, use `InProcessWisp.from_environment(...)`. It applies
 only pre-existing safe trust decisions at startup; an undecided project emits `trust.requested`,
