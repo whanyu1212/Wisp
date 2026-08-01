@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import get_ident
 
 import anyio
 import pytest
 
+import wisp.runtime.extensions as runtime_extensions
 from wisp.events import AgentStarted
 from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.providers.fake import FakeProvider
@@ -141,6 +143,26 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
             "quit",
         ),
     )
+
+
+def test_build_runtime_offloads_catalog_loading(monkeypatch: pytest.MonkeyPatch) -> None:
+    main_thread = get_ident()
+    catalog_threads: list[int] = []
+    original_effective_catalog = runtime_extensions.effective_catalog
+
+    def effective_catalog_in_worker() -> object:
+        catalog_threads.append(get_ident())
+        return original_effective_catalog(home_dir=Path("/nonexistent-test-home"))
+
+    monkeypatch.setattr(runtime_extensions, "effective_catalog", effective_catalog_in_worker)
+
+    async def scenario() -> None:
+        runtime = await build_runtime()
+        await runtime.aclose()
+
+    anyio.run(scenario)
+
+    assert catalog_threads and all(thread_id != main_thread for thread_id in catalog_threads)
 
 
 def test_build_runtime_wires_process_tools_to_runtime_supervisor_and_closes_it() -> None:

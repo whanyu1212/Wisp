@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import get_ident
 
 import anyio
 import pytest
@@ -52,6 +53,54 @@ def test_no_settings_trust_transition_updates_session_without_rebuilding(
         assert agent.trusted is True
 
     anyio.run(scenario)
+
+
+def test_trusted_project_transition_offloads_settings_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main_thread = get_ident()
+    build_threads: list[int] = []
+    startup = WispConfig(provider="fake", session_dir=tmp_path / "sessions")
+    original_build = _ConfigOverrides.build
+
+    def build_in_worker(
+        overrides: _ConfigOverrides,
+        *,
+        trusted: bool,
+        project_dir: Path | None = None,
+    ) -> WispConfig:
+        assert trusted is True
+        assert project_dir == tmp_path
+        build_threads.append(get_ident())
+        return original_build(overrides, trusted=trusted, project_dir=project_dir)
+
+    monkeypatch.setattr(_ConfigOverrides, "build", build_in_worker)
+
+    async def scenario() -> None:
+        runtime = await _runtime_for(startup)
+        agent = CodingSession(
+            provider=runtime.providers.get("fake"),
+            sessions=JsonlSessionStore(startup.session_dir),
+            trusted=False,
+        )
+        transition = RpcProjectConfiguration(
+            startup_config=startup,
+            startup_trusted=False,
+            config_overrides=_ConfigOverrides(provider="fake", session_dir=startup.session_dir),
+            project_context_root=tmp_path,
+            runtime_builder=_runtime_for,
+        )
+
+        event = await transition.apply_trusted_project(runtime=runtime, agent=agent)
+
+        assert event is None
+        assert agent.trusted is True
+        await runtime.aclose()
+
+    anyio.run(scenario)
+
+    assert build_threads and all(thread_id != main_thread for thread_id in build_threads)
 
 
 def test_trusted_project_transition_applies_config_and_returns_event(tmp_path: Path) -> None:

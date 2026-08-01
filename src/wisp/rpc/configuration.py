@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
+
+import anyio
 
 from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.config import WispConfig
@@ -81,9 +84,12 @@ class RpcProjectConfiguration:
 
         if self.startup_trusted or self.config_overrides is None:
             return None
-        trusted_config = self.config_overrides.build(
-            trusted=True,
-            project_dir=self.project_context_root,
+        trusted_config = await anyio.to_thread.run_sync(
+            partial(
+                self.config_overrides.build,
+                trusted=True,
+                project_dir=self.project_context_root,
+            )
         )
         overrides = self.configure_overrides
         effective_provider = overrides.effective_provider(trusted_config.provider)
