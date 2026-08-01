@@ -20,7 +20,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.config import WispConfig
-from wisp.events import TrustRequested, TrustResolved, WispEvent
+from wisp.events import RpcCommandFinished, TrustRequested, TrustResolved, WispEvent
 from wisp.rpc.commands import ApprovalScope
 from wisp.rpc.configuration import RpcProjectConfiguration, _ConfigOverrides, _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
@@ -348,6 +348,7 @@ class RpcHost:
         write_event: RpcEventWriter,
         render_events: RpcEventRenderer,
         on_shutdown_dispatched: Callable[[], None] | None = None,
+        on_shutdown_abandoned: Callable[[], None] | None = None,
     ) -> None:
         self.runtime = runtime
         self.sessions = sessions
@@ -359,6 +360,7 @@ class RpcHost:
         self._write_event = write_event
         self._render_events = render_events
         self._on_shutdown_dispatched = on_shutdown_dispatched
+        self._on_shutdown_abandoned = on_shutdown_abandoned
         self._event_render_lock = anyio.Lock()
         self._event_task_group: TaskGroup | None = None
         self._pending_published_events = 0
@@ -378,6 +380,7 @@ class RpcHost:
         runtime_builder: RuntimeBuilder | None = None,
         max_queued_commands: int = _MAX_QUEUED_RPC_COMMANDS,
         on_shutdown_dispatched: Callable[[], None] | None = None,
+        on_shutdown_abandoned: Callable[[], None] | None = None,
     ) -> RpcHost:
         """Build a host without starting a transport or event loop."""
 
@@ -472,6 +475,7 @@ class RpcHost:
             write_event=write_event,
             render_events=render_events,
             on_shutdown_dispatched=on_shutdown_dispatched,
+            on_shutdown_abandoned=on_shutdown_abandoned,
         )
         return host
 
@@ -518,10 +522,18 @@ class RpcHost:
                 result = executor.dispatch(command, running_command)
                 if result.should_shutdown and self._on_shutdown_dispatched is not None:
                     self._on_shutdown_dispatched()
+                shutdown_abandoned = any(
+                    isinstance(event, RpcCommandFinished)
+                    and event.command_type == "shutdown"
+                    and not event.ok
+                    for event in buffered_events
+                )
                 if buffered_events:
                     await self._render_event_batch(tuple(buffered_events))
                     buffered_events.clear()
                 capturing = False
+                if shutdown_abandoned and self._on_shutdown_abandoned is not None:
+                    self._on_shutdown_abandoned()
                 for release in after_flush:
                     release()
                 return result
@@ -548,6 +560,8 @@ class RpcHost:
             if buffered_events:
                 await self._render_event_batch(tuple(buffered_events))
                 buffered_events.clear()
+            if rpc_command_type(command) == "shutdown" and self._on_shutdown_abandoned is not None:
+                self._on_shutdown_abandoned()
 
         previous_event_task_group = self._event_task_group
         self._event_task_group = task_group

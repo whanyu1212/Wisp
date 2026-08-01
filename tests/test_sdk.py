@@ -656,6 +656,101 @@ def test_in_process_sdk_allows_trust_resolution_while_shutdown_is_queued(
     anyio.run(scenario)
 
 
+def test_in_process_sdk_reopens_admission_after_queued_shutdown_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(project_context_root=tmp_path),
+        )
+        shutdown_id: str | None = None
+        cancel_id: str | None = None
+        state_id: str | None = None
+        events = []
+        try:
+            await controller.prompt("hello", command_id="prompt-1")
+            async for event in controller.events():
+                events.append(event)
+                if isinstance(event, TrustRequested):
+                    shutdown_id = await controller.shutdown(command_id="shutdown-1")
+                    cancel_id = await controller.cancel(shutdown_id, command_id="cancel-1")
+                elif (
+                    cancel_id is not None
+                    and isinstance(event, RpcCommandFinished)
+                    and event.command_id == cancel_id
+                ):
+                    transport = controller._in_process_transport
+                    with anyio.fail_after(0.5):
+                        while transport._shutdown_pending:
+                            await anyio.sleep(0)
+                    state_id = await controller.get_state(command_id="state-1")
+                elif (
+                    state_id is not None
+                    and isinstance(event, RpcStateReported)
+                    and event.command_id == state_id
+                ):
+                    break
+        finally:
+            await controller.aclose()
+
+        assert shutdown_id is not None
+        assert state_id is not None
+        assert any(
+            isinstance(event, RpcCommandFinished)
+            and event.command_id == shutdown_id
+            and not event.ok
+            for event in events
+        )
+
+    anyio.run(scenario)
+
+
+def test_in_process_sdk_reopens_admission_after_shutdown_queue_rejection(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(project_context_root=tmp_path),
+        )
+        shutdown_id: str | None = None
+        state_id: str | None = None
+        events = []
+        try:
+            await controller.prompt("hello", command_id="prompt-1")
+            async for event in controller.events():
+                events.append(event)
+                if isinstance(event, TrustRequested):
+                    for index in range(rpc_host_module._MAX_QUEUED_RPC_COMMANDS):
+                        await controller.prompt(f"queued {index}", command_id=f"queued-{index}")
+                    shutdown_id = await controller.shutdown(command_id="shutdown-1")
+                elif (
+                    shutdown_id is not None
+                    and isinstance(event, RpcCommandFinished)
+                    and event.command_id == shutdown_id
+                ):
+                    assert event.ok is False
+                    transport = controller._in_process_transport
+                    with anyio.fail_after(0.5):
+                        while transport._shutdown_pending:
+                            await anyio.sleep(0)
+                    state_id = await controller.get_state(command_id="state-1")
+                elif (
+                    state_id is not None
+                    and isinstance(event, RpcStateReported)
+                    and event.command_id == state_id
+                ):
+                    break
+        finally:
+            await controller.aclose()
+
+        assert shutdown_id is not None
+        assert state_id is not None
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_cancelled_shutdown_keeps_command_admission_open(
     tmp_path: Path,
 ) -> None:

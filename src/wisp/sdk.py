@@ -284,6 +284,10 @@ class _InProcessTransport(RpcTransport):
             assert transport is not None
             transport._close_command_admission()
 
+        def reopen_command_admission() -> None:
+            assert transport is not None
+            transport._reopen_command_admission()
+
         try:
             host = await RpcHost.create(
                 config,
@@ -293,6 +297,7 @@ class _InProcessTransport(RpcTransport):
                 render_events=event_output.render_events,
                 config_overrides=config_overrides,
                 on_shutdown_dispatched=close_command_admission,
+                on_shutdown_abandoned=reopen_command_admission,
             )
         except BaseException:
             await event_output.aclose_send()
@@ -452,6 +457,12 @@ class _InProcessTransport(RpcTransport):
         for send_cancel_scope, sent in tuple(self._pending_sends.items()):
             if not sent:
                 send_cancel_scope.cancel()
+
+    def _reopen_command_admission(self) -> None:
+        """Resume submissions after a queued shutdown is rejected or canceled."""
+
+        if not self._closed:
+            self._shutdown_pending = False
 
     async def _cancel_pending_sends(self) -> None:
         """Cancel submissions that were blocked while shutdown began."""
