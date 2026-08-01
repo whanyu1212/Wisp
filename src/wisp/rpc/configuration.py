@@ -89,7 +89,8 @@ class RpcProjectConfiguration:
                 self.config_overrides.build,
                 trusted=True,
                 project_dir=self.project_context_root,
-            )
+            ),
+            abandon_on_cancel=True,
         )
         overrides = self.configure_overrides
         effective_provider = overrides.effective_provider(trusted_config.provider)
