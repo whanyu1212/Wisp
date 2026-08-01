@@ -108,6 +108,39 @@ def test_approval_resolution_waits_for_lifecycle_flush() -> None:
     ]
 
 
+def test_approval_resolution_runs_without_post_flush_callback() -> None:
+    events: list[WispEvent] = []
+    resolved: list[dict[str, object]] = []
+
+    class PendingApproval:
+        def has_pending_approval(self, *, call_id: str) -> bool:
+            return call_id == "call-1"
+
+        def resolve_approval(self, **kwargs: object) -> bool:
+            resolved.append(kwargs)
+            return True
+
+    rpc_execution_module.handle_rpc_approval_command(
+        {"id": "approval-1", "type": "approval", "call_id": "call-1", "approved": True},
+        command_id="approval-1",
+        command_type="approval",
+        approval_policy=PendingApproval(),
+        write_event=events.append,
+    )
+
+    assert resolved == [
+        {
+            "call_id": "call-1",
+            "approved": True,
+            "reason": None,
+            "scope": "once",
+        }
+    ]
+    assert len(events) == 1
+    assert isinstance(events[0], RpcCommandFinished)
+    assert events[0].ok is True
+
+
 def test_active_cancellation_waits_for_lifecycle_flush() -> None:
     events: list[WispEvent] = []
     deferred: list[Callable[[], None]] = []

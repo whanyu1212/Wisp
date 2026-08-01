@@ -3035,7 +3035,6 @@ def handle_rpc_approval_command(
             write_event=write_event,
         )
         return
-    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
     resolve = partial(
         approval_policy.resolve_approval,
         call_id=call_id,
@@ -3044,11 +3043,21 @@ def handle_rpc_approval_command(
         scope=scope,
     )
     if defer_resolution is None:
-        assert resolve()
+        if not resolve():
+            write_rpc_command_error(
+                command_id=command_id,
+                command_type=command_type,
+                message=f"No pending tool approval with call_id: {call_id}",
+                write_event=write_event,
+            )
+            return
+        write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
         return
 
+    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
     def resolve_after_flush() -> None:
-        assert resolve()
+        resolve()
 
     defer_resolution(resolve_after_flush)
 
