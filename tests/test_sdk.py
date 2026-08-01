@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import get_ident
 from typing import Any, cast
 
 import anyio
@@ -27,6 +28,61 @@ from wisp.providers.fake import ScriptedProvider
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sdk import InProcessOptions, InProcessWisp
+
+
+def test_in_process_sdk_from_environment_offloads_blocking_setup(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    main_thread = get_ident()
+    call_threads: dict[str, int] = {}
+    expected_config = WispConfig(provider="fake", session_dir=tmp_path / "sessions")
+
+    def resolve_project_root(_cwd: Path) -> Path:
+        call_threads["project_root"] = get_ident()
+        return tmp_path
+
+    def check_trust(project_root: Path) -> bool:
+        assert project_root == tmp_path
+        call_threads["trust"] = get_ident()
+        return False
+
+    def build_config(
+        _overrides: object,
+        *,
+        trusted: bool,
+        project_dir: Path | None = None,
+    ) -> WispConfig:
+        assert trusted is False
+        assert project_dir == tmp_path
+        call_threads["config"] = get_ident()
+        return expected_config
+
+    async def fake_start(
+        cls: type[InProcessWisp],
+        config: WispConfig,
+        *,
+        options: InProcessOptions,
+        config_overrides: object | None = None,
+    ) -> object:
+        assert cls is InProcessWisp
+        assert config == expected_config
+        assert options.project_context_root == tmp_path
+        assert config_overrides is not None
+        return expected_config
+
+    monkeypatch.setattr(sdk_module, "resolve_project_context_root", resolve_project_root)
+    monkeypatch.setattr(sdk_module, "trusted_noninteractive", check_trust)
+    monkeypatch.setattr(sdk_module._ConfigOverrides, "build", build_config)
+    monkeypatch.setattr(InProcessWisp, "_start", classmethod(fake_start))
+
+    async def scenario() -> None:
+        result = await InProcessWisp.from_environment()
+        assert result is expected_config
+
+    anyio.run(scenario)
+    assert set(call_threads) == {"project_root", "trust", "config"}
+    assert all(thread_id != main_thread for thread_id in call_threads.values())
 
 
 def test_in_process_sdk_rejects_non_asyncio_backends_before_startup(

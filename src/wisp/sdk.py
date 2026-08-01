@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Self, cast
 
@@ -84,17 +85,19 @@ class InProcessWisp(RpcController):
         """
 
         selected_options = options or InProcessOptions()
-        project_root = selected_options.project_context_root or resolve_project_context_root(
-            Path.cwd()
-        )
-        startup_trusted = trusted_noninteractive(project_root)
+        project_root = selected_options.project_context_root
+        if project_root is None:
+            project_root = await anyio.to_thread.run_sync(resolve_project_context_root, Path.cwd())
+        startup_trusted = await anyio.to_thread.run_sync(trusted_noninteractive, project_root)
         overrides = _ConfigOverrides(
             provider=provider,
             model=model,
             session_dir=session_dir,
             auth_path=auth_path,
         )
-        config = overrides.build(trusted=startup_trusted, project_dir=project_root)
+        config = await anyio.to_thread.run_sync(
+            partial(overrides.build, trusted=startup_trusted, project_dir=project_root)
+        )
         return await cls._start(
             config,
             options=replace(
