@@ -807,6 +807,61 @@ def test_in_process_sdk_shutdown_cancels_prompt_final_state_refresh(
     anyio.run(scenario)
 
 
+def test_in_process_sdk_reports_prompt_final_state_refresh_errors(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="scripted"),
+                ProviderTextDelta(delta="hello"),
+                ProviderResponseCompleted(content="hello"),
+            ]
+        ]
+    )
+
+    async def build_scripted_runtime(_config: WispConfig) -> WispRuntime:
+        runtime = await build_runtime()
+        runtime.providers.register(provider)
+        return runtime
+
+    def failed_updated_state(
+        _session: JsonlSession,
+        _committed_history: tuple[Message, ...],
+        _entry_start: int,
+    ) -> tuple[int, tuple[Message, ...]]:
+        raise OSError("session state unavailable")
+
+    monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
+    monkeypatch.setattr(rpc_execution_module, "updated_rpc_session_state", failed_updated_state)
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="scripted", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        prompt_id = await controller.prompt("hello", command_id="prompt-1")
+        events = []
+        try:
+            async for event in controller.events():
+                events.append(event)
+                if isinstance(event, RpcCommandFinished) and event.command_id == prompt_id:
+                    break
+        finally:
+            await controller.aclose()
+
+        finished = next(
+            event
+            for event in events
+            if isinstance(event, RpcCommandFinished) and event.command_id == prompt_id
+        )
+        assert finished.ok is False
+        assert finished.error == "session state unavailable"
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_shutdown_cancels_compact_final_state_refresh(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

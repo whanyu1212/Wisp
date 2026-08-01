@@ -2171,12 +2171,18 @@ async def run_rpc_prompt_command(
                             f"RPC command cancelled: {command_id}; prompt entries were retained "
                             "because another writer appended to the session"
                         )
-        entry_count, updated_history = await _run_abandonable_session_read(
-            updated_rpc_session_state,
-            session,
-            committed_history,
-            entry_start,
-        )
+        try:
+            entry_count, updated_history = await _run_abandonable_session_read(
+                updated_rpc_session_state,
+                session,
+                committed_history,
+                entry_start,
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve a usable RPC coordinator
+            entry_count = entry_start
+            updated_history = committed_history
+            if error is None:
+                error = str(exc)
         async with send:
             if cancelled:
                 assert error is not None
