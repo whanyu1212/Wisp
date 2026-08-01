@@ -254,9 +254,10 @@ class _InProcessTransport(RpcTransport):
         self._close_finished = anyio.Event()
         self._close_lock = anyio.Lock()
         self._send_lock = anyio.Lock()
-        self._pending_sends: set[anyio.CancelScope] = set()
+        self._pending_sends: dict[anyio.CancelScope, bool] = {}
         self._pending_sends_drained = anyio.Event()
         self._pending_sends_drained.set()
+        self._shutdown_pending = False
         self._closed = False
         self._runtime_closed = False
         self._events_claimed = False
@@ -314,19 +315,29 @@ class _InProcessTransport(RpcTransport):
 
         raw_command = cast(dict[str, object], command.model_dump(exclude_none=True))
         send_cancel_scope = anyio.CancelScope()
+        is_shutdown = command.type == "shutdown"
+        sent = False
         try:
             with send_cancel_scope:
                 async with self._send_lock:
-                    if self._closed or self._finished.is_set():
+                    if self._closed or self._shutdown_pending or self._finished.is_set():
                         raise RuntimeError("In-process Wisp controller is closed")
+                    if is_shutdown:
+                        self._shutdown_pending = True
                     if not self._pending_sends:
                         self._pending_sends_drained = anyio.Event()
-                    self._pending_sends.add(send_cancel_scope)
+                    self._pending_sends[send_cancel_scope] = False
                 await self._control_send.send(_RpcInputCommand(command=raw_command))
+                # There is no checkpoint between send returning and this assignment,
+                # so shutdown never cancels a submission after it has been enqueued.
+                sent = True
+                self._pending_sends[send_cancel_scope] = True
         finally:
             with anyio.CancelScope(shield=True):
                 async with self._send_lock:
-                    self._pending_sends.discard(send_cancel_scope)
+                    self._pending_sends.pop(send_cancel_scope, None)
+                    if is_shutdown and not sent and not self._closed:
+                        self._shutdown_pending = False
                     if not self._pending_sends:
                         self._pending_sends_drained.set()
         if send_cancel_scope.cancel_called:
@@ -424,8 +435,9 @@ class _InProcessTransport(RpcTransport):
         """Cancel submissions that were blocked while shutdown began."""
 
         async with self._send_lock:
-            for send_cancel_scope in tuple(self._pending_sends):
-                send_cancel_scope.cancel()
+            for send_cancel_scope, sent in tuple(self._pending_sends.items()):
+                if not sent:
+                    send_cancel_scope.cancel()
             pending_sends_drained = self._pending_sends_drained
         await pending_sends_drained.wait()
 
