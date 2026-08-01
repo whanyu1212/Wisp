@@ -108,6 +108,8 @@ _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
 class RpcControlReceiver(Protocol):
     async def receive(self) -> _RpcControlEvent: ...
 
+    def receive_nowait(self) -> _RpcControlEvent: ...
+
 
 class RpcCoordinator:
     """Own active-command, queue, session, and input-closure transitions."""
@@ -149,6 +151,14 @@ class RpcCoordinator:
         """Process control events until EOF drains or shutdown is dispatched."""
 
         while True:
+            if self.running_command is None and self._shutdown_is_next():
+                if self._drain_buffered_events_before_shutdown(
+                    receive,
+                    dispatch=dispatch,
+                    reject=reject,
+                    command_type=command_type,
+                ):
+                    return True
             if self.running_command is None and self.pending_prompt_queue_commands:
                 if self._dispatch(
                     self.pending_prompt_queue_commands.popleft(),
@@ -175,6 +185,36 @@ class RpcCoordinator:
                 command_type=command_type,
             ):
                 return True
+
+    def _shutdown_is_next(self) -> bool:
+        return bool(self.queued_commands) and self.queued_commands[0].get("type") == "shutdown"
+
+    def _drain_buffered_events_before_shutdown(
+        self,
+        receive: RpcControlReceiver,
+        *,
+        dispatch: RpcDispatch,
+        reject: RpcReject,
+        command_type: RpcCommandType,
+    ) -> bool:
+        while self._shutdown_is_next():
+            try:
+                event = receive.receive_nowait()
+            except anyio.WouldBlock:
+                return False
+            if isinstance(event, _RpcInputCommand):
+                command = event.command
+                if command_type(command) not in _ACTIVE_COMMAND_BYPASS_COMMANDS:
+                    self._enqueue_command(command, queue=self.queued_commands, reject=reject)
+                    continue
+            if self.handle_event(
+                event,
+                dispatch=dispatch,
+                reject=reject,
+                command_type=command_type,
+            ):
+                return True
+        return False
 
     def handle_event(
         self,
@@ -310,6 +350,14 @@ class RpcCoordinator:
         """Async-dispatch variant used when event delivery applies backpressure."""
 
         while True:
+            if self.running_command is None and self._shutdown_is_next():
+                if await self._drain_buffered_events_before_shutdown_async(
+                    receive,
+                    dispatch=dispatch,
+                    reject=reject,
+                    command_type=command_type,
+                ):
+                    return True
             if self.running_command is None and self.pending_prompt_queue_commands:
                 if await self._dispatch_async(
                     self.pending_prompt_queue_commands.popleft(), dispatch=dispatch
@@ -335,6 +383,39 @@ class RpcCoordinator:
                 command_type=command_type,
             ):
                 return True
+
+    async def _drain_buffered_events_before_shutdown_async(
+        self,
+        receive: RpcControlReceiver,
+        *,
+        dispatch: Callable[
+            [dict[str, object], _RpcRunningCommand | None], Awaitable[_RpcDispatchResult]
+        ],
+        reject: Callable[[dict[str, object], str], Awaitable[None]],
+        command_type: RpcCommandType,
+    ) -> bool:
+        while self._shutdown_is_next():
+            try:
+                event = receive.receive_nowait()
+            except anyio.WouldBlock:
+                return False
+            if isinstance(event, _RpcInputCommand):
+                command = event.command
+                if command_type(command) not in _ACTIVE_COMMAND_BYPASS_COMMANDS:
+                    await self._enqueue_command_async(
+                        command,
+                        queue=self.queued_commands,
+                        reject=reject,
+                    )
+                    continue
+            if await self.handle_event_async(
+                event,
+                dispatch=dispatch,
+                reject=reject,
+                command_type=command_type,
+            ):
+                return True
+        return False
 
     async def handle_event_async(
         self,
