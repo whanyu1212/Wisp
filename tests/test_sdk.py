@@ -192,6 +192,56 @@ def test_rpc_trust_gate_offloads_store_io(tmp_path: Path, monkeypatch: MonkeyPat
     assert all(thread_id != main_thread for thread_id in call_threads.values())
 
 
+def test_rpc_trust_gate_cancel_abandons_blocked_persistence(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    started = Event()
+    release = Event()
+
+    def check_trust(_project_path: Path) -> None:
+        return None
+
+    def save_trust(_project_path: Path, _trusted: bool) -> None:
+        started.set()
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(rpc_host_module, "is_trusted", check_trust)
+    monkeypatch.setattr(rpc_host_module, "record_trust", save_trust)
+    gate = rpc_host_module.RpcTrustGate(tmp_path, write_event=lambda _event: None)
+
+    async def scenario() -> None:
+        cancel_scope = anyio.CancelScope()
+        cancelled = anyio.Event()
+
+        async def resolve() -> None:
+            with cancel_scope:
+                try:
+                    await gate.resolve()
+                except anyio.get_cancelled_exc_class():
+                    cancelled.set()
+                    raise
+            if cancel_scope.cancel_called:
+                cancelled.set()
+
+        try:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(resolve)
+                while gate._pending is None:
+                    await anyio.sleep(0)
+                assert gate.resolve_request(request_id=gate._pending.request_id, trusted=True)
+                with anyio.fail_after(1):
+                    while not started.is_set():
+                        await anyio.sleep(0.01)
+                cancel_scope.cancel()
+                with anyio.fail_after(1):
+                    await cancelled.wait()
+        finally:
+            release.set()
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_runs_the_shared_command_event_contract(tmp_path: Path) -> None:
     async def scenario() -> None:
         controller = await InProcessWisp.start(

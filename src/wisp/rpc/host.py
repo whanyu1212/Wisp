@@ -240,9 +240,19 @@ class RpcTrustGate:
         await pending.event.wait()
         trusted = pending.trusted is True
         if trusted:
-            await anyio.to_thread.run_sync(record_trust, self._project_path, True)
+            await anyio.to_thread.run_sync(
+                record_trust,
+                self._project_path,
+                True,
+                abandon_on_cancel=True,
+            )
         elif not pending.transient:
-            await anyio.to_thread.run_sync(record_trust, self._project_path, False)
+            await anyio.to_thread.run_sync(
+                record_trust,
+                self._project_path,
+                False,
+                abandon_on_cancel=True,
+            )
         self._pending = None
         self._write_event(
             TrustResolved(
