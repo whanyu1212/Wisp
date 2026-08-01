@@ -39,6 +39,7 @@ from wisp.rpc.coordinator import (
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sdk import InProcessOptions, InProcessWisp
+from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 
 
@@ -804,6 +805,52 @@ def test_in_process_sdk_shutdown_cancels_clone_precommit_read(
             async for event in controller.events():
                 if isinstance(event, RpcCommandFinished) and event.command_id == prompt_id:
                     await controller.clone_session(command_id="clone-1")
+                    break
+            with anyio.fail_after(1):
+                while not read_started.is_set():
+                    await anyio.sleep(0.01)
+            with anyio.fail_after(0.5):
+                await controller.aclose()
+        finally:
+            release_read.set()
+
+    anyio.run(scenario)
+
+
+def test_in_process_sdk_shutdown_cancels_fork_precommit_read(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    read_started = Event()
+    release_read = Event()
+    original_read_active_leaf_id = JsonlSession.read_active_leaf_id
+
+    def blocked_read_active_leaf_id(session: JsonlSession) -> str | None:
+        read_started.set()
+        release_read.wait(timeout=5)
+        return original_read_active_leaf_id(session)
+
+    monkeypatch.setattr(JsonlSession, "read_active_leaf_id", blocked_read_active_leaf_id)
+    monkeypatch.setattr(sdk_module, "_CLOSE_TIMEOUT_SECONDS", 0.01)
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        prompt_id = await controller.prompt("seed", command_id="prompt-1")
+        try:
+            async for event in controller.events():
+                if isinstance(event, RpcCommandFinished) and event.command_id == prompt_id:
+                    session_state = controller._in_process_transport._host.coordinator.session_state
+                    source = session_state.session
+                    assert source is not None
+                    entry = next(
+                        entry
+                        for entry in source.read_entries()
+                        if isinstance(entry, MessageSessionEntry) and entry.message.role == "user"
+                    )
+                    await controller.fork_session(entry.id, command_id="fork-1")
                     break
             with anyio.fail_after(1):
                 while not read_started.is_set():

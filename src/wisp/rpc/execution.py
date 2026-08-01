@@ -1596,7 +1596,7 @@ async def run_rpc_fork_session_command(
             await anyio.sleep(0)
             if not source_session.path.is_file():
                 raise SessionError("Cannot fork an empty session")
-            source_active_leaf_id = await anyio.to_thread.run_sync(
+            source_active_leaf_id = await _run_abandonable_session_read(
                 source_session.read_active_leaf_id
             )
             await anyio.sleep(0)
