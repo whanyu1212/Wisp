@@ -94,6 +94,7 @@ type RpcDispatch = Callable[
 type RpcReject = Callable[[dict[str, object], str], None]
 type RpcCommandType = Callable[[dict[str, object]], str]
 type RpcCompletionEventWriter = Callable[[WispEvent], None]
+type RpcCompletionEventRenderer = Callable[[tuple[WispEvent, ...]], Awaitable[None]]
 
 _MAX_QUEUED_RPC_COMMANDS = 100
 _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
@@ -124,6 +125,7 @@ class RpcCoordinator:
         command_completed_type: type[object] = _RpcCommandCompleted,
         prompt_ready_type: type[object] = _RpcPromptReady,
         completion_event_writer: RpcCompletionEventWriter | None = None,
+        completion_event_renderer: RpcCompletionEventRenderer | None = None,
     ) -> None:
         if max_queued_commands < 0:
             raise ValueError("max_queued_commands must be non-negative")
@@ -139,6 +141,7 @@ class RpcCoordinator:
         self._prompt_ready_type = prompt_ready_type
         self._prompt_queue_ready = False
         self._completion_event_writer = completion_event_writer
+        self._completion_event_renderer = completion_event_renderer
 
     async def run(
         self,
@@ -205,7 +208,7 @@ class RpcCoordinator:
             if isinstance(event, _RpcInputCommand):
                 command = event.command
                 if command_type(command) not in _ACTIVE_COMMAND_BYPASS_COMMANDS:
-                    self._enqueue_command(command, queue=self.queued_commands, reject=reject)
+                    reject(command, "RPC command rejected because shutdown is pending")
                     continue
             if self.handle_event(
                 event,
@@ -402,11 +405,7 @@ class RpcCoordinator:
             if isinstance(event, _RpcInputCommand):
                 command = event.command
                 if command_type(command) not in _ACTIVE_COMMAND_BYPASS_COMMANDS:
-                    await self._enqueue_command_async(
-                        command,
-                        queue=self.queued_commands,
-                        reject=reject,
-                    )
+                    await reject(command, "RPC command rejected because shutdown is pending")
                     continue
             if await self.handle_event_async(
                 event,
@@ -453,8 +452,11 @@ class RpcCoordinator:
                 selected_session = getattr(completed, "selected_session", None)
                 if completed.ok and selected_session is not None:
                     self.session_state.session = selected_session
-                if self._completion_event_writer is not None:
-                    for queued_event in getattr(completed, "post_apply_events", ()):
+                post_apply_events = getattr(completed, "post_apply_events", ())
+                if post_apply_events and self._completion_event_renderer is not None:
+                    await self._completion_event_renderer(post_apply_events)
+                elif self._completion_event_writer is not None:
+                    for queued_event in post_apply_events:
                         self._completion_event_writer(queued_event)
             return False
         if isinstance(event, self._prompt_ready_type):
@@ -472,6 +474,9 @@ class RpcCoordinator:
         command = cast(_RpcInputCommand, event).command
         selected_type = command_type(command)
         running = self.running_command
+        if running is None and selected_type == "shutdown":
+            self.queued_commands.append(command)
+            return False
         prompt_queue_not_ready = (
             running is not None
             and running.command_type == "prompt"

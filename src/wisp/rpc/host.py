@@ -453,6 +453,11 @@ class RpcHost:
             on_first_trusted=rebuild_agent_for_trusted_project,
             initially_trusted=options.startup_trusted,
         )
+
+        async def render_completion_events(events: tuple[WispEvent, ...]) -> None:
+            assert host is not None
+            await host._render_event_batch(events)
+
         coordinator = RpcCoordinator(
             session_state,
             input_closed_handlers=(
@@ -463,6 +468,7 @@ class RpcHost:
             input_closed_type=_RpcInputClosed,
             command_completed_type=_RpcCommandCompleted,
             completion_event_writer=publish_event,
+            completion_event_renderer=render_completion_events,
         )
         host = cls(
             runtime=runtime,

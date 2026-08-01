@@ -699,6 +699,121 @@ def test_coordinator_drains_buffered_cancel_before_queued_shutdown_async() -> No
     anyio.run(scenario)
 
 
+def test_coordinator_awaits_completion_events_before_next_async_dispatch() -> None:
+    async def scenario() -> None:
+        render_started = anyio.Event()
+        release_render = anyio.Event()
+        next_dispatched = anyio.Event()
+        completion_event = RpcSessionSelected(
+            command_id="select",
+            session_id="session",
+            session_path=Path("session.jsonl"),
+            entry_count=1,
+        )
+
+        async def render_completion(events: tuple[WispEvent, ...]) -> None:
+            assert events == (completion_event,)
+            render_started.set()
+            await release_render.wait()
+
+        receiver = _Receiver(
+            [
+                _RpcCommandCompleted(
+                    "select",
+                    "select_session",
+                    True,
+                    (),
+                    1,
+                    post_apply_events=(completion_event,),
+                ),
+                _RpcCommandCompleted("next", "get_sessions", True, (), 1),
+                _RpcInputClosed(),
+            ]
+        )
+        coordinator = RpcCoordinator(
+            _RpcSessionState(None, (), 0),
+            completion_event_renderer=render_completion,
+        )
+        coordinator.running_command = _RpcRunningCommand(
+            "select",
+            "select_session",
+            anyio.CancelScope(),
+        )
+        coordinator.queued_commands.append({"id": "next", "type": "get_sessions"})
+
+        async def dispatch(
+            command: dict[str, object],
+            _running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            next_dispatched.set()
+            return _RpcDispatchResult(
+                _RpcRunningCommand(
+                    str(command["id"]),
+                    "get_sessions",
+                    anyio.CancelScope(),
+                )
+            )
+
+        async def reject(_command: dict[str, object], _message: str) -> None:
+            return None
+
+        async def run_coordinator() -> None:
+            await coordinator.run_async(
+                receiver,
+                dispatch=dispatch,
+                reject=reject,
+                command_type=_command_type,
+            )
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(run_coordinator)
+            await render_started.wait()
+            await anyio.sleep(0)
+            assert next_dispatched.is_set() is False
+            release_render.set()
+            await next_dispatched.wait()
+
+    anyio.run(scenario)
+
+
+def test_coordinator_drains_buffered_control_before_idle_shutdown_async() -> None:
+    async def scenario() -> None:
+        receiver = _Receiver(
+            [
+                _RpcInputCommand({"id": "shutdown", "type": "shutdown"}),
+                _RpcInputCommand({"id": "cancel", "type": "cancel", "target_id": "missing"}),
+            ]
+        )
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        dispatched: list[str] = []
+
+        async def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            command_id = str(command["id"])
+            dispatched.append(command_id)
+            return _RpcDispatchResult(
+                running,
+                should_shutdown=command.get("type") == "shutdown",
+            )
+
+        async def reject(_command: dict[str, object], _message: str) -> None:
+            return None
+
+        assert (
+            await coordinator.run_async(
+                receiver,
+                dispatch=dispatch,
+                reject=reject,
+                command_type=_command_type,
+            )
+        ) is True
+        assert dispatched == ["cancel", "shutdown"]
+
+    anyio.run(scenario)
+
+
 def test_coordinator_returns_immediately_after_shutdown_dispatch() -> None:
     async def scenario() -> None:
         receiver = _Receiver(
