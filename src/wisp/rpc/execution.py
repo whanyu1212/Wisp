@@ -91,6 +91,10 @@ DEFAULT_RPC_SESSION_CATALOG_LIMIT = 50
 MAX_RPC_SESSION_CATALOG_LIMIT = 200
 
 
+async def _run_abandonable_session_read[T](func: Callable[..., T], *args: object) -> T:
+    return await anyio.to_thread.run_sync(func, *args, abandon_on_cancel=True)
+
+
 class RpcApprovalResolver(Protocol):
     def has_pending_approval(self, *, call_id: str) -> bool: ...
 
@@ -1165,7 +1169,7 @@ async def run_rpc_session_stats_command(
         with cancel_scope:
             stats = await agent.get_session_stats(session)
             if session is not None:
-                refreshed_entry_count, refreshed_history = await anyio.to_thread.run_sync(
+                refreshed_entry_count, refreshed_history = await _run_abandonable_session_read(
                     updated_rpc_session_state,
                     session,
                     (),
@@ -1224,7 +1228,7 @@ async def run_rpc_messages_command(
             if session_id is None:
                 session = selected_session
             else:
-                session = await anyio.to_thread.run_sync(sessions.load, session_id)
+                session = await _run_abandonable_session_read(sessions.load, session_id)
 
             if session is None:
                 page = SessionMessagePage(
@@ -1245,7 +1249,7 @@ async def run_rpc_messages_command(
                     next_before_entry_id=None,
                 )
             else:
-                page = await anyio.to_thread.run_sync(
+                page = await _run_abandonable_session_read(
                     partial(
                         session.read_message_page,
                         limit=limit,
@@ -1254,7 +1258,7 @@ async def run_rpc_messages_command(
                 )
 
             if selected_read and session is not None:
-                refreshed_entry_count, refreshed_history = await anyio.to_thread.run_sync(
+                refreshed_entry_count, refreshed_history = await _run_abandonable_session_read(
                     updated_rpc_session_state,
                     session,
                     (),
@@ -1320,9 +1324,11 @@ async def run_rpc_sessions_command(
     error: str | None = None
     try:
         with cancel_scope:
-            summaries = await anyio.to_thread.run_sync(partial(sessions.summaries, limit=limit))
+            summaries = await _run_abandonable_session_read(
+                partial(sessions.summaries, limit=limit)
+            )
             selected_session_name = (
-                await anyio.to_thread.run_sync(selected_session.read_name)
+                await _run_abandonable_session_read(selected_session.read_name)
                 if selected_session is not None
                 else None
             )
@@ -1392,13 +1398,13 @@ async def run_rpc_select_session_command(
     finish_in_worker = True
     try:
         with cancel_scope:
-            loaded_session = await anyio.to_thread.run_sync(sessions.load, session_id)
+            loaded_session = await _run_abandonable_session_read(sessions.load, session_id)
             (
                 refreshed_entry_count,
                 refreshed_history,
                 active_leaf_id,
                 refreshed_name,
-            ) = await anyio.to_thread.run_sync(rpc_selected_session_state, loaded_session)
+            ) = await _run_abandonable_session_read(rpc_selected_session_state, loaded_session)
             if cancel_scope.cancel_called:
                 error = "RPC select_session command cancelled"
                 refreshed_history = None
@@ -1702,7 +1708,7 @@ async def run_rpc_session_tree_command(
                     next_after_entry_id=None,
                 )
             else:
-                page = await anyio.to_thread.run_sync(
+                page = await _run_abandonable_session_read(
                     partial(
                         session.read_tree_page,
                         limit=limit,
@@ -1715,7 +1721,7 @@ async def run_rpc_session_tree_command(
                         refreshed_history,
                         _,
                         _name,
-                    ) = await anyio.to_thread.run_sync(
+                    ) = await _run_abandonable_session_read(
                         rpc_selected_session_state,
                         session,
                     )

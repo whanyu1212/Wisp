@@ -714,6 +714,56 @@ def test_executor_sessions_reports_empty_catalog(tmp_path: Path) -> None:
     anyio.run(scenario)
 
 
+def test_executor_sessions_cancel_abandons_blocked_catalog_read(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        started = threading.Event()
+        release = threading.Event()
+        original_summaries = fixture.sessions.summaries
+
+        def blocked_summaries(*, limit: int | None = None) -> object:
+            started.set()
+            release.wait(timeout=5)
+            return original_summaries(limit=limit)
+
+        monkeypatch.setattr(fixture.sessions, "summaries", blocked_summaries)
+
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = executor.dispatch({"id": "sessions", "type": "get_sessions"}, None)
+            assert result.running_command is not None
+
+            try:
+                with anyio.fail_after(1):
+                    while not started.is_set():
+                        await anyio.sleep(0.01)
+
+                result.running_command.cancel_scope.cancel()
+
+                with anyio.fail_after(1):
+                    completed = await receive.receive()
+            finally:
+                release.set()
+                task_group.cancel_scope.cancel()
+
+        assert completed.command_id == "sessions"
+        assert completed.command_type == "get_sessions"
+        assert completed.ok is False
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            RpcCommandFinished,
+        ]
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.error == "RPC get_sessions command cancelled"
+
+    anyio.run(scenario)
+
+
 def test_executor_sessions_reports_bounded_catalog_with_selected_metadata(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
