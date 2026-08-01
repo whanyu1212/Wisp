@@ -11,6 +11,7 @@ import pytest
 from pytest import MonkeyPatch
 
 import wisp.sdk as sdk_module
+from wisp.agent.messages import Message
 from wisp.config import WispConfig
 from wisp.events import (
     RpcCommandFinished,
@@ -25,9 +26,11 @@ from wisp.providers.events import (
     ProviderTextDelta,
 )
 from wisp.providers.fake import ScriptedProvider
+from wisp.rpc import host as rpc_host_module
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sdk import InProcessOptions, InProcessWisp
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 
 
 def test_in_process_sdk_from_environment_offloads_blocking_setup(
@@ -82,6 +85,56 @@ def test_in_process_sdk_from_environment_offloads_blocking_setup(
 
     anyio.run(scenario)
     assert set(call_threads) == {"project_root", "trust", "config"}
+    assert all(thread_id != main_thread for thread_id in call_threads.values())
+
+
+def test_in_process_sdk_offloads_resumed_session_startup(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    main_thread = get_ident()
+    call_threads: dict[str, int] = {}
+    sessions = JsonlSessionStore(tmp_path)
+
+    original_select_session = rpc_host_module.select_session
+    original_session_state = rpc_host_module.rpc_session_state
+
+    def select_session_in_worker(
+        store: JsonlSessionStore,
+        *,
+        resume: str | None,
+        continue_latest: bool,
+    ) -> JsonlSession | None:
+        call_threads["select"] = get_ident()
+        return original_select_session(store, resume=resume, continue_latest=continue_latest)
+
+    def session_state_in_worker(session: JsonlSession | None) -> object:
+        call_threads["state"] = get_ident()
+        return original_session_state(session)
+
+    monkeypatch.setattr(rpc_host_module, "select_session", select_session_in_worker)
+    monkeypatch.setattr(rpc_host_module, "rpc_session_state", session_state_in_worker)
+
+    async def scenario() -> None:
+        resumed_session = sessions.create()
+        await resumed_session.append_message(Message(role="user", content="resume me"))
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(
+                continue_latest=True,
+                startup_trusted=True,
+                project_context_root=tmp_path,
+            ),
+        )
+        try:
+            session_state = controller._in_process_transport._host.coordinator.session_state
+            assert session_state.session is not None
+            assert session_state.session.path == resumed_session.path
+        finally:
+            await controller.aclose()
+
+    anyio.run(scenario)
+    assert set(call_threads) == {"select", "state"}
     assert all(thread_id != main_thread for thread_id in call_threads.values())
 
 

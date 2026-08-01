@@ -32,6 +32,7 @@ from wisp.rpc.coordinator import (
     _RpcDispatchResult,
     _RpcInputClosed,
     _RpcRunningCommand,
+    _RpcSessionState,
 )
 from wisp.rpc.execution import RpcCommandExecutor, rpc_command_type, rpc_session_state
 from wisp.runtime.api import WispRuntime
@@ -343,16 +344,21 @@ class RpcHost:
         """Build a host without starting a transport or event loop."""
 
         sessions = JsonlSessionStore(config.session_dir)
-        session = select_session(
-            sessions,
-            resume=options.resume,
-            continue_latest=options.continue_latest,
-        )
-        session_state = rpc_session_state(session)
+
+        def load_startup_state() -> tuple[_RpcSessionState, Path]:
+            session = select_session(
+                sessions,
+                resume=options.resume,
+                continue_latest=options.continue_latest,
+            )
+            session_state = rpc_session_state(session)
+            project_context_root = options.project_context_root or resolve_project_context_root(
+                Path.cwd()
+            )
+            return session_state, project_context_root
+
+        session_state, project_context_root = await anyio.to_thread.run_sync(load_startup_state)
         approval_policy = RpcToolApprovalPolicy(tool_approval_policy(options.approve_unsafe_tools))
-        project_context_root = options.project_context_root or resolve_project_context_root(
-            Path.cwd()
-        )
         configure_overrides = _RpcConfigureOverrides()
         selected_runtime_builder = runtime_builder or build_runtime_for_config
         project_configuration = RpcProjectConfiguration(
