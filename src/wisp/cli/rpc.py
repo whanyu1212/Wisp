@@ -1,8 +1,8 @@
-"""RPC output mode for Wisp's CLI.
+"""JSONL stdin/stdout adapter for Wisp's shared RPC command host.
 
-This module hosts the JSONL RPC subsystem that was previously inlined in
-``wisp.cli.__init__``. ``wisp.cli`` re-exports these names via compatibility
-aliases so callers and tests keep importing them from ``wisp.cli``.
+Transport-independent command scheduling lives in :mod:`wisp.rpc`. This module
+keeps CLI input/output plumbing and private compatibility aliases for existing
+``wisp.cli`` callers and tests.
 """
 
 from __future__ import annotations
@@ -22,30 +22,27 @@ from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
 from wisp.agent.messages import Message
-from wisp.agent.prompt import resolve_project_context_root
-from wisp.coding import CodingSession, resolve_coding_session_configuration
+from wisp.coding import CodingSession
 from wisp.config import WispConfig
 from wisp.events import (
     TrustRequested,
     TrustResolved,
 )
 from wisp.providers.base import Provider
+from wisp.rpc import execution as _rpc_execution
 from wisp.rpc.commands import ApprovalScope
+from wisp.rpc.host import InProcessOptions, RpcHost
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
+from wisp.tools import selection as _tool_selection
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.base import Tool, ToolSafety
 from wisp.trust import is_trusted, record_trust
 
 from . import output as _cli_output
-from . import rpc_execution as _rpc_execution
 from . import rpc_transport as _rpc_transport
-from . import tools as _cli_tools
 from . import trust as _cli_trust
-from .rpc_configuration import (
-    RpcProjectConfiguration,
-)
 from .rpc_configuration import (
     _ConfigOverrides as _ConfigOverrides,
 )
@@ -86,9 +83,9 @@ from .rpc_coordinator import (
 _render_json_events = _cli_output._render_json_events
 _write_json_event = _cli_output._write_json_event
 
-_print_mode_tool_approval_policy = _cli_tools._print_mode_tool_approval_policy
-_print_mode_tool_registry = _cli_tools._print_mode_tool_registry
-_session_for_print_run = _cli_tools._session_for_print_run
+_print_mode_tool_approval_policy = _tool_selection.tool_approval_policy
+_print_mode_tool_registry = _tool_selection.select_tools
+_session_for_print_run = _tool_selection.select_session
 
 
 async def _build_runtime_for_config(config: WispConfig) -> WispRuntime:
@@ -178,6 +175,10 @@ class _RpcToolApprovalPolicy(ToolApprovalPolicy):
         finally:
             self._pending.pop(call_id, None)
 
+    def has_pending_approval(self, *, call_id: str) -> bool:
+        pending = self._pending.get(call_id)
+        return pending is not None and not pending.resolved
+
     def resolve_approval(
         self,
         *,
@@ -265,11 +266,11 @@ class _RpcTrustGate:
         if override is not None:
             return await self._finish(override)
 
-        stored = is_trusted(self._project_path)
+        input_closed_before_store = self._input_closed
+        stored = await anyio.to_thread.run_sync(is_trusted, self._project_path)
         if stored is not None:
             return await self._finish(stored)
-
-        if self._input_closed:
+        if input_closed_before_store:
             return await self._finish(False)
 
         # Undecided: prompt the client. Only this path emits trust events, so a
@@ -280,14 +281,16 @@ class _RpcTrustGate:
         _write_json_event(
             TrustRequested(request_id=pending.request_id, project_path=self._project_path)
         )
+        if self._input_closed:
+            self.deny_pending_on_input_closed()
         await pending.event.wait()
         trusted = pending.trusted is True
         if trusted:
-            record_trust(self._project_path, True)
+            await anyio.to_thread.run_sync(record_trust, self._project_path, True)
         elif not pending.transient:
             # Explicit "no" answers are persisted even when they carry explanatory
             # text. Forced UI/input-close denials opt into transient behavior.
-            record_trust(self._project_path, False)
+            await anyio.to_thread.run_sync(record_trust, self._project_path, False)
         self._pending = None
         _write_json_event(
             TrustResolved(
@@ -306,6 +309,7 @@ class _RpcTrustGate:
         trusted: bool,
         reason: str | None = None,
         transient: bool = False,
+        release: bool = True,
     ) -> bool:
         pending = self._pending
         if pending is None or pending.resolved or pending.request_id != request_id:
@@ -314,8 +318,16 @@ class _RpcTrustGate:
         pending.trusted = trusted
         pending.reason = reason
         pending.transient = transient
-        pending.event.set()
+        if release:
+            pending.event.set()
         return True
+
+    def release_request(self, *, request_id: str) -> None:
+        """Release an accepted response after its command lifecycle is published."""
+
+        pending = self._pending
+        if pending is not None and pending.resolved and pending.request_id == request_id:
+            pending.event.set()
 
     def deny_pending_on_input_closed(self) -> None:
         self._input_closed = True
@@ -390,100 +402,36 @@ async def _run_rpc_with_runtime(
     config_overrides: _ConfigOverrides | None = None,
     project_context_root: Path | None = None,
 ) -> None:
-    sessions = JsonlSessionStore(config.session_dir)
-    session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
-    session_state = _rpc_session_state(session)
-    approval_policy = _RpcToolApprovalPolicy(_print_mode_tool_approval_policy(approve_unsafe_tools))
-    selected_project_context_root = project_context_root or resolve_project_context_root(Path.cwd())
-    configure_overrides = _RpcConfigureOverrides()
-    project_configuration = RpcProjectConfiguration(
-        startup_config=config,
-        startup_trusted=startup_trusted,
-        config_overrides=config_overrides,
-        project_context_root=selected_project_context_root,
-        runtime_builder=_build_runtime_for_config,
-        configure_overrides=configure_overrides,
-    )
+    """Run the CLI's stdin/stdout adapter over the shared RPC host."""
 
-    async def _rebuild_agent_for_trusted_project() -> None:
-        event = await project_configuration.apply_trusted_project(runtime=runtime, agent=agent)
-        if event is not None:
-            _write_json_event(event)
-
-    trust_gate = _RpcTrustGate(
-        selected_project_context_root,
-        on_first_trusted=_rebuild_agent_for_trusted_project,
-    )
-    initial_configuration = resolve_coding_session_configuration(
+    host = await RpcHost.create(
         config,
-        providers=runtime.providers,
-        models=runtime.models,
-        trusted=startup_trusted,
-    )
-    agent = CodingSession.from_configuration(
-        initial_configuration,
-        sessions=sessions,
-        events=runtime.events,
-        tool_registry=_print_mode_tool_registry(
-            runtime.tools,
+        runtime,
+        options=InProcessOptions(
             all_tools=all_tools,
             allow_read_tools=allow_read_tools,
             allowed_tools=allowed_tools,
+            resume=resume,
+            continue_latest=continue_latest,
+            approve_unsafe_tools=approve_unsafe_tools,
+            max_tool_iterations=max_tool_iterations,
+            startup_trusted=startup_trusted,
+            project_context_root=project_context_root,
         ),
-        tool_approval_policy=approval_policy,
-        max_tool_iterations=max_tool_iterations,
-        project_context_root=selected_project_context_root,
-    )
-
-    coordinator = RpcCoordinator(
-        session_state,
-        input_closed_handlers=(
-            approval_policy.deny_pending_on_input_closed,
-            trust_gate.deny_pending_on_input_closed,
-        ),
+        write_event=_write_json_event,
+        render_events=_render_json_events,
+        config_overrides=config_overrides,
+        runtime_builder=_build_runtime_for_config,
         max_queued_commands=_MAX_QUEUED_RPC_COMMANDS,
-        input_closed_type=_RpcInputClosed,
-        command_completed_type=_RpcCommandCompleted,
-        completion_event_writer=_write_json_event,
     )
     send, receive = anyio.create_memory_object_stream[_RpcControlEvent](100)
     stop_reader = anyio.Event()
-
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_read_rpc_stdin, send.clone(), stop_reader)
         async with send, receive:
-
-            def dispatch(
-                command: dict[str, object],
-                running_command: _RpcRunningCommand | None,
-            ) -> _RpcDispatchResult:
-                return _dispatch_rpc_command(
-                    command,
-                    agent=agent,
-                    runtime=runtime,
-                    sessions=sessions,
-                    session_state=session_state,
-                    task_group=task_group,
-                    send=send,
-                    running_command=running_command,
-                    approval_policy=approval_policy,
-                    trust_gate=trust_gate,
-                    configure_overrides=configure_overrides,
-                    coordinator=coordinator,
-                )
-
-            await coordinator.run(
-                receive,
-                dispatch=dispatch,
-                reject=lambda command, message: _reject_rpc_command(
-                    command,
-                    message=message,
-                ),
-                command_type=_rpc_command_type,
-            )
-            stop_reader.set()
-            task_group.cancel_scope.cancel()
-            return
+            await host.run_with_streams(receive, send=send, task_group=task_group)
+        stop_reader.set()
+        task_group.cancel_scope.cancel()
 
 
 def _dispatch_rpc_command(

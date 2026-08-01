@@ -13,6 +13,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from inspect import isawaitable
 from pathlib import Path
 
+import anyio
+
 from wisp.auth.storage import JsonAuthStore
 from wisp.config import default_auth_path
 from wisp.extensions import builtin
@@ -46,7 +48,9 @@ async def build_runtime(
         events=events,
         process_supervisor=process_supervisor,
     )
-    models = ModelRegistry(effective_catalog())
+    models = ModelRegistry(
+        await anyio.to_thread.run_sync(effective_catalog, abandon_on_cancel=True)
+    )
     runtime = WispRuntime(
         providers=providers,
         tools=tools,

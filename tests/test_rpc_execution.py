@@ -13,16 +13,6 @@ from pytest import MonkeyPatch
 from tests.rpc_support import build_rpc_executor_fixture
 from wisp.agent.harness import QueuedMessages
 from wisp.agent.messages import Message
-from wisp.cli import rpc_execution as rpc_execution_module
-from wisp.cli.rpc_configuration import _RpcConfigureOverrides
-from wisp.cli.rpc_coordinator import (
-    RpcCoordinator,
-    _RpcCommandCompleted,
-    _RpcDispatchResult,
-    _RpcRunningCommand,
-    _RpcSessionState,
-)
-from wisp.cli.rpc_execution import RpcCommandExecutor, rpc_selected_session_state
 from wisp.coding import CodingSession
 from wisp.coding.session import _RetainedQueueState
 from wisp.config import WispConfig
@@ -46,12 +36,25 @@ from wisp.events import (
     RpcStateSnapshot,
     WispEvent,
 )
+from wisp.rpc import execution as rpc_execution_module
+from wisp.rpc.configuration import _RpcConfigureOverrides
+from wisp.rpc.coordinator import (
+    RpcCoordinator,
+    _RpcCommandCompleted,
+    _RpcDispatchResult,
+    _RpcRunningCommand,
+    _RpcSessionState,
+)
+from wisp.rpc.execution import RpcCommandExecutor, rpc_selected_session_state
 from wisp.runtime.commands import CommandArgument, CommandCategory, CommandDescriptor
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionTreeNavigation
 
 
 class _ApprovalResolver:
+    def has_pending_approval(self, **_kwargs: object) -> bool:
+        return False
+
     def resolve_approval(self, **_kwargs: object) -> bool:
         return False
 
@@ -62,6 +65,117 @@ class _TrustResolver:
 
     def resolve_request(self, **_kwargs: object) -> bool:
         return False
+
+
+def test_approval_resolution_waits_for_lifecycle_flush() -> None:
+    events: list[WispEvent] = []
+    deferred: list[Callable[[], None]] = []
+    resolved: list[dict[str, object]] = []
+
+    class PendingApproval:
+        def has_pending_approval(self, *, call_id: str) -> bool:
+            return call_id == "call-1"
+
+        def resolve_approval(self, **kwargs: object) -> bool:
+            resolved.append(kwargs)
+            return True
+
+    rpc_execution_module.handle_rpc_approval_command(
+        {"id": "approval-1", "type": "approval", "call_id": "call-1", "approved": True},
+        command_id="approval-1",
+        command_type="approval",
+        approval_policy=PendingApproval(),
+        write_event=events.append,
+        defer_resolution=deferred.append,
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], RpcCommandFinished)
+    assert events[0].command_id == "approval-1"
+    assert events[0].ok is True
+    assert not resolved
+    assert len(deferred) == 1
+
+    deferred[0]()
+
+    assert resolved == [
+        {
+            "call_id": "call-1",
+            "approved": True,
+            "reason": None,
+            "scope": "once",
+        }
+    ]
+
+
+def test_approval_resolution_runs_without_post_flush_callback() -> None:
+    events: list[WispEvent] = []
+    resolved: list[dict[str, object]] = []
+
+    class PendingApproval:
+        def has_pending_approval(self, *, call_id: str) -> bool:
+            return call_id == "call-1"
+
+        def resolve_approval(self, **kwargs: object) -> bool:
+            resolved.append(kwargs)
+            return True
+
+    rpc_execution_module.handle_rpc_approval_command(
+        {"id": "approval-1", "type": "approval", "call_id": "call-1", "approved": True},
+        command_id="approval-1",
+        command_type="approval",
+        approval_policy=PendingApproval(),
+        write_event=events.append,
+    )
+
+    assert resolved == [
+        {
+            "call_id": "call-1",
+            "approved": True,
+            "reason": None,
+            "scope": "once",
+        }
+    ]
+    assert len(events) == 1
+    assert isinstance(events[0], RpcCommandFinished)
+    assert events[0].ok is True
+
+
+def test_active_cancellation_waits_for_lifecycle_flush() -> None:
+    events: list[WispEvent] = []
+    deferred: list[Callable[[], None]] = []
+
+    class RecordingCancelScope:
+        cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    cancel_scope = RecordingCancelScope()
+    running_command = _RpcRunningCommand(
+        command_id="prompt-1",
+        command_type="prompt",
+        cancel_scope=cancel_scope,
+    )
+    rpc_execution_module.handle_rpc_cancel_command(
+        {"id": "cancel-1", "type": "cancel", "target_id": "prompt-1"},
+        command_id="cancel-1",
+        command_type="cancel",
+        running_command=running_command,
+        write_event=events.append,
+        defer_cancellation=deferred.append,
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], RpcCommandFinished)
+    assert events[0].command_id == "cancel-1"
+    assert events[0].ok is True
+    assert cancel_scope.cancelled is False
+    assert len(deferred) == 1
+
+    deferred[0]()
+
+    assert cancel_scope.cancelled is True
 
 
 def test_executor_dispatches_validation_and_shutdown_without_stdin(tmp_path: Path) -> None:
@@ -596,6 +710,56 @@ def test_executor_sessions_reports_empty_catalog(tmp_path: Path) -> None:
         assert report.sessions == ()
         assert report.selected_session_id is None
         assert report.selected_session_path is None
+
+    anyio.run(scenario)
+
+
+def test_executor_sessions_cancel_abandons_blocked_catalog_read(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        started = threading.Event()
+        release = threading.Event()
+        original_summaries = fixture.sessions.summaries
+
+        def blocked_summaries(*, limit: int | None = None) -> object:
+            started.set()
+            release.wait(timeout=5)
+            return original_summaries(limit=limit)
+
+        monkeypatch.setattr(fixture.sessions, "summaries", blocked_summaries)
+
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = executor.dispatch({"id": "sessions", "type": "get_sessions"}, None)
+            assert result.running_command is not None
+
+            try:
+                with anyio.fail_after(1):
+                    while not started.is_set():
+                        await anyio.sleep(0.01)
+
+                result.running_command.cancel_scope.cancel()
+
+                with anyio.fail_after(1):
+                    completed = await receive.receive()
+            finally:
+                release.set()
+                task_group.cancel_scope.cancel()
+
+        assert completed.command_id == "sessions"
+        assert completed.command_type == "get_sessions"
+        assert completed.ok is False
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            RpcCommandFinished,
+        ]
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.error == "RPC get_sessions command cancelled"
 
     anyio.run(scenario)
 

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import Event, get_ident
 
 import anyio
 import pytest
 
-from wisp.cli.rpc_configuration import RpcProjectConfiguration, _ConfigOverrides
 from wisp.coding import CodingSession
 from wisp.config import WispConfig
+from wisp.rpc.configuration import RpcProjectConfiguration, _ConfigOverrides
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownProviderError
@@ -50,6 +51,119 @@ def test_no_settings_trust_transition_updates_session_without_rebuilding(
 
         assert event is None
         assert agent.trusted is True
+
+    anyio.run(scenario)
+
+
+def test_trusted_project_transition_offloads_settings_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main_thread = get_ident()
+    build_threads: list[int] = []
+    startup = WispConfig(provider="fake", session_dir=tmp_path / "sessions")
+    original_build = _ConfigOverrides.build
+
+    def build_in_worker(
+        overrides: _ConfigOverrides,
+        *,
+        trusted: bool,
+        project_dir: Path | None = None,
+    ) -> WispConfig:
+        assert trusted is True
+        assert project_dir == tmp_path
+        build_threads.append(get_ident())
+        return original_build(overrides, trusted=trusted, project_dir=project_dir)
+
+    monkeypatch.setattr(_ConfigOverrides, "build", build_in_worker)
+
+    async def scenario() -> None:
+        runtime = await _runtime_for(startup)
+        agent = CodingSession(
+            provider=runtime.providers.get("fake"),
+            sessions=JsonlSessionStore(startup.session_dir),
+            trusted=False,
+        )
+        transition = RpcProjectConfiguration(
+            startup_config=startup,
+            startup_trusted=False,
+            config_overrides=_ConfigOverrides(provider="fake", session_dir=startup.session_dir),
+            project_context_root=tmp_path,
+            runtime_builder=_runtime_for,
+        )
+
+        event = await transition.apply_trusted_project(runtime=runtime, agent=agent)
+
+        assert event is None
+        assert agent.trusted is True
+        await runtime.aclose()
+
+    anyio.run(scenario)
+
+    assert build_threads and all(thread_id != main_thread for thread_id in build_threads)
+
+
+def test_trusted_project_transition_cancel_abandons_settings_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    startup = WispConfig(provider="fake", session_dir=tmp_path / "sessions")
+    original_build = _ConfigOverrides.build
+
+    async def scenario() -> None:
+        started = Event()
+        release = Event()
+        cancelled = anyio.Event()
+
+        def blocking_build(
+            overrides: _ConfigOverrides,
+            *,
+            trusted: bool,
+            project_dir: Path | None = None,
+        ) -> WispConfig:
+            started.set()
+            release.wait(timeout=5)
+            return original_build(overrides, trusted=trusted, project_dir=project_dir)
+
+        monkeypatch.setattr(_ConfigOverrides, "build", blocking_build)
+
+        runtime = await _runtime_for(startup)
+        agent = CodingSession(
+            provider=runtime.providers.get("fake"),
+            sessions=JsonlSessionStore(startup.session_dir),
+            trusted=False,
+        )
+        transition = RpcProjectConfiguration(
+            startup_config=startup,
+            startup_trusted=False,
+            config_overrides=_ConfigOverrides(provider="fake", session_dir=startup.session_dir),
+            project_context_root=tmp_path,
+            runtime_builder=_runtime_for,
+        )
+        cancel_scope = anyio.CancelScope()
+
+        async def apply_transition() -> None:
+            with cancel_scope:
+                try:
+                    await transition.apply_trusted_project(runtime=runtime, agent=agent)
+                except anyio.get_cancelled_exc_class():
+                    cancelled.set()
+                    raise
+            if cancel_scope.cancel_called:
+                cancelled.set()
+
+        try:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(apply_transition)
+                with anyio.fail_after(1):
+                    while not started.is_set():
+                        await anyio.sleep(0.01)
+                cancel_scope.cancel()
+                with anyio.fail_after(1):
+                    await cancelled.wait()
+        finally:
+            release.set()
+            await runtime.aclose()
 
     anyio.run(scenario)
 

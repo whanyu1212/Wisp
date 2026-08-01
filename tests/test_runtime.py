@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event, get_ident
 
 import anyio
 import pytest
 
+import wisp.runtime.extensions as runtime_extensions
 from wisp.events import AgentStarted
 from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.providers.fake import FakeProvider
@@ -120,6 +122,47 @@ def test_activate_extensions_runs_extension_factories() -> None:
     assert anyio.run(run) == (("fake",), ("read",), ("help",))
 
 
+def test_build_runtime_cancel_abandons_catalog_loading(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = Event()
+    release = Event()
+    original_effective_catalog = runtime_extensions.effective_catalog
+
+    def blocked_effective_catalog() -> object:
+        started.set()
+        release.wait(timeout=5)
+        return original_effective_catalog(home_dir=Path("/nonexistent-test-home"))
+
+    monkeypatch.setattr(runtime_extensions, "effective_catalog", blocked_effective_catalog)
+
+    async def scenario() -> None:
+        cancel_scope = anyio.CancelScope()
+        cancelled = anyio.Event()
+
+        async def build() -> None:
+            with cancel_scope:
+                try:
+                    await build_runtime()
+                except anyio.get_cancelled_exc_class():
+                    cancelled.set()
+                    raise
+            if cancel_scope.cancel_called:
+                cancelled.set()
+
+        try:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(build)
+                with anyio.fail_after(1):
+                    while not started.is_set():
+                        await anyio.sleep(0.01)
+                cancel_scope.cancel()
+                with anyio.fail_after(1):
+                    await cancelled.wait()
+        finally:
+            release.set()
+
+    anyio.run(scenario)
+
+
 def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
     async def run() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
         runtime = await build_runtime()
@@ -141,6 +184,26 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
             "quit",
         ),
     )
+
+
+def test_build_runtime_offloads_catalog_loading(monkeypatch: pytest.MonkeyPatch) -> None:
+    main_thread = get_ident()
+    catalog_threads: list[int] = []
+    original_effective_catalog = runtime_extensions.effective_catalog
+
+    def effective_catalog_in_worker() -> object:
+        catalog_threads.append(get_ident())
+        return original_effective_catalog(home_dir=Path("/nonexistent-test-home"))
+
+    monkeypatch.setattr(runtime_extensions, "effective_catalog", effective_catalog_in_worker)
+
+    async def scenario() -> None:
+        runtime = await build_runtime()
+        await runtime.aclose()
+
+    anyio.run(scenario)
+
+    assert catalog_threads and all(thread_id != main_thread for thread_id in catalog_threads)
 
 
 def test_build_runtime_wires_process_tools_to_runtime_supervisor_and_closes_it() -> None:

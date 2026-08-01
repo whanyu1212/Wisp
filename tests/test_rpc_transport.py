@@ -4,9 +4,9 @@ from collections import deque
 
 import anyio
 
-from wisp.cli.rpc_coordinator import _RpcInputClosed, _RpcInputCommand
 from wisp.cli.rpc_transport import RpcStdinTransport
 from wisp.events import ErrorEvent
+from wisp.rpc.coordinator import _RpcInputClosed, _RpcInputCommand
 
 
 class _Input:

@@ -783,18 +783,59 @@ finally:
 `set_queue_mode`, `pop_queue`, `clear_queue`, `cancel`, `approve`, `configure`, and `shutdown`
 methods and yields parsed `WispEvent` objects.
 
+### In-process Python SDK
+
+Python hosts that do not need process isolation can drive the same command/event contract directly:
+
+```python
+from wisp.config import WispConfig
+from wisp.events import RpcCommandFinished
+from wisp.sdk import InProcessOptions, InProcessWisp
+
+# `startup_trusted=True` is an explicit trusted decision made by this host.
+controller = await InProcessWisp.start(
+    WispConfig(provider="fake"),
+    options=InProcessOptions(startup_trusted=True, allow_read_tools=True),
+)
+prompt_id = await controller.prompt("hello")
+shutdown_id = None
+try:
+    async for event in controller.events():
+        render(event)
+        if isinstance(event, RpcCommandFinished) and event.command_id == prompt_id:
+            shutdown_id = await controller.shutdown()
+        elif isinstance(event, RpcCommandFinished) and event.command_id == shutdown_id:
+            break
+finally:
+    await controller.aclose()
+```
+
+`InProcessWisp` has the same typed command methods and `WispEvent` stream as `RpcController`; it
+uses the same command host, agent loop, JSONL sessions, approval policy, project-trust gate, and
+runtime cleanup as RPC. It does not import terminal/TUI code or expose mutable `CodingSession`
+internals. It currently requires AnyIO's `asyncio` backend because built-in process tools use
+asyncio subprocesses; use JSONL RPC from other async backends. Consume `events()` from exactly one
+task and drain it while commands run. Tools are not exposed by default; `allow_read_tools`,
+`allowed_tools`, or `all_tools` control exposure, while mutating/command tools still require
+`approve()` unless `approve_unsafe_tools=True` is selected.
+
+For normal environment/settings resolution, use `InProcessWisp.from_environment(...)`. It applies
+only pre-existing safe trust decisions at startup; an undecided project emits `trust.requested`,
+which the host answers with `trust()`, before project-local configuration is applied.
+
 ## Development
 
 The coding runtime is split into explicit inward-facing layers:
 
 ```text
-CLI / RPC / TUI -> CodingSession -> AgentHarness -> run_agent_loop
+CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarness -> run_agent_loop
 ```
 
 `wisp.coding.session.CodingSession` owns project prompts, persistence, trust state, tool policy,
-and application event publication. `AgentHarness` owns the in-memory transcript and cancellation,
-while `run_agent_loop` remains independent of sessions and frontends. CLI and RPC frontends import
-the coding-session coordinator directly; the TUI consumes that same runtime through RPC events.
+and application event publication. The transport-independent RPC command host owns command
+scheduling, approval/trust responses, selected-session state, and configuration transitions.
+`AgentHarness` owns the in-memory transcript and cancellation, while `run_agent_loop` remains
+independent of sessions and frontends. The TUI consumes the same runtime through RPC events.
 
 Within the Textual frontend, transient presentation state has a separate inward-facing boundary:
 

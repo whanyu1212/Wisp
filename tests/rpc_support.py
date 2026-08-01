@@ -7,12 +7,12 @@ from pathlib import Path
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
-from wisp.cli.rpc_configuration import _RpcConfigureOverrides
-from wisp.cli.rpc_coordinator import RpcCoordinator, _RpcControlEvent, _RpcSessionState
-from wisp.cli.rpc_execution import RpcCommandExecutor
 from wisp.coding import CodingSession
 from wisp.config import WispConfig
 from wisp.events import WispEvent
+from wisp.rpc.configuration import _RpcConfigureOverrides
+from wisp.rpc.coordinator import RpcCoordinator, _RpcControlEvent, _RpcSessionState
+from wisp.rpc.execution import RpcCommandExecutor
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSessionStore
