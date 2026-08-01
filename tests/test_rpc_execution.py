@@ -52,6 +52,9 @@ from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionTreeNavi
 
 
 class _ApprovalResolver:
+    def has_pending_approval(self, **_kwargs: object) -> bool:
+        return False
+
     def resolve_approval(self, **_kwargs: object) -> bool:
         return False
 
@@ -62,6 +65,84 @@ class _TrustResolver:
 
     def resolve_request(self, **_kwargs: object) -> bool:
         return False
+
+
+def test_approval_resolution_waits_for_lifecycle_flush() -> None:
+    events: list[WispEvent] = []
+    deferred: list[Callable[[], None]] = []
+    resolved: list[dict[str, object]] = []
+
+    class PendingApproval:
+        def has_pending_approval(self, *, call_id: str) -> bool:
+            return call_id == "call-1"
+
+        def resolve_approval(self, **kwargs: object) -> bool:
+            resolved.append(kwargs)
+            return True
+
+    rpc_execution_module.handle_rpc_approval_command(
+        {"id": "approval-1", "type": "approval", "call_id": "call-1", "approved": True},
+        command_id="approval-1",
+        command_type="approval",
+        approval_policy=PendingApproval(),
+        write_event=events.append,
+        defer_resolution=deferred.append,
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], RpcCommandFinished)
+    assert events[0].command_id == "approval-1"
+    assert events[0].ok is True
+    assert not resolved
+    assert len(deferred) == 1
+
+    deferred[0]()
+
+    assert resolved == [
+        {
+            "call_id": "call-1",
+            "approved": True,
+            "reason": None,
+            "scope": "once",
+        }
+    ]
+
+
+def test_active_cancellation_waits_for_lifecycle_flush() -> None:
+    events: list[WispEvent] = []
+    deferred: list[Callable[[], None]] = []
+
+    class RecordingCancelScope:
+        cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    cancel_scope = RecordingCancelScope()
+    running_command = _RpcRunningCommand(
+        command_id="prompt-1",
+        command_type="prompt",
+        cancel_scope=cancel_scope,
+    )
+    rpc_execution_module.handle_rpc_cancel_command(
+        {"id": "cancel-1", "type": "cancel", "target_id": "prompt-1"},
+        command_id="cancel-1",
+        command_type="cancel",
+        running_command=running_command,
+        write_event=events.append,
+        defer_cancellation=deferred.append,
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], RpcCommandFinished)
+    assert events[0].command_id == "cancel-1"
+    assert events[0].ok is True
+    assert cancel_scope.cancelled is False
+    assert len(deferred) == 1
+
+    deferred[0]()
+
+    assert cancel_scope.cancelled is True
 
 
 def test_executor_dispatches_validation_and_shutdown_without_stdin(tmp_path: Path) -> None:

@@ -137,6 +137,10 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         finally:
             self._pending.pop(call_id, None)
 
+    def has_pending_approval(self, *, call_id: str) -> bool:
+        pending = self._pending.get(call_id)
+        return pending is not None and not pending.resolved
+
     def resolve_approval(
         self,
         *,

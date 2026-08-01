@@ -92,6 +92,8 @@ MAX_RPC_SESSION_CATALOG_LIMIT = 200
 
 
 class RpcApprovalResolver(Protocol):
+    def has_pending_approval(self, *, call_id: str) -> bool: ...
+
     def resolve_approval(
         self,
         *,
@@ -432,7 +434,7 @@ class RpcCommandExecutor:
             configure_overrides=self.configure_overrides,
             coordinator=self.coordinator,
             write_event=self.write_event,
-            defer_trust_resolution=self.defer_until_after_flush,
+            defer_until_after_flush=self.defer_until_after_flush,
         )
         return _RpcDispatchResult(
             running_command=running_command,
@@ -2738,7 +2740,7 @@ def handle_rpc_control_command(
     configure_overrides: _RpcConfigureOverrides | None = None,
     coordinator: RpcCoordinator | None = None,
     queued_commands: deque[dict[str, object]] | None = None,
-    defer_trust_resolution: Callable[[Callable[[], None]], None] | None = None,
+    defer_until_after_flush: Callable[[Callable[[], None]], None] | None = None,
 ) -> bool:
     command_type, command_id, id_error = rpc_command_identity(command)
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
@@ -2762,6 +2764,7 @@ def handle_rpc_control_command(
             coordinator=coordinator,
             queued_commands=queued_commands,
             write_event=write_event,
+            defer_cancellation=defer_until_after_flush,
         )
         return False
     if command_type == "approval":
@@ -2771,6 +2774,7 @@ def handle_rpc_control_command(
             command_type=command_type,
             approval_policy=approval_policy,
             write_event=write_event,
+            defer_resolution=defer_until_after_flush,
         )
         return False
     if command_type == "trust":
@@ -2788,7 +2792,7 @@ def handle_rpc_control_command(
             command_type=command_type,
             trust_gate=trust_gate,
             write_event=write_event,
-            defer_resolution=defer_trust_resolution,
+            defer_resolution=defer_until_after_flush,
         )
         return False
     if command_type == "configure":
@@ -2966,6 +2970,7 @@ def handle_rpc_approval_command(
     command_type: str,
     approval_policy: RpcApprovalResolver,
     write_event: RpcEventWriter,
+    defer_resolution: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
     call_id = command.get("call_id")
     if not isinstance(call_id, str) or not call_id:
@@ -3022,12 +3027,7 @@ def handle_rpc_approval_command(
             write_event=write_event,
         )
         return
-    if not approval_policy.resolve_approval(
-        call_id=call_id,
-        approved=approved,
-        reason=reason,
-        scope=scope,
-    ):
+    if not approval_policy.has_pending_approval(call_id=call_id):
         write_rpc_command_error(
             command_id=command_id,
             command_type=command_type,
@@ -3036,6 +3036,21 @@ def handle_rpc_approval_command(
         )
         return
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    resolve = partial(
+        approval_policy.resolve_approval,
+        call_id=call_id,
+        approved=approved,
+        reason=reason,
+        scope=scope,
+    )
+    if defer_resolution is None:
+        assert resolve()
+        return
+
+    def resolve_after_flush() -> None:
+        assert resolve()
+
+    defer_resolution(resolve_after_flush)
 
 
 def handle_rpc_trust_command(
@@ -3112,6 +3127,7 @@ def handle_rpc_cancel_command(
     write_event: RpcEventWriter,
     coordinator: RpcCoordinator | None = None,
     queued_commands: deque[dict[str, object]] | None = None,
+    defer_cancellation: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
     target_id = command.get("target_id")
     if not isinstance(target_id, str) or not target_id:
@@ -3121,6 +3137,14 @@ def handle_rpc_cancel_command(
             message="RPC cancel command requires string field: target_id",
             write_event=write_event,
         )
+        return
+    if (
+        running_command is not None
+        and running_command.command_id == target_id
+        and defer_cancellation is not None
+    ):
+        write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+        defer_cancellation(running_command.cancel_scope.cancel)
         return
     if coordinator is not None:
         result = coordinator.cancel(target_id)
