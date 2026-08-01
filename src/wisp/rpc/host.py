@@ -387,7 +387,10 @@ class RpcHost:
             )
             return session_state, project_context_root
 
-        session_state, project_context_root = await anyio.to_thread.run_sync(load_startup_state)
+        session_state, project_context_root = await anyio.to_thread.run_sync(
+            load_startup_state,
+            abandon_on_cancel=True,
+        )
         approval_policy = RpcToolApprovalPolicy(tool_approval_policy(options.approve_unsafe_tools))
         configure_overrides = _RpcConfigureOverrides()
         selected_runtime_builder = runtime_builder or build_runtime_for_config

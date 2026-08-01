@@ -243,9 +243,12 @@ class _InProcessTransport(RpcTransport):
         self._owner_started = anyio.Event()
         self._finished = anyio.Event()
         self._close_finished = anyio.Event()
+        self._close_lock = anyio.Lock()
         self._closed = False
+        self._runtime_closed = False
         self._events_claimed = False
         self._run_error: BaseException | None = None
+        self._close_error: BaseException | None = None
 
     @classmethod
     async def start(
@@ -348,34 +351,43 @@ class _InProcessTransport(RpcTransport):
     async def close(self) -> None:
         """Safely stop the owner task and release runtime-owned resources."""
 
-        if self._closed:
-            with anyio.CancelScope(shield=True):
-                await self._close_finished.wait()
-            return
-        self._closed = True
         with anyio.CancelScope(shield=True):
-            try:
-                if not self._finished.is_set():
-                    with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS):
-                        try:
-                            await self._control_send.send(_RpcInputClosed())
-                        except (anyio.BrokenResourceError, anyio.ClosedResourceError):
-                            pass
-                    with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS) as scope:
-                        await self._finished.wait()
-                    if scope.cancel_called:
-                        owner_cancel_scope = self._owner_cancel_scope
-                        if owner_cancel_scope is not None:
-                            owner_cancel_scope.cancel()
-                    await self._finished.wait()
-                if self._run_error is not None:
-                    raise self._run_error
-            finally:
+            async with self._close_lock:
+                if self._runtime_closed:
+                    if self._close_error is not None:
+                        raise self._close_error
+                    return
+                self._closed = True
+                self._close_finished = anyio.Event()
+                close_error: BaseException | None = None
                 try:
+                    if not self._finished.is_set():
+                        with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS):
+                            try:
+                                await self._control_send.send(_RpcInputClosed())
+                            except (anyio.BrokenResourceError, anyio.ClosedResourceError):
+                                pass
+                        with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS) as scope:
+                            await self._finished.wait()
+                        if scope.cancel_called:
+                            owner_cancel_scope = self._owner_cancel_scope
+                            if owner_cancel_scope is not None:
+                                owner_cancel_scope.cancel()
+                        await self._finished.wait()
+                    if self._run_error is not None:
+                        close_error = self._run_error
                     await self._control_send.aclose()
                     await self._event_output.aclose_receive()
                     await self._host.runtime.aclose()
                     await self._event_output.aclose_send()
+                    self._runtime_closed = True
+                    self._close_error = close_error
+                    if close_error is not None:
+                        raise close_error
+                except BaseException as exc:
+                    if close_error is None or exc is not close_error:
+                        self._close_error = exc
+                    raise
                 finally:
                     self._close_finished.set()
 

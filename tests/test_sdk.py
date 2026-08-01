@@ -138,6 +138,60 @@ def test_in_process_sdk_offloads_resumed_session_startup(
     assert all(thread_id != main_thread for thread_id in call_threads.values())
 
 
+def test_in_process_sdk_start_cancel_abandons_resumed_session_replay(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    started = Event()
+    release = Event()
+    sessions = JsonlSessionStore(tmp_path)
+    original_session_state = rpc_host_module.rpc_session_state
+
+    def blocked_session_state(session: JsonlSession | None) -> object:
+        started.set()
+        release.wait(timeout=5)
+        return original_session_state(session)
+
+    monkeypatch.setattr(rpc_host_module, "rpc_session_state", blocked_session_state)
+
+    async def scenario() -> None:
+        resumed_session = sessions.create()
+        await resumed_session.append_message(Message(role="user", content="resume me"))
+        cancel_scope = anyio.CancelScope()
+        cancelled = anyio.Event()
+
+        async def start_controller() -> None:
+            with cancel_scope:
+                try:
+                    await InProcessWisp.start(
+                        WispConfig(provider="fake", session_dir=tmp_path),
+                        options=InProcessOptions(
+                            continue_latest=True,
+                            startup_trusted=True,
+                            project_context_root=tmp_path,
+                        ),
+                    )
+                except anyio.get_cancelled_exc_class():
+                    cancelled.set()
+                    raise
+            if cancel_scope.cancel_called:
+                cancelled.set()
+
+        try:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(start_controller)
+                with anyio.fail_after(1):
+                    while not started.is_set():
+                        await anyio.sleep(0.01)
+                cancel_scope.cancel()
+                with anyio.fail_after(1):
+                    await cancelled.wait()
+        finally:
+            release.set()
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_rejects_non_asyncio_backends_before_startup(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -443,6 +497,35 @@ def test_in_process_sdk_allows_one_event_consumer_and_idempotent_cleanup(
             release_close.set()
 
     anyio.run(scenario)
+
+
+def test_in_process_sdk_retries_runtime_cleanup_after_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def flaky_aclose(_runtime: WispRuntime) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(WispRuntime, "aclose", flaky_aclose)
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await controller.aclose()
+
+        await controller.aclose()
+
+    anyio.run(scenario)
+    assert calls == 2
 
 
 def test_in_process_sdk_relays_events_when_consumer_falls_behind(
