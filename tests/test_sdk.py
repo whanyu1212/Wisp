@@ -592,6 +592,58 @@ def test_in_process_sdk_allows_one_event_consumer_and_idempotent_cleanup(
     anyio.run(scenario)
 
 
+def test_in_process_sdk_shutdown_cancels_prompt_final_state_refresh(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    started = Event()
+    release = Event()
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="scripted"),
+                ProviderTextDelta(delta="hello"),
+                ProviderResponseCompleted(content="hello"),
+            ]
+        ]
+    )
+    original_updated_state = rpc_execution_module.updated_rpc_session_state
+
+    async def build_scripted_runtime(_config: WispConfig) -> WispRuntime:
+        runtime = await build_runtime()
+        runtime.providers.register(provider)
+        return runtime
+
+    def blocked_updated_state(
+        session: JsonlSession,
+        committed_history: tuple[Message, ...],
+        entry_start: int,
+    ) -> tuple[int, tuple[Message, ...]]:
+        started.set()
+        release.wait(timeout=5)
+        return original_updated_state(session, committed_history, entry_start)
+
+    monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
+    monkeypatch.setattr(rpc_execution_module, "updated_rpc_session_state", blocked_updated_state)
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="scripted", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        await controller.prompt("hello", command_id="prompt-1")
+        try:
+            with anyio.fail_after(1):
+                while not started.is_set():
+                    await anyio.sleep(0.01)
+            with anyio.fail_after(1):
+                await controller.aclose()
+        finally:
+            release.set()
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_shutdown_cancels_prompt_start_snapshot(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

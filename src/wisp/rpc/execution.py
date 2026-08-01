@@ -2148,7 +2148,7 @@ async def run_rpc_prompt_command(
     finally:
         cancelled = error is not None and error.startswith("RPC command cancelled:")
         if cancelled:
-            crossed_completion_boundary = await anyio.to_thread.run_sync(
+            crossed_completion_boundary = await _run_abandonable_session_read(
                 rpc_has_durable_completion,
                 session,
                 run_entry_start,
@@ -2161,13 +2161,13 @@ async def run_rpc_prompt_command(
                     operation_id=command_id,
                 )
                 if not rolled_back and session.path.is_file():
-                    entries = await anyio.to_thread.run_sync(session.read_entries)
+                    entries = await _run_abandonable_session_read(session.read_entries)
                     if any(entry.operation_id == command_id for entry in entries[run_entry_start:]):
                         error = (
                             f"RPC command cancelled: {command_id}; prompt entries were retained "
                             "because another writer appended to the session"
                         )
-        entry_count, updated_history = await anyio.to_thread.run_sync(
+        entry_count, updated_history = await _run_abandonable_session_read(
             updated_rpc_session_state,
             session,
             committed_history,

@@ -48,7 +48,9 @@ async def build_runtime(
         events=events,
         process_supervisor=process_supervisor,
     )
-    models = ModelRegistry(await anyio.to_thread.run_sync(effective_catalog))
+    models = ModelRegistry(
+        await anyio.to_thread.run_sync(effective_catalog, abandon_on_cancel=True)
+    )
     runtime = WispRuntime(
         providers=providers,
         tools=tools,
