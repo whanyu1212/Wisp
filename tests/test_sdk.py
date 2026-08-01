@@ -26,11 +26,58 @@ from wisp.providers.events import (
     ProviderTextDelta,
 )
 from wisp.providers.fake import ScriptedProvider
+from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc import host as rpc_host_module
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sdk import InProcessOptions, InProcessWisp
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
+
+
+def test_in_process_sdk_start_cancel_abandons_startup_trust_lookup(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    started = Event()
+    release = Event()
+
+    def blocking_trusted(_project_path: Path) -> bool:
+        started.set()
+        release.wait(timeout=5)
+        return False
+
+    monkeypatch.setattr(sdk_module, "trusted_noninteractive", blocking_trusted)
+
+    async def scenario() -> None:
+        cancel_scope = anyio.CancelScope()
+        cancelled = anyio.Event()
+
+        async def start_controller() -> None:
+            with cancel_scope:
+                try:
+                    await InProcessWisp.from_environment(
+                        session_dir=tmp_path / "sessions",
+                        options=InProcessOptions(project_context_root=tmp_path),
+                    )
+                except anyio.get_cancelled_exc_class():
+                    cancelled.set()
+                    raise
+            if cancel_scope.cancel_called:
+                cancelled.set()
+
+        try:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(start_controller)
+                with anyio.fail_after(1):
+                    while not started.is_set():
+                        await anyio.sleep(0.01)
+                cancel_scope.cancel()
+                with anyio.fail_after(1):
+                    await cancelled.wait()
+        finally:
+            release.set()
+
+    anyio.run(scenario)
 
 
 def test_in_process_sdk_from_environment_offloads_blocking_setup(
@@ -296,6 +343,52 @@ def test_rpc_trust_gate_cancel_abandons_blocked_persistence(
     anyio.run(scenario)
 
 
+def test_in_process_sdk_reports_trust_persistence_errors_through_prompt(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    def check_trust(_project_path: Path) -> None:
+        return None
+
+    def save_trust(_project_path: Path, _trusted: bool) -> None:
+        raise OSError("trust store unavailable")
+
+    monkeypatch.setattr(rpc_host_module, "is_trusted", check_trust)
+    monkeypatch.setattr(rpc_host_module, "record_trust", save_trust)
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(project_context_root=tmp_path),
+        )
+        prompt_id = await controller.prompt("hello", command_id="prompt-1")
+        events = []
+        try:
+            async for event in controller.events():
+                events.append(event)
+                if isinstance(event, TrustRequested):
+                    await controller.trust(
+                        event.request_id,
+                        trusted=True,
+                        command_id="trust-1",
+                    )
+                elif isinstance(event, RpcCommandFinished) and event.command_id == prompt_id:
+                    break
+        finally:
+            await controller.aclose()
+
+        prompt_finished = next(
+            event
+            for event in events
+            if isinstance(event, RpcCommandFinished) and event.command_id == prompt_id
+        )
+        assert prompt_finished.ok is False
+        assert prompt_finished.error == "trust store unavailable"
+        assert not any(event.type == "message.delta" for event in events)
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_runs_the_shared_command_event_contract(tmp_path: Path) -> None:
     async def scenario() -> None:
         controller = await InProcessWisp.start(
@@ -495,6 +588,54 @@ def test_in_process_sdk_allows_one_event_consumer_and_idempotent_cleanup(
             await anyio.sleep(0)
             assert second_close_finished.is_set() is False
             release_close.set()
+
+    anyio.run(scenario)
+
+
+def test_in_process_sdk_shutdown_cancels_prompt_start_snapshot(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    started = Event()
+    release = Event()
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="scripted"),
+                ProviderTextDelta(delta="hello"),
+                ProviderResponseCompleted(content="hello"),
+            ]
+        ]
+    )
+    original_run_start = rpc_execution_module.rpc_session_run_start
+
+    async def build_scripted_runtime(_config: WispConfig) -> WispRuntime:
+        runtime = await build_runtime()
+        runtime.providers.register(provider)
+        return runtime
+
+    def blocked_run_start(session: JsonlSession, entry_start: int) -> tuple[int, str | None]:
+        started.set()
+        release.wait(timeout=5)
+        return original_run_start(session, entry_start)
+
+    monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
+    monkeypatch.setattr(rpc_execution_module, "rpc_session_run_start", blocked_run_start)
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="scripted", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        await controller.prompt("hello", command_id="prompt-1")
+        try:
+            with anyio.fail_after(1):
+                while not started.is_set():
+                    await anyio.sleep(0.01)
+            with anyio.fail_after(1):
+                await controller.aclose()
+        finally:
+            release.set()
 
     anyio.run(scenario)
 

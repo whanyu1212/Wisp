@@ -87,8 +87,16 @@ class InProcessWisp(RpcController):
         selected_options = options or InProcessOptions()
         project_root = selected_options.project_context_root
         if project_root is None:
-            project_root = await anyio.to_thread.run_sync(resolve_project_context_root, Path.cwd())
-        startup_trusted = await anyio.to_thread.run_sync(trusted_noninteractive, project_root)
+            project_root = await anyio.to_thread.run_sync(
+                resolve_project_context_root,
+                Path.cwd(),
+                abandon_on_cancel=True,
+            )
+        startup_trusted = await anyio.to_thread.run_sync(
+            trusted_noninteractive,
+            project_root,
+            abandon_on_cancel=True,
+        )
         overrides = _ConfigOverrides(
             provider=provider,
             model=model,
@@ -96,7 +104,8 @@ class InProcessWisp(RpcController):
             auth_path=auth_path,
         )
         config = await anyio.to_thread.run_sync(
-            partial(overrides.build, trusted=startup_trusted, project_dir=project_root)
+            partial(overrides.build, trusted=startup_trusted, project_dir=project_root),
+            abandon_on_cancel=True,
         )
         return await cls._start(
             config,

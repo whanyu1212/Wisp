@@ -2105,13 +2105,13 @@ async def run_rpc_prompt_command(
         nonlocal run_active_leaf_id, run_entry_start, run_start_captured
         async for event in events:
             if isinstance(event, AgentStarted):
-                with anyio.CancelScope(shield=True):
-                    run_entry_start, run_active_leaf_id = await anyio.to_thread.run_sync(
-                        rpc_session_run_start,
-                        session,
-                        entry_start,
-                    )
-                    run_start_captured = True
+                run_entry_start, run_active_leaf_id = await anyio.to_thread.run_sync(
+                    rpc_session_run_start,
+                    session,
+                    entry_start,
+                    abandon_on_cancel=True,
+                )
+                run_start_captured = True
                 yield event
                 with anyio.CancelScope(shield=True):
                     await send.send(_RpcPromptReady(command_id=command_id))
@@ -2140,6 +2140,7 @@ async def run_rpc_prompt_command(
                 ToolResultProcessingError,
                 UnknownProviderError,
                 UnknownToolError,
+                OSError,
             ) as exc:
                 error = str(exc)
             except anyio.get_cancelled_exc_class():
