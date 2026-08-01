@@ -608,6 +608,54 @@ def test_in_process_sdk_rejects_commands_submitted_after_shutdown(tmp_path: Path
     anyio.run(scenario)
 
 
+def test_in_process_sdk_allows_trust_resolution_while_shutdown_is_queued(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(project_context_root=tmp_path),
+        )
+        prompt_id = await controller.prompt("hello", command_id="prompt-1")
+        shutdown_id: str | None = None
+        trust_id: str | None = None
+        events = []
+        try:
+            async for event in controller.events():
+                events.append(event)
+                if isinstance(event, TrustRequested):
+                    shutdown_id = await controller.shutdown(command_id="shutdown-1")
+                    trust_id = await controller.trust(
+                        event.request_id,
+                        trusted=False,
+                        command_id="trust-1",
+                    )
+                elif (
+                    shutdown_id is not None
+                    and isinstance(event, RpcCommandFinished)
+                    and event.command_id == shutdown_id
+                ):
+                    break
+        finally:
+            await controller.aclose()
+
+        assert trust_id is not None
+        assert any(
+            isinstance(event, RpcCommandFinished) and event.command_id == trust_id and event.ok
+            for event in events
+        )
+        assert any(
+            isinstance(event, RpcCommandFinished) and event.command_id == prompt_id and event.ok
+            for event in events
+        )
+        assert any(
+            isinstance(event, RpcCommandFinished) and event.command_id == shutdown_id and event.ok
+            for event in events
+        )
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_cancelled_shutdown_keeps_command_admission_open(
     tmp_path: Path,
 ) -> None:

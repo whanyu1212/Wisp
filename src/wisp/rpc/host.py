@@ -347,6 +347,7 @@ class RpcHost:
         coordinator: RpcCoordinator,
         write_event: RpcEventWriter,
         render_events: RpcEventRenderer,
+        on_shutdown_dispatched: Callable[[], None] | None = None,
     ) -> None:
         self.runtime = runtime
         self.sessions = sessions
@@ -357,6 +358,7 @@ class RpcHost:
         self.coordinator = coordinator
         self._write_event = write_event
         self._render_events = render_events
+        self._on_shutdown_dispatched = on_shutdown_dispatched
         self._event_render_lock = anyio.Lock()
         self._event_task_group: TaskGroup | None = None
         self._pending_published_events = 0
@@ -375,6 +377,7 @@ class RpcHost:
         config_overrides: _ConfigOverrides | None = None,
         runtime_builder: RuntimeBuilder | None = None,
         max_queued_commands: int = _MAX_QUEUED_RPC_COMMANDS,
+        on_shutdown_dispatched: Callable[[], None] | None = None,
     ) -> RpcHost:
         """Build a host without starting a transport or event loop."""
 
@@ -468,6 +471,7 @@ class RpcHost:
             coordinator=coordinator,
             write_event=write_event,
             render_events=render_events,
+            on_shutdown_dispatched=on_shutdown_dispatched,
         )
         return host
 
@@ -512,6 +516,8 @@ class RpcHost:
             )
             try:
                 result = executor.dispatch(command, running_command)
+                if result.should_shutdown and self._on_shutdown_dispatched is not None:
+                    self._on_shutdown_dispatched()
                 if buffered_events:
                     await self._render_event_batch(tuple(buffered_events))
                     buffered_events.clear()

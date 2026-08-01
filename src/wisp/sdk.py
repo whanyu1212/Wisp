@@ -278,6 +278,12 @@ class _InProcessTransport(RpcTransport):
         )
         event_output = _BoundedEventOutput(event_send, event_receive)
 
+        transport: _InProcessTransport | None = None
+
+        def close_command_admission() -> None:
+            assert transport is not None
+            transport._close_command_admission()
+
         try:
             host = await RpcHost.create(
                 config,
@@ -286,6 +292,7 @@ class _InProcessTransport(RpcTransport):
                 write_event=event_output.write_event,
                 render_events=event_output.render_events,
                 config_overrides=config_overrides,
+                on_shutdown_dispatched=close_command_admission,
             )
         except BaseException:
             await event_output.aclose_send()
@@ -320,7 +327,14 @@ class _InProcessTransport(RpcTransport):
         try:
             with send_cancel_scope:
                 async with self._send_lock:
-                    if self._closed or self._shutdown_pending or self._finished.is_set():
+                    if (
+                        self._closed
+                        or self._finished.is_set()
+                        or (
+                            self._shutdown_pending
+                            and command.type not in {"approval", "cancel", "trust"}
+                        )
+                    ):
                         raise RuntimeError("In-process Wisp controller is closed")
                     if is_shutdown:
                         self._shutdown_pending = True
@@ -430,6 +444,14 @@ class _InProcessTransport(RpcTransport):
                     raise
                 finally:
                     self._close_finished.set()
+
+    def _close_command_admission(self) -> None:
+        """Reject new submissions after the host has dispatched shutdown."""
+
+        self._closed = True
+        for send_cancel_scope, sent in tuple(self._pending_sends.items()):
+            if not sent:
+                send_cancel_scope.cancel()
 
     async def _cancel_pending_sends(self) -> None:
         """Cancel submissions that were blocked while shutdown began."""
