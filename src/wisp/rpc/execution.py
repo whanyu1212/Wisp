@@ -1790,7 +1790,9 @@ async def run_rpc_navigate_session_tree_command(
     try:
         with cancel_scope:
             await anyio.sleep(0)
-            expected_active_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
+            expected_active_leaf_id = await _run_abandonable_session_read(
+                session.read_active_leaf_id
+            )
             await anyio.sleep(0)
             navigation = await session.navigate_tree(
                 entry_id,
@@ -1892,7 +1894,9 @@ async def run_rpc_unrevert_session_tree_command(
     try:
         with cancel_scope:
             await anyio.sleep(0)
-            expected_active_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
+            expected_active_leaf_id = await _run_abandonable_session_read(
+                session.read_active_leaf_id
+            )
             await anyio.sleep(0)
             unrevert = await session.unrevert_tree(
                 expected_active_leaf_id=expected_active_leaf_id,
@@ -1995,7 +1999,7 @@ async def run_rpc_set_session_name_command(
                 target = selected_session
                 selected_target = True
             else:
-                target = await anyio.to_thread.run_sync(sessions.load, session_id)
+                target = await _run_abandonable_session_read(sessions.load, session_id)
                 selected_target = (
                     selected_session is not None
                     and target.session_id == selected_session.session_id
