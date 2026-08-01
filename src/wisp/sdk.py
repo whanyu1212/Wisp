@@ -8,13 +8,13 @@ callers render events and answer approval/trust requests themselves.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Self, cast
 
 import anyio
-from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from wisp.agent.prompt import resolve_project_context_root
@@ -136,27 +136,34 @@ class InProcessWisp(RpcController):
 
 
 class _InProcessTransport(RpcTransport):
-    """Memory transport that adapts the shared host to ``RpcController``."""
+    """Memory transport that adapts the shared host to ``RpcController``.
+
+    The host and its AnyIO task group run in an owner task created at startup.
+    Public methods only communicate with that task over memory streams, so
+    ``close()`` remains valid from a different task or nested cancel scope.
+    """
 
     def __init__(
         self,
         *,
         host: RpcHost,
         control_send: MemoryObjectSendStream[_RpcControlEvent],
+        host_control_send: MemoryObjectSendStream[_RpcControlEvent],
         control_receive: MemoryObjectReceiveStream[_RpcControlEvent],
         event_send: MemoryObjectSendStream[KnownWispEvent],
         event_receive: MemoryObjectReceiveStream[KnownWispEvent],
-        task_group: TaskGroup,
     ) -> None:
         self._host = host
         self._control_send = control_send
+        self._host_control_send = host_control_send
         self._control_receive = control_receive
         self._event_send = event_send
         self._event_receive = event_receive
-        self._task_group = task_group
+        self._owner_task: asyncio.Task[None] | None = None
         self._finished = anyio.Event()
         self._closed = False
         self._events_claimed = False
+        self._run_error: BaseException | None = None
 
     @classmethod
     async def start(
@@ -200,17 +207,15 @@ class _InProcessTransport(RpcTransport):
         control_send, control_receive = anyio.create_memory_object_stream[_RpcControlEvent](
             _CONTROL_BUFFER_CAPACITY
         )
-        task_group = anyio.create_task_group()
-        await task_group.__aenter__()
         transport = cls(
             host=host,
             control_send=control_send,
+            host_control_send=control_send.clone(),
             control_receive=control_receive,
             event_send=event_send,
             event_receive=event_receive,
-            task_group=task_group,
         )
-        task_group.start_soon(transport._run)
+        transport._owner_task = asyncio.create_task(transport._run_owner())
         return transport
 
     async def send(self, command: RpcCommand) -> None:
@@ -236,40 +241,66 @@ class _InProcessTransport(RpcTransport):
         async for event in self._event_receive:
             yield event
 
-    async def _run(self) -> None:
+    async def _run_owner(self) -> None:
+        """Own the task-group lifetime for all host command operations."""
+
         try:
-            async with self._control_receive:
-                await self._host.run_with_streams(
-                    self._control_receive,
-                    send=self._control_send,
-                    task_group=self._task_group,
-                )
+            async with self._control_receive, self._host_control_send:
+                async with anyio.create_task_group() as task_group:
+                    await self._host.run_with_streams(
+                        self._control_receive,
+                        send=self._host_control_send,
+                        task_group=task_group,
+                    )
+                    # An explicit shutdown returns immediately even if a command
+                    # is active, matching the CLI adapter's cancellation behavior.
+                    task_group.cancel_scope.cancel()
+        except BaseException as exc:
+            if not isinstance(exc, anyio.get_cancelled_exc_class()):
+                self._run_error = exc
         finally:
             await self._event_send.aclose()
             self._finished.set()
 
     async def close(self) -> None:
-        """Safely deny pending decisions, drain briefly, then release resources."""
+        """Safely stop the owner task and release runtime-owned resources."""
 
         if self._closed:
             return
         self._closed = True
-        if not self._finished.is_set():
+        with anyio.CancelScope(shield=True):
+            if not self._finished.is_set():
+                with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS):
+                    try:
+                        await self._control_send.send(_RpcInputClosed())
+                    except (anyio.BrokenResourceError, anyio.ClosedResourceError):
+                        pass
+                with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS) as scope:
+                    await self._finished.wait()
+                if scope.cancel_called:
+                    owner_task = self._owner_task
+                    if owner_task is not None:
+                        owner_task.cancel()
+            await self._await_owner()
             try:
-                await self._control_send.send(_RpcInputClosed())
-            except (anyio.BrokenResourceError, anyio.ClosedResourceError):
-                pass
-            with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS) as scope:
-                await self._finished.wait()
-            if scope.cancel_called:
-                self._task_group.cancel_scope.cancel()
+                if self._run_error is not None:
+                    raise self._run_error
+            finally:
+                await self._control_send.aclose()
+                await self._event_receive.aclose()
+                await self._host.runtime.aclose()
+                await self._event_send.aclose()
+
+    async def _await_owner(self) -> None:
+        """Wait for the owner after graceful or forced shutdown."""
+
+        owner_task = self._owner_task
+        if owner_task is None:
+            return
         try:
-            await self._task_group.__aexit__(None, None, None)
-        finally:
-            await self._control_send.aclose()
-            await self._event_receive.aclose()
-            await self._host.runtime.aclose()
-            await self._event_send.aclose()
+            await owner_task
+        except asyncio.CancelledError:
+            pass
 
 
 __all__ = ["InProcessOptions", "InProcessWisp"]

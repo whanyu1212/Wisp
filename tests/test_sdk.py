@@ -139,6 +139,28 @@ def test_in_process_sdk_allows_one_event_consumer_and_idempotent_cleanup(tmp_pat
     anyio.run(scenario)
 
 
+def test_in_process_sdk_cleanup_is_safe_from_nested_or_other_task(tmp_path: Path) -> None:
+    async def start_controller() -> InProcessWisp:
+        return await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+
+    async def scenario() -> None:
+        nested_controller = await start_controller()
+        # The controller's owner task, not this nested cancel scope, owns its
+        # internal task group. Exiting here must not violate AnyIO's LIFO scope
+        # rules.
+        with anyio.CancelScope():
+            await nested_controller.aclose()
+
+        other_task_controller = await start_controller()
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(other_task_controller.aclose)
+
+    anyio.run(scenario)
+
+
 def test_sdk_and_host_do_not_depend_on_cli_modules() -> None:
     sdk_source = Path(__import__("wisp.sdk").sdk.__file__).read_text(encoding="utf-8")
     host_source = Path(__import__("wisp.rpc.host", fromlist=["host"]).__file__).read_text(
