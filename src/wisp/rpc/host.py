@@ -358,6 +358,7 @@ class RpcHost:
         self._write_event = write_event
         self._render_events = render_events
         self._event_render_lock = anyio.Lock()
+        self._event_task_group: TaskGroup | None = None
 
     @classmethod
     async def create(
@@ -424,14 +425,22 @@ class RpcHost:
             project_context_root=project_context_root,
         )
 
+        host: RpcHost | None = None
+
+        def publish_event(event: WispEvent) -> None:
+            if host is None:
+                write_event(event)
+            else:
+                host._publish_event(event)
+
         async def rebuild_agent_for_trusted_project() -> None:
             event = await project_configuration.apply_trusted_project(runtime=runtime, agent=agent)
             if event is not None:
-                write_event(event)
+                publish_event(event)
 
         trust_gate = RpcTrustGate(
             project_context_root,
-            write_event=write_event,
+            write_event=publish_event,
             on_first_trusted=rebuild_agent_for_trusted_project,
             initially_trusted=options.startup_trusted,
         )
@@ -444,9 +453,9 @@ class RpcHost:
             max_queued_commands=max_queued_commands,
             input_closed_type=_RpcInputClosed,
             command_completed_type=_RpcCommandCompleted,
-            completion_event_writer=write_event,
+            completion_event_writer=publish_event,
         )
-        return cls(
+        host = cls(
             runtime=runtime,
             sessions=sessions,
             agent=agent,
@@ -457,6 +466,7 @@ class RpcHost:
             write_event=write_event,
             render_events=render_events,
         )
+        return host
 
     async def run_with_streams(
         self,
@@ -478,7 +488,7 @@ class RpcHost:
                 if capturing:
                     buffered_events.append(event)
                 else:
-                    self._write_event(event)
+                    self._publish_event(event)
 
             start_gate = anyio.Event()
             after_flush: list[Callable[[], None]] = []
@@ -530,19 +540,34 @@ class RpcHost:
                 await self._render_event_batch(tuple(buffered_events))
                 buffered_events.clear()
 
-        return await self.coordinator.run_async(
-            receive,
-            dispatch=dispatch,
-            reject=reject,
-            command_type=rpc_command_type,
-        )
+        previous_event_task_group = self._event_task_group
+        self._event_task_group = task_group
+        try:
+            return await self.coordinator.run_async(
+                receive,
+                dispatch=dispatch,
+                reject=reject,
+                command_type=rpc_command_type,
+            )
+        finally:
+            self._event_task_group = previous_event_task_group
+
+    def _publish_event(self, event: WispEvent) -> None:
+        task_group = self._event_task_group
+        if task_group is None:
+            self._write_event(event)
+            return
+        task_group.start_soon(self._render_event, event)
 
     async def _render_event_stream(self, events: AsyncIterator[WispEvent]) -> None:
         async def serialized_events() -> AsyncIterator[WispEvent]:
             async for event in events:
                 with anyio.CancelScope(shield=True):
-                    async with self._event_render_lock:
-                        yield event
+                    await self._event_render_lock.acquire()
+                try:
+                    yield event
+                finally:
+                    self._event_render_lock.release()
 
         await self._render_events(serialized_events())
 

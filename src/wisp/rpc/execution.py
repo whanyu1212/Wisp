@@ -2234,7 +2234,7 @@ async def run_rpc_compact_command(
                 error = str(exc)
     finally:
         try:
-            entry_count, updated_history = await anyio.to_thread.run_sync(
+            entry_count, updated_history = await _run_abandonable_session_read(
                 updated_rpc_session_state,
                 session,
                 committed_history,

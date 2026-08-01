@@ -14,6 +14,7 @@ import wisp.sdk as sdk_module
 from wisp.agent.messages import Message
 from wisp.config import WispConfig
 from wisp.events import (
+    ErrorEvent,
     RpcCommandFinished,
     RpcCommandStarted,
     RpcStateReported,
@@ -644,6 +645,132 @@ def test_in_process_sdk_shutdown_cancels_prompt_final_state_refresh(
     anyio.run(scenario)
 
 
+def test_in_process_sdk_shutdown_cancels_compact_final_state_refresh(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    started = Event()
+    release = Event()
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="scripted"),
+                ProviderTextDelta(delta="first answer"),
+                ProviderResponseCompleted(content="first answer"),
+            ],
+            [
+                ProviderResponseStarted(model="scripted"),
+                ProviderTextDelta(delta="second answer"),
+                ProviderResponseCompleted(content="second answer"),
+            ],
+            [
+                ProviderResponseStarted(model="scripted"),
+                ProviderTextDelta(
+                    delta=(
+                        "## Goal\n"
+                        "Preserve the completed work.\n"
+                        "## Constraints & Preferences\n"
+                        "Keep the existing behavior.\n"
+                        "## Progress\n"
+                        "### Done\n"
+                        "Completed two turns.\n"
+                        "### In Progress\n"
+                        "None.\n"
+                        "### Blocked\n"
+                        "None.\n"
+                        "## Key Decisions\n"
+                        "Use a durable checkpoint.\n"
+                        "## Next Steps\n"
+                        "Continue from the checkpoint.\n"
+                        "## Critical Context\n"
+                        "The session contains two completed turns."
+                    )
+                ),
+                ProviderResponseCompleted(
+                    content=(
+                        "## Goal\n"
+                        "Preserve the completed work.\n"
+                        "## Constraints & Preferences\n"
+                        "Keep the existing behavior.\n"
+                        "## Progress\n"
+                        "### Done\n"
+                        "Completed two turns.\n"
+                        "### In Progress\n"
+                        "None.\n"
+                        "### Blocked\n"
+                        "None.\n"
+                        "## Key Decisions\n"
+                        "Use a durable checkpoint.\n"
+                        "## Next Steps\n"
+                        "Continue from the checkpoint.\n"
+                        "## Critical Context\n"
+                        "The session contains two completed turns."
+                    )
+                ),
+            ],
+        ]
+    )
+    original_updated_state = rpc_execution_module.updated_rpc_session_state
+
+    async def build_scripted_runtime(_config: WispConfig) -> WispRuntime:
+        runtime = await build_runtime()
+        runtime.providers.register(provider)
+        return runtime
+
+    def blocked_updated_state(
+        session: JsonlSession,
+        committed_history: tuple[Message, ...],
+        entry_start: int,
+    ) -> tuple[int, tuple[Message, ...]]:
+        started.set()
+        release.wait(timeout=5)
+        return original_updated_state(session, committed_history, entry_start)
+
+    monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="scripted", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        completed_ids: set[str] = set()
+
+        async def consume_events() -> None:
+            async for event in controller.events():
+                if isinstance(event, RpcCommandFinished):
+                    completed_ids.add(event.command_id)
+
+        async def wait_for_completion(command_id: str) -> None:
+            with anyio.fail_after(1):
+                while command_id not in completed_ids:
+                    await anyio.sleep(0.01)
+
+        try:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(consume_events)
+                await controller.prompt("first", command_id="prompt-1")
+                await wait_for_completion("prompt-1")
+                await controller.prompt("second", command_id="prompt-2")
+                await wait_for_completion("prompt-2")
+
+                monkeypatch.setattr(
+                    rpc_execution_module,
+                    "updated_rpc_session_state",
+                    blocked_updated_state,
+                )
+                await controller.compact(command_id="compact-1")
+
+                with anyio.fail_after(1):
+                    while not started.is_set():
+                        await anyio.sleep(0.01)
+                with anyio.fail_after(1):
+                    await controller.aclose()
+        finally:
+            release.set()
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_shutdown_cancels_prompt_start_snapshot(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -796,6 +923,98 @@ def test_in_process_sdk_relays_events_when_consumer_falls_behind(
             event.type == "message.delta"
             for event in events[state_started_index : state_finished_index + 1]
         )
+
+    anyio.run(scenario)
+
+
+def test_in_process_sdk_shutdown_cancels_backpressured_stream(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="scripted"),
+                *(
+                    ProviderTextDelta(delta="x")
+                    for _ in range(sdk_module._STREAM_EVENT_BUFFER_CAPACITY + 10)
+                ),
+                ProviderResponseCompleted(content="done"),
+            ]
+        ]
+    )
+
+    async def build_scripted_runtime(_config: WispConfig) -> WispRuntime:
+        runtime = await build_runtime()
+        runtime.providers.register(provider)
+        return runtime
+
+    monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
+    monkeypatch.setattr(sdk_module, "_CLOSE_TIMEOUT_SECONDS", 0.01)
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="scripted", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        await controller.prompt("burst", command_id="prompt-1")
+
+        event_output = controller._in_process_transport._event_output
+        with anyio.fail_after(1):
+            while event_output._buffered_event_count() < sdk_module._STREAM_EVENT_BUFFER_CAPACITY:
+                await anyio.sleep(0.01)
+        with anyio.fail_after(0.5):
+            await controller.aclose()
+
+    anyio.run(scenario)
+
+
+def test_rpc_host_serializes_worker_event_after_bypass_lifecycle_batch() -> None:
+    async def scenario() -> None:
+        first_event_rendered = anyio.Event()
+        release_batch = anyio.Event()
+        rendered: list[Any] = []
+        batch = (
+            RpcCommandStarted(command_id="state-1", command_type="get_state"),
+            ErrorEvent(message="state payload"),
+            RpcCommandFinished(command_id="state-1", command_type="get_state", ok=True),
+        )
+        worker_event = RpcCommandFinished(
+            command_id="stats-1",
+            command_type="get_session_stats",
+            ok=True,
+        )
+
+        async def render_events(events: Any) -> None:
+            async for event in events:
+                rendered.append(event)
+                if event is batch[0]:
+                    first_event_rendered.set()
+                    await release_batch.wait()
+
+        host = rpc_host_module.RpcHost(
+            runtime=cast(WispRuntime, object()),
+            sessions=cast(Any, object()),
+            agent=cast(Any, object()),
+            approval_policy=cast(Any, object()),
+            trust_gate=cast(Any, object()),
+            configure_overrides=cast(Any, object()),
+            coordinator=cast(Any, object()),
+            write_event=lambda _event: None,
+            render_events=render_events,
+        )
+
+        async with anyio.create_task_group() as task_group:
+            host._event_task_group = task_group
+            task_group.start_soon(host._render_event_batch, batch)
+            await first_event_rendered.wait()
+            host._publish_event(worker_event)
+            await anyio.sleep(0)
+            assert rendered == [batch[0]]
+            release_batch.set()
+
+        host._event_task_group = None
+        assert rendered == [*batch, worker_event]
 
     anyio.run(scenario)
 
