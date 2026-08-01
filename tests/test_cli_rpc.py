@@ -420,6 +420,23 @@ def test_rpc_compact_accepts_optional_string_instructions_but_requires_session(
     assert not list(tmp_path.glob("*.jsonl"))
 
 
+def test_rpc_mode_accepts_zero_tool_iteration_cap(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--max-tool-iterations", "0", "--session-dir", str(tmp_path)],
+        input='{"id":"shutdown-1","type":"shutdown"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == [
+        "rpc.command.started",
+        "rpc.command.finished",
+    ]
+    assert records[1]["ok"] is True
+
+
 def test_rpc_compact_rejects_non_string_instructions_and_remains_usable(
     tmp_path: Path,
 ) -> None:

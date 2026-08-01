@@ -112,7 +112,10 @@ class RpcTrustResolver(Protocol):
         trusted: bool,
         reason: str | None = None,
         transient: bool = False,
+        release: bool = True,
     ) -> bool: ...
+
+    def release_request(self, *, request_id: str) -> None: ...
 
 
 class RpcCommandExecutor:
@@ -135,6 +138,7 @@ class RpcCommandExecutor:
         render_events: RpcEventRenderer,
         running_command_factory: RunningCommandFactory = _RpcRunningCommand,
         command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+        defer_until_after_flush: Callable[[Callable[[], None]], None] | None = None,
     ) -> None:
         self.agent = agent
         self.runtime = runtime
@@ -150,6 +154,7 @@ class RpcCommandExecutor:
         self.render_events = render_events
         self.running_command_factory = running_command_factory
         self.command_completed_factory = command_completed_factory
+        self.defer_until_after_flush = defer_until_after_flush
 
     def dispatch(
         self,
@@ -427,6 +432,7 @@ class RpcCommandExecutor:
             configure_overrides=self.configure_overrides,
             coordinator=self.coordinator,
             write_event=self.write_event,
+            defer_trust_resolution=self.defer_until_after_flush,
         )
         return _RpcDispatchResult(
             running_command=running_command,
@@ -2732,6 +2738,7 @@ def handle_rpc_control_command(
     configure_overrides: _RpcConfigureOverrides | None = None,
     coordinator: RpcCoordinator | None = None,
     queued_commands: deque[dict[str, object]] | None = None,
+    defer_trust_resolution: Callable[[Callable[[], None]], None] | None = None,
 ) -> bool:
     command_type, command_id, id_error = rpc_command_identity(command)
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
@@ -2781,6 +2788,7 @@ def handle_rpc_control_command(
             command_type=command_type,
             trust_gate=trust_gate,
             write_event=write_event,
+            defer_resolution=defer_trust_resolution,
         )
         return False
     if command_type == "configure":
@@ -3037,6 +3045,7 @@ def handle_rpc_trust_command(
     command_type: str,
     trust_gate: RpcTrustResolver,
     write_event: RpcEventWriter,
+    defer_resolution: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
     request_id = command.get("request_id")
     if not isinstance(request_id, str) or not request_id:
@@ -3074,11 +3083,13 @@ def handle_rpc_trust_command(
             write_event=write_event,
         )
         return
+    defer_release = defer_resolution is not None
     if not trust_gate.resolve_request(
         request_id=request_id,
         trusted=trusted,
         reason=reason,
         transient=transient is True,
+        release=not defer_release,
     ):
         write_rpc_command_error(
             command_id=command_id,
@@ -3088,6 +3099,8 @@ def handle_rpc_trust_command(
         )
         return
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    if defer_resolution is not None:
+        defer_resolution(partial(trust_gate.release_request, request_id=request_id))
 
 
 def handle_rpc_cancel_command(

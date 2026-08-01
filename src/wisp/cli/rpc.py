@@ -262,11 +262,11 @@ class _RpcTrustGate:
         if override is not None:
             return await self._finish(override)
 
-        stored = is_trusted(self._project_path)
+        input_closed_before_store = self._input_closed
+        stored = await anyio.to_thread.run_sync(is_trusted, self._project_path)
         if stored is not None:
             return await self._finish(stored)
-
-        if self._input_closed:
+        if input_closed_before_store:
             return await self._finish(False)
 
         # Undecided: prompt the client. Only this path emits trust events, so a
@@ -277,14 +277,16 @@ class _RpcTrustGate:
         _write_json_event(
             TrustRequested(request_id=pending.request_id, project_path=self._project_path)
         )
+        if self._input_closed:
+            self.deny_pending_on_input_closed()
         await pending.event.wait()
         trusted = pending.trusted is True
         if trusted:
-            record_trust(self._project_path, True)
+            await anyio.to_thread.run_sync(record_trust, self._project_path, True)
         elif not pending.transient:
             # Explicit "no" answers are persisted even when they carry explanatory
             # text. Forced UI/input-close denials opt into transient behavior.
-            record_trust(self._project_path, False)
+            await anyio.to_thread.run_sync(record_trust, self._project_path, False)
         self._pending = None
         _write_json_event(
             TrustResolved(
@@ -303,6 +305,7 @@ class _RpcTrustGate:
         trusted: bool,
         reason: str | None = None,
         transient: bool = False,
+        release: bool = True,
     ) -> bool:
         pending = self._pending
         if pending is None or pending.resolved or pending.request_id != request_id:
@@ -311,8 +314,16 @@ class _RpcTrustGate:
         pending.trusted = trusted
         pending.reason = reason
         pending.transient = transient
-        pending.event.set()
+        if release:
+            pending.event.set()
         return True
+
+    def release_request(self, *, request_id: str) -> None:
+        """Release an accepted response after its command lifecycle is published."""
+
+        pending = self._pending
+        if pending is not None and pending.resolved and pending.request_id == request_id:
+            pending.event.set()
 
     def deny_pending_on_input_closed(self) -> None:
         self._input_closed = True

@@ -70,8 +70,8 @@ class InProcessOptions:
     def __post_init__(self) -> None:
         if self.resume is not None and self.continue_latest:
             raise ValueError("resume and continue_latest cannot both be set")
-        if self.max_tool_iterations is not None and self.max_tool_iterations < 1:
-            raise ValueError("max_tool_iterations must be at least 1")
+        if self.max_tool_iterations is not None and self.max_tool_iterations < 0:
+            raise ValueError("max_tool_iterations must be non-negative")
 
 
 @dataclass
@@ -213,10 +213,11 @@ class RpcTrustGate:
         override = trust_override_from_env()
         if override is not None:
             return await self._finish(override)
-        stored = is_trusted(self._project_path)
+        input_closed_before_store = self._input_closed
+        stored = await anyio.to_thread.run_sync(is_trusted, self._project_path)
         if stored is not None:
             return await self._finish(stored)
-        if self._input_closed:
+        if input_closed_before_store:
             return await self._finish(False)
 
         # A process-independent random identifier prevents an untrusted project
@@ -226,12 +227,14 @@ class RpcTrustGate:
         self._write_event(
             TrustRequested(request_id=pending.request_id, project_path=self._project_path)
         )
+        if self._input_closed:
+            self.deny_pending_on_input_closed()
         await pending.event.wait()
         trusted = pending.trusted is True
         if trusted:
-            record_trust(self._project_path, True)
+            await anyio.to_thread.run_sync(record_trust, self._project_path, True)
         elif not pending.transient:
-            record_trust(self._project_path, False)
+            await anyio.to_thread.run_sync(record_trust, self._project_path, False)
         self._pending = None
         self._write_event(
             TrustResolved(
@@ -250,6 +253,7 @@ class RpcTrustGate:
         trusted: bool,
         reason: str | None = None,
         transient: bool = False,
+        release: bool = True,
     ) -> bool:
         pending = self._pending
         if pending is None or pending.resolved or pending.request_id != request_id:
@@ -258,8 +262,16 @@ class RpcTrustGate:
         pending.trusted = trusted
         pending.reason = reason
         pending.transient = transient
-        pending.event.set()
+        if release:
+            pending.event.set()
         return True
+
+    def release_request(self, *, request_id: str) -> None:
+        """Release an accepted response after its command lifecycle is published."""
+
+        pending = self._pending
+        if pending is not None and pending.resolved and pending.request_id == request_id:
+            pending.event.set()
 
     def deny_pending_on_input_closed(self) -> None:
         self._input_closed = True
@@ -447,6 +459,7 @@ class RpcHost:
                     self._write_event(event)
 
             start_gate = anyio.Event()
+            after_flush: list[Callable[[], None]] = []
             executor = RpcCommandExecutor(
                 agent=self.agent,
                 runtime=self.runtime,
@@ -460,12 +473,15 @@ class RpcHost:
                 coordinator=self.coordinator,
                 write_event=write_event,
                 render_events=self._render_events,
+                defer_until_after_flush=after_flush.append,
             )
             try:
                 result = executor.dispatch(command, running_command)
                 while buffered_events:
                     await self._render_event(buffered_events.pop(0))
                 capturing = False
+                for release in after_flush:
+                    release()
                 return result
             finally:
                 start_gate.set()

@@ -151,6 +151,47 @@ def test_in_process_sdk_rejects_non_asyncio_backends_before_startup(
     anyio.run(scenario)
 
 
+def test_in_process_options_allows_zero_tool_iterations() -> None:
+    assert InProcessOptions(max_tool_iterations=0).max_tool_iterations == 0
+    with pytest.raises(ValueError, match="non-negative"):
+        InProcessOptions(max_tool_iterations=-1)
+
+
+def test_rpc_trust_gate_offloads_store_io(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    main_thread = get_ident()
+    call_threads: dict[str, int] = {}
+
+    def check_trust(_project_path: Path) -> None:
+        call_threads["read"] = get_ident()
+        return None
+
+    def save_trust(_project_path: Path, _trusted: bool) -> None:
+        call_threads["write"] = get_ident()
+
+    monkeypatch.setattr(rpc_host_module, "is_trusted", check_trust)
+    monkeypatch.setattr(rpc_host_module, "record_trust", save_trust)
+    gate = rpc_host_module.RpcTrustGate(tmp_path, write_event=lambda _event: None)
+
+    async def scenario() -> bool:
+        decision: bool | None = None
+
+        async def resolve() -> None:
+            nonlocal decision
+            decision = await gate.resolve()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(resolve)
+            while gate._pending is None:
+                await anyio.sleep(0)
+            assert gate.resolve_request(request_id=gate._pending.request_id, trusted=False)
+        assert decision is not None
+        return decision
+
+    assert anyio.run(scenario) is False
+    assert set(call_threads) == {"read", "write"}
+    assert all(thread_id != main_thread for thread_id in call_threads.values())
+
+
 def test_in_process_sdk_runs_the_shared_command_event_contract(tmp_path: Path) -> None:
     async def scenario() -> None:
         controller = await InProcessWisp.start(
@@ -228,11 +269,19 @@ def test_in_process_sdk_surfaces_and_resolves_project_trust(
             for index, event in enumerate(events)
             if isinstance(event, RpcCommandStarted) and event.command_id == prompt_id
         )
-        assert prompt_started_index < trust_requested_index
-        assert any(
-            isinstance(event, RpcCommandFinished) and event.command_id == "trust-1" and event.ok
-            for event in events
+        trust_started_index = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, RpcCommandStarted) and event.command_id == "trust-1"
         )
+        trust_finished_index = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, RpcCommandFinished) and event.command_id == "trust-1" and event.ok
+        )
+        trust_resolved_index = events.index(resolved)
+        assert prompt_started_index < trust_requested_index
+        assert trust_started_index < trust_finished_index < trust_resolved_index
         assert any(
             isinstance(event, RpcCommandFinished) and event.command_id == prompt_id and event.ok
             for event in events
