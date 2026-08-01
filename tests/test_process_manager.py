@@ -25,7 +25,7 @@ def _python_command(source: str) -> str:
 def test_aclose_without_processes_does_not_schedule_asyncio_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def unexpected_create_task(*_args: object, **_kwargs: object) -> object:
+    def unexpected_create_task(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("empty ProcessSupervisor cleanup must not create an asyncio task")
 
     async def scenario() -> None:
