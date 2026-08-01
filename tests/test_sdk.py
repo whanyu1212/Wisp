@@ -8,6 +8,7 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
+import wisp.sdk as sdk_module
 from wisp.config import WispConfig
 from wisp.events import (
     RpcCommandFinished,
@@ -16,6 +17,14 @@ from wisp.events import (
     TrustRequested,
     TrustResolved,
 )
+from wisp.providers.events import (
+    ProviderResponseCompleted,
+    ProviderResponseStarted,
+    ProviderTextDelta,
+)
+from wisp.providers.fake import ScriptedProvider
+from wisp.runtime.api import WispRuntime
+from wisp.runtime.extensions import build_runtime
 from wisp.sdk import InProcessOptions, InProcessWisp
 
 
@@ -139,6 +148,57 @@ def test_in_process_sdk_allows_one_event_consumer_and_idempotent_cleanup(tmp_pat
     anyio.run(scenario)
 
 
+def test_in_process_sdk_relays_events_when_consumer_falls_behind(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    delta_count = 1_100
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="scripted"),
+                *(ProviderTextDelta(delta="x") for _ in range(delta_count)),
+                ProviderResponseCompleted(content="x" * delta_count),
+            ]
+        ]
+    )
+
+    async def build_scripted_runtime(_config: WispConfig) -> WispRuntime:
+        runtime = await build_runtime()
+        runtime.providers.register(provider)
+        return runtime
+
+    monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="scripted", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        prompt_id = await controller.prompt("burst", command_id="prompt-1")
+        # Let the provider pass the bounded consumer buffer before reading it.
+        await anyio.sleep(0.05)
+        shutdown_id: str | None = None
+        events = []
+        try:
+            async for event in controller.events():
+                events.append(event)
+                if isinstance(event, RpcCommandFinished) and event.command_id == prompt_id:
+                    shutdown_id = await controller.shutdown(command_id="shutdown-1")
+                elif isinstance(event, RpcCommandFinished) and event.command_id == shutdown_id:
+                    break
+        finally:
+            await controller.aclose()
+
+        assert sum(event.type == "message.delta" for event in events) == delta_count
+        assert any(
+            isinstance(event, RpcCommandFinished) and event.command_id == prompt_id and event.ok
+            for event in events
+        )
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_cleanup_is_safe_from_nested_or_other_task(tmp_path: Path) -> None:
     async def start_controller() -> InProcessWisp:
         return await InProcessWisp.start(
@@ -162,10 +222,14 @@ def test_in_process_sdk_cleanup_is_safe_from_nested_or_other_task(tmp_path: Path
 
 
 def test_sdk_and_host_do_not_depend_on_cli_modules() -> None:
-    sdk_source = Path(__import__("wisp.sdk").sdk.__file__).read_text(encoding="utf-8")
-    host_source = Path(__import__("wisp.rpc.host", fromlist=["host"]).__file__).read_text(
-        encoding="utf-8"
-    )
+    sdk_path = sdk_module.__file__
+    host_module = __import__("wisp.rpc.host", fromlist=["host"])
+    host_path = host_module.__file__
+    assert sdk_path is not None
+    assert host_path is not None
+
+    sdk_source = Path(sdk_path).read_text(encoding="utf-8")
+    host_source = Path(host_path).read_text(encoding="utf-8")
 
     assert "wisp.cli" not in sdk_source
     assert "wisp.cli" not in host_source

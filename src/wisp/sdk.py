@@ -9,12 +9,15 @@ callers render events and answer approval/trust requests themselves.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from importlib import import_module
 from pathlib import Path
-from typing import Self, cast
+from typing import Any, Self, cast
 
 import anyio
+import sniffio
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from wisp.agent.prompt import resolve_project_context_root
@@ -138,9 +141,9 @@ class InProcessWisp(RpcController):
 class _InProcessTransport(RpcTransport):
     """Memory transport that adapts the shared host to ``RpcController``.
 
-    The host and its AnyIO task group run in an owner task created at startup.
-    Public methods only communicate with that task over memory streams, so
-    ``close()`` remains valid from a different task or nested cancel scope.
+    A backend-native owner task exclusively enters and exits the host's AnyIO
+    task group. Public methods communicate with it through streams, so cleanup
+    is safe from other tasks and nested cancel scopes.
     """
 
     def __init__(
@@ -150,6 +153,8 @@ class _InProcessTransport(RpcTransport):
         control_send: MemoryObjectSendStream[_RpcControlEvent],
         host_control_send: MemoryObjectSendStream[_RpcControlEvent],
         control_receive: MemoryObjectReceiveStream[_RpcControlEvent],
+        pending_event_send: MemoryObjectSendStream[KnownWispEvent],
+        pending_event_receive: MemoryObjectReceiveStream[KnownWispEvent],
         event_send: MemoryObjectSendStream[KnownWispEvent],
         event_receive: MemoryObjectReceiveStream[KnownWispEvent],
     ) -> None:
@@ -157,9 +162,14 @@ class _InProcessTransport(RpcTransport):
         self._control_send = control_send
         self._host_control_send = host_control_send
         self._control_receive = control_receive
+        self._pending_event_send = pending_event_send
+        self._pending_event_receive = pending_event_receive
         self._event_send = event_send
         self._event_receive = event_receive
-        self._owner_task: asyncio.Task[None] | None = None
+        self._asyncio_owner_task: asyncio.Task[None] | None = None
+        self._owner_cancel_scope: anyio.CancelScope | None = None
+        self._owner_started = anyio.Event()
+        self._relay_finished = anyio.Event()
         self._finished = anyio.Event()
         self._closed = False
         self._events_claimed = False
@@ -177,14 +187,16 @@ class _InProcessTransport(RpcTransport):
         event_send, event_receive = anyio.create_memory_object_stream[KnownWispEvent](
             _EVENT_BUFFER_CAPACITY
         )
+        pending_event_send, pending_event_receive = anyio.create_memory_object_stream[
+            KnownWispEvent
+        ](math.inf)
 
         def write_event(event: WispEvent) -> None:
-            try:
-                event_send.send_nowait(cast(KnownWispEvent, event))
-            except anyio.WouldBlock as exc:
-                raise RuntimeError(
-                    "In-process event buffer is full; consume controller.events() concurrently"
-                ) from exc
+            # RPC command dispatch contains synchronous paths, so it cannot await
+            # the bounded frontend stream. The relay below preserves event order
+            # and applies backpressure at that boundary instead of dropping a run
+            # when a frontend is temporarily slower than a provider.
+            pending_event_send.send_nowait(cast(KnownWispEvent, event))
 
         async def render_events(events: AsyncIterator[WispEvent]) -> None:
             async for event in events:
@@ -200,6 +212,8 @@ class _InProcessTransport(RpcTransport):
                 config_overrides=config_overrides,
             )
         except BaseException:
+            await pending_event_send.aclose()
+            await pending_event_receive.aclose()
             await event_send.aclose()
             await event_receive.aclose()
             raise
@@ -212,10 +226,17 @@ class _InProcessTransport(RpcTransport):
             control_send=control_send,
             host_control_send=control_send.clone(),
             control_receive=control_receive,
+            pending_event_send=pending_event_send,
+            pending_event_receive=pending_event_receive,
             event_send=event_send,
             event_receive=event_receive,
         )
-        transport._owner_task = asyncio.create_task(transport._run_owner())
+        try:
+            transport._spawn_owner_task()
+            await transport._owner_started.wait()
+        except BaseException:
+            await transport._abort_start()
+            raise
         return transport
 
     async def send(self, command: RpcCommand) -> None:
@@ -235,32 +256,68 @@ class _InProcessTransport(RpcTransport):
         return self._iter_events()
 
     async def _iter_events(self) -> AsyncIterator[KnownWispEvent]:
-        # The transport owns this receive stream.  Do not close it when a caller
+        # The transport owns this receive stream. Do not close it when a caller
         # breaks from ``async for``: the host may still need to publish its
         # cancellation/trust-completion events while ``aclose()`` drains safely.
         async for event in self._event_receive:
             yield event
 
+    def _spawn_owner_task(self) -> None:
+        """Start an owner task using the active AnyIO backend's native API."""
+
+        backend = sniffio.current_async_library()
+        if backend == "asyncio":
+            self._asyncio_owner_task = asyncio.create_task(self._run_owner())
+            return
+        if backend == "trio":
+            trio = cast(Any, import_module("trio"))
+            trio.lowlevel.spawn_system_task(self._run_owner)
+            return
+        raise RuntimeError(f"Unsupported AnyIO backend for in-process Wisp: {backend}")
+
     async def _run_owner(self) -> None:
-        """Own the task-group lifetime for all host command operations."""
+        """Own the task groups and relay for all host command operations."""
 
         try:
-            async with self._control_receive, self._host_control_send:
-                async with anyio.create_task_group() as task_group:
-                    await self._host.run_with_streams(
-                        self._control_receive,
-                        send=self._host_control_send,
-                        task_group=task_group,
-                    )
-                    # An explicit shutdown returns immediately even if a command
-                    # is active, matching the CLI adapter's cancellation behavior.
-                    task_group.cancel_scope.cancel()
+            with anyio.CancelScope() as owner_cancel_scope:
+                self._owner_cancel_scope = owner_cancel_scope
+                self._owner_started.set()
+                try:
+                    async with self._control_receive, self._host_control_send:
+                        async with anyio.create_task_group() as relay_group:
+                            relay_group.start_soon(self._relay_events)
+                            try:
+                                async with anyio.create_task_group() as task_group:
+                                    await self._host.run_with_streams(
+                                        self._control_receive,
+                                        send=self._host_control_send,
+                                        task_group=task_group,
+                                    )
+                                    # An explicit shutdown returns immediately
+                                    # even if a command is active, matching CLI.
+                                    task_group.cancel_scope.cancel()
+                            finally:
+                                await self._pending_event_send.aclose()
+                            await self._relay_finished.wait()
+                finally:
+                    self._owner_cancel_scope = None
         except BaseException as exc:
             if not isinstance(exc, anyio.get_cancelled_exc_class()):
                 self._run_error = exc
         finally:
+            await self._pending_event_send.aclose()
             await self._event_send.aclose()
             self._finished.set()
+
+    async def _relay_events(self) -> None:
+        """Deliver every queued event to the bounded consumer stream in order."""
+
+        try:
+            async with self._pending_event_receive:
+                async for event in self._pending_event_receive:
+                    await self._event_send.send(event)
+        finally:
+            self._relay_finished.set()
 
     async def close(self) -> None:
         """Safely stop the owner task and release runtime-owned resources."""
@@ -278,10 +335,10 @@ class _InProcessTransport(RpcTransport):
                 with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS) as scope:
                     await self._finished.wait()
                 if scope.cancel_called:
-                    owner_task = self._owner_task
-                    if owner_task is not None:
-                        owner_task.cancel()
-            await self._await_owner()
+                    owner_cancel_scope = self._owner_cancel_scope
+                    if owner_cancel_scope is not None:
+                        owner_cancel_scope.cancel()
+                await self._finished.wait()
             try:
                 if self._run_error is not None:
                     raise self._run_error
@@ -291,16 +348,21 @@ class _InProcessTransport(RpcTransport):
                 await self._host.runtime.aclose()
                 await self._event_send.aclose()
 
-    async def _await_owner(self) -> None:
-        """Wait for the owner after graceful or forced shutdown."""
+    async def _abort_start(self) -> None:
+        """Stop a partially started owner before surfacing a startup failure."""
 
-        owner_task = self._owner_task
-        if owner_task is None:
-            return
-        try:
-            await owner_task
-        except asyncio.CancelledError:
-            pass
+        with anyio.CancelScope(shield=True):
+            owner_cancel_scope = self._owner_cancel_scope
+            if owner_cancel_scope is not None:
+                owner_cancel_scope.cancel()
+                await self._finished.wait()
+            await self._control_send.aclose()
+            await self._host_control_send.aclose()
+            await self._control_receive.aclose()
+            await self._pending_event_send.aclose()
+            await self._pending_event_receive.aclose()
+            await self._event_send.aclose()
+            await self._event_receive.aclose()
 
 
 __all__ = ["InProcessOptions", "InProcessWisp"]
