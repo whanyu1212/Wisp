@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 import anyio
@@ -277,6 +278,29 @@ class RpcTrustGate:
         return trusted
 
 
+class _StartGatedTaskGroup:
+    """Delay command workers until their initial lifecycle events are published."""
+
+    def __init__(self, task_group: TaskGroup, start_gate: anyio.Event) -> None:
+        self._task_group = task_group
+        self._start_gate = start_gate
+
+    def start_soon(
+        self,
+        func: Callable[..., Awaitable[None]],
+        *args: object,
+    ) -> None:
+        self._task_group.start_soon(self._run_when_released, func, args)
+
+    async def _run_when_released(
+        self,
+        func: Callable[..., Awaitable[None]],
+        args: tuple[object, ...],
+    ) -> None:
+        await self._start_gate.wait()
+        await func(*args)
+
+
 class RpcHost:
     """Run the shared command contract against one runtime and session store."""
 
@@ -416,12 +440,13 @@ class RpcHost:
                 else:
                     self._write_event(event)
 
+            start_gate = anyio.Event()
             executor = RpcCommandExecutor(
                 agent=self.agent,
                 runtime=self.runtime,
                 sessions=self.sessions,
                 session_state=self.coordinator.session_state,
-                task_group=task_group,
+                task_group=cast(TaskGroup, _StartGatedTaskGroup(task_group, start_gate)),
                 send=send,
                 approval_policy=self.approval_policy,
                 trust_gate=self.trust_gate,
@@ -430,11 +455,14 @@ class RpcHost:
                 write_event=write_event,
                 render_events=self._render_events,
             )
-            result = executor.dispatch(command, running_command)
-            while buffered_events:
-                await self._render_event(buffered_events.pop(0))
-            capturing = False
-            return result
+            try:
+                result = executor.dispatch(command, running_command)
+                while buffered_events:
+                    await self._render_event(buffered_events.pop(0))
+                capturing = False
+                return result
+            finally:
+                start_gate.set()
 
         async def reject(command: dict[str, object], message: str) -> None:
             buffered_events: list[WispEvent] = []

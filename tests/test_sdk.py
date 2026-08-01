@@ -111,6 +111,15 @@ def test_in_process_sdk_surfaces_and_resolves_project_trust(
 
         resolved = next(event for event in events if isinstance(event, TrustResolved))
         assert resolved.trusted is False
+        trust_requested_index = next(
+            index for index, event in enumerate(events) if isinstance(event, TrustRequested)
+        )
+        prompt_started_index = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, RpcCommandStarted) and event.command_id == prompt_id
+        )
+        assert prompt_started_index < trust_requested_index
         assert any(
             isinstance(event, RpcCommandFinished) and event.command_id == "trust-1" and event.ok
             for event in events
