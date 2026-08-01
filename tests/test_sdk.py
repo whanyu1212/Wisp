@@ -29,6 +29,13 @@ from wisp.providers.events import (
 from wisp.providers.fake import ScriptedProvider
 from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc import host as rpc_host_module
+from wisp.rpc.coordinator import (
+    RpcCoordinator,
+    _RpcCommandCompleted,
+    _RpcInputClosed,
+    _RpcRunningCommand,
+    _RpcSessionState,
+)
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sdk import InProcessOptions, InProcessWisp
@@ -771,6 +778,44 @@ def test_in_process_sdk_shutdown_cancels_compact_final_state_refresh(
     anyio.run(scenario)
 
 
+def test_in_process_sdk_shutdown_cancels_clone_precommit_read(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    read_started = Event()
+    release_read = Event()
+    original_read_active_leaf_id = JsonlSession.read_active_leaf_id
+
+    def blocked_read_active_leaf_id(session: JsonlSession) -> str | None:
+        read_started.set()
+        release_read.wait(timeout=5)
+        return original_read_active_leaf_id(session)
+
+    monkeypatch.setattr(JsonlSession, "read_active_leaf_id", blocked_read_active_leaf_id)
+    monkeypatch.setattr(sdk_module, "_CLOSE_TIMEOUT_SECONDS", 0.01)
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        prompt_id = await controller.prompt("seed", command_id="prompt-1")
+        try:
+            async for event in controller.events():
+                if isinstance(event, RpcCommandFinished) and event.command_id == prompt_id:
+                    await controller.clone_session(command_id="clone-1")
+                    break
+            with anyio.fail_after(1):
+                while not read_started.is_set():
+                    await anyio.sleep(0.01)
+            with anyio.fail_after(0.5):
+                await controller.aclose()
+        finally:
+            release_read.set()
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_shutdown_cancels_prompt_start_snapshot(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -1015,6 +1060,81 @@ def test_rpc_host_serializes_worker_event_after_bypass_lifecycle_batch() -> None
 
         host._event_task_group = None
         assert rendered == [*batch, worker_event]
+
+    anyio.run(scenario)
+
+
+def test_rpc_host_drains_published_completion_events_before_return() -> None:
+    async def scenario() -> None:
+        render_started = anyio.Event()
+        release_render = anyio.Event()
+        host_returned = anyio.Event()
+        rendered: list[Any] = []
+        coordinator = RpcCoordinator(_RpcSessionState(session=None, history=(), entry_count=0))
+        host = rpc_host_module.RpcHost(
+            runtime=cast(WispRuntime, object()),
+            sessions=cast(Any, object()),
+            agent=cast(Any, object()),
+            approval_policy=cast(Any, object()),
+            trust_gate=cast(Any, object()),
+            configure_overrides=cast(Any, object()),
+            coordinator=coordinator,
+            write_event=lambda _event: None,
+            render_events=lambda events: render_events(events),
+        )
+        coordinator._completion_event_writer = host._publish_event
+        coordinator.running_command = _RpcRunningCommand(
+            command_id="select-1",
+            command_type="select_session",
+            cancel_scope=anyio.CancelScope(),
+        )
+        control_send, control_receive = anyio.create_memory_object_stream(2)
+        host_send, host_receive = anyio.create_memory_object_stream(1)
+
+        async def render_events(events: Any) -> None:
+            async for event in events:
+                rendered.append(event)
+                render_started.set()
+                await release_render.wait()
+
+        async def run_host(task_group: anyio.abc.TaskGroup) -> None:
+            assert (
+                await host.run_with_streams(
+                    control_receive,
+                    send=host_send,
+                    task_group=task_group,
+                )
+            ) is False
+            host_returned.set()
+
+        async with (
+            control_send,
+            control_receive,
+            host_send,
+            host_receive,
+            anyio.create_task_group() as task_group,
+        ):
+            task_group.start_soon(run_host, task_group)
+            await control_send.send(
+                _RpcCommandCompleted(
+                    command_id="select-1",
+                    command_type="select_session",
+                    ok=True,
+                    history=(),
+                    entry_count=0,
+                    post_apply_events=(ErrorEvent(message="selection applied"),),
+                )
+            )
+            await control_send.send(_RpcInputClosed())
+            await render_started.wait()
+            await anyio.sleep(0)
+            assert host_returned.is_set() is False
+            release_render.set()
+            await host_returned.wait()
+
+        assert len(rendered) == 1
+        assert isinstance(rendered[0], ErrorEvent)
+        assert rendered[0].message == "selection applied"
 
     anyio.run(scenario)
 

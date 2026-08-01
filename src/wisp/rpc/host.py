@@ -359,6 +359,9 @@ class RpcHost:
         self._render_events = render_events
         self._event_render_lock = anyio.Lock()
         self._event_task_group: TaskGroup | None = None
+        self._pending_published_events = 0
+        self._published_events_drained = anyio.Event()
+        self._published_events_drained.set()
 
     @classmethod
     async def create(
@@ -550,6 +553,7 @@ class RpcHost:
                 command_type=rpc_command_type,
             )
         finally:
+            await self._wait_for_published_events()
             self._event_task_group = previous_event_task_group
 
     def _publish_event(self, event: WispEvent) -> None:
@@ -557,7 +561,29 @@ class RpcHost:
         if task_group is None:
             self._write_event(event)
             return
-        task_group.start_soon(self._render_event, event)
+        if self._pending_published_events == 0:
+            self._published_events_drained = anyio.Event()
+        self._pending_published_events += 1
+        try:
+            task_group.start_soon(self._render_published_event, event)
+        except BaseException:
+            self._published_event_finished()
+            raise
+
+    async def _render_published_event(self, event: WispEvent) -> None:
+        try:
+            await self._render_event(event)
+        finally:
+            self._published_event_finished()
+
+    async def _wait_for_published_events(self) -> None:
+        while self._pending_published_events:
+            await self._published_events_drained.wait()
+
+    def _published_event_finished(self) -> None:
+        self._pending_published_events -= 1
+        if self._pending_published_events == 0:
+            self._published_events_drained.set()
 
     async def _render_event_stream(self, events: AsyncIterator[WispEvent]) -> None:
         async def serialized_events() -> AsyncIterator[WispEvent]:
