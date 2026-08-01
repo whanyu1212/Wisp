@@ -34,7 +34,6 @@ _EVENT_BUFFER_CAPACITY = 1_024
 _CONTROL_BUFFER_CAPACITY = 100
 _SYNC_EVENT_RESERVE = _CONTROL_BUFFER_CAPACITY * 3 + 16
 _STREAM_EVENT_BUFFER_CAPACITY = _EVENT_BUFFER_CAPACITY - _SYNC_EVENT_RESERVE
-_OUTPUT_THROTTLE_BYPASS_COMMANDS = frozenset({"approval", "cancel", "trust"})
 _CLOSE_TIMEOUT_SECONDS = 2
 
 
@@ -155,9 +154,8 @@ class _BoundedEventOutput:
     def write_event(self, event: WispEvent) -> None:
         """Write one bounded synchronous command event.
 
-        The SDK reserves enough output slots for every control command accepted
-        by its bounded input stream. Streamed provider events use
-        :meth:`render_events`, which awaits capacity instead.
+        The SDK reserves output slots for synchronous command responses while
+        streamed provider events use :meth:`render_events` to await capacity.
         """
 
         try:
@@ -171,12 +169,6 @@ class _BoundedEventOutput:
         async for event in events:
             await self._wait_for_stream_capacity()
             await self._send.send(cast(KnownWispEvent, event))
-
-    async def wait_for_command_capacity(self, command: RpcCommand) -> None:
-        """Throttle ordinary command input while output reserves are in use."""
-
-        if command.type not in _OUTPUT_THROTTLE_BYPASS_COMMANDS:
-            await self._wait_for_stream_capacity()
 
     def events(self) -> AsyncIterator[KnownWispEvent]:
         """Yield the event stream and notify blocked producers after each read."""
@@ -291,7 +283,6 @@ class _InProcessTransport(RpcTransport):
 
         if self._closed or self._finished.is_set():
             raise RuntimeError("In-process Wisp controller is closed")
-        await self._event_output.wait_for_command_capacity(command)
         raw_command = cast(dict[str, object], command.model_dump(exclude_none=True))
         await self._control_send.send(_RpcInputCommand(command=raw_command))
 

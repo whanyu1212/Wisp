@@ -178,12 +178,21 @@ def test_in_process_sdk_relays_events_when_consumer_falls_behind(
         prompt_id = await controller.prompt("burst", command_id="prompt-1")
         # Let the provider pass the bounded consumer buffer before reading it.
         await anyio.sleep(0.05)
+        state_id: str | None = None
         shutdown_id: str | None = None
         events = []
         try:
             async for event in controller.events():
                 events.append(event)
-                if isinstance(event, RpcCommandFinished) and event.command_id == prompt_id:
+                if event.type == "message.delta" and state_id is None:
+                    # Yield after consuming a delta so the provider refills the
+                    # stream reserve. A sole event consumer must still be able
+                    # to submit a command without waiting for itself to read
+                    # another event.
+                    await anyio.sleep(0)
+                    with anyio.fail_after(1):
+                        state_id = await controller.get_state(command_id="state-1")
+                elif isinstance(event, RpcCommandFinished) and event.command_id == prompt_id:
                     shutdown_id = await controller.shutdown(command_id="shutdown-1")
                 elif isinstance(event, RpcCommandFinished) and event.command_id == shutdown_id:
                     break
@@ -193,6 +202,10 @@ def test_in_process_sdk_relays_events_when_consumer_falls_behind(
         assert sum(event.type == "message.delta" for event in events) == delta_count
         assert any(
             isinstance(event, RpcCommandFinished) and event.command_id == prompt_id and event.ok
+            for event in events
+        )
+        assert any(
+            isinstance(event, RpcCommandFinished) and event.command_id == state_id and event.ok
             for event in events
         )
 
