@@ -150,6 +150,35 @@ def test_history_entries_from_rpc_messages_pairs_tool_calls_and_results() -> Non
     assert history_from_rpc_messages(tuple()) == ()
 
 
+def test_historical_tool_card_preserves_existing_positional_field_order() -> None:
+    entry = HistoricalToolCard(
+        "history:tool-1",
+        "bash",
+        {"command": "true"},
+        "output",
+        False,
+        "done",
+        0,
+        True,
+        "before",
+        True,
+        "summary",
+        True,
+        True,
+    )
+
+    assert entry.status == "done"
+    assert entry.exit_code == 0
+    assert entry.output_has_exit_status is True
+    assert entry.before_text == "before"
+    assert entry.created is True
+    assert entry.summary == "summary"
+    assert entry.truncated is True
+    assert entry.missing_result is True
+    assert entry.tool_call_id is None
+    assert entry.call_missing is False
+
+
 def test_history_entries_from_rpc_messages_handles_orphan_and_missing_tool_results() -> None:
     entries = history_entries_from_rpc_messages(
         (

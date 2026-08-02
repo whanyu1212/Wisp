@@ -35,8 +35,6 @@ class HistoricalToolCard:
     arguments: JsonObject
     output: str
     is_error: bool
-    tool_call_id: str | None = field(default=None, compare=False)
-    call_missing: bool = field(default=False, compare=False)
     status: ToolPresentationStatus | None = None
     exit_code: int | None = None
     output_has_exit_status: bool = False
@@ -45,6 +43,8 @@ class HistoricalToolCard:
     summary: str | None = None
     truncated: bool = False
     missing_result: bool = False
+    tool_call_id: str | None = field(default=None, compare=False)
+    call_missing: bool = field(default=False, compare=False)
 
 
 type HistoricalTranscriptEntry = HistoricalTranscriptMessage | HistoricalToolCard
