@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
@@ -14,6 +14,7 @@ from wisp.events import (
 )
 
 TUI_HISTORY_MESSAGE_LIMIT = 500
+TUI_HISTORY_PAGE_LIMIT = 75
 _TRUNCATED_SUFFIX = "[content truncated]"
 
 
@@ -42,6 +43,8 @@ class HistoricalToolCard:
     summary: str | None = None
     truncated: bool = False
     missing_result: bool = False
+    tool_call_id: str | None = field(default=None, compare=False)
+    call_missing: bool = field(default=False, compare=False)
 
 
 type HistoricalTranscriptEntry = HistoricalTranscriptMessage | HistoricalToolCard
@@ -62,7 +65,12 @@ def history_from_rpc_messages(
 def history_entries_from_rpc_messages(
     messages: tuple[RpcMessageSnapshot, ...],
 ) -> tuple[HistoricalTranscriptEntry, ...]:
-    """Convert bounded RPC transcript messages into ordered TUI history entries."""
+    """Convert bounded RPC transcript messages into ordered TUI history entries.
+
+    Older message pages can begin or end in the middle of a tool-call exchange.
+    Boundary-only call entries retain their call ID so a renderer can enrich the
+    already-mounted result card without duplicating it.
+    """
 
     rendered: list[HistoricalTranscriptEntry] = []
     pending_tool_calls: dict[str, RpcMessageToolCallSnapshot] = {}
@@ -116,6 +124,8 @@ def _historical_tool_card(
         arguments=tool_call.arguments if tool_call is not None else {},
         output=output,
         is_error=bool(message.is_error),
+        tool_call_id=message.tool_call_id,
+        call_missing=tool_call is None and message.tool_call_id is not None,
         status=status,
         exit_code=tool_result.exit_code if tool_result is not None else None,
         output_has_exit_status=(
@@ -139,6 +149,7 @@ def _missing_tool_cards(
             arguments=tool_call.arguments,
             output="No persisted tool result.",
             is_error=True,
+            tool_call_id=call_id,
             status="cancelled",
             missing_result=True,
         )

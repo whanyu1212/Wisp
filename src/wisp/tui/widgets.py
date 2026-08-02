@@ -1157,6 +1157,9 @@ class Transcript(VerticalScroll):
             super().__init__()
             self.following = following
 
+    class NeedMoreHistory(Message):
+        """The user reached the oldest mounted transcript content."""
+
     def __init__(
         self,
         *args: object,
@@ -1169,13 +1172,16 @@ class Transcript(VerticalScroll):
         self._empty_wordmark = empty_wordmark
         self._empty_hint = empty_hint
         self._empty_state: TranscriptEmptyState | None = None
+        self._has_more_history = False
+        self._history_loading = False
+        self._history_request_armed = True
 
     def compose(self) -> ComposeResult:
         if self._empty_wordmark is not None:
             self._empty_state = TranscriptEmptyState(self._empty_wordmark, self._empty_hint)
             yield self._empty_state
 
-    def mount_message(self, widget: Widget) -> AwaitMount:
+    def mount_message(self, widget: Widget, *, before: Widget | None = None) -> AwaitMount:
         """Mount output after permanently dismissing the initial empty state."""
 
         empty_state = self._empty_state
@@ -1183,13 +1189,16 @@ class Transcript(VerticalScroll):
             self._empty_state = None
             empty_state.display = False
             empty_state.remove()
-        return self.mount(widget)
+        return self.mount(widget, before=before)
 
     def clear_messages(self) -> None:
         """Remove every mounted transcript item and restore tail-follow state."""
 
         self._empty_state = None
         self._follow = True
+        self._has_more_history = False
+        self._history_loading = False
+        self._history_request_armed = True
         self.remove_children()
         self.scroll_home(animate=False)
 
@@ -1203,6 +1212,38 @@ class Transcript(VerticalScroll):
         self._follow = self.is_vertical_scroll_end
         if self._follow != previous:
             self.post_message(self.FollowChanged(self._follow))
+        if new_value > 0:
+            self._history_request_armed = True
+        else:
+            self._request_more_history_if_needed()
+
+    def history_page_loaded(self, *, has_more: bool) -> None:
+        """Record one completed history page and its continuation state."""
+
+        self._has_more_history = has_more
+        self._history_loading = False
+        self._history_request_armed = has_more
+
+    def request_history_at_top(self) -> None:
+        """Request another page only when the settled viewport remains at the top."""
+
+        if self.scroll_y == 0:
+            self._request_more_history_if_needed()
+
+    def _request_more_history_if_needed(self) -> None:
+        if not (
+            self._has_more_history and not self._history_loading and self._history_request_armed
+        ):
+            return
+        self._history_loading = True
+        self._history_request_armed = False
+        self.post_message(self.NeedMoreHistory())
+
+    def history_page_request_failed(self) -> None:
+        """Allow a transient page-load failure to be retried at the top."""
+
+        self._history_loading = False
+        self._history_request_armed = True
 
     @property
     def is_following(self) -> bool:
@@ -1227,6 +1268,27 @@ class Transcript(VerticalScroll):
         self._follow = False
         if previous:
             self.post_message(self.FollowChanged(False))
+
+    def restore_prepend_viewport(
+        self,
+        *,
+        scroll_y: float,
+        anchor: Widget | None,
+        anchor_y_before: float,
+        following: bool,
+    ) -> None:
+        """Keep the same content visible after older entries were prepended."""
+
+        if following:
+            self.return_to_latest()
+            return
+        height_delta = max(0.0, anchor.region.y - anchor_y_before) if anchor is not None else 0.0
+        self.restore_viewport_state(
+            TranscriptViewportState(
+                scroll_y=scroll_y + height_delta,
+                following=False,
+            )
+        )
 
     def follow_tail(self) -> None:
         """Scroll to the newest content iff the user hasn't scrolled away."""
@@ -1715,6 +1777,13 @@ class ToolCard(Static):
             self._elapsed = 0.0
             self._timer = self.set_interval(self._TICK, self._tick)
             self._repaint()
+
+    def update_call(self, name: str, arguments: object) -> None:
+        """Enrich a historical result when its paged-in call arrives later."""
+
+        self._tool_name = name
+        self._summary = _summarize_arguments(arguments)
+        self._repaint()
 
     def on_unmount(self) -> None:
         self._stop_timer()

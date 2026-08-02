@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol, cast
+from uuid import uuid4
 
 import anyio
 from anyio.streams.memory import MemoryObjectSendStream
@@ -58,6 +59,7 @@ from wisp.tui.commands import (
 )
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
+    TUI_HISTORY_PAGE_LIMIT,
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
     history_entries_from_rpc_messages,
@@ -182,6 +184,16 @@ class _PendingSessionSwitch:
     history_report: RpcMessagesReported | None = None
 
 
+@dataclass
+class _HistoryPagination:
+    """Cursor and in-flight command state for one mounted transcript history."""
+
+    session_id: str | None
+    next_before_entry_id: str | None
+    command_id: str | None = None
+    report: RpcMessagesReported | None = None
+
+
 def _default_model_for(models: ModelRegistry, provider_name: str) -> str | None:
     """Return ``provider_name``'s catalog ``default_model``, or ``None`` if unknown."""
 
@@ -238,6 +250,17 @@ class TuiShell:
         self.pending_configures: dict[str, _PendingConfigure] = {}
         self.pending_session_catalog: _PendingSessionCatalog | None = None
         self.pending_session_switch: _PendingSessionSwitch | None = None
+        self._history_pagination: _HistoryPagination | None = None
+        self._ignored_history_page_commands: set[str] = set()
+        self._history_message_limit = (
+            TUI_HISTORY_PAGE_LIMIT
+            if callable(getattr(self.renderer, "set_history_page_request_hook", None))
+            else TUI_HISTORY_MESSAGE_LIMIT
+        )
+        self._call_renderer_optional(
+            "set_history_page_request_hook",
+            self._request_previous_history_page,
+        )
         self.auth_store = JsonAuthStore(auth_path or default_auth_path())
         # Overrides ~/.wisp for /model picker effort persistence in tests; None
         # in production so persist_user_effort resolves the real home dir.
@@ -353,6 +376,7 @@ class TuiShell:
                             history_entries_from_rpc_messages(event.messages),
                             text_fallback=history_from_rpc_messages(event.messages),
                         )
+                        self._activate_history_pagination(event)
                         rendered = True
                     continue
                 should_exit = await self._handle_rpc_event(event)
@@ -435,6 +459,23 @@ class TuiShell:
             cast(Callable[[tuple[HistoricalTranscriptEntry, ...]], None], render_entries)(entries)
             return
         self._render_history(text_fallback)
+
+    def _activate_history_pagination(self, report: RpcMessagesReported) -> None:
+        self._history_pagination = _HistoryPagination(
+            session_id=report.session_id,
+            next_before_entry_id=report.next_before_entry_id,
+        )
+        self._call_renderer_optional(
+            "history_page_loaded",
+            has_more=report.next_before_entry_id is not None,
+        )
+
+    def _clear_history_pagination(self) -> None:
+        pagination = self._history_pagination
+        if pagination is not None and pagination.command_id is not None:
+            self._ignored_history_page_commands.add(pagination.command_id)
+        self._history_pagination = None
+        self._call_renderer_optional("history_page_loaded", has_more=False)
 
     async def _handle_signal(self, signal: _TuiSignal) -> bool:
         if isinstance(signal, _InputLine):
@@ -1057,6 +1098,18 @@ class TuiShell:
         return True
 
     async def _handle_rpc_event(self, event: KnownWispEvent) -> bool:
+        if (
+            isinstance(event, RpcMessagesReported)
+            and event.command_id in self._ignored_history_page_commands
+        ):
+            return False
+        if (
+            isinstance(event, RpcCommandFinished)
+            and event.command_id in self._ignored_history_page_commands
+        ):
+            self._ignored_history_page_commands.discard(event.command_id)
+            return False
+
         catalog = self.pending_session_catalog
         if (
             isinstance(event, RpcSessionsReported)
@@ -1073,6 +1126,7 @@ class TuiShell:
                 and event.command_id == session_switch.select_command_id
             ):
                 session_switch.selected = event
+                self._clear_history_pagination()
                 return False
             if (
                 isinstance(event, RpcMessagesReported)
@@ -1080,6 +1134,15 @@ class TuiShell:
             ):
                 session_switch.history_report = event
                 return False
+
+        pagination = self._history_pagination
+        if (
+            isinstance(event, RpcMessagesReported)
+            and pagination is not None
+            and event.command_id == pagination.command_id
+        ):
+            pagination.report = event
+            return False
 
         context_updated = self.view.update_context_from_event(event)
         if context_updated:
@@ -1189,6 +1252,10 @@ class TuiShell:
             }:
                 await self._finish_session_switch(event)
                 return False
+            pagination = self._history_pagination
+            if pagination is not None and event.command_id == pagination.command_id:
+                await self._finish_history_page(event)
+                return False
             if event.command_id in self.pending_configures:
                 await self._finish_pending_configure(event)
                 return False
@@ -1240,7 +1307,7 @@ class TuiShell:
                 return
             try:
                 pending.history_command_id = await self.controller.get_messages(
-                    limit=TUI_HISTORY_MESSAGE_LIMIT
+                    limit=self._history_message_limit
                 )
             except Exception as exc:  # noqa: BLE001 - selection already committed
                 self._fail_committed_session_hydration(
@@ -1274,6 +1341,7 @@ class TuiShell:
             entries,
             session_label=label,
         )
+        self._activate_history_pagination(pending.history_report)
         self.view.context = None
         self.view.cost = None
         self._update_view(last_session=label)
@@ -1281,6 +1349,7 @@ class TuiShell:
         await self._request_session_stats()
 
     def _fail_committed_session_hydration(self, detail: str) -> None:
+        self._clear_history_pagination()
         pending = self.pending_session_switch
         selected = pending.selected if pending is not None else None
         if pending is not None:
@@ -1395,11 +1464,62 @@ class TuiShell:
             return None
         try:
             return await cast(Callable[..., Awaitable[str]], get_messages)(
-                limit=TUI_HISTORY_MESSAGE_LIMIT
+                limit=self._history_message_limit
             )
         except Exception as exc:  # noqa: BLE001 - history is optional TUI chrome
             self.renderer.send_failed("session history", exc)
             return None
+
+    async def _request_previous_history_page(self) -> None:
+        pagination = self._history_pagination
+        if pagination is None or pagination.next_before_entry_id is None:
+            self._call_renderer_optional("history_page_loaded", has_more=False)
+            return
+        if pagination.command_id is not None:
+            return
+
+        command_id = f"history-page-{uuid4().hex}"
+        pagination.command_id = command_id
+        try:
+            await self.controller.get_messages(
+                session_id=pagination.session_id,
+                limit=TUI_HISTORY_PAGE_LIMIT,
+                before_entry_id=pagination.next_before_entry_id,
+                command_id=command_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve retry after a transient send failure
+            if self._history_pagination is pagination:
+                pagination.command_id = None
+                self.renderer.command_error(f"Failed to load older session history: {exc}")
+                self._call_renderer_optional("history_page_request_failed")
+            return
+
+    async def _finish_history_page(self, event: RpcCommandFinished) -> None:
+        pagination = self._history_pagination
+        if pagination is None or event.command_id != pagination.command_id:
+            return
+        report = pagination.report
+        pagination.command_id = None
+        pagination.report = None
+        if not event.ok or report is None:
+            detail = event.error or "older session history completed without a result"
+            self.renderer.command_error(f"Failed to load older session history: {detail}")
+            self._call_renderer_optional("history_page_request_failed")
+            return
+        if report.session_id != pagination.session_id:
+            self.renderer.command_error(
+                "Failed to load older session history: result did not match the active session."
+            )
+            self._call_renderer_optional("history_page_request_failed")
+            return
+
+        entries = history_entries_from_rpc_messages(report.messages)
+        self._call_renderer_optional("prepend_history_entries", entries)
+        pagination.next_before_entry_id = report.next_before_entry_id
+        self._call_renderer_optional(
+            "history_page_loaded",
+            has_more=report.next_before_entry_id is not None,
+        )
 
     def _handle_rpc_closed(
         self,
