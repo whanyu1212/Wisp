@@ -3184,9 +3184,63 @@ def test_textual_transcript_loads_history_when_the_initial_page_fits() -> None:
             renderer.set_history_page_request_hook(request_history_page)
             renderer.history_page_loaded(has_more=True)
             await pilot.pause()
+            await pilot.pause()
             return requests
 
     assert anyio.run(scenario) == 1
+
+
+def test_textual_transcript_waits_for_layout_before_requesting_history() -> None:
+    async def scenario() -> int:
+        app_instance, renderer = create_textual_tui()
+        requests = 0
+
+        async def request_history_page() -> None:
+            nonlocal requests
+            requests += 1
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer.render_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
+                    for index in range(30)
+                )
+            )
+            renderer.set_history_page_request_hook(request_history_page)
+            renderer.history_page_loaded(has_more=True)
+            await pilot.pause()
+            await pilot.pause()
+            return requests
+
+    assert anyio.run(scenario) == 0
+
+
+def test_textual_home_retries_failed_history_request_at_the_top() -> None:
+    async def scenario() -> int:
+        app_instance, renderer = create_textual_tui()
+        requests = 0
+
+        async def request_history_page() -> None:
+            nonlocal requests
+            requests += 1
+
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            renderer.render_history_entries(
+                (HistoricalTranscriptMessage(role="assistant", content="current"),)
+            )
+            await pilot.pause()
+            renderer.set_history_page_request_hook(request_history_page)
+            renderer.history_page_loaded(has_more=True)
+            await pilot.pause()
+            await pilot.pause()
+            assert requests == 1
+
+            renderer.history_page_request_failed()
+            app_instance.action_scroll_transcript_home()
+            await pilot.pause()
+            return requests
+
+    assert anyio.run(scenario) == 2
 
 
 def test_textual_history_page_prepend_preserves_viewport_and_session_marker() -> None:

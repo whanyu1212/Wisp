@@ -1223,6 +1223,10 @@ class Transcript(VerticalScroll):
         self._has_more_history = has_more
         self._history_loading = False
         self._history_request_armed = has_more
+
+    def request_history_at_top(self) -> None:
+        """Request another page only when the settled viewport remains at the top."""
+
         if self.scroll_y == 0:
             self._request_more_history_if_needed()
 

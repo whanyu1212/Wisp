@@ -320,6 +320,10 @@ class TextualTui(App[None]):
         self._history_prepend_anchor: (
             tuple[Transcript, Widget | None, float, float, bool, int] | None
         ) = None
+        self._history_render_depth = 0
+        self._history_render_mounts: list[AwaitMount] = []
+        self._last_history_render_mounts: tuple[AwaitMount, ...] = ()
+        self._history_layout_generation = 0
         self._transcript_epoch = 0
         # Role→Rich-style map for transcript lines, resolved from the active
         # theme and re-derived on theme change (watch_theme). Populated in
@@ -1014,7 +1018,8 @@ class TextualTui(App[None]):
             return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
-            self._transcript.action_scroll_home()
+            self._transcript.scroll_home(animate=False)
+            self._transcript.request_history_at_top()
 
     def action_scroll_transcript_end(self) -> None:
         if self._decision_panel is not None and self._decision_panel.is_open:
@@ -1205,6 +1210,10 @@ class TextualTui(App[None]):
         self._prepending_history = False
         self._history_prepend_mounts.clear()
         self._history_prepend_anchor = None
+        self._history_render_depth = 0
+        self._history_render_mounts.clear()
+        self._last_history_render_mounts = ()
+        self._history_layout_generation += 1
         self.hide_working_indicator()
         self._stream.discard()
         self._tool_cards.clear()
@@ -1433,6 +1442,93 @@ class TextualTui(App[None]):
         mounted = transcript.mount_message(widget, before=before)
         if self._prepending_history:
             self._history_prepend_mounts.append(mounted)
+        if self._history_render_depth:
+            self._history_render_mounts.append(mounted)
+
+    def begin_history_render(self) -> None:
+        """Track one renderer history batch until all of its widgets mount."""
+
+        if self._history_render_depth == 0:
+            self._history_render_mounts.clear()
+        self._history_render_depth += 1
+
+    def finish_history_render(self) -> None:
+        """Publish the latest completed history batch's mount awaitables."""
+
+        self._history_render_depth -= 1
+        if self._history_render_depth == 0:
+            self._last_history_render_mounts = tuple(self._history_render_mounts)
+            self._history_render_mounts.clear()
+
+    def history_page_loaded(self, *, has_more: bool) -> None:
+        """Record pagination state after the current history batch has laid out."""
+
+        transcript = self._transcript
+        if transcript is None:
+            return
+        transcript.history_page_loaded(has_more=has_more)
+        self._history_layout_generation += 1
+        if not has_more:
+            return
+        self.run_worker(
+            self._settle_history_page_layout(
+                transcript,
+                self._last_history_render_mounts,
+                self._history_layout_generation,
+                self._transcript_epoch,
+            ),
+            group="history-page-layout",
+            exit_on_error=False,
+        )
+
+    async def _settle_history_page_layout(
+        self,
+        transcript: Transcript,
+        mounts: tuple[AwaitMount, ...],
+        generation: int,
+        epoch: int,
+    ) -> None:
+        for mounted in mounts:
+            await mounted
+        self.call_after_refresh(
+            self._settle_history_page_after_refresh,
+            transcript,
+            generation,
+            epoch,
+        )
+
+    def _settle_history_page_after_refresh(
+        self,
+        transcript: Transcript,
+        generation: int,
+        epoch: int,
+    ) -> None:
+        if (
+            generation != self._history_layout_generation
+            or epoch != self._transcript_epoch
+            or transcript is not self._transcript
+        ):
+            return
+        transcript.follow_tail()
+        self.call_after_refresh(
+            self._request_history_if_still_at_top,
+            transcript,
+            generation,
+            epoch,
+        )
+
+    def _request_history_if_still_at_top(
+        self,
+        transcript: Transcript,
+        generation: int,
+        epoch: int,
+    ) -> None:
+        if (
+            generation == self._history_layout_generation
+            and epoch == self._transcript_epoch
+            and transcript is self._transcript
+        ):
+            transcript.request_history_at_top()
 
     def mark_history_marker(self) -> None:
         """Keep a resumed-session label above every subsequently prepended page."""

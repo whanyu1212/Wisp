@@ -246,9 +246,7 @@ class TextualTuiRenderer:
         self.app.set_history_page_request_hook(hook)
 
     def history_page_loaded(self, *, has_more: bool) -> None:
-        transcript = self.app.transcript
-        if transcript is not None:
-            transcript.history_page_loaded(has_more=has_more)
+        self.app.history_page_loaded(has_more=has_more)
 
     def history_page_request_failed(self) -> None:
         transcript = self.app.transcript
@@ -256,21 +254,29 @@ class TextualTuiRenderer:
             transcript.history_page_request_failed()
 
     def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
-        for message in messages:
-            if message.role == "user":
-                self.app.write_user(message.content)
-            else:
-                self.app.write_assistant(message.content)
+        self.app.begin_history_render()
+        try:
+            for message in messages:
+                if message.role == "user":
+                    self.app.write_user(message.content)
+                else:
+                    self.app.write_assistant(message.content)
+        finally:
+            self.app.finish_history_render()
 
     def render_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
-        for entry in entries:
-            if isinstance(entry, HistoricalTranscriptMessage):
-                if entry.role == "user":
-                    self.app.write_user(entry.content)
+        self.app.begin_history_render()
+        try:
+            for entry in entries:
+                if isinstance(entry, HistoricalTranscriptMessage):
+                    if entry.role == "user":
+                        self.app.write_user(entry.content)
+                    else:
+                        self.app.write_assistant(entry.content)
                 else:
-                    self.app.write_assistant(entry.content)
-            else:
-                self._render_historical_tool_card(entry)
+                    self._render_historical_tool_card(entry)
+        finally:
+            self.app.finish_history_render()
 
     def replace_history_entries(
         self,
