@@ -13,6 +13,8 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from textual.content import Content
+
 from wisp.events import (
     AgentCompleted,
     CompactionCompleted,
@@ -102,6 +104,7 @@ class TextualTuiRenderer:
         # Popped when the call resolves, mirroring _tool_started's lifecycle so
         # neither map grows across a session.
         self._tool_arguments: dict[str, JsonObject] = {}
+        self._historical_tool_results: dict[str, HistoricalToolCard] = {}
         self._progress_active = False
         self._progress_turn: int | None = None
         self._response_started = False
@@ -277,6 +280,7 @@ class TextualTuiRenderer:
     ) -> None:
         self._tool_started.clear()
         self._tool_arguments.clear()
+        self._historical_tool_results.clear()
         self.app.replace_transcript()
         self.app.write_dim(f"resumed session: {session_label}")
         self.app.mark_history_marker()
@@ -290,21 +294,77 @@ class TextualTuiRenderer:
             self.app.finish_history_prepend()
 
     def _render_historical_tool_card(self, entry: HistoricalToolCard) -> None:
-        self.app.mount_tool_call(entry.card_id, entry.name, entry.arguments)
+        tool_call_id = entry.tool_call_id
+        if entry.missing_result and tool_call_id is not None:
+            result = self._historical_tool_results.get(tool_call_id)
+            if result is not None and self._enrich_historical_tool_result(
+                tool_call_id,
+                result,
+                name=entry.name,
+                arguments=entry.arguments,
+            ):
+                return
+
+        self.app.mount_tool_call(
+            entry.card_id,
+            entry.name,
+            entry.arguments,
+            historical_tool_call_id=tool_call_id,
+        )
+        if tool_call_id is not None:
+            self._historical_tool_results[tool_call_id] = entry
+        self._apply_historical_tool_result(entry.card_id, entry)
+
+    def _enrich_historical_tool_result(
+        self,
+        tool_call_id: str,
+        result: HistoricalToolCard,
+        *,
+        name: str,
+        arguments: JsonObject,
+    ) -> bool:
+        status, detail, full_output, truncated = self._historical_tool_presentation(
+            result,
+            name=name,
+            arguments=arguments,
+        )
+        return self.app.enrich_historical_tool_call(
+            tool_call_id,
+            name,
+            arguments,
+            status=status,
+            detail=detail,
+            full_output=full_output,
+            truncated=truncated,
+        )
+
+    def _apply_historical_tool_result(self, card_id: str, entry: HistoricalToolCard) -> None:
+        status, detail, full_output, truncated = self._historical_tool_presentation(entry)
+        self.app.resolve_tool_call(
+            card_id,
+            status,
+            detail=detail,
+            full_output=full_output,
+            truncated=truncated,
+        )
+
+    def _historical_tool_presentation(
+        self,
+        entry: HistoricalToolCard,
+        *,
+        name: str | None = None,
+        arguments: JsonObject | None = None,
+    ) -> tuple[str, str | Content, str, bool]:
         status = historical_tool_status(entry)
         if status in {"cancelled", "denied"}:
-            self.app.resolve_tool_call(
-                entry.card_id,
-                status,
-                detail=entry.output,
-            )
-            return
-        self.app.resolve_tool_call(
-            entry.card_id,
+            return status, entry.output, "", False
+        resolved_name = name or entry.name
+        resolved_arguments = entry.arguments if arguments is None else arguments
+        return (
             status,
-            detail=render_tool_result(
-                entry.name,
-                entry.arguments,
+            render_tool_result(
+                resolved_name,
+                resolved_arguments,
                 entry.output,
                 is_error=entry.is_error,
                 exit_code=entry.exit_code,
@@ -313,12 +373,12 @@ class TextualTuiRenderer:
                 created=entry.created,
                 summary=entry.summary,
             ),
-            full_output=full_tool_output_for_display(
+            full_tool_output_for_display(
                 entry.output,
                 entry.exit_code,
                 output_has_exit_status=entry.output_has_exit_status,
             ),
-            truncated=entry.truncated,
+            entry.truncated,
         )
 
     def queued_prompts_cleared(self) -> None:

@@ -983,6 +983,47 @@ def test_textual_tui_renderer_renders_historical_tool_cards() -> None:
     assert "[red]boom[/red]" in rendered
 
 
+def test_textual_tui_renderer_enriches_result_at_a_history_page_boundary() -> None:
+    async def scenario() -> tuple[int, str, str]:
+        app_instance, renderer = create_textual_tui()
+        result = HistoricalToolCard(
+            card_id="history:result",
+            name="bash",
+            arguments={},
+            output="done",
+            is_error=False,
+            tool_call_id="call-1",
+        )
+        paged_call = HistoricalToolCard(
+            card_id="history:missing:call-1",
+            name="bash",
+            arguments={"command": "printf done"},
+            output="No persisted tool result.",
+            is_error=True,
+            tool_call_id="call-1",
+            status="cancelled",
+            missing_result=True,
+        )
+        async with app_instance.run_test() as pilot:
+            renderer.replace_history_entries((result,), session_label="Paged session")
+            await pilot.pause()
+            renderer.prepend_history_entries((paged_call,))
+            await pilot.pause()
+            await pilot.pause()
+            cards = [
+                child
+                for child in app_instance.query_one("#transcript", Transcript).children
+                if isinstance(child, ToolCard)
+            ]
+            assert len(cards) == 1
+            return len(cards), cards[0]._tool_name, cards[0]._summary
+
+    card_count, tool_name, summary = anyio.run(scenario)
+    assert card_count == 1
+    assert tool_name == "bash"
+    assert summary == "command=printf done"
+
+
 def test_textual_tui_renderer_normalizes_historical_bash_full_output() -> None:
     async def scenario() -> tuple[str, str, bool]:
         app_instance, renderer = create_textual_tui()
@@ -3296,6 +3337,37 @@ def test_textual_streaming_does_not_yank_a_reader_who_scrolled_up() -> None:
     scroll_y, follow = anyio.run(scenario)
     assert not follow  # scrolling away cleared the follow intent
     assert scroll_y <= 7  # stayed roughly where the user left it, not the bottom
+
+
+def test_textual_streaming_reconciles_deferred_output_after_returning_to_tail() -> None:
+    async def scenario() -> tuple[str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+
+            renderer.token_delta("visible")
+            await pilot.pause()
+            transcript.scroll_to(y=6, animate=False)
+            await pilot.pause()
+            renderer.token_delta(" deferred")
+            await pilot.pause()
+
+            stream = next(
+                child for child in transcript.children if isinstance(child, StreamMessage)
+            )
+            assert stream._markdown.source == "visible"
+            transcript.return_to_latest()
+            await pilot.pause()
+            await pilot.pause()
+            return stream._markdown.source, transcript.is_following
+
+    content, following = anyio.run(scenario)
+    assert content == "visible deferred"
+    assert following is True
 
 
 def test_textual_scrollback_counts_distinct_unseen_output_and_end_clears_it() -> None:

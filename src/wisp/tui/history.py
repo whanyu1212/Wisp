@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
@@ -13,7 +13,8 @@ from wisp.events import (
     ToolPresentationStatus,
 )
 
-TUI_HISTORY_MESSAGE_LIMIT = 75
+TUI_HISTORY_MESSAGE_LIMIT = 500
+TUI_HISTORY_PAGE_LIMIT = 75
 _TRUNCATED_SUFFIX = "[content truncated]"
 
 
@@ -34,6 +35,7 @@ class HistoricalToolCard:
     arguments: JsonObject
     output: str
     is_error: bool
+    tool_call_id: str | None = field(default=None, compare=False)
     status: ToolPresentationStatus | None = None
     exit_code: int | None = None
     output_has_exit_status: bool = False
@@ -61,14 +63,12 @@ def history_from_rpc_messages(
 
 def history_entries_from_rpc_messages(
     messages: tuple[RpcMessageSnapshot, ...],
-    *,
-    include_missing_tool_cards: bool = True,
 ) -> tuple[HistoricalTranscriptEntry, ...]:
     """Convert bounded RPC transcript messages into ordered TUI history entries.
 
     Older message pages can begin or end in the middle of a tool-call exchange.
-    Callers prepending those pages disable synthesized missing-result cards so a
-    boundary does not duplicate a card already mounted by the newer page.
+    Boundary-only call entries retain their call ID so a renderer can enrich the
+    already-mounted result card without duplicating it.
     """
 
     rendered: list[HistoricalTranscriptEntry] = []
@@ -91,8 +91,7 @@ def history_entries_from_rpc_messages(
             )
         elif message.role == "tool":
             rendered.append(_historical_tool_card(message, pending_tool_calls))
-    if include_missing_tool_cards:
-        rendered.extend(_missing_tool_cards(pending_tool_calls))
+    rendered.extend(_missing_tool_cards(pending_tool_calls))
     return tuple(rendered)
 
 
@@ -124,6 +123,7 @@ def _historical_tool_card(
         arguments=tool_call.arguments if tool_call is not None else {},
         output=output,
         is_error=bool(message.is_error),
+        tool_call_id=message.tool_call_id,
         status=status,
         exit_code=tool_result.exit_code if tool_result is not None else None,
         output_has_exit_status=(
@@ -147,6 +147,7 @@ def _missing_tool_cards(
             arguments=tool_call.arguments,
             output="No persisted tool result.",
             is_error=True,
+            tool_call_id=call_id,
             status="cancelled",
             missing_result=True,
         )

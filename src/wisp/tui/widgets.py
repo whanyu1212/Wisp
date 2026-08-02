@@ -1763,6 +1763,13 @@ class ToolCard(Static):
             self._timer = self.set_interval(self._TICK, self._tick)
             self._repaint()
 
+    def update_call(self, name: str, arguments: object) -> None:
+        """Enrich a historical result when its paged-in call arrives later."""
+
+        self._tool_name = name
+        self._summary = _summarize_arguments(arguments)
+        self._repaint()
+
     def on_unmount(self) -> None:
         self._stop_timer()
 

@@ -336,6 +336,7 @@ class TextualTui(App[None]):
         # call_id → ToolCard, so the request, approval, and result events for one
         # tool call all mutate the same card instead of stacking three lines.
         self._tool_cards: dict[str, ToolCard] = {}
+        self._historical_tool_cards: dict[str, ToolCard] = {}
         # Whether the transcript was following the tail at the moment a ToolCard
         # took focus. Captured then (before Textual's deferred center-scroll of a
         # card taller than the viewport flips follow off) so an explicit keyboard
@@ -517,6 +518,7 @@ class TextualTui(App[None]):
     def on_transcript_follow_changed(self, event: Transcript.FollowChanged) -> None:
         if event.following:
             self._clear_unseen_output()
+            self._stream.resume_if_deferred()
 
     async def on_transcript_need_more_history(self, event: Transcript.NeedMoreHistory) -> None:
         event.stop()
@@ -1206,6 +1208,7 @@ class TextualTui(App[None]):
         self.hide_working_indicator()
         self._stream.discard()
         self._tool_cards.clear()
+        self._historical_tool_cards.clear()
         self._unseen_output.clear()
         self._card_focus_was_following = False
         self._echo_log.clear()
@@ -1269,7 +1272,14 @@ class TextualTui(App[None]):
     def hide_working_indicator(self) -> None:
         self._remove_working_indicator()
 
-    def mount_tool_call(self, call_id: str, name: str, arguments: object) -> None:
+    def mount_tool_call(
+        self,
+        call_id: str,
+        name: str,
+        arguments: object,
+        *,
+        historical_tool_call_id: str | None = None,
+    ) -> None:
         # Mount a fresh card for a tool call and register it by call_id. The
         # status activity is retired: this card now carries the "in progress"
         # signal (pending glyph + dim rule) for the rest of the call's lifecycle.
@@ -1278,9 +1288,38 @@ class TextualTui(App[None]):
         self.hide_working_indicator()
         card = ToolCard(name, arguments)
         self._tool_cards[call_id] = card
+        if historical_tool_call_id is not None:
+            self._historical_tool_cards[historical_tool_call_id] = card
         self._mount_transcript_message(card)
         self._note_transcript_update(card)
         self._follow_tail_after_refresh()
+
+    def enrich_historical_tool_call(
+        self,
+        tool_call_id: str,
+        name: str,
+        arguments: object,
+        *,
+        status: str,
+        detail: str | Content,
+        full_output: str,
+        truncated: bool,
+    ) -> bool:
+        """Apply a paged-in tool call to its already-mounted historical result card."""
+
+        card = self._historical_tool_cards.get(tool_call_id)
+        if card is None:
+            return False
+        card.update_call(name, arguments)
+        card.set_state(
+            status,
+            detail=detail,
+            full_output=full_output,
+            truncated=truncated,
+        )
+        self._note_transcript_update(card)
+        self._follow_tail_after_refresh()
+        return True
 
     def resolve_tool_call(
         self,

@@ -59,6 +59,7 @@ from wisp.tui.commands import (
 )
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
+    TUI_HISTORY_PAGE_LIMIT,
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
     history_entries_from_rpc_messages,
@@ -251,6 +252,11 @@ class TuiShell:
         self.pending_session_switch: _PendingSessionSwitch | None = None
         self._history_pagination: _HistoryPagination | None = None
         self._ignored_history_page_commands: set[str] = set()
+        self._history_message_limit = (
+            TUI_HISTORY_PAGE_LIMIT
+            if callable(getattr(self.renderer, "set_history_page_request_hook", None))
+            else TUI_HISTORY_MESSAGE_LIMIT
+        )
         self._call_renderer_optional(
             "set_history_page_request_hook",
             self._request_previous_history_page,
@@ -635,7 +641,6 @@ class TuiShell:
         # transport. Picker selections may already have entered this lifecycle;
         # renderer implementations intentionally make the repeated start
         # idempotent.
-        self._clear_history_pagination()
         self._call_renderer_optional("session_switch_started", session_id)
         try:
             command_id = await self.controller.select_session(session_id)
@@ -1302,7 +1307,7 @@ class TuiShell:
                 return
             try:
                 pending.history_command_id = await self.controller.get_messages(
-                    limit=TUI_HISTORY_MESSAGE_LIMIT
+                    limit=self._history_message_limit
                 )
             except Exception as exc:  # noqa: BLE001 - selection already committed
                 self._fail_committed_session_hydration(
@@ -1459,7 +1464,7 @@ class TuiShell:
             return None
         try:
             return await cast(Callable[..., Awaitable[str]], get_messages)(
-                limit=TUI_HISTORY_MESSAGE_LIMIT
+                limit=self._history_message_limit
             )
         except Exception as exc:  # noqa: BLE001 - history is optional TUI chrome
             self.renderer.send_failed("session history", exc)
@@ -1478,7 +1483,7 @@ class TuiShell:
         try:
             await self.controller.get_messages(
                 session_id=pagination.session_id,
-                limit=TUI_HISTORY_MESSAGE_LIMIT,
+                limit=TUI_HISTORY_PAGE_LIMIT,
                 before_entry_id=pagination.next_before_entry_id,
                 command_id=command_id,
             )
@@ -1508,10 +1513,7 @@ class TuiShell:
             self._call_renderer_optional("history_page_request_failed")
             return
 
-        entries = history_entries_from_rpc_messages(
-            report.messages,
-            include_missing_tool_cards=False,
-        )
+        entries = history_entries_from_rpc_messages(report.messages)
         self._call_renderer_optional("prepend_history_entries", entries)
         pagination.next_before_entry_id = report.next_before_entry_id
         self._call_renderer_optional(

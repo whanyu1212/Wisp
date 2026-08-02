@@ -37,6 +37,7 @@ from wisp.tui import auth_commands as tui_auth_commands_module
 from wisp.tui.commands import DEFAULT_TUI_COMMAND_CATALOG, TuiCommandCatalog
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
+    TUI_HISTORY_PAGE_LIMIT,
     HistoricalToolCard,
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
@@ -264,6 +265,23 @@ def test_tui_shell_resume_replaces_history_after_selection_and_hydration() -> No
     anyio.run(run)
 
 
+def test_tui_shell_uses_small_initial_history_page_for_paginating_renderer() -> None:
+    class PaginatingRenderer(LineTuiRenderer):
+        def set_history_page_request_hook(self, hook: object) -> None:
+            self.history_page_hook = hook
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = PaginatingRenderer(_console()[0])
+        shell = TuiShell(controller, renderer=renderer)
+
+        await shell._request_session_history()
+
+        assert controller.messages_requests == [("messages-1", None, TUI_HISTORY_PAGE_LIMIT, None)]
+
+    anyio.run(run)
+
+
 def test_tui_shell_paginates_older_history_pages_with_the_reported_cursor() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:
@@ -301,7 +319,7 @@ def test_tui_shell_paginates_older_history_pages_with_the_reported_cursor() -> N
         assert controller.messages_requests[-1] == (
             page_command_id,
             "target",
-            TUI_HISTORY_MESSAGE_LIMIT,
+            TUI_HISTORY_PAGE_LIMIT,
             "newer",
         )
 
@@ -515,6 +533,14 @@ def test_tui_shell_resume_selection_failure_preserves_visible_history() -> None:
         renderer = RecordingRenderer()
         shell = TuiShell(ScriptedController(), renderer=renderer)
         shell.view.last_session = "original"
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="existing-history",
+                session_id="original",
+                truncated=True,
+                next_before_entry_id="older",
+            )
+        )
 
         await shell._handle_resume_command(("missing",))
         await shell._handle_rpc_event(
@@ -529,6 +555,8 @@ def test_tui_shell_resume_selection_failure_preserves_visible_history() -> None:
         assert renderer.replacement_count == 0
         assert shell.view.last_session == "original"
         assert shell.pending_session_switch is None
+        assert shell._history_pagination is not None
+        assert shell._history_pagination.next_before_entry_id == "older"
 
     anyio.run(run)
 
