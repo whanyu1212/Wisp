@@ -640,6 +640,16 @@ class JsonlSession:
 
         return tuple(_read_entries(self.path))
 
+    def _read_cached_entries(self) -> tuple[SessionEntry, ...]:
+        """Read an append-ordered snapshot through the validated entry index."""
+
+        with self._file_state.lock:
+            if self._validate_session_file() is None:
+                raise SessionNotFoundError(f"Session file does not exist: {self.path}")
+            self._refresh_entry_index()
+            assert self._entry_index is not None
+            return tuple(self._entry_index.values())
+
     def read_messages(self) -> tuple[Message, ...]:
         """Read all persisted messages from the session file."""
 
@@ -678,7 +688,7 @@ class JsonlSession:
         """Read a bounded active-path transcript page in chronological order."""
 
         return _message_page_from_entries(
-            self.read_entries(),
+            self._read_cached_entries(),
             session_id=self.session_id,
             path=self.path,
             limit=limit,

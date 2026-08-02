@@ -613,6 +613,82 @@ def test_executor_messages_reads_selected_and_explicit_sessions(
     anyio.run(scenario)
 
 
+def test_executor_messages_historical_page_skips_selected_session_refresh(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        selected = fixture.sessions.create()
+
+        await selected.append_message(Message(role="user", content="one"))
+        await selected.append_message(Message(role="assistant", content="two"))
+        await selected.append_message(Message(role="user", content="three"))
+        fixture.session_state.session = selected
+        fixture.session_state.history = (Message(role="user", content="cached"),)
+        fixture.session_state.entry_count = 3
+
+        newest = selected.read_message_page(limit=2)
+        assert newest.next_before_entry_id is not None
+
+        def unexpected_refresh() -> tuple[object, ...]:
+            raise AssertionError("historical page must not refresh selected session state")
+
+        monkeypatch.setattr(selected, "read_entries", unexpected_refresh)
+
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = executor.dispatch(
+                {
+                    "id": "older",
+                    "type": "get_messages",
+                    "limit": 2,
+                    "before_entry_id": newest.next_before_entry_id,
+                },
+                None,
+            )
+            completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is not None
+        assert completed.ok is True
+        assert completed.history is None
+        assert completed.entry_count == 3
+        reports = [event for event in fixture.events if isinstance(event, RpcMessagesReported)]
+        assert [message.content for message in reports[-1].messages] == ["one"]
+
+    anyio.run(scenario)
+
+
+def test_updated_rpc_session_state_reads_entries_once(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        await session.append_message(Message(role="user", content="one"))
+        await session.append_message(Message(role="assistant", content="two"))
+
+    anyio.run(write)
+    original_read_entries = session.read_entries
+    read_count = 0
+
+    def count_reads() -> tuple[object, ...]:
+        nonlocal read_count
+        read_count += 1
+        return original_read_entries()
+
+    monkeypatch.setattr(session, "read_entries", count_reads)
+
+    entry_count, history = rpc_execution_module.updated_rpc_session_state(session, (), 0)
+
+    assert entry_count == 2
+    assert [message.content for message in history] == ["one", "two"]
+    assert read_count == 1
+
+
 def test_executor_messages_reports_validation_and_read_failures(
     tmp_path: Path,
 ) -> None:

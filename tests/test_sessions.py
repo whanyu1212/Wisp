@@ -413,6 +413,77 @@ def test_session_message_page_reads_active_path_messages_and_pages(
     assert older.next_before_entry_id is None
 
 
+def test_session_message_pages_reuse_validated_entry_index(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def write() -> None:
+        for index in range(5):
+            await session.append_message(Message(role="user", content=f"message-{index}"))
+
+    anyio.run(write)
+    reader = store.load(session.session_id)
+    original_read_entries = jsonl_module._read_entries
+    read_count = 0
+
+    def count_reads(path: Path, *, limit: int | None = None) -> list[SessionEntry]:
+        nonlocal read_count
+        read_count += 1
+        return original_read_entries(path, limit=limit)
+
+    monkeypatch.setattr(jsonl_module, "_read_entries", count_reads)
+
+    newest = reader.read_message_page(limit=2)
+    older = reader.read_message_page(limit=2, before_entry_id=newest.next_before_entry_id)
+
+    assert [message.content for message in newest.messages] == ["message-3", "message-4"]
+    assert [message.content for message in older.messages] == ["message-1", "message-2"]
+    assert read_count == 1
+
+
+def test_session_message_page_cache_reloads_after_external_append(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def write() -> MessageSessionEntry:
+        entry = await session.append_message(Message(role="user", content="first"))
+        assert isinstance(entry, MessageSessionEntry)
+        return entry
+
+    first = anyio.run(write)
+    reader = store.load(session.session_id)
+    original_read_entries = jsonl_module._read_entries
+    read_count = 0
+
+    def count_reads(path: Path, *, limit: int | None = None) -> list[SessionEntry]:
+        nonlocal read_count
+        read_count += 1
+        return original_read_entries(path, limit=limit)
+
+    monkeypatch.setattr(jsonl_module, "_read_entries", count_reads)
+
+    assert [message.content for message in reader.read_message_page().messages] == ["first"]
+    external = MessageSessionEntry(
+        session_id=session.session_id,
+        parent_id=first.id,
+        message=Message(role="user", content="external"),
+    )
+    with session.path.open("a", encoding="utf-8") as session_file:
+        session_file.write(session_entry_to_json(external))
+        session_file.write("\n")
+
+    reloaded = reader.read_message_page()
+
+    assert [message.content for message in reloaded.messages] == ["first", "external"]
+    assert read_count == 2
+
+
 def test_session_message_page_rejects_invalid_limits_and_unknown_cursor(
     tmp_path: Path,
 ) -> None:
