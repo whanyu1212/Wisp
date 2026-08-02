@@ -9,6 +9,7 @@ public surface, so it lives here rather than inside the app module.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -235,6 +236,22 @@ class TextualTuiRenderer:
     def prompt_history_request(self) -> None:
         self.app.show_prompt_history()
 
+    def set_history_page_request_hook(
+        self,
+        hook: Callable[[], Awaitable[None]],
+    ) -> None:
+        self.app.set_history_page_request_hook(hook)
+
+    def history_page_loaded(self, *, has_more: bool) -> None:
+        transcript = self.app.transcript
+        if transcript is not None:
+            transcript.history_page_loaded(has_more=has_more)
+
+    def history_page_request_failed(self) -> None:
+        transcript = self.app.transcript
+        if transcript is not None:
+            transcript.history_page_request_failed()
+
     def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
         for message in messages:
             if message.role == "user":
@@ -262,7 +279,15 @@ class TextualTuiRenderer:
         self._tool_arguments.clear()
         self.app.replace_transcript()
         self.app.write_dim(f"resumed session: {session_label}")
+        self.app.mark_history_marker()
         self.render_history_entries(entries)
+
+    def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
+        self.app.begin_history_prepend()
+        try:
+            self.render_history_entries(entries)
+        finally:
+            self.app.finish_history_prepend()
 
     def _render_historical_tool_card(self, entry: HistoricalToolCard) -> None:
         self.app.mount_tool_call(entry.card_id, entry.name, entry.arguments)

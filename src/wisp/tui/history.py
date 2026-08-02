@@ -13,7 +13,7 @@ from wisp.events import (
     ToolPresentationStatus,
 )
 
-TUI_HISTORY_MESSAGE_LIMIT = 500
+TUI_HISTORY_MESSAGE_LIMIT = 75
 _TRUNCATED_SUFFIX = "[content truncated]"
 
 
@@ -61,8 +61,15 @@ def history_from_rpc_messages(
 
 def history_entries_from_rpc_messages(
     messages: tuple[RpcMessageSnapshot, ...],
+    *,
+    include_missing_tool_cards: bool = True,
 ) -> tuple[HistoricalTranscriptEntry, ...]:
-    """Convert bounded RPC transcript messages into ordered TUI history entries."""
+    """Convert bounded RPC transcript messages into ordered TUI history entries.
+
+    Older message pages can begin or end in the middle of a tool-call exchange.
+    Callers prepending those pages disable synthesized missing-result cards so a
+    boundary does not duplicate a card already mounted by the newer page.
+    """
 
     rendered: list[HistoricalTranscriptEntry] = []
     pending_tool_calls: dict[str, RpcMessageToolCallSnapshot] = {}
@@ -84,7 +91,8 @@ def history_entries_from_rpc_messages(
             )
         elif message.role == "tool":
             rendered.append(_historical_tool_card(message, pending_tool_calls))
-    rendered.extend(_missing_tool_cards(pending_tool_calls))
+    if include_missing_tool_cards:
+        rendered.extend(_missing_tool_cards(pending_tool_calls))
     return tuple(rendered)
 
 

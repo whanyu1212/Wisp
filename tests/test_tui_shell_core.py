@@ -36,6 +36,7 @@ from wisp.events import (
 from wisp.tui import auth_commands as tui_auth_commands_module
 from wisp.tui.commands import DEFAULT_TUI_COMMAND_CATALOG, TuiCommandCatalog
 from wisp.tui.history import (
+    TUI_HISTORY_MESSAGE_LIMIT,
     HistoricalToolCard,
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
@@ -227,7 +228,7 @@ def test_tui_shell_resume_replaces_history_after_selection_and_hydration() -> No
                 ok=True,
             )
         )
-        assert controller.messages_requests[-1][1:] == (None, 500, None)
+        assert controller.messages_requests[-1][1:] == (None, TUI_HISTORY_MESSAGE_LIMIT, None)
         history_id = controller.messages_requests[-1][0]
         await shell._handle_rpc_event(
             RpcMessagesReported(
@@ -259,6 +260,239 @@ def test_tui_shell_resume_replaces_history_after_selection_and_hydration() -> No
         assert shell.view.context is None
         assert shell.view.cost is None
         assert shell.pending_session_switch is None
+
+    anyio.run(run)
+
+
+def test_tui_shell_paginates_older_history_pages_with_the_reported_cursor() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.history_page_hook = None
+            self.page_states: list[bool] = []
+            self.prepended: list[tuple[HistoricalTranscriptEntry, ...]] = []
+
+        def set_history_page_request_hook(self, hook: object) -> None:
+            self.history_page_hook = hook
+
+        def history_page_loaded(self, *, has_more: bool) -> None:
+            self.page_states.append(has_more)
+
+        def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
+            self.prepended.append(entries)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                messages=(_rpc_message("assistant", "newer", entry_id="newer"),),
+                truncated=True,
+                next_before_entry_id="newer",
+            )
+        )
+
+        assert renderer.history_page_hook is not None
+        await renderer.history_page_hook()
+        page_command_id = controller.messages_requests[-1][0]
+        assert controller.messages_requests[-1] == (
+            page_command_id,
+            "target",
+            TUI_HISTORY_MESSAGE_LIMIT,
+            "newer",
+        )
+
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=page_command_id,
+                session_id="target",
+                messages=(_rpc_message("user", "older", entry_id="older"),),
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=page_command_id,
+                command_type="get_messages",
+                ok=True,
+            )
+        )
+
+        assert renderer.prepended == [(HistoricalTranscriptMessage(role="user", content="older"),)]
+        assert renderer.page_states == [True, False]
+
+    anyio.run(run)
+
+
+def test_tui_shell_handles_immediate_history_page_events() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.history_page_hook = None
+            self.prepended: list[tuple[HistoricalTranscriptEntry, ...]] = []
+
+        def set_history_page_request_hook(self, hook: object) -> None:
+            self.history_page_hook = hook
+
+        def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
+            self.prepended.append(entries)
+
+    class ImmediatePageController(ScriptedController):
+        def __init__(self) -> None:
+            super().__init__()
+            self.shell: TuiShell | None = None
+
+        async def get_messages(
+            self,
+            *,
+            session_id: str | None = None,
+            limit: int = 200,
+            before_entry_id: str | None = None,
+            command_id: str | None = None,
+        ) -> str:
+            selected_id = command_id or "unexpected-history-page"
+            self.messages_requests.append((selected_id, session_id, limit, before_entry_id))
+            assert self.shell is not None
+            await self.shell._handle_rpc_event(
+                RpcMessagesReported(
+                    command_id=selected_id,
+                    session_id=session_id,
+                    messages=(_rpc_message("user", "older", entry_id="older"),),
+                )
+            )
+            await self.shell._handle_rpc_event(
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="get_messages",
+                    ok=True,
+                )
+            )
+            return selected_id
+
+    async def run() -> None:
+        controller = ImmediatePageController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        controller.shell = shell
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                truncated=True,
+                next_before_entry_id="cursor",
+            )
+        )
+
+        assert callable(renderer.history_page_hook)
+        await renderer.history_page_hook()
+
+        assert renderer.prepended == [(HistoricalTranscriptMessage(role="user", content="older"),)]
+        assert shell._history_pagination is not None
+        assert shell._history_pagination.command_id is None
+
+    anyio.run(run)
+
+
+def test_tui_shell_retries_a_failed_history_page_request() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.history_page_hook = None
+            self.failures = 0
+            self.errors: list[str] = []
+
+        def set_history_page_request_hook(self, hook: object) -> None:
+            self.history_page_hook = hook
+
+        def history_page_request_failed(self) -> None:
+            self.failures += 1
+
+        def command_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                truncated=True,
+                next_before_entry_id="cursor",
+            )
+        )
+
+        assert renderer.history_page_hook is not None
+        await renderer.history_page_hook()
+        first_command_id = controller.messages_requests[-1][0]
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=first_command_id,
+                command_type="get_messages",
+                ok=False,
+                error="temporary failure",
+            )
+        )
+        await renderer.history_page_hook()
+
+        assert renderer.failures == 1
+        assert renderer.errors == ["Failed to load older session history: temporary failure"]
+        assert [request[3] for request in controller.messages_requests] == ["cursor", "cursor"]
+
+    anyio.run(run)
+
+
+def test_tui_shell_ignores_history_page_events_after_pagination_is_replaced() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.history_page_hook = None
+            self.prepended: list[tuple[HistoricalTranscriptEntry, ...]] = []
+
+        def set_history_page_request_hook(self, hook: object) -> None:
+            self.history_page_hook = hook
+
+        def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
+            self.prepended.append(entries)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                truncated=True,
+                next_before_entry_id="cursor",
+            )
+        )
+
+        assert renderer.history_page_hook is not None
+        await renderer.history_page_hook()
+        page_command_id = controller.messages_requests[-1][0]
+        shell._clear_history_pagination()
+
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=page_command_id,
+                session_id="target",
+                messages=(_rpc_message("user", "stale", entry_id="stale"),),
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=page_command_id,
+                command_type="get_messages",
+                ok=True,
+            )
+        )
+
+        assert renderer.prepended == []
+        assert page_command_id not in shell._ignored_history_page_commands
 
     anyio.run(run)
 
@@ -563,7 +797,9 @@ def test_tui_shell_hydrates_resume_history_before_reading_prompt() -> None:
 
         await shell.run()
 
-        assert controller.messages_requests == [("messages-1", None, 500, None)]
+        assert controller.messages_requests == [
+            ("messages-1", None, TUI_HISTORY_MESSAGE_LIMIT, None)
+        ]
         assert controller.prompts == ["new prompt"]
         assert renderer.calls[:2] == ["history", "running"]
         assert [(message.role, message.content) for message in renderer.histories[0]] == [
@@ -736,7 +972,9 @@ def test_tui_shell_history_hydration_allows_legacy_renderer_without_hook() -> No
 
         await shell.run()
 
-        assert controller.messages_requests == [("messages-1", None, 500, None)]
+        assert controller.messages_requests == [
+            ("messages-1", None, TUI_HISTORY_MESSAGE_LIMIT, None)
+        ]
 
     anyio.run(run)
 

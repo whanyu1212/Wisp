@@ -107,12 +107,22 @@ class StreamCoalescer:
         # the reconcile can await the Markdown mount before following the tail.
         self._app.call_after_refresh(self._reconcile)
 
+    def resume_if_deferred(self) -> None:
+        """Reconcile buffered output after the reader returns to the tail."""
+
+        if self._widget is not None and self._text:
+            self._schedule_refresh()
+
     async def _reconcile(self) -> None:
         self._refresh_pending = False
-        if self._widget is not None:
-            await self._follow_tail_after_content(
-                self._widget, self._widget.set_content(self._text)
-            )
+        widget = self._widget
+        transcript = self._app.transcript
+        if widget is None:
+            return
+        if transcript is not None and not transcript.is_following:
+            self._app.note_transcript_update(widget)
+            return
+        await self._follow_tail_after_content(widget, widget.set_content(self._text))
 
     async def _follow_tail_after_content(
         self,

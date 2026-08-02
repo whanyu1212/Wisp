@@ -3088,6 +3088,112 @@ def _fill_transcript(renderer: TextualTuiRenderer, count: int) -> None:
         renderer.event(ToolCallRequested(call_id=f"c{i}", name=f"tool{i}", arguments={}))
 
 
+def test_textual_transcript_requests_one_history_page_at_a_time_and_rearms() -> None:
+    async def scenario() -> int:
+        app_instance, renderer = create_textual_tui()
+        requests = 0
+
+        async def request_history_page() -> None:
+            nonlocal requests
+            requests += 1
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer.render_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
+                    for index in range(30)
+                )
+            )
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            renderer.set_history_page_request_hook(request_history_page)
+            renderer.history_page_loaded(has_more=True)
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+            transcript.scroll_home(animate=False)
+            await pilot.pause()
+            transcript.scroll_home(animate=False)
+            await pilot.pause()
+            assert requests == 1
+
+            renderer.history_page_loaded(has_more=True)
+            transcript.scroll_to(y=5, animate=False)
+            await pilot.pause()
+            transcript.scroll_home(animate=False)
+            await pilot.pause()
+            return requests
+
+    assert anyio.run(scenario) == 2
+
+
+def test_textual_history_page_prepend_preserves_viewport_and_session_marker() -> None:
+    async def scenario() -> tuple[list[str], float, float, float, float, float, float, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            current = tuple(
+                HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
+                for index in range(30)
+            )
+            older = tuple(
+                HistoricalTranscriptMessage(role="user", content=f"older {index}")
+                for index in range(12)
+            )
+            renderer.replace_history_entries(current, session_label="Paged session")
+            await pilot.pause()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.scroll_to(y=8, animate=False)
+            await pilot.pause()
+            anchor = next(
+                child
+                for child in transcript.children
+                if isinstance(child, LineMessage) and "current 8" in child.render().plain
+            )
+            anchor_y_before = anchor.region.y
+            scroll_y_before = transcript.scroll_y
+            max_scroll_y_before = transcript.max_scroll_y
+
+            renderer.prepend_history_entries(older)
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+
+            return (
+                _transcript_texts(app_instance),
+                scroll_y_before,
+                transcript.scroll_y,
+                max_scroll_y_before,
+                transcript.max_scroll_y,
+                anchor_y_before,
+                anchor.region.y,
+                transcript.is_following,
+            )
+
+    (
+        texts,
+        scroll_y_before,
+        scroll_y_after,
+        max_scroll_y_before,
+        max_scroll_y_after,
+        anchor_y_before,
+        anchor_y_after,
+        following,
+    ) = anyio.run(scenario)
+    assert "resumed session: Paged session" in texts[0]
+    assert texts[1:13] == [f"you: older {index}" for index in range(12)]
+    assert texts[13] == "assistant: current 0"
+    assert scroll_y_after > scroll_y_before, (
+        scroll_y_before,
+        scroll_y_after,
+        max_scroll_y_before,
+        max_scroll_y_after,
+        anchor_y_before,
+        anchor_y_after,
+    )
+    assert abs(anchor_y_after - anchor_y_before) <= 1
+    assert following is False
+
+
 def test_textual_streaming_keeps_the_growing_tail_visible() -> None:
     # Regression: an expanding streamed Markdown widget must stay pinned to the
     # bottom. The bug was measuring "near the bottom?" as the content grew — the

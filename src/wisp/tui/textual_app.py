@@ -11,7 +11,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
-from textual.widget import Widget
+from textual.widget import AwaitMount, Widget
 from textual.widgets import Header, Static, TextArea
 
 from wisp.events import (
@@ -313,6 +313,14 @@ class TextualTui(App[None]):
         self._runner: Callable[[], Awaitable[None]] | None = None
         self._runner_error: Exception | None = None
         self._on_submit: Callable[[], None] | None = None
+        self._history_page_request_hook: Callable[[], Awaitable[None]] | None = None
+        self._history_marker: Widget | None = None
+        self._prepending_history = False
+        self._history_prepend_mounts: list[AwaitMount] = []
+        self._history_prepend_anchor: (
+            tuple[Transcript, Widget | None, float, float, bool, int] | None
+        ) = None
+        self._transcript_epoch = 0
         # Role→Rich-style map for transcript lines, resolved from the active
         # theme and re-derived on theme change (watch_theme). Populated in
         # on_mount. LineMessage widgets carry it as pre-composed markup.
@@ -509,6 +517,16 @@ class TextualTui(App[None]):
     def on_transcript_follow_changed(self, event: Transcript.FollowChanged) -> None:
         if event.following:
             self._clear_unseen_output()
+
+    async def on_transcript_need_more_history(self, event: Transcript.NeedMoreHistory) -> None:
+        event.stop()
+        hook = self._history_page_request_hook
+        if hook is None:
+            transcript = self._transcript
+            if transcript is not None:
+                transcript.history_page_request_failed()
+            return
+        await hook()
 
     def on_jump_to_latest_selected(self, event: JumpToLatest.Selected) -> None:
         event.stop()
@@ -763,6 +781,14 @@ class TextualTui(App[None]):
             return
         self.prefill_command(f"{spec.command} " if spec.takes_args else spec.command)
         suggest.hide()
+
+    def set_history_page_request_hook(
+        self,
+        hook: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Register the shell callback used when the reader reaches transcript history."""
+
+        self._history_page_request_hook = hook
 
     def set_submit_hook(self, on_submit: Callable[[], None]) -> None:
         """Register a callback fired the moment an input line is submitted.
@@ -1172,6 +1198,11 @@ class TextualTui(App[None]):
     def replace_transcript(self) -> None:
         """Drop the previous session's UI-owned transcript bookkeeping."""
 
+        self._transcript_epoch += 1
+        self._history_marker = None
+        self._prepending_history = False
+        self._history_prepend_mounts.clear()
+        self._history_prepend_anchor = None
         self.hide_working_indicator()
         self._stream.discard()
         self._tool_cards.clear()
@@ -1188,7 +1219,7 @@ class TextualTui(App[None]):
         if self._transcript is None:
             return
         self._working_indicator = indicator
-        self._transcript.mount_message(indicator)
+        self._mount_transcript_message(indicator)
         # Surface the heartbeat to a scrolled-back reader too: activity no longer
         # lives in the footer, so the jump-to-latest badge is the only cue that
         # working/retry state has begun. No-op while following the tail.
@@ -1247,7 +1278,7 @@ class TextualTui(App[None]):
         self.hide_working_indicator()
         card = ToolCard(name, arguments)
         self._tool_cards[call_id] = card
-        self._transcript.mount_message(card)
+        self._mount_transcript_message(card)
         self._note_transcript_update(card)
         self._follow_tail_after_refresh()
 
@@ -1341,9 +1372,93 @@ class TextualTui(App[None]):
         if self._transcript is None:
             return
         widget = LineMessage(markup, role=role)
-        self._transcript.mount_message(widget)
+        self._mount_transcript_message(widget)
         self._note_transcript_update(widget)
         self._follow_tail_after_refresh()
+
+    def _mount_transcript_message(self, widget: Widget) -> None:
+        transcript = self._transcript
+        if transcript is None:
+            return
+        anchor = self._history_prepend_anchor
+        before = (
+            anchor[1]
+            if (
+                self._prepending_history
+                and anchor is not None
+                and anchor[0] is transcript
+                and anchor[1] is not None
+            )
+            else None
+        )
+        mounted = transcript.mount_message(widget, before=before)
+        if self._prepending_history:
+            self._history_prepend_mounts.append(mounted)
+
+    def mark_history_marker(self) -> None:
+        """Keep a resumed-session label above every subsequently prepended page."""
+
+        transcript = self._transcript
+        if transcript is not None and transcript.children:
+            self._history_marker = transcript.children[-1]
+
+    def begin_history_prepend(self) -> None:
+        """Capture the viewport before mounting one older transcript page."""
+
+        transcript = self._transcript
+        if transcript is None or not transcript.children:
+            return
+        first_history_entry = next(
+            (child for child in transcript.children if child is not self._history_marker),
+            None,
+        )
+        self._prepending_history = True
+        self._history_prepend_mounts.clear()
+        self._history_prepend_anchor = (
+            transcript,
+            first_history_entry,
+            transcript.scroll_y,
+            transcript.max_scroll_y,
+            transcript.is_following,
+            self._transcript_epoch,
+        )
+
+    def finish_history_prepend(self) -> None:
+        """Restore the reader's anchor after one older page has mounted."""
+
+        self._prepending_history = False
+        anchor = self._history_prepend_anchor
+        mounts = tuple(self._history_prepend_mounts)
+        self._history_prepend_anchor = None
+        self._history_prepend_mounts.clear()
+        if anchor is not None:
+            self.run_worker(
+                self._restore_prepend_viewport_after_mounts(anchor, mounts),
+                group="history-prepend",
+                exit_on_error=False,
+            )
+
+    async def _restore_prepend_viewport_after_mounts(
+        self,
+        anchor: tuple[Transcript, Widget | None, float, float, bool, int],
+        mounts: tuple[AwaitMount, ...],
+    ) -> None:
+        for mounted in mounts:
+            await mounted
+        self.call_after_refresh(self._restore_prepend_viewport, anchor)
+
+    def _restore_prepend_viewport(
+        self,
+        anchor: tuple[Transcript, Widget | None, float, float, bool, int],
+    ) -> None:
+        transcript, _, scroll_y, max_scroll_y_before, following, epoch = anchor
+        if epoch != self._transcript_epoch or transcript is not self._transcript:
+            return
+        transcript.restore_prepend_viewport(
+            scroll_y=scroll_y,
+            max_scroll_y_before=max_scroll_y_before,
+            following=following,
+        )
 
     def append_stream(self, delta: str) -> None:
         self._stream.append(delta)
@@ -1377,6 +1492,8 @@ class TextualTui(App[None]):
         self._note_transcript_update(widget)
 
     def _note_transcript_update(self, widget: Widget) -> None:
+        if self._prepending_history:
+            return
         transcript = self._transcript
         jump = self._jump_to_latest
         if transcript is None or jump is None or transcript.is_following:
