@@ -3167,6 +3167,28 @@ def test_textual_transcript_requests_one_history_page_at_a_time_and_rearms() -> 
     assert anyio.run(scenario) == 2
 
 
+def test_textual_transcript_loads_history_when_the_initial_page_fits() -> None:
+    async def scenario() -> int:
+        app_instance, renderer = create_textual_tui()
+        requests = 0
+
+        async def request_history_page() -> None:
+            nonlocal requests
+            requests += 1
+
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            renderer.render_history_entries(
+                (HistoricalTranscriptMessage(role="assistant", content="current"),)
+            )
+            await pilot.pause()
+            renderer.set_history_page_request_hook(request_history_page)
+            renderer.history_page_loaded(has_more=True)
+            await pilot.pause()
+            return requests
+
+    assert anyio.run(scenario) == 1
+
+
 def test_textual_history_page_prepend_preserves_viewport_and_session_marker() -> None:
     async def scenario() -> tuple[list[str], float, float, float, float, float, float, bool]:
         app_instance, renderer = create_textual_tui()
@@ -3195,6 +3217,7 @@ def test_textual_history_page_prepend_preserves_viewport_and_session_marker() ->
             max_scroll_y_before = transcript.max_scroll_y
 
             renderer.prepend_history_entries(older)
+            app_instance.write_assistant("concurrent tail output")
             await pilot.pause()
             await pilot.pause()
             await pilot.pause()
@@ -3223,6 +3246,7 @@ def test_textual_history_page_prepend_preserves_viewport_and_session_marker() ->
     assert "resumed session: Paged session" in texts[0]
     assert texts[1:13] == [f"you: older {index}" for index in range(12)]
     assert texts[13] == "assistant: current 0"
+    assert texts[-1] == "assistant: concurrent tail output"
     assert scroll_y_after > scroll_y_before, (
         scroll_y_before,
         scroll_y_after,

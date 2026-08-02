@@ -1457,7 +1457,7 @@ class TextualTui(App[None]):
             transcript,
             first_history_entry,
             transcript.scroll_y,
-            transcript.max_scroll_y,
+            first_history_entry.region.y if first_history_entry is not None else 0.0,
             transcript.is_following,
             self._transcript_epoch,
         )
@@ -1490,12 +1490,13 @@ class TextualTui(App[None]):
         self,
         anchor: tuple[Transcript, Widget | None, float, float, bool, int],
     ) -> None:
-        transcript, _, scroll_y, max_scroll_y_before, following, epoch = anchor
+        transcript, anchor_widget, scroll_y, anchor_y_before, following, epoch = anchor
         if epoch != self._transcript_epoch or transcript is not self._transcript:
             return
         transcript.restore_prepend_viewport(
             scroll_y=scroll_y,
-            max_scroll_y_before=max_scroll_y_before,
+            anchor=anchor_widget,
+            anchor_y_before=anchor_y_before,
             following=following,
         )
 

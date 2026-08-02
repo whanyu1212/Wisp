@@ -1214,16 +1214,26 @@ class Transcript(VerticalScroll):
             self.post_message(self.FollowChanged(self._follow))
         if new_value > 0:
             self._history_request_armed = True
-        elif self._has_more_history and not self._history_loading and self._history_request_armed:
-            self._history_loading = True
-            self._history_request_armed = False
-            self.post_message(self.NeedMoreHistory())
+        else:
+            self._request_more_history_if_needed()
 
     def history_page_loaded(self, *, has_more: bool) -> None:
         """Record one completed history page and its continuation state."""
 
         self._has_more_history = has_more
         self._history_loading = False
+        self._history_request_armed = has_more
+        if self.scroll_y == 0:
+            self._request_more_history_if_needed()
+
+    def _request_more_history_if_needed(self) -> None:
+        if not (
+            self._has_more_history and not self._history_loading and self._history_request_armed
+        ):
+            return
+        self._history_loading = True
+        self._history_request_armed = False
+        self.post_message(self.NeedMoreHistory())
 
     def history_page_request_failed(self) -> None:
         """Allow a transient page-load failure to be retried at the top."""
@@ -1259,7 +1269,8 @@ class Transcript(VerticalScroll):
         self,
         *,
         scroll_y: float,
-        max_scroll_y_before: float,
+        anchor: Widget | None,
+        anchor_y_before: float,
         following: bool,
     ) -> None:
         """Keep the same content visible after older entries were prepended."""
@@ -1267,7 +1278,7 @@ class Transcript(VerticalScroll):
         if following:
             self.return_to_latest()
             return
-        height_delta = max(0.0, self.max_scroll_y - max_scroll_y_before)
+        height_delta = max(0.0, anchor.region.y - anchor_y_before) if anchor is not None else 0.0
         self.restore_viewport_state(
             TranscriptViewportState(
                 scroll_y=scroll_y + height_delta,
