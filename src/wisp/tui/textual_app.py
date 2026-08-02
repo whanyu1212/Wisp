@@ -318,8 +318,9 @@ class TextualTui(App[None]):
         self._prepending_history = False
         self._history_prepend_mounts: list[AwaitMount] = []
         self._history_prepend_anchor: (
-            tuple[Transcript, Widget | None, float, float, bool, int] | None
+            tuple[Transcript, Widget | None, float, float, bool, int, int] | None
         ) = None
+        self._transcript_navigation_generation = 0
         self._history_render_depth = 0
         self._history_render_mounts: list[AwaitMount] = []
         self._last_history_render_mounts: tuple[AwaitMount, ...] = ()
@@ -1018,6 +1019,7 @@ class TextualTui(App[None]):
             return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
+            self._transcript_navigation_generation += 1
             self._transcript.scroll_home(animate=False)
             self._transcript.request_history_at_top()
 
@@ -1045,6 +1047,7 @@ class TextualTui(App[None]):
         # not be redirected to move the panel highlight just because one
         # happens to be open, unlike a real End keypress.
         if self._transcript is not None:
+            self._transcript_navigation_generation += 1
             self._transcript.return_to_latest()
         self._clear_unseen_output()
 
@@ -1556,6 +1559,7 @@ class TextualTui(App[None]):
             first_history_entry.region.y if first_history_entry is not None else 0.0,
             transcript.is_following,
             self._transcript_epoch,
+            self._transcript_navigation_generation,
         )
 
     def finish_history_prepend(self) -> None:
@@ -1575,7 +1579,7 @@ class TextualTui(App[None]):
 
     async def _restore_prepend_viewport_after_mounts(
         self,
-        anchor: tuple[Transcript, Widget | None, float, float, bool, int],
+        anchor: tuple[Transcript, Widget | None, float, float, bool, int, int],
         mounts: tuple[AwaitMount, ...],
     ) -> None:
         for mounted in mounts:
@@ -1584,11 +1588,20 @@ class TextualTui(App[None]):
 
     def _restore_prepend_viewport(
         self,
-        anchor: tuple[Transcript, Widget | None, float, float, bool, int],
+        anchor: tuple[Transcript, Widget | None, float, float, bool, int, int],
     ) -> None:
-        transcript, anchor_widget, scroll_y, anchor_y_before, following, epoch = anchor
+        (
+            transcript,
+            anchor_widget,
+            scroll_y,
+            anchor_y_before,
+            following,
+            epoch,
+            navigation_generation,
+        ) = anchor
         if (
             epoch != self._transcript_epoch
+            or navigation_generation != self._transcript_navigation_generation
             or transcript is not self._transcript
             or transcript.is_following != following
             or (not following and transcript.scroll_y != scroll_y)

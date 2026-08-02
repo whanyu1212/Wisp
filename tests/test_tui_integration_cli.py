@@ -3390,6 +3390,37 @@ def test_textual_history_prepend_does_not_override_return_to_latest() -> None:
     assert scroll_y >= max_scroll_y - 1
 
 
+def test_textual_history_prepend_does_not_override_home_at_top() -> None:
+    async def scenario() -> tuple[bool, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            current = tuple(
+                HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
+                for index in range(30)
+            )
+            older = tuple(
+                HistoricalTranscriptMessage(role="user", content=f"older {index}")
+                for index in range(12)
+            )
+            renderer.replace_history_entries(current, session_label="Paged session")
+            await pilot.pause()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.scroll_home(animate=False)
+            await pilot.pause()
+
+            renderer.prepend_history_entries(older)
+            app_instance.action_scroll_transcript_home()
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+            return transcript.is_following, transcript.scroll_y
+
+    following, scroll_y = anyio.run(scenario)
+    assert following is False
+    assert scroll_y == 0
+
+
 def test_textual_streaming_keeps_the_growing_tail_visible() -> None:
     # Regression: an expanding streamed Markdown widget must stay pinned to the
     # bottom. The bug was measuring "near the bottom?" as the content grew — the
