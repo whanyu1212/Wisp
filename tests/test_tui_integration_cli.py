@@ -993,6 +993,7 @@ def test_textual_tui_renderer_enriches_result_at_a_history_page_boundary() -> No
             output="done",
             is_error=False,
             tool_call_id="call-1",
+            call_missing=True,
         )
         paged_call = HistoricalToolCard(
             card_id="history:missing:call-1",
@@ -1022,6 +1023,51 @@ def test_textual_tui_renderer_enriches_result_at_a_history_page_boundary() -> No
     assert card_count == 1
     assert tool_name == "bash"
     assert summary == "command=printf done"
+
+
+def test_textual_tui_renderer_matches_reused_history_tool_call_ids_by_occurrence() -> None:
+    async def scenario() -> list[str]:
+        app_instance, renderer = create_textual_tui()
+        newer_second_result = HistoricalToolCard(
+            card_id="history:second-result",
+            name="bash",
+            arguments={},
+            output="second output",
+            is_error=False,
+            tool_call_id="reused",
+            call_missing=True,
+        )
+        older_first_result = HistoricalToolCard(
+            card_id="history:first-result",
+            name="bash",
+            arguments={"command": "first"},
+            output="first output",
+            is_error=False,
+            tool_call_id="reused",
+        )
+        boundary_second_call = HistoricalToolCard(
+            card_id="history:missing:reused",
+            name="bash",
+            arguments={"command": "second"},
+            output="No persisted tool result.",
+            is_error=True,
+            tool_call_id="reused",
+            status="cancelled",
+            missing_result=True,
+        )
+        async with app_instance.run_test() as pilot:
+            renderer.replace_history_entries((newer_second_result,), session_label="Paged session")
+            await pilot.pause()
+            renderer.prepend_history_entries((older_first_result, boundary_second_call))
+            await pilot.pause()
+            await pilot.pause()
+            return [
+                card._summary
+                for card in app_instance.query_one("#transcript", Transcript).children
+                if isinstance(card, ToolCard)
+            ]
+
+    assert anyio.run(scenario) == ["command=first", "command=second"]
 
 
 def test_textual_tui_renderer_normalizes_historical_bash_full_output() -> None:
@@ -3311,6 +3357,37 @@ def test_textual_history_page_prepend_preserves_viewport_and_session_marker() ->
     )
     assert abs(anchor_y_after - anchor_y_before) <= 1
     assert following is False
+
+
+def test_textual_history_prepend_does_not_override_return_to_latest() -> None:
+    async def scenario() -> tuple[bool, float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            current = tuple(
+                HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
+                for index in range(30)
+            )
+            older = tuple(
+                HistoricalTranscriptMessage(role="user", content=f"older {index}")
+                for index in range(12)
+            )
+            renderer.replace_history_entries(current, session_label="Paged session")
+            await pilot.pause()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            transcript.scroll_to(y=8, animate=False)
+            await pilot.pause()
+
+            renderer.prepend_history_entries(older)
+            transcript.return_to_latest()
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+            return transcript.is_following, transcript.scroll_y, transcript.max_scroll_y
+
+    following, scroll_y, max_scroll_y = anyio.run(scenario)
+    assert following is True
+    assert scroll_y >= max_scroll_y - 1
 
 
 def test_textual_streaming_keeps_the_growing_tail_visible() -> None:

@@ -1287,7 +1287,7 @@ class TextualTui(App[None]):
         name: str,
         arguments: object,
         *,
-        historical_tool_call_id: str | None = None,
+        historical_card_id: str | None = None,
     ) -> None:
         # Mount a fresh card for a tool call and register it by call_id. The
         # status activity is retired: this card now carries the "in progress"
@@ -1297,15 +1297,15 @@ class TextualTui(App[None]):
         self.hide_working_indicator()
         card = ToolCard(name, arguments)
         self._tool_cards[call_id] = card
-        if historical_tool_call_id is not None:
-            self._historical_tool_cards[historical_tool_call_id] = card
+        if historical_card_id is not None:
+            self._historical_tool_cards[historical_card_id] = card
         self._mount_transcript_message(card)
         self._note_transcript_update(card)
         self._follow_tail_after_refresh()
 
     def enrich_historical_tool_call(
         self,
-        tool_call_id: str,
+        card_id: str,
         name: str,
         arguments: object,
         *,
@@ -1316,7 +1316,7 @@ class TextualTui(App[None]):
     ) -> bool:
         """Apply a paged-in tool call to its already-mounted historical result card."""
 
-        card = self._historical_tool_cards.get(tool_call_id)
+        card = self._historical_tool_cards.get(card_id)
         if card is None:
             return False
         card.update_call(name, arguments)
@@ -1587,7 +1587,12 @@ class TextualTui(App[None]):
         anchor: tuple[Transcript, Widget | None, float, float, bool, int],
     ) -> None:
         transcript, anchor_widget, scroll_y, anchor_y_before, following, epoch = anchor
-        if epoch != self._transcript_epoch or transcript is not self._transcript:
+        if (
+            epoch != self._transcript_epoch
+            or transcript is not self._transcript
+            or transcript.is_following != following
+            or (not following and transcript.scroll_y != scroll_y)
+        ):
             return
         transcript.restore_prepend_viewport(
             scroll_y=scroll_y,

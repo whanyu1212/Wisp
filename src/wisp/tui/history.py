@@ -36,6 +36,7 @@ class HistoricalToolCard:
     output: str
     is_error: bool
     tool_call_id: str | None = field(default=None, compare=False)
+    call_missing: bool = field(default=False, compare=False)
     status: ToolPresentationStatus | None = None
     exit_code: int | None = None
     output_has_exit_status: bool = False
@@ -124,6 +125,7 @@ def _historical_tool_card(
         output=output,
         is_error=bool(message.is_error),
         tool_call_id=message.tool_call_id,
+        call_missing=tool_call is None and message.tool_call_id is not None,
         status=status,
         exit_code=tool_result.exit_code if tool_result is not None else None,
         output_has_exit_status=(

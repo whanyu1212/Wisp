@@ -199,6 +199,10 @@ def test_history_entries_from_rpc_messages_handles_orphan_and_missing_tool_resul
             missing_result=True,
         ),
     )
+    assert isinstance(entries[0], HistoricalToolCard)
+    assert isinstance(entries[1], HistoricalToolCard)
+    assert entries[0].call_missing is True
+    assert entries[1].call_missing is False
 
 
 def test_history_entries_from_rpc_messages_marks_legacy_interrupted_repairs_cancelled() -> None:

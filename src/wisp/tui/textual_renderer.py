@@ -9,6 +9,7 @@ public surface, so it lives here rather than inside the app module.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -104,7 +105,7 @@ class TextualTuiRenderer:
         # Popped when the call resolves, mirroring _tool_started's lifecycle so
         # neither map grows across a session.
         self._tool_arguments: dict[str, JsonObject] = {}
-        self._historical_tool_results: dict[str, HistoricalToolCard] = {}
+        self._historical_tool_results: dict[str, deque[tuple[str, HistoricalToolCard]]] = {}
         self._progress_active = False
         self._progress_turn: int | None = None
         self._response_started = False
@@ -302,28 +303,35 @@ class TextualTuiRenderer:
     def _render_historical_tool_card(self, entry: HistoricalToolCard) -> None:
         tool_call_id = entry.tool_call_id
         if entry.missing_result and tool_call_id is not None:
-            result = self._historical_tool_results.get(tool_call_id)
-            if result is not None and self._enrich_historical_tool_result(
-                tool_call_id,
-                result,
-                name=entry.name,
-                arguments=entry.arguments,
-            ):
-                return
+            results = self._historical_tool_results.get(tool_call_id)
+            if results:
+                result_card_id, result = results[0]
+                if self._enrich_historical_tool_result(
+                    result_card_id,
+                    result,
+                    name=entry.name,
+                    arguments=entry.arguments,
+                ):
+                    results.popleft()
+                    if not results:
+                        del self._historical_tool_results[tool_call_id]
+                    return
 
         self.app.mount_tool_call(
             entry.card_id,
             entry.name,
             entry.arguments,
-            historical_tool_call_id=tool_call_id,
+            historical_card_id=entry.card_id if entry.call_missing else None,
         )
-        if tool_call_id is not None:
-            self._historical_tool_results[tool_call_id] = entry
+        if entry.call_missing and tool_call_id is not None:
+            self._historical_tool_results.setdefault(tool_call_id, deque()).append(
+                (entry.card_id, entry)
+            )
         self._apply_historical_tool_result(entry.card_id, entry)
 
     def _enrich_historical_tool_result(
         self,
-        tool_call_id: str,
+        card_id: str,
         result: HistoricalToolCard,
         *,
         name: str,
@@ -335,7 +343,7 @@ class TextualTuiRenderer:
             arguments=arguments,
         )
         return self.app.enrich_historical_tool_call(
-            tool_call_id,
+            card_id,
             name,
             arguments,
             status=status,
