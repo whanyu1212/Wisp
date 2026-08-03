@@ -26,6 +26,8 @@ from wisp.tui.history import history_entries_from_rpc_messages
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 from wisp.tui.widgets import Transcript
 
+_MINIMUM_WORKER_SECONDS = 1.0
+
 
 @dataclass(frozen=True)
 class ScenarioConfig:
@@ -189,12 +191,11 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     )
                     mounted_counts.append(len(transcript.children))
 
-                command = _cpu_command(config.process_seconds)
-                process_id = await supervisor.start(
-                    command, cwd=root, timeout=config.process_seconds + 5
-                )
-                process_update = await supervisor.poll(process_id, wait_seconds=0.1)
-                if process_update.state not in {"running", "completed"}:
+                worker_seconds = max(config.process_seconds, _MINIMUM_WORKER_SECONDS)
+                command = _cpu_command(worker_seconds)
+                process_id = await supervisor.start(command, cwd=root, timeout=worker_seconds + 5)
+                process_update = await supervisor.poll(process_id)
+                if process_update.state != "running":
                     raise RuntimeError(
                         "Benchmark worker did not start: "
                         f"{process_update.state}: {process_update.stderr}"

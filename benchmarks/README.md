@@ -13,6 +13,9 @@ managed CPU-active shell process runs. It reports JSON with page-read and render
 durations, mounted-widget growth, stream durations, final scroll state, and process
 cleanup state.
 
+The CPU worker runs for at least one second and is then cancelled after the
+scroll measurement, so short smoke configurations still measure while it is active.
+
 Compare absolute timings only on the same machine. The useful PR2 comparison is the
 shape of `mounted_widget_counts` as older pages load, plus the before/after page and
 scroll timings. This intentionally executes a local shell command through
