@@ -4587,69 +4587,106 @@ def test_textual_slash_shows_inline_menu_and_filters() -> None:
     assert value == "/mozzz"  # input untouched throughout
 
 
-def test_textual_slash_menu_is_anchored_near_the_input() -> None:
-    # The menu must render near the prompt, not float at the top of the app. Using
-    # a separate `layer:` detaches it to the top (a real regression); overlay:screen
-    # alone keeps its compose position just above #input. Assert it renders in the
-    # lower half of the screen, adjacent to the input, with the input unmoved.
-    async def scenario() -> tuple[int, int, int, int]:
-        app_instance = TextualTui()
-        async with app_instance.run_test(size=(80, 24)) as pilot:
-            input_widget = app_instance.query_one("#input", Input)
-            input_widget.focus()
-            await pilot.pause()
-            suggest = app_instance.query_one("#suggest", SlashSuggest)
-            await pilot.press("/")
-            await pilot.pause()
-            return (
-                suggest.region.y,
-                suggest.region.y + suggest.region.height,
-                input_widget.region.y,
-                app_instance.size.height,
-            )
-
-    menu_top, menu_bottom, input_y, height = anyio.run(scenario)
-    assert menu_top >= height // 2  # menu is in the lower half, not floating at top
-    # input stays pinned near the bottom (not shoved); margin widened from 4 to 6
-    # rows for the #composer panel's border + status-divider rows (see
-    # test_textual_input_is_pinned_to_the_bottom).
-    assert input_y >= height - 6
-    # menu sits adjacent to the input; widened from 5 to 6 for the keybinding
-    # hint row now occupying the last screen row below the composer.
-    assert abs(menu_bottom - input_y) <= 6
-
-
-@pytest.mark.parametrize("size", [(120, 40), (100, 30), (80, 24), (72, 20)])
-def test_textual_slash_suggest_stays_anchored_near_the_input_at_every_breakpoint(
+@pytest.mark.parametrize("size", [(120, 40), (100, 30), (80, 24), (72, 20), (40, 16)])
+def test_textual_slash_suggest_stays_above_the_input_at_every_breakpoint(
     size: tuple[int, int],
 ) -> None:
-    # Issue #72's command-overlay-placement acceptance criterion, generalized
-    # across all four required breakpoints: same invariants as the 80x24-only
-    # test_textual_slash_menu_is_anchored_near_the_input above (menu in the
-    # lower half, adjacent to the input, within the same tolerance — that
-    # test found the gap is the #composer panel's own border + status-divider
-    # rows, not overlap; it holds unchanged at every breakpoint).
-    async def scenario() -> tuple[int, int, int, int]:
+    """Slash suggestions are constrained, non-overlapping, and non-reflowing."""
+
+    async def scenario() -> tuple[
+        int,
+        int,
+        int,
+        tuple[int, int, int, int],
+        tuple[int, int, int, int],
+        str | None,
+    ]:
         app_instance = TextualTui()
         async with app_instance.run_test(size=size) as pilot:
             input_widget = app_instance.query_one("#input", Input)
             input_widget.focus()
             await pilot.pause()
+            before = (
+                input_widget.region.x,
+                input_widget.region.y,
+                input_widget.region.width,
+                input_widget.region.height,
+            )
             suggest = app_instance.query_one("#suggest", SlashSuggest)
             await pilot.press("/")
             await pilot.pause()
+            after = (
+                input_widget.region.x,
+                input_widget.region.y,
+                input_widget.region.width,
+                input_widget.region.height,
+            )
             return (
                 suggest.region.y,
-                suggest.region.y + suggest.region.height,
-                input_widget.region.y,
-                suggest.region.width,
+                suggest.region.bottom,
+                suggest.region.right,
+                before,
+                after,
+                app_instance.focused.id if app_instance.focused else None,
             )
 
-    menu_top, menu_bottom, input_y, menu_width = anyio.run(scenario)
-    height, width = size[1], size[0]
-    assert menu_top >= height // 2
-    assert abs(menu_bottom - input_y) <= 6
-    assert menu_width <= width  # never overflows the viewport
+    menu_top, menu_bottom, menu_right, before, after, focused_id = anyio.run(scenario)
+    assert menu_top >= 0
+    assert menu_bottom <= after[1]  # #193: the menu must never cover the editor
+    assert after == before  # opening suggestions must not reflow the composer
+    assert menu_right <= size[0]
+    assert focused_id == "input"
+
+
+def test_textual_slash_suggest_does_not_cover_typing_or_backspace_at_compact_size() -> None:
+    """The composer stays visible as a live slash query grows and shrinks."""
+
+    async def scenario() -> tuple[
+        tuple[int, int, int, int],
+        list[tuple[str, int, int, int, tuple[int, int, int, int], str | None]],
+    ]:
+        app_instance = TextualTui()
+        states: list[tuple[str, int, int, int, tuple[int, int, int, int], str | None]] = []
+        async with app_instance.run_test(size=(40, 16)) as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.focus()
+            await pilot.pause()
+            before = (
+                input_widget.region.x,
+                input_widget.region.y,
+                input_widget.region.width,
+                input_widget.region.height,
+            )
+            suggest = app_instance.query_one("#suggest", SlashSuggest)
+
+            for key in ("/", "m", "backspace"):
+                await pilot.press(key)
+                await pilot.pause()
+                states.append(
+                    (
+                        input_widget.value,
+                        suggest.option_count,
+                        suggest.region.bottom,
+                        input_widget.region.y,
+                        (
+                            input_widget.region.x,
+                            input_widget.region.y,
+                            input_widget.region.width,
+                            input_widget.region.height,
+                        ),
+                        app_instance.focused.id if app_instance.focused else None,
+                    )
+                )
+        return before, states
+
+    before, states = anyio.run(scenario)
+    assert [value for value, *_ in states] == ["/", "/m", "/"]
+    assert states[1][1] < states[0][1]  # typing filters the suggestions
+    assert states[2][1] == states[0][1]  # Backspace restores them
+    for _, _, menu_bottom, input_y, region, focused_id in states:
+        assert menu_bottom <= input_y
+        assert region == before
+        assert focused_id == "input"
 
 
 @pytest.mark.parametrize("size", [(120, 40), (100, 30), (80, 24), (72, 20)])
