@@ -370,6 +370,10 @@ def _apply_byte_limit(
                 partial = replace(
                     row,
                     text=clipped,
+                    # A byte-clipped prefix cannot still contain the known
+                    # terminator suffix from this row's end. Treat it as
+                    # literal source rather than slicing real content as note.
+                    terminator_note_length=0,
                     hidden_rows=1,
                     hidden_bytes=row_bytes - shown_bytes,
                 )

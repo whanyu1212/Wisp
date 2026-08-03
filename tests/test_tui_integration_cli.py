@@ -1826,6 +1826,42 @@ def test_textual_tool_card_narrow_write_keeps_source_before_newline_note() -> No
     assert "no newline" not in text
 
 
+def test_textual_tool_card_marks_omitted_newline_note_on_exact_source_width() -> None:
+    """A hidden no-newline annotation remains visible as horizontal omission."""
+
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(28, 20)) as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="write",
+                    arguments={"path": "src/newline.py", "content": "abcdefgh\n"},
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="write",
+                    output="Wrote replacement",
+                    is_error=False,
+                    before_text="abcdefgh",
+                )
+            )
+            await pilot.pause()
+            rows = [
+                line.rstrip()
+                for line in _first_tool_card(app_instance).render().plain.splitlines()
+                if "│" in line
+            ]
+            return rows[0], rows[1]
+
+    deletion, addition = anyio.run(scenario)
+    assert "…" in deletion
+    assert deletion != addition
+
+
 def test_textual_tool_card_narrow_full_line_replace_marks_hidden_tail() -> None:
     """A cropped full-line replacement must explicitly mark hidden changed text."""
 

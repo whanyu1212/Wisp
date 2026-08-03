@@ -367,10 +367,14 @@ def _crop_diff_row_source(
     )
     if show_note:
         return f"{cropped}{note}", ranges
-    if note and cell_len(cropped) < width:
+    if note:
         # The annotation did not fit, so make the omitted metadata explicit
-        # without allowing it to displace the source evidence.
-        return f"{cropped}…", ranges
+        # without allowing it to displace the source evidence. On an exact-fit
+        # row, reserve the final cell for the marker rather than silently
+        # making a newline-only change look identical on both sides.
+        if cell_len(cropped) < width:
+            return f"{cropped}…", ranges
+        return f"{_take_cell_prefix(cropped, max(0, width - 1))}…", ranges
     return cropped, ranges
 
 

@@ -124,6 +124,8 @@ def test_partial_retained_source_does_not_double_count_its_omission() -> None:
     )
 
     assert presentation is not None
+    retained_source = next(row for row in presentation.rows if row.is_source)
+    assert retained_source.terminator_note_length == 0
     collapsed = presentation.visible_rows(expanded=False)
     final_omission = collapsed[-1]
 
