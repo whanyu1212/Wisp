@@ -24,6 +24,7 @@ from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionMessageP
 from wisp.tools.process_manager import ProcessSupervisor
 from wisp.tui.history import history_entries_from_rpc_messages
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
+from wisp.tui.transcript_window import TUI_TRANSCRIPT_WINDOW_SIZE
 from wisp.tui.widgets import Transcript
 
 _WORKER_TIMEOUT_SECONDS = 60.0
@@ -126,14 +127,11 @@ async def _render_page(
     prepend: bool,
 ) -> float:
     entries = history_entries_from_rpc_messages(page.messages)
-    transcript = app.query_one("#transcript", Transcript)
-    previous_count = len(transcript.children)
     started = time.perf_counter_ns()
     if prepend:
         renderer.prepend_history_entries(entries)
     else:
         renderer.replace_history_entries(entries, session_label="Long-session benchmark")
-    await _wait_for(pilot, lambda: len(transcript.children) >= previous_count + len(entries))
     await app.wait_for_history_render()
     await pilot.pause()
     return _milliseconds(started)
@@ -183,6 +181,8 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                         await _render_page(app, renderer, pilot, page, prepend=True)
                     )
                     mounted_counts.append(len(transcript.children))
+                    if mounted_counts[-1] > TUI_TRANSCRIPT_WINDOW_SIZE + 1:
+                        raise RuntimeError("Transcript history window exceeded its widget capacity")
 
                 command = _cpu_command()
                 process_id = await supervisor.start(

@@ -3423,6 +3423,55 @@ def test_textual_history_prepend_does_not_override_home_at_top() -> None:
     assert scroll_y == 0
 
 
+def test_textual_history_window_shifts_without_evicting_live_output() -> None:
+    async def scenario() -> tuple[list[str], list[str], int, int, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            current = tuple(
+                HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
+                for index in range(300)
+            )
+            older = tuple(
+                HistoricalTranscriptMessage(role="user", content=f"older {index}")
+                for index in range(75)
+            )
+            renderer.replace_history_entries(current, session_label="Windowed session")
+            await pilot.pause()
+            await pilot.pause()
+            renderer.prepend_history_entries(older)
+            app_instance.write_assistant("live output")
+            await pilot.pause()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            initial_count = sum(isinstance(child, LineMessage) for child in transcript.children)
+
+            app_instance.action_scroll_transcript_home()
+            await pilot.pause()
+            await pilot.pause()
+            older_count = sum(isinstance(child, LineMessage) for child in transcript.children)
+            older_texts = _transcript_texts(app_instance)
+
+            app_instance.on_transcript_follow_changed(Transcript.FollowChanged(True))
+            await pilot.pause()
+            await pilot.pause()
+            newest_count = sum(isinstance(child, LineMessage) for child in transcript.children)
+            return (
+                _transcript_texts(app_instance),
+                older_texts,
+                initial_count,
+                older_count,
+                newest_count,
+            )
+
+    newest_texts, older_texts, initial_count, older_count, newest_count = anyio.run(scenario)
+    assert "you: older 0" in older_texts
+    assert "you: older 0" not in newest_texts
+    assert "assistant: current 299" in newest_texts
+    assert "assistant: live output" in newest_texts
+    # Marker and one live line sit outside the bounded persisted-history window.
+    assert initial_count == older_count == newest_count == 302
+
+
 def test_textual_streaming_keeps_the_growing_tail_visible() -> None:
     # Regression: an expanding streamed Markdown widget must stay pinned to the
     # bottom. The bug was measuring "near the bottom?" as the content grew — the

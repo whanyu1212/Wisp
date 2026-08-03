@@ -11,10 +11,12 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from textual.content import Content
+from textual.widget import Widget
 
 from wisp.events import (
     AgentCompleted,
@@ -55,6 +57,8 @@ from wisp.tui.tool_output import (
     full_tool_output_for_display,
     render_tool_result,
 )
+from wisp.tui.transcript_window import TranscriptWindow
+from wisp.tui.widgets import ToolCard
 
 if TYPE_CHECKING:
     from wisp.tui.textual_app import TextualTui
@@ -66,6 +70,14 @@ _RETRY_REASON_LABELS = {
     "server_error": "server error",
     "transient_http": "temporary HTTP error",
 }
+
+
+@dataclass(frozen=True)
+class _RetainedHistoryEntry:
+    """One UI-local identity for a persisted transcript entry."""
+
+    id: int
+    entry: HistoricalTranscriptEntry
 
 
 def _retry_progress_label(event: ProviderRetrying) -> str:
@@ -106,6 +118,14 @@ class TextualTuiRenderer:
         # neither map grows across a session.
         self._tool_arguments: dict[str, JsonObject] = {}
         self._historical_tool_results: dict[str, deque[tuple[str, HistoricalToolCard]]] = {}
+        self._history_window = TranscriptWindow[_RetainedHistoryEntry]()
+        self._history_widgets: dict[int, Widget] = {}
+        self._next_history_entry_id = 0
+        app.set_history_window_hooks(
+            shift_older=self._shift_history_older,
+            shift_newer=self._shift_history_newer,
+            show_latest=self._show_latest_history,
+        )
         self._progress_active = False
         self._progress_turn: int | None = None
         self._response_started = False
@@ -255,29 +275,10 @@ class TextualTuiRenderer:
             transcript.history_page_request_failed()
 
     def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
-        self.app.begin_history_render()
-        try:
-            for message in messages:
-                if message.role == "user":
-                    self.app.write_user(message.content)
-                else:
-                    self.app.write_assistant(message.content)
-        finally:
-            self.app.finish_history_render()
+        self.render_history_entries(messages)
 
     def render_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
-        self.app.begin_history_render()
-        try:
-            for entry in entries:
-                if isinstance(entry, HistoricalTranscriptMessage):
-                    if entry.role == "user":
-                        self.app.write_user(entry.content)
-                    else:
-                        self.app.write_assistant(entry.content)
-                else:
-                    self._render_historical_tool_card(entry)
-        finally:
-            self.app.finish_history_render()
+        self._append_history_entries(entries)
 
     def replace_history_entries(
         self,
@@ -288,19 +289,135 @@ class TextualTuiRenderer:
         self._tool_started.clear()
         self._tool_arguments.clear()
         self._historical_tool_results.clear()
+        self._history_window.clear()
+        self._history_widgets.clear()
+        self._next_history_entry_id = 0
         self.app.replace_transcript()
-        self.app.write_dim(f"resumed session: {session_label}")
-        self.app.mark_history_marker()
-        self.render_history_entries(entries)
+        self._append_history_entries(entries)
+        self.app.mount_history_marker(
+            f"resumed session: {session_label}",
+            before=next(iter(self._history_widgets.values()), None),
+        )
 
     def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
+        retained = self._retain(entries)
         self.app.begin_history_prepend()
+        self.app.begin_history_render()
         try:
-            self.render_history_entries(entries)
+            self._history_window.prepend(retained)
+            self._reconcile_history()
         finally:
+            self.app.finish_history_render()
             self.app.finish_history_prepend()
 
-    def _render_historical_tool_card(self, entry: HistoricalToolCard) -> None:
+    def _append_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
+        self.app.begin_history_render()
+        try:
+            following = self.app.transcript is None or self.app.transcript.is_following
+            self._history_window.append(
+                self._retain(entries),
+                follow_tail=following,
+            )
+            self._reconcile_history()
+            if following:
+                self.app.follow_transcript_tail_after_refresh()
+        finally:
+            self.app.finish_history_render()
+
+    def _retain(
+        self, entries: tuple[HistoricalTranscriptEntry, ...]
+    ) -> tuple[_RetainedHistoryEntry, ...]:
+        retained = tuple(
+            _RetainedHistoryEntry(id=self._next_history_entry_id + index, entry=entry)
+            for index, entry in enumerate(entries)
+        )
+        self._next_history_entry_id += len(retained)
+        return retained
+
+    def _shift_history_older(self) -> bool:
+        if not self._history_window.shift_older():
+            return False
+        self.app.begin_history_prepend()
+        self.app.begin_history_render()
+        try:
+            self._reconcile_history()
+        finally:
+            self.app.finish_history_render()
+            self.app.finish_history_prepend()
+        return True
+
+    def _show_latest_history(self) -> bool:
+        if not self._history_window.show_latest():
+            return False
+        self._reconcile_history()
+        return True
+
+    def _shift_history_newer(self) -> bool:
+        if not self._history_window.shift_newer():
+            return False
+        self.app.begin_history_render()
+        try:
+            self._reconcile_history()
+        finally:
+            self.app.finish_history_render()
+        return True
+
+    def _reconcile_history(self) -> None:
+        """Apply only the changed edges of the retained history window."""
+
+        visible = self._history_window.visible
+        visible_ids = {item.id for item in visible}
+        for item_id, widget in tuple(self._history_widgets.items()):
+            if item_id not in visible_ids:
+                item = next(item for item in self._history_window.entries if item.id == item_id)
+                if isinstance(item.entry, HistoricalToolCard):
+                    self.app.forget_historical_tool_card(item.entry.card_id)
+                widget.remove()
+                del self._history_widgets[item_id]
+
+        for index, item in enumerate(visible):
+            if item.id in self._history_widgets:
+                continue
+            before: Widget | None = next(
+                (
+                    self._history_widgets[later.id]
+                    for later in visible[index + 1 :]
+                    if later.id in self._history_widgets
+                ),
+                None,
+            )
+            mounted_widget: Widget | None
+            if before is None:
+                mounted_widget = self._mount_retained_history_entry(
+                    item.entry,
+                    before=self.app.history_insertion_boundary(set(self._history_widgets.values())),
+                )
+            else:
+                mounted_widget = self._mount_retained_history_entry(item.entry, before=before)
+            if mounted_widget is not None:
+                self._history_widgets[item.id] = mounted_widget
+
+    def _mount_retained_history_entry(
+        self,
+        entry: HistoricalTranscriptEntry,
+        *,
+        before: Widget | None,
+    ) -> Widget | None:
+        if isinstance(entry, HistoricalTranscriptMessage):
+            role = "user" if entry.role == "user" else "assistant"
+            return self.app.mount_historical_line(
+                role,
+                entry.content,
+                before=before,
+            )
+        return self._render_historical_tool_card(entry, before=before)
+
+    def _render_historical_tool_card(
+        self,
+        entry: HistoricalToolCard,
+        *,
+        before: Widget | None = None,
+    ) -> ToolCard | None:
         tool_call_id = entry.tool_call_id
         if entry.missing_result and tool_call_id is not None:
             results = self._historical_tool_results.get(tool_call_id)
@@ -315,19 +432,21 @@ class TextualTuiRenderer:
                     results.popleft()
                     if not results:
                         del self._historical_tool_results[tool_call_id]
-                    return
+                    return None
 
-        self.app.mount_tool_call(
+        card = self.app.mount_tool_call(
             entry.card_id,
             entry.name,
             entry.arguments,
             historical_card_id=entry.card_id if entry.call_missing else None,
+            before=before,
         )
         if entry.call_missing and tool_call_id is not None:
             self._historical_tool_results.setdefault(tool_call_id, deque()).append(
                 (entry.card_id, entry)
             )
         self._apply_historical_tool_result(entry.card_id, entry)
+        return card
 
     def _enrich_historical_tool_result(
         self,
