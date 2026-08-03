@@ -1071,6 +1071,14 @@ def test_textual_tui_renderer_remounts_boundary_result_without_visible_call() ->
             renderer._shift_history_older()
             await pilot.pause()
             paired_cards = _all_tool_cards(app_instance)
+
+            for _ in range(4):
+                renderer._shift_history_older()
+            await pilot.pause()
+            renderer._show_latest_history()
+            await pilot.pause()
+            remounted_result_cards = _all_tool_cards(app_instance)
+            remounted_detail = remounted_result_cards[0]._detail
             return (
                 len(result_only_cards),
                 (
@@ -1080,13 +1088,21 @@ def test_textual_tui_renderer_remounts_boundary_result_without_visible_call() ->
                 ),
                 len(paired_cards),
                 paired_cards[0]._summary,
+                len(remounted_result_cards),
+                remounted_detail.plain
+                if isinstance(remounted_detail, Content)
+                else remounted_detail,
             )
 
-    result_count, detail, paired_count, summary = anyio.run(scenario)
+    result_count, detail, paired_count, summary, remounted_count, remounted_detail = anyio.run(
+        scenario
+    )
     assert result_count == 1
     assert detail == "done"
     assert paired_count == 1
     assert summary == "command=printf done"
+    assert remounted_count == 1
+    assert remounted_detail == "done"
 
 
 def test_textual_tui_renderer_remounted_boundary_pair_is_not_pending() -> None:

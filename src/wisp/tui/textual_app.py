@@ -1521,11 +1521,19 @@ class TextualTui(App[None]):
             None,
         )
 
-    def forget_historical_tool_card(self, card_id: str) -> None:
-        """Drop an evicted historical card from page-boundary enrichment lookup."""
+    def forget_historical_tool_card(self, card: Widget) -> None:
+        """Drop every lookup alias for an evicted historical tool card."""
 
-        self._historical_tool_cards.pop(card_id, None)
-        self._tool_cards.pop(card_id, None)
+        self._historical_tool_cards = {
+            card_id: registered
+            for card_id, registered in self._historical_tool_cards.items()
+            if registered is not card
+        }
+        self._tool_cards = {
+            call_id: registered
+            for call_id, registered in self._tool_cards.items()
+            if registered is not card
+        }
 
     def historical_tool_card(self, card_id: str) -> ToolCard | None:
         """Return a mounted historical card for a page-boundary tool exchange."""
