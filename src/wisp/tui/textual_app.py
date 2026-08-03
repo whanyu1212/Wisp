@@ -34,7 +34,7 @@ from wisp.tui.rendering import (
     TuiViewSnapshot,
     _markup_escape,
 )
-from wisp.tui.stream_buffer import StreamCoalescer
+from wisp.tui.stream_buffer import MarkdownStreamController
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.theme import WISP_THEMES, role_styles
 from wisp.tui.widgets import (
@@ -330,10 +330,7 @@ class TextualTui(App[None]):
         # theme and re-derived on theme change (watch_theme). Populated in
         # on_mount. LineMessage widgets carry it as pre-composed markup.
         self._role_styles: dict[str, str] = {}
-        # Streaming coalescer: owns the authoritative buffer + the live assistant
-        # widget, reconciling once per refresh (avoids O(n^2) Markdown reparse and
-        # the mount race). Holds a back-ref to this app for its Textual services.
-        self._stream = StreamCoalescer(self)
+        self._stream = MarkdownStreamController(self)
         # Distinct transcript widgets changed while the user is reading history.
         # A set keeps token deltas and in-place tool-card updates from inflating
         # the jump-to-latest count.
@@ -835,9 +832,11 @@ class TextualTui(App[None]):
         except Exception as exc:
             self._runner_error = exc
         finally:
+            await self._stream.shutdown()
             self.exit()
 
     async def close(self) -> None:
+        await self._stream.shutdown()
         self.exit()
 
     def copy_to_clipboard(self, text: str) -> None:
@@ -869,9 +868,8 @@ class TextualTui(App[None]):
     def _is_streaming(self) -> bool:
         """Whether a streamed assistant turn is mid-flight and mutating the transcript.
 
-        The stream widget is mounted on the first token delta and cleared on
-        flush, so its presence (or a non-empty buffer, which the widget lags by a
-        frame) marks the window where Textual's selection bounds can go stale.
+        The active stream clears on flush, so selection bounds are stable before
+        the final Markdown rendering settles.
         """
 
         return self._stream.is_streaming
@@ -1619,6 +1617,11 @@ class TextualTui(App[None]):
 
     def flush_stream(self) -> None:
         self._stream.flush()
+
+    async def wait_for_stream_idle(self) -> None:
+        """Wait for scheduled native Markdown streaming work to finish."""
+
+        await self._stream.wait_until_idle()
 
     def _follow_tail_after_refresh(self) -> None:
         # Non-streamed lines (LineMessage) mount synchronously enough that one
