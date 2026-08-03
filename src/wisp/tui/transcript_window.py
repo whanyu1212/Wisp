@@ -65,7 +65,10 @@ class TranscriptWindow[Entry]:
         if not added:
             return
         self._entries[0:0] = added
-        self._start += len(added)
+        self._start = min(
+            self._start + len(added),
+            max(0, len(self._entries) - self.capacity),
+        )
 
     def append(self, entries: Iterable[Entry], *, follow_tail: bool) -> None:
         added = list(entries)

@@ -38,6 +38,16 @@ def test_prepend_preserves_visible_entries() -> None:
     assert window.visible == (2, 3, 4)
 
 
+def test_prepend_clamps_an_underfilled_window() -> None:
+    window = TranscriptWindow[int](capacity=3, shift=1)
+
+    window.prepend((0, 1, 2))
+
+    assert window.visible == (0, 1, 2)
+    assert window.is_at_oldest
+    assert window.is_at_latest
+
+
 def test_append_only_moves_window_for_tail_following() -> None:
     window = TranscriptWindow[int](capacity=3, shift=1)
     window.replace(range(6))
