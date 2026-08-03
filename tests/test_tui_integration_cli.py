@@ -3472,6 +3472,47 @@ def test_textual_history_window_shifts_without_evicting_live_output() -> None:
     assert initial_count == older_count == newest_count == 302
 
 
+def test_textual_history_window_shift_rearms_durable_paging() -> None:
+    async def scenario() -> int:
+        app_instance, renderer = create_textual_tui()
+        requests = 0
+
+        async def request_history_page() -> None:
+            nonlocal requests
+            requests += 1
+
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            renderer.replace_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
+                    for index in range(300)
+                ),
+                session_label="Windowed session",
+            )
+            renderer.prepend_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="user", content=f"older {index}")
+                    for index in range(75)
+                )
+            )
+            renderer.set_history_page_request_hook(request_history_page)
+            renderer.history_page_loaded(has_more=True)
+            await pilot.pause()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+
+            transcript.scroll_home(animate=False)
+            await pilot.pause()
+            await pilot.pause()
+            transcript.scroll_to(y=1, animate=False)
+            await pilot.pause()
+            transcript.scroll_home(animate=False)
+            await pilot.pause()
+            return requests
+
+    assert anyio.run(scenario) == 1
+
+
 def test_textual_streaming_keeps_the_growing_tail_visible() -> None:
     # Regression: an expanding streamed Markdown widget must stay pinned to the
     # bottom. The bug was measuring "near the bottom?" as the content grew — the

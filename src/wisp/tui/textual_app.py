@@ -315,7 +315,6 @@ class TextualTui(App[None]):
         self._on_submit: Callable[[], None] | None = None
         self._history_page_request_hook: Callable[[], Awaitable[None]] | None = None
         self._history_window_older_hook: Callable[[], bool] | None = None
-        self._history_window_newer_hook: Callable[[], bool] | None = None
         self._history_window_latest_hook: Callable[[], bool] | None = None
         self._history_marker: Widget | None = None
         self._prepending_history = False
@@ -522,8 +521,8 @@ class TextualTui(App[None]):
 
     def on_transcript_follow_changed(self, event: Transcript.FollowChanged) -> None:
         if event.following:
-            shift_newer = self._history_window_newer_hook
-            if shift_newer is not None and shift_newer():
+            show_latest = self._history_window_latest_hook
+            if show_latest is not None and show_latest():
                 return
             self._clear_unseen_output()
             self._stream.resume_if_deferred()
@@ -532,6 +531,9 @@ class TextualTui(App[None]):
         event.stop()
         shift_older = self._history_window_older_hook
         if shift_older is not None and shift_older():
+            transcript = self._transcript
+            if transcript is not None:
+                transcript.history_page_request_failed()
             return
         hook = self._history_page_request_hook
         if hook is None:
@@ -1245,13 +1247,11 @@ class TextualTui(App[None]):
         self,
         *,
         shift_older: Callable[[], bool],
-        shift_newer: Callable[[], bool],
         show_latest: Callable[[], bool],
     ) -> None:
         """Install renderer-owned history-window navigation callbacks."""
 
         self._history_window_older_hook = shift_older
-        self._history_window_newer_hook = shift_newer
         self._history_window_latest_hook = show_latest
 
     # --- Main-screen heartbeat (opencode-style) ---

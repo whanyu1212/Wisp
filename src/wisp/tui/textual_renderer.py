@@ -123,7 +123,6 @@ class TextualTuiRenderer:
         self._next_history_entry_id = 0
         app.set_history_window_hooks(
             shift_older=self._shift_history_older,
-            shift_newer=self._shift_history_newer,
             show_latest=self._show_latest_history,
         )
         self._progress_active = False
@@ -350,16 +349,6 @@ class TextualTuiRenderer:
         if not self._history_window.show_latest():
             return False
         self._reconcile_history()
-        return True
-
-    def _shift_history_newer(self) -> bool:
-        if not self._history_window.shift_newer():
-            return False
-        self.app.begin_history_render()
-        try:
-            self._reconcile_history()
-        finally:
-            self.app.finish_history_render()
         return True
 
     def _reconcile_history(self) -> None:
