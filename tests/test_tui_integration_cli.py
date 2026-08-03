@@ -3445,7 +3445,9 @@ def test_textual_history_window_shifts_without_evicting_live_output() -> None:
             transcript = app_instance.query_one("#transcript", Transcript)
             initial_count = sum(isinstance(child, LineMessage) for child in transcript.children)
 
-            app_instance.action_scroll_transcript_home()
+            # Normal wheel/PageUp edge navigation still shifts retained entries
+            # after the durable page cursor has been exhausted.
+            transcript.scroll_home(animate=False)
             await pilot.pause()
             await pilot.pause()
             older_count = sum(isinstance(child, LineMessage) for child in transcript.children)

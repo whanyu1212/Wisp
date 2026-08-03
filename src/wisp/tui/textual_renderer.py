@@ -363,20 +363,28 @@ class TextualTuiRenderer:
 
         visible = self._history_window.visible
         visible_ids = {item.id for item in visible}
+        self.app.set_history_window_available(has_older=not self._history_window.is_at_oldest)
         for item_id, widget in tuple(self._history_widgets.items()):
             if item_id not in visible_ids:
-                if any(
-                    other_id in visible_ids and other_widget is widget
+                aliases = [
+                    other_id
                     for other_id, other_widget in self._history_widgets.items()
-                    if other_id != item_id
-                ):
-                    del self._history_widgets[item_id]
+                    if other_widget is widget
+                ]
+                if any(other_id in visible_ids for other_id in aliases):
                     continue
+                if len(aliases) > 1:
+                    if item_id != min(aliases):
+                        del self._history_widgets[item_id]
+                        continue
+                    for alias in aliases:
+                        del self._history_widgets[alias]
+                else:
+                    del self._history_widgets[item_id]
                 item = next(item for item in self._history_window.entries if item.id == item_id)
                 if isinstance(item.entry, HistoricalToolCard):
                     self.app.forget_historical_tool_card(item.entry.card_id)
                 widget.remove()
-                del self._history_widgets[item_id]
 
         for index, item in enumerate(visible):
             if item.id in self._history_widgets:

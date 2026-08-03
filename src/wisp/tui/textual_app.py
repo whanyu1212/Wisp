@@ -536,8 +536,8 @@ class TextualTui(App[None]):
                 transcript.history_page_request_failed()
             return
         hook = self._history_page_request_hook
-        if hook is None:
-            transcript = self._transcript
+        transcript = self._transcript
+        if hook is None or transcript is None or not transcript.has_more_history:
             if transcript is not None:
                 transcript.history_page_request_failed()
             return
@@ -1531,6 +1531,12 @@ class TextualTui(App[None]):
         """Return a mounted historical card for a page-boundary tool exchange."""
 
         return self._historical_tool_cards.get(card_id)
+
+    def set_history_window_available(self, *, has_older: bool) -> None:
+        """Expose retained older entries to transcript edge navigation."""
+
+        if self._transcript is not None:
+            self._transcript.history_window_available(has_older=has_older)
 
     def begin_history_render(self) -> None:
         """Track one renderer history batch until all of its widgets mount."""
