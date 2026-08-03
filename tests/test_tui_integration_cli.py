@@ -1751,6 +1751,41 @@ def test_textual_tool_card_narrow_unequal_diff_keeps_tail_tokens_visible() -> No
     assert "…" in text
 
 
+def test_textual_tool_card_narrow_unequal_diff_keeps_prefix_tokens_visible() -> None:
+    """Unequal replacements crop around a linear prefix/middle focus anchor."""
+
+    suffix = "unchanged-" * 8
+
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(28, 20)) as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="edit",
+                    arguments={
+                        "path": "src/unequal-prefix.py",
+                        "edits": [
+                            {
+                                "oldText": f"OLD-{suffix}\n",
+                                "newText": f"NEW-{suffix}\nextra\n",
+                            }
+                        ],
+                    },
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(call_id="c1", name="edit", output="Applied", is_error=False)
+            )
+            await pilot.pause()
+            return _first_tool_card(app_instance).render().plain
+
+    text = anyio.run(scenario)
+    assert "OLD-" in text
+    assert "NEW-" in text
+
+
 def test_textual_tool_card_narrow_write_keeps_source_before_newline_note() -> None:
     """Terminator annotations never displace changed source at compact widths."""
 

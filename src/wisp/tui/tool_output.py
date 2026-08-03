@@ -567,6 +567,7 @@ def _build_diff_presentation(
         multi=multi,
         intra_line_limit=None,
         intra_line_max_total_chars=_INTRA_LINE_MAX_PRESENTATION_CHARS,
+        fallback_focus=True,
     )
     if built is None:
         return None
@@ -609,6 +610,7 @@ def _build_diff_data(
     multi: bool,
     intra_line_limit: int | None = _DIFF_PREVIEW_LINES,
     intra_line_max_total_chars: int | None = None,
+    fallback_focus: bool = False,
 ) -> tuple[list[str], list[int], dict[int, list[tuple[int, int]]]] | None:
     """Run the guarded unified diff and return bounded literal emphasis ranges."""
 
@@ -625,6 +627,7 @@ def _build_diff_data(
             note_lengths,
             limit=len(diff_lines) if intra_line_limit is None else intra_line_limit,
             max_total_chars=intra_line_max_total_chars,
+            fallback_focus=fallback_focus,
         ),
     )
 
@@ -1019,6 +1022,101 @@ def _equal_length_replace_groups(
     return groups
 
 
+def _replacement_groups(
+    diff_lines: Sequence[str], *, limit: int
+) -> tuple[tuple[int, int, int, int], ...]:
+    """Contiguous ``-`` then ``+`` runs in the visible unified-diff window.
+
+    Unlike :func:`_equal_length_replace_groups`, this retains unequal runs for
+    the structured card's cheap crop-anchor fallback. A run crossing ``limit``
+    is excluded rather than partially interpreted, matching the existing
+    conservative treatment of incomplete equal-length groups.
+    """
+
+    groups: list[tuple[int, int, int, int]] = []
+    i = 0
+    n = min(limit, len(diff_lines))
+    while i < n:
+        if not diff_lines[i].startswith("-"):
+            i += 1
+            continue
+        minus_start = i
+        while i < n and diff_lines[i].startswith("-"):
+            i += 1
+        if i == n and i < len(diff_lines) and diff_lines[i].startswith("-"):
+            continue
+        minus_count = i - minus_start
+        plus_start = i
+        while i < n and diff_lines[i].startswith("+"):
+            i += 1
+        plus_count = i - plus_start
+        if not plus_count:
+            continue
+        if i == n and i < len(diff_lines) and diff_lines[i].startswith("+"):
+            continue
+        groups.append((minus_start, minus_count, plus_start, plus_count))
+    return tuple(groups)
+
+
+def _line_difference_ranges(old: str, new: str) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Linear, literal crop anchors for one changed old/new source-line pair."""
+
+    prefix = 0
+    shared = min(len(old), len(new))
+    while prefix < shared and old[prefix] == new[prefix]:
+        prefix += 1
+    suffix = 0
+    while (
+        suffix < len(old) - prefix
+        and suffix < len(new) - prefix
+        and old[len(old) - suffix - 1] == new[len(new) - suffix - 1]
+    ):
+        suffix += 1
+    return (prefix, len(old) - suffix), (prefix, len(new) - suffix)
+
+
+def _add_fallback_focus_ranges(
+    ranges_by_line: dict[int, list[tuple[int, int]]],
+    diff_lines: Sequence[str],
+    note_lengths: Sequence[int],
+    *,
+    limit: int,
+) -> None:
+    """Anchor unhighlighted structured replacement rows on their changed text.
+
+    The precise intra-line matcher may reject a group for its explicit size
+    guard, and unequal runs intentionally never enter that matcher. This linear
+    fallback has no ``SequenceMatcher`` cost and only fills missing ranges, so
+    successful exact highlighting remains authoritative while narrow cards can
+    still crop around prefix/middle changes instead of showing matching tails.
+    """
+
+    for minus_start, minus_count, plus_start, plus_count in _replacement_groups(
+        diff_lines, limit=limit
+    ):
+        paired = min(minus_count, plus_count)
+        for offset in range(paired):
+            minus_index = minus_start + offset
+            plus_index = plus_start + offset
+            old = _line_content_without_note(diff_lines[minus_index], note_lengths[minus_index])
+            new = _line_content_without_note(diff_lines[plus_index], note_lengths[plus_index])
+            old_range, new_range = _line_difference_ranges(old, new)
+            if old_range[1] > old_range[0] and minus_index not in ranges_by_line:
+                ranges_by_line[minus_index] = [old_range]
+            if new_range[1] > new_range[0] and plus_index not in ranges_by_line:
+                ranges_by_line[plus_index] = [new_range]
+        for index in range(minus_start + paired, minus_start + minus_count):
+            if index not in ranges_by_line:
+                text = _line_content_without_note(diff_lines[index], note_lengths[index])
+                if text:
+                    ranges_by_line[index] = [(0, len(text))]
+        for index in range(plus_start + paired, plus_start + plus_count):
+            if index not in ranges_by_line:
+                text = _line_content_without_note(diff_lines[index], note_lengths[index])
+                if text:
+                    ranges_by_line[index] = [(0, len(text))]
+
+
 def _intra_line_ranges_for_group(
     old_lines: Sequence[str], new_lines: Sequence[str]
 ) -> tuple[list[list[tuple[int, int]]], list[list[tuple[int, int]]]] | None:
@@ -1122,6 +1220,7 @@ def _intra_line_highlight_map(
     *,
     limit: int = _DIFF_PREVIEW_LINES,
     max_total_chars: int | None = None,
+    fallback_focus: bool = False,
 ) -> dict[int, list[tuple[int, int]]]:
     """Word/char-level highlight ranges, keyed by index into ``diff_lines``.
 
@@ -1131,7 +1230,9 @@ def _intra_line_highlight_map(
     a separate aggregate character budget. ``max_total_chars`` bounds the
     combined joined character input
     across those groups, keeping wider card presentation from multiplying
-    ``SequenceMatcher`` work.
+    ``SequenceMatcher`` work. Structured cards also opt into ``fallback_focus``:
+    a linear common-prefix/suffix pass supplies crop anchors for replacement
+    rows the guarded matcher intentionally leaves unhighlighted.
     :func:`_equal_length_replace_groups` is given the FULL ``diff_lines``
     plus the window's ``limit``, not a pre-sliced list — a group whose
     ``+``-run is merely cut off exactly at the window boundary can look
@@ -1205,6 +1306,8 @@ def _intra_line_highlight_map(
                 highlight_map[minus_start + k] = old_ranges[k]
             if new_ranges[k]:
                 highlight_map[plus_start + k] = new_ranges[k]
+    if fallback_focus:
+        _add_fallback_focus_ranges(highlight_map, diff_lines, note_lengths, limit=limit)
     return highlight_map
 
 
