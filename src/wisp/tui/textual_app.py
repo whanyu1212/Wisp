@@ -522,8 +522,8 @@ class TextualTui(App[None]):
     def on_transcript_follow_changed(self, event: Transcript.FollowChanged) -> None:
         if event.following:
             show_latest = self._history_window_latest_hook
-            if show_latest is not None and show_latest():
-                return
+            if show_latest is not None:
+                show_latest()
             self._clear_unseen_output()
             self._stream.resume_if_deferred()
 
@@ -1526,6 +1526,11 @@ class TextualTui(App[None]):
 
         self._historical_tool_cards.pop(card_id, None)
         self._tool_cards.pop(card_id, None)
+
+    def historical_tool_card(self, card_id: str) -> ToolCard | None:
+        """Return a mounted historical card for a page-boundary tool exchange."""
+
+        return self._historical_tool_cards.get(card_id)
 
     def begin_history_render(self) -> None:
         """Track one renderer history batch until all of its widgets mount."""

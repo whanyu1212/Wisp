@@ -304,6 +304,12 @@ class TextualTuiRenderer:
         self.app.begin_history_render()
         try:
             self._history_window.prepend(retained)
+            # A durable page arrived because the reader is already at the top.
+            # Reveal its leading slice now so an exhausted page cursor never hides
+            # fetched entries behind Transcript's durable-page request gate.
+            transcript = self.app.transcript
+            if transcript is not None and transcript.scroll_y == 0:
+                self._history_window.shift_older()
             self._reconcile_history()
         finally:
             self.app.finish_history_render()
@@ -349,6 +355,7 @@ class TextualTuiRenderer:
         if not self._history_window.show_latest():
             return False
         self._reconcile_history()
+        self.app.follow_transcript_tail_after_refresh()
         return True
 
     def _reconcile_history(self) -> None:
@@ -358,6 +365,13 @@ class TextualTuiRenderer:
         visible_ids = {item.id for item in visible}
         for item_id, widget in tuple(self._history_widgets.items()):
             if item_id not in visible_ids:
+                if any(
+                    other_id in visible_ids and other_widget is widget
+                    for other_id, other_widget in self._history_widgets.items()
+                    if other_id != item_id
+                ):
+                    del self._history_widgets[item_id]
+                    continue
                 item = next(item for item in self._history_window.entries if item.id == item_id)
                 if isinstance(item.entry, HistoricalToolCard):
                     self.app.forget_historical_tool_card(item.entry.card_id)
@@ -421,7 +435,7 @@ class TextualTuiRenderer:
                     results.popleft()
                     if not results:
                         del self._historical_tool_results[tool_call_id]
-                    return None
+                    return self.app.historical_tool_card(result_card_id)
 
         card = self.app.mount_tool_call(
             entry.card_id,
