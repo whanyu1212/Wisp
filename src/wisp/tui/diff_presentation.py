@@ -40,6 +40,9 @@ class DiffRow:
     old_line: int | None = None
     new_line: int | None = None
     emphasis_ranges: tuple[tuple[int, int], ...] = ()
+    # Omission rows report the source evidence they replace. A source row has
+    # these fields set only when a prior byte cap retained its prefix, so a
+    # tighter later cap can avoid double-counting that pending omission.
     hidden_rows: int = 0
     hidden_bytes: int = 0
 
@@ -330,20 +333,36 @@ def _apply_byte_limit(
         if remaining:
             clipped = _clip_to_bytes(row.text, remaining)
             if clipped:
-                visible.append(DiffVisibleRow(replace(row, text=clipped)))
                 shown_bytes = len(clipped.encode("utf-8"))
+                # A later selection may clip this retained prefix again. Keep
+                # enough metadata to recognize that the following omission
+                # already counts this partially shown source line, while still
+                # retaining its prefix bytes for a tighter future byte window.
+                partial = replace(
+                    row,
+                    text=clipped,
+                    hidden_rows=1,
+                    hidden_bytes=row_bytes - shown_bytes,
+                )
+                visible.append(
+                    DiffVisibleRow(
+                        partial,
+                        hidden_rows=partial.hidden_rows,
+                        hidden_bytes=partial.hidden_bytes,
+                    )
+                )
                 used += shown_bytes
         hidden_rows = sum(
-            (rest.hidden_rows if rest.row.kind is DiffRowKind.omission else int(rest.row.is_source))
+            rest.hidden_rows
+            if rest.row.kind is DiffRowKind.omission
+            else int(rest.row.is_source and not rest.row.hidden_rows)
             for rest in rows[index:]
         )
         hidden_bytes = (
             sum(
-                (
-                    rest.hidden_bytes
-                    if rest.row.kind is DiffRowKind.omission
-                    else len(rest.row.text.encode("utf-8"))
-                )
+                rest.hidden_bytes
+                if rest.row.kind is DiffRowKind.omission
+                else len(rest.row.text.encode("utf-8"))
                 for rest in rows[index:]
             )
             - shown_bytes

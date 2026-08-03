@@ -335,6 +335,7 @@ def _render_diff_visible_row(
         row.text,
         row.emphasis_ranges,
         width=source_width,
+        preserve_tail=row.kind in {DiffRowKind.addition, DiffRowKind.deletion},
     )
     style = _diff_row_style(row)
     return (
@@ -360,6 +361,7 @@ def _crop_diff_source(
     ranges: tuple[tuple[int, int], ...],
     *,
     width: int,
+    preserve_tail: bool,
 ) -> tuple[str, tuple[tuple[int, int], ...]]:
     """Crop a source row while keeping its emphasized evidence in view.
 
@@ -385,6 +387,11 @@ def _crop_diff_source(
         )
     )
     if not normalized:
+        # Unequal replacements intentionally skip intra-line matching. Their
+        # changed rows still need reviewable evidence on narrow terminals: use
+        # a literal suffix window rather than showing only a shared prefix.
+        if preserve_tail and width >= 2:
+            return f"…{_take_cell_suffix(text, width - 1)}", ()
         return _truncate_to_cell_width(text, width), ()
 
     focus_start = normalized[0][0]

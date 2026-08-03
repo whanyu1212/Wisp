@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from wisp.tui.diff_presentation import DiffOperation, DiffRow, DiffRowKind, select_diff_rows
+from wisp.tui.diff_presentation import (
+    DIFF_EXPANDED_BYTES,
+    DiffOperation,
+    DiffRow,
+    DiffRowKind,
+    select_diff_rows,
+)
 from wisp.tui.tool_output import build_edit_diff_presentation, build_write_diff_presentation
 
 
@@ -91,6 +97,23 @@ def test_retained_expanded_omissions_survive_later_collapsed_byte_clipping() -> 
     # byte clip must aggregate that metadata rather than report only retained rows.
     assert final_omission.hidden_rows == 500
     assert final_omission.hidden_bytes > total_bytes - shown_bytes
+
+
+def test_partial_retained_source_does_not_double_count_its_omission() -> None:
+    presentation = build_write_diff_presentation(
+        None,
+        {"path": "large.py", "content": "x" * (DIFF_EXPANDED_BYTES + 1_000)},
+        created=True,
+    )
+
+    assert presentation is not None
+    collapsed = presentation.visible_rows(expanded=False)
+    final_omission = collapsed[-1]
+
+    assert final_omission.row.kind is DiffRowKind.omission
+    # The retained expanded prefix and its later omission describe one source
+    # line, not two independent hidden lines.
+    assert final_omission.hidden_rows == 1
 
 
 def test_create_presentation_has_only_addition_rows() -> None:

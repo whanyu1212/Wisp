@@ -1715,6 +1715,42 @@ def test_textual_tool_card_narrow_multiline_diff_keeps_tail_tokens_visible() -> 
     assert "NEW-0" in text
 
 
+def test_textual_tool_card_narrow_unequal_diff_keeps_tail_tokens_visible() -> None:
+    """Changed rows without intra-line ranges use a suffix review window."""
+
+    prefix = "unchanged-" * 8
+
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(28, 20)) as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="edit",
+                    arguments={
+                        "path": "src/unequal-tail.py",
+                        "edits": [
+                            {
+                                "oldText": f"{prefix}OLD\n",
+                                "newText": f"{prefix}NEW\nextra\n",
+                            }
+                        ],
+                    },
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(call_id="c1", name="edit", output="Applied", is_error=False)
+            )
+            await pilot.pause()
+            return _first_tool_card(app_instance).render().plain
+
+    text = anyio.run(scenario)
+    assert "OLD" in text
+    assert "NEW" in text
+    assert "…" in text
+
+
 def test_textual_tool_card_narrow_full_line_replace_marks_hidden_tail() -> None:
     """A cropped full-line replacement must explicitly mark hidden changed text."""
 
