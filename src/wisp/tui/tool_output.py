@@ -545,7 +545,7 @@ def _render_diff_content(
     built = _build_diff_data(changed, multi=multi)
     if built is None:
         return None
-    diff_lines, intra_line_ranges = built
+    diff_lines, _note_lengths, intra_line_ranges = built
     diff = _content_from_diff_lines(diff_lines, intra_line_ranges)
     if isinstance(path, str) and path:
         return Content.styled(path, _DIFF_META_STYLE) + Content("\n") + diff
@@ -570,9 +570,10 @@ def _build_diff_presentation(
     )
     if built is None:
         return None
-    diff_lines, intra_line_ranges = built
+    diff_lines, note_lengths, intra_line_ranges = built
     rows = _structured_diff_rows(
         diff_lines,
+        note_lengths,
         intra_line_ranges,
         show_line_numbers=show_line_numbers,
     )
@@ -608,7 +609,7 @@ def _build_diff_data(
     multi: bool,
     intra_line_limit: int | None = _DIFF_PREVIEW_LINES,
     intra_line_max_total_chars: int | None = None,
-) -> tuple[list[str], dict[int, list[tuple[int, int]]]] | None:
+) -> tuple[list[str], list[int], dict[int, list[tuple[int, int]]]] | None:
     """Run the guarded unified diff and return bounded literal emphasis ranges."""
 
     if _edit_input_too_large([(old, new) for _, old, new in changed]):
@@ -616,11 +617,15 @@ def _build_diff_data(
     diff_lines, note_lengths = _unified_diff_lines(changed, multi=multi)
     if not diff_lines:
         return None
-    return diff_lines, _intra_line_highlight_map(
+    return (
         diff_lines,
         note_lengths,
-        limit=len(diff_lines) if intra_line_limit is None else intra_line_limit,
-        max_total_chars=intra_line_max_total_chars,
+        _intra_line_highlight_map(
+            diff_lines,
+            note_lengths,
+            limit=len(diff_lines) if intra_line_limit is None else intra_line_limit,
+            max_total_chars=intra_line_max_total_chars,
+        ),
     )
 
 
@@ -632,6 +637,7 @@ _HUNK_HEADER = re.compile(
 
 def _structured_diff_rows(
     diff_lines: Sequence[str],
+    note_lengths: Sequence[int],
     intra_line_ranges: Mapping[int, Sequence[tuple[int, int]]],
     *,
     show_line_numbers: bool,
@@ -670,6 +676,7 @@ def _structured_diff_rows(
                     text,
                     old_line=old_line if show_line_numbers else None,
                     emphasis_ranges=ranges,
+                    terminator_note_length=note_lengths[index],
                 )
             )
             if old_line is not None:
@@ -681,6 +688,7 @@ def _structured_diff_rows(
                     text,
                     new_line=new_line if show_line_numbers else None,
                     emphasis_ranges=ranges,
+                    terminator_note_length=note_lengths[index],
                 )
             )
             if new_line is not None:

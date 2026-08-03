@@ -99,6 +99,23 @@ def test_retained_expanded_omissions_survive_later_collapsed_byte_clipping() -> 
     assert final_omission.hidden_bytes > total_bytes - shown_bytes
 
 
+def test_nested_selection_does_not_double_count_pending_partial_source() -> None:
+    rows = (
+        DiffRow(DiffRowKind.deletion, "shown"),
+        DiffRow(DiffRowKind.deletion, "prefix", hidden_rows=1, hidden_bytes=10),
+        DiffRow(
+            DiffRowKind.omission, "… 1 line hidden, 10 bytes hidden", hidden_rows=1, hidden_bytes=10
+        ),
+    )
+
+    visible = select_diff_rows(rows, max_rows=1, max_bytes=100)
+    omission = visible[-1]
+
+    assert omission.row.kind is DiffRowKind.omission
+    assert omission.hidden_rows == 1
+    assert omission.hidden_bytes == len(b"prefix") + 10
+
+
 def test_partial_retained_source_does_not_double_count_its_omission() -> None:
     presentation = build_write_diff_presentation(
         None,

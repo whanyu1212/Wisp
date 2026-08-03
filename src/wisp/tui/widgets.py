@@ -331,12 +331,7 @@ def _render_diff_visible_row(
     else:
         gutter = f"{marker} │ "
     source_width = max(1, width - cell_len(gutter))
-    source, emphasis_ranges = _crop_diff_source(
-        row.text,
-        row.emphasis_ranges,
-        width=source_width,
-        preserve_tail=row.kind in {DiffRowKind.addition, DiffRowKind.deletion},
-    )
+    source, emphasis_ranges = _crop_diff_row_source(row, width=source_width)
     style = _diff_row_style(row)
     return (
         Content.styled("  " + gutter, style)
@@ -346,6 +341,37 @@ def _render_diff_visible_row(
             style,
         )
     )
+
+
+def _crop_diff_row_source(
+    row: DiffRow,
+    *,
+    width: int,
+) -> tuple[str, tuple[tuple[int, int], ...]]:
+    """Crop literal source before its known synthetic terminator annotation."""
+
+    note_length = min(max(0, row.terminator_note_length), len(row.text))
+    source_text = row.text[:-note_length] if note_length else row.text
+    note = row.text[-note_length:] if note_length else ""
+    # Favor review evidence over an annotation when the gutter leaves too few
+    # cells to show a useful changed token. At wider sizes, reserve the note's
+    # exact known width and append it after the independently cropped literal.
+    note_width = cell_len(note)
+    source_width = width - note_width
+    show_note = bool(note) and source_width >= 4
+    cropped, ranges = _crop_diff_source(
+        source_text,
+        row.emphasis_ranges,
+        width=source_width if show_note else width,
+        preserve_tail=row.kind in {DiffRowKind.addition, DiffRowKind.deletion},
+    )
+    if show_note:
+        return f"{cropped}{note}", ranges
+    if note and cell_len(cropped) < width:
+        # The annotation did not fit, so make the omitted metadata explicit
+        # without allowing it to displace the source evidence.
+        return f"{cropped}…", ranges
+    return cropped, ranges
 
 
 def _diff_row_style(row: DiffRow) -> str:

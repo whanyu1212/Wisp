@@ -1751,6 +1751,46 @@ def test_textual_tool_card_narrow_unequal_diff_keeps_tail_tokens_visible() -> No
     assert "…" in text
 
 
+def test_textual_tool_card_narrow_write_keeps_source_before_newline_note() -> None:
+    """Terminator annotations never displace changed source at compact widths."""
+
+    old = "x" * 12_000 + "OLD"
+    new = "x" * 12_000 + "NEW"
+
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(28, 20)) as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="write",
+                    arguments={"path": "src/no-newline.py", "content": new},
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="write",
+                    output="Wrote replacement",
+                    is_error=False,
+                    before_text=old,
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            return card.render().plain
+
+    text = anyio.run(scenario)
+    assert "OLD" in text
+    assert "NEW" in text
+    assert "no newline" not in text
+
+
 def test_textual_tool_card_narrow_full_line_replace_marks_hidden_tail() -> None:
     """A cropped full-line replacement must explicitly mark hidden changed text."""
 
@@ -1780,8 +1820,8 @@ def test_textual_tool_card_narrow_full_line_replace_marks_hidden_tail() -> None:
             return rows[0], rows[1]
 
     deletion, addition = anyio.run(scenario)
-    assert deletion.endswith("…")
-    assert addition.endswith("…")
+    assert "…" in deletion
+    assert "…" in addition
 
 
 def test_textual_tool_card_write_renders_colored_diff() -> None:

@@ -40,6 +40,9 @@ class DiffRow:
     old_line: int | None = None
     new_line: int | None = None
     emphasis_ranges: tuple[tuple[int, int], ...] = ()
+    # Exact known-length synthetic suffix from a noteworthy line terminator.
+    # It preserves literal-source boundaries without pattern-matching content.
+    terminator_note_length: int = 0
     # Omission rows report the source evidence they replace. A source row has
     # these fields set only when a prior byte cap retained its prefix, so a
     # tighter later cap can avoid double-counting that pending omission.
@@ -283,6 +286,7 @@ def _with_omission_rows(
     visible: list[DiffVisibleRow] = []
     hidden_rows = 0
     hidden_bytes = 0
+    pending_partial_bytes = 0
 
     def flush_hidden() -> None:
         nonlocal hidden_rows, hidden_bytes
@@ -294,17 +298,42 @@ def _with_omission_rows(
     for index, row in enumerate(rows):
         if index in included:
             flush_hidden()
-            visible.append(
-                DiffVisibleRow(
-                    row,
-                    hidden_rows=row.hidden_rows,
-                    hidden_bytes=row.hidden_bytes,
+            if row.kind is DiffRowKind.omission and pending_partial_bytes:
+                # A prior expanded byte cap already counted the pending partial
+                # source row in this omission. Its retained prefix becomes
+                # hidden only at this narrower selection, so merge those bytes
+                # without adding the same source line a second time.
+                visible.append(
+                    DiffVisibleRow.omission(
+                        row.hidden_rows,
+                        row.hidden_bytes + pending_partial_bytes,
+                    )
                 )
-            )
+                pending_partial_bytes = 0
+            else:
+                if pending_partial_bytes:
+                    # Defensive fallback for a synthetic row sequence lacking
+                    # the paired omission produced by _apply_byte_limit.
+                    visible.append(DiffVisibleRow.omission(0, pending_partial_bytes))
+                    pending_partial_bytes = 0
+                visible.append(
+                    DiffVisibleRow(
+                        row,
+                        hidden_rows=row.hidden_rows,
+                        hidden_bytes=row.hidden_bytes,
+                    )
+                )
         elif row.is_source:
-            hidden_rows += 1
-            hidden_bytes += len(row.text.encode("utf-8"))
+            if row.hidden_rows:
+                # The paired omission already owns this line count; only this
+                # retained prefix needs carrying into that omission's byte total.
+                pending_partial_bytes += len(row.text.encode("utf-8"))
+            else:
+                hidden_rows += 1
+                hidden_bytes += len(row.text.encode("utf-8"))
     flush_hidden()
+    if pending_partial_bytes:
+        visible.append(DiffVisibleRow.omission(0, pending_partial_bytes))
     return tuple(visible)
 
 
