@@ -12,7 +12,6 @@ def test_tui_long_session_scenario_reports_current_widget_growth() -> None:
             message_count=12,
             page_size=4,
             stream_chunks=2,
-            process_seconds=0.1,
         ),
     )
 

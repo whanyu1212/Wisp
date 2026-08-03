@@ -26,7 +26,7 @@ from wisp.tui.history import history_entries_from_rpc_messages
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
 from wisp.tui.widgets import Transcript
 
-_MINIMUM_WORKER_SECONDS = 1.0
+_WORKER_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,6 @@ class ScenarioConfig:
     message_count: int = 2_000
     page_size: int = 100
     stream_chunks: int = 20
-    process_seconds: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -71,13 +70,8 @@ def _environment() -> dict[str, str]:
     }
 
 
-def _cpu_command(seconds: float) -> str:
-    program = (
-        "import time\n"
-        f"end = time.monotonic() + {seconds}\n"
-        "while time.monotonic() < end:\n"
-        "    pass\n"
-    )
+def _cpu_command() -> str:
+    program = "import time\nwhile True:\n    pass\n"
     arguments = [sys.executable, "-c", program]
     return subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
 
@@ -150,9 +144,6 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
 
     if config.message_count < 1 or config.page_size < 1 or config.stream_chunks < 1:
         raise ValueError("message_count, page_size, and stream_chunks must be positive")
-    if config.process_seconds <= 0:
-        raise ValueError("process_seconds must be positive")
-
     with tempfile.TemporaryDirectory(prefix="wisp-tui-benchmark-") as temporary_directory:
         root = Path(temporary_directory)
         session = JsonlSessionStore(root).create()
@@ -191,9 +182,10 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     )
                     mounted_counts.append(len(transcript.children))
 
-                worker_seconds = max(config.process_seconds, _MINIMUM_WORKER_SECONDS)
-                command = _cpu_command(worker_seconds)
-                process_id = await supervisor.start(command, cwd=root, timeout=worker_seconds + 5)
+                command = _cpu_command()
+                process_id = await supervisor.start(
+                    command, cwd=root, timeout=_WORKER_TIMEOUT_SECONDS
+                )
                 process_update = await supervisor.poll(process_id)
                 if process_update.state != "running":
                     raise RuntimeError(
@@ -211,6 +203,9 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 transcript.scroll_end(animate=False)
                 await _wait_for(pilot, lambda: transcript.is_following)
                 scroll_while_process_ms = _milliseconds(started)
+                update = await supervisor.cancel(process_id)
+                process_id = None
+                process_state = update.state
 
                 stream_chunks = tuple(
                     f"## Stream section {index}\n\n- benchmark item {index}"
@@ -239,9 +234,6 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 final_following = transcript.is_following
                 final_unseen_output_count = len(app._unseen_output)
 
-                update = await supervisor.cancel(process_id)
-                process_id = None
-                process_state = update.state
         finally:
             if process_id is not None:
                 await supervisor.cancel(process_id)
@@ -271,7 +263,6 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--messages", type=int, default=ScenarioConfig.message_count)
     parser.add_argument("--page-size", type=int, default=ScenarioConfig.page_size)
     parser.add_argument("--stream-chunks", type=int, default=ScenarioConfig.stream_chunks)
-    parser.add_argument("--process-seconds", type=float, default=ScenarioConfig.process_seconds)
     parser.add_argument("--output", type=Path)
     return parser.parse_args(arguments)
 
@@ -283,7 +274,6 @@ async def _main(arguments: Sequence[str] | None = None) -> None:
             message_count=parsed.messages,
             page_size=parsed.page_size,
             stream_chunks=parsed.stream_chunks,
-            process_seconds=parsed.process_seconds,
         )
     )
     print(report.to_json())
