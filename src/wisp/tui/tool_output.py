@@ -449,6 +449,7 @@ def build_edit_diff_presentation(
         multi=multi,
         path=path,
         operation=DiffOperation.modify,
+        show_line_numbers=False,
     )
 
 
@@ -479,7 +480,13 @@ def build_write_diff_presentation(
     if spec is None:
         return None
     changed, path, operation = spec
-    return _build_diff_presentation(changed, multi=False, path=path, operation=operation)
+    return _build_diff_presentation(
+        changed,
+        multi=False,
+        path=path,
+        operation=operation,
+        show_line_numbers=True,
+    )
 
 
 def _edit_diff_spec(
@@ -541,6 +548,7 @@ def _build_diff_presentation(
     multi: bool,
     path: object,
     operation: DiffOperation,
+    show_line_numbers: bool,
 ) -> DiffPresentation | None:
     """Build literal structured rows from the same guarded unified diff input."""
 
@@ -548,7 +556,11 @@ def _build_diff_presentation(
     if built is None:
         return None
     diff_lines, intra_line_ranges = built
-    rows = _structured_diff_rows(diff_lines, intra_line_ranges)
+    rows = _structured_diff_rows(
+        diff_lines,
+        intra_line_ranges,
+        show_line_numbers=show_line_numbers,
+    )
     if not rows:
         return None
     return DiffPresentation(
@@ -557,6 +569,7 @@ def _build_diff_presentation(
         additions=sum(row.kind is DiffRowKind.addition for row in rows),
         deletions=sum(row.kind is DiffRowKind.deletion for row in rows),
         rows=rows,
+        show_line_numbers=show_line_numbers,
     )
 
 
@@ -582,8 +595,10 @@ _HUNK_HEADER = re.compile(
 def _structured_diff_rows(
     diff_lines: Sequence[str],
     intra_line_ranges: Mapping[int, Sequence[tuple[int, int]]],
+    *,
+    show_line_numbers: bool,
 ) -> tuple[DiffRow, ...]:
-    """Attach line positions and semantic kinds without parsing source content."""
+    """Attach semantic rows without claiming unavailable file positions."""
 
     rows: list[DiffRow] = []
     old_line: int | None = None
@@ -598,7 +613,13 @@ def _structured_diff_rows(
                 new_count = int(header["new_count"] or "1")
                 old_line = old_start if old_count else None
                 new_line = new_start if new_count else None
-            rows.append(DiffRow(DiffRowKind.hunk, line))
+            # Edit calls carry only isolated old/new snippets, so difflib's
+            # coordinates are relative to that snippet rather than the file. Keep
+            # multi-edit labels (which do not match _HUNK_HEADER), but omit those
+            # synthetic coordinate headers until the tool protocol promotes real
+            # file offsets. Writes diff complete snapshots and retain coordinates.
+            if show_line_numbers or header is None:
+                rows.append(DiffRow(DiffRowKind.hunk, line))
             continue
 
         marker = line[:1]
@@ -606,18 +627,35 @@ def _structured_diff_rows(
         ranges = tuple(intra_line_ranges.get(index, ()))
         if marker == "-":
             rows.append(
-                DiffRow(DiffRowKind.deletion, text, old_line=old_line, emphasis_ranges=ranges)
+                DiffRow(
+                    DiffRowKind.deletion,
+                    text,
+                    old_line=old_line if show_line_numbers else None,
+                    emphasis_ranges=ranges,
+                )
             )
             if old_line is not None:
                 old_line += 1
         elif marker == "+":
             rows.append(
-                DiffRow(DiffRowKind.addition, text, new_line=new_line, emphasis_ranges=ranges)
+                DiffRow(
+                    DiffRowKind.addition,
+                    text,
+                    new_line=new_line if show_line_numbers else None,
+                    emphasis_ranges=ranges,
+                )
             )
             if new_line is not None:
                 new_line += 1
         else:
-            rows.append(DiffRow(DiffRowKind.context, text, old_line, new_line))
+            rows.append(
+                DiffRow(
+                    DiffRowKind.context,
+                    text,
+                    old_line if show_line_numbers else None,
+                    new_line if show_line_numbers else None,
+                )
+            )
             if old_line is not None:
                 old_line += 1
             if new_line is not None:

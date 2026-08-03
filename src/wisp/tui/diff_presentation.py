@@ -104,6 +104,7 @@ class DiffPresentation:
     additions: int
     deletions: int
     rows: tuple[DiffRow, ...]
+    show_line_numbers: bool
 
     @property
     def file_marker(self) -> str:
@@ -310,15 +311,17 @@ def _apply_byte_limit(
                 shown_bytes = len(clipped.encode("utf-8"))
                 used += shown_bytes
         hidden_rows = sum(
-            1
+            (rest.hidden_rows if rest.row.kind is DiffRowKind.omission else int(rest.row.is_source))
             for rest in rows[index:]
-            if rest.row.kind in {DiffRowKind.context, DiffRowKind.addition, DiffRowKind.deletion}
         )
         hidden_bytes = (
             sum(
-                len(rest.row.text.encode("utf-8"))
+                (
+                    rest.hidden_bytes
+                    if rest.row.kind is DiffRowKind.omission
+                    else len(rest.row.text.encode("utf-8"))
+                )
                 for rest in rows[index:]
-                if rest.row.kind is not DiffRowKind.omission
             )
             - shown_bytes
         )

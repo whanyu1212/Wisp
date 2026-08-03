@@ -291,11 +291,20 @@ def _render_diff_presentation(
     )
     content = Content("  ") + header
     for visible_row in presentation.visible_rows(expanded=expanded):
-        content += Content("\n") + _render_diff_visible_row(visible_row, width=inner_width)
+        content += Content("\n") + _render_diff_visible_row(
+            visible_row,
+            width=inner_width,
+            show_line_numbers=presentation.show_line_numbers,
+        )
     return content
 
 
-def _render_diff_visible_row(visible_row: DiffVisibleRow, *, width: int) -> Content:
+def _render_diff_visible_row(
+    visible_row: DiffVisibleRow,
+    *,
+    width: int,
+    show_line_numbers: bool,
+) -> Content:
     """Render one selected row, filling changed backgrounds through the gutter."""
 
     row = visible_row.row
@@ -315,9 +324,12 @@ def _render_diff_visible_row(visible_row: DiffVisibleRow, *, width: int) -> Cont
         DiffRowKind.addition: "+",
         DiffRowKind.deletion: "-",
     }[row.kind]
-    old_line = "" if row.old_line is None else str(row.old_line)
-    new_line = "" if row.new_line is None else str(row.new_line)
-    gutter = f"{old_line:>4} {new_line:>4} {marker} │ "
+    if show_line_numbers:
+        old_line = "" if row.old_line is None else str(row.old_line)
+        new_line = "" if row.new_line is None else str(row.new_line)
+        gutter = f"{old_line:>4} {new_line:>4} {marker} │ "
+    else:
+        gutter = f"{marker} │ "
     source_width = max(1, width - cell_len(gutter))
     source = _truncate_to_cell_width(row.text, source_width)
     style = _diff_row_style(row)

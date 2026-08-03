@@ -1105,11 +1105,12 @@ def test_render_tool_result_routes_successful_edit_to_diff() -> None:
     assert isinstance(presentation, DiffPresentation)
     assert presentation.path == "src/foo.py"
     assert presentation.additions == presentation.deletions == 1
+    assert presentation.show_line_numbers is False
     assert [row.kind for row in presentation.rows] == [
-        DiffRowKind.hunk,
         DiffRowKind.deletion,
         DiffRowKind.addition,
     ]
+    assert all(row.old_line is None and row.new_line is None for row in presentation.rows)
 
 
 def test_render_tool_result_edit_failure_uses_error_not_diff() -> None:

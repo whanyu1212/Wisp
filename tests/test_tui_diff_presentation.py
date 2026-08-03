@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from wisp.tui.diff_presentation import DiffOperation, DiffRowKind, select_diff_rows
+from wisp.tui.diff_presentation import DiffOperation, DiffRow, DiffRowKind, select_diff_rows
 from wisp.tui.tool_output import build_edit_diff_presentation, build_write_diff_presentation
 
 
@@ -17,11 +17,11 @@ def test_edit_presentation_preserves_literal_rows_and_line_positions() -> None:
     assert presentation.operation is DiffOperation.modify
     assert presentation.path == "pkg/example.py"
     assert presentation.additions == presentation.deletions == 1
+    assert presentation.show_line_numbers is False
     assert [(row.kind, row.old_line, row.new_line, row.text) for row in presentation.rows] == [
-        (DiffRowKind.hunk, None, None, "@@ -1,2 +1,2 @@"),
-        (DiffRowKind.context, 1, 1, "keep"),
-        (DiffRowKind.deletion, 2, None, "old value"),
-        (DiffRowKind.addition, None, 2, "new value"),
+        (DiffRowKind.context, None, None, "keep"),
+        (DiffRowKind.deletion, None, None, "old value"),
+        (DiffRowKind.addition, None, None, "new value"),
     ]
 
 
@@ -68,11 +68,37 @@ def test_create_presentation_has_only_addition_rows() -> None:
     assert presentation.operation is DiffOperation.create
     assert presentation.additions == 2
     assert presentation.deletions == 0
+    assert presentation.show_line_numbers is True
     assert [row.kind for row in presentation.rows] == [
         DiffRowKind.hunk,
         DiffRowKind.addition,
         DiffRowKind.addition,
     ]
+
+
+def test_byte_clipping_counts_preselected_omissions_in_its_final_marker() -> None:
+    rows = (
+        DiffRow(DiffRowKind.hunk, "@@ -1,20 +1,20 @@"),
+        *(
+            DiffRow(DiffRowKind.deletion, "x" * 3_000 if index == 0 else f"old {index}")
+            for index in range(20)
+        ),
+        *(DiffRow(DiffRowKind.addition, f"new {index}") for index in range(20)),
+    )
+
+    visible = select_diff_rows(rows, max_rows=8, max_bytes=32)
+    omission = visible[-1]
+    total_bytes = sum(len(row.text.encode("utf-8")) for row in rows if row.is_source)
+
+    displayed_source_bytes = sum(
+        len(visible_row.row.text.encode("utf-8"))
+        for visible_row in visible
+        if visible_row.row.is_source
+    )
+
+    assert omission.row.kind is DiffRowKind.omission
+    assert omission.hidden_rows == 40
+    assert omission.hidden_bytes == total_bytes - displayed_source_bytes
 
 
 def test_selection_clips_utf8_on_a_character_boundary_and_reports_the_remainder() -> None:
