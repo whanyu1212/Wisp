@@ -1025,7 +1025,7 @@ def test_textual_tui_renderer_enriches_result_at_a_history_page_boundary() -> No
 
 
 def test_textual_tui_renderer_remounts_boundary_result_without_visible_call() -> None:
-    async def scenario() -> tuple[int, str, int, str]:
+    async def scenario() -> tuple[int, str, int, str, int, str, str, str]:
         app_instance, renderer = create_textual_tui()
         result = HistoricalToolCard(
             card_id="history:result",
@@ -1075,8 +1075,12 @@ def test_textual_tui_renderer_remounts_boundary_result_without_visible_call() ->
             for _ in range(4):
                 renderer._shift_history_older()
             await pilot.pause()
+            renderer.running()
+            await pilot.pause()
+            activity_before_remount = _working_activity(app_instance)
             renderer._show_latest_history()
             await pilot.pause()
+            activity_after_remount = _working_activity(app_instance)
             remounted_result_cards = _all_tool_cards(app_instance)
             remounted_detail = remounted_result_cards[0]._detail
             return (
@@ -1092,17 +1096,28 @@ def test_textual_tui_renderer_remounts_boundary_result_without_visible_call() ->
                 remounted_detail.plain
                 if isinstance(remounted_detail, Content)
                 else remounted_detail,
+                activity_before_remount,
+                activity_after_remount,
             )
 
-    result_count, detail, paired_count, summary, remounted_count, remounted_detail = anyio.run(
-        scenario
-    )
+    (
+        result_count,
+        detail,
+        paired_count,
+        summary,
+        remounted_count,
+        remounted_detail,
+        activity_before_remount,
+        activity_after_remount,
+    ) = anyio.run(scenario)
     assert result_count == 1
     assert detail == "done"
     assert paired_count == 1
     assert summary == "command=printf done"
     assert remounted_count == 1
     assert remounted_detail == "done"
+    assert "Working" in activity_before_remount
+    assert "Working" in activity_after_remount
 
 
 def test_textual_tui_renderer_remounted_boundary_pair_is_not_pending() -> None:

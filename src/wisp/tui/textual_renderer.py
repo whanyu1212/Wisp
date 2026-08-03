@@ -445,6 +445,7 @@ class TextualTuiRenderer:
                 entry.name,
                 entry.arguments,
                 historical_card_id=entry.card_id,
+                historical=True,
                 before=before,
             )
             self._apply_historical_tool_result(entry.card_id, entry)
@@ -467,6 +468,7 @@ class TextualTuiRenderer:
                         entry.name,
                         entry.arguments,
                         historical_card_id=entry.card_id,
+                        historical=True,
                         before=before,
                     )
                     if card is not None:
@@ -506,6 +508,7 @@ class TextualTuiRenderer:
             entry.name,
             entry.arguments,
             historical_card_id=entry.card_id if entry.call_missing else None,
+            historical=True,
             before=before,
         )
         if entry.call_missing and tool_call_id is not None:

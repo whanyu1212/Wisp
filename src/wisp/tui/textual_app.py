@@ -1317,6 +1317,7 @@ class TextualTui(App[None]):
         arguments: object,
         *,
         historical_card_id: str | None = None,
+        historical: bool = False,
         before: Widget | None = None,
     ) -> ToolCard | None:
         # Mount a fresh card for a tool call and register it by call_id. The
@@ -1324,7 +1325,8 @@ class TextualTui(App[None]):
         # signal (pending glyph + dim rule) for the rest of the call's lifecycle.
         if self._transcript is None:
             return None
-        self.hide_working_indicator()
+        if not historical:
+            self.hide_working_indicator()
         card = ToolCard(name, arguments)
         self._tool_cards[call_id] = card
         if historical_card_id is not None:
