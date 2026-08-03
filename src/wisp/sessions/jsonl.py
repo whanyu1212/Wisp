@@ -640,7 +640,7 @@ class JsonlSession:
 
         return tuple(_read_entries(self.path))
 
-    def _read_cached_entries(self) -> tuple[SessionEntry, ...]:
+    def read_entry_snapshot(self) -> tuple[SessionEntry, ...]:
         """Read an append-ordered snapshot through the validated entry index."""
 
         with self._file_state.lock:
@@ -688,7 +688,7 @@ class JsonlSession:
         """Read a bounded active-path transcript page in chronological order."""
 
         return _message_page_from_entries(
-            self._read_cached_entries(),
+            self.read_entry_snapshot(),
             session_id=self.session_id,
             path=self.path,
             limit=limit,

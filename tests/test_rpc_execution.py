@@ -48,6 +48,7 @@ from wisp.rpc.coordinator import (
 from wisp.rpc.execution import RpcCommandExecutor, rpc_selected_session_state
 from wisp.runtime.commands import CommandArgument, CommandCategory, CommandDescriptor
 from wisp.runtime.extensions import build_runtime
+from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionTreeNavigation
 
 
@@ -613,9 +614,8 @@ def test_executor_messages_reads_selected_and_explicit_sessions(
     anyio.run(scenario)
 
 
-def test_executor_messages_historical_page_skips_selected_session_refresh(
+def test_executor_messages_historical_page_refreshes_selected_session_after_external_append(
     tmp_path: Path,
-    monkeypatch: MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
@@ -630,11 +630,14 @@ def test_executor_messages_historical_page_skips_selected_session_refresh(
 
         newest = selected.read_message_page(limit=2)
         assert newest.next_before_entry_id is not None
-
-        def unexpected_refresh() -> tuple[object, ...]:
-            raise AssertionError("historical page must not refresh selected session state")
-
-        monkeypatch.setattr(selected, "read_entries", unexpected_refresh)
+        entries = selected.read_entries()
+        await fixture.sessions.load(selected.session_id).append_entry(
+            MessageSessionEntry(
+                session_id=selected.session_id,
+                parent_id=entries[-1].id,
+                message=Message(role="assistant", content="external"),
+            )
+        )
 
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:
@@ -653,8 +656,14 @@ def test_executor_messages_historical_page_skips_selected_session_refresh(
 
         assert result.running_command is not None
         assert completed.ok is True
-        assert completed.history is None
-        assert completed.entry_count == 3
+        assert completed.history is not None
+        assert [message.content for message in completed.history] == [
+            "one",
+            "two",
+            "three",
+            "external",
+        ]
+        assert completed.entry_count == 4
         reports = [event for event in fixture.events if isinstance(event, RpcMessagesReported)]
         assert [message.content for message in reports[-1].messages] == ["one"]
 
@@ -672,15 +681,15 @@ def test_updated_rpc_session_state_reads_entries_once(
         await session.append_message(Message(role="assistant", content="two"))
 
     anyio.run(write)
-    original_read_entries = session.read_entries
+    original_read_entry_snapshot = session.read_entry_snapshot
     read_count = 0
 
     def count_reads() -> tuple[object, ...]:
         nonlocal read_count
         read_count += 1
-        return original_read_entries()
+        return original_read_entry_snapshot()
 
-    monkeypatch.setattr(session, "read_entries", count_reads)
+    monkeypatch.setattr(session, "read_entry_snapshot", count_reads)
 
     entry_count, history = rpc_execution_module.updated_rpc_session_state(session, (), 0)
 
