@@ -2330,8 +2330,9 @@ def updated_rpc_session_state(
 ) -> tuple[int, tuple[Message, ...]]:
     if not session.path.is_file():
         return entry_start, committed_history
-    entries = session.read_entries()
-    return len(entries), session.read_context_messages()
+    entries = session.read_entry_snapshot()
+    replay = replay_session_entries(entries)
+    return len(entries), replay.messages
 
 
 def rpc_selected_session_state(
