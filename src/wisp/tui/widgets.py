@@ -1541,12 +1541,12 @@ class SlashSuggest(OptionList):
     # the OptionList (which drops printable keys) and only `/` would ever submit.
     can_focus = False
 
-    # overlay: screen floats the menu over the transcript WITHOUT reflowing it,
-    # while keeping its natural compose position (just above #input, where it's
-    # yielded). It is deliberately NOT put on a separate `layer:` — a lone child on
-    # the overlay layer gets laid out at the TOP of the app by that layer's own
-    # vertical layout, detaching it from the prompt (the bug Codex caught).
-    # constrain: inside keeps it fully on-screen at any terminal size.
+    # overlay: screen floats the menu over the transcript WITHOUT reflowing it.
+    # `offset: 0 -100%` places it immediately above its compose anchor, so it
+    # cannot cover the editor. It is deliberately NOT put on a separate `layer:`
+    # — a lone child on the overlay layer gets laid out at the TOP of the app by
+    # that layer's own vertical layout, detaching it from the prompt. `constrain:
+    # inside` keeps the offset menu fully on-screen at any terminal size.
     DEFAULT_CSS = """
     SlashSuggest {
         overlay: screen;
@@ -1556,6 +1556,7 @@ class SlashSuggest(OptionList):
         max-width: 60;
         height: auto;
         max-height: 8;
+        offset: 0 -100%;
         border: round $accent;
         background: $panel;
         padding: 0 1;
