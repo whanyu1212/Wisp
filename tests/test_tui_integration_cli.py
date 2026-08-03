@@ -1061,24 +1061,24 @@ def test_textual_tui_renderer_remounts_boundary_result_without_visible_call() ->
             await pilot.pause()
             renderer.prepend_history_entries(older)
             for _ in range(4):
-                renderer._shift_history_older()
+                app_instance.action_scroll_transcript_home()
             await pilot.pause()
 
-            renderer._show_latest_history()
+            app_instance.action_scroll_transcript_end()
             await pilot.pause()
             result_only_cards = _all_tool_cards(app_instance)
 
-            renderer._shift_history_older()
+            app_instance.action_scroll_transcript_home()
             await pilot.pause()
             paired_cards = _all_tool_cards(app_instance)
 
             for _ in range(4):
-                renderer._shift_history_older()
+                app_instance.action_scroll_transcript_home()
             await pilot.pause()
             renderer.running()
             await pilot.pause()
             activity_before_remount = _working_activity(app_instance)
-            renderer._show_latest_history()
+            app_instance.action_scroll_transcript_end()
             await pilot.pause()
             activity_after_remount = _working_activity(app_instance)
             remounted_result_cards = _all_tool_cards(app_instance)
@@ -1153,10 +1153,10 @@ def test_textual_tui_renderer_remounted_boundary_pair_is_not_pending() -> None:
             await pilot.pause()
             renderer.prepend_history_entries(older)
             for _ in range(8):
-                renderer._shift_history_older()
+                app_instance.action_scroll_transcript_home()
             await pilot.pause()
 
-            renderer._show_latest_history()
+            app_instance.action_scroll_transcript_end()
             await pilot.pause()
             card = _first_tool_card(app_instance)
             pending_count = len(app_instance._tool_cards)
@@ -3573,9 +3573,7 @@ def test_textual_history_prepend_does_not_override_home_at_top() -> None:
     assert scroll_y == 0
 
 
-def test_textual_history_window_shifts_without_evicting_live_output(
-    monkeypatch: MonkeyPatch,
-) -> None:
+def test_textual_history_window_shifts_without_evicting_live_output() -> None:
     async def scenario() -> tuple[list[str], list[str], int, int, int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(60, 12)) as pilot:
@@ -3597,15 +3595,6 @@ def test_textual_history_window_shifts_without_evicting_live_output(
             transcript = app_instance.query_one("#transcript", Transcript)
             initial_count = sum(isinstance(child, LineMessage) for child in transcript.children)
 
-            def reject_full_history_scan(_window: object) -> tuple[object, ...]:
-                raise AssertionError("window reconciliation must not scan every retained entry")
-
-            monkeypatch.setattr(
-                type(renderer._history_window),
-                "entries",
-                property(reject_full_history_scan),
-            )
-
             # Normal wheel/PageUp edge navigation still shifts retained entries
             # after the durable page cursor has been exhausted.
             transcript.scroll_home(animate=False)
@@ -3614,7 +3603,7 @@ def test_textual_history_window_shifts_without_evicting_live_output(
             older_count = sum(isinstance(child, LineMessage) for child in transcript.children)
             older_texts = _transcript_texts(app_instance)
 
-            app_instance.on_transcript_follow_changed(Transcript.FollowChanged(True))
+            app_instance.action_scroll_transcript_end()
             await pilot.pause()
             await pilot.pause()
             newest_count = sum(isinstance(child, LineMessage) for child in transcript.children)

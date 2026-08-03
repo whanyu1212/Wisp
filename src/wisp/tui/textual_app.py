@@ -1254,6 +1254,16 @@ class TextualTui(App[None]):
         self._history_window_older_hook = shift_older
         self._history_window_latest_hook = show_latest
 
+    def history_is_at_top(self) -> bool:
+        """Return whether persisted-history navigation is at the transcript top."""
+
+        return self._transcript is not None and self._transcript.scroll_y == 0
+
+    def history_is_following(self) -> bool:
+        """Return the current tail-follow intent for retained-history appends."""
+
+        return self._transcript is None or self._transcript.is_following
+
     # --- Main-screen heartbeat (opencode-style) ---
 
     def _mount_working_indicator(self, indicator: WorkingIndicator) -> None:
@@ -1523,19 +1533,20 @@ class TextualTui(App[None]):
             None,
         )
 
-    def forget_historical_tool_card(self, card: Widget) -> None:
-        """Drop every lookup alias for an evicted historical tool card."""
+    def remove_historical_widget(self, widget: Widget) -> None:
+        """Evict one retained widget and every app-owned lookup for it."""
 
         self._historical_tool_cards = {
             card_id: registered
             for card_id, registered in self._historical_tool_cards.items()
-            if registered is not card
+            if registered is not widget
         }
         self._tool_cards = {
             call_id: registered
             for call_id, registered in self._tool_cards.items()
-            if registered is not card
+            if registered is not widget
         }
+        widget.remove()
 
     def historical_tool_card(self, card_id: str) -> ToolCard | None:
         """Return a mounted historical card for a page-boundary tool exchange."""

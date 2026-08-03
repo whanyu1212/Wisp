@@ -9,14 +9,9 @@ public surface, so it lives here rather than inside the app module.
 
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
-
-from textual.content import Content
-from textual.widget import Widget
 
 from wisp.events import (
     AgentCompleted,
@@ -40,12 +35,7 @@ from wisp.events import (
 from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tool_presentation import tool_result_status
 from wisp.tui.commands import TuiCommandCatalog
-from wisp.tui.history import (
-    HistoricalToolCard,
-    HistoricalTranscriptEntry,
-    HistoricalTranscriptMessage,
-    historical_tool_status,
-)
+from wisp.tui.history import HistoricalTranscriptEntry, HistoricalTranscriptMessage
 from wisp.tui.rendering import (
     TuiViewSnapshot,
     _compaction_completed_text,
@@ -53,12 +43,8 @@ from wisp.tui.rendering import (
     _truncate_to_cell_width,
     _tui_help_text,
 )
-from wisp.tui.tool_output import (
-    full_tool_output_for_display,
-    render_tool_result,
-)
-from wisp.tui.transcript_window import TranscriptWindow
-from wisp.tui.widgets import ToolCard
+from wisp.tui.textual_history import TextualHistoryController
+from wisp.tui.tool_output import full_tool_output_for_display, render_tool_result
 
 if TYPE_CHECKING:
     from wisp.tui.textual_app import TextualTui
@@ -70,14 +56,6 @@ _RETRY_REASON_LABELS = {
     "server_error": "server error",
     "transient_http": "temporary HTTP error",
 }
-
-
-@dataclass(frozen=True)
-class _RetainedHistoryEntry:
-    """One UI-local identity for a persisted transcript entry."""
-
-    id: int
-    entry: HistoricalTranscriptEntry
 
 
 def _retry_progress_label(event: ProviderRetrying) -> str:
@@ -117,15 +95,10 @@ class TextualTuiRenderer:
         # Popped when the call resolves, mirroring _tool_started's lifecycle so
         # neither map grows across a session.
         self._tool_arguments: dict[str, JsonObject] = {}
-        self._historical_tool_results: dict[str, deque[tuple[str, HistoricalToolCard]]] = {}
-        self._resolved_boundary_results: dict[str, HistoricalToolCard] = {}
-        self._boundary_result_calls: dict[str, str] = {}
-        self._history_window = TranscriptWindow[_RetainedHistoryEntry]()
-        self._history_widgets: dict[int, Widget] = {}
-        self._next_history_entry_id = 0
+        self._history = TextualHistoryController(app)
         app.set_history_window_hooks(
-            shift_older=self._shift_history_older,
-            show_latest=self._show_latest_history,
+            shift_older=self._history.shift_older,
+            show_latest=self._history.show_latest,
         )
         self._progress_active = False
         self._progress_turn: int | None = None
@@ -279,7 +252,7 @@ class TextualTuiRenderer:
         self.render_history_entries(messages)
 
     def render_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
-        self._append_history_entries(entries)
+        self._history.render_entries(entries)
 
     def replace_history_entries(
         self,
@@ -289,299 +262,10 @@ class TextualTuiRenderer:
     ) -> None:
         self._tool_started.clear()
         self._tool_arguments.clear()
-        self._historical_tool_results.clear()
-        self._resolved_boundary_results.clear()
-        self._boundary_result_calls.clear()
-        self._history_window.clear()
-        self._history_widgets.clear()
-        self._next_history_entry_id = 0
-        self.app.replace_transcript()
-        self._append_history_entries(entries)
-        self.app.mount_history_marker(
-            f"resumed session: {session_label}",
-            before=next(iter(self._history_widgets.values()), None),
-        )
+        self._history.replace_entries(entries, session_label=session_label)
 
     def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
-        retained = self._retain(entries)
-        self.app.begin_history_prepend()
-        self.app.begin_history_render()
-        try:
-            self._history_window.prepend(retained)
-            # A durable page arrived because the reader is already at the top.
-            # Reveal its leading slice now so an exhausted page cursor never hides
-            # fetched entries behind Transcript's durable-page request gate.
-            transcript = self.app.transcript
-            if transcript is not None and transcript.scroll_y == 0:
-                self._history_window.shift_older()
-            self._reconcile_history()
-        finally:
-            self.app.finish_history_render()
-            self.app.finish_history_prepend()
-
-    def _append_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
-        self.app.begin_history_render()
-        try:
-            following = self.app.transcript is None or self.app.transcript.is_following
-            self._history_window.append(
-                self._retain(entries),
-                follow_tail=following,
-            )
-            self._reconcile_history()
-            if following:
-                self.app.follow_transcript_tail_after_refresh()
-        finally:
-            self.app.finish_history_render()
-
-    def _retain(
-        self, entries: tuple[HistoricalTranscriptEntry, ...]
-    ) -> tuple[_RetainedHistoryEntry, ...]:
-        retained = tuple(
-            _RetainedHistoryEntry(id=self._next_history_entry_id + index, entry=entry)
-            for index, entry in enumerate(entries)
-        )
-        self._next_history_entry_id += len(retained)
-        return retained
-
-    def _shift_history_older(self) -> bool:
-        if not self._history_window.shift_older():
-            return False
-        self.app.begin_history_prepend()
-        self.app.begin_history_render()
-        try:
-            self._reconcile_history()
-        finally:
-            self.app.finish_history_render()
-            self.app.finish_history_prepend()
-        return True
-
-    def _show_latest_history(self) -> bool:
-        if not self._history_window.show_latest():
-            return False
-        self._reconcile_history()
-        self.app.follow_transcript_tail_after_refresh()
-        return True
-
-    def _reconcile_history(self) -> None:
-        """Apply only the changed edges of the retained history window."""
-
-        visible = self._history_window.visible
-        visible_ids = {item.id for item in visible}
-        self.app.set_history_window_available(has_older=not self._history_window.is_at_oldest)
-        for item_id, widget in tuple(self._history_widgets.items()):
-            if item_id not in self._history_widgets:
-                continue
-            if item_id not in visible_ids:
-                aliases = [
-                    other_id
-                    for other_id, other_widget in self._history_widgets.items()
-                    if other_widget is widget
-                ]
-                if any(other_id in visible_ids for other_id in aliases):
-                    continue
-                if len(aliases) > 1:
-                    if item_id != min(aliases):
-                        del self._history_widgets[item_id]
-                        continue
-                    for alias in aliases:
-                        del self._history_widgets[alias]
-                else:
-                    del self._history_widgets[item_id]
-                if isinstance(widget, ToolCard):
-                    self.app.forget_historical_tool_card(widget)
-                widget.remove()
-
-        for index, item in enumerate(visible):
-            if item.id in self._history_widgets:
-                continue
-            before: Widget | None = next(
-                (
-                    self._history_widgets[later.id]
-                    for later in visible[index + 1 :]
-                    if later.id in self._history_widgets
-                ),
-                None,
-            )
-            mounted_widget: Widget | None
-            if before is None:
-                mounted_widget = self._mount_retained_history_entry(
-                    item.entry,
-                    before=self.app.history_insertion_boundary(set(self._history_widgets.values())),
-                )
-            else:
-                mounted_widget = self._mount_retained_history_entry(item.entry, before=before)
-            if mounted_widget is not None:
-                self._history_widgets[item.id] = mounted_widget
-
-    def _mount_retained_history_entry(
-        self,
-        entry: HistoricalTranscriptEntry,
-        *,
-        before: Widget | None,
-    ) -> Widget | None:
-        if isinstance(entry, HistoricalTranscriptMessage):
-            role = "user" if entry.role == "user" else "assistant"
-            return self.app.mount_historical_line(
-                role,
-                entry.content,
-                before=before,
-            )
-        return self._render_historical_tool_card(entry, before=before)
-
-    def _render_historical_tool_card(
-        self,
-        entry: HistoricalToolCard,
-        *,
-        before: Widget | None = None,
-    ) -> ToolCard | None:
-        paired_call_id = self._boundary_result_calls.get(entry.card_id)
-        if paired_call_id is not None:
-            card = self.app.historical_tool_card(paired_call_id)
-            if card is not None:
-                return card
-            card = self.app.mount_tool_call(
-                entry.card_id,
-                entry.name,
-                entry.arguments,
-                historical_card_id=entry.card_id,
-                historical=True,
-                before=before,
-            )
-            self._apply_historical_tool_result(entry.card_id, entry)
-            return card
-        tool_call_id = entry.tool_call_id
-        if entry.missing_result and tool_call_id is not None:
-            result = self._resolved_boundary_results.get(entry.card_id)
-            if result is not None:
-                card = self.app.historical_tool_card(result.card_id)
-                if card is not None:
-                    self._enrich_historical_tool_result(
-                        result.card_id,
-                        result,
-                        name=entry.name,
-                        arguments=entry.arguments,
-                    )
-                else:
-                    card = self.app.mount_tool_call(
-                        entry.card_id,
-                        entry.name,
-                        entry.arguments,
-                        historical_card_id=entry.card_id,
-                        historical=True,
-                        before=before,
-                    )
-                    if card is not None:
-                        status, detail, full_output, truncated = self._historical_tool_presentation(
-                            result,
-                            name=entry.name,
-                            arguments=entry.arguments,
-                        )
-                        self.app.resolve_tool_call(
-                            entry.card_id,
-                            status,
-                            detail=detail,
-                            full_output=full_output,
-                            truncated=truncated,
-                        )
-                if card is not None:
-                    self._boundary_result_calls[result.card_id] = entry.card_id
-                return card
-            results = self._historical_tool_results.get(tool_call_id)
-            if results:
-                result_card_id, result = results[0]
-                if self._enrich_historical_tool_result(
-                    result_card_id,
-                    result,
-                    name=entry.name,
-                    arguments=entry.arguments,
-                ):
-                    results.popleft()
-                    if not results:
-                        del self._historical_tool_results[tool_call_id]
-                    self._resolved_boundary_results[entry.card_id] = result
-                    self._boundary_result_calls[result.card_id] = entry.card_id
-                    return self.app.historical_tool_card(result_card_id)
-
-        card = self.app.mount_tool_call(
-            entry.card_id,
-            entry.name,
-            entry.arguments,
-            historical_card_id=entry.card_id if entry.call_missing else None,
-            historical=True,
-            before=before,
-        )
-        if entry.call_missing and tool_call_id is not None:
-            self._historical_tool_results.setdefault(tool_call_id, deque()).append(
-                (entry.card_id, entry)
-            )
-        self._apply_historical_tool_result(entry.card_id, entry)
-        return card
-
-    def _enrich_historical_tool_result(
-        self,
-        card_id: str,
-        result: HistoricalToolCard,
-        *,
-        name: str,
-        arguments: JsonObject,
-    ) -> bool:
-        status, detail, full_output, truncated = self._historical_tool_presentation(
-            result,
-            name=name,
-            arguments=arguments,
-        )
-        return self.app.enrich_historical_tool_call(
-            card_id,
-            name,
-            arguments,
-            status=status,
-            detail=detail,
-            full_output=full_output,
-            truncated=truncated,
-        )
-
-    def _apply_historical_tool_result(self, card_id: str, entry: HistoricalToolCard) -> None:
-        status, detail, full_output, truncated = self._historical_tool_presentation(entry)
-        self.app.resolve_tool_call(
-            card_id,
-            status,
-            detail=detail,
-            full_output=full_output,
-            truncated=truncated,
-        )
-
-    def _historical_tool_presentation(
-        self,
-        entry: HistoricalToolCard,
-        *,
-        name: str | None = None,
-        arguments: JsonObject | None = None,
-    ) -> tuple[str, str | Content, str, bool]:
-        status = historical_tool_status(entry)
-        if status in {"cancelled", "denied"}:
-            return status, entry.output, "", False
-        resolved_name = name or entry.name
-        resolved_arguments = entry.arguments if arguments is None else arguments
-        return (
-            status,
-            render_tool_result(
-                resolved_name,
-                resolved_arguments,
-                entry.output,
-                is_error=entry.is_error,
-                exit_code=entry.exit_code,
-                output_has_exit_status=entry.output_has_exit_status,
-                before_text=entry.before_text,
-                created=entry.created,
-                summary=entry.summary,
-            ),
-            full_tool_output_for_display(
-                entry.output,
-                entry.exit_code,
-                output_has_exit_status=entry.output_has_exit_status,
-            ),
-            entry.truncated,
-        )
+        self._history.prepend_entries(entries)
 
     def queued_prompts_cleared(self) -> None:
         # The shell dropped its queued follow-ups (cancel/quit/input-closed/error),
