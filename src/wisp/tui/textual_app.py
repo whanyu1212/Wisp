@@ -1461,6 +1461,12 @@ class TextualTui(App[None]):
             self._last_history_render_mounts = tuple(self._history_render_mounts)
             self._history_render_mounts.clear()
 
+    async def wait_for_history_render(self) -> None:
+        """Wait until the latest renderer history batch has mounted its widgets."""
+
+        for mounted in self._last_history_render_mounts:
+            await mounted
+
     def history_page_loaded(self, *, has_more: bool) -> None:
         """Record pagination state after the current history batch has laid out."""
 

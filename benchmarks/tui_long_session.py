@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import shlex
+import subprocess
 import sys
 import tempfile
 import time
@@ -67,6 +69,17 @@ def _environment() -> dict[str, str]:
     }
 
 
+def _cpu_command(seconds: float) -> str:
+    program = (
+        "import time\n"
+        f"end = time.monotonic() + {seconds}\n"
+        "while time.monotonic() < end:\n"
+        "    pass\n"
+    )
+    arguments = [sys.executable, "-c", program]
+    return subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
+
+
 async def _wait_for(pilot: Pilot[None], predicate: Callable[[], bool]) -> None:
     """Wait for a Textual state transition without baking in a settle count."""
 
@@ -125,6 +138,8 @@ async def _render_page(
     else:
         renderer.replace_history_entries(entries, session_label="Long-session benchmark")
     await _wait_for(pilot, lambda: len(transcript.children) >= previous_count + len(entries))
+    await app.wait_for_history_render()
+    await pilot.pause()
     return _milliseconds(started)
 
 
@@ -174,19 +189,16 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     )
                     mounted_counts.append(len(transcript.children))
 
-                command = (
-                    f"{shlex.quote(sys.executable)} -c "
-                    f"{
-                        shlex.quote(
-                            f'import time; end = time.monotonic() + {config.process_seconds}; '
-                            'while time.monotonic() < end: pass'
-                        )
-                    }"
-                )
+                command = _cpu_command(config.process_seconds)
                 process_id = await supervisor.start(
                     command, cwd=root, timeout=config.process_seconds + 5
                 )
-                await supervisor.poll(process_id, wait_seconds=0.1)
+                process_update = await supervisor.poll(process_id, wait_seconds=0.1)
+                if process_update.state not in {"running", "completed"}:
+                    raise RuntimeError(
+                        "Benchmark worker did not start: "
+                        f"{process_update.state}: {process_update.stderr}"
+                    )
                 started = time.perf_counter_ns()
                 transcript.scroll_end(animate=False)
                 await _wait_for(pilot, lambda: transcript.max_scroll_y > 0)
