@@ -7,7 +7,6 @@ import os
 import pytest
 from pytest import MonkeyPatch
 from textual import events
-from textual.await_complete import AwaitComplete
 from textual.content import Content
 from textual.widgets import OptionList, Static
 
@@ -2303,46 +2302,49 @@ def test_textual_streaming_survives_a_burst_without_dropping_text() -> None:
 def test_textual_end_token_stream_finalizes_the_bubble() -> None:
     # end_token_stream() is the ONLY place a streamed assistant turn is finalized
     # (the shell suppresses the trailing MessageCompleted when tokens rendered).
-    # After it, the buffer/live-widget refs are cleared and the text persists.
-    async def scenario() -> tuple[str, object, object]:
+    # After it, the native stream is drained and the text persists.
+    async def scenario() -> tuple[str, bool]:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test() as pilot:
+        async with app_instance.run_test():
             renderer.token_delta("final answer")
             renderer.end_token_stream()
-            await pilot.pause()
-            await pilot.pause()
+            await app_instance.wait_for_stream_idle()
             texts = _transcript_texts(app_instance)
-            return (
-                texts[0] if texts else "",
-                app_instance._stream.live_widget,
-                app_instance._stream.buffered_text,
-            )
+            return texts[0] if texts else "", app_instance._is_streaming()
 
-    text, live_widget, buffer = anyio.run(scenario)
+    text, is_streaming = anyio.run(scenario)
     assert text == "final answer"
-    assert live_widget is None  # finalized, no dangling live widget
-    assert buffer == ""  # buffer cleared
+    assert not is_streaming
+
+
+def test_textual_stream_shutdown_drains_pending_output() -> None:
+    async def scenario() -> tuple[list[str], bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            renderer.token_delta("pending output")
+            await app_instance._stream.shutdown()
+            return _transcript_texts(app_instance), app_instance._is_streaming()
+
+    texts, is_streaming = anyio.run(scenario)
+    assert texts == ["pending output"]
+    assert not is_streaming
 
 
 def test_textual_single_tick_turn_keeps_its_content() -> None:
-    # A turn finalized in the same tick it mounts (delta then flush, no refresh
-    # between) must not lose its text. Markdown._on_mount runs `update("")` on the
-    # widget's Mount event — a path separate from set_content's update — and can
-    # run AFTER finalize, clobbering the content back to empty. set_content keeps
-    # Markdown._initial_markdown in sync so that mount re-applies the real text.
+    # A turn finalized in the same tick it mounts must not lose its text. The
+    # controller schedules native writes after mount refresh, before stopping the
+    # stream, so Markdown's mount initialization cannot clobber the first fragment.
     async def scenario() -> list[str]:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test() as pilot:
+        async with app_instance.run_test():
             renderer.token_delta("first turn")
             renderer.end_token_stream()
-            await pilot.pause()
-            await pilot.pause()
+            await app_instance.wait_for_stream_idle()
             # Second turn finalized in a single tick: the fresh StreamMessage mounts
             # and finalizes before any refresh interleaves — the clobber window.
             renderer.token_delta("second turn")
             renderer.end_token_stream()
-            await pilot.pause()
-            await pilot.pause()
+            await app_instance.wait_for_stream_idle()
             return _transcript_texts(app_instance)
 
     texts = anyio.run(scenario)
@@ -3448,31 +3450,9 @@ def test_textual_streaming_keeps_the_growing_tail_visible() -> None:
     assert scroll_y >= max_scroll_y - 3  # pinned to the tail
 
 
-def test_textual_stream_message_set_content_returns_the_markdown_awaitable() -> None:
-    # Contract test for the deeper race Codex flagged: Markdown.update() mounts its
-    # block children asynchronously and returns an AwaitComplete whose completion is
-    # the signal "all blocks mounted, max_scroll_y is final". set_content must hand
-    # that awaitable back (not swallow it) so the finalize path can await it before
-    # following the tail — rather than guessing a fixed number of refresh cycles.
-    async def scenario() -> object:
-        app_instance, _ = create_textual_tui()
-        async with app_instance.run_test(size=(60, 12)) as pilot:
-            message = StreamMessage()
-            transcript = app_instance.query_one("#transcript", Transcript)
-            transcript.mount(message)
-            await pilot.pause()
-            awaitable = message.set_content("# Title\n\nsome **body** text")
-            await awaitable  # awaiting it must not raise and must settle the mount
-            return awaitable
-
-    result = anyio.run(scenario)
-    assert isinstance(result, AwaitComplete)
-
-
 def test_textual_streaming_keeps_a_large_many_block_reply_pinned_to_the_tail() -> None:
     # A large, many-block Markdown reply (headings + lists) must still end pinned to
-    # the tail. The finalize path awaits Markdown.update()'s AwaitComplete, so the
-    # scroll lands on the settled extent no matter how many block children mount.
+    # the tail after the native stream drains its queued incremental renders.
     async def scenario() -> tuple[float, float]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(60, 12)) as pilot:

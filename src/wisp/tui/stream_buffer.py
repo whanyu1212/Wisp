@@ -1,22 +1,12 @@
-"""Coalescing buffer for a streamed assistant turn.
-
-A streamed turn arrives token-by-token. Reconciling the Markdown widget on every
-token would reparse O(n^2) and hit a mount race (``update()`` on a not-yet-mounted
-widget silently drops content). This coalescer keeps the authoritative text buffer
-and the live widget, and reconciles at most once per refresh via
-``call_after_refresh`` — so the Markdown reparses once per frame, not per token,
-and the reconcile can await the mount before following the tail.
-
-It is Textual-coupled by nature (it needs the app's ``call_after_refresh``
-scheduler, the transcript, and the working-indicator lifecycle), so it holds a
-back-reference to the owning :class:`~wisp.tui.textual_app.TextualTui` rather than
-being a standalone data structure.
-"""
+"""Native Textual Markdown streaming for one assistant turn at a time."""
 
 from __future__ import annotations
 
-from collections.abc import Awaitable
+import asyncio
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from textual.widgets._markdown import MarkdownStream
 
 from wisp.tui.widgets import StreamMessage
 
@@ -24,118 +14,126 @@ if TYPE_CHECKING:
     from wisp.tui.textual_app import TextualTui
 
 
-class StreamCoalescer:
-    """Buffers streamed tokens and reconciles the live widget once per refresh."""
+@dataclass
+class _StreamTurn:
+    widget: StreamMessage
+    stream: MarkdownStream
+    deferred: list[str] = field(default_factory=list)
+    discarded: bool = False
+
+
+class MarkdownStreamController:
+    """Bridge synchronous renderer calls to Textual's async MarkdownStream API."""
 
     def __init__(self, app: TextualTui) -> None:
         self._app = app
-        # Authoritative buffer + the live assistant widget + a coalescing flag so
-        # the widget reconciles once per refresh, not once per token (avoids the
-        # O(n^2) Markdown reparse and the mount race).
-        self._text = ""
-        self._widget: StreamMessage | None = None
-        self._refresh_pending = False
+        self._turn: _StreamTurn | None = None
+        self._pending_callbacks = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
 
     @property
     def is_streaming(self) -> bool:
-        """Whether a streamed turn is mid-flight and mutating the transcript.
+        """Whether a live turn can still mutate the transcript."""
 
-        The stream widget is mounted on the first token delta and cleared on
-        flush, so its presence (or a non-empty buffer, which the widget lags by a
-        frame) marks the window where Textual's selection bounds can go stale.
-        """
-
-        return self._widget is not None or bool(self._text)
-
-    @property
-    def live_widget(self) -> StreamMessage | None:
-        """The live streaming widget, or None when no turn is mid-flight."""
-
-        return self._widget
-
-    @property
-    def buffered_text(self) -> str:
-        """The authoritative streamed-text buffer (empty once flushed)."""
-
-        return self._text
+        return self._turn is not None
 
     def append(self, delta: str) -> None:
-        # Accumulate into the authoritative buffer; lazily mount the streaming
-        # assistant widget on the first delta; reconcile via one coalesced
-        # refresh so the Markdown reparses at most once per frame, not per token.
+        if not delta:
+            return
         self._app.hide_working_indicator()
-        self._text += delta
+        turn = self._turn
         transcript = self._app.transcript
-        if self._widget is None and transcript is not None:
-            self._widget = StreamMessage()
-            transcript.mount_message(self._widget)
-        self._schedule_refresh()
+        if turn is None:
+            if transcript is None:
+                return
+            widget = StreamMessage()
+            transcript.mount_message(widget)
+            turn = _StreamTurn(widget=widget, stream=widget.get_stream())
+            self._turn = turn
+
+        if transcript is None or not transcript.is_following:
+            turn.deferred.append(delta)
+            self._app.note_transcript_update(turn.widget)
+            return
+        self._schedule(self._write, turn, delta)
 
     def flush(self) -> None:
-        # Finalize the streamed turn. This is the ONLY place a streamed assistant
-        # bubble is completed: the shell suppresses the trailing MessageCompleted
-        # when tokens were rendered (shell.py de-dup), so it never reaches event().
-        # Capture the widget + final text and reconcile AFTER refresh, because the
-        # widget may have been mounted this same tick — reconciling inline would
-        # hit the mount race and drop the content.
+        """Finish the active turn without blocking the synchronous renderer."""
+
         self._app.hide_working_indicator()
-        widget = self._widget
-        final_text = self._text
-        self._text = ""
-        self._widget = None
-        self._refresh_pending = False
-        if widget is not None:
-            self._app.call_after_refresh(self._finalize, widget, final_text)
+        turn = self._turn
+        self._turn = None
+        if turn is not None:
+            self._schedule(self._finalize, turn)
 
     def discard(self) -> None:
-        """Forget an in-flight stream while replacing the owning transcript."""
+        """Stop a replaced transcript's native stream without rendering stale output."""
 
-        self._text = ""
-        self._widget = None
-        self._refresh_pending = False
-
-    async def _finalize(self, widget: StreamMessage, text: str) -> None:
-        await self._follow_tail_after_content(widget, widget.set_content(text))
-
-    def _schedule_refresh(self) -> None:
-        if self._refresh_pending:
-            return
-        self._refresh_pending = True
-        # call_after_refresh runs the reconcile once the pending mount/refresh
-        # settles, sidestepping the mount race (update() on a not-yet-mounted
-        # widget silently drops content). Textual awaits coroutine callbacks, so
-        # the reconcile can await the Markdown mount before following the tail.
-        self._app.call_after_refresh(self._reconcile)
+        turn = self._turn
+        self._turn = None
+        if turn is not None:
+            turn.discarded = True
+            self._schedule(self._stop, turn)
 
     def resume_if_deferred(self) -> None:
-        """Reconcile buffered output after the reader returns to the tail."""
+        """Render buffered output when the reader returns to the transcript tail."""
 
-        if self._widget is not None and self._text:
-            self._schedule_refresh()
-
-    async def _reconcile(self) -> None:
-        self._refresh_pending = False
-        widget = self._widget
-        transcript = self._app.transcript
-        if widget is None:
+        turn = self._turn
+        if turn is None or not turn.deferred:
             return
-        if transcript is not None and not transcript.is_following:
-            self._app.note_transcript_update(widget)
-            return
-        await self._follow_tail_after_content(widget, widget.set_content(self._text))
+        deferred = "".join(turn.deferred)
+        turn.deferred.clear()
+        self._schedule(self._write, turn, deferred)
 
-    async def _follow_tail_after_content(
-        self,
-        widget: StreamMessage,
-        await_content: Awaitable[None],
-    ) -> None:
-        # Await the Markdown update's AwaitComplete so this update's block children
-        # have mounted, THEN follow the tail — the scroll lands on the grown extent
-        # instead of a partially-mounted one. This replaces guessing a fixed number
-        # of refresh cycles with the update's own completion signal. The Transcript
-        # still decides whether to scroll (it stays put if the user scrolled away).
-        await await_content
-        self._app.note_transcript_update(widget)
+    async def shutdown(self) -> None:
+        """Drain a live stream before Textual begins tearing down its widgets."""
+
+        self.flush()
+        await self.wait_until_idle()
+
+    async def wait_until_idle(self) -> None:
+        """Wait for scheduled writes and native-stream finalization to complete."""
+
+        await self._idle.wait()
+
+    def _schedule(self, callback: object, *args: object) -> None:
+        self._pending_callbacks += 1
+        self._idle.clear()
+        # Markdown's mount initialization can overwrite an early append. Scheduling
+        # after refresh keeps the native stream incremental while closing that race.
+        self._app.call_after_refresh(self._run_scheduled, callback, *args)
+
+    async def _run_scheduled(self, callback: object, *args: object) -> None:
+        try:
+            assert callable(callback)
+            result = callback(*args)
+            assert hasattr(result, "__await__")
+            await result
+        finally:
+            self._pending_callbacks -= 1
+            if self._pending_callbacks == 0:
+                self._idle.set()
+
+    async def _write(self, turn: _StreamTurn, text: str) -> None:
+        if turn.discarded:
+            return
+        await turn.stream.write(text)
+        self._app.note_transcript_update(turn.widget)
         transcript = self._app.transcript
-        if transcript is not None:
-            transcript.follow_tail()
+        if transcript is not None and transcript.is_following:
+            self._app.call_after_refresh(transcript.follow_tail)
+
+    async def _finalize(self, turn: _StreamTurn) -> None:
+        if not turn.discarded and turn.deferred:
+            await turn.stream.write("".join(turn.deferred))
+            turn.deferred.clear()
+        await self._stop(turn)
+        if not turn.discarded:
+            self._app.note_transcript_update(turn.widget)
+            transcript = self._app.transcript
+            if transcript is not None and transcript.is_following:
+                self._app.call_after_refresh(transcript.follow_tail)
+
+    async def _stop(self, turn: _StreamTurn) -> None:
+        await turn.stream.stop()

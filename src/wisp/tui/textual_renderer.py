@@ -448,8 +448,8 @@ class TextualTuiRenderer:
         self.app.write_notice("cancelled")
 
     def token_delta(self, delta: str) -> None:
-        # Stream live into the assistant Markdown widget; append_stream buffers
-        # and coalesces the reconcile. end_token_stream() finalizes the bubble.
+        # Stream live into the assistant Markdown widget. The app bridges this
+        # synchronous renderer surface to Textual's async MarkdownStream API.
         self._suspend_progress()
         self.app.append_stream(delta)
 
