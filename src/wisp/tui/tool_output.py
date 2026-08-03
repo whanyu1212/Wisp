@@ -566,6 +566,8 @@ def _build_diff_presentation(
     )
     if not rows:
         return None
+    additions = sum(row.kind is DiffRowKind.addition for row in rows)
+    deletions = sum(row.kind is DiffRowKind.deletion for row in rows)
     # The builder may transiently produce a guard-bounded full diff, but a mounted
     # card retains only its maximum expandable evidence. Omission rows preserve the
     # aggregate evidence left outside that window for both expanded and collapsed
@@ -581,8 +583,8 @@ def _build_diff_presentation(
     return DiffPresentation(
         path=path if isinstance(path, str) and path else None,
         operation=operation,
-        additions=sum(row.kind is DiffRowKind.addition for row in rows),
-        deletions=sum(row.kind is DiffRowKind.deletion for row in rows),
+        additions=additions,
+        deletions=deletions,
         rows=rows,
         show_line_numbers=show_line_numbers,
     )

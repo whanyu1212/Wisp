@@ -1683,6 +1683,39 @@ def test_textual_tool_card_narrow_diff_keeps_tail_changed_tokens_visible() -> No
     assert "…" in text
 
 
+def test_textual_tool_card_narrow_full_line_replace_marks_hidden_tail() -> None:
+    """A cropped full-line replacement must explicitly mark hidden changed text."""
+
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(28, 20)) as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="edit",
+                    arguments={
+                        "path": "src/minified.py",
+                        "edits": [{"oldText": "x" * 120, "newText": "y" * 120}],
+                    },
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(call_id="c1", name="edit", output="Applied", is_error=False)
+            )
+            await pilot.pause()
+            rows = [
+                line.rstrip()
+                for line in _first_tool_card(app_instance).render().plain.splitlines()
+                if "│" in line
+            ]
+            return rows[0], rows[1]
+
+    deletion, addition = anyio.run(scenario)
+    assert deletion.endswith("…")
+    assert addition.endswith("…")
+
+
 def test_textual_tool_card_write_renders_colored_diff() -> None:
     # Issue #74 PR B2: a successful `write` renders a colored unified diff. Unlike
     # edit, the "before" text is NOT in the request args (which carry only the new

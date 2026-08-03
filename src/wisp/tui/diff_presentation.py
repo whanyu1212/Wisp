@@ -40,6 +40,8 @@ class DiffRow:
     old_line: int | None = None
     new_line: int | None = None
     emphasis_ranges: tuple[tuple[int, int], ...] = ()
+    hidden_rows: int = 0
+    hidden_bytes: int = 0
 
     @property
     def is_source(self) -> bool:
@@ -71,7 +73,12 @@ class DiffVisibleRow:
         if hidden_bytes:
             parts.append(f"{hidden_bytes} bytes hidden")
         return cls(
-            DiffRow(DiffRowKind.omission, f"… {', '.join(parts) or 'content hidden'}"),
+            DiffRow(
+                DiffRowKind.omission,
+                f"… {', '.join(parts) or 'content hidden'}",
+                hidden_rows=hidden_rows,
+                hidden_bytes=hidden_bytes,
+            ),
             hidden_rows=hidden_rows,
             hidden_bytes=hidden_bytes,
         )
@@ -284,7 +291,13 @@ def _with_omission_rows(
     for index, row in enumerate(rows):
         if index in included:
             flush_hidden()
-            visible.append(DiffVisibleRow(row))
+            visible.append(
+                DiffVisibleRow(
+                    row,
+                    hidden_rows=row.hidden_rows,
+                    hidden_bytes=row.hidden_bytes,
+                )
+            )
         elif row.is_source:
             hidden_rows += 1
             hidden_bytes += len(row.text.encode("utf-8"))

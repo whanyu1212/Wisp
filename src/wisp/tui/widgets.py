@@ -396,6 +396,11 @@ def _crop_diff_source(
     before = ""
     after = ""
     if cell_len(focus) > focus_width:
+        # Prefix-clipping the emphasis itself hides changed source. Reserve a
+        # trailing ellipsis even when the original span reached line end so the
+        # reader knows that horizontally changed evidence remains unavailable.
+        right_marker = "…"
+        focus_width = max(1, width - cell_len(left_marker) - cell_len(right_marker))
         focus = _take_cell_prefix(focus, focus_width)
         focus_end = focus_start + len(focus)
     else:

@@ -53,12 +53,31 @@ def test_expanded_selection_remains_bounded_and_marks_remaining_evidence() -> No
     source_rows = [row for row in expanded if row.row.is_source]
 
     assert len(source_rows) == 400
+    assert presentation.additions == presentation.deletions == 250
     assert any(row.row.kind is DiffRowKind.omission for row in expanded)
     assert "lines hidden" in "\n".join(row.row.text for row in expanded)
     # A mounted card retains the same bounded expanded evidence, not all 500
     # deleted and 500 added source rows used transiently to derive the diff.
     assert sum(row.is_source for row in presentation.rows) == 400
     assert any(row.kind is DiffRowKind.omission for row in presentation.rows)
+
+
+def test_retained_expanded_omissions_survive_later_collapsed_byte_clipping() -> None:
+    old = "x" * 3_000 + "\n" + "".join(f"old {index}\n" for index in range(249))
+    new = "y" * 3_000 + "\n" + "".join(f"new {index}\n" for index in range(249))
+    presentation = build_edit_diff_presentation(_edit(old, new))
+
+    assert presentation is not None
+    visible = presentation.visible_rows(expanded=False)
+    final_omission = visible[-1]
+    total_bytes = sum(len(row.text.encode("utf-8")) for row in presentation.rows if row.is_source)
+    shown_bytes = sum(len(row.row.text.encode("utf-8")) for row in visible if row.row.is_source)
+
+    assert final_omission.row.kind is DiffRowKind.omission
+    # The retained outer 400-row bound hides 100 rows; a later 2-KiB collapsed
+    # byte clip must aggregate that metadata rather than report only retained rows.
+    assert final_omission.hidden_rows == 500
+    assert final_omission.hidden_bytes > total_bytes - shown_bytes
 
 
 def test_create_presentation_has_only_addition_rows() -> None:
