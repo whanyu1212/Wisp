@@ -245,6 +245,8 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     animate=False,
                     immediate=True,
                 )
+                await pilot.pause()
+                await _wait_for(pilot, lambda: 0 < transcript.scroll_y < transcript.max_scroll_y)
                 await _wait_for(pilot, lambda: not transcript.is_following)
                 started = time.perf_counter_ns()
                 renderer.token_delta("\n\nscrolled-back stream output")
