@@ -331,11 +331,15 @@ def _render_diff_visible_row(
     else:
         gutter = f"{marker} │ "
     source_width = max(1, width - cell_len(gutter))
-    source = _truncate_to_cell_width(row.text, source_width)
+    source, emphasis_ranges = _crop_diff_source(
+        row.text,
+        row.emphasis_ranges,
+        width=source_width,
+    )
     style = _diff_row_style(row)
     return (
         Content.styled("  " + gutter, style)
-        + _styled_diff_source(source, row.emphasis_ranges, style)
+        + _styled_diff_source(source, emphasis_ranges, style)
         + Content.styled(
             _pad_to_cell_width("", max(0, source_width - cell_len(source))),
             style,
@@ -349,6 +353,92 @@ def _diff_row_style(row: DiffRow) -> str:
     if row.kind is DiffRowKind.deletion:
         return DIFF_DEL_STYLE
     return ""
+
+
+def _crop_diff_source(
+    text: str,
+    ranges: tuple[tuple[int, int], ...],
+    *,
+    width: int,
+) -> tuple[str, tuple[tuple[int, int], ...]]:
+    """Crop a source row while keeping its emphasized evidence in view.
+
+    A normal width clip starts at column zero, which can hide the only changed
+    token when it occurs near the end of a long line. When emphasis is present,
+    reserve visible cells around its complete span and remap ranges to the cropped
+    literal string. The outer gutter still identifies the row as an addition or
+    deletion, while ellipses explicitly signal omitted source context.
+    """
+
+    if cell_len(text) <= width:
+        return text, ranges
+    if width < 3:
+        # A terminal this narrow cannot accommodate both truncation markers and
+        # a changed character; preserve the row's fixed +/- gutter without
+        # overflowing it. Supported compact layouts have wider source columns.
+        return _truncate_to_cell_width(text, width), ()
+    normalized = tuple(
+        sorted(
+            (max(0, start), min(len(text), end))
+            for start, end in ranges
+            if end > start and start < len(text)
+        )
+    )
+    if not normalized:
+        return _truncate_to_cell_width(text, width), ()
+
+    focus_start = normalized[0][0]
+    focus_end = normalized[-1][1]
+    left_marker = "…" if focus_start else ""
+    right_marker = "…" if focus_end < len(text) else ""
+    focus_width = max(1, width - cell_len(left_marker) - cell_len(right_marker))
+    focus = text[focus_start:focus_end]
+    before = ""
+    after = ""
+    if cell_len(focus) > focus_width:
+        focus = _take_cell_prefix(focus, focus_width)
+        focus_end = focus_start + len(focus)
+    else:
+        context_width = focus_width - cell_len(focus)
+        before = _take_cell_suffix(text[:focus_start], context_width // 2)
+        after = _take_cell_prefix(text[focus_end:], context_width - cell_len(before))
+
+    source = f"{left_marker}{before}{focus}{after}{right_marker}"
+    offset = len(left_marker) + len(before)
+    remapped = tuple(
+        (offset + max(start, focus_start) - focus_start, offset + min(end, focus_end) - focus_start)
+        for start, end in normalized
+        if max(start, focus_start) < min(end, focus_end)
+    )
+    return source, remapped
+
+
+def _take_cell_prefix(text: str, width: int) -> str:
+    """Return the longest literal prefix that fits in ``width`` terminal cells."""
+
+    cells = 0
+    end = 0
+    for index, character in enumerate(text):
+        character_cells = cell_len(character)
+        if cells + character_cells > width:
+            break
+        cells += character_cells
+        end = index + 1
+    return text[:end]
+
+
+def _take_cell_suffix(text: str, width: int) -> str:
+    """Return the longest literal suffix that fits in ``width`` terminal cells."""
+
+    cells = 0
+    start = len(text)
+    for index in range(len(text) - 1, -1, -1):
+        character_cells = cell_len(text[index])
+        if cells + character_cells > width:
+            break
+        cells += character_cells
+        start = index
+    return text[start:]
 
 
 def _styled_diff_source(

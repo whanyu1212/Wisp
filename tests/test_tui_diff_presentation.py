@@ -55,6 +55,10 @@ def test_expanded_selection_remains_bounded_and_marks_remaining_evidence() -> No
     assert len(source_rows) == 400
     assert any(row.row.kind is DiffRowKind.omission for row in expanded)
     assert "lines hidden" in "\n".join(row.row.text for row in expanded)
+    # A mounted card retains the same bounded expanded evidence, not all 500
+    # deleted and 500 added source rows used transiently to derive the diff.
+    assert sum(row.is_source for row in presentation.rows) == 400
+    assert any(row.kind is DiffRowKind.omission for row in presentation.rows)
 
 
 def test_create_presentation_has_only_addition_rows() -> None:

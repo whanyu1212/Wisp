@@ -50,12 +50,15 @@ from wisp.tool_presentation import tool_result_failed
 from wisp.tui.diff_presentation import (
     DIFF_ADD_STYLE,
     DIFF_DEL_STYLE,
+    DIFF_EXPANDED_BYTES,
+    DIFF_EXPANDED_ROWS,
     DIFF_INTRA_HIGHLIGHT_MODIFIER,
     DIFF_META_STYLE,
     DiffOperation,
     DiffPresentation,
     DiffRow,
     DiffRowKind,
+    select_diff_rows,
 )
 from wisp.tui.widgets import (
     _TOOL_OUTPUT_PREVIEW_BYTES,
@@ -563,6 +566,18 @@ def _build_diff_presentation(
     )
     if not rows:
         return None
+    # The builder may transiently produce a guard-bounded full diff, but a mounted
+    # card retains only its maximum expandable evidence. Omission rows preserve the
+    # aggregate evidence left outside that window for both expanded and collapsed
+    # views, preventing long sessions from accumulating complete near-limit diffs.
+    rows = tuple(
+        visible_row.row
+        for visible_row in select_diff_rows(
+            rows,
+            max_rows=DIFF_EXPANDED_ROWS,
+            max_bytes=DIFF_EXPANDED_BYTES,
+        )
+    )
     return DiffPresentation(
         path=path if isinstance(path, str) and path else None,
         operation=operation,

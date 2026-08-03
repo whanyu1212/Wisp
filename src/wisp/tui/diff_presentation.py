@@ -153,7 +153,11 @@ def select_diff_rows(
         return ()
     ordered = tuple(rows)
     selected = _selected_source_indices(ordered, max_rows)
-    included = selected | _required_hunk_indices(ordered, selected)
+    included = (
+        selected
+        | _required_hunk_indices(ordered, selected)
+        | {index for index, row in enumerate(ordered) if row.kind is DiffRowKind.omission}
+    )
     planned = _with_omission_rows(ordered, included)
     return _apply_byte_limit(planned, max_bytes)
 
@@ -183,6 +187,12 @@ def _change_groups(rows: tuple[DiffRow, ...]) -> tuple[tuple[int, ...], ...]:
     for index, row in enumerate(rows):
         if row.kind in {DiffRowKind.addition, DiffRowKind.deletion}:
             current.append(index)
+            continue
+        if row.kind is DiffRowKind.omission:
+            # An outer expanded-limit pass may already have inserted an omission
+            # between the retained deletion/addition sides of one replacement.
+            # It is evidence metadata, not a semantic hunk boundary, so leave the
+            # change group open and let a smaller collapsed pass retain both sides.
             continue
         if current:
             groups.append(tuple(current))

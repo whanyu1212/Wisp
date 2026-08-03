@@ -1645,11 +1645,42 @@ def test_textual_tool_card_edit_diff_rows_stay_unambiguous_at_supported_widths(
 
     text, row_widths, content_width, card_width = anyio.run(scenario)
     assert "✓ edit" in text  # rendered without error at every supported width
-    assert "- │ def f" in text  # deletion row retained its gutter
-    assert "+ │ def f" in text  # addition row retained its gutter
+    assert "- │" in text  # deletion row retained its gutter
+    assert "+ │" in text  # addition row retained its gutter
     assert len(row_widths) == 2  # no soft-wrapped source continuation rows
     assert row_widths == (content_width, content_width)
     assert card_width <= size[0]  # no horizontal overflow past the viewport
+
+
+def test_textual_tool_card_narrow_diff_keeps_tail_changed_tokens_visible() -> None:
+    """Width cropping must not hide the only changed evidence at a line's tail."""
+
+    prefix = "unchanged-" * 8
+
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(28, 20)) as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="edit",
+                    arguments={
+                        "path": "src/tail.py",
+                        "edits": [{"oldText": f"{prefix}OLD", "newText": f"{prefix}NEW"}],
+                    },
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(call_id="c1", name="edit", output="Applied", is_error=False)
+            )
+            await pilot.pause()
+            return _first_tool_card(app_instance).render().plain
+
+    text = anyio.run(scenario)
+    assert "OLD" in text
+    assert "NEW" in text
+    assert "…" in text
 
 
 def test_textual_tool_card_write_renders_colored_diff() -> None:
