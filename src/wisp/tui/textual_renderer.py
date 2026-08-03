@@ -387,8 +387,7 @@ class TextualTuiRenderer:
                         del self._history_widgets[alias]
                 else:
                     del self._history_widgets[item_id]
-                item = next(item for item in self._history_window.entries if item.id == item_id)
-                if isinstance(item.entry, HistoricalToolCard):
+                if isinstance(widget, ToolCard):
                     self.app.forget_historical_tool_card(widget)
                 widget.remove()
 

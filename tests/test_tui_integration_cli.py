@@ -3573,7 +3573,9 @@ def test_textual_history_prepend_does_not_override_home_at_top() -> None:
     assert scroll_y == 0
 
 
-def test_textual_history_window_shifts_without_evicting_live_output() -> None:
+def test_textual_history_window_shifts_without_evicting_live_output(
+    monkeypatch: MonkeyPatch,
+) -> None:
     async def scenario() -> tuple[list[str], list[str], int, int, int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(60, 12)) as pilot:
@@ -3594,6 +3596,15 @@ def test_textual_history_window_shifts_without_evicting_live_output() -> None:
             await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
             initial_count = sum(isinstance(child, LineMessage) for child in transcript.children)
+
+            def reject_full_history_scan(_window: object) -> tuple[object, ...]:
+                raise AssertionError("window reconciliation must not scan every retained entry")
+
+            monkeypatch.setattr(
+                type(renderer._history_window),
+                "entries",
+                property(reject_full_history_scan),
+            )
 
             # Normal wheel/PageUp edge navigation still shifts retained entries
             # after the durable page cursor has been exhausted.
