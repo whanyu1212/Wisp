@@ -252,6 +252,7 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 renderer.token_delta("\n\nscrolled-back stream output")
                 renderer.end_token_stream()
                 await app.wait_for_stream_idle()
+                await pilot.pause()
                 stream_scrolled_back_ms = _milliseconds(started)
                 final_following = transcript.is_following
                 final_unseen_output_count = len(app._unseen_output)
