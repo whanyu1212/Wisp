@@ -314,6 +314,8 @@ class TextualTui(App[None]):
         self._runner_error: Exception | None = None
         self._on_submit: Callable[[], None] | None = None
         self._history_page_request_hook: Callable[[], Awaitable[None]] | None = None
+        self._history_window_older_hook: Callable[[], bool] | None = None
+        self._history_window_latest_hook: Callable[[], bool] | None = None
         self._history_marker: Widget | None = None
         self._prepending_history = False
         self._history_prepend_mounts: list[AwaitMount] = []
@@ -519,14 +521,23 @@ class TextualTui(App[None]):
 
     def on_transcript_follow_changed(self, event: Transcript.FollowChanged) -> None:
         if event.following:
+            show_latest = self._history_window_latest_hook
+            if show_latest is not None:
+                show_latest()
             self._clear_unseen_output()
             self._stream.resume_if_deferred()
 
     async def on_transcript_need_more_history(self, event: Transcript.NeedMoreHistory) -> None:
         event.stop()
-        hook = self._history_page_request_hook
-        if hook is None:
+        shift_older = self._history_window_older_hook
+        if shift_older is not None and shift_older():
             transcript = self._transcript
+            if transcript is not None:
+                transcript.history_page_request_failed()
+            return
+        hook = self._history_page_request_hook
+        transcript = self._transcript
+        if hook is None or transcript is None or not transcript.has_more_history:
             if transcript is not None:
                 transcript.history_page_request_failed()
             return
@@ -1019,6 +1030,9 @@ class TextualTui(App[None]):
         if self._transcript is not None:
             self._transcript_navigation_generation += 1
             self._transcript.scroll_home(animate=False)
+            shift_older = self._history_window_older_hook
+            if shift_older is not None and shift_older():
+                return
             self._transcript.request_history_at_top()
 
     def action_scroll_transcript_end(self) -> None:
@@ -1034,6 +1048,9 @@ class TextualTui(App[None]):
         if self._session_picker is not None and self._session_picker.is_open:
             self._session_picker.move_highlight_last()
             return
+        show_latest = self._history_window_latest_hook
+        if show_latest is not None:
+            show_latest()
         self._scroll_transcript_to_latest()
 
     def _scroll_transcript_to_latest(self) -> None:
@@ -1226,6 +1243,17 @@ class TextualTui(App[None]):
         if self._transcript is not None:
             self._transcript.clear_messages()
 
+    def set_history_window_hooks(
+        self,
+        *,
+        shift_older: Callable[[], bool],
+        show_latest: Callable[[], bool],
+    ) -> None:
+        """Install renderer-owned history-window navigation callbacks."""
+
+        self._history_window_older_hook = shift_older
+        self._history_window_latest_hook = show_latest
+
     # --- Main-screen heartbeat (opencode-style) ---
 
     def _mount_working_indicator(self, indicator: WorkingIndicator) -> None:
@@ -1289,20 +1317,24 @@ class TextualTui(App[None]):
         arguments: object,
         *,
         historical_card_id: str | None = None,
-    ) -> None:
+        historical: bool = False,
+        before: Widget | None = None,
+    ) -> ToolCard | None:
         # Mount a fresh card for a tool call and register it by call_id. The
         # status activity is retired: this card now carries the "in progress"
         # signal (pending glyph + dim rule) for the rest of the call's lifecycle.
         if self._transcript is None:
-            return
-        self.hide_working_indicator()
+            return None
+        if not historical:
+            self.hide_working_indicator()
         card = ToolCard(name, arguments)
         self._tool_cards[call_id] = card
         if historical_card_id is not None:
             self._historical_tool_cards[historical_card_id] = card
-        self._mount_transcript_message(card)
+        self._mount_transcript_message(card, before=before)
         self._note_transcript_update(card)
         self._follow_tail_after_refresh()
+        return card
 
     def enrich_historical_tool_call(
         self,
@@ -1399,6 +1431,16 @@ class TextualTui(App[None]):
     def write_dim(self, message: str) -> None:
         self._write_styled("dim", message)
 
+    def mount_history_marker(self, message: str, *, before: Widget | None) -> None:
+        """Mount the durable boundary between the session label and history."""
+
+        style = self._style("dim")
+        escaped = _markup_escape(message)
+        markup = f"[{style}]{escaped}[/{style}]" if style else escaped
+        widget = LineMessage(markup, role="dim")
+        self._mount_transcript_message(widget, before=before)
+        self._history_marker = widget
+
     def write_user(self, message: str) -> None:
         self.write_labeled("you:", message, role="user")
 
@@ -1425,12 +1467,32 @@ class TextualTui(App[None]):
         self._note_transcript_update(widget)
         self._follow_tail_after_refresh()
 
-    def _mount_transcript_message(self, widget: Widget) -> None:
+    def mount_historical_line(
+        self,
+        role: str,
+        message: str,
+        *,
+        before: Widget | None = None,
+    ) -> LineMessage | None:
+        """Mount one retained history line without treating it as new output."""
+
+        if self._transcript is None:
+            return None
+        label = "you:" if role == "user" else "assistant:"
+        style = self._style(role)
+        markup = f"[{style}]{label}[/{style}]" if style else label
+        if message:
+            markup += f" {_markup_escape(message)}"
+        widget = LineMessage(markup, role=role)
+        self._mount_transcript_message(widget, before=before)
+        return widget
+
+    def _mount_transcript_message(self, widget: Widget, *, before: Widget | None = None) -> None:
         transcript = self._transcript
         if transcript is None:
             return
         anchor = self._history_prepend_anchor
-        before = (
+        mount_before = before or (
             anchor[1]
             if (
                 self._prepending_history
@@ -1440,11 +1502,51 @@ class TextualTui(App[None]):
             )
             else None
         )
-        mounted = transcript.mount_message(widget, before=before)
+        mounted = transcript.mount_message(widget, before=mount_before)
         if self._prepending_history:
             self._history_prepend_mounts.append(mounted)
         if self._history_render_depth:
             self._history_render_mounts.append(mounted)
+
+    def history_insertion_boundary(self, history_widgets: set[Widget]) -> Widget | None:
+        """Return the first live widget after the managed history window."""
+
+        transcript = self._transcript
+        if transcript is None:
+            return None
+        return next(
+            (
+                child
+                for child in transcript.children
+                if child is not self._history_marker and child not in history_widgets
+            ),
+            None,
+        )
+
+    def forget_historical_tool_card(self, card: Widget) -> None:
+        """Drop every lookup alias for an evicted historical tool card."""
+
+        self._historical_tool_cards = {
+            card_id: registered
+            for card_id, registered in self._historical_tool_cards.items()
+            if registered is not card
+        }
+        self._tool_cards = {
+            call_id: registered
+            for call_id, registered in self._tool_cards.items()
+            if registered is not card
+        }
+
+    def historical_tool_card(self, card_id: str) -> ToolCard | None:
+        """Return a mounted historical card for a page-boundary tool exchange."""
+
+        return self._historical_tool_cards.get(card_id)
+
+    def set_history_window_available(self, *, has_older: bool) -> None:
+        """Expose retained older entries to transcript edge navigation."""
+
+        if self._transcript is not None:
+            self._transcript.history_window_available(has_older=has_older)
 
     def begin_history_render(self) -> None:
         """Track one renderer history batch until all of its widgets mount."""
@@ -1634,6 +1736,11 @@ class TextualTui(App[None]):
         # post-refresh pass reaches the settled scroll range; used by _mount_line.
         if self._transcript is not None:
             self.call_after_refresh(self._transcript.follow_tail)
+
+    def follow_transcript_tail_after_refresh(self) -> None:
+        """Settle a historical render at the tail when it began in follow mode."""
+
+        self._follow_tail_after_refresh()
 
     @property
     def transcript(self) -> Transcript | None:

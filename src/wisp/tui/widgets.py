@@ -1171,6 +1171,7 @@ class Transcript(VerticalScroll):
         self._empty_hint = empty_hint
         self._empty_state: TranscriptEmptyState | None = None
         self._has_more_history = False
+        self._has_retained_history = False
         self._history_loading = False
         self._history_request_armed = True
 
@@ -1195,6 +1196,7 @@ class Transcript(VerticalScroll):
         self._empty_state = None
         self._follow = True
         self._has_more_history = False
+        self._has_retained_history = False
         self._history_loading = False
         self._history_request_armed = True
         self.remove_children()
@@ -1220,7 +1222,20 @@ class Transcript(VerticalScroll):
 
         self._has_more_history = has_more
         self._history_loading = False
-        self._history_request_armed = has_more
+        self._history_request_armed = has_more or self._has_retained_history
+
+    def history_window_available(self, *, has_older: bool) -> None:
+        """Record whether the UI can shift to already retained history."""
+
+        self._has_retained_history = has_older
+        if has_older:
+            self._history_request_armed = True
+
+    @property
+    def has_more_history(self) -> bool:
+        """Whether a durable history page remains available."""
+
+        return self._has_more_history
 
     def request_history_at_top(self) -> None:
         """Request another page only when the settled viewport remains at the top."""
@@ -1230,7 +1245,9 @@ class Transcript(VerticalScroll):
 
     def _request_more_history_if_needed(self) -> None:
         if not (
-            self._has_more_history and not self._history_loading and self._history_request_armed
+            (self._has_more_history or self._has_retained_history)
+            and not self._history_loading
+            and self._history_request_armed
         ):
             return
         self._history_loading = True

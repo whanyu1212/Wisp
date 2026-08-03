@@ -1,6 +1,6 @@
-# TUI Long-Session Baseline
+# TUI Long-Session Scenario
 
-Run the current #185 baseline before and after transcript windowing:
+Run the transcript-windowing scenario:
 
 ```bash
 uv run python -m benchmarks.tui_long_session
@@ -16,7 +16,7 @@ cleanup state.
 The CPU worker runs until it is cancelled immediately after the scroll measurement,
 with a 60-second safety timeout. Streaming metrics therefore run without its load.
 
-Compare absolute timings only on the same machine. The useful PR2 comparison is the
-shape of `mounted_widget_counts` as older pages load, plus the before/after page and
-scroll timings. This intentionally executes a local shell command through
+Compare absolute timings only on the same machine. `mounted_widget_counts` remains
+bounded by the 300-entry history window (plus the session marker); compare page and
+scroll timings separately. This intentionally executes a local shell command through
 `ProcessSupervisor`; it uses a temporary directory and is cancelled before exit.
