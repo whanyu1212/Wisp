@@ -118,6 +118,8 @@ class TextualTuiRenderer:
         # neither map grows across a session.
         self._tool_arguments: dict[str, JsonObject] = {}
         self._historical_tool_results: dict[str, deque[tuple[str, HistoricalToolCard]]] = {}
+        self._resolved_boundary_results: dict[str, HistoricalToolCard] = {}
+        self._boundary_result_calls: dict[str, str] = {}
         self._history_window = TranscriptWindow[_RetainedHistoryEntry]()
         self._history_widgets: dict[int, Widget] = {}
         self._next_history_entry_id = 0
@@ -288,6 +290,8 @@ class TextualTuiRenderer:
         self._tool_started.clear()
         self._tool_arguments.clear()
         self._historical_tool_results.clear()
+        self._resolved_boundary_results.clear()
+        self._boundary_result_calls.clear()
         self._history_window.clear()
         self._history_widgets.clear()
         self._next_history_entry_id = 0
@@ -431,8 +435,31 @@ class TextualTuiRenderer:
         *,
         before: Widget | None = None,
     ) -> ToolCard | None:
+        paired_call_id = self._boundary_result_calls.get(entry.card_id)
+        if paired_call_id is not None:
+            return self.app.historical_tool_card(paired_call_id)
         tool_call_id = entry.tool_call_id
         if entry.missing_result and tool_call_id is not None:
+            result = self._resolved_boundary_results.get(entry.card_id)
+            if result is not None:
+                card = self.app.mount_tool_call(
+                    entry.card_id,
+                    entry.name,
+                    entry.arguments,
+                    historical_card_id=entry.card_id,
+                    before=before,
+                )
+                if card is not None:
+                    status, detail, full_output, truncated = self._historical_tool_presentation(
+                        result,
+                        name=entry.name,
+                        arguments=entry.arguments,
+                    )
+                    card.set_state(
+                        status, detail=detail, full_output=full_output, truncated=truncated
+                    )
+                    self._boundary_result_calls[result.card_id] = entry.card_id
+                return card
             results = self._historical_tool_results.get(tool_call_id)
             if results:
                 result_card_id, result = results[0]
@@ -445,6 +472,8 @@ class TextualTuiRenderer:
                     results.popleft()
                     if not results:
                         del self._historical_tool_results[tool_call_id]
+                    self._resolved_boundary_results[entry.card_id] = result
+                    self._boundary_result_calls[result.card_id] = entry.card_id
                     return self.app.historical_tool_card(result_card_id)
 
         card = self.app.mount_tool_call(
