@@ -365,6 +365,8 @@ class TextualTuiRenderer:
         visible_ids = {item.id for item in visible}
         self.app.set_history_window_available(has_older=not self._history_window.is_at_oldest)
         for item_id, widget in tuple(self._history_widgets.items()):
+            if item_id not in self._history_widgets:
+                continue
             if item_id not in visible_ids:
                 aliases = [
                     other_id
