@@ -204,6 +204,10 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 await _wait_for(pilot, lambda: transcript.is_following)
                 scroll_while_process_ms = _milliseconds(started)
                 update = await supervisor.cancel(process_id)
+                if update.state != "cancelled":
+                    raise RuntimeError(
+                        f"Benchmark worker did not cancel: {update.state}: {update.stderr}"
+                    )
                 process_id = None
                 process_state = update.state
 
