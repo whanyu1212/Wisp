@@ -437,27 +437,54 @@ class TextualTuiRenderer:
     ) -> ToolCard | None:
         paired_call_id = self._boundary_result_calls.get(entry.card_id)
         if paired_call_id is not None:
-            return self.app.historical_tool_card(paired_call_id)
+            card = self.app.historical_tool_card(paired_call_id)
+            if card is not None:
+                return card
+            card = self.app.mount_tool_call(
+                entry.card_id,
+                entry.name,
+                entry.arguments,
+                historical_card_id=entry.card_id,
+                before=before,
+            )
+            self._apply_historical_tool_result(entry.card_id, entry)
+            return card
         tool_call_id = entry.tool_call_id
         if entry.missing_result and tool_call_id is not None:
             result = self._resolved_boundary_results.get(entry.card_id)
             if result is not None:
-                card = self.app.mount_tool_call(
-                    entry.card_id,
-                    entry.name,
-                    entry.arguments,
-                    historical_card_id=entry.card_id,
-                    before=before,
-                )
+                card = self.app.historical_tool_card(result.card_id)
                 if card is not None:
-                    status, detail, full_output, truncated = self._historical_tool_presentation(
+                    self._enrich_historical_tool_result(
+                        result.card_id,
                         result,
                         name=entry.name,
                         arguments=entry.arguments,
                     )
-                    card.set_state(
-                        status, detail=detail, full_output=full_output, truncated=truncated
+                else:
+                    card = self.app.mount_tool_call(
+                        entry.card_id,
+                        entry.name,
+                        entry.arguments,
+                        historical_card_id=entry.card_id,
+                        before=before,
                     )
+                    if card is not None:
+                        status, detail, full_output, truncated = (
+                            self._historical_tool_presentation(
+                                result,
+                                name=entry.name,
+                                arguments=entry.arguments,
+                            )
+                        )
+                        self.app.resolve_tool_call(
+                            entry.card_id,
+                            status,
+                            detail=detail,
+                            full_output=full_output,
+                            truncated=truncated,
+                        )
+                if card is not None:
                     self._boundary_result_calls[result.card_id] = entry.card_id
                 return card
             results = self._historical_tool_results.get(tool_call_id)
