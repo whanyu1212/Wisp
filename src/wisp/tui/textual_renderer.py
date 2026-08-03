@@ -470,12 +470,10 @@ class TextualTuiRenderer:
                         before=before,
                     )
                     if card is not None:
-                        status, detail, full_output, truncated = (
-                            self._historical_tool_presentation(
-                                result,
-                                name=entry.name,
-                                arguments=entry.arguments,
-                            )
+                        status, detail, full_output, truncated = self._historical_tool_presentation(
+                            result,
+                            name=entry.name,
+                            arguments=entry.arguments,
                         )
                         self.app.resolve_tool_call(
                             entry.card_id,
