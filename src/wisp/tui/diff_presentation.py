@@ -1,0 +1,352 @@
+"""Structured, renderer-neutral presentation data for Textual tool diffs.
+
+This module deliberately contains no Textual widgets or tool execution logic. Tool
+result rendering builds :class:`DiffPresentation` from already-bounded edit/write
+facts, while ``ToolCard`` chooses how to paint the retained rows at its current
+width. Keeping row selection here makes collapsed and expanded views deterministic,
+testable, and shared by live and reconstructed historical tool cards.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
+from enum import StrEnum
+
+
+class DiffOperation(StrEnum):
+    """The file-level operation represented by one diff."""
+
+    create = "create"
+    modify = "modify"
+
+
+class DiffRowKind(StrEnum):
+    """The semantic role of one diff row."""
+
+    hunk = "hunk"
+    context = "context"
+    addition = "addition"
+    deletion = "deletion"
+    omission = "omission"
+
+
+@dataclass(frozen=True)
+class DiffRow:
+    """One literal source or metadata row in a structured unified diff."""
+
+    kind: DiffRowKind
+    text: str
+    old_line: int | None = None
+    new_line: int | None = None
+    emphasis_ranges: tuple[tuple[int, int], ...] = ()
+
+    @property
+    def is_source(self) -> bool:
+        """Whether this row represents a source line rather than hunk metadata."""
+
+        return self.kind in {
+            DiffRowKind.context,
+            DiffRowKind.addition,
+            DiffRowKind.deletion,
+        }
+
+
+@dataclass(frozen=True)
+class DiffVisibleRow:
+    """One row selected for a bounded collapsed or expanded diff view."""
+
+    row: DiffRow
+    hidden_rows: int = 0
+    hidden_bytes: int = 0
+
+    @classmethod
+    def omission(cls, hidden_rows: int, hidden_bytes: int) -> DiffVisibleRow:
+        """Describe omitted source evidence without pretending it was displayed."""
+
+        parts: list[str] = []
+        if hidden_rows:
+            unit = "line" if hidden_rows == 1 else "lines"
+            parts.append(f"{hidden_rows} {unit} hidden")
+        if hidden_bytes:
+            parts.append(f"{hidden_bytes} bytes hidden")
+        return cls(
+            DiffRow(DiffRowKind.omission, f"… {', '.join(parts) or 'content hidden'}"),
+            hidden_rows=hidden_rows,
+            hidden_bytes=hidden_bytes,
+        )
+
+
+# These are display bounds, not diff-work bounds. The builder has already refused
+# inputs that exceed its bounded SequenceMatcher workload before constructing this
+# presentation. Expanded output is still capped so one card cannot dominate a
+# transcript or unexpectedly consume an entire small terminal.
+# Theme style variables are shared by the legacy ``Content`` renderer and the
+# structured ToolCard painter. The literal +/- markers and header letters remain
+# non-color cues when Textual is running without color.
+DIFF_ADD_STYLE = "$text-success on $success-muted"
+DIFF_DEL_STYLE = "$text-error on $error-muted"
+DIFF_META_STYLE = "$text-muted"
+DIFF_INTRA_HIGHLIGHT_MODIFIER = "bold"
+
+DIFF_COLLAPSED_ROWS = 8
+DIFF_COLLAPSED_BYTES = 2_000
+DIFF_EXPANDED_ROWS = 400
+DIFF_EXPANDED_BYTES = 64_000
+
+
+@dataclass(frozen=True)
+class DiffPresentation:
+    """A literal, bounded-at-render-time view of one edit or write operation."""
+
+    path: str | None
+    operation: DiffOperation
+    additions: int
+    deletions: int
+    rows: tuple[DiffRow, ...]
+
+    @property
+    def file_marker(self) -> str:
+        """A conventional single-letter marker that survives no-color themes."""
+
+        return "A" if self.operation is DiffOperation.create else "M"
+
+    @property
+    def file_label(self) -> str:
+        """A safe fallback label when a malformed tool call omitted its path."""
+
+        return self.path or "(unnamed file)"
+
+    def visible_rows(self, *, expanded: bool) -> tuple[DiffVisibleRow, ...]:
+        """Select a deterministic bounded preview for the requested card state."""
+
+        return select_diff_rows(
+            self.rows,
+            max_rows=DIFF_EXPANDED_ROWS if expanded else DIFF_COLLAPSED_ROWS,
+            max_bytes=DIFF_EXPANDED_BYTES if expanded else DIFF_COLLAPSED_BYTES,
+        )
+
+    @property
+    def can_expand(self) -> bool:
+        """Whether expanded mode reveals diff evidence beyond the preview."""
+
+        return self.visible_rows(expanded=False) != self.visible_rows(expanded=True)
+
+
+def select_diff_rows(
+    rows: Iterable[DiffRow],
+    *,
+    max_rows: int,
+    max_bytes: int,
+) -> tuple[DiffVisibleRow, ...]:
+    """Return a bounded, change-first selection while preserving diff order.
+
+    The preview budget counts source rows, not hunk metadata. A replacement is
+    allocated across its removed and added sides before another change group is
+    considered, avoiding the old first-N-lines behavior that could show only
+    deletions. Context is added only from immediately around selected changes.
+    Omitted spans are explicit rows rather than silent clipping.
+    """
+
+    if max_rows < 1 or max_bytes < 1:
+        return ()
+    ordered = tuple(rows)
+    selected = _selected_source_indices(ordered, max_rows)
+    included = selected | _required_hunk_indices(ordered, selected)
+    planned = _with_omission_rows(ordered, included)
+    return _apply_byte_limit(planned, max_bytes)
+
+
+def _selected_source_indices(rows: tuple[DiffRow, ...], max_rows: int) -> set[int]:
+    selected: set[int] = set()
+    remaining = max_rows
+    for group in _change_groups(rows):
+        if remaining == 0:
+            break
+        chosen = _choose_change_rows(rows, group, remaining)
+        selected.update(chosen)
+        remaining -= len(chosen)
+
+    if remaining:
+        for index in _nearby_context_indices(rows, selected):
+            if remaining == 0:
+                break
+            selected.add(index)
+            remaining -= 1
+    return selected
+
+
+def _change_groups(rows: tuple[DiffRow, ...]) -> tuple[tuple[int, ...], ...]:
+    groups: list[tuple[int, ...]] = []
+    current: list[int] = []
+    for index, row in enumerate(rows):
+        if row.kind in {DiffRowKind.addition, DiffRowKind.deletion}:
+            current.append(index)
+            continue
+        if current:
+            groups.append(tuple(current))
+            current.clear()
+    if current:
+        groups.append(tuple(current))
+    return tuple(groups)
+
+
+def _choose_change_rows(
+    rows: tuple[DiffRow, ...], group: tuple[int, ...], remaining: int
+) -> tuple[int, ...]:
+    deletions = tuple(index for index in group if rows[index].kind is DiffRowKind.deletion)
+    additions = tuple(index for index in group if rows[index].kind is DiffRowKind.addition)
+    if not deletions or not additions:
+        return group[:remaining]
+    if remaining == 1:
+        # A one-row caller cannot show both sides. Prefer the addition because it
+        # describes the resulting file; normal card bounds are always larger.
+        return additions[:1]
+
+    deletion_count = min(len(deletions), max(1, remaining // 2))
+    addition_count = min(len(additions), max(1, remaining - deletion_count))
+    while deletion_count + addition_count < remaining:
+        if deletion_count < len(deletions):
+            deletion_count += 1
+        elif addition_count < len(additions):
+            addition_count += 1
+        else:
+            break
+    return tuple(sorted((*deletions[:deletion_count], *additions[:addition_count])))
+
+
+def _nearby_context_indices(rows: tuple[DiffRow, ...], selected: set[int]) -> tuple[int, ...]:
+    if not selected:
+        return ()
+    candidates: list[int] = []
+    selected_positions = tuple(sorted(selected))
+    for distance in range(1, len(rows)):
+        found_at_distance = False
+        for index in selected_positions:
+            for candidate in (index - distance, index + distance):
+                if (
+                    0 <= candidate < len(rows)
+                    and candidate not in selected
+                    and rows[candidate].kind is DiffRowKind.context
+                    and candidate not in candidates
+                ):
+                    candidates.append(candidate)
+                    found_at_distance = True
+        if not found_at_distance and distance > 2:
+            # Unified diffs contain at most two context rows at either side by
+            # construction. Do not walk distant unrelated hunks for filler.
+            break
+    return tuple(candidates)
+
+
+def _required_hunk_indices(rows: tuple[DiffRow, ...], selected: set[int]) -> set[int]:
+    required: set[int] = set()
+    for index in selected:
+        cursor = index - 1
+        while cursor >= 0 and rows[cursor].kind is not DiffRowKind.hunk:
+            cursor -= 1
+        if cursor < 0:
+            continue
+        while cursor > 0 and rows[cursor - 1].kind is DiffRowKind.hunk:
+            cursor -= 1
+        block_end = cursor
+        while block_end + 1 < len(rows) and rows[block_end + 1].kind is DiffRowKind.hunk:
+            block_end += 1
+        required.update(range(cursor, block_end + 1))
+    return required
+
+
+def _with_omission_rows(
+    rows: tuple[DiffRow, ...], included: set[int]
+) -> tuple[DiffVisibleRow, ...]:
+    visible: list[DiffVisibleRow] = []
+    hidden_rows = 0
+    hidden_bytes = 0
+
+    def flush_hidden() -> None:
+        nonlocal hidden_rows, hidden_bytes
+        if hidden_rows:
+            visible.append(DiffVisibleRow.omission(hidden_rows, hidden_bytes))
+        hidden_rows = 0
+        hidden_bytes = 0
+
+    for index, row in enumerate(rows):
+        if index in included:
+            flush_hidden()
+            visible.append(DiffVisibleRow(row))
+        elif row.is_source:
+            hidden_rows += 1
+            hidden_bytes += len(row.text.encode("utf-8"))
+    flush_hidden()
+    return tuple(visible)
+
+
+def _apply_byte_limit(
+    rows: tuple[DiffVisibleRow, ...], max_bytes: int
+) -> tuple[DiffVisibleRow, ...]:
+    """Clip selected literal row text and report the evidence that did not fit."""
+
+    visible: list[DiffVisibleRow] = []
+    used = 0
+    for index, visible_row in enumerate(rows):
+        row = visible_row.row
+        row_bytes = len(row.text.encode("utf-8"))
+        if row.kind is DiffRowKind.omission:
+            # Metadata is intentionally outside the source-content budget, like the
+            # existing honest-truncation trailer.
+            visible.append(visible_row)
+            continue
+        if used + row_bytes <= max_bytes:
+            visible.append(visible_row)
+            used += row_bytes
+            continue
+
+        remaining = max(0, max_bytes - used)
+        shown_bytes = 0
+        if remaining:
+            clipped = _clip_to_bytes(row.text, remaining)
+            if clipped:
+                visible.append(DiffVisibleRow(replace(row, text=clipped)))
+                shown_bytes = len(clipped.encode("utf-8"))
+                used += shown_bytes
+        hidden_rows = sum(
+            1
+            for rest in rows[index:]
+            if rest.row.kind in {DiffRowKind.context, DiffRowKind.addition, DiffRowKind.deletion}
+        )
+        hidden_bytes = (
+            sum(
+                len(rest.row.text.encode("utf-8"))
+                for rest in rows[index:]
+                if rest.row.kind is not DiffRowKind.omission
+            )
+            - shown_bytes
+        )
+        visible.append(DiffVisibleRow.omission(max(0, hidden_rows), max(0, hidden_bytes)))
+        break
+    return tuple(visible)
+
+
+def _clip_to_bytes(text: str, max_bytes: int) -> str:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+__all__ = [
+    "DIFF_ADD_STYLE",
+    "DIFF_COLLAPSED_BYTES",
+    "DIFF_COLLAPSED_ROWS",
+    "DIFF_DEL_STYLE",
+    "DIFF_EXPANDED_BYTES",
+    "DIFF_EXPANDED_ROWS",
+    "DIFF_INTRA_HIGHLIGHT_MODIFIER",
+    "DIFF_META_STYLE",
+    "DiffOperation",
+    "DiffPresentation",
+    "DiffRow",
+    "DiffRowKind",
+    "DiffVisibleRow",
+    "select_diff_rows",
+]

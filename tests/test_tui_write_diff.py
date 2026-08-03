@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from textual.content import Content
 
+from wisp.tui.diff_presentation import DiffOperation, DiffPresentation, DiffRowKind
 from wisp.tui.tool_output import (
     _DIFF_ADD_STYLE,
     _DIFF_DEL_STYLE,
@@ -175,7 +176,7 @@ def test_render_write_diff_stateful_str_before_is_coerced() -> None:
 
 
 def test_render_tool_result_routes_successful_write_to_diff() -> None:
-    content = render_tool_result(
+    presentation = render_tool_result(
         "write",
         _write("after\n"),
         "Wrote 6 bytes to src/foo.py",
@@ -183,14 +184,19 @@ def test_render_tool_result_routes_successful_write_to_diff() -> None:
         exit_code=None,
         before_text="before\n",
     )
-    assert isinstance(content, Content)
-    assert "-before" in content.plain and "+after" in content.plain
+    assert isinstance(presentation, DiffPresentation)
+    assert presentation.operation is DiffOperation.modify
+    assert [row.kind for row in presentation.rows] == [
+        DiffRowKind.hunk,
+        DiffRowKind.deletion,
+        DiffRowKind.addition,
+    ]
 
 
 def test_render_tool_result_routes_write_create_to_diff() -> None:
     # A create (before_text=None, created=True) routes to a pure-add diff from the
     # content.
-    content = render_tool_result(
+    presentation = render_tool_result(
         "write",
         _write("fresh\n"),
         "Wrote 6 bytes to src/foo.py",
@@ -199,8 +205,11 @@ def test_render_tool_result_routes_write_create_to_diff() -> None:
         before_text=None,
         created=True,
     )
-    assert isinstance(content, Content)
-    assert "+fresh" in content.plain
+    assert isinstance(presentation, DiffPresentation)
+    assert presentation.operation is DiffOperation.create
+    assert presentation.additions == 1
+    assert presentation.deletions == 0
+    assert [row.kind for row in presentation.rows] == [DiffRowKind.hunk, DiffRowKind.addition]
 
 
 def test_render_tool_result_write_overwrite_without_snapshot_falls_back() -> None:

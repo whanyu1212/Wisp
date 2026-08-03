@@ -6,6 +6,7 @@ import os
 
 import pytest
 from pytest import MonkeyPatch
+from rich.cells import cell_len
 from textual import events
 from textual.content import Content
 from textual.widgets import OptionList, Static
@@ -982,6 +983,34 @@ def test_textual_tui_renderer_renders_historical_tool_cards() -> None:
     assert "[red]boom[/red]" in rendered
 
 
+def test_textual_tui_renderer_renders_historical_edit_with_structured_diff() -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.render_history_entries(
+                (
+                    HistoricalToolCard(
+                        card_id="history:edit-1",
+                        name="edit",
+                        arguments={
+                            "path": "src/restored.py",
+                            "edits": [{"oldText": "old\n", "newText": "new\n"}],
+                        },
+                        output="Applied 1 edit(s) to src/restored.py",
+                        is_error=False,
+                    ),
+                )
+            )
+            await pilot.pause()
+            return "\n".join(_transcript_texts(app_instance))
+
+    rendered = anyio.run(scenario)
+    assert "M src/restored.py  +1 -1" in rendered
+    assert "- │ old" in rendered
+    assert "+ │ new" in rendered
+    assert "Applied 1 edit" not in rendered
+
+
 def test_textual_tui_renderer_enriches_result_at_a_history_page_boundary() -> None:
     async def scenario() -> tuple[int, str, str]:
         app_instance, renderer = create_textual_tui()
@@ -1567,8 +1596,9 @@ def test_textual_tool_card_edit_renders_colored_diff() -> None:
 
     text, styles = anyio.run(scenario)
     assert "✓ edit" in text
-    assert "-return 1" in text  # deletion line
-    assert "+return 2" in text  # addition line
+    assert "M src/foo.py  +1 -1" in text
+    assert "- │ return 1" in text  # deletion gutter + literal source
+    assert "+ │ return 2" in text  # addition gutter + literal source
     # Diff spans carry the theme *variables* ($success/$error), not baked hex —
     # Textual resolves them per active theme at paint time, so a theme switch
     # recolors the diff. Asserting the variable names proves it's theme-linked,
@@ -1577,17 +1607,18 @@ def test_textual_tool_card_edit_renders_colored_diff() -> None:
     assert "$error" in styles  # deletions
 
 
-def test_textual_tool_card_edit_diff_renders_within_a_narrow_terminal() -> None:
-    # Acceptance criterion "diff rendering handles narrow terminals": a diff whose
-    # lines are far wider than the terminal must still render (the card soft-wraps it)
-    # without overflowing the viewport width or erroring. The diff carries literal
-    # +/- prefixes, so the add/delete lines stay distinguishable even wrapped.
+@pytest.mark.parametrize("size", [(28, 20), (80, 24), (120, 40)])
+def test_textual_tool_card_edit_diff_rows_stay_unambiguous_at_supported_widths(
+    size: tuple[int, int],
+) -> None:
+    # Structured rows crop source text to the available width instead of soft
+    # wrapping, so every visible row retains its +/- gutter at compact widths.
     long_old = "def f(): return " + "x" * 120
     long_new = "def f(): return " + "y" * 120
 
-    async def scenario() -> tuple[str, int, int]:
+    async def scenario() -> tuple[str, tuple[int, ...], int, int]:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test(size=(28, 20)) as pilot:
+        async with app_instance.run_test(size=size) as pilot:
             renderer.event(
                 ToolCallRequested(
                     call_id="c1",
@@ -1609,13 +1640,16 @@ def test_textual_tool_card_edit_diff_renders_within_a_narrow_terminal() -> None:
             )
             await pilot.pause()
             card = _first_tool_card(app_instance)
-            return card.render().plain, card.region.width, 28
+            rows = tuple(cell_len(line) for line in card.render().plain.splitlines() if "│" in line)
+            return card.render().plain, rows, card.content_size.width, card.region.width
 
-    text, card_width, terminal_width = anyio.run(scenario)
-    assert "✓ edit" in text  # rendered without error at 28 columns
-    assert "-def f" in text  # deletion line present
-    assert "+def f" in text  # addition line present, distinguishable by prefix
-    assert card_width <= terminal_width  # no horizontal overflow past the viewport
+    text, row_widths, content_width, card_width = anyio.run(scenario)
+    assert "✓ edit" in text  # rendered without error at every supported width
+    assert "- │ def f" in text  # deletion row retained its gutter
+    assert "+ │ def f" in text  # addition row retained its gutter
+    assert len(row_widths) == 2  # no soft-wrapped source continuation rows
+    assert row_widths == (content_width, content_width)
+    assert card_width <= size[0]  # no horizontal overflow past the viewport
 
 
 def test_textual_tool_card_write_renders_colored_diff() -> None:
@@ -1651,8 +1685,9 @@ def test_textual_tool_card_write_renders_colored_diff() -> None:
 
     text, styles = anyio.run(scenario)
     assert "✓ write" in text
-    assert "-line a" in text  # deletion line (prior content)
-    assert "+line b" in text  # addition line (new content)
+    assert "M src/foo.py  +1 -1" in text
+    assert "- │ line a" in text  # deletion line (prior content)
+    assert "+ │ line b" in text  # addition line (new content)
     assert "$success" in styles  # additions
     assert "$error" in styles  # deletions
 
@@ -1686,7 +1721,60 @@ def test_textual_tool_card_write_create_renders_pure_addition() -> None:
 
     text = anyio.run(scenario)
     assert "✓ write" in text
-    assert "+fresh line" in text
+    assert "A new.py  +1 -0" in text
+    assert "+ │ fresh line" in text
+
+
+def test_textual_tool_card_expands_structured_diff_without_showing_acknowledgement() -> None:
+    """Diff expansion reveals more review rows, never the raw tool acknowledgement."""
+
+    old = "".join(f"old {index}\n" for index in range(20))
+    new = "".join(f"new {index}\n" for index in range(20))
+
+    async def scenario() -> tuple[str, str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="edit",
+                    arguments={
+                        "path": "src/large.py",
+                        "edits": [{"oldText": old, "newText": new}],
+                    },
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="edit",
+                    output="Applied 1 edit(s) to src/large.py",
+                    is_error=False,
+                )
+            )
+            await pilot.pause()
+            collapsed = "\n".join(_transcript_texts(app_instance))
+
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            expanded = "\n".join(_transcript_texts(app_instance))
+
+            await pilot.press("enter")
+            await pilot.pause()
+            recollapsed = "\n".join(_transcript_texts(app_instance))
+            return collapsed, expanded, recollapsed
+
+    collapsed, expanded, recollapsed = anyio.run(scenario)
+    assert "- │ old 0" in collapsed and "+ │ new 0" in collapsed
+    assert "old 19" not in collapsed and "new 19" not in collapsed
+    assert "… 16 lines hidden" in collapsed
+    assert "- │ old 19" in expanded and "+ │ new 19" in expanded
+    assert "Applied 1 edit" not in expanded
+    assert "old 19" not in recollapsed and "new 19" not in recollapsed
 
 
 def test_textual_tool_card_write_overwrite_without_snapshot_shows_summary() -> None:
@@ -2620,6 +2708,19 @@ def test_textual_no_color_env_var_keeps_transcript_legible(monkeypatch: MonkeyPa
             )
             renderer.event(ToolCallRequested(call_id="c3", name="bash", arguments={}))
             renderer.event(ToolResultReady(call_id="c3", name="bash", output="boom", is_error=True))
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c4",
+                    name="edit",
+                    arguments={
+                        "path": "plain.py",
+                        "edits": [{"oldText": "old\n", "newText": "new\n"}],
+                    },
+                )
+            )
+            renderer.event(
+                ToolResultReady(call_id="c4", name="edit", output="Applied", is_error=False)
+            )
             renderer.notice("heads up")
             await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
@@ -2639,6 +2740,9 @@ def test_textual_no_color_env_var_keeps_transcript_legible(monkeypatch: MonkeyPa
     assert "✓ bash" in rendered
     assert "⊘ write" in rendered
     assert "✗ bash" in rendered
+    assert "M plain.py  +1 -1" in rendered
+    assert "- │ old" in rendered
+    assert "+ │ new" in rendered
     assert "heads up" in rendered
 
 

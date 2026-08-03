@@ -21,6 +21,7 @@ from textual.content import Content
 from textual.widget import Widget
 
 from wisp.events import JsonObject
+from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.history import (
     HistoricalToolCard,
     HistoricalTranscriptEntry,
@@ -84,7 +85,7 @@ class TextualHistorySurface(Protocol):
         arguments: JsonObject,
         *,
         status: str,
-        detail: str | Content,
+        detail: str | Content | DiffPresentation,
         full_output: str,
         truncated: bool,
     ) -> bool: ...
@@ -94,7 +95,7 @@ class TextualHistorySurface(Protocol):
         call_id: str,
         status: str,
         *,
-        detail: str | Content = "",
+        detail: str | Content | DiffPresentation = "",
         full_output: str = "",
         truncated: bool = False,
     ) -> None: ...
@@ -404,7 +405,7 @@ class TextualHistoryController:
         *,
         name: str | None = None,
         arguments: JsonObject | None = None,
-    ) -> tuple[str, str | Content, str, bool]:
+    ) -> tuple[str, str | Content | DiffPresentation, str, bool]:
         status = historical_tool_status(entry)
         if status in {"cancelled", "denied"}:
             return status, entry.output, "", False
