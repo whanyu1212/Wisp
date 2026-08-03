@@ -146,8 +146,10 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         raise ValueError("message_count, page_size, and stream_chunks must be positive")
     with tempfile.TemporaryDirectory(prefix="wisp-tui-benchmark-") as temporary_directory:
         root = Path(temporary_directory)
-        session = JsonlSessionStore(root).create()
+        store = JsonlSessionStore(root)
+        session = store.create()
         await _append_messages(session, config.message_count)
+        session = store.load(session.path)
         newest_page, newest_page_read_ms = _read_page(session, limit=config.page_size)
         older_pages: list[tuple[SessionMessagePage, float]] = []
         cursor = newest_page.next_before_entry_id
@@ -193,15 +195,23 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                         f"{process_update.state}: {process_update.stderr}"
                     )
                 started = time.perf_counter_ns()
-                transcript.scroll_end(animate=False)
                 await _wait_for(pilot, lambda: transcript.max_scroll_y > 0)
                 transcript.scroll_to(
                     y=transcript.max_scroll_y / 2,
                     animate=False,
                     immediate=True,
                 )
-                transcript.scroll_end(animate=False)
-                await _wait_for(pilot, lambda: transcript.is_following)
+                await pilot.pause()
+                await _wait_for(pilot, lambda: 0 < transcript.scroll_y < transcript.max_scroll_y)
+                started = time.perf_counter_ns()
+                transcript.scroll_to(y=transcript.max_scroll_y, animate=False, immediate=True)
+                await pilot.pause()
+                await _wait_for(
+                    pilot,
+                    lambda: (
+                        transcript.is_following and transcript.scroll_y == transcript.max_scroll_y
+                    ),
+                )
                 scroll_while_process_ms = _milliseconds(started)
                 update = await supervisor.cancel(process_id)
                 if update.state != "cancelled":
@@ -220,7 +230,13 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     renderer.token_delta(f"{chunk}\n\n")
                 renderer.end_token_stream()
                 await app.wait_for_stream_idle()
-                await _wait_for(pilot, lambda: transcript.is_following)
+                await pilot.pause()
+                await _wait_for(
+                    pilot,
+                    lambda: (
+                        transcript.is_following and transcript.scroll_y == transcript.max_scroll_y
+                    ),
+                )
                 stream_following_tail_ms = _milliseconds(started)
 
                 await _wait_for(pilot, lambda: transcript.max_scroll_y > 0)
