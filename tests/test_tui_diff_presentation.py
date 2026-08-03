@@ -25,6 +25,19 @@ def test_edit_presentation_preserves_literal_rows_and_line_positions() -> None:
     ]
 
 
+def test_structured_presentation_highlights_multiline_replace_beyond_legacy_preview() -> None:
+    prefix = "unchanged-" * 8
+    old = "".join(f"{prefix}OLD-{index}\n" for index in range(8))
+    new = "".join(f"{prefix}NEW-{index}\n" for index in range(8))
+
+    presentation = build_edit_diff_presentation(_edit(old, new))
+
+    assert presentation is not None
+    changed_rows = [row for row in presentation.rows if row.kind is not DiffRowKind.context]
+    assert len(changed_rows) == 16
+    assert all(row.emphasis_ranges for row in changed_rows)
+
+
 def test_collapsed_preview_balances_replacement_sides_and_expanded_reveals_more() -> None:
     old = "".join(f"old {index}\n" for index in range(20))
     new = "".join(f"new {index}\n" for index in range(20))

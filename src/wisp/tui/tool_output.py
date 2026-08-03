@@ -141,6 +141,13 @@ _DIFF_MAX_TOTAL_CHARS = 2_000_000
 _INTRA_LINE_MAX_GROUP_LINES = 60
 _INTRA_LINE_MAX_GROUP_CHARS = 12_000
 
+# Structured cards can retain far more lines than the legacy eight-line Content
+# preview. Their wider intra-line search must not multiply the character-level
+# matcher work across many otherwise-eligible replace groups: this aggregate
+# allows no more character input than one maximum-size group (both joined sides),
+# while still recognizing a normal multi-line replacement beyond the legacy view.
+_INTRA_LINE_MAX_PRESENTATION_CHARS = 2 * _INTRA_LINE_MAX_GROUP_CHARS
+
 # The single-character boundaries ``str.splitlines`` breaks on. The work guard
 # below must count boundaries the SAME way the diff later splits them, or an input
 # that splits into many lines slips past an undercounting guard and still starts
@@ -555,7 +562,12 @@ def _build_diff_presentation(
 ) -> DiffPresentation | None:
     """Build literal structured rows from the same guarded unified diff input."""
 
-    built = _build_diff_data(changed, multi=multi)
+    built = _build_diff_data(
+        changed,
+        multi=multi,
+        intra_line_limit=None,
+        intra_line_max_total_chars=_INTRA_LINE_MAX_PRESENTATION_CHARS,
+    )
     if built is None:
         return None
     diff_lines, intra_line_ranges = built
@@ -591,16 +603,25 @@ def _build_diff_presentation(
 
 
 def _build_diff_data(
-    changed: Sequence[tuple[int, str, str]], *, multi: bool
+    changed: Sequence[tuple[int, str, str]],
+    *,
+    multi: bool,
+    intra_line_limit: int | None = _DIFF_PREVIEW_LINES,
+    intra_line_max_total_chars: int | None = None,
 ) -> tuple[list[str], dict[int, list[tuple[int, int]]]] | None:
-    """Run the guarded unified diff and return lines plus literal emphasis ranges."""
+    """Run the guarded unified diff and return bounded literal emphasis ranges."""
 
     if _edit_input_too_large([(old, new) for _, old, new in changed]):
         return None
     diff_lines, note_lengths = _unified_diff_lines(changed, multi=multi)
     if not diff_lines:
         return None
-    return diff_lines, _intra_line_highlight_map(diff_lines, note_lengths)
+    return diff_lines, _intra_line_highlight_map(
+        diff_lines,
+        note_lengths,
+        limit=len(diff_lines) if intra_line_limit is None else intra_line_limit,
+        max_total_chars=intra_line_max_total_chars,
+    )
 
 
 _HUNK_HEADER = re.compile(
@@ -1088,15 +1109,21 @@ def _line_content_without_note(line: str, note_length: int) -> str:
 
 
 def _intra_line_highlight_map(
-    diff_lines: Sequence[str], note_lengths: Sequence[int]
+    diff_lines: Sequence[str],
+    note_lengths: Sequence[int],
+    *,
+    limit: int = _DIFF_PREVIEW_LINES,
+    max_total_chars: int | None = None,
 ) -> dict[int, list[tuple[int, int]]]:
     """Word/char-level highlight ranges, keyed by index into ``diff_lines``.
 
-    Issue #111: finds every equal-length replace-group ending within the
-    *previewed* window of ``diff_lines`` — :func:`_content_from_diff_lines`
-    never renders past ``diff_lines[:_DIFF_PREVIEW_LINES]`` (further cut by
-    the byte budget), so a group entirely beyond that window would cost real
-    ``SequenceMatcher`` work for a diff hunk the reader never sees.
+    Finds every equal-length replace-group ending within the selected
+    ``diff_lines`` window. Legacy ``Content`` callers use the established
+    eight-line preview; structured cards scan their guard-bounded diff but use
+    a separate aggregate character budget. ``max_total_chars`` bounds the
+    combined joined character input
+    across those groups, keeping wider card presentation from multiplying
+    ``SequenceMatcher`` work.
     :func:`_equal_length_replace_groups` is given the FULL ``diff_lines``
     plus the window's ``limit``, not a pre-sliced list — a group whose
     ``+``-run is merely cut off exactly at the window boundary can look
@@ -1128,8 +1155,29 @@ def _intra_line_highlight_map(
     """
 
     highlight_map: dict[int, list[tuple[int, int]]] = {}
-    groups = _equal_length_replace_groups(diff_lines, limit=_DIFF_PREVIEW_LINES)
+    remaining_chars = max_total_chars
+    groups = _equal_length_replace_groups(diff_lines, limit=limit)
     for minus_start, plus_start, size in groups:
+        # Avoid materializing sliced source strings for a group the existing
+        # per-group guard would reject anyway. The later helper keeps the same
+        # guard for direct callers.
+        if size > _INTRA_LINE_MAX_GROUP_LINES:
+            continue
+        # Count exactly what the matcher would join without allocating duplicate
+        # strings just to enforce the presentation-wide work budget.
+        group_chars = (
+            sum(
+                len(diff_lines[minus_start + k]) - 1 - note_lengths[minus_start + k]
+                for k in range(size)
+            )
+            + sum(
+                len(diff_lines[plus_start + k]) - 1 - note_lengths[plus_start + k]
+                for k in range(size)
+            )
+            + 2 * max(0, size - 1)
+        )
+        if remaining_chars is not None and group_chars > remaining_chars:
+            continue
         old_stripped = [
             _line_content_without_note(diff_lines[minus_start + k], note_lengths[minus_start + k])
             for k in range(size)
@@ -1141,6 +1189,8 @@ def _intra_line_highlight_map(
         result = _intra_line_ranges_for_group(old_stripped, new_stripped)
         if result is None:
             continue
+        if remaining_chars is not None:
+            remaining_chars -= group_chars
         old_ranges, new_ranges = result
         for k in range(size):
             if old_ranges[k]:

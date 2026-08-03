@@ -1683,6 +1683,38 @@ def test_textual_tool_card_narrow_diff_keeps_tail_changed_tokens_visible() -> No
     assert "…" in text
 
 
+def test_textual_tool_card_narrow_multiline_diff_keeps_tail_tokens_visible() -> None:
+    """Structured cards retain tail-only changes beyond the legacy eight-row preview."""
+
+    prefix = "unchanged-" * 8
+    old = "".join(f"{prefix}OLD-{index}\n" for index in range(8))
+    new = "".join(f"{prefix}NEW-{index}\n" for index in range(8))
+
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(28, 20)) as pilot:
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="edit",
+                    arguments={
+                        "path": "src/multiline-tail.py",
+                        "edits": [{"oldText": old, "newText": new}],
+                    },
+                )
+            )
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(call_id="c1", name="edit", output="Applied", is_error=False)
+            )
+            await pilot.pause()
+            return _first_tool_card(app_instance).render().plain
+
+    text = anyio.run(scenario)
+    assert "OLD-0" in text
+    assert "NEW-0" in text
+
+
 def test_textual_tool_card_narrow_full_line_replace_marks_hidden_tail() -> None:
     """A cropped full-line replacement must explicitly mark hidden changed text."""
 
