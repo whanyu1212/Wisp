@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,9 @@ DEFAULT_MAX_RETAINED_BYTES = 50_000
 DEFAULT_MAX_RETAINED_LINES = 2_000
 POST_TERMINATION_DRAIN_TIMEOUT = 0.25
 PROCESS_TREE_CLEANUP_ERROR = "Failed to terminate process tree"
+_LINE_BREAK_CHARACTERS = frozenset(
+    {"\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,63 +57,175 @@ class ProcessUpdate:
 
 
 @dataclass
+class _PendingFragment:
+    text: str
+    source_byte_lengths: tuple[int, ...]
+    source_bytes: int
+
+
+@dataclass
+class _PendingLine:
+    fragments: deque[_PendingFragment] = field(default_factory=deque)
+    complete: bool = False
+
+
+@dataclass
 class _PendingText:
     max_bytes: int
     max_lines: int
-    text: str = ""
     dropped_bytes: int = 0
-    _source_byte_lengths: list[int] = field(default_factory=list)
+    _lines: deque[_PendingLine] = field(default_factory=deque)
+    _retained_source_bytes: int = 0
     _pending_utf8: bytes = b""
+    _pending_carriage_return: bool = False
 
     @property
     def retained_source_bytes(self) -> int:
-        return sum(self._source_byte_lengths)
+        return self._retained_source_bytes
+
+    @property
+    def has_text(self) -> bool:
+        return bool(self._lines)
+
+    @property
+    def text(self) -> str:
+        return "".join(fragment.text for line in self._lines for fragment in line.fragments)
 
     def append(self, value: str) -> None:
         if not value:
             return
-        self._append_units(
-            DecodedTextUnit(text=character, source_bytes=len(character.encode("utf-8")))
-            for character in value
-        )
+        self._append_text_units((character, len(character.encode("utf-8"))) for character in value)
 
     def append_bytes(self, value: bytes, *, final: bool = False) -> None:
-        units, pending = decode_utf8_units(self._pending_utf8 + value, final=final)
+        data = self._pending_utf8 + value
+        if data.isascii():
+            self._pending_utf8 = b""
+            self._append_text_units((character, 1) for character in data.decode("ascii"))
+            return
+        units, pending = decode_utf8_units(data, final=final)
         self._pending_utf8 = pending
         self._append_units(units)
 
     def _append_units(self, units: Iterable[DecodedTextUnit]) -> None:
-        new_units = tuple(units)
-        if not new_units:
+        self._append_text_units((unit.text, unit.source_bytes) for unit in units)
+
+    def _append_text_units(self, units: Iterable[tuple[str, int]]) -> None:
+        text_parts: list[str] = []
+        source_byte_lengths: list[int] = []
+        appended = False
+
+        def append_unit(text: str, source_bytes: int) -> None:
+            text_parts.append(text)
+            source_byte_lengths.append(source_bytes)
+
+        def flush_fragment() -> None:
+            if not text_parts:
+                return
+            lengths = tuple(source_byte_lengths)
+            source_bytes = sum(lengths)
+            self._current_line().fragments.append(
+                _PendingFragment(
+                    text="".join(text_parts),
+                    source_byte_lengths=lengths,
+                    source_bytes=source_bytes,
+                )
+            )
+            self._retained_source_bytes += source_bytes
+            text_parts.clear()
+            source_byte_lengths.clear()
+
+        for text, source_bytes in units:
+            appended = True
+            if self._pending_carriage_return:
+                if text == "\n":
+                    append_unit(text, source_bytes)
+                    flush_fragment()
+                    self._finish_current_line()
+                    continue
+                flush_fragment()
+                self._finish_current_line()
+
+            append_unit(text, source_bytes)
+            if text == "\r":
+                self._pending_carriage_return = True
+            elif text in _LINE_BREAK_CHARACTERS:
+                flush_fragment()
+                self._finish_current_line()
+        if appended:
+            flush_fragment()
+            self._trim()
+
+    def _current_line(self) -> _PendingLine:
+        if not self._lines or self._lines[-1].complete:
+            self._lines.append(_PendingLine())
+        return self._lines[-1]
+
+    def _finish_current_line(self) -> None:
+        if self._lines:
+            self._lines[-1].complete = True
+        self._pending_carriage_return = False
+
+    def _trim(self) -> None:
+        if self.max_bytes <= 0 or self.max_lines <= 0:
+            self._drop_all()
             return
-        combined = f"{self.text}{''.join(unit.text for unit in new_units)}"
-        source_byte_lengths = [
-            *self._source_byte_lengths,
-            *(unit.source_bytes for unit in new_units),
-        ]
-        bounded, _ = _bounded_text_tail(
-            combined,
-            max_bytes=self.max_bytes,
-            max_lines=self.max_lines,
-        )
-        if bounded:
-            self._source_byte_lengths = source_byte_lengths[-len(bounded) :]
-        else:
-            self._source_byte_lengths = []
-        self.text = bounded
-        self.dropped_bytes += max(
-            0,
-            sum(source_byte_lengths) - self.retained_source_bytes,
-        )
+        while len(self._lines) > self.max_lines:
+            self._drop_line()
+        while self._retained_source_bytes > self.max_bytes and self._lines:
+            line = self._lines[0]
+            fragment = line.fragments[0]
+            excess_bytes = self._retained_source_bytes - self.max_bytes
+            if fragment.source_bytes <= excess_bytes:
+                self._drop_fragment(line.fragments.popleft())
+            else:
+                self._trim_fragment(fragment, excess_bytes)
+            if not line.fragments:
+                self._lines.popleft()
+        if not self._lines or self._lines[-1].complete:
+            self._pending_carriage_return = False
+
+    def _drop_all(self) -> None:
+        while self._lines:
+            self._drop_line()
+        self._pending_carriage_return = False
+
+    def _drop_line(self) -> None:
+        line = self._lines.popleft()
+        while line.fragments:
+            self._drop_fragment(line.fragments.popleft())
+
+    def _drop_fragment(self, fragment: _PendingFragment) -> None:
+        self._retained_source_bytes -= fragment.source_bytes
+        self.dropped_bytes += fragment.source_bytes
+
+    def _trim_fragment(self, fragment: _PendingFragment, excess_bytes: int) -> None:
+        removed_bytes = 0
+        removed_characters = 0
+        for source_bytes in fragment.source_byte_lengths:
+            if removed_bytes >= excess_bytes:
+                break
+            removed_bytes += source_bytes
+            removed_characters += 1
+        fragment.text = fragment.text[removed_characters:]
+        fragment.source_byte_lengths = fragment.source_byte_lengths[removed_characters:]
+        fragment.source_bytes -= removed_bytes
+        self._retained_source_bytes -= removed_bytes
+        self.dropped_bytes += removed_bytes
 
     def drain(self) -> tuple[str, int, int, tuple[int, ...]]:
         text = self.text
         dropped_bytes = self.dropped_bytes
         retained_source_bytes = self.retained_source_bytes
-        source_byte_lengths = tuple(self._source_byte_lengths)
-        self.text = ""
+        source_byte_lengths = tuple(
+            source_bytes
+            for line in self._lines
+            for fragment in line.fragments
+            for source_bytes in fragment.source_byte_lengths
+        )
         self.dropped_bytes = 0
-        self._source_byte_lengths = []
+        self._lines.clear()
+        self._retained_source_bytes = 0
+        self._pending_carriage_return = False
         return text, dropped_bytes, retained_source_bytes, source_byte_lengths
 
 
@@ -134,8 +250,8 @@ class _ManagedProcess:
 
     def has_pending_output(self) -> bool:
         return bool(
-            self.stdout.text
-            or self.stderr.text
+            self.stdout.has_text
+            or self.stderr.has_text
             or self.stdout.dropped_bytes
             or self.stderr.dropped_bytes
         )
