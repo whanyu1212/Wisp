@@ -304,6 +304,24 @@ def test_history_controller_reloads_latest_after_older_paging_evicts_it() -> Non
     assert not controller.show_latest()
 
 
+def test_history_controller_defers_a_latest_reload_after_reader_leaves_tail() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    controller.replace_entries(
+        (HistoricalTranscriptMessage(role="assistant", content="retained"),),
+        session_label="Windowed",
+    )
+    controller.capture_latest_reload_live_entries()
+    follow_requests_before_reload = surface.follow_requests
+    surface.following = False
+
+    assert not controller.replace_latest_entries(
+        (HistoricalTranscriptMessage(role="assistant", content="reloaded"),)
+    )
+    assert surface.history_labels == ["assistant: retained"]
+    assert surface.follow_requests == follow_requests_before_reload
+
+
 def test_history_controller_excludes_live_entries_from_a_latest_reload() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)

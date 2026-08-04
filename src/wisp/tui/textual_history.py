@@ -288,8 +288,16 @@ class TextualHistoryController:
             self._surface.finish_history_render()
         return True
 
-    def replace_latest_entries(self, entries: Iterable[HistoricalTranscriptEntry]) -> None:
-        """Replace evicted history with a newly loaded durable latest page."""
+    def replace_latest_entries(self, entries: Iterable[HistoricalTranscriptEntry]) -> bool:
+        """Replace evicted history with a newly loaded durable latest page.
+
+        Return ``False`` when the reader left the tail while the page was in
+        flight, so the caller can defer replacement until they return.
+        """
+
+        if not self._surface.history_is_following():
+            self._latest_reload_live_entries = None
+            return False
 
         snapshot = self._latest_reload_live_entries
         live_entries = snapshot if snapshot is not None else tuple(self._live_entries)
@@ -304,6 +312,7 @@ class TextualHistoryController:
             self._surface.follow_transcript_tail_after_refresh()
         finally:
             self._surface.finish_history_render()
+        return True
 
     def capture_latest_reload_live_entries(self) -> None:
         """Capture live output at the point the durable latest-page request starts."""
