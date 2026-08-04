@@ -6,7 +6,7 @@ import json
 import os
 import stat
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -179,6 +179,15 @@ class SessionMessagePage:
     messages: tuple[RpcMessageSnapshot, ...]
     truncated: bool
     next_before_entry_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _MessagePageIndex:
+    """Resolved active-path messages and their stable cursor positions."""
+
+    active_leaf_id: str | None
+    messages: tuple[MessageSessionEntry, ...]
+    positions: dict[str, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,6 +466,7 @@ class JsonlSession:
         self._entry_index: dict[str, SessionEntry] | None = None
         self._entry_index_generation: int | None = None
         self._entry_index_signature: _FileSignature | None = None
+        self._message_page_index: _MessagePageIndex | None = None
 
     async def append_message(
         self,
@@ -687,13 +697,23 @@ class JsonlSession:
     ) -> SessionMessagePage:
         """Read a bounded active-path transcript page in chronological order."""
 
-        return _message_page_from_entries(
-            self.read_entry_snapshot(),
-            session_id=self.session_id,
-            path=self.path,
-            limit=limit,
-            before_entry_id=before_entry_id,
-        )
+        _validate_message_page_limit(limit)
+        with self._file_state.lock:
+            if self._validate_session_file() is None:
+                raise SessionNotFoundError(f"Session file does not exist: {self.path}")
+            self._refresh_entry_index()
+            if self._message_page_index is None:
+                assert self._entry_index is not None
+                self._message_page_index = _message_page_index_from_entries(
+                    self._entry_index.values()
+                )
+            return _message_page_from_index(
+                self._message_page_index,
+                session_id=self.session_id,
+                path=self.path,
+                limit=limit,
+                before_entry_id=before_entry_id,
+            )
 
     def read_tree_page(
         self,
@@ -1069,6 +1089,7 @@ class JsonlSession:
         self._entry_index[persisted.id] = persisted
         self._entry_index_generation = self._file_state.generation
         self._entry_index_signature = _session_file_signature(info)
+        self._invalidate_message_page_index()
         return persisted
 
     def _persisted_entry_locked(self, entry: SessionEntry) -> SessionEntry | None:
@@ -1086,6 +1107,7 @@ class JsonlSession:
             self._entry_index = {}
             self._entry_index_generation = self._file_state.generation
             self._entry_index_signature = None
+            self._invalidate_message_page_index()
             return
 
         signature = _session_file_signature(info)
@@ -1097,11 +1119,16 @@ class JsonlSession:
             self._entry_index = self._load_entry_index()
             self._entry_index_generation = self._file_state.generation
             self._entry_index_signature = signature
+            self._invalidate_message_page_index()
 
     def _invalidate_entry_index(self) -> None:
         self._entry_index = None
         self._entry_index_generation = None
         self._entry_index_signature = None
+        self._invalidate_message_page_index()
+
+    def _invalidate_message_page_index(self) -> None:
+        self._message_page_index = None
 
     def _load_entry_index(self) -> dict[str, SessionEntry]:
         entries: dict[str, SessionEntry] = {}
@@ -1322,30 +1349,39 @@ def _session_name_from_entries(entries: Sequence[SessionEntry]) -> str | None:
     return name
 
 
-def _message_page_from_entries(
-    entries: Sequence[SessionEntry],
+def _validate_message_page_limit(limit: int) -> None:
+    if limit < 1:
+        raise ValueError("message page limit must be at least 1")
+    if limit > MAX_SESSION_MESSAGE_PAGE_LIMIT:
+        raise ValueError(f"message page limit cannot exceed {MAX_SESSION_MESSAGE_PAGE_LIMIT}")
+
+
+def _message_page_index_from_entries(
+    entries: Iterable[SessionEntry],
+) -> _MessagePageIndex:
+    tree = resolve_session_tree(tuple(entries))
+    messages = tuple(entry for entry in tree.active_path if isinstance(entry, MessageSessionEntry))
+    return _MessagePageIndex(
+        active_leaf_id=tree.active_leaf_id,
+        messages=messages,
+        positions={entry.id: index for index, entry in enumerate(messages)},
+    )
+
+
+def _message_page_from_index(
+    index: _MessagePageIndex,
     *,
     session_id: str,
     path: Path,
     limit: int,
     before_entry_id: str | None,
 ) -> SessionMessagePage:
-    if limit < 1:
-        raise ValueError("message page limit must be at least 1")
-    if limit > MAX_SESSION_MESSAGE_PAGE_LIMIT:
-        raise ValueError(f"message page limit cannot exceed {MAX_SESSION_MESSAGE_PAGE_LIMIT}")
-
-    tree = resolve_session_tree(entries)
-    active_messages = tuple(
-        entry for entry in tree.active_path if isinstance(entry, MessageSessionEntry)
-    )
+    _validate_message_page_limit(limit)
+    active_messages = index.messages
     if before_entry_id is None:
         candidates = active_messages
     else:
-        cursor_index = next(
-            (index for index, entry in enumerate(active_messages) if entry.id == before_entry_id),
-            None,
-        )
+        cursor_index = index.positions.get(before_entry_id)
         if cursor_index is None:
             raise SessionError(f"Session message cursor not found: {before_entry_id}")
         candidates = active_messages[:cursor_index]
@@ -1359,7 +1395,7 @@ def _message_page_from_entries(
     return SessionMessagePage(
         session_id=session_id,
         path=path,
-        active_leaf_id=tree.active_leaf_id,
+        active_leaf_id=index.active_leaf_id,
         messages=tuple(reversed(newest_first_messages)),
         truncated=truncated,
         next_before_entry_id=selected[0].id if truncated and selected else None,

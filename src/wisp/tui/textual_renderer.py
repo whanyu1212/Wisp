@@ -240,6 +240,12 @@ class TextualTuiRenderer:
     ) -> None:
         self.app.set_history_page_request_hook(hook)
 
+    def set_history_latest_request_hook(
+        self,
+        hook: Callable[[], Awaitable[None]],
+    ) -> None:
+        self.app.set_history_latest_request_hook(hook)
+
     def history_page_loaded(self, *, has_more: bool) -> None:
         self.app.history_page_loaded(has_more=has_more)
 
@@ -247,6 +253,12 @@ class TextualTuiRenderer:
         transcript = self.app.transcript
         if transcript is not None:
             transcript.history_page_request_failed()
+
+    @property
+    def retained_history_entry_count(self) -> int:
+        """Return bounded Textual history retention for diagnostics and benchmarks."""
+
+        return self._history.retained_entry_count
 
     def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
         self.render_history_entries(messages)
@@ -266,6 +278,12 @@ class TextualTuiRenderer:
 
     def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
         self._history.prepend_entries(entries)
+
+    def replace_latest_history_entries(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+    ) -> None:
+        self._history.replace_latest_entries(entries)
 
     def queued_prompts_cleared(self) -> None:
         # The shell dropped its queued follow-ups (cancel/quit/input-closed/error),

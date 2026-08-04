@@ -29,7 +29,7 @@ from wisp.tui.history import (
     historical_tool_status,
 )
 from wisp.tui.tool_output import full_tool_output_for_display, render_tool_result
-from wisp.tui.transcript_window import TranscriptWindow
+from wisp.tui.transcript_window import TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, TranscriptWindow
 
 
 class TextualHistorySurface(Protocol):
@@ -52,6 +52,8 @@ class TextualHistorySurface(Protocol):
     def finish_history_render(self) -> None: ...
 
     def follow_transcript_tail_after_refresh(self) -> None: ...
+
+    def request_latest_history(self) -> bool: ...
 
     def set_history_window_available(self, *, has_older: bool) -> None: ...
 
@@ -120,14 +122,25 @@ class TextualHistoryController:
     rather than exposing its mutable window or widget maps.
     """
 
-    def __init__(self, surface: TextualHistorySurface) -> None:
+    def __init__(
+        self,
+        surface: TextualHistorySurface,
+        *,
+        retained_capacity: int = TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
+    ) -> None:
         self._surface = surface
         self._historical_tool_results: dict[str, deque[tuple[str, HistoricalToolCard]]] = {}
         self._resolved_boundary_results: dict[str, HistoricalToolCard] = {}
         self._boundary_result_calls: dict[str, str] = {}
-        self._window = TranscriptWindow[_RetainedHistoryEntry]()
+        self._window = TranscriptWindow[_RetainedHistoryEntry](retained_capacity=retained_capacity)
         self._widgets: dict[int, Widget] = {}
         self._next_entry_id = 0
+
+    @property
+    def retained_entry_count(self) -> int:
+        """Return the number of history entries retained by the UI."""
+
+        return self._window.retained_count
 
     def render_entries(self, entries: Iterable[HistoricalTranscriptEntry]) -> None:
         """Append persisted entries received with the current history page."""
@@ -157,7 +170,7 @@ class TextualHistoryController:
         self._surface.begin_history_prepend()
         self._surface.begin_history_render()
         try:
-            self._window.prepend(retained)
+            self._discard_entries(self._window.prepend(retained))
             # A durable page arrived because the reader is already at the top.
             # Reveal its leading slice now so an exhausted page cursor never hides
             # fetched entries behind Transcript's durable-page request gate.
@@ -185,11 +198,31 @@ class TextualHistoryController:
     def show_latest(self) -> bool:
         """Move the mounted window to the newest retained history."""
 
+        if not self._window.latest_is_retained:
+            if self._surface.request_latest_history():
+                return True
         if not self._window.show_latest():
             return False
-        self._reconcile()
-        self._surface.follow_transcript_tail_after_refresh()
+        self._surface.begin_history_render()
+        try:
+            self._reconcile()
+            self._surface.follow_transcript_tail_after_refresh()
+        finally:
+            self._surface.finish_history_render()
         return True
+
+    def replace_latest_entries(self, entries: Iterable[HistoricalTranscriptEntry]) -> None:
+        """Replace evicted history with a newly loaded durable latest page."""
+
+        self._surface.begin_history_render()
+        try:
+            self._remove_historical_widgets()
+            self._clear()
+            self._window.replace(self._retain(entries))
+            self._reconcile()
+            self._surface.follow_transcript_tail_after_refresh()
+        finally:
+            self._surface.finish_history_render()
 
     def _clear(self) -> None:
         self._historical_tool_results.clear()
@@ -203,7 +236,7 @@ class TextualHistoryController:
         self._surface.begin_history_render()
         try:
             following = self._surface.history_is_following()
-            self._window.append(self._retain(entries), follow_tail=following)
+            self._discard_entries(self._window.append(self._retain(entries), follow_tail=following))
             self._reconcile()
             if following:
                 self._surface.follow_transcript_tail_after_refresh()
@@ -219,6 +252,37 @@ class TextualHistoryController:
         )
         self._next_entry_id += len(retained)
         return retained
+
+    def _remove_historical_widgets(self) -> None:
+        for widget in set(self._widgets.values()):
+            self._surface.remove_historical_widget(widget)
+
+    def _discard_entries(self, entries: Iterable[_RetainedHistoryEntry]) -> None:
+        """Release pairing state that only referenced evicted history entries."""
+
+        card_ids = {
+            item.entry.card_id for item in entries if isinstance(item.entry, HistoricalToolCard)
+        }
+        if not card_ids:
+            return
+        for tool_call_id, results in tuple(self._historical_tool_results.items()):
+            retained = deque(
+                (card_id, result) for card_id, result in results if card_id not in card_ids
+            )
+            if retained:
+                self._historical_tool_results[tool_call_id] = retained
+            else:
+                del self._historical_tool_results[tool_call_id]
+        self._resolved_boundary_results = {
+            card_id: result
+            for card_id, result in self._resolved_boundary_results.items()
+            if card_id not in card_ids and result.card_id not in card_ids
+        }
+        self._boundary_result_calls = {
+            result_card_id: call_card_id
+            for result_card_id, call_card_id in self._boundary_result_calls.items()
+            if result_card_id not in card_ids and call_card_id not in card_ids
+        }
 
     def _reconcile(self) -> None:
         """Apply only the changed edges of the retained history window."""

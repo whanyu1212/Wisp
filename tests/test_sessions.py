@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -62,7 +63,7 @@ from wisp.sessions.jsonl import (
     SessionNotFoundError,
     SessionSummary,
 )
-from wisp.sessions.replay import SessionReplayError
+from wisp.sessions.replay import SessionReplayError, SessionTreeState
 
 
 def _message_page_text_bytes(page: SessionMessagePage) -> int:
@@ -442,6 +443,39 @@ def test_session_message_pages_reuse_validated_entry_index(
     assert [message.content for message in newest.messages] == ["message-3", "message-4"]
     assert [message.content for message in older.messages] == ["message-1", "message-2"]
     assert read_count == 1
+
+
+def test_session_message_pages_reuse_active_path_index(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def write() -> None:
+        for index in range(5):
+            await session.append_message(Message(role="user", content=f"message-{index}"))
+
+    anyio.run(write)
+    reader = store.load(session.session_id)
+    original_resolve = jsonl_module.resolve_session_tree
+    resolve_count = 0
+
+    def count_resolves(entries: Sequence[SessionEntry]) -> SessionTreeState:
+        nonlocal resolve_count
+        resolve_count += 1
+        return original_resolve(entries)
+
+    monkeypatch.setattr(jsonl_module, "resolve_session_tree", count_resolves)
+
+    newest = reader.read_message_page(limit=2)
+    older = reader.read_message_page(limit=2, before_entry_id=newest.next_before_entry_id)
+
+    assert [message.content for message in newest.messages] == ["message-3", "message-4"]
+    assert [message.content for message in older.messages] == ["message-1", "message-2"]
+    # The initial read validates JSONL once and builds the active-path cache once.
+    # Cursor reads use the cache without another tree traversal.
+    assert resolve_count == 2
 
 
 def test_session_message_page_cache_reloads_after_external_append(

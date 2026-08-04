@@ -35,6 +35,7 @@ class _HistorySurface:
     prepend_starts: int = 0
     prepend_finishes: int = 0
     follow_requests: int = 0
+    latest_history_requests: int = 0
     fail_line_mount: bool = False
 
     def replace_transcript(self) -> None:
@@ -65,6 +66,10 @@ class _HistorySurface:
 
     def follow_transcript_tail_after_refresh(self) -> None:
         self.follow_requests += 1
+
+    def request_latest_history(self) -> bool:
+        self.latest_history_requests += 1
+        return True
 
     def set_history_window_available(self, *, has_older: bool) -> None:
         self.window_availability.append(has_older)
@@ -275,3 +280,25 @@ def test_history_controller_finishes_a_render_batch_when_mounting_fails() -> Non
 
     assert surface.render_starts == surface.render_finishes == 1
     assert surface.prepend_starts == surface.prepend_finishes == 0
+
+
+def test_history_controller_reloads_latest_after_older_paging_evicts_it() -> None:
+    surface = _HistorySurface(at_top=True)
+    controller = TextualHistoryController(surface, retained_capacity=300)
+    current = _messages("assistant", "current", 300)
+    older = _messages("user", "older", 75)
+
+    controller.replace_entries(current, session_label="Windowed")
+    controller.prepend_entries(older)
+
+    assert controller.show_latest()
+    assert surface.latest_history_requests == 1
+    assert surface.history_labels[0] == "user: older 0"
+
+    reloaded = _messages("assistant", "latest", 75)
+    follow_requests_before_reload = surface.follow_requests
+    controller.replace_latest_entries(reloaded)
+
+    assert surface.history_labels == [f"assistant: latest {index}" for index in range(75)]
+    assert surface.follow_requests == follow_requests_before_reload + 1
+    assert not controller.show_latest()

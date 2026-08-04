@@ -200,6 +200,8 @@ class _HistoryPagination:
     next_before_entry_id: str | None
     command_id: str | None = None
     report: RpcMessagesReported | None = None
+    latest_command_id: str | None = None
+    latest_report: RpcMessagesReported | None = None
 
 
 def _default_model_for(models: ModelRegistry, provider_name: str) -> str | None:
@@ -270,6 +272,10 @@ class TuiShell:
         self._call_renderer_optional(
             "set_history_page_request_hook",
             self._request_previous_history_page,
+        )
+        self._call_renderer_optional(
+            "set_history_latest_request_hook",
+            self._request_latest_history_page,
         )
         self.auth_store = JsonAuthStore(auth_path or default_auth_path())
         # Overrides ~/.wisp for /model picker effort persistence in tests; None
@@ -482,8 +488,10 @@ class TuiShell:
 
     def _clear_history_pagination(self) -> None:
         pagination = self._history_pagination
-        if pagination is not None and pagination.command_id is not None:
-            self._ignored_history_page_commands.add(pagination.command_id)
+        if pagination is not None:
+            for command_id in (pagination.command_id, pagination.latest_command_id):
+                if command_id is not None:
+                    self._ignored_history_page_commands.add(command_id)
         self._history_pagination = None
         self._call_renderer_optional("history_page_loaded", has_more=False)
 
@@ -1186,6 +1194,13 @@ class TuiShell:
         ):
             pagination.report = event
             return False
+        if (
+            isinstance(event, RpcMessagesReported)
+            and pagination is not None
+            and event.command_id == pagination.latest_command_id
+        ):
+            pagination.latest_report = event
+            return False
 
         context_updated = self.view.update_context_from_event(event)
         if context_updated:
@@ -1303,6 +1318,9 @@ class TuiShell:
             pagination = self._history_pagination
             if pagination is not None and event.command_id == pagination.command_id:
                 await self._finish_history_page(event)
+                return False
+            if pagination is not None and event.command_id == pagination.latest_command_id:
+                await self._finish_latest_history_page(event)
                 return False
             if event.command_id in self.pending_configures:
                 await self._finish_pending_configure(event)
@@ -1539,7 +1557,7 @@ class TuiShell:
         if pagination is None or pagination.next_before_entry_id is None:
             self._call_renderer_optional("history_page_loaded", has_more=False)
             return
-        if pagination.command_id is not None:
+        if pagination.command_id is not None or pagination.latest_command_id is not None:
             return
 
         command_id = f"history-page-{uuid4().hex}"
@@ -1555,6 +1573,28 @@ class TuiShell:
             if self._history_pagination is pagination:
                 pagination.command_id = None
                 self.renderer.command_error(f"Failed to load older session history: {exc}")
+                self._call_renderer_optional("history_page_request_failed")
+            return
+
+    async def _request_latest_history_page(self) -> None:
+        pagination = self._history_pagination
+        if pagination is None:
+            return
+        if pagination.command_id is not None or pagination.latest_command_id is not None:
+            return
+
+        command_id = f"history-latest-{uuid4().hex}"
+        pagination.latest_command_id = command_id
+        try:
+            await self.controller.get_messages(
+                session_id=pagination.session_id,
+                limit=TUI_HISTORY_PAGE_LIMIT,
+                command_id=command_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve retry after a transient send failure
+            if self._history_pagination is pagination:
+                pagination.latest_command_id = None
+                self.renderer.command_error(f"Failed to reload latest session history: {exc}")
                 self._call_renderer_optional("history_page_request_failed")
             return
 
@@ -1579,6 +1619,33 @@ class TuiShell:
 
         entries = history_entries_from_rpc_messages(report.messages)
         self._call_renderer_optional("prepend_history_entries", entries)
+        pagination.next_before_entry_id = report.next_before_entry_id
+        self._call_renderer_optional(
+            "history_page_loaded",
+            has_more=report.next_before_entry_id is not None,
+        )
+
+    async def _finish_latest_history_page(self, event: RpcCommandFinished) -> None:
+        pagination = self._history_pagination
+        if pagination is None or event.command_id != pagination.latest_command_id:
+            return
+        report = pagination.latest_report
+        pagination.latest_command_id = None
+        pagination.latest_report = None
+        if not event.ok or report is None:
+            detail = event.error or "latest session history completed without a result"
+            self.renderer.command_error(f"Failed to reload latest session history: {detail}")
+            self._call_renderer_optional("history_page_request_failed")
+            return
+        if report.session_id != pagination.session_id:
+            self.renderer.command_error(
+                "Failed to reload latest session history: result did not match the active session."
+            )
+            self._call_renderer_optional("history_page_request_failed")
+            return
+
+        entries = history_entries_from_rpc_messages(report.messages)
+        self._call_renderer_optional("replace_latest_history_entries", entries)
         pagination.next_before_entry_id = report.next_before_entry_id
         self._call_renderer_optional(
             "history_page_loaded",
