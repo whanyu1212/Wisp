@@ -22,6 +22,7 @@ from wisp.events import (
 from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tui.commands import DEFAULT_TUI_COMMAND_CATALOG, TuiCommandCatalog
 from wisp.tui.compact_echo import CompactEchoLog
+from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.overlay import (
     OverlayKind,
     OverlayOperation,
@@ -1353,7 +1354,7 @@ class TextualTui(App[None]):
         arguments: object,
         *,
         status: str,
-        detail: str | Content,
+        detail: str | Content | DiffPresentation,
         full_output: str,
         truncated: bool,
     ) -> bool:
@@ -1378,7 +1379,7 @@ class TextualTui(App[None]):
         call_id: str,
         status: str,
         *,
-        detail: str | Content = "",
+        detail: str | Content | DiffPresentation = "",
         elapsed: float | None = None,
         full_output: str = "",
         truncated: bool = False,

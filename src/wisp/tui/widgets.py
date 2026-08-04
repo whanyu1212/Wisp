@@ -17,6 +17,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 
+from rich.cells import cell_len, set_cell_size
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -45,6 +46,16 @@ from wisp.tui.decision_content import (
     _bounded_tool_session_option_name,
     _DecisionContent,
     _trust_content,
+)
+from wisp.tui.diff_presentation import (
+    DIFF_ADD_STYLE,
+    DIFF_DEL_STYLE,
+    DIFF_INTRA_HIGHLIGHT_MODIFIER,
+    DIFF_META_STYLE,
+    DiffPresentation,
+    DiffRow,
+    DiffRowKind,
+    DiffVisibleRow,
 )
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.rendering import (
@@ -229,7 +240,7 @@ def _format_duration(seconds: float) -> str:
     return f"{minutes}m{secs:02d}s"
 
 
-def _has_detail(detail: str | Content) -> bool:
+def _has_detail(detail: str | Content | DiffPresentation) -> bool:
     """Whether a card detail carries content, for both str and Content forms.
 
     An empty ``str`` and an empty ``Content`` both mean "no detail", so a
@@ -239,6 +250,8 @@ def _has_detail(detail: str | Content) -> bool:
 
     if isinstance(detail, Content):
         return bool(detail.plain)
+    if isinstance(detail, DiffPresentation):
+        return bool(detail.rows)
     return bool(detail)
 
 
@@ -257,6 +270,254 @@ def _indent_content(detail: Content) -> Content:
             indented += Content("\n")
         indented += Content("  ") + line
     return indented
+
+
+def _render_diff_presentation(
+    presentation: DiffPresentation,
+    *,
+    width: int,
+    expanded: bool,
+) -> Content:
+    """Paint one structured diff with a fixed gutter and no ambiguous wrapping."""
+
+    inner_width = max(1, width - 2)  # ToolCard indents details by two cells.
+    counts = f"+{presentation.additions} -{presentation.deletions}"
+    path_width = max(1, inner_width - cell_len(counts) - 4)
+    path = _truncate_to_cell_width(presentation.file_label, path_width)
+    header = (
+        Content.styled(f"{presentation.file_marker} {path}", "b")
+        + Content("  ")
+        + Content.styled(counts, DIFF_META_STYLE)
+    )
+    content = Content("  ") + header
+    for visible_row in presentation.visible_rows(expanded=expanded):
+        content += Content("\n") + _render_diff_visible_row(
+            visible_row,
+            width=inner_width,
+            show_line_numbers=presentation.show_line_numbers,
+        )
+    return content
+
+
+def _render_diff_visible_row(
+    visible_row: DiffVisibleRow,
+    *,
+    width: int,
+    show_line_numbers: bool,
+) -> Content:
+    """Render one selected row, filling changed backgrounds through the gutter."""
+
+    row = visible_row.row
+    if row.kind is DiffRowKind.omission:
+        return Content("  ") + Content.styled(
+            _pad_to_cell_width(_truncate_to_cell_width(row.text, width), width),
+            DIFF_META_STYLE,
+        )
+    if row.kind is DiffRowKind.hunk:
+        return Content("  ") + Content.styled(
+            _pad_to_cell_width(_truncate_to_cell_width(row.text, width), width),
+            DIFF_META_STYLE,
+        )
+
+    marker = {
+        DiffRowKind.context: " ",
+        DiffRowKind.addition: "+",
+        DiffRowKind.deletion: "-",
+    }[row.kind]
+    if show_line_numbers:
+        old_line = "" if row.old_line is None else str(row.old_line)
+        new_line = "" if row.new_line is None else str(row.new_line)
+        gutter = f"{old_line:>4} {new_line:>4} {marker} │ "
+    else:
+        gutter = f"{marker} │ "
+    source_width = max(1, width - cell_len(gutter))
+    source, emphasis_ranges = _crop_diff_row_source(row, width=source_width)
+    style = _diff_row_style(row)
+    return (
+        Content.styled("  " + gutter, style)
+        + _styled_diff_source(source, emphasis_ranges, style)
+        + Content.styled(
+            _pad_to_cell_width("", max(0, source_width - cell_len(source))),
+            style,
+        )
+    )
+
+
+def _crop_diff_row_source(
+    row: DiffRow,
+    *,
+    width: int,
+) -> tuple[str, tuple[tuple[int, int], ...]]:
+    """Crop literal source before its known synthetic terminator annotation."""
+
+    note_length = min(max(0, row.terminator_note_length), len(row.text))
+    source_text = row.text[:-note_length] if note_length else row.text
+    note = row.text[-note_length:] if note_length else ""
+    # Favor review evidence over an annotation when the gutter leaves too few
+    # cells to show a useful changed token. At wider sizes, reserve the note's
+    # exact known width and append it after the independently cropped literal.
+    note_width = cell_len(note)
+    source_width = width - note_width
+    show_note = bool(note) and source_width >= 4
+    cropped, ranges = _crop_diff_source(
+        source_text,
+        row.emphasis_ranges,
+        width=source_width if show_note else width,
+        preserve_tail=row.kind in {DiffRowKind.addition, DiffRowKind.deletion},
+    )
+    if show_note:
+        return f"{cropped}{note}", ranges
+    if note:
+        # The annotation did not fit, so make the omitted metadata explicit
+        # without allowing it to displace the source evidence. On an exact-fit
+        # row, reserve the final cell for the marker rather than silently
+        # making a newline-only change look identical on both sides.
+        if cell_len(cropped) < width:
+            return f"{cropped}…", ranges
+        return f"{_take_cell_prefix(cropped, max(0, width - 1))}…", ranges
+    return cropped, ranges
+
+
+def _diff_row_style(row: DiffRow) -> str:
+    if row.kind is DiffRowKind.addition:
+        return DIFF_ADD_STYLE
+    if row.kind is DiffRowKind.deletion:
+        return DIFF_DEL_STYLE
+    return ""
+
+
+def _crop_diff_source(
+    text: str,
+    ranges: tuple[tuple[int, int], ...],
+    *,
+    width: int,
+    preserve_tail: bool,
+) -> tuple[str, tuple[tuple[int, int], ...]]:
+    """Crop a source row while keeping its emphasized evidence in view.
+
+    A normal width clip starts at column zero, which can hide the only changed
+    token when it occurs near the end of a long line. When emphasis is present,
+    reserve visible cells around its complete span and remap ranges to the cropped
+    literal string. The outer gutter still identifies the row as an addition or
+    deletion, while ellipses explicitly signal omitted source context.
+    """
+
+    if cell_len(text) <= width:
+        return text, ranges
+    if width < 3:
+        # A terminal this narrow cannot accommodate both truncation markers and
+        # a changed character; preserve the row's fixed +/- gutter without
+        # overflowing it. Supported compact layouts have wider source columns.
+        return _truncate_to_cell_width(text, width), ()
+    normalized = tuple(
+        sorted(
+            (max(0, start), min(len(text), end))
+            for start, end in ranges
+            if end > start and start < len(text)
+        )
+    )
+    if not normalized:
+        # Unequal replacements intentionally skip intra-line matching. Their
+        # changed rows still need reviewable evidence on narrow terminals: use
+        # a literal suffix window rather than showing only a shared prefix.
+        if preserve_tail and width >= 2:
+            return f"…{_take_cell_suffix(text, width - 1)}", ()
+        return _truncate_to_cell_width(text, width), ()
+
+    focus_start = normalized[0][0]
+    focus_end = normalized[-1][1]
+    left_marker = "…" if focus_start else ""
+    right_marker = "…" if focus_end < len(text) else ""
+    focus_width = max(1, width - cell_len(left_marker) - cell_len(right_marker))
+    focus = text[focus_start:focus_end]
+    before = ""
+    after = ""
+    if cell_len(focus) > focus_width:
+        # Prefix-clipping the emphasis itself hides changed source. Reserve a
+        # trailing ellipsis even when the original span reached line end so the
+        # reader knows that horizontally changed evidence remains unavailable.
+        right_marker = "…"
+        focus_width = max(1, width - cell_len(left_marker) - cell_len(right_marker))
+        focus = _take_cell_prefix(focus, focus_width)
+        focus_end = focus_start + len(focus)
+    else:
+        context_width = focus_width - cell_len(focus)
+        before = _take_cell_suffix(text[:focus_start], context_width // 2)
+        after = _take_cell_prefix(text[focus_end:], context_width - cell_len(before))
+
+    source = f"{left_marker}{before}{focus}{after}{right_marker}"
+    offset = len(left_marker) + len(before)
+    remapped = tuple(
+        (offset + max(start, focus_start) - focus_start, offset + min(end, focus_end) - focus_start)
+        for start, end in normalized
+        if max(start, focus_start) < min(end, focus_end)
+    )
+    return source, remapped
+
+
+def _take_cell_prefix(text: str, width: int) -> str:
+    """Return the longest literal prefix that fits in ``width`` terminal cells."""
+
+    cells = 0
+    end = 0
+    for index, character in enumerate(text):
+        character_cells = cell_len(character)
+        if cells + character_cells > width:
+            break
+        cells += character_cells
+        end = index + 1
+    return text[:end]
+
+
+def _take_cell_suffix(text: str, width: int) -> str:
+    """Return the longest literal suffix that fits in ``width`` terminal cells."""
+
+    cells = 0
+    start = len(text)
+    for index in range(len(text) - 1, -1, -1):
+        character_cells = cell_len(text[index])
+        if cells + character_cells > width:
+            break
+        cells += character_cells
+        start = index
+    return text[start:]
+
+
+def _styled_diff_source(
+    source: str,
+    ranges: tuple[tuple[int, int], ...],
+    base_style: str,
+) -> Content:
+    """Keep literal source styled while retaining bounded intra-line emphasis."""
+
+    if not ranges:
+        return Content.styled(source, base_style) if base_style else Content(source)
+    content = Content("")
+    cursor = 0
+    for start, end in sorted(ranges):
+        start = min(max(cursor, start), len(source))
+        end = min(max(start, end), len(source))
+        if start > cursor:
+            content += (
+                Content.styled(source[cursor:start], base_style)
+                if base_style
+                else Content(source[cursor:start])
+            )
+        if end > start:
+            style = f"{base_style} {DIFF_INTRA_HIGHLIGHT_MODIFIER}".strip()
+            content += Content.styled(source[start:end], style)
+        cursor = end
+    if cursor < len(source):
+        content += (
+            Content.styled(source[cursor:], base_style) if base_style else Content(source[cursor:])
+        )
+    return content
+
+
+def _pad_to_cell_width(text: str, width: int) -> str:
+    """Pad literal text to exactly ``width`` terminal cells without wrapping."""
+
+    return set_cell_size(text, width) if width > 0 else ""
 
 
 def _preview_tool_output(
@@ -1767,7 +2028,7 @@ class ToolCard(Static):
         # A plain str is untrusted output escaped at repaint; a Content is an
         # already-styled renderable (e.g. a colored diff) whose text is literal,
         # so it is composed directly without markup escaping.
-        self._detail: str | Content = ""
+        self._detail: str | Content | DiffPresentation = ""
         # The full (tool-bounded) output, kept so the reader can expand past the
         # collapsed preview/summary/diff. Untrusted text, rendered literally like a
         # str detail. Empty when there is nothing more to show than the detail.
@@ -1794,6 +2055,12 @@ class ToolCard(Static):
             self._timer = self.set_interval(self._TICK, self._tick)
             self._repaint()
 
+    def on_resize(self, event: events.Resize) -> None:
+        """Repaint structured rows when a terminal resize changes source width."""
+
+        if isinstance(self._detail, DiffPresentation):
+            self._repaint()
+
     def update_call(self, name: str, arguments: object) -> None:
         """Enrich a historical result when its paged-in call arrives later."""
 
@@ -1817,7 +2084,7 @@ class ToolCard(Static):
         self,
         status: str,
         *,
-        detail: str | Content = "",
+        detail: str | Content | DiffPresentation = "",
         elapsed: float | None = None,
         full_output: str = "",
         truncated: bool = False,
@@ -1868,6 +2135,8 @@ class ToolCard(Static):
         expand, so its toggle is a no-op and no affordance is shown.
         """
 
+        if isinstance(self._detail, DiffPresentation):
+            return self._detail.can_expand
         if not self._full_output:
             return False
         detail_text = self._detail.plain if isinstance(self._detail, Content) else self._detail
@@ -1926,13 +2195,21 @@ class ToolCard(Static):
         if self._can_expand():
             content += Content.styled(" ▾" if self._expanded else " ▸", "dim")
 
-        if self._expanded and self._full_output:
+        if isinstance(self._detail, DiffPresentation):
+            # Structured edit/write cards retain diff rows for both states; unlike
+            # generic tools, expansion must never replace review evidence with the
+            # raw "Applied" or "Wrote" acknowledgement kept in _full_output.
+            content += Content("\n") + _render_diff_presentation(
+                self._detail,
+                width=max(12, self.content_size.width or self.size.width or 80),
+                expanded=self._expanded,
+            )
+        elif self._expanded and self._full_output:
             # Expanded: show the full (tool-bounded) output in place of the collapsed
-            # detail, so the reader sees what the preview/summary/diff stood in for.
+            # detail, so the reader sees what the preview/summary stood in for.
             content += Content("\n") + self._indent_str(self._full_output)
         elif isinstance(self._detail, Content):
-            # A pre-styled renderable (e.g. a colored diff): compose its already
-            # theme-styled, literal text directly, indented under the status row.
+            # A pre-styled renderable is composed directly, preserving literal text.
             content += Content("\n") + _indent_content(self._detail)
         elif self._detail:
             content += Content("\n") + self._indent_str(self._detail)

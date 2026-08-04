@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from textual.content import Content
 
+from wisp.tui.diff_presentation import DiffPresentation, DiffRowKind
 from wisp.tui.tool_output import (
     _DIFF_ADD_STYLE,
     _DIFF_DEL_STYLE,
@@ -1094,15 +1095,22 @@ def test_render_edit_diff_intra_line_highlight_clipped_by_preview_bounds() -> No
 
 
 def test_render_tool_result_routes_successful_edit_to_diff() -> None:
-    content = render_tool_result(
+    presentation = render_tool_result(
         "edit",
         _edit(("a", "b")),
         "Applied 1 edit(s) to src/foo.py",
         is_error=False,
         exit_code=None,
     )
-    assert isinstance(content, Content)
-    assert "-a" in content.plain and "+b" in content.plain
+    assert isinstance(presentation, DiffPresentation)
+    assert presentation.path == "src/foo.py"
+    assert presentation.additions == presentation.deletions == 1
+    assert presentation.show_line_numbers is False
+    assert [row.kind for row in presentation.rows] == [
+        DiffRowKind.deletion,
+        DiffRowKind.addition,
+    ]
+    assert all(row.old_line is None and row.new_line is None for row in presentation.rows)
 
 
 def test_render_tool_result_edit_failure_uses_error_not_diff() -> None:
