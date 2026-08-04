@@ -174,6 +174,7 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
         (
             "help",
             "compact",
+            "context",
             "history",
             "model",
             "resume",

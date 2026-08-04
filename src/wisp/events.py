@@ -238,6 +238,17 @@ class ContextBudget(BaseModel):
     over_budget: bool | None = None
 
 
+class CompactionPolicyStatus(BaseModel):
+    """Current automatic-compaction policy and threshold eligibility."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    auto_compaction_enabled: bool = True
+    threshold_eligible: bool = False
+    threshold_ineligible_reason: str | None = "status unavailable"
+    overflow_recovery_enabled: bool = True
+
+
 class SessionStats(BaseModel):
     """Derived lifetime usage and active-context statistics for one session."""
 
@@ -250,6 +261,7 @@ class SessionStats(BaseModel):
     usage_record_count: int = Field(ge=0)
     usage: TokenUsage
     context: ContextBudget
+    compaction: CompactionPolicyStatus = Field(default_factory=CompactionPolicyStatus)
     cost: SessionCostSummary = Field(default_factory=SessionCostSummary)
 
     @model_validator(mode="before")
@@ -535,7 +547,8 @@ class ProjectConfigApplied(WispEvent):
     from the project's ``.wisp/settings.json``. It lets an out-of-process front-end
     (the TUI) refresh the provider/model/auth it displays and mutates, so its header
     and ``/provider`` / ``/model`` / ``/auth`` / ``/login`` commands match the config
-    the agent is actually running with.
+    the agent is actually running with. It also carries the effective automatic-
+    compaction setting so frontends do not infer policy from their own startup state.
 
     ``effort`` carries the RPC agent's already-filtered, authoritative post-rebuild
     value (see ``_rebuild_agent_for_trusted_project`` in ``wisp.cli.rpc``) rather than
@@ -550,6 +563,7 @@ class ProjectConfigApplied(WispEvent):
     provider: str
     model: str | None = None
     effort: str | None = None
+    auto_compaction_enabled: bool = True
     auth_path: Path
 
 

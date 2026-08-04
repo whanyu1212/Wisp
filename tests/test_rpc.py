@@ -1329,6 +1329,23 @@ def test_rpc_controller_configure_sends_effort() -> None:
     anyio.run(run)
 
 
+def test_rpc_controller_configure_sends_auto_compaction_setting() -> None:
+    async def run() -> None:
+        transport = RecordingTransport()
+        controller = RpcController(
+            transport,
+            command_id_factory=lambda prefix: f"{prefix}-id",
+        )
+
+        await controller.configure(auto_compaction_enabled=False)
+
+        assert transport.commands == [
+            ConfigureCommand(id="configure-id", auto_compaction_enabled=False),
+        ]
+
+    anyio.run(run)
+
+
 def test_configure_command_serializes_effort_and_omits_when_unset() -> None:
     with_effort = ConfigureCommand(id="configure-1", effort="medium")
 

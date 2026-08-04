@@ -214,6 +214,7 @@ class ConfigureCommand(RpcCommandModel):
     provider: str | None = None
     model: str | None = None
     effort: str | None = None
+    auto_compaction_enabled: bool | None = None
     # `to_json_line()` uses `exclude_none=True`, so a bare `effort=None` is
     # indistinguishable on the wire from never having set `effort` at all --
     # the RPC server keys off "effort" in command (dict key presence), not

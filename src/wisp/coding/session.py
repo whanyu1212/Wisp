@@ -1043,6 +1043,7 @@ class CodingSession:
                 observed_is_current=observed_is_current,
                 observed_entry_id=observed_entry_id,
                 observed_context_fingerprint=observed_context_fingerprint,
+                auto_compaction_enabled=self.auto_compaction_enabled,
             )
 
     def _allowed_tool_specs(self, tool_registry: ToolRegistry) -> tuple[ToolSpec, ...]:

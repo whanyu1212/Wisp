@@ -2814,6 +2814,14 @@ def handle_rpc_control_command(
         )
         return False
     if command_type == "configure":
+        if running_command is not None:
+            write_rpc_command_error(
+                command_id=command_id,
+                command_type=command_type,
+                message="Cannot configure while another RPC operation is active",
+                write_event=write_event,
+            )
+            return False
         if agent is None or runtime is None:
             write_rpc_command_error(
                 command_id=command_id,
@@ -2855,15 +2863,19 @@ def handle_rpc_configure_command(
     provider = command.get("provider")
     model = command.get("model")
     effort = command.get("effort")
+    auto_compaction_enabled = command.get("auto_compaction_enabled")
     clear_effort = command.get("clear_effort") is True
     has_provider = "provider" in command
     has_model = "model" in command
     has_effort = "effort" in command or clear_effort
-    if not has_provider and not has_model and not has_effort:
+    has_auto_compaction_enabled = "auto_compaction_enabled" in command
+    if not has_provider and not has_model and not has_effort and not has_auto_compaction_enabled:
         write_rpc_command_error(
             command_id=command_id,
             command_type=command_type,
-            message="RPC configure command requires provider, model, or effort",
+            message=(
+                "RPC configure command requires provider, model, effort, or auto_compaction_enabled"
+            ),
             write_event=write_event,
         )
         return
@@ -2891,10 +2903,21 @@ def handle_rpc_configure_command(
             write_event=write_event,
         )
         return
+    if has_auto_compaction_enabled and not isinstance(auto_compaction_enabled, bool):
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC configure command field auto_compaction_enabled must be a boolean",
+            write_event=write_event,
+        )
+        return
     configuration = agent.configuration
     selected_provider = configuration.provider
     selected_model = configuration.model
     selected_effort = configuration.effort
+    selected_auto_compaction_enabled = configuration.auto_compaction_enabled
+    if has_auto_compaction_enabled:
+        selected_auto_compaction_enabled = cast(bool, auto_compaction_enabled)
     if isinstance(provider, str):
         try:
             selected_provider = runtime.providers.get(provider)
@@ -2942,15 +2965,28 @@ def handle_rpc_configure_command(
         if configure_overrides is not None:
             configure_overrides.effort = None if clear_effort else effort
             configure_overrides.has_effort = True
-    agent.reconfigure(
-        replace(
-            configuration,
-            provider=selected_provider,
-            model=selected_model,
-            effort=selected_effort,
-            models=runtime.models,
+    try:
+        agent.reconfigure(
+            replace(
+                configuration,
+                provider=selected_provider,
+                model=selected_model,
+                effort=selected_effort,
+                models=runtime.models,
+                auto_compaction_enabled=selected_auto_compaction_enabled,
+            )
         )
-    )
+    except RuntimeError as exc:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=str(exc),
+            write_event=write_event,
+        )
+        return
+    if configure_overrides is not None and has_auto_compaction_enabled:
+        configure_overrides.auto_compaction_enabled = selected_auto_compaction_enabled
+        configure_overrides.has_auto_compaction_enabled = True
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 

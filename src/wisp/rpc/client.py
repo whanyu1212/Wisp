@@ -335,9 +335,10 @@ class RpcController:
         model: str | None = None,
         effort: str | None = None,
         clear_effort: bool = False,
+        auto_compaction_enabled: bool | None = None,
         command_id: str | None = None,
     ) -> str:
-        """Update provider/model/effort settings for future prompt commands.
+        """Update runtime settings for future prompt commands.
 
         ``effort=None`` (the default) leaves any previously configured effort
         tier untouched -- the command's JSON serialization omits unset fields,
@@ -354,6 +355,7 @@ class RpcController:
                 model=model,
                 effort=effort,
                 clear_effort=clear_effort,
+                auto_compaction_enabled=auto_compaction_enabled,
             )
         )
         return selected_id

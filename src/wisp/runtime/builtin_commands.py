@@ -31,6 +31,24 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=20,
         ),
         CommandDescriptor(
+            name="context",
+            title="Context",
+            description="Show context and automatic-compaction status",
+            category=CommandCategory.configuration,
+            arguments=(
+                CommandArgument(
+                    name="auto",
+                    description="Optional 'on' or 'off' automatic-compaction toggle",
+                ),
+                CommandArgument(
+                    name="state",
+                    description="Automatic-compaction state",
+                ),
+            ),
+            accepts_arguments=True,
+            order=22,
+        ),
+        CommandDescriptor(
             name="history",
             title="Prompt history",
             description="Search prompts submitted in this TUI run",

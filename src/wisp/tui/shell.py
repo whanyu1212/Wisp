@@ -67,7 +67,12 @@ from wisp.tui.history import (
 )
 from wisp.tui.launch import _stdin_is_interactive
 from wisp.tui.live import LiveFullscreenInputInterrupted
-from wisp.tui.rendering import TuiRenderer, TuiRendererKind, create_tui_renderer
+from wisp.tui.rendering import (
+    TuiRenderer,
+    TuiRendererKind,
+    create_tui_renderer,
+    format_compaction_status,
+)
 from wisp.tui.state import (
     TuiInteractionState,
     TuiStatus,
@@ -147,6 +152,7 @@ class TuiController(Protocol):
         model: str | None = None,
         effort: str | None = None,
         clear_effort: bool = False,
+        auto_compaction_enabled: bool | None = None,
         command_id: str | None = None,
     ) -> str: ...
 
@@ -167,6 +173,8 @@ class _PendingConfigure:
     reset_model: bool = False
     effort: str | None = None
     has_effort: bool = False
+    auto_compaction_enabled: bool | None = None
+    has_auto_compaction_enabled: bool = False
 
 
 @dataclass
@@ -248,6 +256,8 @@ class TuiShell:
             effort=effort,
         )
         self.pending_configures: dict[str, _PendingConfigure] = {}
+        self.pending_context_status_command_id: str | None = None
+        self.pending_context_status_received = False
         self.pending_session_catalog: _PendingSessionCatalog | None = None
         self.pending_session_switch: _PendingSessionSwitch | None = None
         self._history_pagination: _HistoryPagination | None = None
@@ -596,6 +606,9 @@ class TuiShell:
                 return False
             instructions = " ".join(command.args).strip() or None
             return await self._start_compaction(instructions)
+        if command.name is TuiSlashCommandName.context:
+            await self._handle_context_command(command.args)
+            return False
         if command.name is TuiSlashCommandName.auth:
             self._auth.status(command.args)
             return False
@@ -697,6 +710,33 @@ class TuiShell:
         )
         self._update_view(status="configuring")
         self.renderer.notice(f"Configuring provider: {provider}")
+
+    async def _handle_context_command(self, args: tuple[str, ...]) -> None:
+        if not args:
+            try:
+                command_id = await self.controller.get_session_stats()
+            except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
+                self.renderer.send_failed("context status", exc)
+                return
+            self.pending_context_status_command_id = command_id
+            self.pending_context_status_received = False
+            return
+        if len(args) != 2 or args[0].lower() != "auto" or args[1].lower() not in {"on", "off"}:
+            self.renderer.command_error("Usage: /context [auto on|off]")
+            return
+        enabled = args[1].lower() == "on"
+        try:
+            command_id = await self.controller.configure(auto_compaction_enabled=enabled)
+        except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
+            self.renderer.send_failed("configure", exc)
+            return
+        self.pending_configures[command_id] = _PendingConfigure(
+            command_id=command_id,
+            auto_compaction_enabled=enabled,
+            has_auto_compaction_enabled=True,
+        )
+        self._update_view(status="configuring")
+        self.renderer.notice(f"Configuring automatic compaction: {'on' if enabled else 'off'}")
 
     async def _handle_model_command(self, args: tuple[str, ...]) -> None:
         if len(args) > 2:
@@ -1147,7 +1187,12 @@ class TuiShell:
         context_updated = self.view.update_context_from_event(event)
         if context_updated:
             self._update_view()
-        if isinstance(event, (ContextEstimated, SessionStatsReported)):
+        if isinstance(event, SessionStatsReported):
+            if event.command_id == self.pending_context_status_command_id:
+                self.pending_context_status_received = True
+                self.renderer.notice(format_compaction_status(event.stats))
+            return False
+        if isinstance(event, ContextEstimated):
             return False
         if isinstance(event, ProviderRetrying):
             self._update_view(
@@ -1258,6 +1303,15 @@ class TuiShell:
                 return False
             if event.command_id in self.pending_configures:
                 await self._finish_pending_configure(event)
+                return False
+            if event.command_id == self.pending_context_status_command_id:
+                received = self.pending_context_status_received
+                self.pending_context_status_command_id = None
+                self.pending_context_status_received = False
+                if not event.ok:
+                    self.renderer.command_error(event.error or "context status failed")
+                elif not received:
+                    self.renderer.command_error("Context status completed without a result.")
                 return False
             if event.command_id == self.state.shutdown_command_id:
                 self._render_event(event)
@@ -1394,6 +1448,11 @@ class TuiShell:
             if pending.has_effort:
                 self.current_effort = pending.effort
                 persist_user_effort(pending.effort, home_dir=self._settings_home_dir)
+            if pending.has_auto_compaction_enabled:
+                self.renderer.notice(
+                    "Automatic compaction "
+                    f"{'enabled' if pending.auto_compaction_enabled else 'disabled'}."
+                )
             self.view.context = None
             self._sync_view()
             await self._request_session_stats()
@@ -1405,6 +1464,8 @@ class TuiShell:
             self.renderer.command_error(
                 f"Model unchanged ({self.current_model or 'provider default'}): {message}"
             )
+        elif pending.has_auto_compaction_enabled:
+            self.renderer.command_error(f"Automatic compaction unchanged: {message}")
         self._update_view(
             status="error",
             input_hint=_prompt_for_mode(_InputMode.idle),
@@ -1546,6 +1607,8 @@ class TuiShell:
             self.renderer.rpc_stream_ended_before_command(command_id)
         elif self.pending_session_catalog is not None:
             self.renderer.rpc_stream_ended_before_command(self.pending_session_catalog.command_id)
+        elif self.pending_context_status_command_id is not None:
+            self.renderer.rpc_stream_ended_before_command(self.pending_context_status_command_id)
         elif pending_command_id is not None:
             self.renderer.rpc_stream_ended_before_command(pending_command_id)
         elif self.state.shutdown_command_id is not None:

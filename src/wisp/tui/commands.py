@@ -30,6 +30,7 @@ class TuiSlashCommandName(StrEnum):
     model = "model"
     resume = "resume"
     compact = "compact"
+    context = "context"
 
 
 # Sentinel effort token for "/model <id> <token>" meaning "explicitly clear
