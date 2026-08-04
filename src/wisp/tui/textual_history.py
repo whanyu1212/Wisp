@@ -232,10 +232,8 @@ class TextualHistoryController:
         """Move the mounted window to the newest retained history."""
 
         if not self._window.latest_is_retained:
-            self._latest_reload_live_entries = tuple(self._live_entries)
             if self._surface.request_latest_history():
                 return True
-            self._latest_reload_live_entries = None
         if not self._window.show_latest():
             return False
         self._surface.begin_history_render()
@@ -262,6 +260,11 @@ class TextualHistoryController:
             self._surface.follow_transcript_tail_after_refresh()
         finally:
             self._surface.finish_history_render()
+
+    def capture_latest_reload_live_entries(self) -> None:
+        """Capture live output at the point the durable latest-page request starts."""
+
+        self._latest_reload_live_entries = tuple(self._live_entries)
 
     def _clear(self, *, clear_live: bool = True) -> None:
         self._historical_tool_results.clear()

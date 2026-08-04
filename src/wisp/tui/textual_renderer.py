@@ -292,6 +292,9 @@ class TextualTuiRenderer:
     ) -> None:
         self._history.replace_latest_entries(entries)
 
+    def capture_latest_history_reload(self) -> None:
+        self._history.capture_latest_reload_live_entries()
+
     def queued_prompts_cleared(self) -> None:
         # The shell dropped its queued follow-ups (cancel/quit/input-closed/error),
         # so their pending compact echoes will never be consumed — reclaim them.

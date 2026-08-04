@@ -1596,6 +1596,7 @@ class TuiShell:
         pagination.latest_reload_pending = False
         pagination.latest_command_id = command_id
         try:
+            self._call_renderer_optional("capture_latest_history_reload")
             await self.controller.get_messages(
                 session_id=pagination.session_id,
                 limit=TUI_HISTORY_PAGE_LIMIT,

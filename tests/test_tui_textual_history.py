@@ -343,6 +343,7 @@ def test_history_controller_uses_the_live_snapshot_from_the_reload_request() -> 
     controller.record_live_message("user", "persisted before reload")
 
     assert controller.show_latest()
+    controller.capture_latest_reload_live_entries()
     controller.record_live_message("user", "submitted after reload")
     controller.replace_latest_entries(
         (HistoricalTranscriptMessage(role="user", content="persisted before reload"),)

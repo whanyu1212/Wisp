@@ -571,6 +571,7 @@ def test_tui_shell_reloads_latest_history_after_an_older_page_finishes() -> None
             super().__init__(_console()[0])
             self.history_page_hook = None
             self.latest_history_hook = None
+            self.latest_history_captures = 0
             self.reloaded: list[tuple[HistoricalTranscriptEntry, ...]] = []
 
         def set_history_page_request_hook(self, hook: object) -> None:
@@ -587,6 +588,9 @@ def test_tui_shell_reloads_latest_history_after_an_older_page_finishes() -> None
             entries: tuple[HistoricalTranscriptEntry, ...],
         ) -> None:
             self.reloaded.append(entries)
+
+        def capture_latest_history_reload(self) -> None:
+            self.latest_history_captures += 1
 
     async def run() -> None:
         controller = ScriptedController()
@@ -607,6 +611,7 @@ def test_tui_shell_reloads_latest_history_after_an_older_page_finishes() -> None
         older_command_id = controller.messages_requests[-1][0]
         await renderer.latest_history_hook()
         assert len(controller.messages_requests) == 1
+        assert renderer.latest_history_captures == 0
 
         await shell._handle_rpc_event(
             RpcMessagesReported(
@@ -624,6 +629,7 @@ def test_tui_shell_reloads_latest_history_after_an_older_page_finishes() -> None
         )
 
         latest_command_id = controller.messages_requests[-1][0]
+        assert renderer.latest_history_captures == 1
         assert controller.messages_requests[-1] == (
             latest_command_id,
             "target",
