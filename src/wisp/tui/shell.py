@@ -969,6 +969,9 @@ class TuiShell:
                 input_mode=_InputMode.idle,
             )
             self.renderer.send_failed("compact", exc)
+            pagination = self._history_pagination
+            if pagination is not None and pagination.latest_reload_pending:
+                await self._request_latest_history_page()
             return False
         self.state.current_command_id = command_id
         return False

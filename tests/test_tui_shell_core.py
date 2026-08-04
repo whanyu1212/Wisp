@@ -3198,3 +3198,57 @@ def test_tui_shell_compact_send_failure_remains_usable() -> None:
         assert "Commands:" in output.getvalue()
 
     anyio.run(run)
+
+
+def test_tui_shell_reloads_latest_history_after_a_compaction_send_failure() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.latest_history_hook = None
+            self.latest_history_captures = 0
+
+        def set_history_latest_request_hook(self, hook: object) -> None:
+            self.latest_history_hook = hook
+
+        def capture_latest_history_reload(self) -> None:
+            self.latest_history_captures += 1
+
+    class FailingCompactController(ScriptedController):
+        def __init__(self) -> None:
+            super().__init__()
+            self.renderer: RecordingRenderer | None = None
+
+        async def compact(
+            self,
+            instructions: str | None = None,
+            *,
+            command_id: str | None = None,
+        ) -> str:
+            self.compactions.append(instructions)
+            assert self.renderer is not None
+            assert callable(self.renderer.latest_history_hook)
+            await self.renderer.latest_history_hook()
+            raise RuntimeError("pipe closed")
+
+    async def run() -> None:
+        controller = FailingCompactController()
+        renderer = RecordingRenderer()
+        controller.renderer = renderer
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                truncated=True,
+                next_before_entry_id="cursor",
+            )
+        )
+
+        await shell._start_compaction(None)
+
+        assert controller.messages_requests[-1][1:] == ("target", TUI_HISTORY_PAGE_LIMIT, None)
+        assert renderer.latest_history_captures == 1
+        assert shell._history_pagination is not None
+        assert not shell._history_pagination.latest_reload_pending
+
+    anyio.run(run)
