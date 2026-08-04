@@ -1238,6 +1238,7 @@ class TuiShell:
             suppress_completed_message = self.state.rendered_tokens
             self.state.rendered_tokens = False
             if suppress_completed_message:
+                self._call_renderer_optional("record_streamed_message_completed", event)
                 return False
         if isinstance(event, ToolApprovalRequested):
             self.state.pending_approval = event

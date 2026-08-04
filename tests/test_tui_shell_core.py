@@ -1113,9 +1113,13 @@ def test_tui_shell_updates_context_before_suppressing_streamed_completion() -> N
         def __init__(self) -> None:
             super().__init__(_console()[0])
             self.snapshots: list[TuiViewSnapshot] = []
+            self.streamed_messages: list[MessageCompleted] = []
 
         def view_updated(self, snapshot: TuiViewSnapshot) -> None:
             self.snapshots.append(snapshot)
+
+        def record_streamed_message_completed(self, event: MessageCompleted) -> None:
+            self.streamed_messages.append(event)
 
     async def run() -> None:
         renderer = RecordingRenderer()
@@ -1136,6 +1140,7 @@ def test_tui_shell_updates_context_before_suppressing_streamed_completion() -> N
         assert renderer.snapshots[-1].context is not None
         assert renderer.snapshots[-1].context.observed_tokens == 12_000
         assert renderer.snapshots[-1].context.observed_is_current is True
+        assert [event.content for event in renderer.streamed_messages] == ["streamed answer"]
 
     anyio.run(run)
 

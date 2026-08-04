@@ -232,6 +232,12 @@ class TextualTuiRenderer:
     def prompt_accepted(self, prompt: str) -> None:
         self.app.record_prompt(prompt)
 
+    def record_streamed_message_completed(self, event: MessageCompleted) -> None:
+        """Record a streamed message that the shell suppresses from normal rendering."""
+
+        if event.content:
+            self._history.record_live_message("assistant", event.content)
+
     def prompt_history_request(self) -> None:
         self.app.show_prompt_history()
 
