@@ -333,3 +333,20 @@ def test_history_controller_excludes_live_entries_from_a_latest_reload() -> None
     )
 
     assert surface.history_labels == ["assistant: previous"]
+
+
+def test_history_controller_uses_the_live_snapshot_from_the_reload_request() -> None:
+    surface = _HistorySurface(at_top=True)
+    controller = TextualHistoryController(surface, retained_capacity=300)
+    controller.replace_entries(_messages("assistant", "current", 300), session_label="Windowed")
+    controller.prepend_entries(_messages("user", "older", 75))
+    controller.record_live_message("user", "persisted before reload")
+
+    assert controller.show_latest()
+    controller.record_live_message("user", "submitted after reload")
+    controller.replace_latest_entries(
+        (HistoricalTranscriptMessage(role="user", content="persisted before reload"),)
+    )
+
+    assert surface.latest_history_requests == 1
+    assert surface.history_labels == []

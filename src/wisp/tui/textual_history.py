@@ -146,6 +146,7 @@ class TextualHistoryController:
         self._widgets: dict[int, Widget] = {}
         self._next_entry_id = 0
         self._live_entries: list[_LiveHistoryEntry] = []
+        self._latest_reload_live_entries: tuple[_LiveHistoryEntry, ...] | None = None
 
     @property
     def retained_entry_count(self) -> int:
@@ -231,8 +232,10 @@ class TextualHistoryController:
         """Move the mounted window to the newest retained history."""
 
         if not self._window.latest_is_retained:
+            self._latest_reload_live_entries = tuple(self._live_entries)
             if self._surface.request_latest_history():
                 return True
+            self._latest_reload_live_entries = None
         if not self._window.show_latest():
             return False
         self._surface.begin_history_render()
@@ -246,7 +249,10 @@ class TextualHistoryController:
     def replace_latest_entries(self, entries: Iterable[HistoricalTranscriptEntry]) -> None:
         """Replace evicted history with a newly loaded durable latest page."""
 
-        reloaded_entries = self._exclude_live_tail(tuple(entries))
+        snapshot = self._latest_reload_live_entries
+        live_entries = snapshot if snapshot is not None else tuple(self._live_entries)
+        self._latest_reload_live_entries = None
+        reloaded_entries = self._exclude_live_tail(tuple(entries), live_entries=live_entries)
         self._surface.begin_history_render()
         try:
             self._remove_historical_widgets()
@@ -266,6 +272,7 @@ class TextualHistoryController:
         self._next_entry_id = 0
         if clear_live:
             self._live_entries.clear()
+        self._latest_reload_live_entries = None
 
     def _append_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
         self._surface.begin_history_render()
@@ -301,13 +308,15 @@ class TextualHistoryController:
     def _exclude_live_tail(
         self,
         entries: tuple[HistoricalTranscriptEntry, ...],
+        *,
+        live_entries: tuple[_LiveHistoryEntry, ...],
     ) -> tuple[HistoricalTranscriptEntry, ...]:
         """Drop the durable suffix already visible as live transcript output."""
 
         end = len(entries)
-        live_end = len(self._live_entries)
+        live_end = len(live_entries)
         while end and live_end:
-            if not _history_entry_matches_live(entries[end - 1], self._live_entries[live_end - 1]):
+            if not _history_entry_matches_live(entries[end - 1], live_entries[live_end - 1]):
                 break
             end -= 1
             live_end -= 1
