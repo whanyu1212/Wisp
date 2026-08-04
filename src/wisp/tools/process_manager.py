@@ -60,7 +60,9 @@ class ProcessUpdate:
 class _PendingFragment:
     text: str
     source_byte_lengths: tuple[int, ...]
+    encoded_byte_lengths: tuple[int, ...]
     source_bytes: int
+    encoded_bytes: int
 
 
 @dataclass
@@ -76,6 +78,7 @@ class _PendingText:
     dropped_bytes: int = 0
     _lines: deque[_PendingLine] = field(default_factory=deque)
     _retained_source_bytes: int = 0
+    _retained_encoded_bytes: int = 0
     _pending_utf8: bytes = b""
     _pending_carriage_return: bool = False
 
@@ -122,15 +125,25 @@ class _PendingText:
             if not text_parts:
                 return
             lengths = tuple(source_byte_lengths)
+            text = "".join(text_parts)
+            encoded_lengths = (
+                lengths
+                if text.isascii()
+                else tuple(len(part.encode("utf-8")) for part in text_parts)
+            )
             source_bytes = sum(lengths)
+            encoded_bytes = sum(encoded_lengths)
             self._current_line().fragments.append(
                 _PendingFragment(
-                    text="".join(text_parts),
+                    text=text,
                     source_byte_lengths=lengths,
+                    encoded_byte_lengths=encoded_lengths,
                     source_bytes=source_bytes,
+                    encoded_bytes=encoded_bytes,
                 )
             )
             self._retained_source_bytes += source_bytes
+            self._retained_encoded_bytes += encoded_bytes
             text_parts.clear()
             source_byte_lengths.clear()
 
@@ -171,11 +184,11 @@ class _PendingText:
             return
         while len(self._lines) > self.max_lines:
             self._drop_line()
-        while self._retained_source_bytes > self.max_bytes and self._lines:
+        while self._retained_encoded_bytes > self.max_bytes and self._lines:
             line = self._lines[0]
             fragment = line.fragments[0]
-            excess_bytes = self._retained_source_bytes - self.max_bytes
-            if fragment.source_bytes <= excess_bytes:
+            excess_bytes = self._retained_encoded_bytes - self.max_bytes
+            if fragment.encoded_bytes <= excess_bytes:
                 self._drop_fragment(line.fragments.popleft())
             else:
                 self._trim_fragment(fragment, excess_bytes)
@@ -196,21 +209,29 @@ class _PendingText:
 
     def _drop_fragment(self, fragment: _PendingFragment) -> None:
         self._retained_source_bytes -= fragment.source_bytes
+        self._retained_encoded_bytes -= fragment.encoded_bytes
         self.dropped_bytes += fragment.source_bytes
 
-    def _trim_fragment(self, fragment: _PendingFragment, excess_bytes: int) -> None:
-        removed_bytes = 0
+    def _trim_fragment(self, fragment: _PendingFragment, excess_encoded_bytes: int) -> None:
+        removed_encoded_bytes = 0
+        removed_source_bytes = 0
         removed_characters = 0
-        for source_bytes in fragment.source_byte_lengths:
-            if removed_bytes >= excess_bytes:
+        for source_bytes, encoded_bytes in zip(
+            fragment.source_byte_lengths, fragment.encoded_byte_lengths, strict=True
+        ):
+            if removed_encoded_bytes >= excess_encoded_bytes:
                 break
-            removed_bytes += source_bytes
+            removed_source_bytes += source_bytes
+            removed_encoded_bytes += encoded_bytes
             removed_characters += 1
         fragment.text = fragment.text[removed_characters:]
         fragment.source_byte_lengths = fragment.source_byte_lengths[removed_characters:]
-        fragment.source_bytes -= removed_bytes
-        self._retained_source_bytes -= removed_bytes
-        self.dropped_bytes += removed_bytes
+        fragment.encoded_byte_lengths = fragment.encoded_byte_lengths[removed_characters:]
+        fragment.source_bytes -= removed_source_bytes
+        fragment.encoded_bytes -= removed_encoded_bytes
+        self._retained_source_bytes -= removed_source_bytes
+        self._retained_encoded_bytes -= removed_encoded_bytes
+        self.dropped_bytes += removed_source_bytes
 
     def drain(self) -> tuple[str, int, int, tuple[int, ...]]:
         text = self.text
@@ -225,6 +246,7 @@ class _PendingText:
         self.dropped_bytes = 0
         self._lines.clear()
         self._retained_source_bytes = 0
+        self._retained_encoded_bytes = 0
         self._pending_carriage_return = False
         return text, dropped_bytes, retained_source_bytes, source_byte_lengths
 

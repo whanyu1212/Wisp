@@ -404,6 +404,18 @@ def test_pending_text_incrementally_matches_tail_retention(
     assert dropped_bytes + retained_source_bytes == len(source)
 
 
+def test_pending_text_applies_byte_cap_to_malformed_utf8() -> None:
+    pending = _PendingText(max_bytes=1, max_lines=10)
+
+    pending.append_bytes(b"\xff", final=True)
+    text, dropped_bytes, retained_source_bytes, source_byte_lengths = pending.drain()
+
+    assert text == ""
+    assert dropped_bytes == 1
+    assert retained_source_bytes == 0
+    assert source_byte_lengths == ()
+
+
 def test_managed_process_timeout_is_not_an_exit_code(tmp_path: Path) -> None:
     async def run() -> ProcessUpdate:
         supervisor = ProcessSupervisor()
