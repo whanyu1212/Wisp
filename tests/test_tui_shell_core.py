@@ -180,6 +180,29 @@ def test_tui_context_command_renders_authoritative_compaction_status() -> None:
     anyio.run(run)
 
 
+def test_tui_context_command_rejects_overlapping_status_requests() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.errors: list[str] = []
+
+        def command_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+
+        await shell._handle_input_line(_InputLine("/context", _InputMode.idle))
+        await shell._handle_input_line(_InputLine("/context", _InputMode.idle))
+
+        assert controller.session_stats_requests == ["session-stats-1"]
+        assert renderer.errors == ["Context status request is already pending."]
+
+    anyio.run(run)
+
+
 def test_tui_context_command_marks_legacy_compaction_policy_unavailable() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:

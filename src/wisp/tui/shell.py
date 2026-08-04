@@ -713,6 +713,9 @@ class TuiShell:
 
     async def _handle_context_command(self, args: tuple[str, ...]) -> None:
         if not args:
+            if self.pending_context_status_command_id is not None:
+                self.renderer.command_error("Context status request is already pending.")
+                return
             try:
                 command_id = await self.controller.get_session_stats()
             except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
