@@ -1521,6 +1521,9 @@ class TuiShell:
             )
             self.renderer.running_queued_follow_up(len(self.state.queued_prompts))
             return await self._start_prompt(queued_prompt)
+        pagination = self._history_pagination
+        if pagination is not None and pagination.latest_reload_pending:
+            await self._request_latest_history_page()
         self.state.cancel_requested = False
         self.state.status = TuiStatus.idle
         if event.ok:
@@ -1590,7 +1593,7 @@ class TuiShell:
             return
         if pagination.latest_command_id is not None:
             return
-        if pagination.command_id is not None:
+        if pagination.command_id is not None or self.state.current_command_id is not None:
             pagination.latest_reload_pending = True
             return
 
