@@ -226,6 +226,7 @@ class TextualTuiRenderer:
     def prompt_submitted(self, prompt: str) -> None:
         # Echo a compact line for large pastes (marker kept) while the model still
         # received the full expanded text via controller.prompt(prompt).
+        self._history.record_live_message("user", prompt)
         self.app.write_user(self.app.compact_echo_for(prompt))
 
     def prompt_accepted(self, prompt: str) -> None:
@@ -427,6 +428,7 @@ class TextualTuiRenderer:
         elif isinstance(event, MessageCompleted):
             self._suspend_progress()
             if event.content:
+                self._history.record_live_message("assistant", event.content)
                 self.app.write_assistant(event.content)
         elif isinstance(event, ToolCallRequested):
             # Mount the evolving card; approval/result mutate it in place. Record
@@ -436,6 +438,7 @@ class TextualTuiRenderer:
             self._suspend_progress()
             self._tool_started[event.call_id] = event.timestamp
             self._tool_arguments[event.call_id] = event.arguments
+            self._history.record_live_tool_call(event.call_id)
             self.app.mount_tool_call(event.call_id, event.name, event.arguments)
         elif isinstance(event, ToolApprovalResolved):
             # Only a denial changes the card here: an approval leaves it pending
@@ -462,6 +465,7 @@ class TextualTuiRenderer:
             # was never seen, e.g. a resumed session) so tool-aware renderers can
             # use them; pop so the map doesn't grow across the session.
             arguments = self._tool_arguments.pop(event.call_id, {})
+            self._history.record_live_tool_result(event.call_id)
             self.app.resolve_tool_call(
                 event.call_id,
                 status,

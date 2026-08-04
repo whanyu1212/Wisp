@@ -302,3 +302,34 @@ def test_history_controller_reloads_latest_after_older_paging_evicts_it() -> Non
     assert surface.history_labels == [f"assistant: latest {index}" for index in range(75)]
     assert surface.follow_requests == follow_requests_before_reload + 1
     assert not controller.show_latest()
+
+
+def test_history_controller_excludes_live_entries_from_a_latest_reload() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    controller.replace_entries(
+        (HistoricalTranscriptMessage(role="assistant", content="previous"),),
+        session_label="Windowed",
+    )
+    controller.record_live_message("user", "prompt")
+    controller.record_live_message("assistant", "reply")
+    controller.record_live_tool_call("call-1")
+    controller.record_live_tool_result("call-1")
+
+    controller.replace_latest_entries(
+        (
+            HistoricalTranscriptMessage(role="assistant", content="previous"),
+            HistoricalTranscriptMessage(role="user", content="prompt"),
+            HistoricalTranscriptMessage(role="assistant", content="reply"),
+            HistoricalToolCard(
+                card_id="history:result",
+                name="bash",
+                arguments={},
+                output="done",
+                is_error=False,
+                tool_call_id="call-1",
+            ),
+        )
+    )
+
+    assert surface.history_labels == ["assistant: previous"]

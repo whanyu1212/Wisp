@@ -202,6 +202,7 @@ class _HistoryPagination:
     report: RpcMessagesReported | None = None
     latest_command_id: str | None = None
     latest_report: RpcMessagesReported | None = None
+    latest_reload_pending: bool = False
 
 
 def _default_model_for(models: ModelRegistry, provider_name: str) -> str | None:
@@ -1557,7 +1558,11 @@ class TuiShell:
         if pagination is None or pagination.next_before_entry_id is None:
             self._call_renderer_optional("history_page_loaded", has_more=False)
             return
-        if pagination.command_id is not None or pagination.latest_command_id is not None:
+        if (
+            pagination.command_id is not None
+            or pagination.latest_command_id is not None
+            or pagination.latest_reload_pending
+        ):
             return
 
         command_id = f"history-page-{uuid4().hex}"
@@ -1580,10 +1585,14 @@ class TuiShell:
         pagination = self._history_pagination
         if pagination is None:
             return
-        if pagination.command_id is not None or pagination.latest_command_id is not None:
+        if pagination.latest_command_id is not None:
+            return
+        if pagination.command_id is not None:
+            pagination.latest_reload_pending = True
             return
 
         command_id = f"history-latest-{uuid4().hex}"
+        pagination.latest_reload_pending = False
         pagination.latest_command_id = command_id
         try:
             await self.controller.get_messages(
@@ -1605,25 +1614,29 @@ class TuiShell:
         report = pagination.report
         pagination.command_id = None
         pagination.report = None
-        if not event.ok or report is None:
-            detail = event.error or "older session history completed without a result"
-            self.renderer.command_error(f"Failed to load older session history: {detail}")
-            self._call_renderer_optional("history_page_request_failed")
-            return
-        if report.session_id != pagination.session_id:
-            self.renderer.command_error(
-                "Failed to load older session history: result did not match the active session."
-            )
-            self._call_renderer_optional("history_page_request_failed")
-            return
+        try:
+            if not event.ok or report is None:
+                detail = event.error or "older session history completed without a result"
+                self.renderer.command_error(f"Failed to load older session history: {detail}")
+                self._call_renderer_optional("history_page_request_failed")
+                return
+            if report.session_id != pagination.session_id:
+                self.renderer.command_error(
+                    "Failed to load older session history: result did not match the active session."
+                )
+                self._call_renderer_optional("history_page_request_failed")
+                return
 
-        entries = history_entries_from_rpc_messages(report.messages)
-        self._call_renderer_optional("prepend_history_entries", entries)
-        pagination.next_before_entry_id = report.next_before_entry_id
-        self._call_renderer_optional(
-            "history_page_loaded",
-            has_more=report.next_before_entry_id is not None,
-        )
+            entries = history_entries_from_rpc_messages(report.messages)
+            self._call_renderer_optional("prepend_history_entries", entries)
+            pagination.next_before_entry_id = report.next_before_entry_id
+            self._call_renderer_optional(
+                "history_page_loaded",
+                has_more=report.next_before_entry_id is not None,
+            )
+        finally:
+            if self._history_pagination is pagination and pagination.latest_reload_pending:
+                await self._request_latest_history_page()
 
     async def _finish_latest_history_page(self, event: RpcCommandFinished) -> None:
         pagination = self._history_pagination
