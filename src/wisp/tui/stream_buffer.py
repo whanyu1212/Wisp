@@ -86,6 +86,9 @@ class MarkdownStreamController:
         turn = self._turn
         self._turn = None
         if turn is not None:
+            # The shell records MessageCompleted immediately after flush(), before
+            # this turn's async finalizer runs, so publish its widget synchronously.
+            self._last_completed_widget = turn.widget
             turn.finalize_requested = True
             if not self._cancel_drain(turn):
                 self._queue_finalize(turn)
@@ -243,7 +246,6 @@ class MarkdownStreamController:
                 await turn.stream.write(text)
                 turn.write_count += 1
             await self._stop(turn)
-            self._last_completed_widget = turn.widget
             self._last_completed_write_count = turn.write_count
             self._app.settle_stream_widget(turn.widget)
             self._app.note_transcript_update(turn.widget)

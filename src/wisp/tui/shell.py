@@ -1622,6 +1622,7 @@ class TuiShell:
                 pagination.latest_command_id = None
                 self.renderer.command_error(f"Failed to reload latest session history: {exc}")
                 self._call_renderer_optional("history_page_request_failed")
+                self._call_renderer_optional("latest_history_reload_failed")
             return
 
     async def _finish_history_page(self, event: RpcCommandFinished) -> None:
@@ -1666,12 +1667,14 @@ class TuiShell:
             detail = event.error or "latest session history completed without a result"
             self.renderer.command_error(f"Failed to reload latest session history: {detail}")
             self._call_renderer_optional("history_page_request_failed")
+            self._call_renderer_optional("latest_history_reload_failed")
             return
         if report.session_id != pagination.session_id:
             self.renderer.command_error(
                 "Failed to reload latest session history: result did not match the active session."
             )
             self._call_renderer_optional("history_page_request_failed")
+            self._call_renderer_optional("latest_history_reload_failed")
             return
 
         entries = history_entries_from_rpc_messages(report.messages)

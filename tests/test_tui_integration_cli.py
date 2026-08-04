@@ -2818,6 +2818,23 @@ def test_textual_end_token_stream_finalizes_the_bubble() -> None:
     assert not is_streaming
 
 
+def test_textual_stream_widget_is_available_before_async_finalization() -> None:
+    async def scenario() -> bool:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            renderer.token_delta("streamed response")
+            renderer.end_token_stream()
+            renderer.record_streamed_message_completed(
+                completed_message(content="streamed response")
+            )
+            return (
+                renderer._history._live_entries[-1].widget
+                is app_instance.stream_widget_for_completed_message()
+            )
+
+    assert anyio.run(scenario)
+
+
 def test_textual_stream_shutdown_drains_pending_output() -> None:
     async def scenario() -> tuple[list[str], bool]:
         app_instance, renderer = create_textual_tui()
