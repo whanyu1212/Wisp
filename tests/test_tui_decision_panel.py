@@ -208,7 +208,7 @@ def test_approval_panel_defaults_to_approve_once_and_preserves_composer_draft() 
 
             await pilot.press("1")
             with anyio.fail_after(1):
-                answer = await app._prompt_receive.receive()
+                answer = await app._input_controller.receive_stream.receive()
             assert isinstance(answer, str)
             renderer.view_updated(TuiViewSnapshot(status="idle", input_hint="wisp> "))
             await pilot.pause()
@@ -281,7 +281,7 @@ def test_approval_panel_yolo_confirmation_defaults_back(cancel_key: str) -> None
             await pilot.pause()
             await pilot.press("3")
             with anyio.fail_after(1):
-                first = await app._prompt_receive.receive()
+                first = await app._input_controller.receive_stream.receive()
             assert isinstance(first, str)
 
             renderer.approval_all_confirmation(approval)
@@ -291,7 +291,7 @@ def test_approval_panel_yolo_confirmation_defaults_back(cancel_key: str) -> None
             title = _static_plain(app.query_one("#decision-title", Static))
             await pilot.press(cancel_key)
             with anyio.fail_after(1):
-                second = await app._prompt_receive.receive()
+                second = await app._input_controller.receive_stream.receive()
             assert isinstance(second, str)
             return first, second, highlighted, title
 
@@ -345,7 +345,7 @@ def test_approval_panel_explicit_deny_paths_are_fail_closed(key: str, expected: 
             await pilot.pause()
             await pilot.press(key)
             with anyio.fail_after(1):
-                answer = await app._prompt_receive.receive()
+                answer = await app._input_controller.receive_stream.receive()
             assert isinstance(answer, str)
             return answer
 
@@ -370,7 +370,7 @@ def test_approval_panel_enter_follows_approve_once_default() -> None:
             await pilot.pause()
             await pilot.press("enter")
             with anyio.fail_after(1):
-                answer = await app._prompt_receive.receive()
+                answer = await app._input_controller.receive_stream.receive()
             assert isinstance(answer, str)
             return answer
 
@@ -421,7 +421,7 @@ def test_approval_panel_drops_key_queued_before_panel_opened() -> None:
 
             await pilot.press("4")
             with anyio.fail_after(1):
-                answer = await app._prompt_receive.receive()
+                answer = await app._input_controller.receive_stream.receive()
             assert isinstance(answer, str)
             return rejected, answer
 
@@ -631,7 +631,7 @@ def test_approval_panel_end_key_moves_highlight_not_transcript() -> None:
 
             await pilot.press("enter")
             with anyio.fail_after(1):
-                answer = await app._prompt_receive.receive()
+                answer = await app._input_controller.receive_stream.receive()
             assert isinstance(answer, str)
             return highlighted, answer
 
