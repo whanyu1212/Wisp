@@ -60,6 +60,31 @@ def test_append_only_moves_window_for_tail_following() -> None:
     assert window.visible == (5, 6, 7)
 
 
+def test_prepend_evicts_newest_entries_when_retention_is_full() -> None:
+    window = TranscriptWindow[int](capacity=3, shift=1, retained_capacity=6)
+    window.replace(range(6))
+    window.shift_older()
+
+    evicted = window.prepend((-3, -2, -1))
+
+    assert evicted == (3, 4, 5)
+    assert window.entries == (-3, -2, -1, 0, 1, 2)
+    assert window.visible == (0, 1, 2)
+    assert not window.latest_is_retained
+
+
+def test_append_evicts_oldest_entries_and_keeps_latest_retained() -> None:
+    window = TranscriptWindow[int](capacity=3, shift=1, retained_capacity=6)
+    window.replace(range(6))
+
+    evicted = window.append((6, 7), follow_tail=True)
+
+    assert evicted == (0, 1)
+    assert window.entries == (2, 3, 4, 5, 6, 7)
+    assert window.visible == (5, 6, 7)
+    assert window.latest_is_retained
+
+
 @pytest.mark.parametrize(
     ("capacity", "shift"),
     [(0, 1), (2, 0), (2, 3)],
@@ -67,3 +92,8 @@ def test_append_only_moves_window_for_tail_following() -> None:
 def test_window_rejects_invalid_limits(capacity: int, shift: int) -> None:
     with pytest.raises(ValueError):
         TranscriptWindow[int](capacity=capacity, shift=shift)
+
+
+def test_window_rejects_retention_smaller_than_visible_capacity() -> None:
+    with pytest.raises(ValueError, match="retained_capacity"):
+        TranscriptWindow[int](capacity=2, shift=1, retained_capacity=1)

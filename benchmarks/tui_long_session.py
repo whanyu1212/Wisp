@@ -1,4 +1,4 @@
-"""Measure current long-session TUI behavior before transcript windowing."""
+"""Measure bounded paging and history rendering for long Textual sessions."""
 
 from __future__ import annotations
 
@@ -24,10 +24,14 @@ from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionMessageP
 from wisp.tools.process_manager import ProcessSupervisor
 from wisp.tui.history import history_entries_from_rpc_messages
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
-from wisp.tui.transcript_window import TUI_TRANSCRIPT_WINDOW_SIZE
+from wisp.tui.transcript_window import (
+    TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
+    TUI_TRANSCRIPT_WINDOW_SIZE,
+)
 from wisp.tui.widgets import Transcript
 
 _WORKER_TIMEOUT_SECONDS = 60.0
+DEFAULT_SCENARIO_MESSAGE_COUNTS = (2_000, 5_000)
 
 
 @dataclass(frozen=True)
@@ -44,10 +48,12 @@ class ScenarioReport:
     session_entry_count: int
     session_size_bytes: int
     newest_page_read_ms: float
+    warm_newest_page_read_ms: float
     older_page_read_ms: tuple[float, ...]
     initial_render_ms: float
     prepend_render_ms: tuple[float, ...]
     mounted_widget_counts: tuple[int, ...]
+    retained_entry_counts: tuple[int, ...]
     scroll_while_process_ms: float
     stream_following_tail_ms: float
     stream_scrolled_back_ms: float
@@ -149,6 +155,7 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         await _append_messages(session, config.message_count)
         session = store.load(session.path)
         newest_page, newest_page_read_ms = _read_page(session, limit=config.page_size)
+        _warm_newest_page, warm_newest_page_read_ms = _read_page(session, limit=config.page_size)
         older_pages: list[tuple[SessionMessagePage, float]] = []
         cursor = newest_page.next_before_entry_id
         while cursor is not None:
@@ -175,14 +182,18 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 )
                 transcript = app.query_one("#transcript", Transcript)
                 mounted_counts = [len(transcript.children)]
+                retained_counts = [renderer.retained_history_entry_count]
                 prepend_render_ms: list[float] = []
                 for page, _duration_ms in older_pages:
                     prepend_render_ms.append(
                         await _render_page(app, renderer, pilot, page, prepend=True)
                     )
                     mounted_counts.append(len(transcript.children))
+                    retained_counts.append(renderer.retained_history_entry_count)
                     if mounted_counts[-1] > TUI_TRANSCRIPT_WINDOW_SIZE + 1:
                         raise RuntimeError("Transcript history window exceeded its widget capacity")
+                    if retained_counts[-1] > TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT:
+                        raise RuntimeError("Transcript history exceeded its retention capacity")
 
                 command = _cpu_command()
                 process_id = await supervisor.start(
@@ -268,10 +279,12 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             session_entry_count=config.message_count,
             session_size_bytes=session.path.stat().st_size,
             newest_page_read_ms=newest_page_read_ms,
+            warm_newest_page_read_ms=warm_newest_page_read_ms,
             older_page_read_ms=tuple(duration for _page, duration in older_pages),
             initial_render_ms=initial_render_ms,
             prepend_render_ms=tuple(prepend_render_ms),
             mounted_widget_counts=tuple(mounted_counts),
+            retained_entry_counts=tuple(retained_counts),
             scroll_while_process_ms=scroll_while_process_ms,
             stream_following_tail_ms=stream_following_tail_ms,
             stream_scrolled_back_ms=stream_scrolled_back_ms,
@@ -283,7 +296,12 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
 
 def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--messages", type=int, default=ScenarioConfig.message_count)
+    parser.add_argument(
+        "--messages",
+        type=int,
+        action="append",
+        help="Message count to benchmark; repeat for multiple scenarios.",
+    )
     parser.add_argument("--page-size", type=int, default=ScenarioConfig.page_size)
     parser.add_argument("--stream-chunks", type=int, default=ScenarioConfig.stream_chunks)
     parser.add_argument("--output", type=Path)
@@ -292,16 +310,21 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
 
 async def _main(arguments: Sequence[str] | None = None) -> None:
     parsed = _parse_args(arguments)
-    report = await run_scenario(
-        ScenarioConfig(
-            message_count=parsed.messages,
-            page_size=parsed.page_size,
-            stream_chunks=parsed.stream_chunks,
+    message_counts = tuple(parsed.messages or DEFAULT_SCENARIO_MESSAGE_COUNTS)
+    reports = tuple(
+        await run_scenario(
+            ScenarioConfig(
+                message_count=message_count,
+                page_size=parsed.page_size,
+                stream_chunks=parsed.stream_chunks,
+            )
         )
+        for message_count in message_counts
     )
-    print(report.to_json())
+    payload = json.dumps([asdict(report) for report in reports], indent=2, sort_keys=True)
+    print(payload)
     if parsed.output is not None:
-        parsed.output.write_text(f"{report.to_json()}\n", encoding="utf-8")
+        parsed.output.write_text(f"{payload}\n", encoding="utf-8")
 
 
 def main() -> None:

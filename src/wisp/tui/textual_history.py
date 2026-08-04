@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 from textual.content import Content
 from textual.widget import Widget
@@ -29,7 +29,7 @@ from wisp.tui.history import (
     historical_tool_status,
 )
 from wisp.tui.tool_output import full_tool_output_for_display, render_tool_result
-from wisp.tui.transcript_window import TranscriptWindow
+from wisp.tui.transcript_window import TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, TranscriptWindow
 
 
 class TextualHistorySurface(Protocol):
@@ -52,6 +52,8 @@ class TextualHistorySurface(Protocol):
     def finish_history_render(self) -> None: ...
 
     def follow_transcript_tail_after_refresh(self) -> None: ...
+
+    def request_latest_history(self) -> bool: ...
 
     def set_history_window_available(self, *, has_older: bool) -> None: ...
 
@@ -111,6 +113,16 @@ class _RetainedHistoryEntry:
     entry: HistoricalTranscriptEntry
 
 
+@dataclass(frozen=True)
+class _LiveHistoryEntry:
+    """One persisted entry already represented by a live transcript widget."""
+
+    kind: Literal["message", "tool"]
+    role: Literal["user", "assistant"] | None = None
+    content: str | None = None
+    tool_call_id: str | None = None
+
+
 class TextualHistoryController:
     """Own bounded retained-history state for one Textual transcript.
 
@@ -120,19 +132,62 @@ class TextualHistoryController:
     rather than exposing its mutable window or widget maps.
     """
 
-    def __init__(self, surface: TextualHistorySurface) -> None:
+    def __init__(
+        self,
+        surface: TextualHistorySurface,
+        *,
+        retained_capacity: int = TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
+    ) -> None:
         self._surface = surface
         self._historical_tool_results: dict[str, deque[tuple[str, HistoricalToolCard]]] = {}
         self._resolved_boundary_results: dict[str, HistoricalToolCard] = {}
         self._boundary_result_calls: dict[str, str] = {}
-        self._window = TranscriptWindow[_RetainedHistoryEntry]()
+        self._window = TranscriptWindow[_RetainedHistoryEntry](retained_capacity=retained_capacity)
         self._widgets: dict[int, Widget] = {}
         self._next_entry_id = 0
+        self._live_entries: list[_LiveHistoryEntry] = []
+        self._latest_reload_live_entries: tuple[_LiveHistoryEntry, ...] | None = None
+
+    @property
+    def retained_entry_count(self) -> int:
+        """Return the number of history entries retained by the UI."""
+
+        return self._window.retained_count
 
     def render_entries(self, entries: Iterable[HistoricalTranscriptEntry]) -> None:
         """Append persisted entries received with the current history page."""
 
         self._append_entries(tuple(entries))
+
+    def record_live_message(self, role: Literal["user", "assistant"], content: str) -> None:
+        """Remember a live persisted message so a durable reload does not duplicate it."""
+
+        if content:
+            self._append_live_entry(_LiveHistoryEntry(kind="message", role=role, content=content))
+
+    def discard_live_message(self, role: Literal["user", "assistant"], content: str) -> None:
+        """Forget a live message that did not become a durable session entry."""
+
+        for index in range(len(self._live_entries) - 1, -1, -1):
+            entry = self._live_entries[index]
+            if entry.kind == "message" and entry.role == role and entry.content == content:
+                del self._live_entries[index]
+                return
+
+    def record_live_tool_call(self, tool_call_id: str) -> None:
+        """Remember a pending live tool card as the durable history page would render it."""
+
+        self._append_live_entry(_LiveHistoryEntry(kind="tool", tool_call_id=tool_call_id))
+
+    def record_live_tool_result(self, tool_call_id: str) -> None:
+        """Replace a pending live tool card identity with its persisted result identity."""
+
+        self._live_entries = [
+            entry
+            for entry in self._live_entries
+            if not (entry.kind == "tool" and entry.tool_call_id == tool_call_id)
+        ]
+        self._append_live_entry(_LiveHistoryEntry(kind="tool", tool_call_id=tool_call_id))
 
     def replace_entries(
         self,
@@ -157,7 +212,7 @@ class TextualHistoryController:
         self._surface.begin_history_prepend()
         self._surface.begin_history_render()
         try:
-            self._window.prepend(retained)
+            self._discard_entries(self._window.prepend(retained))
             # A durable page arrived because the reader is already at the top.
             # Reveal its leading slice now so an exhausted page cursor never hides
             # fetched entries behind Transcript's durable-page request gate.
@@ -185,25 +240,57 @@ class TextualHistoryController:
     def show_latest(self) -> bool:
         """Move the mounted window to the newest retained history."""
 
+        if not self._window.latest_is_retained:
+            if self._surface.request_latest_history():
+                return True
         if not self._window.show_latest():
             return False
-        self._reconcile()
-        self._surface.follow_transcript_tail_after_refresh()
+        self._surface.begin_history_render()
+        try:
+            self._reconcile()
+            self._surface.follow_transcript_tail_after_refresh()
+        finally:
+            self._surface.finish_history_render()
         return True
 
-    def _clear(self) -> None:
+    def replace_latest_entries(self, entries: Iterable[HistoricalTranscriptEntry]) -> None:
+        """Replace evicted history with a newly loaded durable latest page."""
+
+        snapshot = self._latest_reload_live_entries
+        live_entries = snapshot if snapshot is not None else tuple(self._live_entries)
+        self._latest_reload_live_entries = None
+        reloaded_entries = self._exclude_live_tail(tuple(entries), live_entries=live_entries)
+        self._surface.begin_history_render()
+        try:
+            self._remove_historical_widgets()
+            self._clear(clear_live=False)
+            self._window.replace(self._retain(reloaded_entries))
+            self._reconcile()
+            self._surface.follow_transcript_tail_after_refresh()
+        finally:
+            self._surface.finish_history_render()
+
+    def capture_latest_reload_live_entries(self) -> None:
+        """Capture live output at the point the durable latest-page request starts."""
+
+        self._latest_reload_live_entries = tuple(self._live_entries)
+
+    def _clear(self, *, clear_live: bool = True) -> None:
         self._historical_tool_results.clear()
         self._resolved_boundary_results.clear()
         self._boundary_result_calls.clear()
         self._window.clear()
         self._widgets.clear()
         self._next_entry_id = 0
+        if clear_live:
+            self._live_entries.clear()
+        self._latest_reload_live_entries = None
 
     def _append_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
         self._surface.begin_history_render()
         try:
             following = self._surface.history_is_following()
-            self._window.append(self._retain(entries), follow_tail=following)
+            self._discard_entries(self._window.append(self._retain(entries), follow_tail=following))
             self._reconcile()
             if following:
                 self._surface.follow_transcript_tail_after_refresh()
@@ -219,6 +306,60 @@ class TextualHistoryController:
         )
         self._next_entry_id += len(retained)
         return retained
+
+    def _remove_historical_widgets(self) -> None:
+        for widget in set(self._widgets.values()):
+            self._surface.remove_historical_widget(widget)
+
+    def _append_live_entry(self, entry: _LiveHistoryEntry) -> None:
+        self._live_entries.append(entry)
+        overflow = len(self._live_entries) - TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT
+        if overflow > 0:
+            del self._live_entries[:overflow]
+
+    def _exclude_live_tail(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+        *,
+        live_entries: tuple[_LiveHistoryEntry, ...],
+    ) -> tuple[HistoricalTranscriptEntry, ...]:
+        """Drop the durable suffix already visible as live transcript output."""
+
+        end = len(entries)
+        live_end = len(live_entries)
+        while end and live_end:
+            if not _history_entry_matches_live(entries[end - 1], live_entries[live_end - 1]):
+                break
+            end -= 1
+            live_end -= 1
+        return entries[:end]
+
+    def _discard_entries(self, entries: Iterable[_RetainedHistoryEntry]) -> None:
+        """Release pairing state that only referenced evicted history entries."""
+
+        card_ids = {
+            item.entry.card_id for item in entries if isinstance(item.entry, HistoricalToolCard)
+        }
+        if not card_ids:
+            return
+        for tool_call_id, results in tuple(self._historical_tool_results.items()):
+            retained = deque(
+                (card_id, result) for card_id, result in results if card_id not in card_ids
+            )
+            if retained:
+                self._historical_tool_results[tool_call_id] = retained
+            else:
+                del self._historical_tool_results[tool_call_id]
+        self._resolved_boundary_results = {
+            card_id: result
+            for card_id, result in self._resolved_boundary_results.items()
+            if card_id not in card_ids and result.card_id not in card_ids
+        }
+        self._boundary_result_calls = {
+            result_card_id: call_card_id
+            for result_card_id, call_card_id in self._boundary_result_calls.items()
+            if result_card_id not in card_ids and call_card_id not in card_ids
+        }
 
     def _reconcile(self) -> None:
         """Apply only the changed edges of the retained history window."""
@@ -431,6 +572,23 @@ class TextualHistoryController:
             ),
             entry.truncated,
         )
+
+
+def _history_entry_matches_live(
+    entry: HistoricalTranscriptEntry,
+    live: _LiveHistoryEntry,
+) -> bool:
+    if isinstance(entry, HistoricalToolCard):
+        return live.kind == "tool" and entry.tool_call_id == live.tool_call_id
+    if live.kind != "message" or entry.role != live.role or live.content is None:
+        return False
+    if entry.content == live.content:
+        return True
+    truncated_suffix = "[content truncated]"
+    if not entry.content.endswith(truncated_suffix):
+        return False
+    content_prefix = entry.content[: -len(truncated_suffix)].rstrip("\n")
+    return live.content.startswith(content_prefix)
 
 
 __all__ = ["TextualHistoryController", "TextualHistorySurface"]

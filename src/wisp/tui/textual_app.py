@@ -14,7 +14,7 @@ provider, session, approval, or RPC policy.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import AbstractContextManager, suppress
 
 from textual import events, on
 from textual.app import App, ComposeResult
@@ -321,6 +321,7 @@ class TextualTui(App[None]):
         self._runner: Callable[[], Awaitable[None]] | None = None
         self._runner_error: Exception | None = None
         self._history_page_request_hook: Callable[[], Awaitable[None]] | None = None
+        self._history_latest_request_hook: Callable[[], Awaitable[None]] | None = None
         self._history_window_older_hook: Callable[[], bool] | None = None
         self._history_window_latest_hook: Callable[[], bool] | None = None
         self._history_marker: Widget | None = None
@@ -331,6 +332,7 @@ class TextualTui(App[None]):
         ) = None
         self._transcript_navigation_generation = 0
         self._history_render_depth = 0
+        self._history_render_batch: AbstractContextManager[None] | None = None
         self._history_render_mounts: list[AwaitMount] = []
         self._last_history_render_mounts: tuple[AwaitMount, ...] = ()
         self._history_layout_generation = 0
@@ -756,6 +758,14 @@ class TextualTui(App[None]):
 
         self._history_page_request_hook = hook
 
+    def set_history_latest_request_hook(
+        self,
+        hook: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Register the shell callback used to reload an evicted transcript tail."""
+
+        self._history_latest_request_hook = hook
+
     def set_submit_hook(self, on_submit: Callable[[], None]) -> None:
         """Register the renderer's at-accept input-mode snapshot callback."""
 
@@ -1157,6 +1167,10 @@ class TextualTui(App[None]):
         self._history_prepend_mounts.clear()
         self._history_prepend_anchor = None
         self._history_render_depth = 0
+        batch = self._history_render_batch
+        self._history_render_batch = None
+        if batch is not None:
+            batch.__exit__(None, None, None)
         self._history_render_mounts.clear()
         self._last_history_render_mounts = ()
         self._history_layout_generation += 1
@@ -1176,6 +1190,19 @@ class TextualTui(App[None]):
 
         self._history_window_older_hook = shift_older
         self._history_window_latest_hook = show_latest
+
+    def request_latest_history(self) -> bool:
+        """Schedule a durable latest-page reload requested by history retention."""
+
+        hook = self._history_latest_request_hook
+        if hook is None:
+            return False
+        self.run_worker(
+            hook(),
+            group="history-latest-reload",
+            exit_on_error=False,
+        )
+        return True
 
     def history_is_at_top(self) -> bool:
         """Return whether persisted-history navigation is at the transcript top."""
@@ -1458,6 +1485,9 @@ class TextualTui(App[None]):
 
         if self._history_render_depth == 0:
             self._history_render_mounts.clear()
+            batch = self.batch_update()
+            batch.__enter__()
+            self._history_render_batch = batch
         self._history_render_depth += 1
 
     def finish_history_render(self) -> None:
@@ -1467,6 +1497,10 @@ class TextualTui(App[None]):
         if self._history_render_depth == 0:
             self._last_history_render_mounts = tuple(self._history_render_mounts)
             self._history_render_mounts.clear()
+            batch = self._history_render_batch
+            self._history_render_batch = None
+            if batch is not None:
+                batch.__exit__(None, None, None)
 
     async def wait_for_history_render(self) -> None:
         """Wait until the latest renderer history batch has mounted its widgets."""

@@ -35,6 +35,7 @@ class _HistorySurface:
     prepend_starts: int = 0
     prepend_finishes: int = 0
     follow_requests: int = 0
+    latest_history_requests: int = 0
     fail_line_mount: bool = False
 
     def replace_transcript(self) -> None:
@@ -65,6 +66,10 @@ class _HistorySurface:
 
     def follow_transcript_tail_after_refresh(self) -> None:
         self.follow_requests += 1
+
+    def request_latest_history(self) -> bool:
+        self.latest_history_requests += 1
+        return True
 
     def set_history_window_available(self, *, has_older: bool) -> None:
         self.window_availability.append(has_older)
@@ -275,3 +280,87 @@ def test_history_controller_finishes_a_render_batch_when_mounting_fails() -> Non
 
     assert surface.render_starts == surface.render_finishes == 1
     assert surface.prepend_starts == surface.prepend_finishes == 0
+
+
+def test_history_controller_reloads_latest_after_older_paging_evicts_it() -> None:
+    surface = _HistorySurface(at_top=True)
+    controller = TextualHistoryController(surface, retained_capacity=300)
+    current = _messages("assistant", "current", 300)
+    older = _messages("user", "older", 75)
+
+    controller.replace_entries(current, session_label="Windowed")
+    controller.prepend_entries(older)
+
+    assert controller.show_latest()
+    assert surface.latest_history_requests == 1
+    assert surface.history_labels[0] == "user: older 0"
+
+    reloaded = _messages("assistant", "latest", 75)
+    follow_requests_before_reload = surface.follow_requests
+    controller.replace_latest_entries(reloaded)
+
+    assert surface.history_labels == [f"assistant: latest {index}" for index in range(75)]
+    assert surface.follow_requests == follow_requests_before_reload + 1
+    assert not controller.show_latest()
+
+
+def test_history_controller_excludes_live_entries_from_a_latest_reload() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    controller.replace_entries(
+        (HistoricalTranscriptMessage(role="assistant", content="previous"),),
+        session_label="Windowed",
+    )
+    controller.record_live_message("user", "prompt")
+    controller.record_live_message("assistant", "reply")
+    controller.record_live_tool_call("call-1")
+    controller.record_live_tool_result("call-1")
+
+    controller.replace_latest_entries(
+        (
+            HistoricalTranscriptMessage(role="assistant", content="previous"),
+            HistoricalTranscriptMessage(role="user", content="prompt"),
+            HistoricalTranscriptMessage(role="assistant", content="reply"),
+            HistoricalToolCard(
+                card_id="history:result",
+                name="bash",
+                arguments={},
+                output="done",
+                is_error=False,
+                tool_call_id="call-1",
+            ),
+        )
+    )
+
+    assert surface.history_labels == ["assistant: previous"]
+
+
+def test_history_controller_discards_a_failed_live_prompt() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    controller.record_live_message("user", "failed prompt")
+    controller.discard_live_message("user", "failed prompt")
+
+    controller.replace_latest_entries(
+        (HistoricalTranscriptMessage(role="assistant", content="previous"),)
+    )
+
+    assert surface.history_labels == ["assistant: previous"]
+
+
+def test_history_controller_uses_the_live_snapshot_from_the_reload_request() -> None:
+    surface = _HistorySurface(at_top=True)
+    controller = TextualHistoryController(surface, retained_capacity=300)
+    controller.replace_entries(_messages("assistant", "current", 300), session_label="Windowed")
+    controller.prepend_entries(_messages("user", "older", 75))
+    controller.record_live_message("user", "persisted before reload")
+
+    assert controller.show_latest()
+    controller.capture_latest_reload_live_entries()
+    controller.record_live_message("user", "submitted after reload")
+    controller.replace_latest_entries(
+        (HistoricalTranscriptMessage(role="user", content="persisted before reload"),)
+    )
+
+    assert surface.latest_history_requests == 1
+    assert surface.history_labels == []

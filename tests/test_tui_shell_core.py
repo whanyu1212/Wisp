@@ -496,6 +496,316 @@ def test_tui_shell_paginates_older_history_pages_with_the_reported_cursor() -> N
     anyio.run(run)
 
 
+def test_tui_shell_reloads_latest_history_after_retention_eviction() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.latest_history_hook = None
+            self.reloaded: list[tuple[HistoricalTranscriptEntry, ...]] = []
+            self.page_states: list[bool] = []
+
+        def set_history_latest_request_hook(self, hook: object) -> None:
+            self.latest_history_hook = hook
+
+        def replace_latest_history_entries(
+            self,
+            entries: tuple[HistoricalTranscriptEntry, ...],
+        ) -> None:
+            self.reloaded.append(entries)
+
+        def history_page_loaded(self, *, has_more: bool) -> None:
+            self.page_states.append(has_more)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                messages=(_rpc_message("assistant", "current", entry_id="current"),),
+                truncated=True,
+                next_before_entry_id="current",
+            )
+        )
+
+        assert callable(renderer.latest_history_hook)
+        await renderer.latest_history_hook()
+        latest_command_id = controller.messages_requests[-1][0]
+        assert controller.messages_requests[-1] == (
+            latest_command_id,
+            "target",
+            TUI_HISTORY_PAGE_LIMIT,
+            None,
+        )
+
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=latest_command_id,
+                session_id="target",
+                messages=(_rpc_message("assistant", "latest", entry_id="latest"),),
+                truncated=True,
+                next_before_entry_id="latest",
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=latest_command_id,
+                command_type="get_messages",
+                ok=True,
+            )
+        )
+
+        assert renderer.reloaded == [
+            (HistoricalTranscriptMessage(role="assistant", content="latest"),)
+        ]
+        assert renderer.page_states == [True, True]
+
+    anyio.run(run)
+
+
+def test_tui_shell_reloads_latest_history_after_an_older_page_finishes() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.history_page_hook = None
+            self.latest_history_hook = None
+            self.latest_history_captures = 0
+            self.reloaded: list[tuple[HistoricalTranscriptEntry, ...]] = []
+
+        def set_history_page_request_hook(self, hook: object) -> None:
+            self.history_page_hook = hook
+
+        def set_history_latest_request_hook(self, hook: object) -> None:
+            self.latest_history_hook = hook
+
+        def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
+            del entries
+
+        def replace_latest_history_entries(
+            self,
+            entries: tuple[HistoricalTranscriptEntry, ...],
+        ) -> None:
+            self.reloaded.append(entries)
+
+        def capture_latest_history_reload(self) -> None:
+            self.latest_history_captures += 1
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                truncated=True,
+                next_before_entry_id="cursor",
+            )
+        )
+
+        assert callable(renderer.history_page_hook)
+        assert callable(renderer.latest_history_hook)
+        await renderer.history_page_hook()
+        older_command_id = controller.messages_requests[-1][0]
+        await renderer.latest_history_hook()
+        assert len(controller.messages_requests) == 1
+        assert renderer.latest_history_captures == 0
+
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=older_command_id,
+                session_id="target",
+                messages=(_rpc_message("user", "older", entry_id="older"),),
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=older_command_id,
+                command_type="get_messages",
+                ok=True,
+            )
+        )
+
+        latest_command_id = controller.messages_requests[-1][0]
+        assert renderer.latest_history_captures == 1
+        assert controller.messages_requests[-1] == (
+            latest_command_id,
+            "target",
+            TUI_HISTORY_PAGE_LIMIT,
+            None,
+        )
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=latest_command_id,
+                session_id="target",
+                messages=(_rpc_message("assistant", "latest", entry_id="latest"),),
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=latest_command_id,
+                command_type="get_messages",
+                ok=True,
+            )
+        )
+
+        assert renderer.reloaded == [
+            (HistoricalTranscriptMessage(role="assistant", content="latest"),)
+        ]
+
+    anyio.run(run)
+
+
+def test_tui_shell_reloads_latest_history_after_an_older_page_send_failure() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.history_page_hook = None
+            self.latest_history_hook = None
+            self.latest_history_captures = 0
+
+        def set_history_page_request_hook(self, hook: object) -> None:
+            self.history_page_hook = hook
+
+        def set_history_latest_request_hook(self, hook: object) -> None:
+            self.latest_history_hook = hook
+
+        def capture_latest_history_reload(self) -> None:
+            self.latest_history_captures += 1
+
+    class FailingOlderPageController(ScriptedController):
+        def __init__(self) -> None:
+            super().__init__()
+            self.renderer: RecordingRenderer | None = None
+
+        async def get_messages(
+            self,
+            *,
+            session_id: str | None = None,
+            limit: int = 200,
+            before_entry_id: str | None = None,
+            command_id: str | None = None,
+        ) -> str:
+            selected_id = command_id or "unexpected-history-page"
+            self.messages_requests.append((selected_id, session_id, limit, before_entry_id))
+            if before_entry_id is not None:
+                assert self.renderer is not None
+                assert callable(self.renderer.latest_history_hook)
+                await self.renderer.latest_history_hook()
+                raise RuntimeError("transport closed")
+            return selected_id
+
+    async def run() -> None:
+        controller = FailingOlderPageController()
+        renderer = RecordingRenderer()
+        controller.renderer = renderer
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                truncated=True,
+                next_before_entry_id="cursor",
+            )
+        )
+
+        assert callable(renderer.history_page_hook)
+        await renderer.history_page_hook()
+
+        assert len(controller.messages_requests) == 2
+        latest_request = controller.messages_requests[-1]
+        assert latest_request[1:] == ("target", TUI_HISTORY_PAGE_LIMIT, None)
+        assert renderer.latest_history_captures == 1
+        assert shell._history_pagination is not None
+        assert not shell._history_pagination.latest_reload_pending
+
+    anyio.run(run)
+
+
+def test_tui_shell_reloads_latest_history_after_the_active_prompt_finishes() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.latest_history_hook = None
+            self.latest_history_captures = 0
+
+        def set_history_latest_request_hook(self, hook: object) -> None:
+            self.latest_history_hook = hook
+
+        def capture_latest_history_reload(self) -> None:
+            self.latest_history_captures += 1
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                truncated=True,
+                next_before_entry_id="cursor",
+            )
+        )
+        shell.state.current_command_id = "prompt-1"
+        shell.state.current_command_type = "prompt"
+
+        assert callable(renderer.latest_history_hook)
+        await renderer.latest_history_hook()
+
+        assert controller.messages_requests == []
+        assert shell._history_pagination is not None
+        assert shell._history_pagination.latest_reload_pending
+
+        await shell._finish_current_prompt(
+            RpcCommandFinished(
+                command_id="prompt-1",
+                command_type="prompt",
+                ok=True,
+            )
+        )
+
+        assert controller.messages_requests[-1][1:] == ("target", TUI_HISTORY_PAGE_LIMIT, None)
+        assert renderer.latest_history_captures == 1
+
+    anyio.run(run)
+
+
+def test_tui_shell_defers_latest_history_while_prompt_submission_is_in_flight() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.latest_history_hook = None
+
+        def set_history_latest_request_hook(self, hook: object) -> None:
+            self.latest_history_hook = hook
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                truncated=True,
+                next_before_entry_id="cursor",
+            )
+        )
+        shell.state.current_command_type = "prompt"
+
+        assert callable(renderer.latest_history_hook)
+        await renderer.latest_history_hook()
+
+        assert controller.messages_requests == []
+        assert shell._history_pagination is not None
+        assert shell._history_pagination.latest_reload_pending
+
+    anyio.run(run)
+
+
 def test_tui_shell_handles_immediate_history_page_events() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:
@@ -663,6 +973,61 @@ def test_tui_shell_ignores_history_page_events_after_pagination_is_replaced() ->
 
         assert renderer.prepended == []
         assert page_command_id not in shell._ignored_history_page_commands
+
+    anyio.run(run)
+
+
+def test_tui_shell_ignores_latest_history_after_pagination_is_replaced() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.latest_history_hook = None
+            self.reloaded: list[tuple[HistoricalTranscriptEntry, ...]] = []
+
+        def set_history_latest_request_hook(self, hook: object) -> None:
+            self.latest_history_hook = hook
+
+        def replace_latest_history_entries(
+            self,
+            entries: tuple[HistoricalTranscriptEntry, ...],
+        ) -> None:
+            self.reloaded.append(entries)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                truncated=True,
+                next_before_entry_id="cursor",
+            )
+        )
+
+        assert callable(renderer.latest_history_hook)
+        await renderer.latest_history_hook()
+        latest_command_id = controller.messages_requests[-1][0]
+        shell._clear_history_pagination()
+
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=latest_command_id,
+                session_id="target",
+                messages=(_rpc_message("assistant", "stale", entry_id="stale"),),
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=latest_command_id,
+                command_type="get_messages",
+                ok=True,
+            )
+        )
+
+        assert renderer.reloaded == []
+        assert latest_command_id not in shell._ignored_history_page_commands
 
     anyio.run(run)
 
@@ -902,9 +1267,13 @@ def test_tui_shell_updates_context_before_suppressing_streamed_completion() -> N
         def __init__(self) -> None:
             super().__init__(_console()[0])
             self.snapshots: list[TuiViewSnapshot] = []
+            self.streamed_messages: list[MessageCompleted] = []
 
         def view_updated(self, snapshot: TuiViewSnapshot) -> None:
             self.snapshots.append(snapshot)
+
+        def record_streamed_message_completed(self, event: MessageCompleted) -> None:
+            self.streamed_messages.append(event)
 
     async def run() -> None:
         renderer = RecordingRenderer()
@@ -925,6 +1294,7 @@ def test_tui_shell_updates_context_before_suppressing_streamed_completion() -> N
         assert renderer.snapshots[-1].context is not None
         assert renderer.snapshots[-1].context.observed_tokens == 12_000
         assert renderer.snapshots[-1].context.observed_is_current is True
+        assert [event.content for event in renderer.streamed_messages] == ["streamed answer"]
 
     anyio.run(run)
 
@@ -2826,5 +3196,59 @@ def test_tui_shell_compact_send_failure_remains_usable() -> None:
         assert shell.state.current_command_type is None
         assert "failed to send compact: pipe closed" in output.getvalue()
         assert "Commands:" in output.getvalue()
+
+    anyio.run(run)
+
+
+def test_tui_shell_reloads_latest_history_after_a_compaction_send_failure() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.latest_history_hook = None
+            self.latest_history_captures = 0
+
+        def set_history_latest_request_hook(self, hook: object) -> None:
+            self.latest_history_hook = hook
+
+        def capture_latest_history_reload(self) -> None:
+            self.latest_history_captures += 1
+
+    class FailingCompactController(ScriptedController):
+        def __init__(self) -> None:
+            super().__init__()
+            self.renderer: RecordingRenderer | None = None
+
+        async def compact(
+            self,
+            instructions: str | None = None,
+            *,
+            command_id: str | None = None,
+        ) -> str:
+            self.compactions.append(instructions)
+            assert self.renderer is not None
+            assert callable(self.renderer.latest_history_hook)
+            await self.renderer.latest_history_hook()
+            raise RuntimeError("pipe closed")
+
+    async def run() -> None:
+        controller = FailingCompactController()
+        renderer = RecordingRenderer()
+        controller.renderer = renderer
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                truncated=True,
+                next_before_entry_id="cursor",
+            )
+        )
+
+        await shell._start_compaction(None)
+
+        assert controller.messages_requests[-1][1:] == ("target", TUI_HISTORY_PAGE_LIMIT, None)
+        assert renderer.latest_history_captures == 1
+        assert shell._history_pagination is not None
+        assert not shell._history_pagination.latest_reload_pending
 
     anyio.run(run)

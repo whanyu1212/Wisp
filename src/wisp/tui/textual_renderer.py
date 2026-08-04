@@ -226,10 +226,20 @@ class TextualTuiRenderer:
     def prompt_submitted(self, prompt: str) -> None:
         # Echo a compact line for large pastes (marker kept) while the model still
         # received the full expanded text via controller.prompt(prompt).
+        self._history.record_live_message("user", prompt)
         self.app.write_user(self.app.compact_echo_for(prompt))
 
     def prompt_accepted(self, prompt: str) -> None:
         self.app.record_prompt(prompt)
+
+    def discard_live_prompt(self, prompt: str) -> None:
+        self._history.discard_live_message("user", prompt)
+
+    def record_streamed_message_completed(self, event: MessageCompleted) -> None:
+        """Record a streamed message that the shell suppresses from normal rendering."""
+
+        if event.content:
+            self._history.record_live_message("assistant", event.content)
 
     def prompt_history_request(self) -> None:
         self.app.show_prompt_history()
@@ -240,6 +250,12 @@ class TextualTuiRenderer:
     ) -> None:
         self.app.set_history_page_request_hook(hook)
 
+    def set_history_latest_request_hook(
+        self,
+        hook: Callable[[], Awaitable[None]],
+    ) -> None:
+        self.app.set_history_latest_request_hook(hook)
+
     def history_page_loaded(self, *, has_more: bool) -> None:
         self.app.history_page_loaded(has_more=has_more)
 
@@ -247,6 +263,12 @@ class TextualTuiRenderer:
         transcript = self.app.transcript
         if transcript is not None:
             transcript.history_page_request_failed()
+
+    @property
+    def retained_history_entry_count(self) -> int:
+        """Return bounded Textual history retention for diagnostics and benchmarks."""
+
+        return self._history.retained_entry_count
 
     def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
         self.render_history_entries(messages)
@@ -266,6 +288,15 @@ class TextualTuiRenderer:
 
     def prepend_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
         self._history.prepend_entries(entries)
+
+    def replace_latest_history_entries(
+        self,
+        entries: tuple[HistoricalTranscriptEntry, ...],
+    ) -> None:
+        self._history.replace_latest_entries(entries)
+
+    def capture_latest_history_reload(self) -> None:
+        self._history.capture_latest_reload_live_entries()
 
     def queued_prompts_cleared(self) -> None:
         # The shell dropped its queued follow-ups (cancel/quit/input-closed/error),
@@ -409,6 +440,7 @@ class TextualTuiRenderer:
         elif isinstance(event, MessageCompleted):
             self._suspend_progress()
             if event.content:
+                self._history.record_live_message("assistant", event.content)
                 self.app.write_assistant(event.content)
         elif isinstance(event, ToolCallRequested):
             # Mount the evolving card; approval/result mutate it in place. Record
@@ -418,6 +450,7 @@ class TextualTuiRenderer:
             self._suspend_progress()
             self._tool_started[event.call_id] = event.timestamp
             self._tool_arguments[event.call_id] = event.arguments
+            self._history.record_live_tool_call(event.call_id)
             self.app.mount_tool_call(event.call_id, event.name, event.arguments)
         elif isinstance(event, ToolApprovalResolved):
             # Only a denial changes the card here: an approval leaves it pending
@@ -444,6 +477,7 @@ class TextualTuiRenderer:
             # was never seen, e.g. a resumed session) so tool-aware renderers can
             # use them; pop so the map doesn't grow across the session.
             arguments = self._tool_arguments.pop(event.call_id, {})
+            self._history.record_live_tool_result(event.call_id)
             self.app.resolve_tool_call(
                 event.call_id,
                 status,
