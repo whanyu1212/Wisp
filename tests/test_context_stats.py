@@ -161,11 +161,11 @@ def test_session_stats_reports_threshold_policy_eligibility() -> None:
 
 
 @pytest.mark.parametrize(
-    ("context_window", "reserve_tokens", "enabled", "reason"),
+    ("context_window", "reserve_tokens", "enabled", "reason", "overflow_enabled"),
     [
-        (None, 100, True, "model context window is unknown"),
-        (100, 100, True, "reserve consumes the model window"),
-        (100, 10, False, "automatic compaction is disabled"),
+        (None, 100, True, "model context window is unknown", True),
+        (100, 100, True, "reserve consumes the model window", False),
+        (100, 10, False, "automatic compaction is disabled", False),
     ],
 )
 def test_session_stats_explains_unavailable_threshold_policy(
@@ -173,6 +173,7 @@ def test_session_stats_explains_unavailable_threshold_policy(
     reserve_tokens: int,
     enabled: bool,
     reason: str,
+    overflow_enabled: bool,
 ) -> None:
     stats = build_session_stats(
         session_id=None,
@@ -187,7 +188,7 @@ def test_session_stats_explains_unavailable_threshold_policy(
 
     assert stats.compaction.threshold_eligible is False
     assert stats.compaction.threshold_ineligible_reason == reason
-    assert stats.compaction.overflow_recovery_enabled is enabled
+    assert stats.compaction.overflow_recovery_enabled is overflow_enabled
 
 
 def test_context_statistics_events_accept_schema_v9_and_current() -> None:
@@ -210,7 +211,10 @@ def test_context_statistics_events_accept_schema_v9_and_current() -> None:
     legacy_stats = reported.model_copy(update={"schema_version": 25})
     legacy_stats_payload = json.loads(legacy_stats.model_dump_json())
     assert "compaction" not in legacy_stats_payload["stats"]
-    assert wisp_event_from_json(json.dumps(legacy_stats_payload)).schema_version == 25
+    legacy_event = wisp_event_from_json(json.dumps(legacy_stats_payload))
+    assert legacy_event.schema_version == 25
+    assert isinstance(legacy_event, SessionStatsReported)
+    assert legacy_event.stats.compaction is None
     stats_policy_payload = json.loads(reported.model_dump_json())
     stats_policy_payload["schema_version"] = 25
     with pytest.raises(ValueError, match="Session compaction policy requires schema_version 26"):

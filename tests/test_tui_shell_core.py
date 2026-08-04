@@ -180,6 +180,40 @@ def test_tui_context_command_renders_authoritative_compaction_status() -> None:
     anyio.run(run)
 
 
+def test_tui_context_command_marks_legacy_compaction_policy_unavailable() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.notices: list[str] = []
+
+        def notice(self, message: str) -> None:
+            self.notices.append(message)
+
+    async def run() -> None:
+        stats = SessionStats(
+            session_id="session-1",
+            entry_count=0,
+            active_message_count=0,
+            compaction_count=0,
+            usage_record_count=0,
+            usage=TokenUsage(input_tokens=0, output_tokens=0, total_tokens=0),
+            context=_context_budget(estimated=1_000),
+        )
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+
+        await shell._handle_input_line(_InputLine("/context", _InputMode.idle))
+        await shell._handle_rpc_event(
+            SessionStatsReported(command_id="session-stats-1", stats=stats)
+        )
+
+        assert renderer.notices[-1].splitlines()[0] == "Automatic compaction: unavailable"
+        assert renderer.notices[-1].splitlines()[-1] == "Overflow recovery: unavailable"
+
+    anyio.run(run)
+
+
 def test_tui_context_toggle_uses_typed_configure_and_rejects_busy_commands() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:
@@ -2651,6 +2685,7 @@ def test_tui_shell_bare_compact_passes_no_instructions_and_shows_help() -> None:
         assert controller.compactions == [None]
         assert controller.prompts == []
         assert "/compact [instructions]" in output.getvalue()
+        assert "/context [auto on|off]" in output.getvalue()
 
     anyio.run(run)
 

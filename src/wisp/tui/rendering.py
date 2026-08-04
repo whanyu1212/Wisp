@@ -1115,9 +1115,13 @@ def format_compaction_status(stats: SessionStats) -> str:
         else "unavailable"
     )
     eligibility = (
-        "eligible"
-        if policy.threshold_eligible
-        else f"unavailable - {policy.threshold_ineligible_reason or 'not available'}"
+        "unavailable - status unavailable"
+        if policy is None
+        else (
+            "eligible"
+            if policy.threshold_eligible
+            else f"unavailable - {policy.threshold_ineligible_reason or 'not available'}"
+        )
     )
     usage_source = (
         "provider observation"
@@ -1126,13 +1130,21 @@ def format_compaction_status(stats: SessionStats) -> str:
     )
     return "\n".join(
         (
-            f"Automatic compaction: {'on' if policy.auto_compaction_enabled else 'off'}",
+            (
+                "Automatic compaction: unavailable"
+                if policy is None
+                else f"Automatic compaction: {'on' if policy.auto_compaction_enabled else 'off'}"
+            ),
             f"Context: {_format_token_count(current_tokens)} / {window}",
             f"Trigger: {trigger}",
             f"Reserve: {_format_token_count(context.reserve_tokens)}",
             f"Usage source: {usage_source}",
             f"Threshold eligibility: {eligibility}",
-            f"Overflow recovery: {'on' if policy.overflow_recovery_enabled else 'off'}",
+            (
+                "Overflow recovery: unavailable"
+                if policy is None
+                else f"Overflow recovery: {'on' if policy.overflow_recovery_enabled else 'off'}"
+            ),
         )
     )
 
@@ -1325,6 +1337,7 @@ def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? 
         "Commands:\n"
         "  /help                    show this help\n"
         "  /compact [instructions]  compact the active session context\n"
+        "  /context [auto on|off]   show or set automatic-compaction policy\n"
         "  /auth [provider]         show credential status\n"
         "  /login [provider] [method]  login to a provider\n"
         "  /logout [provider]       remove stored provider credentials\n"

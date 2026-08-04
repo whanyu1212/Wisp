@@ -262,7 +262,7 @@ class SessionStats(BaseModel):
     usage_record_count: int = Field(ge=0)
     usage: TokenUsage
     context: ContextBudget
-    compaction: CompactionPolicyStatus = Field(default_factory=CompactionPolicyStatus)
+    compaction: CompactionPolicyStatus | None = None
     cost: SessionCostSummary = Field(default_factory=SessionCostSummary)
 
     @model_validator(mode="before")

@@ -100,6 +100,7 @@ def _compaction_policy_status(
     if context.reserve_tokens >= context.context_window:
         return CompactionPolicyStatus(
             threshold_ineligible_reason="reserve consumes the model window",
+            overflow_recovery_enabled=False,
         )
     try:
         plan_manual_compaction(replay)
