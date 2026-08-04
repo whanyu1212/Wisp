@@ -371,6 +371,7 @@ def test_history_controller_releases_evicted_live_widget_identity() -> None:
     controller = TextualHistoryController(surface)
     widget = Widget()
     controller.record_live_message("assistant", "evicted response", widget=widget)
+    controller.capture_latest_reload_live_entries()
     controller.forget_live_widget(widget)
 
     controller.replace_latest_entries(

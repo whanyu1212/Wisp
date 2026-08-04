@@ -19,10 +19,12 @@ from textual.content import Content
 from textual.widget import Widget
 
 from wisp.tui.diff_presentation import DiffPresentation
-from wisp.tui.transcript_window import TUI_TRANSCRIPT_WINDOW_SIZE
+from wisp.tui.history import TUI_HISTORY_PAGE_LIMIT
 from wisp.tui.widgets import ToolCard, WorkingIndicator
 
-TUI_SETTLED_LIVE_WIDGET_LIMIT = TUI_TRANSCRIPT_WINDOW_SIZE
+# Keep an evicted widget inside the next durable latest-page reload, whose first
+# entry falls immediately before this bounded visible live suffix.
+TUI_SETTLED_LIVE_WIDGET_LIMIT = TUI_HISTORY_PAGE_LIMIT - 1
 
 
 class TextualTranscriptSurface(Protocol):

@@ -218,6 +218,11 @@ class TextualHistoryController:
         """Allow an evicted live entry to reappear through durable history paging."""
 
         self._live_entries = [entry for entry in self._live_entries if entry.widget is not widget]
+        snapshot = self._latest_reload_live_entries
+        if snapshot is not None:
+            self._latest_reload_live_entries = tuple(
+                entry for entry in snapshot if entry.widget is not widget
+            )
 
     def replace_entries(
         self,
