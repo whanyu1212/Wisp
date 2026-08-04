@@ -940,7 +940,11 @@ class TuiShell:
         except Exception as exc:
             self.state.current_command_type = None
             self._update_view(status="error")
+            self._call_renderer_optional("discard_live_prompt", prompt)
             self.renderer.send_failed("prompt", exc)
+            pagination = self._history_pagination
+            if pagination is not None and pagination.latest_reload_pending:
+                await self._request_latest_history_page()
             return True
         self.state.current_command_id = command_id
         return False
@@ -1593,7 +1597,10 @@ class TuiShell:
             return
         if pagination.latest_command_id is not None:
             return
-        if pagination.command_id is not None or self.state.current_command_id is not None:
+        if pagination.command_id is not None or self.state.current_command_type in {
+            "prompt",
+            "compact",
+        }:
             pagination.latest_reload_pending = True
             return
 

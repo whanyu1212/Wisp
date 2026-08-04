@@ -232,6 +232,9 @@ class TextualTuiRenderer:
     def prompt_accepted(self, prompt: str) -> None:
         self.app.record_prompt(prompt)
 
+    def discard_live_prompt(self, prompt: str) -> None:
+        self._history.discard_live_message("user", prompt)
+
     def record_streamed_message_completed(self, event: MessageCompleted) -> None:
         """Record a streamed message that the shell suppresses from normal rendering."""
 

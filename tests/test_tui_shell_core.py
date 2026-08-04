@@ -773,6 +773,39 @@ def test_tui_shell_reloads_latest_history_after_the_active_prompt_finishes() -> 
     anyio.run(run)
 
 
+def test_tui_shell_defers_latest_history_while_prompt_submission_is_in_flight() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.latest_history_hook = None
+
+        def set_history_latest_request_hook(self, hook: object) -> None:
+            self.latest_history_hook = hook
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(
+                command_id="initial-history",
+                session_id="target",
+                truncated=True,
+                next_before_entry_id="cursor",
+            )
+        )
+        shell.state.current_command_type = "prompt"
+
+        assert callable(renderer.latest_history_hook)
+        await renderer.latest_history_hook()
+
+        assert controller.messages_requests == []
+        assert shell._history_pagination is not None
+        assert shell._history_pagination.latest_reload_pending
+
+    anyio.run(run)
+
+
 def test_tui_shell_handles_immediate_history_page_events() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:

@@ -335,6 +335,19 @@ def test_history_controller_excludes_live_entries_from_a_latest_reload() -> None
     assert surface.history_labels == ["assistant: previous"]
 
 
+def test_history_controller_discards_a_failed_live_prompt() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    controller.record_live_message("user", "failed prompt")
+    controller.discard_live_message("user", "failed prompt")
+
+    controller.replace_latest_entries(
+        (HistoricalTranscriptMessage(role="assistant", content="previous"),)
+    )
+
+    assert surface.history_labels == ["assistant: previous"]
+
+
 def test_history_controller_uses_the_live_snapshot_from_the_reload_request() -> None:
     surface = _HistorySurface(at_top=True)
     controller = TextualHistoryController(surface, retained_capacity=300)

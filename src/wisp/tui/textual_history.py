@@ -165,6 +165,15 @@ class TextualHistoryController:
         if content:
             self._append_live_entry(_LiveHistoryEntry(kind="message", role=role, content=content))
 
+    def discard_live_message(self, role: Literal["user", "assistant"], content: str) -> None:
+        """Forget a live message that did not become a durable session entry."""
+
+        for index in range(len(self._live_entries) - 1, -1, -1):
+            entry = self._live_entries[index]
+            if entry.kind == "message" and entry.role == role and entry.content == content:
+                del self._live_entries[index]
+                return
+
     def record_live_tool_call(self, tool_call_id: str) -> None:
         """Remember a pending live tool card as the durable history page would render it."""
 
