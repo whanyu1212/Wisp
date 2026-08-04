@@ -8,8 +8,9 @@ from pydantic import ValidationError
 
 from wisp.agent.context import build_context_budget, context_fingerprint, estimate_context
 from wisp.agent.messages import Message
+from wisp.coding.compaction import NothingToCompactError, plan_manual_compaction
 from wisp.coding.costs import aggregate_session_cost
-from wisp.events import SessionStats, TokenUsage, UsageCost
+from wisp.events import CompactionPolicyStatus, ContextBudget, SessionStats, TokenUsage, UsageCost
 from wisp.providers.base import ToolSpec
 from wisp.sessions.entries import (
     CompactionSessionEntry,
@@ -33,6 +34,7 @@ def build_session_stats(
     observed_is_current: bool = False,
     observed_entry_id: str | None = None,
     observed_context_fingerprint: str | None = None,
+    auto_compaction_enabled: bool = True,
 ) -> SessionStats:
     """Derive one consistent statistics snapshot from durable session state."""
 
@@ -54,6 +56,13 @@ def build_session_stats(
     ):
         observed_is_current = False
     estimate = estimate_context(provider_messages, tools)
+    context = build_context_budget(
+        estimate,
+        context_window=context_window,
+        reserve_tokens=reserve_tokens,
+        observed_tokens=observed_tokens,
+        observed_is_current=observed_is_current,
+    )
     return SessionStats(
         session_id=session_id,
         entry_count=len(entries),
@@ -62,13 +71,51 @@ def build_session_stats(
         usage_record_count=len(usage_records),
         usage=_sum_usage(usage_records),
         cost=aggregate_session_cost(_cost_records(entries)),
-        context=build_context_budget(
-            estimate,
-            context_window=context_window,
-            reserve_tokens=reserve_tokens,
-            observed_tokens=observed_tokens,
-            observed_is_current=observed_is_current,
+        context=context,
+        compaction=_compaction_policy_status(
+            replay,
+            context=context,
+            auto_compaction_enabled=auto_compaction_enabled,
         ),
+    )
+
+
+def _compaction_policy_status(
+    replay: SessionReplay,
+    *,
+    context: ContextBudget,
+    auto_compaction_enabled: bool,
+) -> CompactionPolicyStatus:
+    if not auto_compaction_enabled:
+        return CompactionPolicyStatus(
+            auto_compaction_enabled=False,
+            threshold_eligible=False,
+            threshold_ineligible_reason="automatic compaction is disabled",
+            overflow_recovery_enabled=False,
+        )
+    if context.context_window is not None and context.reserve_tokens >= context.context_window:
+        return CompactionPolicyStatus(
+            threshold_ineligible_reason="reserve consumes the model window",
+            overflow_recovery_enabled=False,
+        )
+    try:
+        plan_manual_compaction(replay)
+    except NothingToCompactError:
+        return CompactionPolicyStatus(
+            threshold_ineligible_reason=(
+                "model context window is unknown"
+                if context.context_window is None
+                else "no compactable context prefix"
+            ),
+            overflow_recovery_enabled=False,
+        )
+    if context.context_window is None:
+        return CompactionPolicyStatus(
+            threshold_ineligible_reason="model context window is unknown",
+        )
+    return CompactionPolicyStatus(
+        threshold_eligible=True,
+        threshold_ineligible_reason=None,
     )
 
 

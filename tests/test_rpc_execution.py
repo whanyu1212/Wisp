@@ -303,6 +303,33 @@ def test_executor_reports_state_without_replacing_running_command(
     anyio.run(scenario)
 
 
+def test_executor_rejects_runtime_configuration_while_busy(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+
+            result = executor.dispatch(
+                {
+                    "id": "configure-1",
+                    "type": "configure",
+                    "auto_compaction_enabled": False,
+                },
+                running,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is running
+        finished = next(event for event in fixture.events if isinstance(event, RpcCommandFinished))
+        assert finished.ok is False
+        assert finished.error == "Cannot configure while another RPC operation is active"
+        assert fixture.agent.auto_compaction_enabled is True
+
+    anyio.run(scenario)
+
+
 def test_executor_state_projects_prompt_startup_queue_buffer(tmp_path: Path) -> None:
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
@@ -443,6 +470,7 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
         assert [descriptor.name for descriptor in report.commands[1:]] == [
             "help",
             "compact",
+            "context",
             "history",
             "model",
             "resume",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 
@@ -47,6 +47,8 @@ class _RpcConfigureOverrides:
     has_model: bool = False
     effort: str | None = None
     has_effort: bool = False
+    auto_compaction_enabled: bool | None = None
+    has_auto_compaction_enabled: bool = False
 
     def effective_provider(self, default: str) -> str:
         return self.provider or default
@@ -126,6 +128,11 @@ class RpcProjectConfiguration:
                 runtime.adopt_provider_configuration(trusted_runtime)
             finally:
                 await trusted_runtime.aclose()
+        if overrides.has_auto_compaction_enabled and overrides.auto_compaction_enabled is not None:
+            configuration = replace(
+                configuration,
+                auto_compaction_enabled=overrides.auto_compaction_enabled,
+            )
         agent.reconfigure(configuration)
         if trusted_config == self.startup_config:
             return None
@@ -133,6 +140,7 @@ class RpcProjectConfiguration:
             provider=effective_provider,
             model=effective_model,
             effort=agent.effort,
+            auto_compaction_enabled=agent.auto_compaction_enabled,
             auth_path=trusted_config.auth_path,
         )
 

@@ -309,6 +309,9 @@ active context exceeds the reserved input budget. It uses the same validated sum
 the latest complete turn. If an automatic summary fails, Wisp preserves the completed prompt,
 reports a failed threshold-compaction event, and leaves replay unchanged. Disable it with
 `WISP_AUTO_COMPACTION=0` or `"auto_compaction_enabled": false` in user settings.
+The interactive TUI also exposes `/context` for the current context budget, usage source, and
+automatic-compaction eligibility. Use `/context auto on` or `/context auto off` to change the
+setting for subsequent operations in the current process; this does not edit user settings.
 
 When a provider explicitly rejects an input for context overflow, Wisp can compact and retry the
 same prompt once. It preserves the append-only audit log, keeps completed read-tool results in
@@ -349,6 +352,7 @@ Available slash commands:
 /model [model]              switch model for future prompts
 /resume [session-id]        browse or resume a persisted session
 /compact [instructions]     summarize older context while preserving the JSONL audit
+/context [auto on|off]      show or toggle compaction policy
 /history                    search prompts submitted in this TUI run
 /quit, /exit
 ```
@@ -455,8 +459,9 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 25`; readers also accept legacy schema v5
-through v24 events for compatibility. Schema v25 adds resumable `bash` process metadata to
+Every outbound `WispEvent` includes `"schema_version": 26`; readers also accept legacy schema v5
+through v25 events for compatibility. Schema v26 adds automatic-compaction policy metadata to
+`session.stats` and `project.config.applied`. Schema v25 adds resumable `bash` process metadata to
 `tool.execution.ended` and `tool.result`: `process_id`, `process_state`, `process_error`,
 incremental `stdout`/`stderr`, per-stream truncation flags, and dropped-byte counts.
 

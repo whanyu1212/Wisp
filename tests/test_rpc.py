@@ -1100,6 +1100,28 @@ def test_project_config_applied_round_trips_through_json() -> None:
     minimal = ProjectConfigApplied(provider="fake", auth_path=Path("/tmp/auth.json"))
     assert wisp_event_from_json(minimal.model_dump_json()) == minimal
 
+    legacy = applied.model_copy(update={"schema_version": 25})
+    legacy_payload = json.loads(legacy.model_dump_json())
+    assert "auto_compaction_enabled" not in legacy_payload
+    legacy_event = wisp_event_from_json(json.dumps(legacy_payload))
+    assert legacy_event.schema_version == 25
+    assert isinstance(legacy_event, ProjectConfigApplied)
+    assert legacy_event.auto_compaction_enabled is None
+
+
+def test_compaction_policy_fields_require_schema_v26() -> None:
+    project_payload = json.loads(
+        ProjectConfigApplied(
+            provider="openai",
+            auto_compaction_enabled=False,
+            auth_path=Path("/home/u/.wisp/auth.json"),
+        ).model_dump_json()
+    )
+    project_payload["schema_version"] = 25
+
+    with pytest.raises(ValueError, match="Project compaction policy requires schema_version 26"):
+        wisp_event_from_json(json.dumps(project_payload))
+
 
 def test_rpc_commands_allow_protocol_optional_id() -> None:
     command = PromptCommand(prompt="hello")
@@ -1324,6 +1346,23 @@ def test_rpc_controller_configure_sends_effort() -> None:
 
         assert transport.commands == [
             ConfigureCommand(id="configure-id", effort="high"),
+        ]
+
+    anyio.run(run)
+
+
+def test_rpc_controller_configure_sends_auto_compaction_setting() -> None:
+    async def run() -> None:
+        transport = RecordingTransport()
+        controller = RpcController(
+            transport,
+            command_id_factory=lambda prefix: f"{prefix}-id",
+        )
+
+        await controller.configure(auto_compaction_enabled=False)
+
+        assert transport.commands == [
+            ConfigureCommand(id="configure-id", auto_compaction_enabled=False),
         ]
 
     anyio.run(run)

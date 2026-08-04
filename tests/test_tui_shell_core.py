@@ -13,6 +13,7 @@ from tests.tui_support import *
 from wisp.auth.storage import OAuthCredential
 from wisp.events import (
     BillableTokenUsage,
+    CompactionPolicyStatus,
     ContextBudget,
     ContextEstimate,
     ContextEstimated,
@@ -28,6 +29,7 @@ from wisp.events import (
     RpcSessionsReported,
     RpcSessionSummary,
     SessionCostSummary,
+    SessionStats,
     SessionStatsReported,
     TokenUsage,
     UsageCost,
@@ -116,6 +118,156 @@ def test_tui_shell_history_dispatches_renderer_request_and_rejects_arguments() -
 
         assert renderer.history_requests == 2
         assert renderer.errors == ["Usage: /history"]
+
+    anyio.run(run)
+
+
+def test_tui_context_command_renders_authoritative_compaction_status() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.notices: list[str] = []
+            self.errors: list[str] = []
+
+        def notice(self, message: str) -> None:
+            self.notices.append(message)
+
+        def command_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    async def run() -> None:
+        stats = SessionStats(
+            session_id="session-1",
+            entry_count=4,
+            active_message_count=4,
+            compaction_count=0,
+            usage_record_count=1,
+            usage=TokenUsage(input_tokens=90_000, output_tokens=2_000, total_tokens=92_000),
+            context=_context_budget(estimated=80_000, observed=92_000, current=True),
+            compaction=CompactionPolicyStatus(
+                threshold_eligible=True,
+                threshold_ineligible_reason=None,
+            ),
+        )
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+
+        await shell._handle_input_line(_InputLine("/context", _InputMode.idle))
+        await shell._handle_rpc_event(
+            SessionStatsReported(command_id="session-stats-1", stats=stats)
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id="session-stats-1",
+                command_type="get_session_stats",
+                ok=True,
+            )
+        )
+
+        assert controller.session_stats_requests == ["session-stats-1"]
+        assert renderer.errors == []
+        assert renderer.notices[-1].splitlines() == [
+            "Automatic compaction: on",
+            "Context: 92k / 128k",
+            "Trigger: >120k",
+            "Reserve: 8k",
+            "Usage source: provider observation",
+            "Threshold eligibility: eligible",
+            "Overflow recovery: on",
+        ]
+
+    anyio.run(run)
+
+
+def test_tui_context_command_rejects_overlapping_status_requests() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.errors: list[str] = []
+
+        def command_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+
+        await shell._handle_input_line(_InputLine("/context", _InputMode.idle))
+        await shell._handle_input_line(_InputLine("/context", _InputMode.idle))
+
+        assert controller.session_stats_requests == ["session-stats-1"]
+        assert renderer.errors == ["Context status request is already pending."]
+
+    anyio.run(run)
+
+
+def test_tui_context_command_marks_legacy_compaction_policy_unavailable() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.notices: list[str] = []
+
+        def notice(self, message: str) -> None:
+            self.notices.append(message)
+
+    async def run() -> None:
+        stats = SessionStats(
+            session_id="session-1",
+            entry_count=0,
+            active_message_count=0,
+            compaction_count=0,
+            usage_record_count=0,
+            usage=TokenUsage(input_tokens=0, output_tokens=0, total_tokens=0),
+            context=_context_budget(estimated=1_000),
+        )
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+
+        await shell._handle_input_line(_InputLine("/context", _InputMode.idle))
+        await shell._handle_rpc_event(
+            SessionStatsReported(command_id="session-stats-1", stats=stats)
+        )
+
+        assert renderer.notices[-1].splitlines()[0] == "Automatic compaction: unavailable"
+        assert renderer.notices[-1].splitlines()[-1] == "Overflow recovery: unavailable"
+
+    anyio.run(run)
+
+
+def test_tui_context_toggle_uses_typed_configure_and_rejects_busy_commands() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.notices: list[str] = []
+            self.errors: list[str] = []
+
+        def notice(self, message: str) -> None:
+            self.notices.append(message)
+
+        def command_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+
+        await shell._handle_input_line(_InputLine("/context auto off", _InputMode.idle))
+        assert controller.auto_compaction_settings == [False]
+        await shell._handle_rpc_event(
+            RpcCommandFinished(command_id="configure-1", command_type="configure", ok=True)
+        )
+        assert "Automatic compaction disabled." in renderer.notices
+        assert controller.session_stats_requests == ["session-stats-1"]
+
+        shell.state.current_command_id = "prompt-1"
+        shell.state.current_command_type = "prompt"
+        await shell._handle_input_line(_InputLine("/context auto on", _InputMode.running))
+        assert controller.auto_compaction_settings == [False]
+        assert renderer.errors[-1] == "Cannot run slash commands while a prompt is running."
 
     anyio.run(run)
 
@@ -2556,6 +2708,7 @@ def test_tui_shell_bare_compact_passes_no_instructions_and_shows_help() -> None:
         assert controller.compactions == [None]
         assert controller.prompts == []
         assert "/compact [instructions]" in output.getvalue()
+        assert "/context [auto on|off]" in output.getvalue()
 
     anyio.run(run)
 

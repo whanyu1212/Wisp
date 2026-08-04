@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from wisp.agent.context import build_context_budget, context_fingerprint, estimate_context
@@ -7,6 +9,7 @@ from wisp.agent.messages import CompactionRecord, Message
 from wisp.coding.compaction import should_auto_compact
 from wisp.coding.stats import build_session_stats
 from wisp.events import (
+    CompactionPolicyStatus,
     ContextEstimated,
     SessionStatsReported,
     TokenUsage,
@@ -118,6 +121,89 @@ def test_auto_compaction_skips_when_reserve_consumes_context_window(reserve: int
     assert should_auto_compact(budget, enabled=True) is False
 
 
+def test_session_stats_reports_threshold_policy_eligibility() -> None:
+    entries: tuple[SessionEntry, ...] = (
+        MessageSessionEntry(
+            id="user-1", session_id="s", message=Message(role="user", content="one")
+        ),
+        MessageSessionEntry(
+            id="assistant-1",
+            session_id="s",
+            message=Message(role="assistant", content="one answer", finish_reason="stop"),
+        ),
+        MessageSessionEntry(
+            id="user-2", session_id="s", message=Message(role="user", content="two")
+        ),
+        MessageSessionEntry(
+            id="assistant-2",
+            session_id="s",
+            message=Message(role="assistant", content="two answer", finish_reason="stop"),
+        ),
+    )
+    replay = replay_session_entries(entries)
+
+    stats = build_session_stats(
+        session_id="s",
+        entries=entries,
+        replay=replay,
+        provider_messages=replay.messages,
+        tools=(),
+        context_window=1_000,
+        reserve_tokens=100,
+    )
+
+    assert stats.compaction == CompactionPolicyStatus(
+        auto_compaction_enabled=True,
+        threshold_eligible=True,
+        threshold_ineligible_reason=None,
+        overflow_recovery_enabled=True,
+    )
+    unknown_window_stats = build_session_stats(
+        session_id="s",
+        entries=entries,
+        replay=replay,
+        provider_messages=replay.messages,
+        tools=(),
+        context_window=None,
+        reserve_tokens=100,
+    )
+    assert unknown_window_stats.compaction == CompactionPolicyStatus(
+        threshold_ineligible_reason="model context window is unknown",
+    )
+
+
+@pytest.mark.parametrize(
+    ("context_window", "reserve_tokens", "enabled", "reason", "overflow_enabled"),
+    [
+        (None, 100, True, "model context window is unknown", False),
+        (100, 100, True, "reserve consumes the model window", False),
+        (100, 10, True, "no compactable context prefix", False),
+        (100, 10, False, "automatic compaction is disabled", False),
+    ],
+)
+def test_session_stats_explains_unavailable_threshold_policy(
+    context_window: int | None,
+    reserve_tokens: int,
+    enabled: bool,
+    reason: str,
+    overflow_enabled: bool,
+) -> None:
+    stats = build_session_stats(
+        session_id=None,
+        entries=(),
+        replay=replay_session_entries(()),
+        provider_messages=(),
+        tools=(),
+        context_window=context_window,
+        reserve_tokens=reserve_tokens,
+        auto_compaction_enabled=enabled,
+    )
+
+    assert stats.compaction.threshold_eligible is False
+    assert stats.compaction.threshold_ineligible_reason == reason
+    assert stats.compaction.overflow_recovery_enabled is overflow_enabled
+
+
 def test_context_statistics_events_accept_schema_v9_and_current() -> None:
     estimate = estimate_context((Message(role="user", content="hello"),))
     budget = build_context_budget(estimate, context_window=1_000, reserve_tokens=100)
@@ -135,13 +221,24 @@ def test_context_statistics_events_accept_schema_v9_and_current() -> None:
 
     assert wisp_event_from_json(estimated.model_dump_json()) == estimated
     assert wisp_event_from_json(reported.model_dump_json()) == reported
+    legacy_stats = reported.model_copy(update={"schema_version": 25})
+    legacy_stats_payload = json.loads(legacy_stats.model_dump_json())
+    assert "compaction" not in legacy_stats_payload["stats"]
+    legacy_event = wisp_event_from_json(json.dumps(legacy_stats_payload))
+    assert legacy_event.schema_version == 25
+    assert isinstance(legacy_event, SessionStatsReported)
+    assert legacy_event.stats.compaction is None
+    stats_policy_payload = json.loads(reported.model_dump_json())
+    stats_policy_payload["schema_version"] = 25
+    with pytest.raises(ValueError, match="Session compaction policy requires schema_version 26"):
+        wisp_event_from_json(json.dumps(stats_policy_payload))
     assert (
         wisp_event_from_json(
             estimated.model_copy(update={"schema_version": 9}).model_dump_json()
         ).schema_version
         == 9
     )
-    with pytest.raises(ValueError, match="require schema_version 9 through 25"):
+    with pytest.raises(ValueError, match="require schema_version 9 through 26"):
         wisp_event_from_json(estimated.model_copy(update={"schema_version": 8}).model_dump_json())
 
 

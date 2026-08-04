@@ -26,6 +26,7 @@ from wisp.events import (
     RpcSessionSummary,
     SessionCostSummary,
     SessionSaved,
+    SessionStats,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
@@ -1093,6 +1094,61 @@ def format_tui_footer_text(snapshot: TuiViewSnapshot, *, width: int | None = Non
     return "\n".join(format_tui_footer_lines(snapshot, width=width))
 
 
+def format_compaction_status(stats: SessionStats) -> str:
+    """Render the authoritative compaction and context status for `/context`."""
+
+    context = stats.context
+    current_tokens = (
+        context.observed_tokens
+        if context.observed_is_current and context.observed_tokens is not None
+        else context.estimate.total_tokens
+    )
+    window = (
+        _format_token_count(context.context_window)
+        if context.context_window is not None
+        else "unknown"
+    )
+    policy = stats.compaction
+    trigger = (
+        f">{_format_token_count(context.context_window - context.reserve_tokens)}"
+        if context.context_window is not None and context.reserve_tokens < context.context_window
+        else "unavailable"
+    )
+    eligibility = (
+        "unavailable - status unavailable"
+        if policy is None
+        else (
+            "eligible"
+            if policy.threshold_eligible
+            else f"unavailable - {policy.threshold_ineligible_reason or 'not available'}"
+        )
+    )
+    usage_source = (
+        "provider observation"
+        if context.observed_is_current and context.observed_tokens is not None
+        else "deterministic estimate"
+    )
+    return "\n".join(
+        (
+            (
+                "Automatic compaction: unavailable"
+                if policy is None
+                else f"Automatic compaction: {'on' if policy.auto_compaction_enabled else 'off'}"
+            ),
+            f"Context: {_format_token_count(current_tokens)} / {window}",
+            f"Trigger: {trigger}",
+            f"Reserve: {_format_token_count(context.reserve_tokens)}",
+            f"Usage source: {usage_source}",
+            f"Threshold eligibility: {eligibility}",
+            (
+                "Overflow recovery: unavailable"
+                if policy is None
+                else f"Overflow recovery: {'on' if policy.overflow_recovery_enabled else 'off'}"
+            ),
+        )
+    )
+
+
 def _format_cwd_for_footer(cwd: str) -> str:
     selected = cwd or os.getcwd()
     expanded = os.path.abspath(os.path.expanduser(selected))
@@ -1281,6 +1337,7 @@ def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? 
         "Commands:\n"
         "  /help                    show this help\n"
         "  /compact [instructions]  compact the active session context\n"
+        "  /context [auto on|off]   show or set automatic-compaction policy\n"
         "  /auth [provider]         show credential status\n"
         "  /login [provider] [method]  login to a provider\n"
         "  /logout [provider]       remove stored provider credentials\n"

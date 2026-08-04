@@ -51,6 +51,33 @@ def test_configure_effort_sets_agent_effort(tmp_path: Path) -> None:
     assert agent.effort == "high"
 
 
+def test_configure_auto_compaction_sets_agent_policy(tmp_path: Path) -> None:
+    provider = CapturingProvider()
+    runtime = _runtime_with_capturing_provider(provider)
+    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
+
+    _handle_rpc_configure_command(
+        {"auto_compaction_enabled": False},
+        command_id="configure-1",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+    )
+
+    assert agent.auto_compaction_enabled is False
+    assert agent.state_snapshot().auto_compaction_enabled is False
+
+    _handle_rpc_configure_command(
+        {"auto_compaction_enabled": True},
+        command_id="configure-2",
+        command_type="configure",
+        agent=agent,
+        runtime=runtime,
+    )
+
+    assert agent.auto_compaction_enabled is True
+
+
 def test_configure_effort_alone_is_accepted_without_model_or_provider(tmp_path: Path) -> None:
     # Regression guard: effort-only configure must not hit the "requires
     # provider or model" rejection path that predates this field.

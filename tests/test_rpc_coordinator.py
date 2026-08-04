@@ -177,6 +177,37 @@ def test_coordinator_dispatches_control_commands_while_active() -> None:
     anyio.run(scenario)
 
 
+def test_coordinator_dispatches_busy_configure_for_rejection_async() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        running = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
+        coordinator.running_command = running
+        dispatched: list[dict[str, object]] = []
+
+        async def dispatch(
+            command: dict[str, object],
+            active: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            assert active is running
+            dispatched.append(command)
+            return _RpcDispatchResult(active)
+
+        async def reject(_command: dict[str, object], _message: str) -> None:
+            raise AssertionError("configure should reach the executor for busy rejection")
+
+        await coordinator.handle_event_async(
+            _RpcInputCommand({"id": "configure", "type": "configure"}),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+
+        assert dispatched == [{"id": "configure", "type": "configure"}]
+        assert not coordinator.queued_commands
+
+    anyio.run(scenario)
+
+
 def test_coordinator_buffers_queue_commands_until_prompt_ready() -> None:
     async def scenario() -> None:
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
