@@ -107,6 +107,7 @@ def _compaction_policy_status(
     except NothingToCompactError:
         return CompactionPolicyStatus(
             threshold_ineligible_reason="no compactable context prefix",
+            overflow_recovery_enabled=False,
         )
     return CompactionPolicyStatus(
         threshold_eligible=True,

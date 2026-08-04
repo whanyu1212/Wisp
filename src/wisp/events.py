@@ -564,7 +564,7 @@ class ProjectConfigApplied(WispEvent):
     provider: str
     model: str | None = None
     effort: str | None = None
-    auto_compaction_enabled: bool = True
+    auto_compaction_enabled: bool | None = None
     auth_path: Path
 
     @model_serializer(mode="wrap")

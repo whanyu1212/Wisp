@@ -165,6 +165,7 @@ def test_session_stats_reports_threshold_policy_eligibility() -> None:
     [
         (None, 100, True, "model context window is unknown", True),
         (100, 100, True, "reserve consumes the model window", False),
+        (100, 10, True, "no compactable context prefix", False),
         (100, 10, False, "automatic compaction is disabled", False),
     ],
 )

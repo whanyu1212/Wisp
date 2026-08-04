@@ -1103,7 +1103,10 @@ def test_project_config_applied_round_trips_through_json() -> None:
     legacy = applied.model_copy(update={"schema_version": 25})
     legacy_payload = json.loads(legacy.model_dump_json())
     assert "auto_compaction_enabled" not in legacy_payload
-    assert wisp_event_from_json(json.dumps(legacy_payload)).schema_version == 25
+    legacy_event = wisp_event_from_json(json.dumps(legacy_payload))
+    assert legacy_event.schema_version == 25
+    assert isinstance(legacy_event, ProjectConfigApplied)
+    assert legacy_event.auto_compaction_enabled is None
 
 
 def test_compaction_policy_fields_require_schema_v26() -> None:
