@@ -106,6 +106,11 @@ _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
 }
 
 
+def _bypasses_active_command(command_type: str) -> bool:
+    # Configure must reach the executor to report its busy error instead of applying later.
+    return command_type == "configure" or command_type in _ACTIVE_COMMAND_BYPASS_COMMANDS
+
+
 class RpcControlReceiver(Protocol):
     async def receive(self) -> _RpcControlEvent: ...
 
@@ -285,7 +290,7 @@ class RpcCoordinator:
                 reject=reject,
             )
             return False
-        if running is not None and (selected_type not in _ACTIVE_COMMAND_BYPASS_COMMANDS):
+        if running is not None and not _bypasses_active_command(selected_type):
             self._enqueue_command(command, queue=self.queued_commands, reject=reject)
             return False
         return self._dispatch(command, dispatch=dispatch)
@@ -490,7 +495,7 @@ class RpcCoordinator:
                 reject=reject,
             )
             return False
-        if running is not None and (selected_type not in _ACTIVE_COMMAND_BYPASS_COMMANDS):
+        if running is not None and not _bypasses_active_command(selected_type):
             await self._enqueue_command_async(command, queue=self.queued_commands, reject=reject)
             return False
         return await self._dispatch_async(command, dispatch=dispatch)
