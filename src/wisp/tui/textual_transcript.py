@@ -25,7 +25,9 @@ from wisp.tui.widgets import ToolCard, WorkingIndicator
 # Keep an evicted widget inside the next durable latest-page reload, whose first
 # entry falls immediately before this bounded visible live suffix.
 TUI_SETTLED_LIVE_WIDGET_LIMIT = TUI_HISTORY_PAGE_LIMIT - 1
-TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT = TUI_HISTORY_PAGE_LIMIT - 1
+# A settled ToolCard represents both its call and result. Keep enough spare
+# history-page capacity that resolving one cannot evict an unrecoverable row.
+TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT = TUI_HISTORY_PAGE_LIMIT - 2
 
 
 class TextualTranscriptSurface(Protocol):

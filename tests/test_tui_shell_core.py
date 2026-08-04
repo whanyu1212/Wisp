@@ -608,22 +608,68 @@ def test_tui_shell_releases_live_reload_guard_after_a_latest_history_failure() -
     anyio.run(run)
 
 
-def test_tui_shell_releases_live_reload_guard_without_history_pagination() -> None:
+def test_tui_shell_recovers_history_pagination_for_a_live_reload() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:
             super().__init__(_console()[0])
+            self.history_page_hook = None
             self.latest_history_failures = 0
+            self.latest_history_captures = 0
+            self.reloaded: list[tuple[HistoricalTranscriptEntry, ...]] = []
+
+        def set_history_page_request_hook(self, hook: object) -> None:
+            self.history_page_hook = hook
 
         def latest_history_reload_failed(self) -> None:
             self.latest_history_failures += 1
 
+        def capture_latest_history_reload(self) -> None:
+            self.latest_history_captures += 1
+
+        def replace_latest_history_entries(
+            self,
+            entries: tuple[HistoricalTranscriptEntry, ...],
+        ) -> None:
+            self.reloaded.append(entries)
+
     async def run() -> None:
+        controller = ScriptedController()
         renderer = RecordingRenderer()
-        shell = TuiShell(ScriptedController(), renderer=renderer)
+        shell = TuiShell(controller, renderer=renderer)
 
         await shell._request_latest_history_page()
+        command_id = controller.messages_requests[-1][0]
 
-        assert renderer.latest_history_failures == 1
+        assert controller.messages_requests[-1] == (
+            command_id,
+            None,
+            TUI_HISTORY_PAGE_LIMIT,
+            None,
+        )
+        assert renderer.latest_history_captures == 1
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=command_id,
+                session_id="target",
+                messages=(_rpc_message("assistant", "recovered", entry_id="recovered"),),
+                truncated=True,
+                next_before_entry_id="recovered",
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=command_id,
+                command_type="get_messages",
+                ok=True,
+            )
+        )
+
+        assert shell._history_pagination is not None
+        assert shell._history_pagination.session_id == "target"
+        assert renderer.latest_history_failures == 0
+        assert renderer.reloaded == [
+            (HistoricalTranscriptMessage(role="assistant", content="recovered"),)
+        ]
 
     anyio.run(run)
 

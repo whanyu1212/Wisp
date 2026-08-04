@@ -202,7 +202,7 @@ def test_settled_live_widgets_are_bounded_and_released_for_durable_history() -> 
 
 def test_settled_live_limit_keeps_the_first_eviction_in_one_history_page() -> None:
     assert TUI_SETTLED_LIVE_WIDGET_LIMIT == TUI_HISTORY_PAGE_LIMIT - 1
-    assert TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT == TUI_HISTORY_PAGE_LIMIT - 1
+    assert TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT == TUI_HISTORY_PAGE_LIMIT - 2
 
 
 def test_settled_live_widgets_are_also_bounded_by_durable_entry_count() -> None:
