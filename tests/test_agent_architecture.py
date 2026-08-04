@@ -71,6 +71,16 @@ _TEXTUAL_INPUT_FORBIDDEN_IMPORTS = (
     "wisp.tui.textual_app",
     "wisp.tui.widgets",
 )
+_TEXTUAL_TRANSCRIPT_FORBIDDEN_IMPORTS = (
+    "wisp.providers",
+    "wisp.rpc",
+    "wisp.sessions",
+    "wisp.tui.shell",
+    "wisp.tui.stream_buffer",
+    "wisp.tui.textual_app",
+    "wisp.tui.textual_history",
+    "wisp.tui.textual_renderer",
+)
 
 
 def _module_imports(path: Path) -> set[str]:
@@ -156,6 +166,18 @@ def test_textual_input_controller_preserves_frontend_import_direction() -> None:
         imported
         for imported in sorted(_module_imports(path))
         if imported.startswith(_TEXTUAL_INPUT_FORBIDDEN_IMPORTS)
+    ]
+
+    assert violations == []
+
+
+def test_textual_transcript_controller_preserves_frontend_import_direction() -> None:
+    path = Path(__file__).parents[1] / "src" / "wisp" / "tui" / "textual_transcript.py"
+
+    violations = [
+        imported
+        for imported in sorted(_module_imports(path))
+        if imported.startswith(_TEXTUAL_TRANSCRIPT_FORBIDDEN_IMPORTS)
     ]
 
     assert violations == []

@@ -64,7 +64,7 @@ def _transcript_texts(app: TextualTui) -> list[str]:
 def _working_activity(app: TextualTui) -> str:
     """Plain transcript heartbeat text, or empty when activity is hidden."""
 
-    indicator = app._working_indicator
+    indicator = app._transcript_controller.working_indicator
     return indicator.render().plain if isinstance(indicator, WorkingIndicator) else ""
 
 
@@ -1188,7 +1188,7 @@ def test_textual_tui_renderer_remounted_boundary_pair_is_not_pending() -> None:
             app_instance.action_scroll_transcript_end()
             await pilot.pause()
             card = _first_tool_card(app_instance)
-            pending_count = len(app_instance._tool_cards)
+            pending_count = app_instance._transcript_controller.pending_tool_count
             detail = card._detail.plain if isinstance(card._detail, Content) else card._detail
             before_cancel = (card._glyph, str(card.border_title), detail)
             renderer.cancelled()
@@ -3037,7 +3037,7 @@ def test_textual_compaction_notices_and_rpc_completion_stop_progress() -> None:
                 )
             )
             await pilot.pause()
-            assert app_instance._working_indicator is not None
+            assert app_instance._transcript_controller.working_indicator is not None
 
             renderer.event(
                 RpcCommandFinished(command_id="compact-1", command_type="compact", ok=True)
@@ -3046,7 +3046,7 @@ def test_textual_compaction_notices_and_rpc_completion_stop_progress() -> None:
             return (
                 _transcript_texts(app_instance),
                 _transcript_cards(app_instance),
-                app_instance._working_indicator is None,
+                app_instance._transcript_controller.working_indicator is None,
             )
 
     texts, cards, progress_stopped = anyio.run(scenario)
@@ -3115,7 +3115,7 @@ def test_textual_overflow_compaction_restarts_progress_for_retry() -> None:
                 )
             )
             await pilot.pause()
-            started = app_instance._working_indicator is not None
+            started = app_instance._transcript_controller.working_indicator is not None
             renderer.event(
                 CompactionCompleted(
                     session_id="session-1",
@@ -3127,10 +3127,10 @@ def test_textual_overflow_compaction_restarts_progress_for_retry() -> None:
                 )
             )
             await pilot.pause()
-            stopped = app_instance._working_indicator is None
+            stopped = app_instance._transcript_controller.working_indicator is None
             renderer.event(TurnStarted(turn=2))
             await pilot.pause()
-            restarted = app_instance._working_indicator is not None
+            restarted = app_instance._transcript_controller.working_indicator is not None
             return _transcript_texts(app_instance), started and stopped, restarted
 
     texts, stopped_after_compaction, restarted_for_retry = anyio.run(scenario)
@@ -3182,7 +3182,7 @@ def test_textual_retry_progress_mutates_status_and_rejects_older_attempts() -> N
             renderer.event(_provider_retry(attempt=3, status_code=429))
             await pilot.pause()
             return (
-                app_instance._working_indicator is not None,
+                app_instance._transcript_controller.working_indicator is not None,
                 first,
                 _working_activity(app_instance),
                 _transcript_texts(app_instance),
@@ -3214,8 +3214,8 @@ def test_textual_retry_progress_recovers_and_ignores_post_start_retry() -> None:
             return (
                 recovered,
                 "\n".join(texts),
-                app_instance._working_indicator is None,
-                app_instance._working_indicator is not None,
+                app_instance._transcript_controller.working_indicator is None,
+                app_instance._transcript_controller.working_indicator is not None,
             )
 
     recovered, transcript, timer_stopped, active = anyio.run(scenario)
@@ -3251,7 +3251,7 @@ def test_textual_retry_progress_does_not_replay_or_survive_terminal_states() -> 
         async with app_instance.run_test() as pilot:
             renderer.event(_provider_retry())
             await pilot.pause()
-            replayed = app_instance._working_indicator is not None
+            replayed = app_instance._transcript_controller.working_indicator is not None
 
             renderer.running()
             renderer.event(TurnStarted(turn=1))
@@ -3260,7 +3260,7 @@ def test_textual_retry_progress_does_not_replay_or_survive_terminal_states() -> 
             renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
             renderer.event(_provider_retry(attempt=2))
             await pilot.pause()
-            remaining = app_instance._working_indicator is not None
+            remaining = app_instance._transcript_controller.working_indicator is not None
             return replayed, remaining, not remaining, _working_activity(app_instance)
 
     replayed, remaining, timer_stopped, rendered = anyio.run(scenario)
@@ -3286,7 +3286,7 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
             )
             await pilot.pause()
             return (
-                app_instance._working_indicator is not None,
+                app_instance._transcript_controller.working_indicator is not None,
                 app_instance.query_one("#decision-panel").display,
             )
 
@@ -3299,7 +3299,7 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
             renderer.cancelling("Cancelling current prompt...")
             renderer.event(_provider_retry(attempt=2))
             await pilot.pause()
-            remaining = app_instance._working_indicator is not None
+            remaining = app_instance._transcript_controller.working_indicator is not None
             return remaining, not remaining
 
     async def failure_scenario() -> tuple[bool, bool]:
@@ -3310,7 +3310,7 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
             await pilot.pause()
             renderer.rpc_event_reader_failed("closed")
             await pilot.pause()
-            remaining = app_instance._working_indicator is not None
+            remaining = app_instance._transcript_controller.working_indicator is not None
             return remaining, not remaining
 
     approval_row, approval_visible = anyio.run(approval_scenario)
@@ -3419,7 +3419,7 @@ def test_textual_cancel_drains_pending_tool_cards() -> None:
             return (
                 [c.render().plain for c in cards],
                 [c._timer is None for c in cards],
-                len(app_instance._tool_cards),
+                app_instance._transcript_controller.pending_tool_count,
                 len(renderer._tool_started),
             )
 
@@ -3438,12 +3438,12 @@ def test_textual_rpc_command_failure_drains_pending_tool_cards() -> None:
         async with app_instance.run_test() as pilot:
             renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={}))
             await pilot.pause()
-            assert len(app_instance._tool_cards) == 1
+            assert app_instance._transcript_controller.pending_tool_count == 1
             renderer.event(
                 RpcCommandFinished(command_id="cmd1", command_type="prompt", ok=False, error="boom")
             )
             await pilot.pause()
-            return len(app_instance._tool_cards)
+            return app_instance._transcript_controller.pending_tool_count
 
     assert anyio.run(scenario) == 0
 
@@ -4144,19 +4144,19 @@ def test_textual_scrollback_counts_distinct_unseen_output_and_end_clears_it() ->
             await pilot.pause()
             renderer.token_delta("second")
             await pilot.pause()
-            stream_count = len(app_instance._unseen_output)
+            stream_count = app_instance._transcript_controller.unseen_output_count
             stream_label = jump.render().plain
 
             # A new ToolCard is a second logical output; resolving that same card
             # in place must not increase the count again.
             renderer.event(ToolCallRequested(call_id="latest", name="read", arguments={}))
             await pilot.pause()
-            tool_count = len(app_instance._unseen_output)
+            tool_count = app_instance._transcript_controller.unseen_output_count
             renderer.event(
                 ToolResultReady(call_id="latest", name="read", output="ok", is_error=False)
             )
             await pilot.pause()
-            resolved_count = len(app_instance._unseen_output)
+            resolved_count = app_instance._transcript_controller.unseen_output_count
             resolved_label = jump.render().plain
 
             await pilot.press("end")
@@ -4167,7 +4167,7 @@ def test_textual_scrollback_counts_distinct_unseen_output_and_end_clears_it() ->
                 "tool_count": tool_count,
                 "resolved_count": resolved_count,
                 "resolved_label": resolved_label,
-                "cleared": len(app_instance._unseen_output) == 0,
+                "cleared": app_instance._transcript_controller.unseen_output_count == 0,
                 "hidden": jump.display is False,
                 "following": transcript.is_following,
             }
@@ -4203,7 +4203,7 @@ def test_textual_heartbeat_notifies_scrolled_back_reader_and_clears_on_removal()
 
             app_instance.show_working_indicator()
             await pilot.pause()
-            working_count = len(app_instance._unseen_output)
+            working_count = app_instance._transcript_controller.unseen_output_count
             working_shown = jump.display is True
 
             # Retiring the heartbeat must drop it from the unseen set and hide the
@@ -4213,7 +4213,7 @@ def test_textual_heartbeat_notifies_scrolled_back_reader_and_clears_on_removal()
             return {
                 "working_count": working_count,
                 "working_shown": working_shown,
-                "cleared": len(app_instance._unseen_output) == 0,
+                "cleared": app_instance._transcript_controller.unseen_output_count == 0,
                 "hidden": jump.display is False,
             }
 
