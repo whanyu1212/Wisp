@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
-import anyio
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -21,14 +20,12 @@ from wisp.events import (
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tui.commands import DEFAULT_TUI_COMMAND_CATALOG, TuiCommandCatalog
-from wisp.tui.compact_echo import CompactEchoLog
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.overlay import (
     OverlayKind,
     OverlayOperation,
     TextualOverlayController,
 )
-from wisp.tui.prompt_history import PromptHistory
 from wisp.tui.prompt_history_widget import PromptHistoryPicker
 from wisp.tui.rendering import (
     TuiRenderer,
@@ -36,6 +33,7 @@ from wisp.tui.rendering import (
     _markup_escape,
 )
 from wisp.tui.stream_buffer import MarkdownStreamController
+from wisp.tui.textual_input import TextualInputController
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.theme import WISP_THEMES, role_styles
 from wisp.tui.widgets import (
@@ -294,9 +292,7 @@ class TextualTui(App[None]):
 
     def __init__(self) -> None:
         super().__init__()
-        self._prompt_send, self._prompt_receive = anyio.create_memory_object_stream[
-            str | BaseException
-        ](100)
+        self._input_controller = TextualInputController(self)
         self._status: StatusBar | None = None
         self._transcript: Transcript | None = None
         self._jump_to_latest: JumpToLatest | None = None
@@ -309,11 +305,9 @@ class TextualTui(App[None]):
         self._session_picker: SessionPicker | None = None
         self._overlay_controller: TextualOverlayController | None = None
         self._command_catalog = DEFAULT_TUI_COMMAND_CATALOG
-        self._prompt_history = PromptHistory()
         self._current_prompt = "wisp> "
         self._runner: Callable[[], Awaitable[None]] | None = None
         self._runner_error: Exception | None = None
-        self._on_submit: Callable[[], None] | None = None
         self._history_page_request_hook: Callable[[], Awaitable[None]] | None = None
         self._history_window_older_hook: Callable[[], bool] | None = None
         self._history_window_latest_hook: Callable[[], bool] | None = None
@@ -351,12 +345,17 @@ class TextualTui(App[None]):
         # Main-screen heartbeat (opencode-style): a dim WorkingIndicator row in the
         # transcript right after the user prompt, not in the stable footer chrome.
         self._working_indicator: Widget | None = None
-        # full submitted text → FIFO of compact echoes (raw editor text with
-        # large-paste markers intact). The channel/shell carry only the full str;
-        # this side map lets prompt_submitted() echo a compact line without
-        # re-plumbing the queue. Registered only when display differs from the full
-        # text (a large paste was expanded); consumed by compact_echo_for().
-        self._echo_log = CompactEchoLog()
+
+    def clear_prompt_editor(self) -> None:
+        """Clear the editor when an input-controller transition requests it."""
+
+        if self._input is not None:
+            self._input.value = ""
+
+    def write_input_error(self, message: str) -> None:
+        """Render a recoverable input-controller queue error."""
+
+        self.write_error(message)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -459,7 +458,7 @@ class TextualTui(App[None]):
         # what the editor showed — a large paste. The transcript then echoes the
         # marker line, not the whole blob, while the model still gets event.value.
         if event.display != event.value:
-            self._register_compact_echo(event.value, event.display)
+            self._input_controller.register_compact_echo(event.value, event.display)
         self.submit_command_line(event.value)
 
     def _accept_menu_highlight_on_enter(self, typed: str) -> bool:
@@ -487,29 +486,15 @@ class TextualTui(App[None]):
             self.submit_command_line(spec.command)
         return True
 
-    def _register_compact_echo(self, prompt: str, display: str) -> None:
-        self._echo_log.register(prompt, display)
-
     def clear_compact_echoes(self) -> None:
-        """Drop all pending compact echoes (the shell dropped its queued prompts).
+        """Drop echoes for queued prompts the shell actually abandoned."""
 
-        Called by the renderer only on paths that actually abandon queued
-        follow-ups, so their never-to-be-consumed echoes can't orphan (unbounded
-        growth) or be popped by mistake by a later identical paste.
-        """
-
-        self._echo_log.clear()
+        self._input_controller.clear_compact_echoes()
 
     def compact_echo_for(self, prompt: str) -> str:
-        """Return the compact transcript echo for a submitted prompt.
+        """Return the compact transcript echo for one submitted prompt."""
 
-        Falls back to the prompt itself when no large-paste echo was registered
-        (the common case). Each registered echo is single-use — consumed in
-        submission order from the per-prompt FIFO — so N identical large pastes
-        each echo compactly, and a later repeat with no fresh paste echoes verbatim.
-        """
-
-        return self._echo_log.take(prompt)
+        return self._input_controller.compact_echo_for(prompt)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         # Keep the inline slash menu in sync with the input WITHOUT ever touching
@@ -622,32 +607,14 @@ class TextualTui(App[None]):
         event.stop()
 
     def submit_command_line(self, text: str) -> None:
-        """Submit a line as if the user typed it and pressed Enter.
+        """Submit a typed/command-palette line through the input controller."""
 
-        The single entry point for both a real editor submission and a command
-        palette selection, so `/command` semantics stay sourced only from the
-        shell's typed-line handling. Clears the editor, fires the submit hook (so
-        the input mode is captured), then queues the line. send_nowait degrades
-        to a notice on a full buffer rather than crashing the action handler.
-        """
-        if self._input is not None:
-            self._input.value = ""
-        self._submit_line(text)
+        self._input_controller.submit_line(text, clear_editor=True)
 
     def _submit_decision_line(self, text: str) -> bool:
         # The decision overlay temporarily hides the composer. Keep its draft
         # untouched so approval never discards a follow-up the user was typing.
-        return self._submit_line(text)
-
-    def _submit_line(self, text: str) -> bool:
-        if self._on_submit is not None:
-            self._on_submit()
-        try:
-            self._prompt_send.send_nowait(text)
-        except anyio.WouldBlock:
-            self.write_error("input buffer full; command dropped")
-            return False
-        return True
+        return self._input_controller.submit_line(text, clear_editor=False)
 
     def on_decision_panel_selected(self, event: DecisionPanel.Selected) -> None:
         event.stop()
@@ -807,21 +774,13 @@ class TextualTui(App[None]):
         self._history_page_request_hook = hook
 
     def set_submit_hook(self, on_submit: Callable[[], None]) -> None:
-        """Register a callback fired the moment an input line is submitted.
+        """Register the renderer's at-accept input-mode snapshot callback."""
 
-        The renderer uses this to snapshot the input mode active at accept time,
-        which can differ from the mode observed when `read_prompt()` began
-        waiting (e.g. a tool approval arriving mid-line).
-        """
-
-        self._on_submit = on_submit
+        self._input_controller.set_submit_hook(on_submit)
 
     async def read_prompt(self, prompt: str) -> str:
         self.set_input_hint(prompt)
-        value = await self._prompt_receive.receive()
-        if isinstance(value, BaseException):
-            raise value
-        return value
+        return await self._input_controller.receive()
 
     async def run_shell(self, runner: Callable[[], Awaitable[None]]) -> None:
         self._runner = runner
@@ -966,7 +925,7 @@ class TextualTui(App[None]):
         overlays.open(OverlayKind.prompt_history, preserve_viewport=True)
         composer = self.query_one("#composer")
         picker.styles.max_height = max(4, composer.region.y)
-        picker.show(self._prompt_history.entries)
+        picker.show(self._input_controller.prompt_history_entries)
 
     # Scrollback: delegate to the Transcript's own scroll actions. Its scroll
     # watcher derives follow intent for normal movement; End uses return_to_latest
@@ -1068,24 +1027,9 @@ class TextualTui(App[None]):
         self._clear_unseen_output()
 
     def _signal_input(self, signal: BaseException, *, action: str) -> None:
-        # send_nowait raises WouldBlock if the buffer is full; degrade to a
-        # notice rather than crashing the Textual action handler.
-        try:
-            self._prompt_send.send_nowait(signal)
-        except anyio.WouldBlock:
-            self.write_error(f"input buffer full; {action} ignored")
-            return
-        # Drop any partially typed line so it can't be resubmitted on the next
-        # Enter after the shell has already handled this interrupt/EOF. Only do
-        # this once the signal is actually queued, so a dropped signal doesn't
-        # silently discard the user's text without cancelling anything.
-        if self._input is not None:
-            self._input.value = ""
-        # NOTE: pending compact echoes are NOT cleared here. Ctrl+C/EOF is
-        # context-dependent shell-side — during an approval/trust prompt it only
-        # denies that decision and the queued follow-ups (and their echoes) still
-        # run. The shell calls queued_prompts_cleared() on the paths that actually
-        # drop the queue, which is where the echoes are reclaimed.
+        # Pending compact echoes remain intact here. Ctrl+C/EOF can merely deny an
+        # approval; the shell clears them only when it actually drops follow-ups.
+        self._input_controller.signal(signal, action=action)
 
     def set_status(self, snapshot: TuiViewSnapshot) -> None:
         if self._status is not None:
@@ -1116,9 +1060,9 @@ class TextualTui(App[None]):
             overlays.close(OverlayKind.command_palette)
 
     def record_prompt(self, prompt: str) -> None:
-        """Retain one exact submitted prompt for this TUI process only."""
+        """Retain one shell-accepted prompt for this TUI process only."""
 
-        self._prompt_history.record(prompt)
+        self._input_controller.record_prompt(prompt)
 
     def show_prompt_history(self) -> None:
         self.action_open_prompt_history()
@@ -1239,7 +1183,7 @@ class TextualTui(App[None]):
         self._historical_tool_cards.clear()
         self._unseen_output.clear()
         self._card_focus_was_following = False
-        self._echo_log.clear()
+        self._input_controller.clear_compact_echoes()
         self._clear_unseen_output()
         if self._transcript is not None:
             self._transcript.clear_messages()

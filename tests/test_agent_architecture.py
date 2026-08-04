@@ -63,6 +63,14 @@ _RPC_EXECUTION_FORBIDDEN_IMPORTS = (
     "wisp.trust",
     "wisp.tui",
 )
+_TEXTUAL_INPUT_FORBIDDEN_IMPORTS = (
+    "wisp.providers",
+    "wisp.rpc",
+    "wisp.sessions",
+    "wisp.tui.shell",
+    "wisp.tui.textual_app",
+    "wisp.tui.widgets",
+)
 
 
 def _module_imports(path: Path) -> set[str]:
@@ -136,6 +144,18 @@ def test_rpc_layers_preserve_dependency_direction(
 
     violations = [
         imported for imported in sorted(_module_imports(path)) if imported.startswith(forbidden)
+    ]
+
+    assert violations == []
+
+
+def test_textual_input_controller_preserves_frontend_import_direction() -> None:
+    path = Path(__file__).parents[1] / "src" / "wisp" / "tui" / "textual_input.py"
+
+    violations = [
+        imported
+        for imported in sorted(_module_imports(path))
+        if imported.startswith(_TEXTUAL_INPUT_FORBIDDEN_IMPORTS)
     ]
 
     assert violations == []

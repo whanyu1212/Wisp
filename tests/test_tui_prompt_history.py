@@ -133,7 +133,7 @@ def test_ctrl_c_closes_history_instead_of_signalling_interrupt() -> None:
             await pilot.pause()
             picker = app.query_one("#prompt-history", PromptHistoryPicker)
             with pytest.raises(anyio.WouldBlock):
-                app._prompt_receive.receive_nowait()
+                app._input_controller.receive_stream.receive_nowait()
             return picker.is_open, editor.has_focus, editor.value
 
     opened, focused, draft = anyio.run(scenario)
@@ -182,7 +182,7 @@ def test_history_search_restores_exact_prompt_without_submitting() -> None:
             await pilot.press("enter")
             await pilot.pause()
             with pytest.raises(anyio.WouldBlock):
-                app._prompt_receive.receive_nowait()
+                app._input_controller.receive_stream.receive_nowait()
             restored = editor.value
             focused = editor.has_focus
             await pilot.press("enter")
@@ -426,11 +426,11 @@ def test_textual_renderer_records_only_explicit_prompt_submission_seam() -> None
     renderer.render_history(())
     renderer.prompt_history_request()
     renderer.prompt_submitted("echoed only when execution starts")
-    assert app._prompt_history.entries == ()
+    assert app._input_controller.prompt_history_entries == ()
 
     renderer.prompt_accepted("real submitted prompt")
 
-    assert tuple(entry.prompt for entry in app._prompt_history.entries) == (
+    assert tuple(entry.prompt for entry in app._input_controller.prompt_history_entries) == (
         "real submitted prompt",
     )
 
@@ -444,7 +444,7 @@ def test_shell_records_real_prompts_but_not_history_or_help_commands() -> None:
         await shell._handle_input_line(_InputLine("/help", _InputMode.idle))
         await shell._handle_input_line(_InputLine("real prompt", _InputMode.idle))
 
-        return tuple(entry.prompt for entry in app._prompt_history.entries)
+        return tuple(entry.prompt for entry in app._input_controller.prompt_history_entries)
 
     assert anyio.run(scenario) == ("real prompt",)
 
@@ -478,10 +478,14 @@ def test_shell_records_queued_prompt_immediately_and_queue_clear_does_not_erase_
         shell.state.current_command_type = "prompt"
 
         await shell._handle_input_line(_InputLine("submitted follow-up", _InputMode.running))
-        recorded_before_clear = tuple(entry.prompt for entry in app._prompt_history.entries)
+        recorded_before_clear = tuple(
+            entry.prompt for entry in app._input_controller.prompt_history_entries
+        )
         queued_before_clear = tuple(shell.state.queued_prompts)
         shell._clear_queued_prompts()
-        recorded_after_clear = tuple(entry.prompt for entry in app._prompt_history.entries)
+        recorded_after_clear = tuple(
+            entry.prompt for entry in app._input_controller.prompt_history_entries
+        )
         return recorded_before_clear, queued_before_clear, recorded_after_clear
 
     before, queued, after = anyio.run(scenario)

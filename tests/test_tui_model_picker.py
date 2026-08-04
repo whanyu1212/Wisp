@@ -192,7 +192,7 @@ def test_model_picker_enter_selects_highlighted_model_without_effort() -> None:
             await pilot.pause()
             await pilot.press("enter")
             with anyio.fail_after(1):
-                answer = await app._prompt_receive.receive()
+                answer = await app._input_controller.receive_stream.receive()
             assert isinstance(answer, str)
             return answer
 
@@ -219,7 +219,7 @@ def test_model_picker_arrow_keys_cycle_effort_and_submit_it() -> None:
 
             await pilot.press("enter")
             with anyio.fail_after(1):
-                answer = await app._prompt_receive.receive()
+                answer = await app._input_controller.receive_stream.receive()
             assert isinstance(answer, str)
             return before, after_one_right, answer
 
@@ -270,7 +270,7 @@ def test_model_picker_left_right_ignored_for_model_without_effort_levels() -> No
             await pilot.pause()
             await pilot.press("enter")
             with anyio.fail_after(1):
-                answer = await app._prompt_receive.receive()
+                answer = await app._input_controller.receive_stream.receive()
             assert isinstance(answer, str)
             return answer
 
@@ -337,7 +337,7 @@ def test_model_picker_drops_stale_key_and_selection_queued_before_open() -> None
 
             await pilot.press("enter")
             with anyio.fail_after(1):
-                answer = await app._prompt_receive.receive()
+                answer = await app._input_controller.receive_stream.receive()
             assert isinstance(answer, str)
             return rejected, answer
 
@@ -361,7 +361,7 @@ def test_model_picker_preserves_composer_draft_across_selection() -> None:
             await pilot.pause()
             await pilot.press("enter")
             with anyio.fail_after(1):
-                answer = await app._prompt_receive.receive()
+                answer = await app._input_controller.receive_stream.receive()
             assert isinstance(answer, str)
             await pilot.pause()
             restored = input_widget.display and app.focused is input_widget
@@ -478,7 +478,7 @@ def test_model_picker_qualifies_selection_with_provider_for_a_shared_model_id() 
             options.highlighted = 1
             await pilot.press("enter")
             with anyio.fail_after(1):
-                first_answer = await app._prompt_receive.receive()
+                first_answer = await app._input_controller.receive_stream.receive()
             assert isinstance(first_answer, str)
 
             renderer.model_picker_request(
@@ -492,7 +492,7 @@ def test_model_picker_qualifies_selection_with_provider_for_a_shared_model_id() 
             options.highlighted = 3
             await pilot.press("enter")
             with anyio.fail_after(1):
-                second_answer = await app._prompt_receive.receive()
+                second_answer = await app._input_controller.receive_stream.receive()
             assert isinstance(second_answer, str)
             return first_answer, second_answer
 
@@ -523,7 +523,7 @@ def test_model_picker_cycling_back_to_default_sends_explicit_clear_token() -> No
             # Untouched: submit immediately without cycling effort at all.
             await pilot.press("enter")
             with anyio.fail_after(1):
-                untouched_answer = await app._prompt_receive.receive()
+                untouched_answer = await app._input_controller.receive_stream.receive()
             assert isinstance(untouched_answer, str)
 
             renderer.model_picker_request(
@@ -541,7 +541,7 @@ def test_model_picker_cycling_back_to_default_sends_explicit_clear_token() -> No
             await pilot.pause()
             await pilot.press("enter")
             with anyio.fail_after(1):
-                cleared_answer = await app._prompt_receive.receive()
+                cleared_answer = await app._input_controller.receive_stream.receive()
             assert isinstance(cleared_answer, str)
             return untouched_answer, cleared_answer
 
@@ -569,7 +569,7 @@ def test_model_picker_does_not_seed_a_tier_the_current_row_does_not_list() -> No
             await pilot.pause()
             await pilot.press("enter")
             with anyio.fail_after(1):
-                answer = await app._prompt_receive.receive()
+                answer = await app._input_controller.receive_stream.receive()
             assert isinstance(answer, str)
             return answer
 

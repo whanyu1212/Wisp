@@ -4558,7 +4558,7 @@ def test_textual_multiline_paste_is_submitted_without_truncation() -> None:
             editor_text = input_widget.value
             await pilot.press("enter")
             with anyio.fail_after(1):
-                submitted = await app_instance._prompt_receive.receive()
+                submitted = await app_instance._input_controller.receive_stream.receive()
             assert isinstance(submitted, str)
             return editor_text, submitted
 
@@ -4583,7 +4583,7 @@ def test_textual_large_paste_replaces_selection_and_expands_on_submit() -> None:
             cursor_position = input_widget.cursor_position
             await pilot.press("enter")
             with anyio.fail_after(1):
-                submitted = await app_instance._prompt_receive.receive()
+                submitted = await app_instance._input_controller.receive_stream.receive()
             assert isinstance(submitted, str)
             return editor_text, submitted, cursor_position
 
@@ -4620,7 +4620,7 @@ def test_textual_large_paste_survives_placeholder_delete_then_restore() -> None:
             await pilot.pause()
             await pilot.press("enter")
             with anyio.fail_after(1):
-                submitted = await app_instance._prompt_receive.receive()
+                submitted = await app_instance._input_controller.receive_stream.receive()
             assert isinstance(submitted, str)
             return marker, submitted
 
@@ -4652,7 +4652,7 @@ def test_textual_large_paste_survives_cut_and_move() -> None:
             await pilot.pause()
             await pilot.press("enter")
             with anyio.fail_after(1):
-                submitted = await app_instance._prompt_receive.receive()
+                submitted = await app_instance._input_controller.receive_stream.receive()
             assert isinstance(submitted, str)
             return marker, submitted
 
@@ -4680,7 +4680,7 @@ def test_textual_large_paste_echoes_compact_line_while_model_gets_full_text() ->
 
             await pilot.press("enter")
             with anyio.fail_after(1):
-                submitted = await app_instance._prompt_receive.receive()
+                submitted = await app_instance._input_controller.receive_stream.receive()
             assert isinstance(submitted, str)
             # Drive the echo seam the shell uses: prompt_submitted(full_text).
             renderer.prompt_submitted(submitted)
@@ -4745,11 +4745,11 @@ def test_textual_queue_drop_clears_pending_paste_echoes_but_bare_interrupt_does_
             # A bare interrupt (approval-deny shape) must PRESERVE queued echoes.
             app_instance.action_interrupt()
             await pilot.pause()
-            after_bare_interrupt = app_instance._echo_log.key_count
+            after_bare_interrupt = app_instance._input_controller.compact_echo_key_count
 
             # The shell's real queue-drop hook reclaims them.
             app_instance.clear_compact_echoes()
-            after_queue_drop = app_instance._echo_log.key_count
+            after_queue_drop = app_instance._input_controller.compact_echo_key_count
 
             # A later identical paste registers and echoes its OWN marker.
             fresh_marker = "[Pasted content #2: 4,800 characters, 4.7 KB]"
@@ -4779,8 +4779,8 @@ def test_textual_pending_paste_echoes_are_bounded() -> None:
                 marker = f"[Pasted content #{i}: ...]"
                 app_instance.post_message(input_widget.Submitted(full, marker))
             await pilot.pause()
-            total = app_instance._echo_log.pending_count
-            order_len = app_instance._echo_log.order_length
+            total = app_instance._input_controller.pending_compact_echo_count
+            order_len = app_instance._input_controller.compact_echo_order_length
             # The oldest were evicted; the newest survives and still echoes compact.
             newest = app_instance.compact_echo_for(f"blob-{overflow - 1} " * 400)
             return total, order_len, newest
@@ -4801,14 +4801,14 @@ def test_textual_newline_keys_edit_without_submitting() -> None:
             await pilot.pause()
             editor_text = input_widget.value
             try:
-                app_instance._prompt_receive.receive_nowait()
+                app_instance._input_controller.receive_stream.receive_nowait()
             except anyio.WouldBlock:
                 was_submitted = False
             else:
                 was_submitted = True
             await pilot.press("enter")
             with anyio.fail_after(1):
-                submitted = await app_instance._prompt_receive.receive()
+                submitted = await app_instance._input_controller.receive_stream.receive()
             assert isinstance(submitted, str)
             return editor_text, was_submitted, submitted
 
@@ -5177,7 +5177,7 @@ def test_textual_enter_runs_completed_command_through_typed_path() -> None:
             await pilot.pause()
             await pilot.press("enter")
             await pilot.pause()
-            queued = await app_instance._prompt_receive.receive()
+            queued = await app_instance._input_controller.receive_stream.receive()
             return queued, suggest.is_open
 
     queued, menu_open = anyio.run(scenario)
@@ -5206,7 +5206,7 @@ def test_textual_full_command_typed_letter_by_letter_submits_whole_line() -> Non
             focused_id = app_instance.focused.id if app_instance.focused else None
             await pilot.press("enter")
             await pilot.pause()
-            queued = await app_instance._prompt_receive.receive()
+            queued = await app_instance._input_controller.receive_stream.receive()
             return queued, suggest.can_focus, menu_open, focused_id
 
     queued, suggest_focusable, menu_open, focused_id = anyio.run(scenario)
@@ -5244,7 +5244,7 @@ def test_textual_enter_runs_highlighted_argless_command_without_typing_it() -> N
             await _navigate_menu_to(pilot, suggest, "/quit")
             await pilot.press("enter")
             await pilot.pause()
-            queued = await app_instance._prompt_receive.receive()
+            queued = await app_instance._input_controller.receive_stream.receive()
             return queued, suggest.is_open
 
     queued, menu_open = anyio.run(scenario)
@@ -5267,7 +5267,7 @@ def test_textual_enter_on_partial_model_command_opens_model_picker() -> None:
             await pilot.pause()
             await pilot.press("enter")
             await pilot.pause()
-            queued = await app_instance._prompt_receive.receive()
+            queued = await app_instance._input_controller.receive_stream.receive()
             return queued, input_widget.value, suggest.is_open
 
     queued, buffer_after, menu_open = anyio.run(scenario)
@@ -5292,7 +5292,7 @@ def test_textual_enter_runs_fully_typed_optional_arg_command_bare() -> None:
             await pilot.pause()
             await pilot.press("enter")
             await pilot.pause()
-            queued = await app_instance._prompt_receive.receive()
+            queued = await app_instance._input_controller.receive_stream.receive()
             return queued, input_widget.value
 
     queued, buffer_after = anyio.run(scenario)
@@ -5315,7 +5315,7 @@ def test_textual_enter_accepts_fully_typed_command_case_insensitively() -> None:
             await pilot.pause()
             await pilot.press("enter")
             await pilot.pause()
-            queued = await app_instance._prompt_receive.receive()
+            queued = await app_instance._input_controller.receive_stream.receive()
             return queued, input_widget.value
 
     queued, buffer_after = anyio.run(scenario)
@@ -5338,7 +5338,7 @@ def test_textual_enter_executes_highlighted_optional_arg_command() -> None:
             await _navigate_menu_to(pilot, suggest, "/auth")
             await pilot.press("enter")
             await pilot.pause()
-            queued = await app_instance._prompt_receive.receive()
+            queued = await app_instance._input_controller.receive_stream.receive()
             return input_widget.value, queued
 
     assert anyio.run(scenario) == ("", "/auth")
@@ -5361,7 +5361,7 @@ def test_textual_partial_logout_selection_waits_for_provider() -> None:
             await pilot.press("enter")
             await pilot.pause()
             try:
-                app_instance._prompt_receive.receive_nowait()
+                app_instance._input_controller.receive_stream.receive_nowait()
             except anyio.WouldBlock:
                 submitted = False
             else:
@@ -5387,10 +5387,10 @@ def test_textual_enter_on_fully_typed_command_runs_it_once() -> None:
             await pilot.pause()
             await pilot.press("enter")
             await pilot.pause()
-            first = await app_instance._prompt_receive.receive()
+            first = await app_instance._input_controller.receive_stream.receive()
             try:
                 with anyio.fail_after(0.2):
-                    second = await app_instance._prompt_receive.receive()
+                    second = await app_instance._input_controller.receive_stream.receive()
             except TimeoutError:
                 second = "<none>"
             return first, second
