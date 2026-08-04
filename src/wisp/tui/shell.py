@@ -1580,6 +1580,8 @@ class TuiShell:
                 pagination.command_id = None
                 self.renderer.command_error(f"Failed to load older session history: {exc}")
                 self._call_renderer_optional("history_page_request_failed")
+                if pagination.latest_reload_pending:
+                    await self._request_latest_history_page()
             return
 
     async def _request_latest_history_page(self) -> None:
