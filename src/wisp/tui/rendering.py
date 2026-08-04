@@ -1111,8 +1111,7 @@ def format_compaction_status(stats: SessionStats) -> str:
     policy = stats.compaction
     trigger = (
         f">{_format_token_count(context.context_window - context.reserve_tokens)}"
-        if context.context_window is not None
-        and context.reserve_tokens < context.context_window
+        if context.context_window is not None and context.reserve_tokens < context.context_window
         else "unavailable"
     )
     eligibility = (
