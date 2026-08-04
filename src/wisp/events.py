@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION: Literal[25] = 25
+EVENT_SCHEMA_VERSION: Literal[26] = 26
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -35,6 +35,7 @@ RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION = 22
 RPC_COMMANDS_SCHEMA_VERSION = 23
 RPC_SESSION_UNREVERT_SCHEMA_VERSION = 24
 PROCESS_METADATA_SCHEMA_VERSION = 25
+COMPACTION_POLICY_SCHEMA_VERSION = 26
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -72,7 +73,7 @@ class WispEvent(BaseModel):
 
     type: str
     schema_version: Literal[
-        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25
+        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -566,6 +567,13 @@ class ProjectConfigApplied(WispEvent):
     auto_compaction_enabled: bool = True
     auth_path: Path
 
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.schema_version < COMPACTION_POLICY_SCHEMA_VERSION:
+            data.pop("auto_compaction_enabled", None)
+        return data
+
 
 class ToolExecutionEnded(WispEvent):
     type: Literal["tool.execution.ended"] = "tool.execution.ended"
@@ -827,6 +835,9 @@ class SessionStatsReported(WispEvent):
         if self.schema_version < COST_ACCOUNTING_SCHEMA_VERSION:
             stats = cast(dict[str, object], data["stats"])
             stats.pop("cost", None)
+        if self.schema_version < COMPACTION_POLICY_SCHEMA_VERSION:
+            stats = cast(dict[str, object], data["stats"])
+            stats.pop("compaction", None)
         return data
 
 
@@ -1349,6 +1360,24 @@ def _require_current_schema(data: JsonObject) -> None:
                 "Session cost metadata requires schema_version "
                 f"{COST_ACCOUNTING_SCHEMA_VERSION} or newer"
             )
+        if (
+            isinstance(stats, dict)
+            and "compaction" in stats
+            and version < COMPACTION_POLICY_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "Session compaction policy requires schema_version "
+                f"{COMPACTION_POLICY_SCHEMA_VERSION} or newer"
+            )
+    if (
+        data.get("type") == "project.config.applied"
+        and "auto_compaction_enabled" in data
+        and version < COMPACTION_POLICY_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "Project compaction policy requires schema_version "
+            f"{COMPACTION_POLICY_SCHEMA_VERSION} or newer"
+        )
     if data.get("type") == "queue.updated" and version < QUEUE_UPDATE_SCHEMA_VERSION:
         raise ValueError(
             f"Queue update events require schema_version {QUEUE_UPDATE_SCHEMA_VERSION} or newer"

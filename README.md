@@ -459,8 +459,9 @@ color disabled; see the open accessibility issues for current coverage.
 
 ## Machine-readable output
 
-Every outbound `WispEvent` includes `"schema_version": 25`; readers also accept legacy schema v5
-through v24 events for compatibility. Schema v25 adds resumable `bash` process metadata to
+Every outbound `WispEvent` includes `"schema_version": 26`; readers also accept legacy schema v5
+through v25 events for compatibility. Schema v26 adds automatic-compaction policy metadata to
+`session.stats` and `project.config.applied`. Schema v25 adds resumable `bash` process metadata to
 `tool.execution.ended` and `tool.result`: `process_id`, `process_state`, `process_error`,
 incremental `stdout`/`stderr`, per-stream truncation flags, and dropped-byte counts.
 

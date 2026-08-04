@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from wisp.agent.context import build_context_budget, context_fingerprint, estimate_context
@@ -205,13 +207,21 @@ def test_context_statistics_events_accept_schema_v9_and_current() -> None:
 
     assert wisp_event_from_json(estimated.model_dump_json()) == estimated
     assert wisp_event_from_json(reported.model_dump_json()) == reported
+    legacy_stats = reported.model_copy(update={"schema_version": 25})
+    legacy_stats_payload = json.loads(legacy_stats.model_dump_json())
+    assert "compaction" not in legacy_stats_payload["stats"]
+    assert wisp_event_from_json(json.dumps(legacy_stats_payload)).schema_version == 25
+    stats_policy_payload = json.loads(reported.model_dump_json())
+    stats_policy_payload["schema_version"] = 25
+    with pytest.raises(ValueError, match="Session compaction policy requires schema_version 26"):
+        wisp_event_from_json(json.dumps(stats_policy_payload))
     assert (
         wisp_event_from_json(
             estimated.model_copy(update={"schema_version": 9}).model_dump_json()
         ).schema_version
         == 9
     )
-    with pytest.raises(ValueError, match="require schema_version 9 through 25"):
+    with pytest.raises(ValueError, match="require schema_version 9 through 26"):
         wisp_event_from_json(estimated.model_copy(update={"schema_version": 8}).model_dump_json())
 
 
