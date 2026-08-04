@@ -1715,7 +1715,9 @@ class TuiShell:
             return
 
         entries = history_entries_from_rpc_messages(report.messages)
-        self._call_renderer_optional("replace_latest_history_entries", entries)
+        replace_latest_entries = getattr(self.renderer, "replace_latest_history_entries", None)
+        if callable(replace_latest_entries) and replace_latest_entries(entries) is False:
+            return
         pagination.next_before_entry_id = report.next_before_entry_id
         self._call_renderer_optional(
             "history_page_loaded",

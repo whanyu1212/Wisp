@@ -297,11 +297,13 @@ class TextualTuiRenderer:
     def replace_latest_history_entries(
         self,
         entries: tuple[HistoricalTranscriptEntry, ...],
-    ) -> None:
+    ) -> bool:
         if self._history.replace_latest_entries(entries):
             self.app.live_history_reloaded()
+            return True
         else:
             self.app.live_history_reload_failed()
+            return False
 
     def latest_history_reload_failed(self) -> None:
         """Allow a later live-widget eviction to retry a failed durable reload."""
