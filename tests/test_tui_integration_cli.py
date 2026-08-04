@@ -4580,6 +4580,28 @@ def test_textual_mouse_wheel_scrolls_transcript_and_updates_follow() -> None:
     assert result["follow_restored"]
 
 
+def test_textual_wheel_outside_transcript_keeps_following_tail() -> None:
+    async def scenario() -> bool:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            input_widget = app_instance.query_one("#input", Input)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+
+            await pilot._post_mouse_events(
+                [events.MouseScrollUp],
+                widget=input_widget,
+                times=1,
+            )
+            await pilot.pause()
+            return transcript.is_following
+
+    assert anyio.run(scenario)
+
+
 def test_textual_home_key_scrolls_transcript_over_input_cursor() -> None:
     # home is priority-bound to the transcript, so it jumps the transcript to the
     # top even while the Input has typed text — it does not move the input cursor.

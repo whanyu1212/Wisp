@@ -569,14 +569,31 @@ class TextualTui(App[None]):
         self._transcript_controller.user_scrolled()
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        self._cancel_card_expand_repin()
-        if self._transcript is not None:
+        if self._wheel_event_targets_transcript(event):
+            self._cancel_card_expand_repin()
+            assert self._transcript is not None
             self._transcript.stop_following()
         self._forward_jump_overlay_scroll(event, direction=-1)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        self._cancel_card_expand_repin()
+        if self._wheel_event_targets_transcript(event):
+            self._cancel_card_expand_repin()
         self._forward_jump_overlay_scroll(event, direction=1)
+
+    def _wheel_event_targets_transcript(
+        self,
+        event: events.MouseScrollUp | events.MouseScrollDown,
+    ) -> bool:
+        """Return whether wheel input originated in the transcript or its overlay row."""
+
+        transcript = self._transcript
+        target = event.widget
+        if transcript is None or target is None:
+            return False
+        if target is transcript or transcript in target.ancestors:
+            return True
+        jump = self._jump_to_latest
+        return jump is not None and target in {jump, jump.parent}
 
     def _forward_jump_overlay_scroll(
         self,
