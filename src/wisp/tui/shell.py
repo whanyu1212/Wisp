@@ -1597,6 +1597,7 @@ class TuiShell:
     async def _request_latest_history_page(self) -> None:
         pagination = self._history_pagination
         if pagination is None:
+            self._call_renderer_optional("latest_history_reload_failed")
             return
         if pagination.latest_command_id is not None:
             return

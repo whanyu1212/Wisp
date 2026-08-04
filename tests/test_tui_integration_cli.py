@@ -9,6 +9,7 @@ from pytest import MonkeyPatch
 from rich.cells import cell_len
 from textual import events
 from textual.content import Content
+from textual.widget import Widget
 from textual.widgets import OptionList, Static
 
 import wisp.cli as cli_module
@@ -2833,6 +2834,31 @@ def test_textual_stream_widget_is_available_before_async_finalization() -> None:
             )
 
     assert anyio.run(scenario)
+
+
+def test_textual_live_eviction_defers_history_reload_while_reader_is_browsing() -> None:
+    async def scenario() -> tuple[int, int]:
+        app_instance, _renderer = create_textual_tui()
+        requests = 0
+
+        async def request_latest() -> None:
+            nonlocal requests
+            requests += 1
+
+        async with app_instance.run_test() as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            app_instance.set_history_latest_request_hook(request_latest)
+            transcript._follow = False
+            app_instance.live_transcript_widget_evicted(Widget())
+            await pilot.pause()
+            deferred_requests = requests
+            transcript.return_to_latest()
+            await pilot.pause()
+            return deferred_requests, requests
+
+    deferred_requests, resumed_requests = anyio.run(scenario)
+    assert deferred_requests == 0
+    assert resumed_requests == 1
 
 
 def test_textual_stream_shutdown_drains_pending_output() -> None:

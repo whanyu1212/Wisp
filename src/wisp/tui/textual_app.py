@@ -326,6 +326,7 @@ class TextualTui(App[None]):
         self._history_window_latest_hook: Callable[[], bool] | None = None
         self._live_widget_evicted_hook: Callable[[Widget], None] | None = None
         self._live_history_reload_pending = False
+        self._live_history_reload_needed = False
         self._history_marker: Widget | None = None
         self._prepending_history = False
         self._history_prepend_mounts: list[AwaitMount] = []
@@ -511,6 +512,7 @@ class TextualTui(App[None]):
                 show_latest()
             self._transcript_controller.clear_unseen_output()
             self._stream.resume_if_deferred()
+            self._request_live_history_reload()
 
     async def on_transcript_need_more_history(self, event: Transcript.NeedMoreHistory) -> None:
         event.stop()
@@ -1169,6 +1171,7 @@ class TextualTui(App[None]):
         self._history_marker = None
         self._prepending_history = False
         self._live_history_reload_pending = False
+        self._live_history_reload_needed = False
         self._history_prepend_mounts.clear()
         self._history_prepend_anchor = None
         self._history_render_depth = 0
@@ -1248,17 +1251,35 @@ class TextualTui(App[None]):
         hook = self._live_widget_evicted_hook
         if hook is not None:
             hook(widget)
+        self._live_history_reload_needed = True
+        self._request_live_history_reload()
+
+    def _request_live_history_reload(self) -> None:
+        transcript = self._transcript
         request_latest = self._history_latest_request_hook
-        if request_latest is not None and not self._live_history_reload_pending:
-            self._live_history_reload_pending = True
-            self.run_worker(
-                request_latest(),
-                group="history-latest-reload",
-                exit_on_error=False,
-            )
+        if (
+            not self._live_history_reload_needed
+            or self._live_history_reload_pending
+            or request_latest is None
+            or transcript is None
+            or not transcript.is_following
+        ):
+            return
+        self._live_history_reload_pending = True
+        self.run_worker(
+            request_latest(),
+            group="history-latest-reload",
+            exit_on_error=False,
+        )
 
     def live_history_reloaded(self) -> None:
         """Allow another durable refresh after the current live-eviction reload settles."""
+
+        self._live_history_reload_pending = False
+        self._live_history_reload_needed = False
+
+    def live_history_reload_failed(self) -> None:
+        """Release a failed request while retaining recovery work for a later retry."""
 
         self._live_history_reload_pending = False
 

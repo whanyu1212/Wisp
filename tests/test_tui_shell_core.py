@@ -608,6 +608,26 @@ def test_tui_shell_releases_live_reload_guard_after_a_latest_history_failure() -
     anyio.run(run)
 
 
+def test_tui_shell_releases_live_reload_guard_without_history_pagination() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.latest_history_failures = 0
+
+        def latest_history_reload_failed(self) -> None:
+            self.latest_history_failures += 1
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+
+        await shell._request_latest_history_page()
+
+        assert renderer.latest_history_failures == 1
+
+    anyio.run(run)
+
+
 def test_tui_shell_reloads_latest_history_after_an_older_page_finishes() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:

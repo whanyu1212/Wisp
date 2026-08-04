@@ -304,7 +304,7 @@ class TextualTuiRenderer:
     def latest_history_reload_failed(self) -> None:
         """Allow a later live-widget eviction to retry a failed durable reload."""
 
-        self.app.live_history_reloaded()
+        self.app.live_history_reload_failed()
 
     def capture_latest_history_reload(self) -> None:
         self._history.capture_latest_reload_live_entries()
