@@ -93,11 +93,7 @@ def _compaction_policy_status(
             threshold_ineligible_reason="automatic compaction is disabled",
             overflow_recovery_enabled=False,
         )
-    if context.context_window is None:
-        return CompactionPolicyStatus(
-            threshold_ineligible_reason="model context window is unknown",
-        )
-    if context.reserve_tokens >= context.context_window:
+    if context.context_window is not None and context.reserve_tokens >= context.context_window:
         return CompactionPolicyStatus(
             threshold_ineligible_reason="reserve consumes the model window",
             overflow_recovery_enabled=False,
@@ -106,8 +102,16 @@ def _compaction_policy_status(
         plan_manual_compaction(replay)
     except NothingToCompactError:
         return CompactionPolicyStatus(
-            threshold_ineligible_reason="no compactable context prefix",
+            threshold_ineligible_reason=(
+                "model context window is unknown"
+                if context.context_window is None
+                else "no compactable context prefix"
+            ),
             overflow_recovery_enabled=False,
+        )
+    if context.context_window is None:
+        return CompactionPolicyStatus(
+            threshold_ineligible_reason="model context window is unknown",
         )
     return CompactionPolicyStatus(
         threshold_eligible=True,

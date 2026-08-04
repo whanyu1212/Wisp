@@ -158,12 +158,24 @@ def test_session_stats_reports_threshold_policy_eligibility() -> None:
         threshold_ineligible_reason=None,
         overflow_recovery_enabled=True,
     )
+    unknown_window_stats = build_session_stats(
+        session_id="s",
+        entries=entries,
+        replay=replay,
+        provider_messages=replay.messages,
+        tools=(),
+        context_window=None,
+        reserve_tokens=100,
+    )
+    assert unknown_window_stats.compaction == CompactionPolicyStatus(
+        threshold_ineligible_reason="model context window is unknown",
+    )
 
 
 @pytest.mark.parametrize(
     ("context_window", "reserve_tokens", "enabled", "reason", "overflow_enabled"),
     [
-        (None, 100, True, "model context window is unknown", True),
+        (None, 100, True, "model context window is unknown", False),
         (100, 100, True, "reserve consumes the model window", False),
         (100, 10, True, "no compactable context prefix", False),
         (100, 10, False, "automatic compaction is disabled", False),
