@@ -25,6 +25,7 @@ from wisp.tui.widgets import ToolCard, WorkingIndicator
 # Keep an evicted widget inside the next durable latest-page reload, whose first
 # entry falls immediately before this bounded visible live suffix.
 TUI_SETTLED_LIVE_WIDGET_LIMIT = TUI_HISTORY_PAGE_LIMIT - 1
+TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT = TUI_HISTORY_PAGE_LIMIT - 1
 
 
 class TextualTranscriptSurface(Protocol):
@@ -83,12 +84,17 @@ class TextualTranscriptController:
         surface: TextualTranscriptSurface,
         *,
         settled_capacity: int = TUI_SETTLED_LIVE_WIDGET_LIMIT,
+        durable_entry_capacity: int = TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT,
     ) -> None:
         if settled_capacity < 1:
             raise ValueError("settled_capacity must be positive")
+        if durable_entry_capacity < 1:
+            raise ValueError("durable_entry_capacity must be positive")
         self._surface = surface
         self._settled_capacity = settled_capacity
-        self._settled_widgets: deque[Widget] = deque()
+        self._durable_entry_capacity = durable_entry_capacity
+        self._settled_widgets: deque[tuple[Widget, int]] = deque()
+        self._settled_durable_entry_count = 0
         self._unseen_output: set[Widget] = set()
         self._tool_cards: dict[str, ToolCard] = {}
         self._historical_tool_cards: dict[str, ToolCard] = {}
@@ -270,7 +276,7 @@ class TextualTranscriptController:
         if status != "pending":
             del self._tool_cards[call_id]
             if card not in self._historical_widgets:
-                self.settle_widget(card)
+                self.settle_widget(card, durable_entry_count=2)
         self._surface.follow_transcript_tail_after_refresh()
         return card
 
@@ -280,7 +286,7 @@ class TextualTranscriptController:
         for card in self._tool_cards.values():
             card.set_state("cancelled", detail=detail)
             self._surface.record_live_transcript_update(card)
-            self.settle_widget(card)
+            self.settle_widget(card, durable_entry_count=2)
         self._tool_cards.clear()
 
     def historical_tool_card(self, card_id: str) -> ToolCard | None:
@@ -298,8 +304,14 @@ class TextualTranscriptController:
         }
         if isinstance(widget, ToolCard):
             self._historical_widgets.discard(widget)
-        self._settled_widgets = deque(
-            candidate for candidate in self._settled_widgets if candidate is not widget
+        retained_settled = deque(
+            (candidate, entry_count)
+            for candidate, entry_count in self._settled_widgets
+            if candidate is not widget
+        )
+        self._settled_widgets = retained_settled
+        self._settled_durable_entry_count = sum(
+            entry_count for _candidate, entry_count in retained_settled
         )
         self._tool_cards = {
             call_id: card for call_id, card in self._tool_cards.items() if card is not widget
@@ -316,6 +328,7 @@ class TextualTranscriptController:
         self._historical_tool_cards.clear()
         self._historical_widgets.clear()
         self._settled_widgets.clear()
+        self._settled_durable_entry_count = 0
         self._card_focus_was_following = False
         self.clear_unseen_output()
 
@@ -336,14 +349,21 @@ class TextualTranscriptController:
         if self._card_focus_was_following and self._surface.is_newest_transcript_widget(card):
             self._surface.return_transcript_to_latest()
 
-    def settle_widget(self, widget: Widget) -> None:
+    def settle_widget(self, widget: Widget, *, durable_entry_count: int = 0) -> None:
         """Retain a completed live widget until the bounded transcript window fills."""
 
-        if widget in self._settled_widgets:
+        if durable_entry_count < 0:
+            raise ValueError("durable_entry_count cannot be negative")
+        if any(candidate is widget for candidate, _entry_count in self._settled_widgets):
             return
-        self._settled_widgets.append(widget)
-        while len(self._settled_widgets) > self._settled_capacity:
-            evicted = self._settled_widgets.popleft()
+        self._settled_widgets.append((widget, durable_entry_count))
+        self._settled_durable_entry_count += durable_entry_count
+        while (
+            len(self._settled_widgets) > self._settled_capacity
+            or self._settled_durable_entry_count > self._durable_entry_capacity
+        ):
+            evicted, evicted_entry_count = self._settled_widgets.popleft()
+            self._settled_durable_entry_count -= evicted_entry_count
             self.discard_unseen_output(evicted)
             self._surface.remove_live_transcript_widget(evicted)
             self._surface.live_transcript_widget_evicted(evicted)
@@ -359,6 +379,7 @@ class TextualTranscriptController:
 
 __all__ = [
     "TUI_SETTLED_LIVE_WIDGET_LIMIT",
+    "TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT",
     "TextualTranscriptController",
     "TextualTranscriptSurface",
 ]

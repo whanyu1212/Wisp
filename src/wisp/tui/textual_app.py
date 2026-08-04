@@ -1270,7 +1270,7 @@ class TextualTui(App[None]):
     def settle_stream_widget(self, widget: Widget) -> None:
         """Bound a completed native Markdown stream like other settled live output."""
 
-        self._transcript_controller.settle_widget(widget)
+        self._transcript_controller.settle_widget(widget, durable_entry_count=1)
 
     def transcript_is_following(self) -> bool:
         """Return whether a mounted transcript currently follows its tail."""
@@ -1439,7 +1439,10 @@ class TextualTui(App[None]):
             return None
         widget = LineMessage(markup, role=role)
         self._mount_transcript_message(widget)
-        self._transcript_controller.settle_widget(widget)
+        self._transcript_controller.settle_widget(
+            widget,
+            durable_entry_count=1 if role in {"user", "assistant"} else 0,
+        )
         self.note_transcript_update(widget)
         self._follow_tail_after_refresh()
         return widget

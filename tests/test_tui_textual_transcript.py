@@ -9,6 +9,7 @@ from textual.widget import Widget
 
 from wisp.tui.history import TUI_HISTORY_PAGE_LIMIT
 from wisp.tui.textual_transcript import (
+    TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT,
     TUI_SETTLED_LIVE_WIDGET_LIMIT,
     TextualTranscriptController,
 )
@@ -201,6 +202,24 @@ def test_settled_live_widgets_are_bounded_and_released_for_durable_history() -> 
 
 def test_settled_live_limit_keeps_the_first_eviction_in_one_history_page() -> None:
     assert TUI_SETTLED_LIVE_WIDGET_LIMIT == TUI_HISTORY_PAGE_LIMIT - 1
+    assert TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT == TUI_HISTORY_PAGE_LIMIT - 1
+
+
+def test_settled_live_widgets_are_also_bounded_by_durable_entry_count() -> None:
+    surface = _Surface()
+    controller = TextualTranscriptController(
+        surface,
+        settled_capacity=4,
+        durable_entry_capacity=2,
+    )
+    first = Widget()
+    second = Widget()
+
+    controller.settle_widget(first, durable_entry_count=2)
+    controller.settle_widget(second, durable_entry_count=2)
+
+    assert controller.settled_widget_count == 1
+    assert surface.removed == [first]
 
 
 def test_pending_tool_cards_are_not_eligible_for_settled_widget_eviction() -> None:

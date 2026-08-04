@@ -1473,6 +1473,8 @@ class Transcript(VerticalScroll):
         super().watch_scroll_y(old_value, new_value)
         self._follow = self.is_vertical_scroll_end
         if self._follow != previous:
+            if not self._follow:
+                self._follow_generation += 1
             self.post_message(self.FollowChanged(self._follow))
         if new_value > 0:
             self._history_request_armed = True
