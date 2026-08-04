@@ -100,7 +100,7 @@ class TextualHistorySurface(Protocol):
         detail: str | Content | DiffPresentation = "",
         full_output: str = "",
         truncated: bool = False,
-    ) -> None: ...
+    ) -> Widget | None: ...
 
     def historical_tool_card(self, card_id: str) -> Widget | None: ...
 
@@ -121,6 +121,7 @@ class _LiveHistoryEntry:
     role: Literal["user", "assistant"] | None = None
     content: str | None = None
     tool_call_id: str | None = None
+    widget: Widget | None = None
 
 
 class TextualHistoryController:
@@ -159,11 +160,19 @@ class TextualHistoryController:
 
         self._append_entries(tuple(entries))
 
-    def record_live_message(self, role: Literal["user", "assistant"], content: str) -> None:
+    def record_live_message(
+        self,
+        role: Literal["user", "assistant"],
+        content: str,
+        *,
+        widget: Widget | None = None,
+    ) -> None:
         """Remember a live persisted message so a durable reload does not duplicate it."""
 
         if content:
-            self._append_live_entry(_LiveHistoryEntry(kind="message", role=role, content=content))
+            self._append_live_entry(
+                _LiveHistoryEntry(kind="message", role=role, content=content, widget=widget)
+            )
 
     def discard_live_message(self, role: Literal["user", "assistant"], content: str) -> None:
         """Forget a live message that did not become a durable session entry."""
@@ -174,20 +183,41 @@ class TextualHistoryController:
                 del self._live_entries[index]
                 return
 
-    def record_live_tool_call(self, tool_call_id: str) -> None:
+    def record_live_tool_call(self, tool_call_id: str, *, widget: Widget | None = None) -> None:
         """Remember a pending live tool card as the durable history page would render it."""
 
-        self._append_live_entry(_LiveHistoryEntry(kind="tool", tool_call_id=tool_call_id))
+        self._append_live_entry(
+            _LiveHistoryEntry(kind="tool", tool_call_id=tool_call_id, widget=widget)
+        )
 
-    def record_live_tool_result(self, tool_call_id: str) -> None:
+    def record_live_tool_result(self, tool_call_id: str, *, widget: Widget | None = None) -> None:
         """Replace a pending live tool card identity with its persisted result identity."""
 
+        prior_widget = next(
+            (
+                entry.widget
+                for entry in reversed(self._live_entries)
+                if entry.kind == "tool" and entry.tool_call_id == tool_call_id
+            ),
+            None,
+        )
         self._live_entries = [
             entry
             for entry in self._live_entries
             if not (entry.kind == "tool" and entry.tool_call_id == tool_call_id)
         ]
-        self._append_live_entry(_LiveHistoryEntry(kind="tool", tool_call_id=tool_call_id))
+        self._append_live_entry(
+            _LiveHistoryEntry(
+                kind="tool",
+                tool_call_id=tool_call_id,
+                widget=widget or prior_widget,
+            )
+        )
+
+    def forget_live_widget(self, widget: Widget) -> None:
+        """Allow an evicted live entry to reappear through durable history paging."""
+
+        self._live_entries = [entry for entry in self._live_entries if entry.widget is not widget]
 
     def replace_entries(
         self,

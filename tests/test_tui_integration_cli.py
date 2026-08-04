@@ -2780,6 +2780,26 @@ def test_textual_streaming_survives_a_burst_without_dropping_text() -> None:
     assert texts == ["The quick brown fox"]
 
 
+def test_textual_streaming_coalesces_one_pending_drain_per_turn() -> None:
+    async def scenario() -> tuple[int, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("first ")
+            await pilot.pause()
+            for delta in ("batched ", "stream ", "output"):
+                renderer.token_delta(delta)
+            turn = app_instance._stream._turn
+            assert turn is not None
+            pending_callbacks = app_instance._stream._pending_callbacks
+            renderer.end_token_stream()
+            await app_instance.wait_for_stream_idle()
+            return pending_callbacks, _transcript_texts(app_instance)[0]
+
+    pending_callbacks, text = anyio.run(scenario)
+    assert pending_callbacks == 1
+    assert text == "first batched stream output"
+
+
 def test_textual_end_token_stream_finalizes_the_bubble() -> None:
     # end_token_stream() is the ONLY place a streamed assistant turn is finalized
     # (the shell suppresses the trailing MessageCompleted when tokens rendered).
@@ -3165,6 +3185,32 @@ def test_textual_status_activity_animates_spinner_and_counts_elapsed() -> None:
     assert start.endswith("0s")
     assert later.endswith("1s")  # counter advanced with elapsed time
     assert start[0] in WorkingIndicator._FRAMES  # a braille frame, not the old dot
+
+
+def test_textual_working_indicator_ticks_without_relayout(monkeypatch: MonkeyPatch) -> None:
+    layouts: list[bool] = []
+    original_update = WorkingIndicator.update
+
+    def record_update(self: WorkingIndicator, content: object = "", *, layout: bool = True) -> None:
+        layouts.append(layout)
+        original_update(self, content, layout=layout)
+
+    monkeypatch.setattr(WorkingIndicator, "update", record_update)
+
+    async def scenario() -> list[bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            await pilot.pause()
+            indicator = app_instance.query_one(WorkingIndicator)
+            layouts.clear()
+            indicator._tick()
+            indicator._tick()
+            return layouts
+
+    layouts = anyio.run(scenario)
+    assert len(layouts) >= 2
+    assert not any(layouts)
 
 
 def test_textual_retry_progress_mutates_status_and_rejects_older_attempts() -> None:

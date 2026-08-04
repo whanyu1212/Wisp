@@ -37,8 +37,9 @@ DEFAULT_SCENARIO_MESSAGE_COUNTS = (2_000, 5_000)
 @dataclass(frozen=True)
 class ScenarioConfig:
     message_count: int = 2_000
-    page_size: int = 100
+    page_size: int = TUI_TRANSCRIPT_WINDOW_SIZE
     stream_chunks: int = 20
+    stream_interval_seconds: float = 0.02
 
 
 @dataclass(frozen=True)
@@ -54,9 +55,14 @@ class ScenarioReport:
     prepend_render_ms: tuple[float, ...]
     mounted_widget_counts: tuple[int, ...]
     retained_entry_counts: tuple[int, ...]
+    idle_page_up_ms: float
     scroll_while_process_ms: float
     stream_following_tail_ms: float
+    stream_page_up_ms: float
     stream_scrolled_back_ms: float
+    stream_max_event_loop_stall_ms: float
+    stream_markdown_writes: int
+    settled_live_widget_count: int
     final_following: bool
     final_unseen_output_count: int
     process_state: str
@@ -148,6 +154,8 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
 
     if config.message_count < 1 or config.page_size < 1 or config.stream_chunks < 1:
         raise ValueError("message_count, page_size, and stream_chunks must be positive")
+    if config.stream_interval_seconds <= 0:
+        raise ValueError("stream_interval_seconds must be positive")
     with tempfile.TemporaryDirectory(prefix="wisp-tui-benchmark-") as temporary_directory:
         root = Path(temporary_directory)
         store = JsonlSessionStore(root)
@@ -195,6 +203,16 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     if retained_counts[-1] > TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT:
                         raise RuntimeError("Transcript history exceeded its retention capacity")
 
+                await _wait_for(pilot, lambda: transcript.max_scroll_y > 0)
+                transcript.return_to_latest()
+                await pilot.pause()
+                started = time.perf_counter_ns()
+                transcript.page_up()
+                await pilot.pause()
+                idle_page_up_ms = _milliseconds(started)
+                transcript.return_to_latest()
+                await pilot.pause()
+
                 command = _cpu_command()
                 process_id = await supervisor.start(
                     command, cwd=root, timeout=_WORKER_TIMEOUT_SECONDS
@@ -220,7 +238,8 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 await _wait_for(
                     pilot,
                     lambda: (
-                        transcript.is_following and transcript.scroll_y == transcript.max_scroll_y
+                        transcript.is_following
+                        and transcript.scroll_y >= transcript.max_scroll_y - 3
                     ),
                 )
                 scroll_while_process_ms = _milliseconds(started)
@@ -237,27 +256,46 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                     for index in range(config.stream_chunks)
                 )
                 started = time.perf_counter_ns()
+                stream_max_event_loop_stall_ms = 0.0
                 for chunk in stream_chunks:
+                    chunk_started = time.perf_counter_ns()
                     renderer.token_delta(f"{chunk}\n\n")
+                    await anyio.sleep(config.stream_interval_seconds)
+                    stream_max_event_loop_stall_ms = max(
+                        stream_max_event_loop_stall_ms,
+                        max(
+                            0.0,
+                            _milliseconds(chunk_started) - config.stream_interval_seconds * 1_000,
+                        ),
+                    )
                 renderer.end_token_stream()
                 await app.wait_for_stream_idle()
                 await pilot.pause()
                 await _wait_for(
                     pilot,
                     lambda: (
-                        transcript.is_following and transcript.scroll_y == transcript.max_scroll_y
+                        transcript.is_following
+                        and transcript.scroll_y >= transcript.max_scroll_y - 3
                     ),
                 )
                 stream_following_tail_ms = _milliseconds(started)
+                stream_markdown_writes = app.last_stream_write_count
 
                 await _wait_for(pilot, lambda: transcript.max_scroll_y > 0)
-                transcript.scroll_to(
-                    y=transcript.max_scroll_y / 2,
-                    animate=False,
-                    immediate=True,
-                )
+                transcript.return_to_latest()
+                renderer.token_delta("streaming page-up latency probe")
                 await pilot.pause()
-                await _wait_for(pilot, lambda: 0 < transcript.scroll_y < transcript.max_scroll_y)
+                started = time.perf_counter_ns()
+                transcript.page_up()
+                await pilot.pause()
+                stream_page_up_ms = _milliseconds(started)
+                renderer.end_token_stream()
+                await app.wait_for_stream_idle()
+                transcript.return_to_latest()
+                await pilot.pause()
+
+                transcript.page_up()
+                await pilot.pause()
                 await _wait_for(pilot, lambda: not transcript.is_following)
                 started = time.perf_counter_ns()
                 renderer.token_delta("\n\nscrolled-back stream output")
@@ -267,6 +305,7 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 stream_scrolled_back_ms = _milliseconds(started)
                 final_following = transcript.is_following
                 final_unseen_output_count = app._transcript_controller.unseen_output_count
+                settled_live_widget_count = app._transcript_controller.settled_widget_count
 
         finally:
             if process_id is not None:
@@ -285,9 +324,14 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
             prepend_render_ms=tuple(prepend_render_ms),
             mounted_widget_counts=tuple(mounted_counts),
             retained_entry_counts=tuple(retained_counts),
+            idle_page_up_ms=idle_page_up_ms,
             scroll_while_process_ms=scroll_while_process_ms,
             stream_following_tail_ms=stream_following_tail_ms,
+            stream_page_up_ms=stream_page_up_ms,
             stream_scrolled_back_ms=stream_scrolled_back_ms,
+            stream_max_event_loop_stall_ms=stream_max_event_loop_stall_ms,
+            stream_markdown_writes=stream_markdown_writes,
+            settled_live_widget_count=settled_live_widget_count,
             final_following=final_following,
             final_unseen_output_count=final_unseen_output_count,
             process_state=process_state,
@@ -304,6 +348,11 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--page-size", type=int, default=ScenarioConfig.page_size)
     parser.add_argument("--stream-chunks", type=int, default=ScenarioConfig.stream_chunks)
+    parser.add_argument(
+        "--stream-interval-seconds",
+        type=float,
+        default=ScenarioConfig.stream_interval_seconds,
+    )
     parser.add_argument("--output", type=Path)
     return parser.parse_args(arguments)
 
@@ -311,16 +360,18 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
 async def _main(arguments: Sequence[str] | None = None) -> None:
     parsed = _parse_args(arguments)
     message_counts = tuple(parsed.messages or DEFAULT_SCENARIO_MESSAGE_COUNTS)
-    reports = tuple(
-        await run_scenario(
-            ScenarioConfig(
-                message_count=message_count,
-                page_size=parsed.page_size,
-                stream_chunks=parsed.stream_chunks,
+    reports: list[ScenarioReport] = []
+    for message_count in message_counts:
+        reports.append(
+            await run_scenario(
+                ScenarioConfig(
+                    message_count=message_count,
+                    page_size=parsed.page_size,
+                    stream_chunks=parsed.stream_chunks,
+                    stream_interval_seconds=parsed.stream_interval_seconds,
+                )
             )
         )
-        for message_count in message_counts
-    )
     payload = json.dumps([asdict(report) for report in reports], indent=2, sort_keys=True)
     print(payload)
     if parsed.output is not None:

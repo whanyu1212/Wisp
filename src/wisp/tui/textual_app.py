@@ -324,6 +324,8 @@ class TextualTui(App[None]):
         self._history_latest_request_hook: Callable[[], Awaitable[None]] | None = None
         self._history_window_older_hook: Callable[[], bool] | None = None
         self._history_window_latest_hook: Callable[[], bool] | None = None
+        self._live_widget_evicted_hook: Callable[[Widget], None] | None = None
+        self._live_history_reload_pending = False
         self._history_marker: Widget | None = None
         self._prepending_history = False
         self._history_prepend_mounts: list[AwaitMount] = []
@@ -566,6 +568,8 @@ class TextualTui(App[None]):
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         self._cancel_card_expand_repin()
+        if self._transcript is not None:
+            self._transcript.stop_following()
         self._forward_jump_overlay_scroll(event, direction=-1)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
@@ -947,7 +951,7 @@ class TextualTui(App[None]):
             return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
-            self._transcript.action_page_up()
+            self._transcript.page_up()
 
     def action_scroll_transcript_page_down(self) -> None:
         if self._decision_panel is not None and self._decision_panel.is_open:
@@ -964,7 +968,7 @@ class TextualTui(App[None]):
             return
         self._cancel_card_expand_repin()
         if self._transcript is not None:
-            self._transcript.action_page_down()
+            self._transcript.page_down()
 
     def action_scroll_transcript_home(self) -> None:
         if self._decision_panel is not None and self._decision_panel.is_open:
@@ -982,7 +986,7 @@ class TextualTui(App[None]):
         self._cancel_card_expand_repin()
         if self._transcript is not None:
             self._transcript_navigation_generation += 1
-            self._transcript.scroll_home(animate=False)
+            self._transcript.scroll_to_oldest()
             shift_older = self._history_window_older_hook
             if shift_older is not None and shift_older():
                 return
@@ -1164,6 +1168,7 @@ class TextualTui(App[None]):
         self._transcript_epoch += 1
         self._history_marker = None
         self._prepending_history = False
+        self._live_history_reload_pending = False
         self._history_prepend_mounts.clear()
         self._history_prepend_anchor = None
         self._history_render_depth = 0
@@ -1236,6 +1241,36 @@ class TextualTui(App[None]):
 
         with suppress(Exception):
             widget.remove()
+
+    def live_transcript_widget_evicted(self, widget: Widget) -> None:
+        """Let the renderer release live de-duplication after bounded eviction."""
+
+        hook = self._live_widget_evicted_hook
+        if hook is not None:
+            hook(widget)
+        request_latest = self._history_latest_request_hook
+        if request_latest is not None and not self._live_history_reload_pending:
+            self._live_history_reload_pending = True
+            self.run_worker(
+                request_latest(),
+                group="history-latest-reload",
+                exit_on_error=False,
+            )
+
+    def live_history_reloaded(self) -> None:
+        """Allow another durable refresh after the current live-eviction reload settles."""
+
+        self._live_history_reload_pending = False
+
+    def set_live_widget_evicted_hook(self, hook: Callable[[Widget], None]) -> None:
+        """Register the renderer-owned durable-history identity release hook."""
+
+        self._live_widget_evicted_hook = hook
+
+    def settle_stream_widget(self, widget: Widget) -> None:
+        """Bound a completed native Markdown stream like other settled live output."""
+
+        self._transcript_controller.settle_widget(widget)
 
     def transcript_is_following(self) -> bool:
         """Return whether a mounted transcript currently follows its tail."""
@@ -1335,10 +1370,10 @@ class TextualTui(App[None]):
         elapsed: float | None = None,
         full_output: str = "",
         truncated: bool = False,
-    ) -> None:
+    ) -> ToolCard | None:
         """Resolve a registered tool card in place."""
 
-        self._transcript_controller.resolve_tool_call(
+        return self._transcript_controller.resolve_tool_call(
             call_id,
             status,
             detail=detail,
@@ -1381,31 +1416,33 @@ class TextualTui(App[None]):
         self._mount_transcript_message(widget, before=before)
         self._history_marker = widget
 
-    def write_user(self, message: str) -> None:
-        self.write_labeled("you:", message, role="user")
+    def write_user(self, message: str) -> LineMessage | None:
+        return self.write_labeled("you:", message, role="user")
 
-    def write_assistant(self, message: str) -> None:
-        self.write_labeled("assistant:", message, role="assistant")
+    def write_assistant(self, message: str) -> LineMessage | None:
+        return self.write_labeled("assistant:", message, role="assistant")
 
-    def write_labeled(self, label: str, message: str = "", *, role: str) -> None:
+    def write_labeled(self, label: str, message: str = "", *, role: str) -> LineMessage | None:
         # `label` is a fixed literal styled with the role's theme color; `message`
         # is untrusted and escaped, preserving the escape-at-boundary invariant.
         style = self._style(role)
         text = f"[{style}]{label}[/{style}]" if style else label
         if message:
             text += f" {_markup_escape(message)}"
-        self._mount_line(role, text)
+        return self._mount_line(role, text)
 
-    def _mount_line(self, role: str, markup: str) -> None:
+    def _mount_line(self, role: str, markup: str) -> LineMessage | None:
         # Mount one role-styled LineMessage. Transcript owns the transcript and
         # its own follow-the-tail intent; we just re-assert the follow after the
         # mount lays out.
         if self._transcript is None:
-            return
+            return None
         widget = LineMessage(markup, role=role)
         self._mount_transcript_message(widget)
+        self._transcript_controller.settle_widget(widget)
         self.note_transcript_update(widget)
         self._follow_tail_after_refresh()
+        return widget
 
     def mount_historical_line(
         self,
@@ -1664,6 +1701,17 @@ class TextualTui(App[None]):
 
     def flush_stream(self) -> None:
         self._stream.flush()
+
+    def stream_widget_for_completed_message(self) -> Widget | None:
+        """Return the completed stream widget represented by a suppressed message event."""
+
+        return self._stream.last_completed_widget
+
+    @property
+    def last_stream_write_count(self) -> int:
+        """Return native Markdown writes used by the latest completed stream turn."""
+
+        return self._stream.last_completed_write_count
 
     async def wait_for_stream_idle(self) -> None:
         """Wait for scheduled native Markdown streaming work to finish."""

@@ -12,13 +12,17 @@ providers, persisted-history controller, or Markdown stream controller.
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Protocol
 
 from textual.content import Content
 from textual.widget import Widget
 
 from wisp.tui.diff_presentation import DiffPresentation
+from wisp.tui.transcript_window import TUI_TRANSCRIPT_WINDOW_SIZE
 from wisp.tui.widgets import ToolCard, WorkingIndicator
+
+TUI_SETTLED_LIVE_WIDGET_LIMIT = TUI_TRANSCRIPT_WINDOW_SIZE
 
 
 class TextualTranscriptSurface(Protocol):
@@ -59,6 +63,9 @@ class TextualTranscriptSurface(Protocol):
     def hide_unseen_output(self) -> None:
         """Hide the jump-to-latest affordance."""
 
+    def live_transcript_widget_evicted(self, widget: Widget) -> None:
+        """Forget a durable live identity after its widget leaves the transcript."""
+
 
 class TextualTranscriptController:
     """Own transient live transcript cards, activity, and follow presentation.
@@ -69,11 +76,21 @@ class TextualTranscriptController:
     tool-card state and route Textual events into its narrow lifecycle methods.
     """
 
-    def __init__(self, surface: TextualTranscriptSurface) -> None:
+    def __init__(
+        self,
+        surface: TextualTranscriptSurface,
+        *,
+        settled_capacity: int = TUI_SETTLED_LIVE_WIDGET_LIMIT,
+    ) -> None:
+        if settled_capacity < 1:
+            raise ValueError("settled_capacity must be positive")
         self._surface = surface
+        self._settled_capacity = settled_capacity
+        self._settled_widgets: deque[Widget] = deque()
         self._unseen_output: set[Widget] = set()
         self._tool_cards: dict[str, ToolCard] = {}
         self._historical_tool_cards: dict[str, ToolCard] = {}
+        self._historical_widgets: set[ToolCard] = set()
         self._working_indicator: WorkingIndicator | None = None
         self._card_focus_was_following = False
 
@@ -94,6 +111,12 @@ class TextualTranscriptController:
         """Return the transient activity widget, if one is currently mounted."""
 
         return self._working_indicator
+
+    @property
+    def settled_widget_count(self) -> int:
+        """Return the bounded count of completed live transcript widgets."""
+
+        return len(self._settled_widgets)
 
     def note_update(self, widget: Widget) -> None:
         """Mark one distinct widget unseen unless the reader follows the tail."""
@@ -186,6 +209,7 @@ class TextualTranscriptController:
         self._tool_cards[call_id] = card
         if historical_card_id is not None:
             self._historical_tool_cards[historical_card_id] = card
+            self._historical_widgets.add(card)
         self._surface.mount_live_transcript_widget(card, before=before)
         self._surface.record_live_transcript_update(card)
         self._surface.follow_transcript_tail_after_refresh()
@@ -227,12 +251,12 @@ class TextualTranscriptController:
         elapsed: float | None = None,
         full_output: str = "",
         truncated: bool = False,
-    ) -> None:
+    ) -> ToolCard | None:
         """Resolve a registered card in place and retire terminal registry entries."""
 
         card = self._tool_cards.get(call_id)
         if card is None:
-            return
+            return None
         card.set_state(
             status,
             detail=detail,
@@ -243,7 +267,10 @@ class TextualTranscriptController:
         self._surface.record_live_transcript_update(card)
         if status != "pending":
             del self._tool_cards[call_id]
+            if card not in self._historical_widgets:
+                self.settle_widget(card)
         self._surface.follow_transcript_tail_after_refresh()
+        return card
 
     def fail_pending_tool_calls(self, detail: str = "cancelled") -> None:
         """Cancel all unresolved cards so no timer or lookup leaks into a later turn."""
@@ -251,6 +278,7 @@ class TextualTranscriptController:
         for card in self._tool_cards.values():
             card.set_state("cancelled", detail=detail)
             self._surface.record_live_transcript_update(card)
+            self.settle_widget(card)
         self._tool_cards.clear()
 
     def historical_tool_card(self, card_id: str) -> ToolCard | None:
@@ -266,6 +294,11 @@ class TextualTranscriptController:
             for card_id, card in self._historical_tool_cards.items()
             if card is not widget
         }
+        if isinstance(widget, ToolCard):
+            self._historical_widgets.discard(widget)
+        self._settled_widgets = deque(
+            candidate for candidate in self._settled_widgets if candidate is not widget
+        )
         self._tool_cards = {
             call_id: card for call_id, card in self._tool_cards.items() if card is not widget
         }
@@ -279,6 +312,8 @@ class TextualTranscriptController:
         self.hide_working_indicator()
         self._tool_cards.clear()
         self._historical_tool_cards.clear()
+        self._historical_widgets.clear()
+        self._settled_widgets.clear()
         self._card_focus_was_following = False
         self.clear_unseen_output()
 
@@ -299,6 +334,18 @@ class TextualTranscriptController:
         if self._card_focus_was_following and self._surface.is_newest_transcript_widget(card):
             self._surface.return_transcript_to_latest()
 
+    def settle_widget(self, widget: Widget) -> None:
+        """Retain a completed live widget until the bounded transcript window fills."""
+
+        if widget in self._settled_widgets:
+            return
+        self._settled_widgets.append(widget)
+        while len(self._settled_widgets) > self._settled_capacity:
+            evicted = self._settled_widgets.popleft()
+            self.discard_unseen_output(evicted)
+            self._surface.remove_live_transcript_widget(evicted)
+            self._surface.live_transcript_widget_evicted(evicted)
+
     def _mount_working_indicator(self, indicator: WorkingIndicator) -> None:
         if not self._surface.transcript_available():
             return
@@ -308,4 +355,8 @@ class TextualTranscriptController:
         self._surface.follow_transcript_tail_after_refresh()
 
 
-__all__ = ["TextualTranscriptController", "TextualTranscriptSurface"]
+__all__ = [
+    "TUI_SETTLED_LIVE_WIDGET_LIMIT",
+    "TextualTranscriptController",
+    "TextualTranscriptSurface",
+]

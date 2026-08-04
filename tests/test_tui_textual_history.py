@@ -364,3 +364,17 @@ def test_history_controller_uses_the_live_snapshot_from_the_reload_request() -> 
 
     assert surface.latest_history_requests == 1
     assert surface.history_labels == []
+
+
+def test_history_controller_releases_evicted_live_widget_identity() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    widget = Widget()
+    controller.record_live_message("assistant", "evicted response", widget=widget)
+    controller.forget_live_widget(widget)
+
+    controller.replace_latest_entries(
+        (HistoricalTranscriptMessage(role="assistant", content="evicted response"),)
+    )
+
+    assert surface.history_labels == ["assistant: evicted response"]
