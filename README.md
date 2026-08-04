@@ -837,25 +837,33 @@ scheduling, approval/trust responses, selected-session state, and configuration 
 `AgentHarness` owns the in-memory transcript and cancellation, while `run_agent_loop` remains
 independent of sessions and frontends. The TUI consumes the same runtime through RPC events.
 
-Within the Textual frontend, transient presentation state has a separate inward-facing boundary:
+Within the Textual frontend, presentation state has explicit, inward-facing owners:
 
 ```text
 TuiShell / RPC state
         ↓
-TextualTui orchestration
-        ├──→ presentation widgets
-        │            ↓
-        └──→ TextualOverlayController
+TextualTuiRenderer ──→ TextualHistoryController
+        ↓                     ↓
+     TextualTui orchestration ─→ mounted transcript/history widgets
+        ├──→ TextualInputController      → prompt history / compact echoes
+        ├──→ TextualOverlayController    → structural overlay/viewport surfaces
+        ├──→ TextualTranscriptController → ToolCard / WorkingIndicator widgets
+        └──→ MarkdownStreamController    → StreamMessage widget
 ```
 
-The shell owns agent, session, and approval decisions. `TextualTui` translates those decisions
-into presentation operations, while `TextualOverlayController` exclusively coordinates overlay
-visibility, composer focus, application-wide stale-input barriers, and temporary transcript
-viewport snapshots.
-Widgets retain their rendered content and local interaction state. The concrete import graph is
-`textual_app → widgets → overlay` plus `textual_app → overlay`: widgets import shared viewport
-state from the controller module, while the controller depends only on structural surface
-protocols and imports neither concrete widgets nor the shell/session runtime.
+The shell owns agent, session, provider, and approval decisions. `TextualTuiRenderer` translates
+typed events and owns event-order/progress bookkeeping; `TextualTui` routes framework events and
+coordinates cross-controller session replacement. `TextualInputController` owns the process-local
+input queue, recall history, and compact-paste echoes. `TextualOverlayController` owns overlay
+visibility, composer focus, stale-input barriers, and temporary viewport snapshots.
+`TextualHistoryController` owns the bounded persisted-history window, while
+`TextualTranscriptController` owns only live card/activity/unseen-output presentation state.
+`MarkdownStreamController` remains the owner of asynchronous Markdown writes.
+
+Widgets retain rendered content and widget-local interaction state. Controllers do not import the
+shell, RPC, provider, session, or agent runtime; history and input controllers additionally avoid
+concrete widgets through structural surfaces. The app is the only owner of Textual mounting/layout
+restoration, and no controller moves runtime or approval policy into the UI.
 
 Providers yield typed events from `wisp.providers`. A stream may emit zero or more
 `ProviderRetrying` events before exactly one `ProviderResponseStarted`, followed by zero or more

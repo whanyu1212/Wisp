@@ -1,4 +1,15 @@
-"""Textual-based fullscreen TUI adapter for Wisp."""
+"""Textual widget routing and cross-controller orchestration for Wisp's TUI.
+
+State ownership is deliberately narrow: ``TextualInputController`` owns the
+process-local input queue, prompt recall, and compact echoes;
+``TextualOverlayController`` owns transient overlay/focus transitions;
+``TextualHistoryController`` owns persisted-history retention; and
+``TextualTranscriptController`` owns transient live transcript presentation.
+``MarkdownStreamController`` remains the owner of native asynchronous Markdown
+writes. ``TextualTui`` composes these owners, routes framework events, and owns
+Textual-specific mounting and layout restoration; it does not interpret agent,
+provider, session, approval, or RPC policy.
+"""
 
 from __future__ import annotations
 
@@ -35,6 +46,7 @@ from wisp.tui.rendering import (
 from wisp.tui.stream_buffer import MarkdownStreamController
 from wisp.tui.textual_input import TextualInputController
 from wisp.tui.textual_renderer import TextualTuiRenderer
+from wisp.tui.textual_transcript import TextualTranscriptController
 from wisp.tui.theme import WISP_THEMES, role_styles
 from wisp.tui.widgets import (
     CommandPalette,
@@ -48,7 +60,6 @@ from wisp.tui.widgets import (
     StatusBar,
     ToolCard,
     Transcript,
-    WorkingIndicator,
 )
 
 # Plain Rich color names used only before on_mount resolves the themed palette
@@ -293,6 +304,7 @@ class TextualTui(App[None]):
     def __init__(self) -> None:
         super().__init__()
         self._input_controller = TextualInputController(self)
+        self._transcript_controller = TextualTranscriptController(self)
         self._status: StatusBar | None = None
         self._transcript: Transcript | None = None
         self._jump_to_latest: JumpToLatest | None = None
@@ -328,23 +340,6 @@ class TextualTui(App[None]):
         # on_mount. LineMessage widgets carry it as pre-composed markup.
         self._role_styles: dict[str, str] = {}
         self._stream = MarkdownStreamController(self)
-        # Distinct transcript widgets changed while the user is reading history.
-        # A set keeps token deltas and in-place tool-card updates from inflating
-        # the jump-to-latest count.
-        self._unseen_output: set[Widget] = set()
-        # call_id → ToolCard, so the request, approval, and result events for one
-        # tool call all mutate the same card instead of stacking three lines.
-        self._tool_cards: dict[str, ToolCard] = {}
-        self._historical_tool_cards: dict[str, ToolCard] = {}
-        # Whether the transcript was following the tail at the moment a ToolCard
-        # took focus. Captured then (before Textual's deferred center-scroll of a
-        # card taller than the viewport flips follow off) so an explicit keyboard
-        # expand can re-pin the tail it would otherwise have scrolled away from,
-        # without yanking a reader who had deliberately scrolled up.
-        self._card_focus_was_following = False
-        # Main-screen heartbeat (opencode-style): a dim WorkingIndicator row in the
-        # transcript right after the user prompt, not in the stable footer chrome.
-        self._working_indicator: Widget | None = None
 
     def clear_prompt_editor(self) -> None:
         """Clear the editor when an input-controller transition requests it."""
@@ -510,7 +505,7 @@ class TextualTui(App[None]):
             show_latest = self._history_window_latest_hook
             if show_latest is not None:
                 show_latest()
-            self._clear_unseen_output()
+            self._transcript_controller.clear_unseen_output()
             self._stream.resume_if_deferred()
 
     async def on_transcript_need_more_history(self, event: Transcript.NeedMoreHistory) -> None:
@@ -538,14 +533,10 @@ class TextualTui(App[None]):
             self._decision_panel.focus_options()
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
-        # A ToolCard taller than the viewport is center-scrolled by Textual when it
-        # takes focus, which settles the transcript off the bottom and flips follow
-        # off before an expand can re-pin. Record the follow intent now — this fires
-        # before that deferred scroll — so on_tool_card_toggled can restore it. A
-        # deliberate user scroll before the expand clears this (_cancel_card_expand_repin),
-        # so the re-pin never yanks a reader who has since left the tail.
-        if isinstance(event.widget, ToolCard) and self._transcript is not None:
-            self._card_focus_was_following = self._transcript.is_following
+        # Capture follow intent before Textual's deferred center-scroll of a tall
+        # card can drop it; the controller clears this intent after user scrolling.
+        if isinstance(event.widget, ToolCard):
+            self._transcript_controller.tool_card_focused(event.widget)
 
     def on_tool_card_toggled(self, event: ToolCard.Toggled) -> None:
         # A card grew or shrank. Re-pin the tail only when the *newest* card (the
@@ -554,12 +545,7 @@ class TextualTui(App[None]):
         # off first. Expanding an older card, or one the reader scrolled up to reach,
         # leaves the viewport alone so the freshly revealed content isn't yanked away.
         event.stop()
-        transcript = self._transcript
-        if transcript is None:
-            return
-        is_newest = bool(transcript.children) and transcript.children[-1] is event.card
-        if self._card_focus_was_following and is_newest:
-            transcript.return_to_latest()
+        self._transcript_controller.tool_card_toggled(event.card)
 
     def on_tool_card_leave_requested(self, event: ToolCard.LeaveRequested) -> None:
         # Escape on a focused card hands focus back to the resting target: the input,
@@ -573,11 +559,8 @@ class TextualTui(App[None]):
             self._decision_panel.focus_options()
 
     def _cancel_card_expand_repin(self) -> None:
-        # A user scroll after focusing a card is a deliberate move away from the tail,
-        # so an expand must no longer re-pin (see on_descendant_focus). Called only from
-        # the *user* scroll paths — the programmatic focus center-scroll doesn't route
-        # through them, so the tall-newest-card re-pin it exists for is unaffected.
-        self._card_focus_was_following = False
+        # A user scroll after focusing a card is a deliberate move away from the tail.
+        self._transcript_controller.user_scrolled()
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         self._cancel_card_expand_repin()
@@ -1024,7 +1007,7 @@ class TextualTui(App[None]):
         if self._transcript is not None:
             self._transcript_navigation_generation += 1
             self._transcript.return_to_latest()
-        self._clear_unseen_output()
+        self._transcript_controller.clear_unseen_output()
 
     def _signal_input(self, signal: BaseException, *, action: str) -> None:
         # Pending compact echoes remain intact here. Ctrl+C/EOF can merely deny an
@@ -1177,14 +1160,9 @@ class TextualTui(App[None]):
         self._history_render_mounts.clear()
         self._last_history_render_mounts = ()
         self._history_layout_generation += 1
-        self.hide_working_indicator()
         self._stream.discard()
-        self._tool_cards.clear()
-        self._historical_tool_cards.clear()
-        self._unseen_output.clear()
-        self._card_focus_was_following = False
+        self._transcript_controller.reset()
         self._input_controller.clear_compact_echoes()
-        self._clear_unseen_output()
         if self._transcript is not None:
             self._transcript.clear_messages()
 
@@ -1209,61 +1187,73 @@ class TextualTui(App[None]):
 
         return self._transcript is None or self._transcript.is_following
 
-    # --- Main-screen heartbeat (opencode-style) ---
+    # --- Transient live transcript presentation ---
 
-    def _mount_working_indicator(self, indicator: WorkingIndicator) -> None:
-        if self._transcript is None:
-            return
-        self._working_indicator = indicator
-        self._mount_transcript_message(indicator)
-        # Surface the heartbeat to a scrolled-back reader too: activity no longer
-        # lives in the footer, so the jump-to-latest badge is the only cue that
-        # working/retry state has begun. No-op while following the tail.
-        self._note_transcript_update(indicator)
-        self._follow_tail_after_refresh()
+    def transcript_available(self) -> bool:
+        """Return whether Textual has mounted the live transcript widget."""
 
-    def _remove_working_indicator(self) -> None:
-        indicator = self._working_indicator
-        if indicator is None:
-            return
-        self._working_indicator = None
-        # The heartbeat is transient — drop it from the unseen set on removal so a
-        # retired indicator never inflates the badge or leaves it pointing at a
-        # widget no longer in the transcript.
-        self._discard_unseen_output(indicator)
+        return self._transcript is not None
+
+    def mount_live_transcript_widget(
+        self,
+        widget: Widget,
+        *,
+        before: Widget | None = None,
+    ) -> None:
+        """Mount one live transcript widget through the app's layout owner."""
+
+        self._mount_transcript_message(widget, before=before)
+
+    def remove_live_transcript_widget(self, widget: Widget) -> None:
+        """Remove one live transcript widget without surfacing a stale unmount."""
+
         with suppress(Exception):
-            indicator.remove()
+            widget.remove()
+
+    def transcript_is_following(self) -> bool:
+        """Return whether a mounted transcript currently follows its tail."""
+
+        return self._transcript is not None and self._transcript.is_following
+
+    def return_transcript_to_latest(self) -> None:
+        """Restore transcript tail-follow after a focused newest card expands."""
+
+        if self._transcript is not None:
+            self._transcript.return_to_latest()
+
+    def is_newest_transcript_widget(self, widget: Widget) -> bool:
+        """Return whether ``widget`` is the latest mounted transcript message."""
+
+        transcript = self._transcript
+        return bool(
+            transcript is not None and transcript.children and transcript.children[-1] is widget
+        )
+
+    def show_unseen_output(self, count: int) -> None:
+        """Show the jump-to-latest affordance for distinct unseen live output."""
+
+        if self._jump_to_latest is not None:
+            self._jump_to_latest.show_count(count)
+
+    def hide_unseen_output(self) -> None:
+        """Hide the jump-to-latest affordance when no live output is unseen."""
+
+        if self._jump_to_latest is not None:
+            self._jump_to_latest.hide()
 
     def show_working_indicator(self) -> None:
-        existing = self._working_indicator
-        if isinstance(existing, WorkingIndicator):
-            existing.show_working()
-            return
-        # No active indicator — create a fresh one in the transcript timeline.
-        self._remove_working_indicator()
-        indicator = WorkingIndicator()
-        indicator.restart_working()
-        self._mount_working_indicator(indicator)
+        self._transcript_controller.show_working_indicator()
 
     def show_retry_indicator(self, label: str) -> None:
-        existing = self._working_indicator
-        if isinstance(existing, WorkingIndicator):
-            existing.show_retry(label)
-            return
-        indicator = WorkingIndicator()
-        indicator.show_retry(label)
-        self._mount_working_indicator(indicator)
+        self._transcript_controller.show_retry_indicator(label)
 
     def restart_working_indicator(self) -> None:
         """Start fresh transcript activity for a newly submitted prompt."""
 
-        self._remove_working_indicator()
-        indicator = WorkingIndicator()
-        indicator.restart_working()
-        self._mount_working_indicator(indicator)
+        self._transcript_controller.restart_working_indicator()
 
     def hide_working_indicator(self) -> None:
-        self._remove_working_indicator()
+        self._transcript_controller.hide_working_indicator()
 
     def mount_tool_call(
         self,
@@ -1275,21 +1265,16 @@ class TextualTui(App[None]):
         historical: bool = False,
         before: Widget | None = None,
     ) -> ToolCard | None:
-        # Mount a fresh card for a tool call and register it by call_id. The
-        # status activity is retired: this card now carries the "in progress"
-        # signal (pending glyph + dim rule) for the rest of the call's lifecycle.
-        if self._transcript is None:
-            return None
-        if not historical:
-            self.hide_working_indicator()
-        card = ToolCard(name, arguments)
-        self._tool_cards[call_id] = card
-        if historical_card_id is not None:
-            self._historical_tool_cards[historical_card_id] = card
-        self._mount_transcript_message(card, before=before)
-        self._note_transcript_update(card)
-        self._follow_tail_after_refresh()
-        return card
+        """Mount and register one evolving live or retained-history tool card."""
+
+        return self._transcript_controller.mount_tool_call(
+            call_id,
+            name,
+            arguments,
+            historical_card_id=historical_card_id,
+            historical=historical,
+            before=before,
+        )
 
     def enrich_historical_tool_call(
         self,
@@ -1302,21 +1287,17 @@ class TextualTui(App[None]):
         full_output: str,
         truncated: bool,
     ) -> bool:
-        """Apply a paged-in tool call to its already-mounted historical result card."""
+        """Apply a paged-in call to its already-mounted historical result card."""
 
-        card = self._historical_tool_cards.get(card_id)
-        if card is None:
-            return False
-        card.update_call(name, arguments)
-        card.set_state(
-            status,
+        return self._transcript_controller.enrich_historical_tool_call(
+            card_id,
+            name,
+            arguments,
+            status=status,
             detail=detail,
             full_output=full_output,
             truncated=truncated,
         )
-        self._note_transcript_update(card)
-        self._follow_tail_after_refresh()
-        return True
 
     def resolve_tool_call(
         self,
@@ -1328,44 +1309,21 @@ class TextualTui(App[None]):
         full_output: str = "",
         truncated: bool = False,
     ) -> None:
-        # Transition the card for this call_id in place. If the request card was
-        # never seen (a result arriving with no prior request, e.g. after a
-        # resume), there is nothing to mutate — drop it rather than mint a
-        # half-formed card, keeping the registry the single source of truth.
-        # `elapsed` is the true wall-clock duration; it freezes the live counter.
-        # `full_output`/`truncated` let the card expand past the collapsed detail.
-        card = self._tool_cards.get(call_id)
-        if card is None:
-            return
-        card.set_state(
+        """Resolve a registered tool card in place."""
+
+        self._transcript_controller.resolve_tool_call(
+            call_id,
             status,
             detail=detail,
             elapsed=elapsed,
             full_output=full_output,
             truncated=truncated,
         )
-        self._note_transcript_update(card)
-        # A terminal state (done/denied/error) ends the call's lifecycle; forget
-        # the card so the registry doesn't grow across a long session. The widget
-        # stays mounted in the transcript — we just stop tracking it.
-        if status != "pending":
-            del self._tool_cards[call_id]
-        self._follow_tail_after_refresh()
 
     def fail_pending_tool_calls(self, detail: str = "cancelled") -> None:
-        # Drain every still-pending tool card when a turn ends without results —
-        # a cancel, a send/shutdown failure, or an RPC stream that dies after
-        # ToolCallRequested but before ToolResultReady. Without this the card
-        # keeps spinning forever (timer running) while the user continues in the
-        # same session. Mark each cancelled (which stops its timer) and clear the
-        # registry so nothing leaks into the next turn. The renderer clears its
-        # own request-timestamp map alongside this call.
-        if not self._tool_cards:
-            return
-        for card in self._tool_cards.values():
-            card.set_state("cancelled", detail=detail)
-            self._note_transcript_update(card)
-        self._tool_cards.clear()
+        """Drain unresolved live tool cards after a cancelled or failed turn."""
+
+        self._transcript_controller.fail_pending_tool_calls(detail)
 
     def _style(self, role: str) -> str:
         # Resolve a transcript role to a theme-derived Rich style. Falls back to
@@ -1419,7 +1377,7 @@ class TextualTui(App[None]):
             return
         widget = LineMessage(markup, role=role)
         self._mount_transcript_message(widget)
-        self._note_transcript_update(widget)
+        self.note_transcript_update(widget)
         self._follow_tail_after_refresh()
 
     def mount_historical_line(
@@ -1479,24 +1437,15 @@ class TextualTui(App[None]):
         )
 
     def remove_historical_widget(self, widget: Widget) -> None:
-        """Evict one retained widget and every app-owned lookup for it."""
+        """Evict one retained widget and its transient live-transcript lookups."""
 
-        self._historical_tool_cards = {
-            card_id: registered
-            for card_id, registered in self._historical_tool_cards.items()
-            if registered is not widget
-        }
-        self._tool_cards = {
-            call_id: registered
-            for call_id, registered in self._tool_cards.items()
-            if registered is not widget
-        }
+        self._transcript_controller.forget_widget(widget)
         widget.remove()
 
     def historical_tool_card(self, card_id: str) -> ToolCard | None:
         """Return a mounted historical card for a page-boundary tool exchange."""
 
-        return self._historical_tool_cards.get(card_id)
+        return self._transcript_controller.historical_tool_card(card_id)
 
     def set_history_window_available(self, *, has_older: bool) -> None:
         """Expose retained older entries to transcript edge navigation."""
@@ -1709,42 +1658,15 @@ class TextualTui(App[None]):
         return self._transcript
 
     def note_transcript_update(self, widget: Widget) -> None:
-        """Record that ``widget`` changed while the user is reading history.
+        """Record a live widget update while preserving history-prepend semantics."""
 
-        Public entry point for collaborators; internal callers use the private
-        alias below.
-        """
+        if not self._prepending_history:
+            self._transcript_controller.note_update(widget)
 
-        self._note_transcript_update(widget)
+    def record_live_transcript_update(self, widget: Widget) -> None:
+        """Surface live-controller updates through the history-prepend guard."""
 
-    def _note_transcript_update(self, widget: Widget) -> None:
-        if self._prepending_history:
-            return
-        transcript = self._transcript
-        jump = self._jump_to_latest
-        if transcript is None or jump is None or transcript.is_following:
-            return
-        self._unseen_output.add(widget)
-        jump.show_count(len(self._unseen_output))
-
-    def _discard_unseen_output(self, widget: Widget) -> None:
-        # Forget one widget (e.g. a retired heartbeat) and reconcile the badge:
-        # hide it once nothing unseen remains, otherwise shrink the count.
-        if widget not in self._unseen_output:
-            return
-        self._unseen_output.discard(widget)
-        jump = self._jump_to_latest
-        if jump is None:
-            return
-        if self._unseen_output:
-            jump.show_count(len(self._unseen_output))
-        else:
-            jump.hide()
-
-    def _clear_unseen_output(self) -> None:
-        self._unseen_output.clear()
-        if self._jump_to_latest is not None:
-            self._jump_to_latest.hide()
+        self.note_transcript_update(widget)
 
 
 def create_textual_tui() -> tuple[TextualTui, TuiRenderer]:

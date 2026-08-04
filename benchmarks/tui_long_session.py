@@ -255,7 +255,7 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
                 await pilot.pause()
                 stream_scrolled_back_ms = _milliseconds(started)
                 final_following = transcript.is_following
-                final_unseen_output_count = len(app._unseen_output)
+                final_unseen_output_count = app._transcript_controller.unseen_output_count
 
         finally:
             if process_id is not None:
