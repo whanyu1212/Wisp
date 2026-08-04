@@ -1,4 +1,4 @@
-# TUI Long-Session Scenario
+# Benchmarks
 
 Run the transcript-windowing scenario:
 
@@ -20,3 +20,15 @@ Compare absolute timings only on the same machine. `mounted_widget_counts` remai
 bounded by the 300-entry history window (plus the session marker); compare page and
 scroll timings separately. This intentionally executes a local shell command through
 `ProcessSupervisor`; it uses a temporary directory and is cancelled before exit.
+
+## Managed Process Output
+
+Run the deterministic bounded-output benchmark with production retention limits:
+
+```bash
+uv run python -m benchmarks.process_output
+uv run python -m benchmarks.process_output --sizes 1048576,2097152 --output process-output.json
+```
+
+It reports per-size elapsed time, throughput, retained bytes, and exact dropped-byte
+accounting while retaining only the configured output tail.

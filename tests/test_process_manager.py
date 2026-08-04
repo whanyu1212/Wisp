@@ -13,7 +13,12 @@ import pytest
 
 import wisp.tools.process_manager as process_manager_module
 from wisp.tools.process import ProcessResult
-from wisp.tools.process_manager import ProcessSupervisor, ProcessUpdate, _bounded_text_tail
+from wisp.tools.process_manager import (
+    ProcessSupervisor,
+    ProcessUpdate,
+    _bounded_text_tail,
+    _PendingText,
+)
 from wisp.tools.result import ToolError
 
 
@@ -362,6 +367,53 @@ def test_retention_counts_unterminated_trailing_logical_line(separator: str) -> 
 
     assert bounded == "second"
     assert dropped_bytes == len(f"first{separator}".encode())
+
+
+@pytest.mark.parametrize(
+    ("chunks", "max_bytes", "max_lines"),
+    [
+        ((b"first\r", b"\nsecond"), 1_000, 1),
+        ((b"alpha\n", b"beta\n", b"gamma"), 1_000, 2),
+        ((b"prefix\xf0\x9f", b"\x99\x82-tail"), 9, 10),
+        ((b"discard",), 0, 10),
+        ((b"discard",), 10, 0),
+    ],
+)
+def test_pending_text_incrementally_matches_tail_retention(
+    chunks: tuple[bytes, ...],
+    max_bytes: int,
+    max_lines: int,
+) -> None:
+    pending = _PendingText(max_bytes=max_bytes, max_lines=max_lines)
+    source = b"".join(chunks)
+
+    for chunk in chunks:
+        pending.append_bytes(chunk)
+    pending.append_bytes(b"", final=True)
+    text, dropped_bytes, retained_source_bytes, source_byte_lengths = pending.drain()
+    expected, expected_dropped_bytes = _bounded_text_tail(
+        source.decode("utf-8"),
+        max_bytes=max_bytes,
+        max_lines=max_lines,
+    )
+
+    assert text == expected
+    assert dropped_bytes == expected_dropped_bytes
+    assert retained_source_bytes == len(text.encode("utf-8"))
+    assert sum(source_byte_lengths) == retained_source_bytes
+    assert dropped_bytes + retained_source_bytes == len(source)
+
+
+def test_pending_text_applies_byte_cap_to_malformed_utf8() -> None:
+    pending = _PendingText(max_bytes=1, max_lines=10)
+
+    pending.append_bytes(b"\xff", final=True)
+    text, dropped_bytes, retained_source_bytes, source_byte_lengths = pending.drain()
+
+    assert text == ""
+    assert dropped_bytes == 1
+    assert retained_source_bytes == 0
+    assert source_byte_lengths == ()
 
 
 def test_managed_process_timeout_is_not_an_exit_code(tmp_path: Path) -> None:
