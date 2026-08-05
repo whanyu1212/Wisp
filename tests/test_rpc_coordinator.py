@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import anyio
+import pytest
 
 from wisp.agent.messages import Message
 from wisp.events import RpcSessionSelected, WispEvent
@@ -120,11 +121,14 @@ def test_coordinator_applies_new_session_reset_atomically(tmp_path: Path) -> Non
     anyio.run(scenario)
 
 
-def test_coordinator_queues_new_session_behind_work_already_waiting_on_stats() -> None:
+@pytest.mark.parametrize("command_type", ["get_session_stats", "get_messages"])
+def test_coordinator_queues_new_session_behind_work_already_waiting_on_background_read(
+    command_type: Literal["get_session_stats", "get_messages"],
+) -> None:
     async def scenario() -> None:
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
-        stats = _RpcRunningCommand("stats", "get_session_stats", anyio.CancelScope())
-        coordinator.running_command = stats
+        background = _RpcRunningCommand("background", command_type, anyio.CancelScope())
+        coordinator.running_command = background
         coordinator.queued_commands.append({"id": "prompt", "type": "prompt"})
         dispatched: list[str] = []
 
@@ -142,7 +146,7 @@ def test_coordinator_queues_new_session_behind_work_already_waiting_on_stats() -
             {"id": "prompt", "type": "prompt"},
             {"id": "new", "type": "new_session"},
         ]
-        assert stats.cancel_scope.cancel_called is False
+        assert background.cancel_scope.cancel_called is False
 
     anyio.run(scenario)
 
