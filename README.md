@@ -310,8 +310,10 @@ the latest complete turn. If an automatic summary fails, Wisp preserves the comp
 reports a failed threshold-compaction event, and leaves replay unchanged. Disable it with
 `WISP_AUTO_COMPACTION=0` or `"auto_compaction_enabled": false` in user settings.
 The interactive TUI also exposes `/context` for the current context budget, usage source, and
-automatic-compaction eligibility. Use `/context auto on` or `/context auto off` to change the
-setting for subsequent operations in the current process; this does not edit user settings.
+automatic-compaction eligibility. Textual presents the report as a dismissible visual overlay with
+a context-usage progress bar; line and fullscreen modes print the same authoritative status. Use
+`/context auto on` or `/context auto off` to change the setting for subsequent operations in the
+current process; this does not edit user settings.
 
 When a provider explicitly rejects an input for context overflow, Wisp can compact and retry the
 same prompt once. It preserves the append-only audit log, keeps completed read-tool results in

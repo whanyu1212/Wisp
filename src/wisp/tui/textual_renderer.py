@@ -25,6 +25,7 @@ from wisp.events import (
     ProviderRetrying,
     RpcCommandFinished,
     RpcSessionSummary,
+    SessionStats,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
@@ -430,6 +431,9 @@ class TextualTuiRenderer:
 
     def session_switch_finished(self) -> None:
         self.app.session_switch_finished()
+
+    def context_status(self, stats: SessionStats) -> None:
+        self.app.show_context_status(stats)
 
     def event(self, event: KnownWispEvent) -> None:
         # Typed dispatch mirroring LineTuiRenderer.event() so tool calls, tool

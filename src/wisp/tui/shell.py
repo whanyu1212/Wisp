@@ -72,7 +72,6 @@ from wisp.tui.rendering import (
     TuiRenderer,
     TuiRendererKind,
     create_tui_renderer,
-    format_compaction_status,
 )
 from wisp.tui.state import (
     TuiInteractionState,
@@ -1287,7 +1286,7 @@ class TuiShell:
                 self._update_view()
             if is_context_status:
                 self.pending_context_status_received = True
-                self.renderer.notice(format_compaction_status(event.stats))
+                self.renderer.context_status(event.stats)
             return False
         context_updated = self.view.update_context_from_event(event)
         if context_updated:

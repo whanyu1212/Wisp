@@ -1,0 +1,243 @@
+"""Visual context-budget status for the Textual frontend."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal
+
+from textual import events
+from textual.app import ComposeResult
+from textual.containers import Horizontal, Vertical
+from textual.message import Message
+from textual.widgets import Button, Label, ProgressBar, Static
+
+from wisp.events import SessionStats
+
+
+@dataclass(frozen=True)
+class ContextStatusPresentation:
+    """Literal, renderer-ready values derived from authoritative session stats."""
+
+    current_tokens: int
+    context_window: int | None
+    percentage: float | None
+    source: str
+    reserve: str
+    remaining: str
+    trigger: str
+    compaction: str
+    eligibility: str
+    overflow_recovery: str
+    cost: str
+    over_budget: bool
+
+
+def context_status_presentation(stats: SessionStats) -> ContextStatusPresentation:
+    """Derive context display values without coupling them to widget layout."""
+
+    context = stats.context
+    observed = context.observed_is_current and context.observed_tokens is not None
+    current_tokens = context.observed_tokens if observed else context.estimate.total_tokens
+    assert current_tokens is not None
+    window = context.context_window
+    percentage = current_tokens / window * 100 if window is not None else None
+    trigger_tokens = (
+        window - context.reserve_tokens
+        if window is not None and context.reserve_tokens < window
+        else None
+    )
+    policy = stats.compaction
+    eligibility = (
+        "unavailable · status unavailable"
+        if policy is None
+        else (
+            "eligible"
+            if policy.threshold_eligible
+            else f"unavailable · {policy.threshold_ineligible_reason or 'not available'}"
+        )
+    )
+    return ContextStatusPresentation(
+        current_tokens=current_tokens,
+        context_window=window,
+        percentage=percentage,
+        source="provider observation" if observed else "deterministic estimate (approximate)",
+        reserve=_format_tokens(context.reserve_tokens),
+        remaining=(
+            _format_tokens(context.remaining_tokens)
+            if context.remaining_tokens is not None
+            else "unknown"
+        ),
+        trigger=(
+            f">{_format_tokens(trigger_tokens)}" if trigger_tokens is not None else "unavailable"
+        ),
+        compaction=(
+            "unavailable" if policy is None else ("on" if policy.auto_compaction_enabled else "off")
+        ),
+        eligibility=eligibility,
+        overflow_recovery=(
+            "unavailable"
+            if policy is None
+            else ("on" if policy.overflow_recovery_enabled else "off")
+        ),
+        cost=_format_cost(stats.cost.known_usd, complete=stats.cost.complete),
+        over_budget=(
+            context.over_budget
+            if context.over_budget is not None
+            else bool(window is not None and current_tokens >= window - context.reserve_tokens)
+        ),
+    )
+
+
+def _format_tokens(value: int) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}".rstrip("0").rstrip(".") + "m"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
+    return str(value)
+
+
+def _format_cost(known_usd: Decimal, *, complete: bool) -> str:
+    amount = f"${known_usd:.2f}"
+    return amount if complete else f"{amount} known · partial pricing"
+
+
+class ContextStatusOverlay(Vertical):
+    """Dismissible visual report for one explicitly requested context snapshot."""
+
+    DEFAULT_CSS = """
+    ContextStatusOverlay {
+        overlay: screen;
+        display: none;
+        width: 100%;
+        height: 100%;
+        align: center middle;
+        background: transparent;
+    }
+
+    ContextStatusOverlay #context-status-panel {
+        width: 48;
+        max-width: 94%;
+        height: auto;
+        max-height: 94%;
+        padding: 0 2;
+        border: heavy $accent;
+        background: $panel;
+    }
+
+    ContextStatusOverlay #context-status-title {
+        height: 1;
+        color: $accent;
+        text-style: bold;
+    }
+
+    ContextStatusOverlay #context-status-progress {
+        height: 1;
+        margin-top: 1;
+    }
+
+    ContextStatusOverlay .context-status-row {
+        height: auto;
+        min-height: 1;
+        color: $text;
+    }
+
+    ContextStatusOverlay #context-status-source,
+    ContextStatusOverlay #context-status-detail,
+    ContextStatusOverlay #context-status-cost {
+        color: $text-muted;
+    }
+
+    ContextStatusOverlay #context-status-warning {
+        display: none;
+        height: 1;
+        color: $warning;
+        text-style: bold;
+    }
+
+    ContextStatusOverlay #context-status-actions {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    ContextStatusOverlay #context-status-close {
+        min-width: 10;
+    }
+    """
+
+    class Cancelled(Message):
+        """The reader dismissed the context report."""
+
+    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
+        super().__init__(id=id)
+        self._progress = ProgressBar(
+            total=100,
+            show_eta=False,
+            id="context-status-progress",
+        )
+        self._usage = Label("", classes="context-status-row", id="context-status-usage")
+        self._source = Label("", classes="context-status-row", id="context-status-source")
+        self._detail = Label("", classes="context-status-row", id="context-status-detail")
+        self._policy = Label("", classes="context-status-row", id="context-status-policy")
+        self._eligibility = Label("", classes="context-status-row", id="context-status-eligibility")
+        self._recovery = Label("", classes="context-status-row", id="context-status-recovery")
+        self._cost = Label("", classes="context-status-row", id="context-status-cost")
+        self._warning = Static("Context threshold reached", id="context-status-warning")
+        self._close = Button("Close", id="context-status-close")
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="context-status-panel"):
+            yield Static("Context", id="context-status-title")
+            yield self._progress
+            yield self._usage
+            yield self._source
+            yield self._detail
+            yield self._warning
+            yield self._policy
+            yield self._eligibility
+            yield self._recovery
+            yield self._cost
+            with Horizontal(id="context-status-actions"):
+                yield self._close
+
+    @property
+    def is_open(self) -> bool:
+        return self.display
+
+    def show_stats(self, stats: SessionStats) -> None:
+        """Render and show one authoritative session-stat snapshot."""
+
+        view = context_status_presentation(stats)
+        if view.percentage is None:
+            self._progress.display = False
+            percent = "unknown"
+        else:
+            self._progress.display = True
+            self._progress.update(progress=min(100.0, max(0.0, view.percentage)))
+            percent = f"{view.percentage:.0f}%"
+        window = (
+            _format_tokens(view.context_window) if view.context_window is not None else "unknown"
+        )
+        self._usage.update(f"Usage: {_format_tokens(view.current_tokens)} / {window} · {percent}")
+        self._source.update(f"Source: {view.source}")
+        self._detail.update(f"Reserve: {view.reserve} · Remaining: {view.remaining}")
+        self._policy.update(f"Automatic compaction: {view.compaction} · Trigger: {view.trigger}")
+        self._eligibility.update(f"Threshold: {view.eligibility}")
+        self._recovery.update(f"Overflow recovery: {view.overflow_recovery}")
+        self._cost.update(f"Cost: {view.cost}")
+        self._warning.display = view.over_budget
+        self.display = True
+        self._close.focus()
+
+    def hide(self) -> None:
+        self.display = False
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button is self._close:
+            event.stop()
+            self.post_message(self.Cancelled())
+
+    def on_key(self, event: events.Key) -> None:
+        if self.is_open and event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.Cancelled())
