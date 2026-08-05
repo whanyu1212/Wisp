@@ -240,10 +240,11 @@ class TextualHistoryController:
 
         self._clear()
         self._surface.replace_transcript()
-        # History mounts are queued by Textual. Mount the marker first instead
-        # of trying to insert it before a possibly detached history widget.
-        self._surface.mount_history_marker(f"resumed session: {session_label}", before=None)
         self._append_entries(tuple(entries))
+        self._surface.mount_history_marker(
+            f"resumed session: {session_label}",
+            before=next(iter(self._widgets.values()), None),
+        )
 
     def prepend_entries(self, entries: Iterable[HistoricalTranscriptEntry]) -> None:
         """Prepend one durable older-history page and preserve its viewport anchor."""

@@ -234,7 +234,7 @@ def test_history_controller_reconciles_a_bounded_window_without_full_history_sca
     assert surface.window_availability[-1] is True
 
 
-def test_history_controller_mounts_session_marker_before_queued_history() -> None:
+def test_history_controller_mounts_session_marker_before_restored_history() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)
 
@@ -243,7 +243,8 @@ def test_history_controller_mounts_session_marker_before_queued_history() -> Non
         session_label="Resumed",
     )
 
-    assert surface.marker_boundaries == [None]
+    assert len(surface.marker_boundaries) == 1
+    assert surface.marker_boundaries[0] is surface.widgets[1]
     assert [widget.label for widget in surface.widgets] == [
         "resumed session: Resumed",
         "assistant: restored",

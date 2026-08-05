@@ -1462,6 +1462,67 @@ class TextualTui(App[None]):
         escaped = _markup_escape(message)
         markup = f"[{style}]{escaped}[/{style}]" if style else escaped
         widget = LineMessage(markup, role="dim")
+        transcript = self._transcript
+        if before is not None and transcript is not None and before.parent is not transcript:
+            # Textual may not have attached a widget mounted in the completed
+            # history batch yet. Wait for that batch before using its widget as
+            # a relative mount point, rather than appending this marker below
+            # the restored transcript.
+            self._history_marker = widget
+            self.run_worker(
+                self._mount_history_marker_after_history_batch(
+                    widget,
+                    before=before,
+                    transcript=transcript,
+                    epoch=self._transcript_epoch,
+                ),
+                group="history-marker",
+                exit_on_error=False,
+            )
+            return
+        self._mount_history_marker_widget(widget, before=before)
+
+    async def _mount_history_marker_after_history_batch(
+        self,
+        widget: LineMessage,
+        *,
+        before: Widget,
+        transcript: Transcript,
+        epoch: int,
+    ) -> None:
+        """Wait for restored history before mounting a deferred session marker."""
+
+        await self.wait_for_history_render()
+        self.call_after_refresh(
+            self._mount_deferred_history_marker,
+            widget,
+            before,
+            transcript,
+            epoch,
+        )
+
+    def _mount_deferred_history_marker(
+        self,
+        widget: LineMessage,
+        before: Widget,
+        transcript: Transcript,
+        epoch: int,
+    ) -> None:
+        """Mount a session marker once its history boundary is attached."""
+
+        if epoch != self._transcript_epoch or transcript is not self._transcript:
+            return
+        # A failed or superseded history mount may leave the original boundary
+        # detached. The transcript head is still a stable boundary that keeps
+        # the marker above all restored entries.
+        mount_before = (
+            before if before.parent is transcript else next(iter(transcript.children), None)
+        )
+        self._mount_history_marker_widget(widget, before=mount_before)
+
+    def _mount_history_marker_widget(self, widget: LineMessage, *, before: Widget | None) -> None:
+        """Mount and retain one session-history boundary widget."""
+
         self._mount_transcript_message(widget, before=before)
         self._history_marker = widget
 
