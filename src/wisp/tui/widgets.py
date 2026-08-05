@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from rich.cells import cell_len, set_cell_size
 from textual import events
@@ -27,6 +28,7 @@ from textual.message import Message
 from textual.timer import Timer
 from textual.widget import AwaitMount, Widget
 from textual.widgets import (
+    DataTable,
     Input,
     Label,
     LoadingIndicator,
@@ -1128,6 +1130,25 @@ class ModelPicker(Vertical):
             event.stop()
 
 
+_SESSION_TABLE_MIN_WIDTH = 96
+
+
+@dataclass(frozen=True)
+class _SessionPickerRow:
+    """One stable persisted-session identity shared by both picker layouts."""
+
+    session_id: str
+    name: str
+    updated: str
+    entry_count: int
+    path: str
+    current: bool
+
+    @property
+    def marker(self) -> str:
+        return "●" if self.current else " "
+
+
 class SessionPicker(Vertical):
     """Interactive newest-first RPC session selector used by bare ``/resume``."""
 
@@ -1148,7 +1169,8 @@ class SessionPicker(Vertical):
         text-style: bold;
     }
 
-    SessionPicker #session-picker-options {
+    SessionPicker #session-picker-options,
+    SessionPicker #session-picker-table {
         height: auto;
         max-height: 15;
         border: none;
@@ -1156,8 +1178,18 @@ class SessionPicker(Vertical):
         padding: 0;
     }
 
-    SessionPicker #session-picker-options > .option-list--option-highlighted {
+    SessionPicker #session-picker-table {
+        display: none;
+    }
+
+    SessionPicker #session-picker-options > .option-list--option-highlighted,
+    SessionPicker #session-picker-table > .datatable--cursor {
         background: $accent 30%;
+    }
+
+    SessionPicker #session-picker-table > .datatable--header {
+        background: $panel;
+        color: $text-muted;
     }
 
     SessionPicker #session-picker-hint {
@@ -1181,18 +1213,27 @@ class SessionPicker(Vertical):
         super().__init__(id=id)
         self._title = Static("Resume a session", id="session-picker-title", markup=False)
         self._options = OptionList(id="session-picker-options")
+        self._table: DataTable[Content] = DataTable(
+            cursor_type="row",
+            show_row_labels=False,
+            zebra_stripes=True,
+            id="session-picker-table",
+        )
         self._hint = Static(
             "enter select · esc cancel",
             id="session-picker-hint",
             markup=False,
         )
-        self._rows: list[str] = []
+        self._rows: tuple[_SessionPickerRow, ...] = ()
+        self._row_indices: dict[str, int] = {}
+        self._table_layout = False
         self._submitted = False
         self._opened_at = 0.0
 
     def compose(self) -> ComposeResult:
         yield self._title
         yield self._options
+        yield self._table
         yield self._hint
 
     @property
@@ -1201,19 +1242,25 @@ class SessionPicker(Vertical):
 
     def focus_options(self) -> None:
         if self.is_open:
-            self._options.focus()
+            (self._table if self._table_layout else self._options).focus()
 
     def move_highlight_page_up(self) -> None:
-        self._options.action_page_up()  # type: ignore[no-untyped-call]
+        if self._table_layout:
+            self._table.action_page_up()
+        else:
+            self._options.action_page_up()  # type: ignore[no-untyped-call]
 
     def move_highlight_page_down(self) -> None:
-        self._options.action_page_down()  # type: ignore[no-untyped-call]
+        if self._table_layout:
+            self._table.action_page_down()
+        else:
+            self._options.action_page_down()  # type: ignore[no-untyped-call]
 
     def move_highlight_first(self) -> None:
-        self._options.action_first()
+        self._move_highlight_to(0)
 
     def move_highlight_last(self) -> None:
-        self._options.action_last()
+        self._move_highlight_to(len(self._rows) - 1)
 
     def show(
         self,
@@ -1223,30 +1270,34 @@ class SessionPicker(Vertical):
     ) -> None:
         self._submitted = False
         self._opened_at = time.monotonic()
-        self._options.clear_options()
-        self._rows = []
-        selected_index: int | None = None
-        for index, session in enumerate(sessions):
-            current = session.session_id == selected_session_id
-            marker = "●" if current else " "
-            name = _truncate_to_cell_width(session.name or session.session_id[:12], 48)
-            updated = session.updated_at.isoformat(timespec="minutes")
-            path = _truncate_to_cell_width(str(session.session_path), 72)
-            label = f"{marker} {name} · {session.entry_count} entries · {updated}\n  {path}"
-            # Persisted names and paths are untrusted display text. Content()
-            # keeps bracket syntax literal instead of letting Option parse it as
-            # Textual markup.
-            self._options.add_option(Option(Content(label), id=session.session_id))
-            self._rows.append(session.session_id)
-            if current:
-                selected_index = index
-        if sessions:
-            self._options.highlighted = selected_index if selected_index is not None else 0
+        self._rows = tuple(
+            _SessionPickerRow(
+                session_id=session.session_id,
+                name=session.name or session.session_id[:12],
+                updated=session.updated_at.isoformat(timespec="minutes"),
+                entry_count=session.entry_count,
+                path=str(session.session_path),
+                current=session.session_id == selected_session_id,
+            )
+            for session in sessions
+        )
+        self._row_indices = {row.session_id: index for index, row in enumerate(self._rows)}
+        self._populate_options()
+        self._populate_table()
+        if self._rows:
+            initial_session_id = (
+                selected_session_id
+                if selected_session_id in self._row_indices
+                else self._rows[0].session_id
+            )
             self._hint.update("enter select · esc cancel")
         else:
-            self._options.add_option(Option("No persisted sessions found.", disabled=True))
+            initial_session_id = None
             self._hint.update("esc close")
         self.display = True
+        self._sync_layout(focus=False)
+        if initial_session_id is not None:
+            self._select_session(initial_session_id)
         self.focus_options()
 
     def hide(self) -> None:
@@ -1254,13 +1305,7 @@ class SessionPicker(Vertical):
         self._submitted = False
 
     def submit_current_selection(self) -> None:
-        if self._submitted or not self.is_open:
-            return
-        highlighted = self._options.highlighted
-        if highlighted is None or highlighted >= len(self._rows):
-            return
-        self._submitted = True
-        self.post_message(self.Selected(self._rows[highlighted]))
+        self._submit_session(self._highlighted_session_id())
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list is not self._options:
@@ -1268,7 +1313,19 @@ class SessionPicker(Vertical):
         event.stop()
         if event.time < self._opened_at:
             return
-        self.submit_current_selection()
+        self._submit_session(event.option.id)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table is not self._table:
+            return
+        event.stop()
+        if event.time < self._opened_at:
+            return
+        self._submit_session(event.row_key.value)
+
+    def on_resize(self, event: events.Resize) -> None:
+        if self.is_open:
+            self._sync_layout(focus=True)
 
     def on_key(self, event: events.Key) -> None:
         if not self.is_open:
@@ -1282,21 +1339,108 @@ class SessionPicker(Vertical):
             event.prevent_default()
             event.stop()
         elif event.key == "pageup":
-            self._options.action_page_up()  # type: ignore[no-untyped-call]
+            self.move_highlight_page_up()
             event.prevent_default()
             event.stop()
         elif event.key == "pagedown":
-            self._options.action_page_down()  # type: ignore[no-untyped-call]
+            self.move_highlight_page_down()
             event.prevent_default()
             event.stop()
         elif event.key == "home":
-            self._options.action_first()
+            self.move_highlight_first()
             event.prevent_default()
             event.stop()
         elif event.key == "end":
-            self._options.action_last()
+            self.move_highlight_last()
             event.prevent_default()
             event.stop()
+
+    def _populate_options(self) -> None:
+        self._options.clear_options()
+        for row in self._rows:
+            name = _truncate_to_cell_width(row.name, 48)
+            path = _truncate_to_cell_width(row.path, 72)
+            label = f"{row.marker} {name} · {row.entry_count} entries · {row.updated}\n  {path}"
+            # Persisted names and paths are untrusted display text. Content()
+            # keeps bracket syntax literal instead of letting Option parse it as
+            # Textual markup.
+            self._options.add_option(Option(Content(label), id=row.session_id))
+        if not self._rows:
+            self._options.add_option(Option("No persisted sessions found.", disabled=True))
+
+    def _populate_table(self) -> None:
+        self._table.clear(columns=True)
+        self._table.add_column("", width=1, key="current")
+        self._table.add_column("Session", width=24, key="session")
+        self._table.add_column("Updated", width=22, key="updated")
+        self._table.add_column("Entries", width=7, key="entries")
+        self._table.add_column("Path", width=27, key="path")
+        for row in self._rows:
+            self._table.add_row(
+                Content(row.marker),
+                Content(_truncate_to_cell_width(row.name, 24)),
+                Content(row.updated),
+                Content(str(row.entry_count)),
+                Content(_truncate_to_cell_width(row.path, 27)),
+                key=row.session_id,
+            )
+        if not self._rows:
+            self._table.add_row(
+                Content(""),
+                Content("No persisted sessions found."),
+                Content(""),
+                Content(""),
+                Content(""),
+                key=None,
+            )
+
+    def _sync_layout(self, *, focus: bool) -> None:
+        table_layout = self.screen.size.width >= _SESSION_TABLE_MIN_WIDTH
+        if table_layout == self._table_layout:
+            return
+        selected_session_id = self._highlighted_session_id()
+        self._table_layout = table_layout
+        self._options.display = not table_layout
+        self._table.display = table_layout
+        if selected_session_id is not None:
+            self._select_session(selected_session_id)
+        elif self._rows:
+            self._move_highlight_to(0)
+        if focus:
+            self.focus_options()
+
+    def _highlighted_session_id(self) -> str | None:
+        if self._table_layout:
+            row_index = self._table.cursor_row
+            return self._rows[row_index].session_id if row_index < len(self._rows) else None
+        highlighted = self._options.highlighted
+        return (
+            self._rows[highlighted].session_id
+            if highlighted is not None and highlighted < len(self._rows)
+            else None
+        )
+
+    def _select_session(self, session_id: str) -> None:
+        row_index = self._row_indices.get(session_id)
+        if row_index is None:
+            return
+        self._options.highlighted = row_index
+        self._table.move_cursor(row=row_index, column=0, animate=False, scroll=False)
+
+    def _move_highlight_to(self, row_index: int) -> None:
+        if not self._rows:
+            return
+        bounded_index = min(max(0, row_index), len(self._rows) - 1)
+        if self._table_layout:
+            self._table.move_cursor(row=bounded_index, column=0, animate=False)
+        else:
+            self._options.highlighted = bounded_index
+
+    def _submit_session(self, session_id: str | None) -> None:
+        if self._submitted or not self.is_open or session_id not in self._row_indices:
+            return
+        self._submitted = True
+        self.post_message(self.Selected(session_id))
 
 
 class TranscriptEmptyState(Vertical):
