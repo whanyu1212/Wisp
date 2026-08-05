@@ -264,6 +264,14 @@ class CodingSession:
             raise RuntimeError("CodingSession is busy")
         self.mode = mode
 
+    def reset_session_state(self) -> None:
+        """Discard process-local queue state when no persisted session is selected."""
+
+        if self._operation_active:
+            raise RuntimeError("CodingSession is busy")
+        self._last_session_id = None
+        self._retained_queues.clear()
+
     def follow_up(self, content: str) -> QueueUpdated:
         """Queue user text for the active run's next completed-turn boundary."""
 

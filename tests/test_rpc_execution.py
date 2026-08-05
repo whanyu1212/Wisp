@@ -341,6 +341,10 @@ def test_executor_new_session_resets_selected_state_and_rejects_while_busy(
         fixture.session_state.history = (Message(role="user", content="previous"),)
         fixture.session_state.entry_count = 1
         fixture.session_state.name = "Previous"
+        fixture.agent._last_session_id = selected.session_id  # noqa: SLF001
+        fixture.agent._retained_queues[selected.session_id] = _RetainedQueueState(  # noqa: SLF001
+            messages=QueuedMessages(follow_up=(Message(role="user", content="stale follow-up"),))
+        )
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
@@ -363,6 +367,9 @@ def test_executor_new_session_resets_selected_state_and_rejects_while_busy(
         assert fixture.session_state.history == ()
         assert fixture.session_state.entry_count == 0
         assert fixture.session_state.name is None
+        assert fixture.agent.state_snapshot().pending_follow_up_count == 0
+        assert fixture.agent._last_session_id is None  # noqa: SLF001
+        assert not fixture.agent._retained_queues  # noqa: SLF001
         assert selected.path.is_file()
         finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
         assert [(event.command_id, event.ok, event.error) for event in finished] == [

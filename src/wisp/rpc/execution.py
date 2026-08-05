@@ -298,6 +298,8 @@ class RpcCommandExecutor:
             running_command=effective_running,
             write_event=self.write_event,
         )
+        if reset_session:
+            self.agent.reset_session_state()
         return _RpcDispatchResult(
             running_command=effective_running,
             reset_session=reset_session,
