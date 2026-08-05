@@ -1295,8 +1295,8 @@ class TranscriptEmptyState(Vertical):
     """Centered welcome panel shown only while the transcript has no output.
 
     A native ``Label`` inside a fixed-width ``Center`` provides a compact
-    badge above the prompt hint and quick-action reminder without consuming a
-    permanent header row. Every direct child has the same explicit width because
+    badge above the tagline, prompt hint, and quick-action reminder without
+    consuming a permanent header row. Every direct child has the same explicit width because
     Textual centers these siblings as a block rather than independently.
     """
 
@@ -1305,14 +1305,16 @@ class TranscriptEmptyState(Vertical):
         display: none;
     }
 
+    TranscriptEmptyState.-minimal #transcript-empty-tagline,
     TranscriptEmptyState.-minimal #transcript-empty-hint {
         display: none;
     }
     """
 
-    def __init__(self, wordmark: str, hint: str) -> None:
+    def __init__(self, wordmark: str, tagline: str, hint: str) -> None:
         super().__init__(id="transcript-empty")
         self._wordmark = wordmark
+        self._tagline = tagline
         self._hint = hint
 
     @staticmethod
@@ -1327,6 +1329,7 @@ class TranscriptEmptyState(Vertical):
                 id="transcript-empty-wordmark-frame",
             )
         )
+        yield self._centered(Label(self._tagline, id="transcript-empty-tagline", markup=False))
         yield self._centered(Label(self._hint, id="transcript-empty-hint", markup=False))
         yield self._centered(
             Static(
@@ -1337,8 +1340,8 @@ class TranscriptEmptyState(Vertical):
         )
 
     def on_resize(self, event: events.Resize) -> None:
-        self.set_class(self.size.height < 7, "-compact")
-        self.set_class(self.size.height < 4, "-minimal")
+        self.set_class(self.size.height < 9, "-compact")
+        self.set_class(self.size.height < 6, "-minimal")
 
 
 class JumpToLatest(Static):
@@ -1423,6 +1426,7 @@ class Transcript(VerticalScroll):
         self,
         *args: object,
         empty_wordmark: str | None = None,
+        empty_tagline: str = "",
         empty_hint: str = "",
         **kwargs: object,
     ) -> None:
@@ -1430,6 +1434,7 @@ class Transcript(VerticalScroll):
         self._follow = True
         self._follow_generation = 0
         self._empty_wordmark = empty_wordmark
+        self._empty_tagline = empty_tagline
         self._empty_hint = empty_hint
         self._empty_state: TranscriptEmptyState | None = None
         self._has_more_history = False
@@ -1439,7 +1444,11 @@ class Transcript(VerticalScroll):
 
     def compose(self) -> ComposeResult:
         if self._empty_wordmark is not None:
-            self._empty_state = TranscriptEmptyState(self._empty_wordmark, self._empty_hint)
+            self._empty_state = TranscriptEmptyState(
+                self._empty_wordmark,
+                self._empty_tagline,
+                self._empty_hint,
+            )
             yield self._empty_state
 
     def mount_message(self, widget: Widget, *, before: Widget | None = None) -> AwaitMount:

@@ -5529,8 +5529,8 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
     # scrollback, and disappears before the first real transcript item is
     # mounted.
     async def scenario() -> tuple[
-        tuple[str, str, str],
-        tuple[int, int, int, int],
+        tuple[str, str, str, str],
+        tuple[int, int, int, int, int],
         list[str],
         list[str],
     ]:
@@ -5541,26 +5541,35 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
             transcript = app_instance.query_one("#transcript", Transcript)
             empty = app_instance.query_one("#transcript-empty", TranscriptEmptyState)
             wordmark = app_instance.query_one("#transcript-empty-wordmark", Label)
+            tagline = app_instance.query_one("#transcript-empty-tagline", Label)
             hint = app_instance.query_one("#transcript-empty-hint", Label)
             actions = app_instance.query_one("#transcript-empty-actions", Static)
             centers = (
                 transcript.region.x + transcript.region.width // 2,
                 wordmark.region.x + wordmark.region.width // 2,
+                tagline.region.x + tagline.region.width // 2,
                 hint.region.x + hint.region.width // 2,
                 actions.region.x + actions.region.width // 2,
             )
             initial_children = [type(child).__name__ for child in transcript.children]
             wordmark_content = wordmark.render()
+            tagline_content = tagline.render()
             hint_content = hint.render()
             actions_content = actions.render()
             assert isinstance(wordmark_content, Content)
+            assert isinstance(tagline_content, Content)
             assert isinstance(hint_content, Content)
             assert isinstance(actions_content, Content)
             assert wordmark.region.width == 16
             assert wordmark.region.height == 3
             assert wordmark.styles.border_top[0] == "heavy"
             assert wordmark.styles.background.a == 0
-            content = (wordmark_content.plain, hint_content.plain, actions_content.plain)
+            content = (
+                wordmark_content.plain,
+                tagline_content.plain,
+                hint_content.plain,
+                actions_content.plain,
+            )
 
             renderer.prompt_submitted("hello")
             await pilot.pause()
@@ -5569,8 +5578,9 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
             return content, centers, initial_children, final_children
 
     content, centers, initial_children, final_children = anyio.run(scenario)
-    wordmark, hint, actions = content
+    wordmark, tagline, hint, actions = content
     assert wordmark == "W  I  S  P"
+    assert tagline == "A coding agent that stays in sync"
     assert hint == "Type a prompt or / for commands."
     assert actions == "/resume session  ·  Ctrl+O actions"
     assert len(set(centers)) == 1

@@ -79,6 +79,7 @@ _ROLE_FALLBACK: dict[str, str] = {
 # lettering gives the compact badge more presence without relying on terminal-
 # dependent ASCII art or unsupported font scaling.
 _WORDMARK = "W  I  S  P"
+_EMPTY_TRANSCRIPT_TAGLINE = "A coding agent that stays in sync"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 
 # Persistent, low-contrast keybinding reminder below the composer. Only real,
@@ -143,7 +144,7 @@ class TextualTui(App[None]):
     #transcript-empty {
         width: 1fr;
         height: 1fr;
-        min-height: 7;
+        min-height: 9;
         align: center middle;
     }
 
@@ -163,11 +164,19 @@ class TextualTui(App[None]):
         text-align: center;
     }
 
-    #transcript-empty-hint {
+    #transcript-empty-tagline {
         max-width: 100%;
         height: 1;
         margin-top: 1;
         color: $text;
+        text-align: center;
+    }
+
+    #transcript-empty-hint {
+        max-width: 100%;
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
         text-align: center;
     }
 
@@ -377,6 +386,7 @@ class TextualTui(App[None]):
             # height: 1fr and float the input into the middle of the screen.
             yield Transcript(
                 empty_wordmark=_WORDMARK,
+                empty_tagline=_EMPTY_TRANSCRIPT_TAGLINE,
                 empty_hint=_EMPTY_TRANSCRIPT_HINT,
                 id="transcript",
             )
