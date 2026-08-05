@@ -99,7 +99,6 @@ type RpcCompletionEventWriter = Callable[[WispEvent], None]
 type RpcCompletionEventRenderer = Callable[[tuple[WispEvent, ...]], Awaitable[None]]
 
 _MAX_QUEUED_RPC_COMMANDS = 100
-SESSION_RESET_BACKGROUND_COMMAND_TYPES = frozenset({"get_messages", "get_session_stats"})
 _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
     "approval",
     "cancel",
@@ -296,14 +295,19 @@ class RpcCoordinator:
                 reject=reject,
             )
             return False
-        new_session_waits_for_queued_work = (
+        new_session_waits_for_ordered_read = (
             selected_type == "new_session"
             and running is not None
-            and running.command_type in SESSION_RESET_BACKGROUND_COMMAND_TYPES
-            and bool(self.pending_prompt_queue_commands or self.queued_commands)
+            and (
+                running.command_type == "get_messages"
+                or (
+                    running.command_type == "get_session_stats"
+                    and bool(self.pending_prompt_queue_commands or self.queued_commands)
+                )
+            )
         )
         if running is not None and (
-            not _bypasses_active_command(selected_type) or new_session_waits_for_queued_work
+            not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_read
         ):
             self._enqueue_command(command, queue=self.queued_commands, reject=reject)
             return False
@@ -511,14 +515,19 @@ class RpcCoordinator:
                 reject=reject,
             )
             return False
-        new_session_waits_for_queued_work = (
+        new_session_waits_for_ordered_read = (
             selected_type == "new_session"
             and running is not None
-            and running.command_type in SESSION_RESET_BACKGROUND_COMMAND_TYPES
-            and bool(self.pending_prompt_queue_commands or self.queued_commands)
+            and (
+                running.command_type == "get_messages"
+                or (
+                    running.command_type == "get_session_stats"
+                    and bool(self.pending_prompt_queue_commands or self.queued_commands)
+                )
+            )
         )
         if running is not None and (
-            not _bypasses_active_command(selected_type) or new_session_waits_for_queued_work
+            not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_read
         ):
             await self._enqueue_command_async(command, queue=self.queued_commands, reject=reject)
             return False

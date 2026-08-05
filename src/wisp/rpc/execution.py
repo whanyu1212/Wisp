@@ -72,7 +72,6 @@ from wisp.sessions.replay import replay_session_entries, resolve_session_tree
 
 from .configuration import _RpcConfigureOverrides
 from .coordinator import (
-    SESSION_RESET_BACKGROUND_COMMAND_TYPES,
     RpcCoordinator,
     _RpcCancelResult,
     _RpcCommandCompleted,
@@ -288,13 +287,10 @@ class RpcCommandExecutor:
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         effective_running = running_command
-        if (
-            running_command is not None
-            and running_command.command_type in SESSION_RESET_BACKGROUND_COMMAND_TYPES
-        ):
-            # Stats and transcript paging are optional frontend chrome. Cancel and
-            # detach the old read so it cannot delay or repopulate a fresh session.
-            # Foreground operations still reject the command below.
+        if running_command is not None and running_command.command_type == "get_session_stats":
+            # Stats are optional frontend chrome. Cancel and detach the old read so
+            # it cannot delay or repopulate a fresh session. Ordered transcript reads
+            # remain queued ahead of the reset in the coordinator.
             running_command.cancel_scope.cancel()
             effective_running = None
         reset_session = handle_rpc_new_session_command(

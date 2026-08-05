@@ -384,17 +384,17 @@ def test_executor_new_session_resets_selected_state_and_rejects_while_busy(
     anyio.run(scenario)
 
 
-@pytest.mark.parametrize("command_type", ["get_session_stats", "get_messages"])
-def test_executor_new_session_cancels_background_reads_instead_of_rejecting(
+def test_executor_new_session_cancels_background_stats_instead_of_rejecting(
     tmp_path: Path,
-    command_type: Literal["get_session_stats", "get_messages"],
 ) -> None:
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            background = _RpcRunningCommand("background-1", command_type, anyio.CancelScope())
+            background = _RpcRunningCommand(
+                "background-1", "get_session_stats", anyio.CancelScope()
+            )
 
             result = executor.dispatch(
                 {"id": "new-1", "type": "new_session"},

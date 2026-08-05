@@ -151,6 +151,29 @@ def test_coordinator_queues_new_session_behind_work_already_waiting_on_backgroun
     anyio.run(scenario)
 
 
+def test_coordinator_queues_new_session_behind_active_message_read() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        messages = _RpcRunningCommand("messages", "get_messages", anyio.CancelScope())
+        coordinator.running_command = messages
+        dispatched: list[str] = []
+
+        coordinator.handle_event(
+            _RpcInputCommand({"id": "new", "type": "new_session"}),
+            dispatch=lambda command, running: (
+                dispatched.append(str(command["id"])) or _RpcDispatchResult(running)
+            ),
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+
+        assert dispatched == []
+        assert list(coordinator.queued_commands) == [{"id": "new", "type": "new_session"}]
+        assert messages.cancel_scope.cancel_called is False
+
+    anyio.run(scenario)
+
+
 def test_coordinator_queues_new_session_behind_work_waiting_on_stats_async() -> None:
     async def scenario() -> None:
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
