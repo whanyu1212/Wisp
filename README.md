@@ -693,6 +693,7 @@ Commands (the `id` field is optional — Wisp generates one when omitted):
 | `{"id":"commands-1","type":"get_commands"}` | Emit an immediate in-memory `rpc.commands` descriptor snapshot |
 | `{"id":"messages-1","type":"get_messages","limit":200}` | Emit a bounded active transcript page |
 | `{"id":"sessions-1","type":"get_sessions","limit":50}` | Emit a bounded persisted session catalog |
+| `{"id":"new-1","type":"new_session"}` | Deselect the active session; the next prompt creates a fresh session lazily |
 | `{"id":"select-1","type":"select_session","session_id":"…"}` | Select a persisted session for later RPC commands |
 | `{"id":"clone-1","type":"clone_session"}` | Clone the selected active path and select the clone |
 | `{"id":"fork-1","type":"fork_session","entry_id":"…"}` | Fork before a user message, select the fork, and return its prompt |
@@ -796,7 +797,7 @@ finally:
 ```
 
 `RpcController` exposes typed `prompt`, `compact`, `get_session_stats`, `get_state`,
-`get_commands`, `get_messages`, `get_sessions`, `select_session`, `clone_session`,
+`get_commands`, `get_messages`, `get_sessions`, `new_session`, `select_session`, `clone_session`,
 `fork_session`, `get_session_tree`,
 `navigate_session_tree`, `set_session_name`, `steer`, `follow_up`, `get_queue_state`,
 `set_queue_mode`, `pop_queue`, `clear_queue`, `cancel`, `approve`, `configure`, and `shutdown`
