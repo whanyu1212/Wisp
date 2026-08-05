@@ -154,6 +154,8 @@ class TuiRenderer(Protocol):
 
     def session_switch_finished(self) -> None: ...
 
+    def context_status(self, stats: SessionStats) -> None: ...
+
     def clear_session(self) -> None: ...
 
     def replace_history_entries(
@@ -367,6 +369,9 @@ class LineTuiRenderer:
 
     def session_switch_finished(self) -> None:
         pass
+
+    def context_status(self, stats: SessionStats) -> None:
+        self.notice(format_compaction_status(stats))
 
     def clear_session(self) -> None:
         if self.console.is_terminal:
@@ -768,6 +773,9 @@ class FullscreenTuiRenderer:
 
     def session_switch_finished(self) -> None:
         self._refresh()
+
+    def context_status(self, stats: SessionStats) -> None:
+        self.notice(format_compaction_status(stats))
 
     def clear_session(self) -> None:
         self.state.transcript.clear()

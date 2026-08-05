@@ -26,11 +26,13 @@ from textual.widgets import Static, TextArea
 
 from wisp.events import (
     RpcSessionSummary,
+    SessionStats,
     ToolApprovalRequested,
     TrustRequested,
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tui.commands import DEFAULT_TUI_COMMAND_CATALOG, TuiCommandCatalog
+from wisp.tui.context_widget import ContextStatusOverlay
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.overlay import (
     OverlayKind,
@@ -340,6 +342,7 @@ class TextualTui(App[None]):
         self._decision_panel: DecisionPanel | None = None
         self._model_picker: ModelPicker | None = None
         self._session_picker: SessionPicker | None = None
+        self._context_status: ContextStatusOverlay | None = None
         self._operation_indicator: OperationIndicator | None = None
         self._overlay_controller: TextualOverlayController | None = None
         self._command_catalog = DEFAULT_TUI_COMMAND_CATALOG
@@ -390,6 +393,7 @@ class TextualTui(App[None]):
             # `overlay: screen` starts at the screen origin rather than below
             # transcript/composer siblings when it becomes visible.
             yield OperationIndicator(id="operation-indicator")
+            yield ContextStatusOverlay(id="context-status")
             # Transcript takes all remaining height (1fr). The input and compact
             # footer hug the bottom, matching Pi's editor-above-footer visual shape.
             # The input is yielded directly — a wrapping Container would default to
@@ -447,6 +451,7 @@ class TextualTui(App[None]):
         self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
         self._model_picker = self.query_one("#model-picker", ModelPicker)
         self._session_picker = self.query_one("#session-picker", SessionPicker)
+        self._context_status = self.query_one("#context-status", ContextStatusOverlay)
         self._operation_indicator = self.query_one("#operation-indicator", OperationIndicator)
         self._overlay_controller = TextualOverlayController(
             composer=self._input,
@@ -458,6 +463,7 @@ class TextualTui(App[None]):
                 OverlayKind.session_picker: self._session_picker,
                 OverlayKind.command_palette: self._command_palette,
                 OverlayKind.prompt_history: self._prompt_history_picker,
+                OverlayKind.context_status: self._context_status,
                 OverlayKind.operation_indicator: self._operation_indicator,
             },
             defer_after_refresh=self._defer_overlay_restore,
@@ -703,6 +709,10 @@ class TextualTui(App[None]):
     def on_prompt_history_picker_cancelled(self, event: PromptHistoryPicker.Cancelled) -> None:
         event.stop()
         self.hide_prompt_history()
+
+    def on_context_status_overlay_cancelled(self, event: ContextStatusOverlay.Cancelled) -> None:
+        event.stop()
+        self.hide_context_status()
 
     def set_command_catalog(self, catalog: TuiCommandCatalog) -> None:
         """Apply one executable catalog to both Textual command surfaces."""
@@ -1196,6 +1206,29 @@ class TextualTui(App[None]):
         overlays = self._overlay_controller
         if overlays is not None:
             overlays.close(OverlayKind.session_picker, restore_composer=restore_input)
+
+    def show_context_status(self, stats: SessionStats) -> None:
+        """Show an explicitly requested visual context report."""
+
+        overlay = self._context_status
+        overlays = self._overlay_controller
+        if overlay is None or overlays is None:
+            return
+        # A context response may arrive after another interaction or session
+        # operation took ownership. Do not let this informational report displace
+        # approvals, pickers, or a guarded session transition.
+        if overlays.active_overlay is not None or overlays.active_operation is not None:
+            return
+        overlays.open(OverlayKind.context_status, preserve_viewport=True)
+        overlay.show_stats(stats)
+
+    def hide_context_status(self) -> bool:
+        """Dismiss the context report and restore its composer/viewport state."""
+
+        overlays = self._overlay_controller
+        if overlays is None:
+            return False
+        return overlays.close(OverlayKind.context_status)
 
     def session_catalog_started(self) -> None:
         self._start_session_operation(OverlayOperation.session_catalog)
