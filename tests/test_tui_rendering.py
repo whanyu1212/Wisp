@@ -27,6 +27,28 @@ from wisp.tui.history import (
 )
 
 
+def test_renderers_clear_session_for_new_session() -> None:
+    console, output = _console()
+    line = LineTuiRenderer(console)
+    interactive_output = io.StringIO()
+    interactive_line = LineTuiRenderer(
+        Console(file=interactive_output, force_terminal=True, color_system=None)
+    )
+    fullscreen = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+    fullscreen.notice("old transcript")
+
+    line.clear_session()
+    interactive_line.clear_session()
+    fullscreen.clear_session()
+
+    assert "--- new session ---" in output.getvalue()
+    assert "\x1b[2J" in interactive_output.getvalue()
+    assert "\x1b[H" in interactive_output.getvalue()
+    assert fullscreen.state.transcript == []
+    assert fullscreen.state.streaming_text == ""
+    assert fullscreen.state.transcript_scroll_offset == 0
+
+
 def _rpc_message(
     role: MessageRole,
     content: str,

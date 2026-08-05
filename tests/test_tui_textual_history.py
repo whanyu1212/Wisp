@@ -232,6 +232,19 @@ def test_history_controller_reconciles_a_bounded_window_without_full_history_sca
     assert surface.window_availability[-1] is True
 
 
+def test_history_controller_clears_entries_for_new_session() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    controller.render_entries(_messages("assistant", "old", 2))
+
+    controller.clear_entries()
+
+    assert controller.retained_entry_count == 0
+    assert surface.widgets == []
+    assert surface.historical_cards == {}
+    assert surface.tool_cards == {}
+
+
 def test_history_controller_pairs_boundary_tool_cards_and_resets_on_session_replace() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)

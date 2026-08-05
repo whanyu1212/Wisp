@@ -154,6 +154,8 @@ class TuiRenderer(Protocol):
 
     def session_switch_finished(self) -> None: ...
 
+    def clear_session(self) -> None: ...
+
     def replace_history_entries(
         self,
         entries: tuple[HistoricalTranscriptEntry, ...],
@@ -365,6 +367,12 @@ class LineTuiRenderer:
 
     def session_switch_finished(self) -> None:
         pass
+
+    def clear_session(self) -> None:
+        if self.console.is_terminal:
+            self.console.clear(home=True)
+        else:
+            self.console.print("--- new session ---", markup=False, highlight=False)
 
     def event(self, event: KnownWispEvent) -> None:
         if isinstance(event, ProviderRetrying):
@@ -759,6 +767,12 @@ class FullscreenTuiRenderer:
         self._refresh()
 
     def session_switch_finished(self) -> None:
+        self._refresh()
+
+    def clear_session(self) -> None:
+        self.state.transcript.clear()
+        self.state.streaming_text = ""
+        self.state.transcript_scroll_offset = 0
         self._refresh()
 
     def scroll_transcript_up(self, amount: int | None = None) -> None:
@@ -1349,6 +1363,7 @@ def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? 
         "  /logout [provider]       remove stored provider credentials\n"
         "  /provider [provider]     show or switch provider for future prompts\n"
         "  /model [model]           show or switch model for future prompts\n"
+        "  /new                     start a fresh session and clear the screen\n"
         "  /resume [session-id]     browse or resume a previous session\n"
         "  /quit, /exit             quit the TUI\n"
         "While a prompt or compaction is running, submitted input is queued as a follow-up.\n"

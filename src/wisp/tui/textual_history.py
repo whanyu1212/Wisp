@@ -224,6 +224,12 @@ class TextualHistoryController:
                 entry for entry in snapshot if entry.widget is not widget
             )
 
+    def clear_entries(self) -> None:
+        """Clear retained and live transcript state for a fresh session."""
+
+        self._clear()
+        self._surface.replace_transcript()
+
     def replace_entries(
         self,
         entries: Iterable[HistoricalTranscriptEntry],

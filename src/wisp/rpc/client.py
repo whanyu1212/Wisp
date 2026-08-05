@@ -32,6 +32,7 @@ from wisp.rpc.commands import (
     GetSessionTreeCommand,
     GetStateCommand,
     NavigateSessionTreeCommand,
+    NewSessionCommand,
     PopQueueCommand,
     PromptCommand,
     RpcCommand,
@@ -136,6 +137,13 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("sessions")
         await self._transport.send(GetSessionsCommand(id=selected_id, limit=limit))
+        return selected_id
+
+    async def new_session(self, *, command_id: str | None = None) -> str:
+        """Deselect the active session so the next prompt starts a fresh one."""
+
+        selected_id = command_id or self._command_id_factory("new-session")
+        await self._transport.send(NewSessionCommand(id=selected_id))
         return selected_id
 
     async def select_session(self, session_id: str, *, command_id: str | None = None) -> str:

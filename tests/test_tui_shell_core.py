@@ -143,6 +143,88 @@ def test_tui_shell_switches_agent_mode_after_successful_configure() -> None:
     anyio.run(run)
 
 
+def test_tui_new_session_clears_transcript_state_only_after_rpc_success() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.clears = 0
+            self.notices: list[str] = []
+            self.errors: list[str] = []
+
+        def clear_session(self) -> None:
+            self.clears += 1
+
+        def notice(self, message: str) -> None:
+            self.notices.append(message)
+
+        def command_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell.view.last_session = "old-session"
+        shell.view.context = _context_budget(estimated=100)
+        shell.view.cost = SessionCostSummary()
+
+        await shell._handle_input_line(_InputLine("/new extra", _InputMode.idle))
+        await shell._handle_input_line(_InputLine("/new", _InputMode.idle))
+
+        assert renderer.errors == ["Usage: /new"]
+        assert renderer.clears == 0
+        command_id = controller.new_session_requests[-1]
+        await shell._handle_rpc_event(
+            RpcCommandFinished(command_id=command_id, command_type="new_session", ok=True)
+        )
+
+        assert renderer.clears == 1
+        assert renderer.notices == ["Started a new session."]
+        assert shell.view.last_session is None
+        assert shell.view.context is None
+        assert shell.view.cost is None
+        assert shell.pending_new_session_command_id is None
+
+    anyio.run(run)
+
+
+def test_tui_new_session_failure_preserves_existing_view() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.clears = 0
+            self.errors: list[str] = []
+
+        def clear_session(self) -> None:
+            self.clears += 1
+
+        def command_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell.view.last_session = "old-session"
+
+        await shell._handle_input_line(_InputLine("/new", _InputMode.idle))
+        command_id = controller.new_session_requests[-1]
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=command_id,
+                command_type="new_session",
+                ok=False,
+                error="busy",
+            )
+        )
+
+        assert renderer.clears == 0
+        assert renderer.errors == ["busy"]
+        assert shell.view.last_session == "old-session"
+
+    anyio.run(run)
+
+
 def test_tui_context_command_renders_authoritative_compaction_status() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:

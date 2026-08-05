@@ -180,6 +180,8 @@ class RpcCommandExecutor:
             return self._dispatch_messages(command)
         if command_type == "get_sessions":
             return self._dispatch_sessions(command)
+        if command_type == "new_session":
+            return self._dispatch_new_session(command, running_command)
         if command_type == "select_session":
             return self._dispatch_select_session(command)
         if command_type == "clone_session":
@@ -277,6 +279,21 @@ class RpcCommandExecutor:
                 running_command_factory=self.running_command_factory,
                 command_completed_factory=self.command_completed_factory,
             )
+        )
+
+    def _dispatch_new_session(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        reset_session = handle_rpc_new_session_command(
+            command,
+            running_command=running_command,
+            write_event=self.write_event,
+        )
+        return _RpcDispatchResult(
+            running_command=running_command,
+            reset_session=reset_session,
         )
 
     def _dispatch_select_session(self, command: dict[str, object]) -> _RpcDispatchResult:
@@ -448,6 +465,36 @@ class RpcCommandExecutor:
 
     def reject(self, command: dict[str, object], message: str) -> None:
         reject_rpc_command(command, message=message, write_event=self.write_event)
+
+
+def handle_rpc_new_session_command(
+    command: dict[str, object],
+    *,
+    running_command: _RpcRunningCommand | None,
+    write_event: RpcEventWriter,
+) -> bool:
+    """Validate and synchronously reset the selected-session state."""
+
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return False
+    if running_command is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="Cannot start a new session while another RPC operation is active",
+            write_event=write_event,
+        )
+        return False
+    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+    return True
 
 
 def rpc_session_state(session: JsonlSession | None) -> _RpcSessionState:

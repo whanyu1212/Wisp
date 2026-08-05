@@ -1095,6 +1095,7 @@ def test_rpc_mode_reports_commands_before_prompt(tmp_path: Path) -> None:
         "plan",
         "build",
         "model",
+        "new",
         "resume",
         "provider",
         "auth",
@@ -1731,6 +1732,32 @@ def test_rpc_mode_reports_idle_and_reconfigured_state(tmp_path: Path) -> None:
         "rpc.state",
         "rpc.command.finished",
     ]
+
+
+def test_rpc_mode_new_session_is_lazy_and_reports_no_selected_session(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"new-1","type":"new_session"}\n'
+            '{"id":"new-2","type":"new_session"}\n'
+            '{"id":"state-1","type":"get_state"}\n'
+        ),
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    finished = [record for record in records if record["type"] == "rpc.command.finished"]
+    assert [(record["command_id"], record["ok"]) for record in finished] == [
+        ("new-1", True),
+        ("new-2", True),
+        ("state-1", True),
+    ]
+    state = next(record["state"] for record in records if record["type"] == "rpc.state")
+    assert state["session_id"] is None
+    assert state["session_path"] is None
+    assert list(tmp_path.glob("*.jsonl")) == []
 
 
 def test_rpc_mode_configures_model_for_future_prompts(tmp_path: Path) -> None:

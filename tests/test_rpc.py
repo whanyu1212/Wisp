@@ -57,6 +57,7 @@ from wisp.rpc import (
     GetStateCommand,
     JsonlSubprocessRpcTransport,
     NavigateSessionTreeCommand,
+    NewSessionCommand,
     PopQueueCommand,
     RpcController,
     SelectSessionCommand,
@@ -1230,6 +1231,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             before_entry_id="entry-1",
         )
         sessions_id = await controller.get_sessions(limit=25)
+        new_session_id = await controller.new_session()
         select_id = await controller.select_session("session-1")
         clone_id = await controller.clone_session()
         fork_id = await controller.fork_session("entry-1")
@@ -1261,6 +1263,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             commands_id,
             messages_id,
             sessions_id,
+            new_session_id,
             select_id,
             clone_id,
             fork_id,
@@ -1286,6 +1289,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             "commands-id",
             "messages-id",
             "sessions-id",
+            "new-session-id",
             "select-session-id",
             "clone-session-id",
             "fork-session-id",
@@ -1317,6 +1321,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
                 before_entry_id="entry-1",
             ),
             GetSessionsCommand(id="sessions-id", limit=25),
+            NewSessionCommand(id="new-session-id"),
             SelectSessionCommand(id="select-session-id", session_id="session-1"),
             CloneSessionCommand(id="clone-session-id"),
             ForkSessionCommand(id="fork-session-id", entry_id="entry-1"),

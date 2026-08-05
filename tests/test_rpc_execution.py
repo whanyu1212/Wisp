@@ -330,6 +330,53 @@ def test_executor_rejects_runtime_configuration_while_busy(tmp_path: Path) -> No
     anyio.run(scenario)
 
 
+def test_executor_new_session_resets_selected_state_and_rejects_while_busy(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        selected = fixture.sessions.create()
+        await selected.append_message(Message(role="user", content="previous"))
+        fixture.session_state.session = selected
+        fixture.session_state.history = (Message(role="user", content="previous"),)
+        fixture.session_state.entry_count = 1
+        fixture.session_state.name = "Previous"
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            busy = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
+
+            rejected = executor.dispatch(
+                {"id": "new-busy", "type": "new_session"},
+                busy,
+            )
+            accepted = executor.dispatch(
+                {"id": "new-1", "type": "new_session"},
+                None,
+            )
+            assert rejected.reset_session is False
+            assert accepted.reset_session is True
+            fixture.coordinator._reset_session_state()
+            task_group.cancel_scope.cancel()
+
+        assert fixture.session_state.session is None
+        assert fixture.session_state.history == ()
+        assert fixture.session_state.entry_count == 0
+        assert fixture.session_state.name is None
+        assert selected.path.is_file()
+        finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
+        assert [(event.command_id, event.ok, event.error) for event in finished] == [
+            (
+                "new-busy",
+                False,
+                "Cannot start a new session while another RPC operation is active",
+            ),
+            ("new-1", True, None),
+        ]
+
+    anyio.run(scenario)
+
+
 def test_executor_configures_agent_mode_and_reports_it_in_state(tmp_path: Path) -> None:
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
@@ -514,6 +561,7 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
             "plan",
             "build",
             "model",
+            "new",
             "resume",
             "provider",
             "auth",

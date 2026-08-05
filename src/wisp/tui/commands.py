@@ -28,6 +28,7 @@ class TuiSlashCommandName(StrEnum):
     logout = "logout"
     provider = "provider"
     model = "model"
+    new = "new"
     resume = "resume"
     compact = "compact"
     context = "context"

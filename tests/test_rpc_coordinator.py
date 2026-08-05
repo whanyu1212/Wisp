@@ -82,6 +82,44 @@ def test_coordinator_runs_queued_commands_in_fifo_order() -> None:
     anyio.run(scenario)
 
 
+def test_coordinator_applies_new_session_reset_atomically(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = JsonlSessionStore(tmp_path).create()
+        await session.append_message(Message(role="user", content="previous"))
+        history = (Message(role="user", content="previous"),)
+        state = _RpcSessionState(
+            session=session,
+            history=history,
+            entry_count=3,
+            name="Previous",
+        )
+        coordinator = RpcCoordinator(state)
+        receiver = _Receiver(
+            [
+                _RpcInputCommand({"id": "new-1", "type": "new_session"}),
+                _RpcInputClosed(),
+            ]
+        )
+
+        await coordinator.run(
+            receiver,
+            dispatch=lambda _command, running: _RpcDispatchResult(
+                running_command=running,
+                reset_session=True,
+            ),
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+
+        assert state.session is None
+        assert state.history == ()
+        assert state.entry_count == 0
+        assert state.name is None
+        assert session.path.is_file()
+
+    anyio.run(scenario)
+
+
 def test_coordinator_dispatches_control_commands_while_active() -> None:
     async def scenario() -> None:
         receiver = _Receiver(
