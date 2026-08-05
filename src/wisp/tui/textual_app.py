@@ -1214,6 +1214,11 @@ class TextualTui(App[None]):
         overlays = self._overlay_controller
         if overlay is None or overlays is None:
             return
+        # A context response may arrive after another interaction or session
+        # operation took ownership. Do not let this informational report displace
+        # approvals, pickers, or a guarded session transition.
+        if overlays.active_overlay is not None or overlays.active_operation is not None:
+            return
         overlays.open(OverlayKind.context_status, preserve_viewport=True)
         overlay.show_stats(stats)
 

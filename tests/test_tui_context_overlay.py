@@ -24,7 +24,10 @@ _DEFAULT_POLICY = CompactionPolicyStatus(
     threshold_eligible=True,
     threshold_ineligible_reason=None,
 )
-_DEFAULT_COST = SessionCostSummary(known_usd=Decimal("0.42"))
+_DEFAULT_COST = SessionCostSummary(
+    known_usd=Decimal("0.42"),
+    priced_record_count=1,
+)
 
 
 def _stats(
@@ -88,14 +91,24 @@ def test_context_presentation_prefers_current_provider_observation() -> None:
 
 
 def test_context_presentation_recomputes_remaining_from_displayed_observation() -> None:
-    view = context_status_presentation(_stats(observed=92_000, remaining=40_000))
+    view = context_status_presentation(
+        _stats(observed=122_000, remaining=40_000, over_budget=False)
+    )
 
-    assert view.current_tokens == 92_000
-    assert view.remaining == "28k"
+    assert view.current_tokens == 122_000
+    assert view.remaining == "-2k"
+    assert view.over_budget
 
 
 def test_context_presentation_preserves_meaningful_small_costs() -> None:
-    view = context_status_presentation(_stats(cost=SessionCostSummary(known_usd=Decimal("0.0042"))))
+    view = context_status_presentation(
+        _stats(
+            cost=SessionCostSummary(
+                known_usd=Decimal("0.0042"),
+                priced_record_count=1,
+            )
+        )
+    )
 
     assert view.cost == "$0.0042"
 
@@ -116,7 +129,20 @@ def test_context_presentation_marks_estimates_and_partial_cost() -> None:
 
     assert view.current_tokens == 80_000
     assert view.source == "deterministic estimate (approximate)"
-    assert view.cost == "$0.100 known · partial pricing"
+    assert view.cost == "≥$0.100"
+
+
+def test_context_presentation_marks_all_unpriced_usage_unknown() -> None:
+    view = context_status_presentation(
+        _stats(
+            cost=SessionCostSummary(
+                complete=False,
+                unpriced_record_count=2,
+            )
+        )
+    )
+
+    assert view.cost == "unknown"
 
 
 def test_context_overlay_renders_progress_and_authoritative_policy() -> None:
@@ -262,6 +288,52 @@ def test_context_overlay_yields_to_approval() -> None:
     context_open, decision_open = anyio.run(scenario)
     assert not context_open
     assert decision_open
+
+
+def test_context_report_does_not_displace_active_approval() -> None:
+    async def scenario() -> tuple[bool, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test() as pilot:
+            renderer.approval_request(
+                ToolApprovalRequested(
+                    call_id="call-1",
+                    name="write",
+                    arguments={"path": "file.txt", "content": "new"},
+                    safety="mutating",
+                )
+            )
+            await pilot.pause()
+            renderer.context_status(_stats())
+            await pilot.pause()
+            return (
+                app.query_one("#context-status", ContextStatusOverlay).is_open,
+                app.query_one("#decision-panel", DecisionPanel).is_open,
+            )
+
+    context_open, decision_open = anyio.run(scenario)
+    assert not context_open
+    assert decision_open
+
+
+def test_context_report_does_not_displace_active_session_operation() -> None:
+    async def scenario() -> tuple[bool, bool, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test() as pilot:
+            editor = app.query_one("#input", PromptEditor)
+            renderer.session_switch_started("target")
+            await pilot.pause()
+            renderer.context_status(_stats())
+            await pilot.pause()
+            return (
+                app.query_one("#context-status", ContextStatusOverlay).is_open,
+                app.query_one("#operation-indicator").display,
+                editor.display,
+            )
+
+    context_open, operation_open, composer_visible = anyio.run(scenario)
+    assert not context_open
+    assert operation_open
+    assert not composer_visible
 
 
 @pytest.mark.parametrize("size", [(40, 14), (72, 20)])

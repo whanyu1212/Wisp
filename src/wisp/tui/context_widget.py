@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
 
 from textual import events
 from textual.app import ComposeResult
@@ -11,8 +10,8 @@ from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import Button, Label, ProgressBar, Static
 
-from wisp.coding.costs import format_usd
-from wisp.events import SessionStats
+from wisp.coding.costs import format_cost_summary
+from wisp.events import SessionCostSummary, SessionStats
 
 
 @dataclass(frozen=True)
@@ -79,26 +78,28 @@ def context_status_presentation(stats: SessionStats) -> ContextStatusPresentatio
             if policy is None
             else ("on" if policy.overflow_recovery_enabled else "off")
         ),
-        cost=_format_cost(stats.cost.known_usd, complete=stats.cost.complete),
-        over_budget=(
-            context.over_budget
-            if context.over_budget is not None
-            else bool(window is not None and current_tokens >= window - context.reserve_tokens)
-        ),
+        cost=_format_cost(stats.cost),
+        over_budget=bool(window is not None and current_tokens >= window - context.reserve_tokens),
     )
 
 
 def _format_tokens(value: int) -> str:
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}".rstrip("0").rstrip(".") + "m"
-    if value >= 1_000:
-        return f"{value / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
+    sign = "-" if value < 0 else ""
+    magnitude = abs(value)
+    if magnitude >= 1_000_000:
+        formatted = f"{magnitude / 1_000_000:.1f}".rstrip("0").rstrip(".") + "m"
+        return sign + formatted
+    if magnitude >= 1_000:
+        formatted = f"{magnitude / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
+        return sign + formatted
     return str(value)
 
 
-def _format_cost(known_usd: Decimal, *, complete: bool) -> str:
-    amount = format_usd(known_usd)
-    return amount if complete else f"{amount} known · partial pricing"
+def _format_cost(cost: SessionCostSummary) -> str:
+    summary = format_cost_summary(cost)
+    if not summary:
+        return "unavailable"
+    return summary.removeprefix("cost ")
 
 
 class ContextStatusOverlay(Vertical):
