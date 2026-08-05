@@ -16,6 +16,7 @@ def test_tui_long_session_scenario_reports_bounded_widget_growth() -> None:
             message_count=12,
             page_size=4,
             stream_chunks=2,
+            stream_interval_seconds=0.001,
         ),
     )
 
@@ -27,8 +28,15 @@ def test_tui_long_session_scenario_reports_bounded_widget_growth() -> None:
     assert len(report.prepend_render_ms) == 2
     assert max(report.mounted_widget_counts) <= TUI_TRANSCRIPT_WINDOW_SIZE + 1
     assert max(report.retained_entry_counts) <= TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT
+    # These broad limits catch a renewed animation/layout backlog without binding
+    # the benchmark to one machine's absolute Textual timings.
+    assert 0 <= report.idle_page_up_ms < 1_000
     assert report.stream_following_tail_ms >= 0
+    assert 0 <= report.stream_page_up_ms < 1_000
     assert report.stream_scrolled_back_ms >= 0
+    assert 0 <= report.stream_max_event_loop_stall_ms < 1_000
+    assert 1 <= report.stream_markdown_writes <= report.config.stream_chunks
+    assert report.settled_live_widget_count <= TUI_TRANSCRIPT_WINDOW_SIZE
     assert not report.final_following
     assert report.final_unseen_output_count == 1
     assert report.process_state in {"cancelled", "completed"}

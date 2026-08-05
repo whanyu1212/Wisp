@@ -96,6 +96,7 @@ class TextualTuiRenderer:
         # neither map grows across a session.
         self._tool_arguments: dict[str, JsonObject] = {}
         self._history = TextualHistoryController(app)
+        app.set_live_widget_evicted_hook(self._history.forget_live_widget)
         app.set_history_window_hooks(
             shift_older=self._history.shift_older,
             show_latest=self._history.show_latest,
@@ -226,8 +227,8 @@ class TextualTuiRenderer:
     def prompt_submitted(self, prompt: str) -> None:
         # Echo a compact line for large pastes (marker kept) while the model still
         # received the full expanded text via controller.prompt(prompt).
-        self._history.record_live_message("user", prompt)
-        self.app.write_user(self.app.compact_echo_for(prompt))
+        widget = self.app.write_user(self.app.compact_echo_for(prompt))
+        self._history.record_live_message("user", prompt, widget=widget)
 
     def prompt_accepted(self, prompt: str) -> None:
         self.app.record_prompt(prompt)
@@ -239,7 +240,11 @@ class TextualTuiRenderer:
         """Record a streamed message that the shell suppresses from normal rendering."""
 
         if event.content:
-            self._history.record_live_message("assistant", event.content)
+            self._history.record_live_message(
+                "assistant",
+                event.content,
+                widget=self.app.stream_widget_for_completed_message(),
+            )
 
     def prompt_history_request(self) -> None:
         self.app.show_prompt_history()
@@ -292,8 +297,18 @@ class TextualTuiRenderer:
     def replace_latest_history_entries(
         self,
         entries: tuple[HistoricalTranscriptEntry, ...],
-    ) -> None:
-        self._history.replace_latest_entries(entries)
+    ) -> bool:
+        if self._history.replace_latest_entries(entries):
+            self.app.live_history_reloaded()
+            return True
+        else:
+            self.app.live_history_reload_failed()
+            return False
+
+    def latest_history_reload_failed(self) -> None:
+        """Allow a later live-widget eviction to retry a failed durable reload."""
+
+        self.app.live_history_reload_failed()
 
     def capture_latest_history_reload(self) -> None:
         self._history.capture_latest_reload_live_entries()
@@ -440,8 +455,8 @@ class TextualTuiRenderer:
         elif isinstance(event, MessageCompleted):
             self._suspend_progress()
             if event.content:
-                self._history.record_live_message("assistant", event.content)
-                self.app.write_assistant(event.content)
+                widget = self.app.write_assistant(event.content)
+                self._history.record_live_message("assistant", event.content, widget=widget)
         elif isinstance(event, ToolCallRequested):
             # Mount the evolving card; approval/result mutate it in place. Record
             # the request time so the card can show its true duration on resolve,
@@ -450,8 +465,8 @@ class TextualTuiRenderer:
             self._suspend_progress()
             self._tool_started[event.call_id] = event.timestamp
             self._tool_arguments[event.call_id] = event.arguments
-            self._history.record_live_tool_call(event.call_id)
-            self.app.mount_tool_call(event.call_id, event.name, event.arguments)
+            card = self.app.mount_tool_call(event.call_id, event.name, event.arguments)
+            self._history.record_live_tool_call(event.call_id, widget=card)
         elif isinstance(event, ToolApprovalResolved):
             # Only a denial changes the card here: an approval leaves it pending
             # until the result lands (the tool still has to run). A denial short-
@@ -477,8 +492,7 @@ class TextualTuiRenderer:
             # was never seen, e.g. a resumed session) so tool-aware renderers can
             # use them; pop so the map doesn't grow across the session.
             arguments = self._tool_arguments.pop(event.call_id, {})
-            self._history.record_live_tool_result(event.call_id)
-            self.app.resolve_tool_call(
+            card = self.app.resolve_tool_call(
                 event.call_id,
                 status,
                 detail=render_tool_result(
@@ -505,6 +519,7 @@ class TextualTuiRenderer:
                 ),
                 truncated=event.truncated,
             )
+            self._history.record_live_tool_result(event.call_id, widget=card)
         elif isinstance(event, AgentCompleted):
             self._finish_progress()
         elif isinstance(event, ErrorEvent):

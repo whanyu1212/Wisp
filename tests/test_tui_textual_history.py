@@ -304,6 +304,24 @@ def test_history_controller_reloads_latest_after_older_paging_evicts_it() -> Non
     assert not controller.show_latest()
 
 
+def test_history_controller_defers_a_latest_reload_after_reader_leaves_tail() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    controller.replace_entries(
+        (HistoricalTranscriptMessage(role="assistant", content="retained"),),
+        session_label="Windowed",
+    )
+    controller.capture_latest_reload_live_entries()
+    follow_requests_before_reload = surface.follow_requests
+    surface.following = False
+
+    assert not controller.replace_latest_entries(
+        (HistoricalTranscriptMessage(role="assistant", content="reloaded"),)
+    )
+    assert surface.history_labels == ["assistant: retained"]
+    assert surface.follow_requests == follow_requests_before_reload
+
+
 def test_history_controller_excludes_live_entries_from_a_latest_reload() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)
@@ -364,3 +382,18 @@ def test_history_controller_uses_the_live_snapshot_from_the_reload_request() -> 
 
     assert surface.latest_history_requests == 1
     assert surface.history_labels == []
+
+
+def test_history_controller_releases_evicted_live_widget_identity() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    widget = Widget()
+    controller.record_live_message("assistant", "evicted response", widget=widget)
+    controller.capture_latest_reload_live_entries()
+    controller.forget_live_widget(widget)
+
+    controller.replace_latest_entries(
+        (HistoricalTranscriptMessage(role="assistant", content="evicted response"),)
+    )
+
+    assert surface.history_labels == ["assistant: evicted response"]

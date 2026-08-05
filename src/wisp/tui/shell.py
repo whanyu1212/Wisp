@@ -264,6 +264,8 @@ class TuiShell:
         self.pending_session_catalog: _PendingSessionCatalog | None = None
         self.pending_session_switch: _PendingSessionSwitch | None = None
         self._history_pagination: _HistoryPagination | None = None
+        self._history_recovery_command_id: str | None = None
+        self._history_recovery_report_received = False
         self._ignored_history_page_commands: set[str] = set()
         self._history_message_limit = (
             TUI_HISTORY_PAGE_LIMIT
@@ -493,6 +495,10 @@ class TuiShell:
             for command_id in (pagination.command_id, pagination.latest_command_id):
                 if command_id is not None:
                     self._ignored_history_page_commands.add(command_id)
+        if self._history_recovery_command_id is not None:
+            self._ignored_history_page_commands.add(self._history_recovery_command_id)
+        self._history_recovery_command_id = None
+        self._history_recovery_report_received = False
         self._history_pagination = None
         self._call_renderer_optional("history_page_loaded", has_more=False)
 
@@ -1194,6 +1200,16 @@ class TuiShell:
                 session_switch.history_report = event
                 return False
 
+        if (
+            isinstance(event, RpcMessagesReported)
+            and event.command_id == self._history_recovery_command_id
+        ):
+            self._history_recovery_report_received = True
+            self._activate_history_pagination(event)
+            entries = history_entries_from_rpc_messages(event.messages)
+            self._call_renderer_optional("replace_latest_history_entries", entries)
+            return False
+
         pagination = self._history_pagination
         if (
             isinstance(event, RpcMessagesReported)
@@ -1315,6 +1331,16 @@ class TuiShell:
             return False
 
         if isinstance(event, RpcCommandFinished):
+            if event.command_id == self._history_recovery_command_id:
+                received_report = self._history_recovery_report_received
+                self._history_recovery_command_id = None
+                self._history_recovery_report_received = False
+                if not event.ok or not received_report:
+                    detail = event.error or "session history completed without a result"
+                    self.renderer.command_error(f"Failed to recover session history: {detail}")
+                    self._call_renderer_optional("history_page_request_failed")
+                    self._call_renderer_optional("latest_history_reload_failed")
+                return False
             if catalog is not None and event.command_id == catalog.command_id:
                 await self._finish_session_catalog(event)
                 return False
@@ -1552,13 +1578,14 @@ class TuiShell:
         except Exception as exc:  # noqa: BLE001 - stats are optional TUI chrome
             self.renderer.send_failed("session stats", exc)
 
-    async def _request_session_history(self) -> str | None:
+    async def _request_session_history(self, *, command_id: str | None = None) -> str | None:
         get_messages = getattr(self.controller, "get_messages", None)
         if not callable(get_messages):
             return None
         try:
             return await cast(Callable[..., Awaitable[str]], get_messages)(
-                limit=self._history_message_limit
+                limit=self._history_message_limit,
+                command_id=command_id,
             )
         except Exception as exc:  # noqa: BLE001 - history is optional TUI chrome
             self.renderer.send_failed("session history", exc)
@@ -1597,6 +1624,16 @@ class TuiShell:
     async def _request_latest_history_page(self) -> None:
         pagination = self._history_pagination
         if pagination is None:
+            if self._history_recovery_command_id is not None:
+                return
+            self._call_renderer_optional("capture_latest_history_reload")
+            command_id = f"history-recovery-{uuid4().hex}"
+            self._history_recovery_command_id = command_id
+            self._history_recovery_report_received = False
+            if await self._request_session_history(command_id=command_id) is None:
+                self._history_recovery_command_id = None
+                self._call_renderer_optional("latest_history_reload_failed")
+                return
             return
         if pagination.latest_command_id is not None:
             return
@@ -1622,6 +1659,7 @@ class TuiShell:
                 pagination.latest_command_id = None
                 self.renderer.command_error(f"Failed to reload latest session history: {exc}")
                 self._call_renderer_optional("history_page_request_failed")
+                self._call_renderer_optional("latest_history_reload_failed")
             return
 
     async def _finish_history_page(self, event: RpcCommandFinished) -> None:
@@ -1666,16 +1704,20 @@ class TuiShell:
             detail = event.error or "latest session history completed without a result"
             self.renderer.command_error(f"Failed to reload latest session history: {detail}")
             self._call_renderer_optional("history_page_request_failed")
+            self._call_renderer_optional("latest_history_reload_failed")
             return
         if report.session_id != pagination.session_id:
             self.renderer.command_error(
                 "Failed to reload latest session history: result did not match the active session."
             )
             self._call_renderer_optional("history_page_request_failed")
+            self._call_renderer_optional("latest_history_reload_failed")
             return
 
         entries = history_entries_from_rpc_messages(report.messages)
-        self._call_renderer_optional("replace_latest_history_entries", entries)
+        replace_latest_entries = getattr(self.renderer, "replace_latest_history_entries", None)
+        if callable(replace_latest_entries) and replace_latest_entries(entries) is False:
+            return
         pagination.next_before_entry_id = report.next_before_entry_id
         self._call_renderer_optional(
             "history_page_loaded",

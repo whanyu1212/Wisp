@@ -9,6 +9,7 @@ from pytest import MonkeyPatch
 from rich.cells import cell_len
 from textual import events
 from textual.content import Content
+from textual.widget import Widget
 from textual.widgets import OptionList, Static
 
 import wisp.cli as cli_module
@@ -2780,6 +2781,26 @@ def test_textual_streaming_survives_a_burst_without_dropping_text() -> None:
     assert texts == ["The quick brown fox"]
 
 
+def test_textual_streaming_coalesces_one_pending_drain_per_turn() -> None:
+    async def scenario() -> tuple[int, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("first ")
+            await pilot.pause()
+            for delta in ("batched ", "stream ", "output"):
+                renderer.token_delta(delta)
+            turn = app_instance._stream._turn
+            assert turn is not None
+            pending_callbacks = app_instance._stream._pending_callbacks
+            renderer.end_token_stream()
+            await app_instance.wait_for_stream_idle()
+            return pending_callbacks, _transcript_texts(app_instance)[0]
+
+    pending_callbacks, text = anyio.run(scenario)
+    assert pending_callbacks == 1
+    assert text == "first batched stream output"
+
+
 def test_textual_end_token_stream_finalizes_the_bubble() -> None:
     # end_token_stream() is the ONLY place a streamed assistant turn is finalized
     # (the shell suppresses the trailing MessageCompleted when tokens rendered).
@@ -2796,6 +2817,48 @@ def test_textual_end_token_stream_finalizes_the_bubble() -> None:
     text, is_streaming = anyio.run(scenario)
     assert text == "final answer"
     assert not is_streaming
+
+
+def test_textual_stream_widget_is_available_before_async_finalization() -> None:
+    async def scenario() -> bool:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            renderer.token_delta("streamed response")
+            renderer.end_token_stream()
+            renderer.record_streamed_message_completed(
+                completed_message(content="streamed response")
+            )
+            return (
+                renderer._history._live_entries[-1].widget
+                is app_instance.stream_widget_for_completed_message()
+            )
+
+    assert anyio.run(scenario)
+
+
+def test_textual_live_eviction_defers_history_reload_while_reader_is_browsing() -> None:
+    async def scenario() -> tuple[int, int]:
+        app_instance, _renderer = create_textual_tui()
+        requests = 0
+
+        async def request_latest() -> None:
+            nonlocal requests
+            requests += 1
+
+        async with app_instance.run_test() as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            app_instance.set_history_latest_request_hook(request_latest)
+            transcript._follow = False
+            app_instance.live_transcript_widget_evicted(Widget())
+            await pilot.pause()
+            deferred_requests = requests
+            transcript.return_to_latest()
+            await pilot.pause()
+            return deferred_requests, requests
+
+    deferred_requests, resumed_requests = anyio.run(scenario)
+    assert deferred_requests == 0
+    assert resumed_requests == 1
 
 
 def test_textual_stream_shutdown_drains_pending_output() -> None:
@@ -3165,6 +3228,32 @@ def test_textual_status_activity_animates_spinner_and_counts_elapsed() -> None:
     assert start.endswith("0s")
     assert later.endswith("1s")  # counter advanced with elapsed time
     assert start[0] in WorkingIndicator._FRAMES  # a braille frame, not the old dot
+
+
+def test_textual_working_indicator_ticks_without_relayout(monkeypatch: MonkeyPatch) -> None:
+    layouts: list[bool] = []
+    original_update = WorkingIndicator.update
+
+    def record_update(self: WorkingIndicator, content: object = "", *, layout: bool = True) -> None:
+        layouts.append(layout)
+        original_update(self, content, layout=layout)
+
+    monkeypatch.setattr(WorkingIndicator, "update", record_update)
+
+    async def scenario() -> list[bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            await pilot.pause()
+            indicator = app_instance.query_one(WorkingIndicator)
+            layouts.clear()
+            indicator._tick()
+            indicator._tick()
+            return layouts
+
+    layouts = anyio.run(scenario)
+    assert len(layouts) >= 2
+    assert not any(layouts)
 
 
 def test_textual_retry_progress_mutates_status_and_rejects_older_attempts() -> None:
@@ -4489,6 +4578,28 @@ def test_textual_mouse_wheel_scrolls_transcript_and_updates_follow() -> None:
     assert result["focus_kept"]
     assert result["returned_to_bottom"]
     assert result["follow_restored"]
+
+
+def test_textual_wheel_outside_transcript_keeps_following_tail() -> None:
+    async def scenario() -> bool:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            input_widget = app_instance.query_one("#input", Input)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.scroll_end(animate=False)
+            await pilot.pause()
+
+            await pilot._post_mouse_events(
+                [events.MouseScrollUp],
+                widget=input_widget,
+                times=1,
+            )
+            await pilot.pause()
+            return transcript.is_following
+
+    assert anyio.run(scenario)
 
 
 def test_textual_home_key_scrolls_transcript_over_input_cursor() -> None:

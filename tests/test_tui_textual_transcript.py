@@ -7,7 +7,12 @@ from dataclasses import dataclass, field
 import anyio
 from textual.widget import Widget
 
-from wisp.tui.textual_transcript import TextualTranscriptController
+from wisp.tui.history import TUI_HISTORY_PAGE_LIMIT
+from wisp.tui.textual_transcript import (
+    TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT,
+    TUI_SETTLED_LIVE_WIDGET_LIMIT,
+    TextualTranscriptController,
+)
 from wisp.tui.widgets import ToolCard, WorkingIndicator
 
 
@@ -19,6 +24,7 @@ class _Surface:
     removed: list[Widget] = field(default_factory=list)
     unseen_counts: list[int] = field(default_factory=list)
     unseen_hidden: int = 0
+    evicted: list[Widget] = field(default_factory=list)
     follow_requests: int = 0
     returned_to_latest: int = 0
     controller: TextualTranscriptController | None = field(default=None, repr=False)
@@ -61,6 +67,9 @@ class _Surface:
 
     def hide_unseen_output(self) -> None:
         self.unseen_hidden += 1
+
+    def live_transcript_widget_evicted(self, widget: Widget) -> None:
+        self.evicted.append(widget)
 
 
 def _controller(surface: _Surface) -> TextualTranscriptController:
@@ -173,6 +182,63 @@ def test_only_newest_focused_card_repins_until_user_scrolls() -> None:
     controller.tool_card_focused(first)
     controller.tool_card_toggled(first)
     assert surface.returned_to_latest == 1
+
+
+def test_settled_live_widgets_are_bounded_and_released_for_durable_history() -> None:
+    surface = _Surface()
+    controller = TextualTranscriptController(surface, settled_capacity=2)
+    first = Widget()
+    second = Widget()
+    third = Widget()
+
+    controller.settle_widget(first)
+    controller.settle_widget(second)
+    controller.settle_widget(third)
+
+    assert controller.settled_widget_count == 2
+    assert surface.removed == [first]
+    assert surface.evicted == [first]
+
+
+def test_settled_live_limit_keeps_the_first_eviction_in_one_history_page() -> None:
+    assert TUI_SETTLED_LIVE_WIDGET_LIMIT == TUI_HISTORY_PAGE_LIMIT - 1
+    assert TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT == TUI_HISTORY_PAGE_LIMIT - 2
+
+
+def test_settled_live_widgets_are_also_bounded_by_durable_entry_count() -> None:
+    surface = _Surface()
+    controller = TextualTranscriptController(
+        surface,
+        settled_capacity=4,
+        durable_entry_capacity=2,
+    )
+    first = Widget()
+    second = Widget()
+
+    controller.settle_widget(first, durable_entry_count=2)
+    controller.settle_widget(second, durable_entry_count=2)
+
+    assert controller.settled_widget_count == 1
+    assert surface.removed == [first]
+
+
+def test_pending_tool_cards_are_not_eligible_for_settled_widget_eviction() -> None:
+    surface = _Surface()
+    controller = TextualTranscriptController(surface, settled_capacity=1)
+    surface.controller = controller
+
+    first = controller.mount_tool_call("one", "read", {})
+    second = controller.mount_tool_call("two", "bash", {})
+    assert isinstance(first, ToolCard)
+    assert isinstance(second, ToolCard)
+    assert controller.settled_widget_count == 0
+
+    controller.resolve_tool_call("one", "done")
+    controller.resolve_tool_call("two", "done")
+
+    assert controller.settled_widget_count == 1
+    assert surface.removed == [first]
+    assert surface.evicted == [first]
 
 
 def test_reset_clears_live_state_without_creating_missing_transcript_widgets() -> None:

@@ -1428,6 +1428,7 @@ class Transcript(VerticalScroll):
     ) -> None:
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
         self._follow = True
+        self._follow_generation = 0
         self._empty_wordmark = empty_wordmark
         self._empty_hint = empty_hint
         self._empty_state: TranscriptEmptyState | None = None
@@ -1472,6 +1473,8 @@ class Transcript(VerticalScroll):
         super().watch_scroll_y(old_value, new_value)
         self._follow = self.is_vertical_scroll_end
         if self._follow != previous:
+            if not self._follow:
+                self._follow_generation += 1
             self.post_message(self.FollowChanged(self._follow))
         if new_value > 0:
             self._history_request_armed = True
@@ -1527,6 +1530,12 @@ class Transcript(VerticalScroll):
 
         return self._follow
 
+    @property
+    def follow_generation(self) -> int:
+        """Return the latest explicit reader navigation generation."""
+
+        return self._follow_generation
+
     def viewport_state(self) -> TranscriptViewportState:
         """Capture the current viewport offset and tail-follow intent."""
 
@@ -1571,10 +1580,40 @@ class Transcript(VerticalScroll):
         if self._follow:
             self.scroll_end(animate=False)
 
+    def page_up(self) -> None:
+        """Move away from the tail before a page-up layout can re-pin it."""
+
+        self._stop_following()
+        self.scroll_page_up(animate=False)
+
+    def page_down(self) -> None:
+        """Scroll one transcript page without Textual's default animation."""
+
+        self.scroll_page_down(animate=False)
+
+    def scroll_to_oldest(self) -> None:
+        """Move to the durable-history boundary without waiting for scroll settlement."""
+
+        self._stop_following()
+        self.scroll_home(animate=False)
+
+    def stop_following(self) -> None:
+        """Record explicit reader intent before a wheel scroll is processed."""
+
+        self._stop_following()
+
+    def _stop_following(self) -> None:
+        self._follow_generation += 1
+        if not self._follow:
+            return
+        self._follow = False
+        self.post_message(self.FollowChanged(False))
+
     def return_to_latest(self) -> None:
         """Restore tail-follow intent and jump to the newest output immediately."""
 
         was_following = self._follow
+        self._follow_generation += 1
         self._follow = True
         self.scroll_end(animate=False)
         if not was_following:
@@ -2077,8 +2116,11 @@ class ToolCard(Static):
             self._timer = None
 
     def _tick(self) -> None:
-        self._elapsed = (self._elapsed or 0.0) + self._TICK
-        self._repaint()
+        previous = self._elapsed or 0.0
+        self._elapsed = previous + self._TICK
+        self._repaint(
+            layout=len(_format_duration(previous)) != len(_format_duration(self._elapsed))
+        )
 
     def set_state(
         self,
@@ -2178,7 +2220,7 @@ class ToolCard(Static):
     class LeaveRequested(Message):
         """A focused card asked to hand focus back to the prompt input."""
 
-    def _repaint(self) -> None:
+    def _repaint(self, *, layout: bool = True) -> None:
         # Build the whole card as Content, appending every untrusted value
         # (name, summary, detail) as LITERAL styled text. Nothing untrusted is
         # ever routed through a markup parser, so no escaping is needed and no
@@ -2224,7 +2266,7 @@ class ToolCard(Static):
                 "  ⋯ output truncated at the tool's limit", "dim"
             )
 
-        self.update(content)
+        self.update(content, layout=layout)
 
     @staticmethod
     def _indent_str(text: str) -> Content:
@@ -2253,6 +2295,7 @@ class WorkingIndicator(Static):
         self._label = "Working…"
         self._show_elapsed = True
         self._timer: Timer | None = None
+        self._rendered_width: int | None = None
 
     def on_mount(self) -> None:
         self._start_timer()
@@ -2304,7 +2347,9 @@ class WorkingIndicator(Static):
             text += f" · {seconds}s"
         # No Rich markup — this Static is markup=False and styled dim via
         # CSS class `message--dim` (muted, no border). Just plain text.
-        self.update(text)
+        width = len(text)
+        self.update(text, layout=width != self._rendered_width)
+        self._rendered_width = width
 
 
 class StatusBar(Static):
