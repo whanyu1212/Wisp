@@ -20,6 +20,7 @@ type _SequentialRpcCommandType = Literal[
     "get_session_stats",
     "get_messages",
     "get_sessions",
+    "new_session",
     "select_session",
     "clone_session",
     "fork_session",
@@ -77,6 +78,7 @@ class _RpcRunningCommand:
 class _RpcDispatchResult:
     running_command: _RpcRunningCommand | None
     selected_session: JsonlSession | None = None
+    reset_session: bool = False
     should_shutdown: bool = False
 
 
@@ -107,8 +109,11 @@ _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
 
 
 def _bypasses_active_command(command_type: str) -> bool:
-    # Configure must reach the executor to report its busy error instead of applying later.
-    return command_type == "configure" or command_type in _ACTIVE_COMMAND_BYPASS_COMMANDS
+    # Configuration and session reset must reach the executor to report a busy
+    # error immediately instead of being queued and applied later.
+    return command_type in {"configure", "new_session"} or command_type in (
+        _ACTIVE_COMMAND_BYPASS_COMMANDS
+    )
 
 
 class RpcControlReceiver(Protocol):
@@ -290,7 +295,14 @@ class RpcCoordinator:
                 reject=reject,
             )
             return False
-        if running is not None and not _bypasses_active_command(selected_type):
+        new_session_waits_for_ordered_operation = (
+            selected_type == "new_session"
+            and running is not None
+            and running.command_type not in {"prompt", "compact"}
+        )
+        if running is not None and (
+            not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_operation
+        ):
             self._enqueue_command(command, queue=self.queued_commands, reject=reject)
             return False
         return self._dispatch(command, dispatch=dispatch)
@@ -317,7 +329,9 @@ class RpcCoordinator:
         self.running_command = result.running_command
         if result.running_command is not previous_running:
             self._prompt_queue_ready = False
-        if result.selected_session is not None:
+        if result.reset_session:
+            self._reset_session_state()
+        elif result.selected_session is not None:
             self.session_state.session = result.selected_session
         return result.should_shutdown
 
@@ -495,7 +509,14 @@ class RpcCoordinator:
                 reject=reject,
             )
             return False
-        if running is not None and not _bypasses_active_command(selected_type):
+        new_session_waits_for_ordered_operation = (
+            selected_type == "new_session"
+            and running is not None
+            and running.command_type not in {"prompt", "compact"}
+        )
+        if running is not None and (
+            not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_operation
+        ):
             await self._enqueue_command_async(command, queue=self.queued_commands, reject=reject)
             return False
         return await self._dispatch_async(command, dispatch=dispatch)
@@ -513,9 +534,17 @@ class RpcCoordinator:
         self.running_command = result.running_command
         if result.running_command is not previous_running:
             self._prompt_queue_ready = False
-        if result.selected_session is not None:
+        if result.reset_session:
+            self._reset_session_state()
+        elif result.selected_session is not None:
             self.session_state.session = result.selected_session
         return result.should_shutdown
+
+    def _reset_session_state(self) -> None:
+        self.session_state.session = None
+        self.session_state.history = ()
+        self.session_state.entry_count = 0
+        self.session_state.name = None
 
     async def _dispatch_pending_queue_commands_async(
         self,

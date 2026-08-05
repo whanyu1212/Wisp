@@ -84,6 +84,12 @@ class GetSessionsCommand(RpcCommandModel):
     limit: int = Field(default=50, ge=0, le=200, strict=True)
 
 
+class NewSessionCommand(RpcCommandModel):
+    """Deselect the active session so the next prompt starts a fresh one."""
+
+    type: Literal["new_session"] = "new_session"
+
+
 class SelectSessionCommand(RpcCommandModel):
     """Select a persisted session as the active RPC session."""
 
@@ -235,6 +241,7 @@ type RpcCommand = Annotated[
     | GetCommandsCommand
     | GetMessagesCommand
     | GetSessionsCommand
+    | NewSessionCommand
     | SelectSessionCommand
     | CloneSessionCommand
     | ForkSessionCommand

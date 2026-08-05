@@ -264,6 +264,14 @@ class CodingSession:
             raise RuntimeError("CodingSession is busy")
         self.mode = mode
 
+    def reset_session_state(self) -> None:
+        """Discard process-local queue state when no persisted session is selected."""
+
+        if self._operation_active:
+            raise RuntimeError("CodingSession is busy")
+        self._last_session_id = None
+        self._retained_queues.clear()
+
     def follow_up(self, content: str) -> QueueUpdated:
         """Queue user text for the active run's next completed-turn boundary."""
 
@@ -1027,7 +1035,10 @@ class CodingSession:
             if session is None or not session.path.exists():
                 entries: tuple[SessionEntry, ...] = ()
             else:
-                entries = await anyio.to_thread.run_sync(session.read_entries)
+                entries = await anyio.to_thread.run_sync(
+                    session.read_entries,
+                    abandon_on_cancel=True,
+                )
             replay = replay_session_entries(entries)
             history = self._conversation_history(replay.messages)
             provider_messages = self._provider_messages(history)

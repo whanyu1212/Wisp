@@ -120,6 +120,8 @@ class TuiController(Protocol):
 
     async def get_sessions(self, *, limit: int = 50, command_id: str | None = None) -> str: ...
 
+    async def new_session(self, *, command_id: str | None = None) -> str: ...
+
     async def select_session(self, session_id: str, *, command_id: str | None = None) -> str: ...
 
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str: ...
@@ -265,8 +267,11 @@ class TuiShell:
         self.pending_configures: dict[str, _PendingConfigure] = {}
         self.pending_context_status_command_id: str | None = None
         self.pending_context_status_received = False
+        self._pending_session_stats_command_ids: set[str] = set()
+        self._ignored_session_stats_command_ids: set[str] = set()
         self.pending_session_catalog: _PendingSessionCatalog | None = None
         self.pending_session_switch: _PendingSessionSwitch | None = None
+        self.pending_new_session_command_id: str | None = None
         self._history_pagination: _HistoryPagination | None = None
         self._history_recovery_command_id: str | None = None
         self._history_recovery_report_received = False
@@ -650,6 +655,9 @@ class TuiShell:
         if command.name is TuiSlashCommandName.model:
             await self._handle_model_command(command.args)
             return False
+        if command.name is TuiSlashCommandName.new:
+            await self._handle_new_session_command(command.args)
+            return False
         if command.name is TuiSlashCommandName.resume:
             await self._handle_resume_command(command.args)
             return False
@@ -666,6 +674,18 @@ class TuiShell:
             command_id=command_id,
             mode=mode,
         )
+
+    async def _handle_new_session_command(self, args: tuple[str, ...]) -> None:
+        if args:
+            self.renderer.command_error("Usage: /new")
+            return
+        try:
+            command_id = await self.controller.new_session()
+        except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
+            self.renderer.send_failed("new session", exc)
+            return
+        self.pending_new_session_command_id = command_id
+        self._update_view(status="starting new session")
 
     async def _handle_resume_command(self, args: tuple[str, ...]) -> None:
         if len(args) > 1:
@@ -705,11 +725,17 @@ class TuiShell:
         self._update_view(status="switching session")
 
     def _session_operation_active(self) -> bool:
-        return self.pending_session_catalog is not None or self.pending_session_switch is not None
+        return (
+            self.pending_session_catalog is not None
+            or self.pending_session_switch is not None
+            or self.pending_new_session_command_id is not None
+        )
 
     def _session_operation_name(self) -> str:
         if self.pending_session_switch is not None:
             return "a session switch is in progress"
+        if self.pending_new_session_command_id is not None:
+            return "a new session is starting"
         return "the session catalog is loading"
 
     def _call_renderer_optional(self, method_name: str, *args: object, **kwargs: object) -> None:
@@ -1248,14 +1274,24 @@ class TuiShell:
             pagination.latest_report = event
             return False
 
-        context_updated = self.view.update_context_from_event(event)
-        if context_updated:
-            self._update_view()
         if isinstance(event, SessionStatsReported):
-            if event.command_id == self.pending_context_status_command_id:
+            if event.command_id in self._ignored_session_stats_command_ids:
+                return False
+            is_context_status = event.command_id == self.pending_context_status_command_id
+            if (
+                not is_context_status
+                and event.command_id not in self._pending_session_stats_command_ids
+            ):
+                return False
+            if self.view.update_context_from_event(event):
+                self._update_view()
+            if is_context_status:
                 self.pending_context_status_received = True
                 self.renderer.notice(format_compaction_status(event.stats))
             return False
+        context_updated = self.view.update_context_from_event(event)
+        if context_updated:
+            self._update_view()
         if isinstance(event, ContextEstimated):
             return False
         if isinstance(event, ProviderRetrying):
@@ -1353,6 +1389,10 @@ class TuiShell:
             return False
 
         if isinstance(event, RpcCommandFinished):
+            if event.command_id in self._ignored_session_stats_command_ids:
+                self._ignored_session_stats_command_ids.discard(event.command_id)
+                return False
+            self._pending_session_stats_command_ids.discard(event.command_id)
             if event.command_id == self._history_recovery_command_id:
                 received_report = self._history_recovery_report_received
                 self._history_recovery_command_id = None
@@ -1379,6 +1419,9 @@ class TuiShell:
             if pagination is not None and event.command_id == pagination.latest_command_id:
                 await self._finish_latest_history_page(event)
                 return False
+            if event.command_id == self.pending_new_session_command_id:
+                self._finish_new_session(event)
+                return False
             if event.command_id in self.pending_configures:
                 await self._finish_pending_configure(event)
                 return False
@@ -1399,6 +1442,26 @@ class TuiShell:
                 return await self._finish_current_prompt(event)
         self._render_event(event)
         return False
+
+    def _finish_new_session(self, event: RpcCommandFinished) -> None:
+        self.pending_new_session_command_id = None
+        if not event.ok:
+            self.renderer.command_error(event.error or "new session failed")
+            self._sync_view()
+            return
+        self._clear_history_pagination()
+        self._ignored_session_stats_command_ids.update(self._pending_session_stats_command_ids)
+        self._pending_session_stats_command_ids.clear()
+        if self.pending_context_status_command_id is not None:
+            self._ignored_session_stats_command_ids.add(self.pending_context_status_command_id)
+            self.pending_context_status_command_id = None
+            self.pending_context_status_received = False
+        self.view.context = None
+        self.view.cost = None
+        self.view.last_session = None
+        self._call_renderer_optional("clear_session")
+        self.renderer.notice("Started a new session.")
+        self._sync_view()
 
     async def _finish_session_catalog(self, event: RpcCommandFinished) -> None:
         pending = self.pending_session_catalog
@@ -1603,9 +1666,11 @@ class TuiShell:
 
     async def _request_session_stats(self) -> None:
         try:
-            await self.controller.get_session_stats()
+            command_id = await self.controller.get_session_stats()
         except Exception as exc:  # noqa: BLE001 - stats are optional TUI chrome
             self.renderer.send_failed("session stats", exc)
+            return
+        self._pending_session_stats_command_ids.add(command_id)
 
     async def _request_session_history(self, *, command_id: str | None = None) -> str | None:
         get_messages = getattr(self.controller, "get_messages", None)
@@ -1783,6 +1848,8 @@ class TuiShell:
             self.renderer.rpc_stream_ended_before_command(command_id)
         elif self.pending_session_catalog is not None:
             self.renderer.rpc_stream_ended_before_command(self.pending_session_catalog.command_id)
+        elif self.pending_new_session_command_id is not None:
+            self.renderer.rpc_stream_ended_before_command(self.pending_new_session_command_id)
         elif self.pending_context_status_command_id is not None:
             self.renderer.rpc_stream_ended_before_command(self.pending_context_status_command_id)
         elif pending_command_id is not None:

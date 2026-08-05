@@ -172,6 +172,7 @@ class ScriptedController:
         self.messages_requests: list[tuple[str, str | None, int, str | None]] = []
         self.sessions_requests: list[tuple[str, int]] = []
         self.selected_sessions: list[tuple[str, str]] = []
+        self.new_session_requests: list[str] = []
         self.session_stats_requests: list[str] = []
         self.shutdown_count = 0
         self.closed = False
@@ -269,6 +270,11 @@ class ScriptedController:
                 ),
             ],
         )
+        return selected_id
+
+    async def new_session(self, *, command_id: str | None = None) -> str:
+        selected_id = command_id or f"new-session-{len(self.new_session_requests) + 1}"
+        self.new_session_requests.append(selected_id)
         return selected_id
 
     async def select_session(

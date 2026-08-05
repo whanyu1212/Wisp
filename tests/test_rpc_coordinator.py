@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import anyio
+import pytest
 
 from wisp.agent.messages import Message
 from wisp.events import RpcSessionSelected, WispEvent
@@ -78,6 +79,138 @@ def test_coordinator_runs_queued_commands_in_fifo_order() -> None:
         assert dispatched == ["one", "two", "three"]
         assert state.history == history
         assert state.entry_count == 3
+
+    anyio.run(scenario)
+
+
+def test_coordinator_applies_new_session_reset_atomically(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = JsonlSessionStore(tmp_path).create()
+        await session.append_message(Message(role="user", content="previous"))
+        history = (Message(role="user", content="previous"),)
+        state = _RpcSessionState(
+            session=session,
+            history=history,
+            entry_count=3,
+            name="Previous",
+        )
+        coordinator = RpcCoordinator(state)
+        receiver = _Receiver(
+            [
+                _RpcInputCommand({"id": "new-1", "type": "new_session"}),
+                _RpcInputClosed(),
+            ]
+        )
+
+        await coordinator.run(
+            receiver,
+            dispatch=lambda _command, running: _RpcDispatchResult(
+                running_command=running,
+                reset_session=True,
+            ),
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+
+        assert state.session is None
+        assert state.history == ()
+        assert state.entry_count == 0
+        assert state.name is None
+        assert session.path.is_file()
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("command_type", ["get_session_stats", "get_messages"])
+def test_coordinator_queues_new_session_behind_work_already_waiting_on_background_read(
+    command_type: Literal["get_session_stats", "get_messages"],
+) -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        background = _RpcRunningCommand("background", command_type, anyio.CancelScope())
+        coordinator.running_command = background
+        coordinator.queued_commands.append({"id": "prompt", "type": "prompt"})
+        dispatched: list[str] = []
+
+        coordinator.handle_event(
+            _RpcInputCommand({"id": "new", "type": "new_session"}),
+            dispatch=lambda command, running: (
+                dispatched.append(str(command["id"])) or _RpcDispatchResult(running)
+            ),
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+
+        assert dispatched == []
+        assert list(coordinator.queued_commands) == [
+            {"id": "prompt", "type": "prompt"},
+            {"id": "new", "type": "new_session"},
+        ]
+        assert background.cancel_scope.cancel_called is False
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    "command_type",
+    ["get_messages", "get_sessions", "get_session_stats", "get_session_tree"],
+)
+def test_coordinator_queues_new_session_behind_active_ordered_read(
+    command_type: Literal["get_messages", "get_sessions", "get_session_stats", "get_session_tree"],
+) -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        background = _RpcRunningCommand("background", command_type, anyio.CancelScope())
+        coordinator.running_command = background
+        dispatched: list[str] = []
+
+        coordinator.handle_event(
+            _RpcInputCommand({"id": "new", "type": "new_session"}),
+            dispatch=lambda command, running: (
+                dispatched.append(str(command["id"])) or _RpcDispatchResult(running)
+            ),
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+
+        assert dispatched == []
+        assert list(coordinator.queued_commands) == [{"id": "new", "type": "new_session"}]
+        assert background.cancel_scope.cancel_called is False
+
+    anyio.run(scenario)
+
+
+def test_coordinator_queues_new_session_behind_work_waiting_on_stats_async() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        stats = _RpcRunningCommand("stats", "get_session_stats", anyio.CancelScope())
+        coordinator.running_command = stats
+        coordinator.queued_commands.append({"id": "prompt", "type": "prompt"})
+        dispatched: list[str] = []
+
+        async def dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            dispatched.append(str(command["id"]))
+            return _RpcDispatchResult(running)
+
+        async def reject(_command: dict[str, object], _message: str) -> None:
+            raise AssertionError("new_session should be queued, not rejected")
+
+        await coordinator.handle_event_async(
+            _RpcInputCommand({"id": "new", "type": "new_session"}),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+
+        assert dispatched == []
+        assert list(coordinator.queued_commands) == [
+            {"id": "prompt", "type": "prompt"},
+            {"id": "new", "type": "new_session"},
+        ]
+        assert stats.cancel_scope.cancel_called is False
 
     anyio.run(scenario)
 

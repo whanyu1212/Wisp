@@ -88,6 +88,13 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=30,
         ),
         CommandDescriptor(
+            name="new",
+            title="New session",
+            description="Start a fresh session",
+            category=CommandCategory.session,
+            order=35,
+        ),
+        CommandDescriptor(
             name="resume",
             title="Resume",
             description="Browse or resume a previous session",

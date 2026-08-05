@@ -281,6 +281,11 @@ class TextualTuiRenderer:
     def render_history_entries(self, entries: tuple[HistoricalTranscriptEntry, ...]) -> None:
         self._history.render_entries(entries)
 
+    def clear_session(self) -> None:
+        self._tool_started.clear()
+        self._tool_arguments.clear()
+        self._history.clear_entries()
+
     def replace_history_entries(
         self,
         entries: tuple[HistoricalTranscriptEntry, ...],
