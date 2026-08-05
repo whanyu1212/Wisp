@@ -408,6 +408,7 @@ def test_coding_session_state_snapshot_uses_effective_configuration_without_io(
     assert default_agent.state_snapshot().model_dump() == {
         "provider": "fake",
         "model": "fake",
+        "mode": "build",
         "effort": None,
         "auto_compaction_enabled": True,
         "steering_mode": "one_at_a_time",
@@ -418,6 +419,7 @@ def test_coding_session_state_snapshot_uses_effective_configuration_without_io(
     assert configured_agent.state_snapshot().model_dump() == {
         "provider": "fake",
         "model": "configured-model",
+        "mode": "build",
         "effort": "high",
         "auto_compaction_enabled": False,
         "steering_mode": "one_at_a_time",
@@ -1772,6 +1774,62 @@ def test_coding_session_filters_provider_tool_specs_by_policy(tmp_path: Path) ->
 
     assert provider.seen_tools is not None
     assert [tool.name for tool in provider.seen_tools] == ["echo"]
+
+
+def test_coding_session_plan_mode_exposes_only_read_tools_and_restores_build_tools(
+    tmp_path: Path,
+) -> None:
+    provider = CapturingProvider()
+    tools = ToolRegistry()
+    tools.register(EchoTool())
+    tools.register(MutatingTool())
+    agent = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path),
+        tool_registry=tools,
+    )
+
+    async def run_agent() -> tuple[list[str], list[str], list[str]]:
+        agent.set_mode("plan")
+        _ = [event async for event in agent.run("plan this")]
+        plan_tools = [tool.name for tool in provider.seen_tools or ()]
+        plan_messages = [message.content for message in provider.seen_messages or ()]
+        agent.set_mode("build")
+        _ = [event async for event in agent.run("build this")]
+        build_tools = [tool.name for tool in provider.seen_tools or ()]
+        return plan_tools, plan_messages, build_tools
+
+    plan_tools, plan_messages, build_tools = anyio.run(run_agent)
+
+    assert plan_tools == ["echo"]
+    assert any("You are in plan mode" in message for message in plan_messages)
+    assert build_tools == ["echo", "mutate"]
+
+
+def test_coding_session_plan_mode_blocks_fabricated_mutating_tool_call(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [
+            [ToolCall(call_id="call-1", name="mutate", arguments={}, response_id="response-1")],
+            ["recovered"],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(MutatingTool())
+
+    async def run_agent() -> None:
+        agent = CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+            mode="plan",
+        )
+        _ = [event async for event in agent.run("plan this")]
+
+    anyio.run(run_agent)
+
+    assert provider.calls[1][0] == (
+        ToolCallResult(call_id="call-1", output="Tool mutate is blocked by policy", is_error=True),
+    )
 
 
 def test_coding_session_returns_error_result_for_policy_blocked_tool(tmp_path: Path) -> None:

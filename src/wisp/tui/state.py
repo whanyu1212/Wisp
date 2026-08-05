@@ -8,6 +8,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
+from wisp.agent.mode import AgentMode
 from wisp.events import (
     CompactionCompleted,
     CompactionStarted,
@@ -59,6 +60,7 @@ class TuiViewState:
     """Shell-owned renderer-visible TUI state."""
 
     status: str = "idle"
+    mode: AgentMode = "build"
     input_hint: str = "wisp> "
     input_mode: str = "idle"
     queued_follow_ups: int = 0
@@ -74,6 +76,7 @@ class TuiViewState:
 
         return TuiViewSnapshot(
             status=self.status,
+            mode=self.mode,
             input_hint=self.input_hint,
             input_mode=self.input_mode,
             queued_follow_ups=self.queued_follow_ups,

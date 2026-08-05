@@ -330,6 +330,45 @@ def test_executor_rejects_runtime_configuration_while_busy(tmp_path: Path) -> No
     anyio.run(scenario)
 
 
+def test_executor_configures_agent_mode_and_reports_it_in_state(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            executor.dispatch(
+                {"id": "configure-1", "type": "configure", "mode": "plan"},
+                None,
+            )
+            executor.dispatch({"id": "state-1", "type": "get_state"}, None)
+            task_group.cancel_scope.cancel()
+
+        assert fixture.agent.mode == "plan"
+        report = next(event for event in fixture.events if isinstance(event, RpcStateReported))
+        assert report.state.mode == "plan"
+
+    anyio.run(scenario)
+
+
+def test_executor_rejects_invalid_agent_mode_without_changing_state(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            executor.dispatch(
+                {"id": "configure-1", "type": "configure", "mode": "invalid"},
+                None,
+            )
+            task_group.cancel_scope.cancel()
+
+        finished = next(event for event in fixture.events if isinstance(event, RpcCommandFinished))
+        assert finished.ok is False
+        assert fixture.agent.mode == "build"
+
+    anyio.run(scenario)
+
+
 def test_executor_state_projects_prompt_startup_queue_buffer(tmp_path: Path) -> None:
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
@@ -472,6 +511,8 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
             "compact",
             "context",
             "history",
+            "plan",
+            "build",
             "model",
             "resume",
             "provider",

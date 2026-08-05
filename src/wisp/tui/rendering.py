@@ -14,6 +14,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
+from wisp.agent.mode import AgentMode
 from wisp.events import (
     CompactionCompleted,
     CompactionStarted,
@@ -59,6 +60,7 @@ class TuiViewSnapshot:
 
     status: str
     input_hint: str
+    mode: AgentMode = "build"
     input_mode: str = "idle"
     queued_follow_ups: int = 0
     last_session: str | None = None
@@ -472,6 +474,7 @@ class FullscreenTuiState:
 
     status: str = "idle"
     input_hint: str = "wisp> "
+    mode: AgentMode = "build"
     input_mode: str = "idle"
     queued_follow_ups: int = 0
     last_session: str | None = None
@@ -516,6 +519,7 @@ class FullscreenTuiRenderer:
     def view_updated(self, snapshot: TuiViewSnapshot) -> None:
         self.state.status = snapshot.status
         self.state.input_hint = snapshot.input_hint
+        self.state.mode = snapshot.mode
         self.state.input_mode = snapshot.input_mode
         self.state.queued_follow_ups = snapshot.queued_follow_ups
         self.state.last_session = snapshot.last_session
@@ -1069,7 +1073,7 @@ def format_tui_footer_lines(
         _sanitize_footer_text(f"session: {snapshot.last_session}") if snapshot.last_session else ""
     )
 
-    status_parts = [snapshot.status]
+    status_parts = (["plan"] if snapshot.mode == "plan" else []) + [snapshot.status]
     if snapshot.queued_follow_ups:
         status_parts.append(f"queued {snapshot.queued_follow_ups}")
     status_left = _sanitize_footer_text(" • ".join(status_parts))
@@ -1338,6 +1342,8 @@ def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? 
         "  /help                    show this help\n"
         "  /compact [instructions]  compact the active session context\n"
         "  /context [auto on|off]   show or set automatic-compaction policy\n"
+        "  /plan                    switch to read-only planning mode\n"
+        "  /build                   switch to normal build mode\n"
         "  /auth [provider]         show credential status\n"
         "  /login [provider] [method]  login to a provider\n"
         "  /logout [provider]       remove stored provider credentials\n"

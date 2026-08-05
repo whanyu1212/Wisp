@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 import wisp.tui.app as tui_app_module
 from wisp import tui as tui_module
+from wisp.agent.mode import AgentMode
 from wisp.cli import app
 from wisp.config import WispConfig
 from wisp.events import (
@@ -166,6 +167,7 @@ class ScriptedController:
         self.cancelled: list[str] = []
         self.configurations: list[tuple[str | None, str | None, str | None, bool]] = []
         self.auto_compaction_settings: list[bool | None] = []
+        self.agent_modes: list[AgentMode | None] = []
         self.commands_requests: list[str] = []
         self.messages_requests: list[tuple[str, str | None, int, str | None]] = []
         self.sessions_requests: list[tuple[str, int]] = []
@@ -344,10 +346,12 @@ class ScriptedController:
         effort: str | None = None,
         clear_effort: bool = False,
         auto_compaction_enabled: bool | None = None,
+        mode: AgentMode | None = None,
         command_id: str | None = None,
     ) -> str:
         self.configurations.append((provider, model, effort, clear_effort))
         self.auto_compaction_settings.append(auto_compaction_enabled)
+        self.agent_modes.append(mode)
         selected_id = command_id or f"configure-{len(self.configurations)}"
         await self._emit_scripted(
             self.configure_events,

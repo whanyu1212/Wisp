@@ -122,6 +122,27 @@ def test_tui_shell_history_dispatches_renderer_request_and_rejects_arguments() -
     anyio.run(run)
 
 
+def test_tui_shell_switches_agent_mode_after_successful_configure() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        shell = TuiShell(controller, renderer=LineTuiRenderer(_console()[0]))
+
+        await shell._handle_input_line(_InputLine("/plan", _InputMode.idle))
+        assert controller.agent_modes == ["plan"]
+        command_id = next(iter(shell.pending_configures))
+        await shell._handle_rpc_event(
+            RpcCommandFinished(command_id=command_id, command_type="configure", ok=True)
+        )
+
+        assert shell.current_mode == "plan"
+        assert shell.view.mode == "plan"
+
+        await shell._handle_input_line(_InputLine("/build", _InputMode.idle))
+        assert controller.agent_modes == ["plan", "build"]
+
+    anyio.run(run)
+
+
 def test_tui_context_command_renders_authoritative_compaction_status() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:

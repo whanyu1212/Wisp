@@ -217,6 +217,12 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
             self._close_input()
             event.app.invalidate()
 
+        @bindings.add(Keys.BackTab)
+        def _toggle_agent_mode(event: KeyPressEvent) -> None:
+            command = "/build" if self.state.mode == "plan" else "/plan"
+            self._submit_synthetic_input(command)
+            event.app.invalidate()
+
         @bindings.add(Keys.PageUp)
         def _page_up(event: KeyPressEvent) -> None:
             self.scroll_transcript_up()
@@ -233,6 +239,16 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
             event.app.invalidate()
 
         return bindings
+
+    def _submit_synthetic_input(self, text: str) -> None:
+        """Submit a control line without discarding the user's editor draft."""
+
+        mode = self._buffer_input_mode
+        if self._input_future is None or self._input_future.done():
+            self._queued_submissions.append((text, mode))
+            return
+        self._submitted_input_mode = mode
+        self._input_future.set_result(text)
 
     def _accept_input(self) -> None:
         text = self._buffer.text

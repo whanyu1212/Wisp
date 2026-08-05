@@ -17,6 +17,7 @@ from wisp.agent.messages import (
     message_from_completion_event,
     provider_history_message,
 )
+from wisp.agent.mode import DEFAULT_AGENT_MODE, PLAN_MODE_SYSTEM_PROMPT, AgentMode
 from wisp.agent.prompt import (
     DEFAULT_CONTEXT_MAX_CHARS,
     build_prompt_messages,
@@ -152,6 +153,7 @@ class CodingSession:
         trusted: bool = False,
         context_reserve_tokens: int = 16_384,
         auto_compaction_enabled: bool = True,
+        mode: AgentMode = DEFAULT_AGENT_MODE,
     ) -> None:
         self.sessions = sessions
         self.events = events
@@ -169,6 +171,7 @@ class CodingSession:
         self.project_context_max_chars = project_context_max_chars
         self.project_context_root = project_context_root
         self.max_tool_iterations = max_tool_iterations
+        self.mode = mode
         self._pending_entries: deque[_PendingSessionEntry] = deque()
         self._pending_flush_lock = anyio.Lock()
         self._operation_lock = anyio.Semaphore(1)
@@ -254,6 +257,13 @@ class CodingSession:
             raise RuntimeError("CodingSession is busy")
         self._apply_configuration(configuration)
 
+    def set_mode(self, mode: AgentMode) -> None:
+        """Select the operating mode for subsequent agent operations."""
+
+        if self._operation_active:
+            raise RuntimeError("CodingSession is busy")
+        self.mode = mode
+
     def follow_up(self, content: str) -> QueueUpdated:
         """Queue user text for the active run's next completed-turn boundary."""
 
@@ -285,6 +295,7 @@ class CodingSession:
         return CodingSessionState(
             provider=self.provider.name,
             model=self.model or self.provider.default_model,
+            mode=self.mode,
             effort=self.effort,
             auto_compaction_enabled=self.auto_compaction_enabled,
             steering_mode=queue.steering_mode,
@@ -415,11 +426,12 @@ class CodingSession:
         async def emit(event: WispEvent) -> WispEvent:
             return await self._emit(event, session=session, operation_id=operation_id)
 
-        prompt_messages = self._prompt_messages()
+        effective_tools = self._effective_tools()
+        prompt_messages = self._prompt_messages(effective_tools)
         executor = ConfiguredToolExecutor(
             registry=self.tool_registry,
             context=self.tool_context,
-            policy=self.tool_policy,
+            policy=self._effective_tool_policy(effective_tools),
             approval_policy=self.tool_approval_policy,
         )
         harness = AgentHarness(
@@ -427,7 +439,7 @@ class CodingSession:
                 provider=self.provider,
                 tool_executor=executor,
                 model=self.model,
-                tools=self.tools,
+                tools=effective_tools,
                 max_tool_iterations=self.max_tool_iterations,
                 effort=self.effort,
                 context_window=self._context_window(),
@@ -532,7 +544,9 @@ class CodingSession:
                             model=self.model or self.provider.default_model,
                             tokens=event.usage.total_tokens,
                             entry_id=completion_entry_id,
-                            context_fingerprint=context_fingerprint(current_messages, self.tools),
+                            context_fingerprint=context_fingerprint(
+                                current_messages, effective_tools
+                            ),
                         )
 
                     yield await emit(event)
@@ -731,9 +745,10 @@ class CodingSession:
         status: _AutoCompactionStatus,
     ) -> AsyncIterator[WispEvent]:
         provider_messages = self._normalize_provider_messages(harness.messages)
-        estimate = estimate_context(provider_messages, self.tools)
+        tools = tuple(harness.config.tools)
+        estimate = estimate_context(provider_messages, tools)
         observation = self._context_observations.get(session.session_id)
-        current_fingerprint = context_fingerprint(provider_messages, self.tools)
+        current_fingerprint = context_fingerprint(provider_messages, tools)
         observed_tokens = None
         observed_is_current = False
         if observation is not None:
@@ -1036,7 +1051,7 @@ class CodingSession:
                 entries=entries,
                 replay=replay,
                 provider_messages=provider_messages,
-                tools=self.tools,
+                tools=self._effective_tools(),
                 context_window=self._context_window(),
                 reserve_tokens=self.context_reserve_tokens,
                 observed_tokens=observed_tokens,
@@ -1063,12 +1078,34 @@ class CodingSession:
         except UnknownToolError:
             return True
 
-    def _prompt_messages(self) -> tuple[Message, ...]:
+    def _effective_tools(self) -> tuple[ToolSpec, ...]:
+        """Return the startup-authorized tools available in the current mode."""
+
+        if self.mode == "build" or self.tool_registry is None:
+            return self.tools if self.mode == "build" else ()
+        build_names = {tool.name for tool in self.tools}
+        return tuple(
+            ToolSpec.from_tool(tool)
+            for tool in self.tool_registry.all()
+            if tool.name in build_names and tool.safety == "read" and self.tool_policy.allows(tool)
+        )
+
+    def _effective_tool_policy(self, tools: Sequence[ToolSpec]) -> ToolPolicy:
+        if self.mode == "build":
+            return self.tool_policy
+        return ToolPolicy.allow_tool_names({tool.name for tool in tools})
+
+    def _prompt_messages(self, tools: Sequence[ToolSpec] | None = None) -> tuple[Message, ...]:
+        effective_tools = tuple(tools) if tools is not None else self._effective_tools()
         if self.prompt_messages is not None:
-            return self.prompt_messages
+            messages = self.prompt_messages
+            if self.mode == "plan":
+                return (*messages, Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT))
+            return messages
         return build_prompt_messages(
             cwd=self.tool_context.cwd,
-            tools=self.tools,
+            tools=effective_tools,
+            mode=self.mode,
             max_context_chars=self.project_context_max_chars,
             include_project_context=self.trusted,
             protected_paths=self.tool_context.protected_paths,

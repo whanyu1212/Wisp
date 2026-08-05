@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from wisp.agent.messages import Message
+from wisp.agent.mode import DEFAULT_AGENT_MODE, PLAN_MODE_SYSTEM_PROMPT, AgentMode
 from wisp.providers.base import ToolSpec
 from wisp.settings import DEFAULT_PROTECTED_PATHS
 from wisp.tools.context import ToolContext
@@ -63,6 +64,7 @@ def build_prompt_messages(
     *,
     cwd: Path,
     tools: Sequence[ToolSpec] = (),
+    mode: AgentMode = DEFAULT_AGENT_MODE,
     max_context_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
     max_context_file_chars: int = DEFAULT_CONTEXT_FILE_MAX_CHARS,
     include_project_context: bool = True,
@@ -83,10 +85,13 @@ def build_prompt_messages(
         if include_project_context
         else build_untrusted_project_context(tools=tools, max_chars=max_context_chars)
     )
-    return (
+    messages = [
         Message(role="system", content=DEFAULT_SYSTEM_PROMPT),
         Message(role="system", content=context),
-    )
+    ]
+    if mode == "plan":
+        messages.append(Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT))
+    return tuple(messages)
 
 
 def build_project_context(

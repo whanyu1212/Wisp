@@ -353,6 +353,8 @@ Available slash commands:
 /resume [session-id]        browse or resume a persisted session
 /compact [instructions]     summarize older context while preserving the JSONL audit
 /context [auto on|off]      show or toggle compaction policy
+/plan                       switch to read-only planning mode
+/build                      switch to normal build mode
 /history                    search prompts submitted in this TUI run
 /quit, /exit
 ```
@@ -362,6 +364,12 @@ than a Textual-owned table. Built-in descriptor metadata now drives shared slash
 parsing, and RPC `get_commands` discovery. It does not yet add extension command handlers, dynamic
 project extension loading, skills, prompt templates, package management, or configurable
 keybindings.
+
+Plan mode applies to future prompts in the current process. It exposes only read-only tools that
+were already authorized at startup (`read`, `grep`, `find`, and `ls` when selected); `write`,
+`edit`, `bash`, and non-read extension tools are unavailable. Use `/build` to restore the original
+authorized tool set. `Shift+Tab` toggles plan/build mode in the Textual and live fullscreen TUIs;
+line input uses the slash commands. The selected mode is not persisted in session JSONL.
 
 In the Textual TUI, press `Ctrl+R` or run `/history` to search up to 100 unique prompts
 submitted during the current TUI process. Selecting a result restores its exact text to the

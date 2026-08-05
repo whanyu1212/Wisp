@@ -18,7 +18,9 @@ from pydantic import (
     model_validator,
 )
 
-EVENT_SCHEMA_VERSION: Literal[26] = 26
+from wisp.agent.mode import AgentMode
+
+EVENT_SCHEMA_VERSION: Literal[27] = 27
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -36,6 +38,7 @@ RPC_COMMANDS_SCHEMA_VERSION = 23
 RPC_SESSION_UNREVERT_SCHEMA_VERSION = 24
 PROCESS_METADATA_SCHEMA_VERSION = 25
 COMPACTION_POLICY_SCHEMA_VERSION = 26
+AGENT_MODE_SCHEMA_VERSION = 27
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -73,7 +76,7 @@ class WispEvent(BaseModel):
 
     type: str
     schema_version: Literal[
-        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
+        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -287,6 +290,7 @@ class CodingSessionState(BaseModel):
 
     provider: str
     model: str | None = None
+    mode: AgentMode = "build"
     effort: str | None = None
     auto_compaction_enabled: bool
     steering_mode: QueueMode
@@ -859,9 +863,11 @@ class RpcStateReported(WispEvent):
     @model_serializer(mode="wrap")
     def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
         data = cast(dict[str, object], handler(self))
+        state = cast(dict[str, object], data["state"])
         if self.schema_version < RPC_SESSION_NAME_SCHEMA_VERSION:
-            state = cast(dict[str, object], data["state"])
             state.pop("session_name", None)
+        if self.schema_version < AGENT_MODE_SCHEMA_VERSION:
+            state.pop("mode", None)
         return data
 
 

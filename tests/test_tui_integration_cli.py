@@ -4624,6 +4624,19 @@ def test_textual_home_key_scrolls_transcript_over_input_cursor() -> None:
     assert value == "hello"  # input text untouched
 
 
+def test_textual_plan_mode_hotkey_routes_through_input_queue() -> None:
+    async def scenario() -> tuple[str, str]:
+        app = TextualTui()
+        app.action_toggle_agent_mode()
+        plan = await app.read_prompt("wisp> ")
+        app.set_status(TuiViewSnapshot(status="idle", input_hint="wisp> ", mode="plan"))
+        app.action_toggle_agent_mode()
+        build = await app.read_prompt("wisp> ")
+        return plan, build
+
+    assert anyio.run(scenario) == ("/plan", "/build")
+
+
 def test_textual_scroll_actions_are_safe_before_mount() -> None:
     # The scroll actions are None-guarded, so invoking them before on_mount wires
     # the transcript is a no-op, not a crash.

@@ -74,6 +74,26 @@ def test_resume_command_parses_and_is_available_in_slash_menu() -> None:
     assert spec.takes_args is True
 
 
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [
+        ("/plan", TuiSlashCommandName.plan),
+        ("/build", TuiSlashCommandName.build),
+    ],
+)
+def test_agent_mode_commands_parse_and_are_available_in_slash_menu(
+    text: str,
+    name: TuiSlashCommandName,
+) -> None:
+    command = parse_tui_slash_command(text)
+    spec = next(spec for spec in SLASH_COMMAND_SPECS if spec.command == text)
+
+    assert command is not None
+    assert command.name is name
+    assert command.args == ()
+    assert spec.takes_args is False
+
+
 def test_history_command_parses_and_is_available_in_slash_menu() -> None:
     command = parse_tui_slash_command("/history")
     spec = next(spec for spec in SLASH_COMMAND_SPECS if spec.command == "/history")

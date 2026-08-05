@@ -13,6 +13,7 @@ import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 from rich.console import Console
 
+from wisp.agent.mode import AgentMode
 from wisp.auth.storage import (
     JsonAuthStore,
 )
@@ -153,6 +154,7 @@ class TuiController(Protocol):
         effort: str | None = None,
         clear_effort: bool = False,
         auto_compaction_enabled: bool | None = None,
+        mode: AgentMode | None = None,
         command_id: str | None = None,
     ) -> str: ...
 
@@ -175,6 +177,7 @@ class _PendingConfigure:
     has_effort: bool = False
     auto_compaction_enabled: bool | None = None
     has_auto_compaction_enabled: bool = False
+    mode: AgentMode | None = None
 
 
 @dataclass
@@ -239,6 +242,7 @@ class TuiShell:
         self.state = state or TuiInteractionState()
         self.view = TuiViewState(provider=provider, model=model)
         self.current_provider = provider
+        self.current_mode: AgentMode = "build"
         self.current_model = model
         self.command_catalog = DEFAULT_TUI_COMMAND_CATALOG
         self.models = ModelRegistry(effective_catalog())
@@ -318,6 +322,7 @@ class TuiShell:
     def _sync_view(self) -> None:
         self.view.provider = self.current_provider
         self.view.model = self.current_model
+        self.view.mode = self.current_mode
         mode = _input_mode_for_status(self.state.status)
         self._update_view(
             status=_view_status_for_status(self.state.status),
@@ -615,6 +620,12 @@ class TuiShell:
                 f"Cannot run slash commands while {self._session_operation_name()}."
             )
             return False
+        if command.name in {TuiSlashCommandName.plan, TuiSlashCommandName.build}:
+            if command.args:
+                self.renderer.command_error(f"Usage: /{command.name.value}")
+                return False
+            await self._handle_mode_command(cast(AgentMode, command.name.value))
+            return False
         if command.name is TuiSlashCommandName.compact:
             if self.state.status is not TuiStatus.idle:
                 self.renderer.command_error("Cannot compact while another operation is active.")
@@ -644,6 +655,17 @@ class TuiShell:
             return False
         self.renderer.command_error(f"Unknown command: /{command.name.value}")
         return False
+
+    async def _handle_mode_command(self, mode: AgentMode) -> None:
+        try:
+            command_id = await self.controller.configure(mode=mode)
+        except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
+            self.renderer.send_failed("configure", exc)
+            return
+        self.pending_configures[command_id] = _PendingConfigure(
+            command_id=command_id,
+            mode=mode,
+        )
 
     async def _handle_resume_command(self, args: tuple[str, ...]) -> None:
         if len(args) > 1:
@@ -1509,6 +1531,11 @@ class TuiShell:
                     "Automatic compaction "
                     f"{'enabled' if pending.auto_compaction_enabled else 'disabled'}."
                 )
+            if pending.mode is not None:
+                self.current_mode = pending.mode
+                self.renderer.notice(
+                    "Plan mode enabled." if pending.mode == "plan" else "Build mode enabled."
+                )
             self.view.context = None
             self._sync_view()
             await self._request_session_stats()
@@ -1522,6 +1549,8 @@ class TuiShell:
             )
         elif pending.has_auto_compaction_enabled:
             self.renderer.command_error(f"Automatic compaction unchanged: {message}")
+        elif pending.mode is not None:
+            self.renderer.command_error(f"Agent mode unchanged ({self.current_mode}): {message}")
         self._update_view(
             status="error",
             input_hint=_prompt_for_mode(_InputMode.idle),
