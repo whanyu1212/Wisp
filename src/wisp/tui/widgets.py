@@ -21,12 +21,20 @@ from rich.cells import cell_len, set_cell_size
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Center, Vertical, VerticalScroll
+from textual.containers import Center, Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
 from textual.timer import Timer
 from textual.widget import AwaitMount, Widget
-from textual.widgets import Input, Label, Markdown, OptionList, Static, TextArea
+from textual.widgets import (
+    Input,
+    Label,
+    LoadingIndicator,
+    Markdown,
+    OptionList,
+    Static,
+    TextArea,
+)
 from textual.widgets._markdown import MarkdownStream
 from textual.widgets.option_list import Option
 
@@ -1342,6 +1350,74 @@ class TranscriptEmptyState(Vertical):
     def on_resize(self, event: events.Resize) -> None:
         self.set_class(self.size.height < 9, "-compact")
         self.set_class(self.size.height < 6, "-minimal")
+
+
+class OperationIndicator(Vertical):
+    """Centered native loading surface for an active session operation.
+
+    The app maps typed operation state to literal labels; this widget only
+    presents the current label and never decides when an operation begins or
+    ends. Its full-screen overlay does not participate in transcript layout.
+    """
+
+    DEFAULT_CSS = """
+    OperationIndicator {
+        overlay: screen;
+        display: none;
+        width: 100%;
+        height: 100%;
+        align: center middle;
+        background: transparent;
+    }
+
+    OperationIndicator #operation-indicator-panel {
+        width: auto;
+        height: 3;
+        padding: 0 2;
+        border: heavy $accent;
+        background: $panel;
+        align-vertical: middle;
+    }
+
+    OperationIndicator #operation-indicator-spinner {
+        width: 9;
+        height: 1;
+        min-height: 1;
+        color: $accent;
+    }
+
+    OperationIndicator #operation-indicator-label {
+        width: auto;
+        height: 1;
+        color: $text;
+    }
+    """
+
+    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
+        super().__init__(id=id)
+        self._label = Label("", id="operation-indicator-label", markup=False)
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="operation-indicator-panel"):
+            yield LoadingIndicator(id="operation-indicator-spinner")
+            yield self._label
+
+    @property
+    def is_open(self) -> bool:
+        """Whether the operation surface is currently visible."""
+
+        return self.display
+
+    def show_operation(self, label: str) -> None:
+        """Display a caller-owned operation label beside the native spinner."""
+
+        self._label.update(label)
+        self.display = True
+
+    def hide(self) -> None:
+        """Hide the operation surface through the generic overlay protocol."""
+
+        self.display = False
 
 
 class JumpToLatest(Static):

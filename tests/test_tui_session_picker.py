@@ -5,12 +5,20 @@ from pathlib import Path
 
 import anyio
 from textual.content import Content
-from textual.widgets import OptionList
+from textual.widget import Widget
+from textual.widgets import Label, LoadingIndicator, OptionList
 
-from wisp.events import RpcSessionSummary
+from wisp.events import RpcSessionSummary, ToolApprovalRequested
 from wisp.tui.history import HistoricalTranscriptMessage
 from wisp.tui.textual_app import create_textual_tui
-from wisp.tui.widgets import LineMessage, PromptEditor, SessionPicker, Transcript
+from wisp.tui.widgets import (
+    DecisionPanel,
+    LineMessage,
+    OperationIndicator,
+    PromptEditor,
+    SessionPicker,
+    Transcript,
+)
 
 
 def _session(
@@ -54,25 +62,136 @@ def test_session_picker_preserves_rpc_order_and_highlights_selected_session() ->
 
 
 def test_session_catalog_loading_hides_composer_and_preserves_draft() -> None:
-    async def scenario() -> tuple[str, bool, bool]:
+    async def scenario() -> tuple[str, bool, bool, str, bool]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
             editor = app.query_one("#input", PromptEditor)
+            indicator = app.query_one("#operation-indicator", OperationIndicator)
+            label = app.query_one("#operation-indicator-label", Label)
+            spinner = app.query_one("#operation-indicator-spinner", LoadingIndicator)
             editor.value = "draft while catalog loads"
             renderer.session_catalog_started()
             await pilot.pause()
             hidden = not editor.display
+            content = label.render()
+            assert isinstance(content, Content)
+            assert spinner.display
             await pilot.press("enter", "ctrl+c")
             await pilot.pause()
             draft = editor.value
             renderer.session_catalog_finished()
             await pilot.pause()
-            return draft, hidden, editor.has_focus
+            return draft, hidden, editor.has_focus, content.plain, indicator.is_open
 
-    draft, hidden, focused = anyio.run(scenario)
+    draft, hidden, focused, label, visible_after_finish = anyio.run(scenario)
     assert draft == "draft while catalog loads"
     assert hidden is True
     assert focused is True
+    assert label == "Loading sessions…"
+    assert visible_after_finish is False
+
+
+def test_session_operation_indicator_does_not_obscure_an_approval() -> None:
+    async def scenario() -> tuple[bool, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            indicator = app.query_one("#operation-indicator", OperationIndicator)
+            renderer.session_catalog_started()
+            await pilot.pause()
+            renderer.approval_request(
+                ToolApprovalRequested(
+                    call_id="call-1",
+                    name="write",
+                    arguments={"path": "file.txt", "content": "updated"},
+                    safety="mutating",
+                )
+            )
+            await pilot.pause()
+            panel = app.query_one("#decision-panel", DecisionPanel)
+            return indicator.is_open, panel.is_open
+
+    indicator_open, decision_open = anyio.run(scenario)
+    assert indicator_open is False
+    assert decision_open is True
+
+
+def test_session_operation_indicator_ignores_stale_completion() -> None:
+    async def scenario() -> tuple[str, bool, bool, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            editor = app.query_one("#input", PromptEditor)
+            indicator = app.query_one("#operation-indicator", OperationIndicator)
+            label = app.query_one("#operation-indicator-label", Label)
+            editor.value = "draft during operation replacement"
+
+            renderer.session_catalog_started()
+            renderer.session_switch_started("target")
+            renderer.session_catalog_finished()
+            await pilot.pause()
+            content = label.render()
+            assert isinstance(content, Content)
+            visible_after_stale_finish = indicator.is_open
+            hidden_after_stale_finish = not editor.display
+
+            renderer.session_switch_finished()
+            await pilot.pause()
+            return (
+                content.plain,
+                visible_after_stale_finish,
+                hidden_after_stale_finish,
+                indicator.is_open,
+            )
+
+    label, visible_after_stale_finish, hidden_after_stale_finish, visible_after_finish = anyio.run(
+        scenario
+    )
+    assert label == "Switching session…"
+    assert visible_after_stale_finish is True
+    assert hidden_after_stale_finish is True
+    assert visible_after_finish is False
+
+
+def test_session_operation_indicator_fits_a_narrow_terminal() -> None:
+    async def scenario() -> tuple[tuple[int, int, int, int], tuple[int, int]]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(40, 12)) as pilot:
+            renderer.session_switch_started("target")
+            await pilot.pause()
+            panel = app.query_one("#operation-indicator-panel", Widget)
+            return (
+                (panel.region.x, panel.region.y, panel.region.right, panel.region.bottom),
+                (app.size.width, app.size.height),
+            )
+
+    (left, top, right, bottom), (width, height) = anyio.run(scenario)
+    assert 0 <= left < right <= width
+    assert 0 <= top < bottom <= height
+
+
+def test_session_operation_indicator_preserves_transcript_scroll_intent() -> None:
+    async def scenario() -> tuple[tuple[float, bool], tuple[float, bool]]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            for index in range(24):
+                app.write_assistant(f"transcript line {index}")
+            await pilot.pause()
+            transcript = app.query_one("#transcript", Transcript)
+            transcript.scroll_to(y=4, animate=False)
+            await pilot.pause()
+            before_state = transcript.viewport_state()
+
+            renderer.session_catalog_started()
+            await pilot.pause()
+            during_state = transcript.viewport_state()
+            renderer.session_catalog_finished()
+            await pilot.pause()
+            return (
+                (before_state.scroll_y, before_state.following),
+                (during_state.scroll_y, during_state.following),
+            )
+
+    before_state, during_state = anyio.run(scenario)
+    assert during_state == before_state
 
 
 def test_session_picker_renders_persisted_labels_as_plain_text() -> None:

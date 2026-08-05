@@ -54,6 +54,7 @@ from wisp.tui.widgets import (
     JumpToLatest,
     LineMessage,
     ModelPicker,
+    OperationIndicator,
     PromptEditor,
     SessionPicker,
     SlashSuggest,
@@ -81,6 +82,10 @@ _ROLE_FALLBACK: dict[str, str] = {
 _WORDMARK = "W  I  S  P"
 _EMPTY_TRANSCRIPT_TAGLINE = "A coding agent that stays in sync"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
+_SESSION_OPERATION_LABELS: dict[OverlayOperation, str] = {
+    OverlayOperation.session_catalog: "Loading sessions…",
+    OverlayOperation.session_switch: "Switching session…",
+}
 
 # Persistent, low-contrast keybinding reminder below the composer. Only real,
 # currently-hidden (show=False) affordances — not aspirational: `/` opens the
@@ -335,6 +340,7 @@ class TextualTui(App[None]):
         self._decision_panel: DecisionPanel | None = None
         self._model_picker: ModelPicker | None = None
         self._session_picker: SessionPicker | None = None
+        self._operation_indicator: OperationIndicator | None = None
         self._overlay_controller: TextualOverlayController | None = None
         self._command_catalog = DEFAULT_TUI_COMMAND_CATALOG
         self._agent_mode = "build"
@@ -380,6 +386,10 @@ class TextualTui(App[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
+            # This full-screen overlay must be the first normal-layout child so
+            # `overlay: screen` starts at the screen origin rather than below
+            # transcript/composer siblings when it becomes visible.
+            yield OperationIndicator(id="operation-indicator")
             # Transcript takes all remaining height (1fr). The input and compact
             # footer hug the bottom, matching Pi's editor-above-footer visual shape.
             # The input is yielded directly — a wrapping Container would default to
@@ -437,6 +447,7 @@ class TextualTui(App[None]):
         self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
         self._model_picker = self.query_one("#model-picker", ModelPicker)
         self._session_picker = self.query_one("#session-picker", SessionPicker)
+        self._operation_indicator = self.query_one("#operation-indicator", OperationIndicator)
         self._overlay_controller = TextualOverlayController(
             composer=self._input,
             suggestion=self._suggest,
@@ -447,6 +458,7 @@ class TextualTui(App[None]):
                 OverlayKind.session_picker: self._session_picker,
                 OverlayKind.command_palette: self._command_palette,
                 OverlayKind.prompt_history: self._prompt_history_picker,
+                OverlayKind.operation_indicator: self._operation_indicator,
             },
             defer_after_refresh=self._defer_overlay_restore,
         )
@@ -1186,24 +1198,36 @@ class TextualTui(App[None]):
             overlays.close(OverlayKind.session_picker, restore_composer=restore_input)
 
     def session_catalog_started(self) -> None:
-        overlays = self._overlay_controller
-        if overlays is not None:
-            overlays.start_operation(OverlayOperation.session_catalog)
+        self._start_session_operation(OverlayOperation.session_catalog)
 
     def session_catalog_finished(self) -> None:
-        overlays = self._overlay_controller
-        if overlays is not None:
-            overlays.finish_operation(OverlayOperation.session_catalog)
+        self._finish_session_operation(OverlayOperation.session_catalog)
 
     def session_switch_started(self) -> None:
-        overlays = self._overlay_controller
-        if overlays is not None:
-            overlays.start_operation(OverlayOperation.session_switch)
+        self._start_session_operation(OverlayOperation.session_switch)
 
     def session_switch_finished(self) -> None:
+        self._finish_session_operation(OverlayOperation.session_switch)
+
+    def _start_session_operation(self, operation: OverlayOperation) -> None:
+        """Show typed session work without giving the indicator lifecycle ownership."""
+
         overlays = self._overlay_controller
         if overlays is not None:
-            overlays.finish_operation(OverlayOperation.session_switch)
+            overlays.start_operation(operation)
+        indicator = self._operation_indicator
+        if indicator is not None:
+            indicator.show_operation(_SESSION_OPERATION_LABELS[operation])
+
+    def _finish_session_operation(self, operation: OverlayOperation) -> None:
+        """Hide only after the active typed session operation completed."""
+
+        overlays = self._overlay_controller
+        if overlays is None or not overlays.finish_operation(operation):
+            return
+        indicator = self._operation_indicator
+        if indicator is not None:
+            indicator.hide()
 
     def replace_transcript(self) -> None:
         """Drop the previous session's UI-owned transcript bookkeeping."""
