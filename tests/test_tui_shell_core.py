@@ -168,6 +168,8 @@ def test_tui_new_session_clears_transcript_state_only_after_rpc_success() -> Non
         shell.view.context = _context_budget(estimated=100)
         shell.view.cost = SessionCostSummary()
 
+        await shell._request_session_stats()
+        stale_stats_command_id = controller.session_stats_requests[-1]
         await shell._handle_input_line(_InputLine("/new extra", _InputMode.idle))
         await shell._handle_input_line(_InputLine("/new", _InputMode.idle))
 
@@ -184,6 +186,27 @@ def test_tui_new_session_clears_transcript_state_only_after_rpc_success() -> Non
         assert shell.view.context is None
         assert shell.view.cost is None
         assert shell.pending_new_session_command_id is None
+
+        await shell._handle_rpc_event(
+            SessionStatsReported(
+                command_id=stale_stats_command_id,
+                stats=SessionStats.model_construct(
+                    context=_context_budget(estimated=90_000),
+                    cost=SessionCostSummary(known_usd=Decimal("1.25")),
+                ),
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=stale_stats_command_id,
+                command_type="get_session_stats",
+                ok=True,
+            )
+        )
+
+        assert shell.view.context is None
+        assert shell.view.cost is None
+        assert stale_stats_command_id not in shell._ignored_session_stats_command_ids
 
     anyio.run(run)
 

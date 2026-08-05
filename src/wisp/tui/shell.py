@@ -267,6 +267,8 @@ class TuiShell:
         self.pending_configures: dict[str, _PendingConfigure] = {}
         self.pending_context_status_command_id: str | None = None
         self.pending_context_status_received = False
+        self._pending_session_stats_command_ids: set[str] = set()
+        self._ignored_session_stats_command_ids: set[str] = set()
         self.pending_session_catalog: _PendingSessionCatalog | None = None
         self.pending_session_switch: _PendingSessionSwitch | None = None
         self.pending_new_session_command_id: str | None = None
@@ -1272,14 +1274,24 @@ class TuiShell:
             pagination.latest_report = event
             return False
 
-        context_updated = self.view.update_context_from_event(event)
-        if context_updated:
-            self._update_view()
         if isinstance(event, SessionStatsReported):
-            if event.command_id == self.pending_context_status_command_id:
+            if event.command_id in self._ignored_session_stats_command_ids:
+                return False
+            is_context_status = event.command_id == self.pending_context_status_command_id
+            if (
+                not is_context_status
+                and event.command_id not in self._pending_session_stats_command_ids
+            ):
+                return False
+            if self.view.update_context_from_event(event):
+                self._update_view()
+            if is_context_status:
                 self.pending_context_status_received = True
                 self.renderer.notice(format_compaction_status(event.stats))
             return False
+        context_updated = self.view.update_context_from_event(event)
+        if context_updated:
+            self._update_view()
         if isinstance(event, ContextEstimated):
             return False
         if isinstance(event, ProviderRetrying):
@@ -1377,6 +1389,10 @@ class TuiShell:
             return False
 
         if isinstance(event, RpcCommandFinished):
+            if event.command_id in self._ignored_session_stats_command_ids:
+                self._ignored_session_stats_command_ids.discard(event.command_id)
+                return False
+            self._pending_session_stats_command_ids.discard(event.command_id)
             if event.command_id == self._history_recovery_command_id:
                 received_report = self._history_recovery_report_received
                 self._history_recovery_command_id = None
@@ -1434,6 +1450,12 @@ class TuiShell:
             self._sync_view()
             return
         self._clear_history_pagination()
+        self._ignored_session_stats_command_ids.update(self._pending_session_stats_command_ids)
+        self._pending_session_stats_command_ids.clear()
+        if self.pending_context_status_command_id is not None:
+            self._ignored_session_stats_command_ids.add(self.pending_context_status_command_id)
+            self.pending_context_status_command_id = None
+            self.pending_context_status_received = False
         self.view.context = None
         self.view.cost = None
         self.view.last_session = None
@@ -1644,9 +1666,11 @@ class TuiShell:
 
     async def _request_session_stats(self) -> None:
         try:
-            await self.controller.get_session_stats()
+            command_id = await self.controller.get_session_stats()
         except Exception as exc:  # noqa: BLE001 - stats are optional TUI chrome
             self.renderer.send_failed("session stats", exc)
+            return
+        self._pending_session_stats_command_ids.add(command_id)
 
     async def _request_session_history(self, *, command_id: str | None = None) -> str | None:
         get_messages = getattr(self.controller, "get_messages", None)
