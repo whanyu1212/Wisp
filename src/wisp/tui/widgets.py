@@ -21,12 +21,12 @@ from rich.cells import cell_len, set_cell_size
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Center, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
 from textual.timer import Timer
 from textual.widget import AwaitMount, Widget
-from textual.widgets import Input, Label, Markdown, OptionList, Rule, Static, TextArea
+from textual.widgets import Input, Label, Markdown, OptionList, Static, TextArea
 from textual.widgets._markdown import MarkdownStream
 from textual.widgets.option_list import Option
 
@@ -1294,14 +1294,13 @@ class SessionPicker(Vertical):
 class TranscriptEmptyState(Vertical):
     """Centered welcome panel shown only while the transcript has no output.
 
-    Native ``Label`` and ``Rule`` widgets provide a restrained identity,
-    separator, prompt hint, and quick-action reminder without consuming a
-    permanent header row. Every child has the same explicit width because
+    A native ``Label`` inside a fixed-width ``Center`` provides a compact
+    badge above the prompt hint and quick-action reminder without consuming a
+    permanent header row. Every direct child has the same explicit width because
     Textual centers these siblings as a block rather than independently.
     """
 
     DEFAULT_CSS = """
-    TranscriptEmptyState.-compact #transcript-empty-rule,
     TranscriptEmptyState.-compact #transcript-empty-actions {
         display: none;
     }
@@ -1322,8 +1321,12 @@ class TranscriptEmptyState(Vertical):
         return widget
 
     def compose(self) -> ComposeResult:
-        yield self._centered(Label(self._wordmark, id="transcript-empty-wordmark", markup=False))
-        yield self._centered(Rule(line_style="heavy", id="transcript-empty-rule"))
+        yield self._centered(
+            Center(
+                Label(self._wordmark, id="transcript-empty-wordmark", markup=False),
+                id="transcript-empty-wordmark-frame",
+            )
+        )
         yield self._centered(Label(self._hint, id="transcript-empty-hint", markup=False))
         yield self._centered(
             Static(

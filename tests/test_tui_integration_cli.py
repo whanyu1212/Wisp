@@ -10,7 +10,7 @@ from rich.cells import cell_len
 from textual import events
 from textual.content import Content
 from textual.widget import Widget
-from textual.widgets import Header, OptionList, Rule, Static
+from textual.widgets import Header, Label, OptionList, Static
 
 import wisp.cli as cli_module
 from tests.tui_support import *
@@ -5540,9 +5540,8 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
             await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
             empty = app_instance.query_one("#transcript-empty", TranscriptEmptyState)
-            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
-            rule = app_instance.query_one("#transcript-empty-rule", Rule)
-            hint = app_instance.query_one("#transcript-empty-hint", Static)
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Label)
+            hint = app_instance.query_one("#transcript-empty-hint", Label)
             actions = app_instance.query_one("#transcript-empty-actions", Static)
             centers = (
                 transcript.region.x + transcript.region.width // 2,
@@ -5557,7 +5556,9 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
             assert isinstance(wordmark_content, Content)
             assert isinstance(hint_content, Content)
             assert isinstance(actions_content, Content)
-            assert rule.display
+            assert wordmark.region.width == 16
+            assert wordmark.region.height == 3
+            assert wordmark.styles.border_top[0] == "round"
             content = (wordmark_content.plain, hint_content.plain, actions_content.plain)
 
             renderer.prompt_submitted("hello")
@@ -5568,7 +5569,7 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
 
     content, centers, initial_children, final_children = anyio.run(scenario)
     wordmark, hint, actions = content
-    assert wordmark == "wisp"
+    assert wordmark == "W I S P"
     assert hint == "Type a prompt or / for commands."
     assert actions == "/resume session  ·  Ctrl+O actions"
     assert len(set(centers)) == 1
@@ -5577,19 +5578,15 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
 
 
 def test_textual_startup_empty_state_wordmark_centers_match_hint() -> None:
-    # Regression: Textual's align: center middle centers SIBLINGS AS A BLOCK
-    # (sharing a left edge), not each one independently — confirmed by direct
-    # probe: two Statics of different widths landed at the same region.x, so
-    # their true centers (x + width // 2) differed. The wordmark and hint
-    # must be given matching explicit widths (TranscriptEmptyState.compose)
-    # so their centers always match.
+    # Regression: the badge is narrower than the hint, so its fixed-width
+    # Center wrapper must keep their true centers aligned.
     async def scenario() -> tuple[int, int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(90, 20)) as pilot:
             renderer.startup()
             await pilot.pause()
-            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
-            hint = app_instance.query_one("#transcript-empty-hint", Static)
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Label)
+            hint = app_instance.query_one("#transcript-empty-hint", Label)
             wordmark_center = wordmark.region.x + wordmark.region.width // 2
             hint_center = hint.region.x + hint.region.width // 2
             return wordmark_center, hint_center

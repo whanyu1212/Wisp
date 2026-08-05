@@ -75,14 +75,10 @@ _ROLE_FALLBACK: dict[str, str] = {
     "denied": "red",
 }
 
-# The Wisp wordmark, shown while the transcript is empty. Plain lowercase
-# text — an ASCII-art figlet-style treatment (solid Unicode block glyphs)
-# was tried twice, with two different fonts, and both rendered with visible
-# gaps/misalignment depending on the terminal's font rendering — a
-# font-independent limitation, not something a different figlet font fixes.
-# Styled bold (see #transcript-empty-wordmark CSS) for more visual weight.
-# This disposable welcome state is the app's only visible identity treatment.
-_WORDMARK = "wisp"
+# The Wisp wordmark, shown while the transcript is empty. Spaced uppercase
+# lettering gives the compact badge more presence without relying on terminal-
+# dependent ASCII art or unsupported font scaling.
+_WORDMARK = "W I S P"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 
 # Persistent, low-contrast keybinding reminder below the composer. Only real,
@@ -151,24 +147,26 @@ class TextualTui(App[None]):
         align: center middle;
     }
 
-    #transcript-empty-wordmark {
+    #transcript-empty-wordmark-frame {
         max-width: 100%;
-        height: 1;
+        height: 3;
+    }
+
+    #transcript-empty-wordmark {
+        width: 16;
+        height: 3;
+        padding: 0 2;
+        border: round $accent;
+        background: $surface;
         color: $accent;
         text-style: bold;
         text-align: center;
     }
 
-    #transcript-empty-rule {
-        max-width: 100%;
-        height: 1;
-        margin-top: 1;
-        color: $secondary;
-    }
-
     #transcript-empty-hint {
         max-width: 100%;
         height: 1;
+        margin-top: 1;
         color: $text;
         text-align: center;
     }
