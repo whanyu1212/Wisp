@@ -1706,7 +1706,12 @@ class TuiShell:
             self._call_renderer_optional("history_page_request_failed")
             self._call_renderer_optional("latest_history_reload_failed")
             return
-        if report.session_id != pagination.session_id:
+        if pagination.session_id is None:
+            # A fresh TUI hydrates an empty selected session as ``None``. The
+            # first prompt creates that session in the RPC host, so a later live
+            # reload is the first place the shell can learn its concrete id.
+            pagination.session_id = report.session_id
+        elif report.session_id != pagination.session_id:
             self.renderer.command_error(
                 "Failed to reload latest session history: result did not match the active session."
             )
