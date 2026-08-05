@@ -337,6 +337,28 @@ def test_rpc_state_report_round_trips_only_at_schema_v16() -> None:
         wisp_event_from_json(event.model_copy(update={"schema_version": 15}).model_dump_json())
 
 
+def test_rpc_state_agent_mode_is_backward_compatible_before_schema_v27() -> None:
+    event = RpcStateReported(
+        command_id="state-1",
+        state=RpcStateSnapshot(
+            provider="fake",
+            mode="plan",
+            auto_compaction_enabled=True,
+            steering_mode="one_at_a_time",
+            follow_up_mode="one_at_a_time",
+            pending_steering_count=0,
+            pending_follow_up_count=0,
+        ),
+    )
+    legacy = event.model_copy(update={"schema_version": 26})
+    payload = json.loads(legacy.model_dump_json())
+
+    assert "mode" not in payload["state"]
+    restored = wisp_event_from_json(json.dumps(payload))
+    assert isinstance(restored, RpcStateReported)
+    assert restored.state.mode == "build"
+
+
 def test_rpc_commands_report_round_trips_only_at_schema_v23() -> None:
     event = RpcCommandsReported(
         command_id="commands-1",
@@ -1346,6 +1368,23 @@ def test_rpc_controller_configure_sends_effort() -> None:
 
         assert transport.commands == [
             ConfigureCommand(id="configure-id", effort="high"),
+        ]
+
+    anyio.run(run)
+
+
+def test_rpc_controller_configure_sends_agent_mode() -> None:
+    async def run() -> None:
+        transport = RecordingTransport()
+        controller = RpcController(
+            transport,
+            command_id_factory=lambda _prefix: "configure-id",
+        )
+
+        await controller.configure(mode="plan")
+
+        assert transport.commands == [
+            ConfigureCommand(id="configure-id", mode="plan"),
         ]
 
     anyio.run(run)

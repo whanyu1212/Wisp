@@ -16,6 +16,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 
 from wisp.agent.execution import ToolResultProcessingError
 from wisp.agent.messages import Message
+from wisp.agent.mode import AgentMode, is_agent_mode
 from wisp.coding import CodingSession
 from wisp.events import (
     AgentStarted,
@@ -2864,17 +2865,26 @@ def handle_rpc_configure_command(
     model = command.get("model")
     effort = command.get("effort")
     auto_compaction_enabled = command.get("auto_compaction_enabled")
+    mode = command.get("mode")
     clear_effort = command.get("clear_effort") is True
     has_provider = "provider" in command
     has_model = "model" in command
     has_effort = "effort" in command or clear_effort
     has_auto_compaction_enabled = "auto_compaction_enabled" in command
-    if not has_provider and not has_model and not has_effort and not has_auto_compaction_enabled:
+    has_mode = "mode" in command
+    if (
+        not has_provider
+        and not has_model
+        and not has_effort
+        and not has_auto_compaction_enabled
+        and not has_mode
+    ):
         write_rpc_command_error(
             command_id=command_id,
             command_type=command_type,
             message=(
-                "RPC configure command requires provider, model, effort, or auto_compaction_enabled"
+                "RPC configure command requires provider, model, effort, "
+                "auto_compaction_enabled, or mode"
             ),
             write_event=write_event,
         )
@@ -2900,6 +2910,14 @@ def handle_rpc_configure_command(
             command_id=command_id,
             command_type=command_type,
             message="RPC configure command field effort must be a string",
+            write_event=write_event,
+        )
+        return
+    if has_mode and not is_agent_mode(mode):
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message="RPC configure command field mode must be 'build' or 'plan'",
             write_event=write_event,
         )
         return
@@ -2984,6 +3002,8 @@ def handle_rpc_configure_command(
             write_event=write_event,
         )
         return
+    if has_mode:
+        agent.set_mode(cast(AgentMode, mode))
     if configure_overrides is not None and has_auto_compaction_enabled:
         configure_overrides.auto_compaction_enabled = selected_auto_compaction_enabled
         configure_overrides.has_auto_compaction_enabled = True

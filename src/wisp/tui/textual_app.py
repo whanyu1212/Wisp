@@ -93,7 +93,9 @@ _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 # returns focus from a card to the input (ToolCard.BINDINGS "leave" action).
 # Textual-only chrome — deliberately not folded into format_tui_footer_lines,
 # which the line/fullscreen renderers also consume.
-_KEYBINDING_HINT = "ctrl+o actions   ctrl+r history   / commands   enter expand   esc back"
+_KEYBINDING_HINT = (
+    "shift+tab plan/build   ctrl+o actions   ctrl+r history   / commands   enter expand   esc back"
+)
 
 # The input's prompt glyph. The shell hands the Textual renderer a semantic hint
 # (`wisp> `, `wisp(running)> `, `approve? [y/N] `) shared with the line/fullscreen
@@ -291,6 +293,7 @@ class TextualTui(App[None]):
     BINDINGS = [
         Binding("ctrl+o", "open_command_palette", "Actions", priority=True),
         Binding("ctrl+r", "open_prompt_history", "History", priority=True),
+        Binding("shift+tab", "toggle_agent_mode", "Plan/build", priority=True, show=False),
         Binding("ctrl+c", "interrupt", "Interrupt", priority=True),
         Binding("ctrl+d", "eof", "EOF", priority=True),
         Binding("pageup", "scroll_transcript_page_up", "Scroll up", priority=True, show=False),
@@ -317,6 +320,7 @@ class TextualTui(App[None]):
         self._session_picker: SessionPicker | None = None
         self._overlay_controller: TextualOverlayController | None = None
         self._command_catalog = DEFAULT_TUI_COMMAND_CATALOG
+        self._agent_mode = "build"
         self._current_prompt = "wisp> "
         self._runner: Callable[[], Awaitable[None]] | None = None
         self._runner_error: Exception | None = None
@@ -909,6 +913,12 @@ class TextualTui(App[None]):
     def action_eof(self) -> None:
         self._signal_input(EOFError(), action="EOF")
 
+    def action_toggle_agent_mode(self) -> None:
+        """Route the plan/build hotkey through the normal slash-command path."""
+
+        command = "/build" if self._agent_mode == "plan" else "/plan"
+        self._input_controller.submit_line(command, clear_editor=False)
+
     def action_open_command_palette(self) -> None:
         palette = self._command_palette
         if palette is None:
@@ -1048,6 +1058,7 @@ class TextualTui(App[None]):
         self._input_controller.signal(signal, action=action)
 
     def set_status(self, snapshot: TuiViewSnapshot) -> None:
+        self._agent_mode = snapshot.mode
         if self._status is not None:
             self._status.set_snapshot(snapshot)
 

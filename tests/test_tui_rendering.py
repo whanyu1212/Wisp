@@ -794,6 +794,14 @@ def test_tui_footer_formats_current_stale_and_unknown_context() -> None:
     assert "ctx ~12k" in unknown
 
 
+def test_tui_footer_displays_plan_mode_without_changing_default_build_footer() -> None:
+    build = TuiViewSnapshot(status="idle", input_hint="wisp> ", mode="build")
+    plan = TuiViewSnapshot(status="idle", input_hint="wisp> ", mode="plan")
+
+    assert format_tui_footer_lines(build, width=40)[1].strip() == "idle"
+    assert format_tui_footer_lines(plan, width=40)[1].strip() == "plan • idle"
+
+
 def test_tui_footer_context_gauge_is_responsive_without_displacing_status() -> None:
     snapshot = TuiViewSnapshot(
         status="idle",

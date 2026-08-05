@@ -56,6 +56,20 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=25,
         ),
         CommandDescriptor(
+            name="plan",
+            title="Plan mode",
+            description="Switch to read-only planning mode",
+            category=CommandCategory.configuration,
+            order=27,
+        ),
+        CommandDescriptor(
+            name="build",
+            title="Build mode",
+            description="Switch to normal build mode",
+            category=CommandCategory.configuration,
+            order=28,
+        ),
+        CommandDescriptor(
             name="model",
             title="Model",
             description="Show or switch the active model",

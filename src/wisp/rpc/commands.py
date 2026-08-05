@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from wisp.agent.mode import AgentMode
 from wisp.events import QueueKind, QueueMode
 
 type ApprovalScope = Literal["once", "tool_session", "all_session"]
@@ -215,6 +216,7 @@ class ConfigureCommand(RpcCommandModel):
     model: str | None = None
     effort: str | None = None
     auto_compaction_enabled: bool | None = None
+    mode: AgentMode | None = None
     # `to_json_line()` uses `exclude_none=True`, so a bare `effort=None` is
     # indistinguishable on the wire from never having set `effort` at all --
     # the RPC server keys off "effort" in command (dict key presence), not

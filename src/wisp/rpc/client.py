@@ -12,6 +12,7 @@ from uuid import uuid4
 import anyio
 from anyio.abc import Process
 
+from wisp.agent.mode import AgentMode
 from wisp.events import KnownWispEvent, QueueKind, QueueMode, wisp_event_from_json
 from wisp.rpc.commands import (
     ApprovalCommand,
@@ -336,6 +337,7 @@ class RpcController:
         effort: str | None = None,
         clear_effort: bool = False,
         auto_compaction_enabled: bool | None = None,
+        mode: AgentMode | None = None,
         command_id: str | None = None,
     ) -> str:
         """Update runtime settings for future prompt commands.
@@ -356,6 +358,7 @@ class RpcController:
                 effort=effort,
                 clear_effort=clear_effort,
                 auto_compaction_enabled=auto_compaction_enabled,
+                mode=mode,
             )
         )
         return selected_id
