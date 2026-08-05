@@ -151,11 +151,17 @@ def test_coordinator_queues_new_session_behind_work_already_waiting_on_backgroun
     anyio.run(scenario)
 
 
-def test_coordinator_queues_new_session_behind_active_message_read() -> None:
+@pytest.mark.parametrize(
+    "command_type",
+    ["get_messages", "get_sessions", "get_session_tree"],
+)
+def test_coordinator_queues_new_session_behind_active_ordered_read(
+    command_type: Literal["get_messages", "get_sessions", "get_session_tree"],
+) -> None:
     async def scenario() -> None:
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
-        messages = _RpcRunningCommand("messages", "get_messages", anyio.CancelScope())
-        coordinator.running_command = messages
+        background = _RpcRunningCommand("background", command_type, anyio.CancelScope())
+        coordinator.running_command = background
         dispatched: list[str] = []
 
         coordinator.handle_event(
@@ -169,7 +175,7 @@ def test_coordinator_queues_new_session_behind_active_message_read() -> None:
 
         assert dispatched == []
         assert list(coordinator.queued_commands) == [{"id": "new", "type": "new_session"}]
-        assert messages.cancel_scope.cancel_called is False
+        assert background.cancel_scope.cancel_called is False
 
     anyio.run(scenario)
 

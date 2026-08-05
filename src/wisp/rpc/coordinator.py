@@ -295,11 +295,11 @@ class RpcCoordinator:
                 reject=reject,
             )
             return False
-        new_session_waits_for_ordered_read = (
+        new_session_waits_for_ordered_operation = (
             selected_type == "new_session"
             and running is not None
             and (
-                running.command_type == "get_messages"
+                running.command_type not in {"prompt", "compact", "get_session_stats"}
                 or (
                     running.command_type == "get_session_stats"
                     and bool(self.pending_prompt_queue_commands or self.queued_commands)
@@ -307,7 +307,7 @@ class RpcCoordinator:
             )
         )
         if running is not None and (
-            not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_read
+            not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_operation
         ):
             self._enqueue_command(command, queue=self.queued_commands, reject=reject)
             return False
@@ -515,11 +515,11 @@ class RpcCoordinator:
                 reject=reject,
             )
             return False
-        new_session_waits_for_ordered_read = (
+        new_session_waits_for_ordered_operation = (
             selected_type == "new_session"
             and running is not None
             and (
-                running.command_type == "get_messages"
+                running.command_type not in {"prompt", "compact", "get_session_stats"}
                 or (
                     running.command_type == "get_session_stats"
                     and bool(self.pending_prompt_queue_commands or self.queued_commands)
@@ -527,7 +527,7 @@ class RpcCoordinator:
             )
         )
         if running is not None and (
-            not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_read
+            not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_operation
         ):
             await self._enqueue_command_async(command, queue=self.queued_commands, reject=reject)
             return False
