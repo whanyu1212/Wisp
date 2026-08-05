@@ -75,10 +75,10 @@ _ROLE_FALLBACK: dict[str, str] = {
     "denied": "red",
 }
 
-# The Wisp wordmark, shown while the transcript is empty. Spaced uppercase
+# The Wisp wordmark, shown while the transcript is empty. Wide-spaced uppercase
 # lettering gives the compact badge more presence without relying on terminal-
 # dependent ASCII art or unsupported font scaling.
-_WORDMARK = "W I S P"
+_WORDMARK = "W  I  S  P"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 
 # Persistent, low-contrast keybinding reminder below the composer. Only real,
@@ -156,8 +156,8 @@ class TextualTui(App[None]):
         width: 16;
         height: 3;
         padding: 0 2;
-        border: round $accent;
-        background: $surface;
+        border: heavy $accent;
+        background: transparent;
         color: $accent;
         text-style: bold;
         text-align: center;

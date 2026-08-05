@@ -5558,7 +5558,8 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
             assert isinstance(actions_content, Content)
             assert wordmark.region.width == 16
             assert wordmark.region.height == 3
-            assert wordmark.styles.border_top[0] == "round"
+            assert wordmark.styles.border_top[0] == "heavy"
+            assert wordmark.styles.background.a == 0
             content = (wordmark_content.plain, hint_content.plain, actions_content.plain)
 
             renderer.prompt_submitted("hello")
@@ -5569,7 +5570,7 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
 
     content, centers, initial_children, final_children = anyio.run(scenario)
     wordmark, hint, actions = content
-    assert wordmark == "W I S P"
+    assert wordmark == "W  I  S  P"
     assert hint == "Type a prompt or / for commands."
     assert actions == "/resume session  ·  Ctrl+O actions"
     assert len(set(centers)) == 1
