@@ -26,7 +26,7 @@ from textual.content import Content
 from textual.message import Message
 from textual.timer import Timer
 from textual.widget import AwaitMount, Widget
-from textual.widgets import Input, Markdown, OptionList, Static, TextArea
+from textual.widgets import Input, Label, Markdown, OptionList, Rule, Static, TextArea
 from textual.widgets._markdown import MarkdownStream
 from textual.widgets.option_list import Option
 
@@ -1292,26 +1292,21 @@ class SessionPicker(Vertical):
 
 
 class TranscriptEmptyState(Vertical):
-    """Centered identity shown only while the transcript has no output.
+    """Centered welcome panel shown only while the transcript has no output.
 
-    Just a wordmark line plus a hint line, both given matching explicit
-    widths (set on ``.styles``, not fixed CSS) rather than relying on
-    Textual's ``align: center middle`` to center each child independently —
-    empirically it doesn't: siblings under it share a left edge, not a
-    center, so two boxes of different widths end up with visibly different
-    true centers (confirmed by a probe: two Statics at width 51 vs 40 landed
-    at x=14 both, centers 39 vs 34). Matching widths is the only combination
-    that produces matching centers.
-
-    Below all four of Wisp's supported breakpoints (72x20 and up), this
-    already fits with room to spare, so the hint-hiding below is a defensive
-    floor for smaller-than-spec terminals, not the primary responsive
-    mechanism for issue #72 — it just avoids the hint line ever crowding or
-    clipping against the wordmark on an unusually short screen.
+    Native ``Label`` and ``Rule`` widgets provide a restrained identity,
+    separator, prompt hint, and quick-action reminder without consuming a
+    permanent header row. Every child has the same explicit width because
+    Textual centers these siblings as a block rather than independently.
     """
 
     DEFAULT_CSS = """
-    TranscriptEmptyState.-compact #transcript-empty-hint {
+    TranscriptEmptyState.-compact #transcript-empty-rule,
+    TranscriptEmptyState.-compact #transcript-empty-actions {
+        display: none;
+    }
+
+    TranscriptEmptyState.-minimal #transcript-empty-hint {
         display: none;
     }
     """
@@ -1321,24 +1316,28 @@ class TranscriptEmptyState(Vertical):
         self._wordmark = wordmark
         self._hint = hint
 
+    @staticmethod
+    def _centered(widget: Widget) -> Widget:
+        widget.styles.width = 40
+        return widget
+
     def compose(self) -> ComposeResult:
-        wordmark_static = Static(
-            self._wordmark,
-            id="transcript-empty-wordmark",
-            markup=False,
+        yield self._centered(
+            Label(self._wordmark, id="transcript-empty-wordmark", markup=False)
         )
-        wordmark_static.styles.width = 40
-        yield wordmark_static
-        hint_static = Static(
-            self._hint,
-            id="transcript-empty-hint",
-            markup=False,
+        yield self._centered(Rule(line_style="heavy", id="transcript-empty-rule"))
+        yield self._centered(Label(self._hint, id="transcript-empty-hint", markup=False))
+        yield self._centered(
+            Static(
+                "/resume session  ·  Ctrl+O actions",
+                id="transcript-empty-actions",
+                markup=False,
+            )
         )
-        hint_static.styles.width = 40
-        yield hint_static
 
     def on_resize(self, event: events.Resize) -> None:
-        self.set_class(self.size.height < 5, "-compact")
+        self.set_class(self.size.height < 7, "-compact")
+        self.set_class(self.size.height < 4, "-minimal")
 
 
 class JumpToLatest(Static):

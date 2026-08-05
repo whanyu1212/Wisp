@@ -10,7 +10,7 @@ from rich.cells import cell_len
 from textual import events
 from textual.content import Content
 from textual.widget import Widget
-from textual.widgets import OptionList, Static
+from textual.widgets import Header, OptionList, Rule, Static
 
 import wisp.cli as cli_module
 from tests.tui_support import *
@@ -5529,8 +5529,8 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
     # scrollback, and disappears before the first real transcript item is
     # mounted.
     async def scenario() -> tuple[
-        tuple[str, str],
-        tuple[int, int, int],
+        tuple[str, str, str],
+        tuple[int, int, int, int],
         list[str],
         list[str],
     ]:
@@ -5541,18 +5541,24 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
             transcript = app_instance.query_one("#transcript", Transcript)
             empty = app_instance.query_one("#transcript-empty", TranscriptEmptyState)
             wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
+            rule = app_instance.query_one("#transcript-empty-rule", Rule)
             hint = app_instance.query_one("#transcript-empty-hint", Static)
+            actions = app_instance.query_one("#transcript-empty-actions", Static)
             centers = (
                 transcript.region.x + transcript.region.width // 2,
                 wordmark.region.x + wordmark.region.width // 2,
                 hint.region.x + hint.region.width // 2,
+                actions.region.x + actions.region.width // 2,
             )
             initial_children = [type(child).__name__ for child in transcript.children]
             wordmark_content = wordmark.render()
             hint_content = hint.render()
+            actions_content = actions.render()
             assert isinstance(wordmark_content, Content)
             assert isinstance(hint_content, Content)
-            content = (wordmark_content.plain, hint_content.plain)
+            assert isinstance(actions_content, Content)
+            assert rule.display
+            content = (wordmark_content.plain, hint_content.plain, actions_content.plain)
 
             renderer.prompt_submitted("hello")
             await pilot.pause()
@@ -5561,10 +5567,11 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
             return content, centers, initial_children, final_children
 
     content, centers, initial_children, final_children = anyio.run(scenario)
-    wordmark, hint = content
+    wordmark, hint, actions = content
     assert wordmark == "wisp"
     assert hint == "Type a prompt or / for commands."
-    assert centers[0] == centers[1] == centers[2]
+    assert actions == "/resume session  ·  Ctrl+O actions"
+    assert len(set(centers)) == 1
     assert initial_children == ["TranscriptEmptyState"]
     assert final_children == ["LineMessage"]
 
@@ -5794,29 +5801,25 @@ def test_textual_run_shell_enables_mouse_for_wheel_scrolling() -> None:
     assert captured["mouse"] is True
 
 
-def test_textual_header_shows_the_wisp_wordmark() -> None:
-    # The header title is the bare lowercase wordmark, no subtitle: the full
-    # identity treatment lives in TranscriptEmptyState, not the header, so
-    # the two never show the "wisp" identity at the same time.
-    async def scenario() -> tuple[str, str]:
+def test_textual_header_is_removed_without_losing_application_metadata() -> None:
+    async def scenario() -> tuple[str, str, int]:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
             await pilot.pause()
-            return app_instance.title, app_instance.sub_title
+            return app_instance.title, app_instance.sub_title, len(list(app_instance.query(Header)))
 
-    title, sub_title = anyio.run(scenario)
+    title, sub_title, header_count = anyio.run(scenario)
     assert title == "wisp"
     assert sub_title == ""
+    assert header_count == 0
 
 
 @pytest.mark.parametrize("size", [(120, 40), (100, 30), (80, 24), (72, 20)])
 @pytest.mark.parametrize("theme", ["wisp", "wisp-light"])
 def test_textual_no_duplicate_identity_at_any_breakpoint(size: tuple[int, int], theme: str) -> None:
-    # Issue #72: "wisp" must appear as a prominent identity in exactly one
-    # place at a time — the header stays bare, and the full wordmark
-    # treatment (TranscriptEmptyState) is gone once the transcript has
-    # content, at every supported breakpoint and both themes.
-    async def scenario() -> tuple[str, str, bool, bool]:
+    # Issue #72: the disposable welcome treatment is gone once the transcript
+    # has content, and no permanent Header duplicates it at any breakpoint.
+    async def scenario() -> tuple[str, str, bool, bool, int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=size) as pilot:
             app_instance.theme = theme
@@ -5832,13 +5835,15 @@ def test_textual_no_duplicate_identity_at_any_breakpoint(size: tuple[int, int], 
                 app_instance.sub_title,
                 empty_state_present_initially,
                 empty_state_present_after_prompt,
+                len(list(app_instance.query(Header))),
             )
 
-    title, sub_title, empty_before, empty_after = anyio.run(scenario)
+    title, sub_title, empty_before, empty_after, header_count = anyio.run(scenario)
     assert title == "wisp"
     assert sub_title == ""
     assert empty_before is True
     assert empty_after is False
+    assert header_count == 0
 
 
 def _read_prompt_signal_for_key(key: str) -> type[BaseException] | None:

@@ -22,7 +22,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.widget import AwaitMount, Widget
-from textual.widgets import Header, Static, TextArea
+from textual.widgets import Static, TextArea
 
 from wisp.events import (
     RpcSessionSummary,
@@ -81,8 +81,7 @@ _ROLE_FALLBACK: dict[str, str] = {
 # gaps/misalignment depending on the terminal's font rendering — a
 # font-independent limitation, not something a different figlet font fixes.
 # Styled bold (see #transcript-empty-wordmark CSS) for more visual weight.
-# This is the app's only "wisp" identity treatment beyond the bare Header
-# title — no separate tagline; that's what previously duplicated here.
+# This disposable welcome state is the app's only visible identity treatment.
 _WORDMARK = "wisp"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 
@@ -153,22 +152,33 @@ class TextualTui(App[None]):
     }
 
     #transcript-empty-wordmark {
-        /* Width is also set explicitly in Python (TranscriptEmptyState.compose),
-           matching #transcript-empty-hint's width so both land on the same true
-           center (see the class docstring for why that can't rely on `align:
-           center middle` alone). Bold gives it more visual weight — this is
-           the app's one full-identity treatment; the header stays plain. */
         max-width: 100%;
+        height: 1;
         color: $accent;
         text-style: bold;
         text-align: center;
     }
 
+    #transcript-empty-rule {
+        max-width: 100%;
+        height: 1;
+        margin-top: 1;
+        color: $secondary;
+    }
+
     #transcript-empty-hint {
+        max-width: 100%;
+        height: 1;
+        color: $text;
+        text-align: center;
+    }
+
+    #transcript-empty-actions {
         max-width: 100%;
         height: 1;
         margin-top: 1;
         color: $text-muted;
+        text-style: dim;
         text-align: center;
     }
 
@@ -362,7 +372,6 @@ class TextualTui(App[None]):
         self.write_error(message)
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
         with Vertical():
             # Transcript takes all remaining height (1fr). The input and compact
             # footer hug the bottom, matching Pi's editor-above-footer visual shape.
@@ -402,13 +411,9 @@ class TextualTui(App[None]):
             yield Static(_KEYBINDING_HINT, id="keybinding-hint", markup=False)
 
     async def on_mount(self) -> None:
-        # Bare lowercase title only — no subtitle. The wordmark (below, via
-        # TranscriptEmptyState) is the app's one full-identity treatment,
-        # shown once while the transcript is empty; the always-visible header
-        # only needs a quiet "wisp" so the two don't compete for attention.
-        # A subtitle here also previously round-tripped through Textual's
-        # title/subtitle em-dash separator, which was the source of mojibake
-        # at narrow widths under some terminal encodings.
+        # Retain an application title for terminal metadata without spending a
+        # permanent screen row on Textual's Header. The disposable welcome state
+        # below is Wisp's only visible identity treatment.
         self.title = "wisp"
         for theme in WISP_THEMES:
             self.register_theme(theme)
