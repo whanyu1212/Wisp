@@ -734,6 +734,67 @@ def test_tui_shell_recovers_history_pagination_for_a_live_reload() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_adopts_first_session_id_during_latest_history_reload() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.latest_history_hook = None
+            self.latest_history_failures = 0
+            self.reloaded: list[tuple[HistoricalTranscriptEntry, ...]] = []
+
+        def set_history_latest_request_hook(self, hook: object) -> None:
+            self.latest_history_hook = hook
+
+        def latest_history_reload_failed(self) -> None:
+            self.latest_history_failures += 1
+
+        def replace_latest_history_entries(
+            self,
+            entries: tuple[HistoricalTranscriptEntry, ...],
+        ) -> None:
+            self.reloaded.append(entries)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+        shell._activate_history_pagination(
+            RpcMessagesReported(command_id="initial-history", session_id=None)
+        )
+
+        assert callable(renderer.latest_history_hook)
+        await renderer.latest_history_hook()
+        latest_command_id = controller.messages_requests[-1][0]
+        assert controller.messages_requests[-1][1] is None
+
+        await shell._handle_rpc_event(
+            RpcMessagesReported(
+                command_id=latest_command_id,
+                session_id="first-session",
+                messages=(_rpc_message("assistant", "latest", entry_id="latest"),),
+            )
+        )
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id=latest_command_id,
+                command_type="get_messages",
+                ok=True,
+            )
+        )
+
+        assert shell._history_pagination is not None
+        assert shell._history_pagination.session_id == "first-session"
+        assert renderer.latest_history_failures == 0
+        assert renderer.reloaded == [
+            (HistoricalTranscriptMessage(role="assistant", content="latest"),)
+        ]
+
+        await renderer.latest_history_hook()
+        assert controller.messages_requests[-1][1] == "first-session"
+
+    anyio.run(run)
+
+
 def test_tui_shell_reloads_latest_history_after_an_older_page_finishes() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:
