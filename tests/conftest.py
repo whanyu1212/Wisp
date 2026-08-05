@@ -1,15 +1,17 @@
 """Shared test fixtures.
 
-The settings layer (:mod:`wisp.settings`) reads ``~/.wisp/settings.json`` and
-``./.wisp/settings.json`` by default. Without isolation, a developer who happens
-to have real settings files would see the suite behave differently from CI. The
-autouse fixture below redirects ``HOME`` and the working directory to a fresh temp
-directory for every test, so settings resolution starts from a clean slate; a test
-that wants specific settings writes them into that temp directory itself.
+Wisp reads configuration from both ``WISP_*`` environment variables and settings
+files under the user home and project directory. Without isolation, a developer's
+active Wisp process or local settings could change test behavior. The autouse
+fixture below clears inherited Wisp configuration, then redirects ``HOME`` and the
+working directory to fresh temporary directories for every test. Tests that need
+specific configuration opt in explicitly with ``monkeypatch.setenv()`` or by
+writing settings files into those directories.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -17,8 +19,17 @@ from pytest import MonkeyPatch
 
 
 @pytest.fixture(autouse=True)
-def _isolate_settings(tmp_path_factory: pytest.TempPathFactory, monkeypatch: MonkeyPatch) -> None:
-    """Point HOME and the cwd at an empty temp dir so real settings never leak in."""
+def _isolate_test_environment(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Start each test without inherited Wisp configuration or settings files."""
+
+    # Unset means "undecided" for trust; forcing WISP_TRUST=0 would suppress the
+    # trust-request flow that several tests intentionally exercise.
+    for name in tuple(os.environ):
+        if name.startswith("WISP_"):
+            monkeypatch.delenv(name, raising=False)
 
     home = tmp_path_factory.mktemp("home")
     workdir = tmp_path_factory.mktemp("cwd")

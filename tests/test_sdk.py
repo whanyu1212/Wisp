@@ -292,9 +292,12 @@ def test_rpc_trust_gate_offloads_store_io(tmp_path: Path, monkeypatch: MonkeyPat
 
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(resolve)
-            while gate._pending is None:
-                await anyio.sleep(0)
-            assert gate.resolve_request(request_id=gate._pending.request_id, trusted=False)
+            with anyio.fail_after(2):
+                while gate._pending is None:
+                    await anyio.sleep(0)
+            pending = gate._pending
+            assert pending is not None
+            assert gate.resolve_request(request_id=pending.request_id, trusted=False)
         assert decision is not None
         return decision
 
@@ -338,9 +341,12 @@ def test_rpc_trust_gate_cancel_abandons_blocked_persistence(
         try:
             async with anyio.create_task_group() as task_group:
                 task_group.start_soon(resolve)
-                while gate._pending is None:
-                    await anyio.sleep(0)
-                assert gate.resolve_request(request_id=gate._pending.request_id, trusted=True)
+                with anyio.fail_after(2):
+                    while gate._pending is None:
+                        await anyio.sleep(0)
+                pending = gate._pending
+                assert pending is not None
+                assert gate.resolve_request(request_id=pending.request_id, trusted=True)
                 with anyio.fail_after(1):
                     while not started.is_set():
                         await anyio.sleep(0.01)

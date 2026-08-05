@@ -357,14 +357,18 @@ def test_rpc_trust_denial_with_reason_persists(tmp_path: Path, monkeypatch: Monk
 
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(resolve)
-            while gate._pending is None:
-                await anyio.sleep(0)
+            with anyio.fail_after(2):
+                while gate._pending is None:
+                    await anyio.sleep(0)
+            pending = gate._pending
+            assert pending is not None
             assert gate.resolve_request(
-                request_id=gate._pending.request_id,
+                request_id=pending.request_id,
                 trusted=False,
                 reason="user declined",
             )
-            await done.wait()
+            with anyio.fail_after(2):
+                await done.wait()
             task_group.cancel_scope.cancel()
         assert decision is not None
         return decision
@@ -396,15 +400,19 @@ def test_rpc_trust_transient_denial_with_reason_does_not_persist(
 
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(resolve)
-            while gate._pending is None:
-                await anyio.sleep(0)
+            with anyio.fail_after(2):
+                while gate._pending is None:
+                    await anyio.sleep(0)
+            pending = gate._pending
+            assert pending is not None
             assert gate.resolve_request(
-                request_id=gate._pending.request_id,
+                request_id=pending.request_id,
                 trusted=False,
                 reason="Trust prompt closed",
                 transient=True,
             )
-            await done.wait()
+            with anyio.fail_after(2):
+                await done.wait()
             task_group.cancel_scope.cancel()
         assert decision is not None
         return decision
