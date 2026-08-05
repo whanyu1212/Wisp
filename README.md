@@ -362,6 +362,9 @@ Available slash commands:
 /quit, /exit
 ```
 
+Textual uses a tabular session browser on wide terminals and automatically falls back to the
+compact list on narrow terminals.
+
 Slash command metadata is backed by Wisp's frontend-neutral runtime command descriptors rather
 than a Textual-owned table. Built-in descriptor metadata now drives shared slash suggestions,
 parsing, and RPC `get_commands` discovery. It does not yet add extension command handlers, dynamic

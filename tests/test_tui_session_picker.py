@@ -4,9 +4,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import anyio
+import pytest
 from textual.content import Content
 from textual.widget import Widget
-from textual.widgets import Label, LoadingIndicator, OptionList
+from textual.widgets import DataTable, Label, LoadingIndicator, OptionList
 
 from wisp.events import RpcSessionSummary, ToolApprovalRequested
 from wisp.tui.history import HistoricalTranscriptMessage
@@ -60,6 +61,152 @@ def test_session_picker_preserves_rpc_order_and_highlights_selected_session() ->
     assert labels[0].startswith("  Newer")
     assert labels[1].startswith("● Selected")
     assert highlighted == 1
+
+
+def test_session_picker_uses_a_data_table_at_the_wide_breakpoint() -> None:
+    sessions = (
+        _session("newer", name="Newer", updated_at=datetime(2026, 2, 1, tzinfo=UTC)),
+        _session("selected", name="Selected", entry_count=42),
+    )
+
+    async def scenario() -> tuple[bool, bool, int, tuple[str, ...], list[str]]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(96, 24)) as pilot:
+            renderer.session_picker_request(sessions, selected_session_id="selected")
+            await pilot.pause()
+            table = app.query_one("#session-picker-table", DataTable)
+            options = app.query_one("#session-picker-options", OptionList)
+            row = table.get_row_at(1)
+            assert all(isinstance(cell, Content) for cell in row)
+            return (
+                table.display,
+                options.display,
+                table.cursor_row,
+                tuple(str(column.key.value) for column in table.ordered_columns),
+                [cell.plain for cell in row if isinstance(cell, Content)],
+            )
+
+    table_visible, options_visible, cursor_row, columns, row = anyio.run(scenario)
+    assert table_visible
+    assert not options_visible
+    assert cursor_row == 1
+    assert columns == ("current", "session", "updated", "entries", "path")
+    assert row == ["●", "Selected", "2026-01-01T00:00+00:00", "42", "/tmp/selected.jsonl"]
+
+
+def test_session_picker_uses_the_compact_list_below_the_wide_breakpoint() -> None:
+    async def scenario() -> tuple[bool, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(95, 24)) as pilot:
+            renderer.session_picker_request((_session("target"),), selected_session_id=None)
+            await pilot.pause()
+            table = app.query_one("#session-picker-table", DataTable)
+            options = app.query_one("#session-picker-options", OptionList)
+            return table.display, options.display
+
+    table_visible, options_visible = anyio.run(scenario)
+    assert not table_visible
+    assert options_visible
+
+
+@pytest.mark.parametrize("theme", ["wisp", "wisp-light"])
+def test_session_picker_table_fits_the_wide_breakpoint(theme: str) -> None:
+    async def scenario() -> tuple[int, int, int, int, int, int, float]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(96, 24)) as pilot:
+            app.theme = theme
+            renderer.session_picker_request((_session("target"),), selected_session_id=None)
+            await pilot.pause()
+            table = app.query_one("#session-picker-table", DataTable)
+            return (
+                table.region.x,
+                table.region.y,
+                table.region.right,
+                table.region.bottom,
+                app.size.width,
+                app.size.height,
+                table.max_scroll_x,
+            )
+
+    left, top, right, bottom, width, height, max_scroll_x = anyio.run(scenario)
+    assert 0 <= left < right <= width
+    assert 0 <= top < bottom <= height
+    assert max_scroll_x == 0
+
+
+def test_session_picker_table_mouse_selection_uses_the_resume_command() -> None:
+    sessions = (_session("first"), _session("target"))
+
+    async def scenario() -> str:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(100, 24)) as pilot:
+            renderer.session_picker_request(sessions, selected_session_id=None)
+            await pilot.pause()
+            # One click moves the row cursor; the second selects it through the
+            # same DataTable.RowSelected path as Enter.
+            await pilot.click("#session-picker-table", offset=(5, 2), times=2)
+            await pilot.pause()
+            answer = await app.read_prompt("wisp> ")
+            renderer.session_switch_finished()
+            return answer
+
+    assert anyio.run(scenario) == "/resume target"
+
+
+def test_session_picker_preserves_the_selected_session_across_layout_resizes() -> None:
+    sessions = (_session("first"), _session("selected"), _session("last"))
+
+    async def scenario() -> tuple[bool, bool, int | None, int, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(100, 24)) as pilot:
+            renderer.session_picker_request(sessions, selected_session_id="selected")
+            await pilot.pause()
+            table = app.query_one("#session-picker-table", DataTable)
+            options = app.query_one("#session-picker-options", OptionList)
+            await pilot.resize_terminal(95, 24)
+            await pilot.pause()
+            narrow_selected = options.highlighted
+            narrow_visible = options.display
+            await pilot.resize_terminal(100, 24)
+            await pilot.pause()
+            return table.display, narrow_visible, narrow_selected, table.cursor_row, table.has_focus
+
+    table_visible, options_visible, narrow_selected, wide_selected, table_focused = anyio.run(
+        scenario
+    )
+    assert table_visible
+    assert options_visible
+    assert narrow_selected == wide_selected == 1
+    assert table_focused
+
+
+def test_session_picker_table_navigation_is_bounded() -> None:
+    sessions = tuple(_session(f"session-{index}") for index in range(20))
+
+    async def scenario() -> tuple[int, int, int, int]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(100, 24)) as pilot:
+            renderer.session_picker_request(sessions, selected_session_id=None)
+            await pilot.pause()
+            table = app.query_one("#session-picker-table", DataTable)
+            await pilot.press("pagedown")
+            await pilot.pause()
+            after_page_down = table.cursor_row
+            await pilot.press("pageup")
+            await pilot.pause()
+            after_page_up = table.cursor_row
+            await pilot.press("end")
+            await pilot.pause()
+            after_end = table.cursor_row
+            await pilot.press("home")
+            await pilot.pause()
+            return after_page_down, after_page_up, after_end, table.cursor_row
+
+    after_page_down, after_page_up, after_end, after_home = anyio.run(scenario)
+    assert after_page_down > 0
+    assert after_page_up == 0
+    assert after_end == 19
+    assert after_home == 0
 
 
 def test_session_catalog_loading_hides_composer_and_preserves_draft() -> None:
@@ -198,6 +345,54 @@ def test_session_operation_indicator_preserves_transcript_scroll_intent() -> Non
 
     before_state, during_state = anyio.run(scenario)
     assert during_state == before_state
+
+
+def test_session_picker_table_renders_persisted_values_as_literal_text() -> None:
+    session = RpcSessionSummary(
+        session_id="literal",
+        session_path=Path("/tmp/[archive]/literal.jsonl"),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        entry_count=1,
+        name="[WIP] task",
+    )
+
+    async def scenario() -> list[str]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(100, 24)) as pilot:
+            renderer.session_picker_request((session,), selected_session_id=None)
+            await pilot.pause()
+            table = app.query_one("#session-picker-table", DataTable)
+            row = table.get_row_at(0)
+            assert all(isinstance(cell, Content) for cell in row)
+            return [cell.plain for cell in row if isinstance(cell, Content)]
+
+    assert anyio.run(scenario) == [
+        " ",
+        "[WIP] task",
+        "2026-01-01T00:00+00:00",
+        "1",
+        "/tmp/[archive]/literal.jso…",
+    ]
+
+
+def test_session_picker_wide_empty_catalog_does_not_select_a_session() -> None:
+    async def scenario() -> tuple[int, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(100, 24)) as pilot:
+            renderer.session_picker_request((), selected_session_id=None)
+            await pilot.pause()
+            table = app.query_one("#session-picker-table", DataTable)
+            await pilot.press("enter")
+            await pilot.pause()
+            try:
+                app._input_controller.receive_stream.receive_nowait()
+            except anyio.WouldBlock:
+                submitted = False
+            else:
+                submitted = True
+            return table.row_count, submitted
+
+    assert anyio.run(scenario) == (1, False)
 
 
 def test_session_picker_renders_persisted_labels_as_plain_text() -> None:
