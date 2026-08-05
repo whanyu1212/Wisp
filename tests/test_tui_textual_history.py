@@ -37,6 +37,7 @@ class _HistorySurface:
     follow_requests: int = 0
     latest_history_requests: int = 0
     fail_line_mount: bool = False
+    marker_boundaries: list[Widget | None] = field(default_factory=list)
 
     def replace_transcript(self) -> None:
         self.widgets.clear()
@@ -44,6 +45,7 @@ class _HistorySurface:
         self.tool_cards.clear()
 
     def mount_history_marker(self, message: str, *, before: Widget | None) -> None:
+        self.marker_boundaries.append(before)
         self._mount(message, before=before)
 
     def history_is_at_top(self) -> bool:
@@ -230,6 +232,22 @@ def test_history_controller_reconciles_a_bounded_window_without_full_history_sca
     assert len(surface.history_labels) == 300
     assert any(widget.label == "live: output" for widget in surface.widgets)
     assert surface.window_availability[-1] is True
+
+
+def test_history_controller_mounts_session_marker_before_queued_history() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+
+    controller.replace_entries(
+        (HistoricalTranscriptMessage(role="assistant", content="restored"),),
+        session_label="Resumed",
+    )
+
+    assert surface.marker_boundaries == [None]
+    assert [widget.label for widget in surface.widgets] == [
+        "resumed session: Resumed",
+        "assistant: restored",
+    ]
 
 
 def test_history_controller_clears_entries_for_new_session() -> None:
