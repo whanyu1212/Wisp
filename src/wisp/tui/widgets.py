@@ -21,12 +21,20 @@ from rich.cells import cell_len, set_cell_size
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Center, Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
 from textual.timer import Timer
 from textual.widget import AwaitMount, Widget
-from textual.widgets import Input, Label, Markdown, OptionList, Rule, Static, TextArea
+from textual.widgets import (
+    Input,
+    Label,
+    LoadingIndicator,
+    Markdown,
+    OptionList,
+    Static,
+    TextArea,
+)
 from textual.widgets._markdown import MarkdownStream
 from textual.widgets.option_list import Option
 
@@ -1294,26 +1302,27 @@ class SessionPicker(Vertical):
 class TranscriptEmptyState(Vertical):
     """Centered welcome panel shown only while the transcript has no output.
 
-    Native ``Label`` and ``Rule`` widgets provide a restrained identity,
-    separator, prompt hint, and quick-action reminder without consuming a
-    permanent header row. Every child has the same explicit width because
+    A native ``Label`` inside a fixed-width ``Center`` provides a compact
+    badge above the tagline, prompt hint, and quick-action reminder without
+    consuming a permanent header row. Every direct child has the same explicit width because
     Textual centers these siblings as a block rather than independently.
     """
 
     DEFAULT_CSS = """
-    TranscriptEmptyState.-compact #transcript-empty-rule,
     TranscriptEmptyState.-compact #transcript-empty-actions {
         display: none;
     }
 
+    TranscriptEmptyState.-minimal #transcript-empty-tagline,
     TranscriptEmptyState.-minimal #transcript-empty-hint {
         display: none;
     }
     """
 
-    def __init__(self, wordmark: str, hint: str) -> None:
+    def __init__(self, wordmark: str, tagline: str, hint: str) -> None:
         super().__init__(id="transcript-empty")
         self._wordmark = wordmark
+        self._tagline = tagline
         self._hint = hint
 
     @staticmethod
@@ -1322,8 +1331,13 @@ class TranscriptEmptyState(Vertical):
         return widget
 
     def compose(self) -> ComposeResult:
-        yield self._centered(Label(self._wordmark, id="transcript-empty-wordmark", markup=False))
-        yield self._centered(Rule(line_style="heavy", id="transcript-empty-rule"))
+        yield self._centered(
+            Center(
+                Label(self._wordmark, id="transcript-empty-wordmark", markup=False),
+                id="transcript-empty-wordmark-frame",
+            )
+        )
+        yield self._centered(Label(self._tagline, id="transcript-empty-tagline", markup=False))
         yield self._centered(Label(self._hint, id="transcript-empty-hint", markup=False))
         yield self._centered(
             Static(
@@ -1334,8 +1348,76 @@ class TranscriptEmptyState(Vertical):
         )
 
     def on_resize(self, event: events.Resize) -> None:
-        self.set_class(self.size.height < 7, "-compact")
-        self.set_class(self.size.height < 4, "-minimal")
+        self.set_class(self.size.height < 9, "-compact")
+        self.set_class(self.size.height < 6, "-minimal")
+
+
+class OperationIndicator(Vertical):
+    """Centered native loading surface for an active session operation.
+
+    The app maps typed operation state to literal labels; this widget only
+    presents the current label and never decides when an operation begins or
+    ends. Its full-screen overlay does not participate in transcript layout.
+    """
+
+    DEFAULT_CSS = """
+    OperationIndicator {
+        overlay: screen;
+        display: none;
+        width: 100%;
+        height: 100%;
+        align: center middle;
+        background: transparent;
+    }
+
+    OperationIndicator #operation-indicator-panel {
+        width: auto;
+        height: 3;
+        padding: 0 2;
+        border: heavy $accent;
+        background: $panel;
+        align-vertical: middle;
+    }
+
+    OperationIndicator #operation-indicator-spinner {
+        width: 9;
+        height: 1;
+        min-height: 1;
+        color: $accent;
+    }
+
+    OperationIndicator #operation-indicator-label {
+        width: auto;
+        height: 1;
+        color: $text;
+    }
+    """
+
+    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
+        super().__init__(id=id)
+        self._label = Label("", id="operation-indicator-label", markup=False)
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="operation-indicator-panel"):
+            yield LoadingIndicator(id="operation-indicator-spinner")
+            yield self._label
+
+    @property
+    def is_open(self) -> bool:
+        """Whether the operation surface is currently visible."""
+
+        return self.display
+
+    def show_operation(self, label: str) -> None:
+        """Display a caller-owned operation label beside the native spinner."""
+
+        self._label.update(label)
+        self.display = True
+
+    def hide(self) -> None:
+        """Hide the operation surface through the generic overlay protocol."""
+
+        self.display = False
 
 
 class JumpToLatest(Static):
@@ -1420,6 +1502,7 @@ class Transcript(VerticalScroll):
         self,
         *args: object,
         empty_wordmark: str | None = None,
+        empty_tagline: str = "",
         empty_hint: str = "",
         **kwargs: object,
     ) -> None:
@@ -1427,6 +1510,7 @@ class Transcript(VerticalScroll):
         self._follow = True
         self._follow_generation = 0
         self._empty_wordmark = empty_wordmark
+        self._empty_tagline = empty_tagline
         self._empty_hint = empty_hint
         self._empty_state: TranscriptEmptyState | None = None
         self._has_more_history = False
@@ -1436,7 +1520,11 @@ class Transcript(VerticalScroll):
 
     def compose(self) -> ComposeResult:
         if self._empty_wordmark is not None:
-            self._empty_state = TranscriptEmptyState(self._empty_wordmark, self._empty_hint)
+            self._empty_state = TranscriptEmptyState(
+                self._empty_wordmark,
+                self._empty_tagline,
+                self._empty_hint,
+            )
             yield self._empty_state
 
     def mount_message(self, widget: Widget, *, before: Widget | None = None) -> AwaitMount:

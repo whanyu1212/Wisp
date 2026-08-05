@@ -25,6 +25,7 @@ class OverlayKind(StrEnum):
     session_picker = "session_picker"
     command_palette = "command_palette"
     prompt_history = "prompt_history"
+    operation_indicator = "operation_indicator"
 
 
 class OverlayOperation(StrEnum):
