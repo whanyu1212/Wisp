@@ -11,6 +11,7 @@ from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import Button, Label, ProgressBar, Static
 
+from wisp.coding.costs import format_usd
 from wisp.events import SessionStats
 
 
@@ -46,6 +47,9 @@ def context_status_presentation(stats: SessionStats) -> ContextStatusPresentatio
         if window is not None and context.reserve_tokens < window
         else None
     )
+    remaining_tokens = (
+        window - context.reserve_tokens - current_tokens if window is not None else None
+    )
     policy = stats.compaction
     eligibility = (
         "unavailable · status unavailable"
@@ -62,11 +66,7 @@ def context_status_presentation(stats: SessionStats) -> ContextStatusPresentatio
         percentage=percentage,
         source="provider observation" if observed else "deterministic estimate (approximate)",
         reserve=_format_tokens(context.reserve_tokens),
-        remaining=(
-            _format_tokens(context.remaining_tokens)
-            if context.remaining_tokens is not None
-            else "unknown"
-        ),
+        remaining=(_format_tokens(remaining_tokens) if remaining_tokens is not None else "unknown"),
         trigger=(
             f">{_format_tokens(trigger_tokens)}" if trigger_tokens is not None else "unavailable"
         ),
@@ -97,7 +97,7 @@ def _format_tokens(value: int) -> str:
 
 
 def _format_cost(known_usd: Decimal, *, complete: bool) -> str:
-    amount = f"${known_usd:.2f}"
+    amount = format_usd(known_usd)
     return amount if complete else f"{amount} known · partial pricing"
 
 

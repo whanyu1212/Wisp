@@ -84,7 +84,20 @@ def test_context_presentation_prefers_current_provider_observation() -> None:
     assert view.compaction == "on"
     assert view.eligibility == "eligible"
     assert view.overflow_recovery == "on"
-    assert view.cost == "$0.42"
+    assert view.cost == "$0.420"
+
+
+def test_context_presentation_recomputes_remaining_from_displayed_observation() -> None:
+    view = context_status_presentation(_stats(observed=92_000, remaining=40_000))
+
+    assert view.current_tokens == 92_000
+    assert view.remaining == "28k"
+
+
+def test_context_presentation_preserves_meaningful_small_costs() -> None:
+    view = context_status_presentation(_stats(cost=SessionCostSummary(known_usd=Decimal("0.0042"))))
+
+    assert view.cost == "$0.0042"
 
 
 def test_context_presentation_marks_estimates_and_partial_cost() -> None:
@@ -103,7 +116,7 @@ def test_context_presentation_marks_estimates_and_partial_cost() -> None:
 
     assert view.current_tokens == 80_000
     assert view.source == "deterministic estimate (approximate)"
-    assert view.cost == "$0.10 known · partial pricing"
+    assert view.cost == "$0.100 known · partial pricing"
 
 
 def test_context_overlay_renders_progress_and_authoritative_policy() -> None:
@@ -139,7 +152,7 @@ def test_context_overlay_renders_progress_and_authoritative_policy() -> None:
         "Automatic compaction: on · Trigger: >120k",
         "Threshold: eligible",
         "Overflow recovery: on",
-        "Cost: $0.42",
+        "Cost: $0.420",
     ]
     assert not warning
 
