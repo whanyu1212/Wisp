@@ -8,12 +8,13 @@ import anyio
 from textual.widget import Widget
 
 from wisp.tui.history import TUI_HISTORY_PAGE_LIMIT
+from wisp.tui.textual_app import TextualTui
 from wisp.tui.textual_transcript import (
     TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT,
     TUI_SETTLED_LIVE_WIDGET_LIMIT,
     TextualTranscriptController,
 )
-from wisp.tui.widgets import ToolCard, WorkingIndicator
+from wisp.tui.widgets import LineMessage, ToolCard, WorkingIndicator
 
 
 @dataclass
@@ -76,6 +77,51 @@ def _controller(surface: _Surface) -> TextualTranscriptController:
     controller = TextualTranscriptController(surface)
     surface.controller = controller
     return controller
+
+
+def test_history_mount_falls_back_from_a_detached_insertion_boundary() -> None:
+    async def run() -> None:
+        app = TextualTui()
+        async with app.run_test() as pilot:
+            current = app.mount_historical_line("assistant", "current")
+            assert current is not None
+            await pilot.pause()
+
+            app.begin_history_prepend()
+            older = app.mount_historical_line("user", "older", before=Widget())
+            app.finish_history_prepend()
+            assert older is not None
+            await pilot.pause()
+
+            transcript = app._transcript
+            assert transcript is not None
+            assert list(transcript.children).index(older) < list(transcript.children).index(current)
+
+    anyio.run(run)
+
+
+def test_history_marker_falls_back_to_the_attached_transcript_head() -> None:
+    async def run() -> None:
+        app = TextualTui()
+        async with app.run_test() as pilot:
+            current = app.mount_historical_line("assistant", "current")
+            assert current is not None
+            await pilot.pause()
+
+            app.mount_history_marker("resumed session: Restored", before=Widget())
+            await pilot.pause()
+            await pilot.pause()
+
+            transcript = app._transcript
+            assert transcript is not None
+            lines = [
+                child.render().plain
+                for child in transcript.children
+                if isinstance(child, LineMessage)
+            ]
+            assert lines == ["resumed session: Restored", "assistant: current"]
+
+    anyio.run(run)
 
 
 def test_unseen_output_counts_distinct_widgets_and_clears_at_tail() -> None:
