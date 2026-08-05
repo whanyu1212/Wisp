@@ -8,6 +8,7 @@ import anyio
 from textual.widget import Widget
 
 from wisp.tui.history import TUI_HISTORY_PAGE_LIMIT
+from wisp.tui.textual_app import TextualTui
 from wisp.tui.textual_transcript import (
     TUI_SETTLED_LIVE_DURABLE_ENTRY_LIMIT,
     TUI_SETTLED_LIVE_WIDGET_LIMIT,
@@ -76,6 +77,27 @@ def _controller(surface: _Surface) -> TextualTranscriptController:
     controller = TextualTranscriptController(surface)
     surface.controller = controller
     return controller
+
+
+def test_history_mount_falls_back_from_a_detached_insertion_boundary() -> None:
+    async def run() -> None:
+        app = TextualTui()
+        async with app.run_test() as pilot:
+            current = app.mount_historical_line("assistant", "current")
+            assert current is not None
+            await pilot.pause()
+
+            app.begin_history_prepend()
+            older = app.mount_historical_line("user", "older", before=Widget())
+            app.finish_history_prepend()
+            assert older is not None
+            await pilot.pause()
+
+            transcript = app._transcript
+            assert transcript is not None
+            assert list(transcript.children).index(older) < list(transcript.children).index(current)
+
+    anyio.run(run)
 
 
 def test_unseen_output_counts_distinct_widgets_and_clears_at_tail() -> None:

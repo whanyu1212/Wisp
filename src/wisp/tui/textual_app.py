@@ -1521,15 +1521,23 @@ class TextualTui(App[None]):
         if transcript is None:
             return
         anchor = self._history_prepend_anchor
-        mount_before = before or (
+        anchor_boundary = (
             anchor[1]
             if (
                 self._prepending_history
                 and anchor is not None
                 and anchor[0] is transcript
                 and anchor[1] is not None
+                and anchor[1].parent is transcript
             )
             else None
+        )
+        # Textual queues mounts until the next message-pump cycle. Reconciliation
+        # can therefore offer a widget mounted earlier in this batch as the next
+        # insertion boundary even though it has no parent yet. Textual rejects
+        # such a relative mount, so fall back to the stable prepend anchor.
+        mount_before = (
+            before if before is not None and before.parent is transcript else anchor_boundary
         )
         mounted = transcript.mount_message(widget, before=mount_before)
         if self._prepending_history:

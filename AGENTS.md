@@ -196,6 +196,8 @@ For Wisp repository work:
   suitable timeout or focused command when practical, otherwise mark it unverified.
 - Record the completed result before claiming `uv run ruff check .`, the configured mypy command,
   or `uv run pytest` passed. Partial output is not a successful result.
+- Do not run pytest against anything under `refs/`; reference repositories are not part of Wisp's
+  test suite. Scope pytest runs to Wisp's own tests (for example, `uv run pytest tests`).
 - Always finish implementation work with a concise summary of changes, passed/failed/timed-out/not
   run checks, and any remaining blockers or uncertainty.
 
