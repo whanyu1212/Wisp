@@ -298,13 +298,7 @@ class RpcCoordinator:
         new_session_waits_for_ordered_operation = (
             selected_type == "new_session"
             and running is not None
-            and (
-                running.command_type not in {"prompt", "compact", "get_session_stats"}
-                or (
-                    running.command_type == "get_session_stats"
-                    and bool(self.pending_prompt_queue_commands or self.queued_commands)
-                )
-            )
+            and running.command_type not in {"prompt", "compact"}
         )
         if running is not None and (
             not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_operation
@@ -518,13 +512,7 @@ class RpcCoordinator:
         new_session_waits_for_ordered_operation = (
             selected_type == "new_session"
             and running is not None
-            and (
-                running.command_type not in {"prompt", "compact", "get_session_stats"}
-                or (
-                    running.command_type == "get_session_stats"
-                    and bool(self.pending_prompt_queue_commands or self.queued_commands)
-                )
-            )
+            and running.command_type not in {"prompt", "compact"}
         )
         if running is not None and (
             not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_operation

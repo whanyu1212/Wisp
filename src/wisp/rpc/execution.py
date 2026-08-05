@@ -286,22 +286,15 @@ class RpcCommandExecutor:
         command: dict[str, object],
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
-        effective_running = running_command
-        if running_command is not None and running_command.command_type == "get_session_stats":
-            # Stats are optional frontend chrome. Cancel and detach the old read so
-            # it cannot delay or repopulate a fresh session. Ordered transcript reads
-            # remain queued ahead of the reset in the coordinator.
-            running_command.cancel_scope.cancel()
-            effective_running = None
         reset_session = handle_rpc_new_session_command(
             command,
-            running_command=effective_running,
+            running_command=running_command,
             write_event=self.write_event,
         )
         if reset_session:
             self.agent.reset_session_state()
         return _RpcDispatchResult(
-            running_command=effective_running,
+            running_command=running_command,
             reset_session=reset_session,
         )
 

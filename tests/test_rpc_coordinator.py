@@ -153,10 +153,10 @@ def test_coordinator_queues_new_session_behind_work_already_waiting_on_backgroun
 
 @pytest.mark.parametrize(
     "command_type",
-    ["get_messages", "get_sessions", "get_session_tree"],
+    ["get_messages", "get_sessions", "get_session_stats", "get_session_tree"],
 )
 def test_coordinator_queues_new_session_behind_active_ordered_read(
-    command_type: Literal["get_messages", "get_sessions", "get_session_tree"],
+    command_type: Literal["get_messages", "get_sessions", "get_session_stats", "get_session_tree"],
 ) -> None:
     async def scenario() -> None:
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
