@@ -286,13 +286,20 @@ class RpcCommandExecutor:
         command: dict[str, object],
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
+        effective_running = running_command
+        if running_command is not None and running_command.command_type == "get_session_stats":
+            # Stats are optional frontend chrome. Cancel and detach the old read so
+            # its completion cannot restore the previous session's history after
+            # the reset. Foreground operations still reject the command below.
+            running_command.cancel_scope.cancel()
+            effective_running = None
         reset_session = handle_rpc_new_session_command(
             command,
-            running_command=running_command,
+            running_command=effective_running,
             write_event=self.write_event,
         )
         return _RpcDispatchResult(
-            running_command=running_command,
+            running_command=effective_running,
             reset_session=reset_session,
         )
 

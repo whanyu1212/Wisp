@@ -377,6 +377,31 @@ def test_executor_new_session_resets_selected_state_and_rejects_while_busy(
     anyio.run(scenario)
 
 
+def test_executor_new_session_cancels_background_stats_instead_of_rejecting(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            stats = _RpcRunningCommand("stats-1", "get_session_stats", anyio.CancelScope())
+
+            result = executor.dispatch(
+                {"id": "new-1", "type": "new_session"},
+                stats,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert stats.cancel_scope.cancel_called is True
+        assert result.running_command is None
+        assert result.reset_session is True
+        finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
+        assert [(event.command_id, event.ok) for event in finished] == [("new-1", True)]
+
+    anyio.run(scenario)
+
+
 def test_executor_configures_agent_mode_and_reports_it_in_state(tmp_path: Path) -> None:
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
