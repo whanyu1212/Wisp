@@ -1322,9 +1322,7 @@ class TranscriptEmptyState(Vertical):
         return widget
 
     def compose(self) -> ComposeResult:
-        yield self._centered(
-            Label(self._wordmark, id="transcript-empty-wordmark", markup=False)
-        )
+        yield self._centered(Label(self._wordmark, id="transcript-empty-wordmark", markup=False))
         yield self._centered(Rule(line_style="heavy", id="transcript-empty-rule"))
         yield self._centered(Label(self._hint, id="transcript-empty-hint", markup=False))
         yield self._centered(
