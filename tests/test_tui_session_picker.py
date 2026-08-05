@@ -10,6 +10,7 @@ from textual.widgets import Label, LoadingIndicator, OptionList
 
 from wisp.events import RpcSessionSummary, ToolApprovalRequested
 from wisp.tui.history import HistoricalTranscriptMessage
+from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.textual_app import create_textual_tui
 from wisp.tui.widgets import (
     DecisionPanel,
@@ -174,11 +175,16 @@ def test_session_operation_indicator_preserves_transcript_scroll_intent() -> Non
         async with app.run_test(size=(80, 24)) as pilot:
             for index in range(24):
                 app.write_assistant(f"transcript line {index}")
+            # Let the queued tail-follow callbacks from the line mounts settle
+            # before explicitly preserving a reader's scroll position.
+            await pilot.pause()
             await pilot.pause()
             transcript = app.query_one("#transcript", Transcript)
+            transcript.stop_following()
             transcript.scroll_to(y=4, animate=False)
             await pilot.pause()
             before_state = transcript.viewport_state()
+            assert before_state == TranscriptViewportState(scroll_y=4, following=False)
 
             renderer.session_catalog_started()
             await pilot.pause()
