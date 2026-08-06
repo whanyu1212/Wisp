@@ -186,6 +186,7 @@ you trust the project.
 {
   "provider": "openai",
   "model": "gpt-5.6-sol",
+  "effort": "high",
   "session_dir": "~/.wisp/sessions",
   "context_reserve_tokens": 16384,
   "auto_compaction_enabled": true,
@@ -198,6 +199,13 @@ Configuration precedence, highest to lowest:
 ```text
 CLI flag > environment variable > project ./.wisp/settings.json > user ~/.wisp/settings.json > built-in default
 ```
+
+After a successful TUI `/model` or `/provider` change, Wisp atomically records the active
+provider, model, and reasoning effort as user defaults. They are reused on the next launch unless
+a higher-precedence source overrides them. Selecting a provider default removes the saved model
+and effort instead of copying a catalog default. Failed changes, trusted-project configuration,
+CLI flags, and external RPC configuration do not rewrite these preferences; Wisp does not infer
+them from the newest session file.
 
 Never commit auth files or real API keys.
 
@@ -351,7 +359,7 @@ Available slash commands:
 /login [provider] [device-code]
 /logout [provider]
 /provider [provider]        switch provider for future prompts (resets model to default)
-/model [model]              switch model for future prompts
+/model [model] [effort]     switch model and optional reasoning effort
 /new                        start a fresh session and clear the screen
 /resume [session-id]        browse or resume a persisted session
 /compact [instructions]     summarize older context while preserving the JSONL audit
@@ -408,9 +416,13 @@ extension command handlers remain future work.
 
 TUI login currently uses the `openai-codex` device-code flow; browser login is available from the
 CLI (`uv run wisp auth login openai-codex`). `/model` with no arguments opens a model picker in
-the Textual TUI and lists every catalog model grouped by provider in line mode. `/resume` with no
-arguments opens the newest-first session picker in Textual and prints the same RPC-owned catalog
-in line/fullscreen fallback modes; use `/resume <session-id>` there to select one directly.
+the Textual TUI and lists every catalog model grouped by provider in line mode. Textual keeps the
+scrollable model catalog in an option list and shows the highlighted model's catalog-supported
+reasoning tiers in a radio set with an explicit **Default** choice. Use Up/Down for models,
+Left/Right for effort, Enter to apply, and Escape to cancel; the effort buttons are also clickable.
+`/resume` with no arguments opens the newest-first session picker in Textual and prints the same
+RPC-owned catalog in line/fullscreen fallback modes; use `/resume <session-id>` there to select one
+directly.
 
 ### Model catalog
 

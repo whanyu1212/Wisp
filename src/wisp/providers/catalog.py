@@ -492,11 +492,11 @@ def startup_effort(
 ) -> str | None:
     """Return ``effort`` if valid for the startup provider/model, else ``None``.
 
-    Persisted effort (see :func:`wisp.settings.persist_user_effort`) is a
-    single global string with no provider/model scope -- a tier chosen for
-    one provider/model (e.g. Google's uppercase ``"HIGH"``) is not just
-    unlikely to suit whatever provider/model a later session actually starts
-    on, it can be an outright invalid wire value there. Called once at
+    User effort is normally persisted alongside the last TUI provider/model
+    selection, but higher-precedence environment or trusted-project settings can
+    still pair it with a different provider/model. A tier chosen for one provider
+    (e.g. Google's uppercase ``"HIGH"``) can be an invalid wire value elsewhere.
+    Called once at
     session construction, before the first prompt, so a stale persisted tier
     never reaches a provider it was never chosen for.
 

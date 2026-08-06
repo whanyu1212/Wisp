@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -205,35 +206,49 @@ def user_settings_path(*, home_dir: Path | None = None) -> Path:
     return (home / ".wisp" / PROJECT_SETTINGS_FILENAME).expanduser()
 
 
+def persist_user_model_selection(
+    provider: str,
+    model: str | None,
+    effort: str | None,
+    *,
+    home_dir: Path | None = None,
+) -> None:
+    """Persist the last successful TUI model selection as user defaults.
+
+    ``None`` removes ``model`` or ``effort`` so provider defaults remain defaults
+    rather than being copied into the settings file. The update is best-effort and
+    preserves every unrelated user setting.
+    """
+
+    _persist_user_settings(
+        {"provider": provider, "model": model, "effort": effort},
+        home_dir=home_dir,
+        preference="model selection",
+    )
+
+
 def persist_user_effort(effort: str | None, *, home_dir: Path | None = None) -> None:
-    """Write ``effort`` into the user settings file, preserving other keys.
+    """Persist only ``effort`` while preserving the compatibility API."""
 
-    Effort is the only setting Wisp writes back from inside a running session
-    (see :func:`resolve_settings`'s docstring for why -- every other key is
-    read-only from the app's perspective, set by hand-editing the file). Scoped
-    to just this key rather than a general "persist current config" mechanism,
-    since nothing else asked for one yet. ``effort=None`` clears a previously
-    persisted tier rather than writing a ``null`` -- the key is dropped so an
-    older Wisp build reading this file sees "unset," not an explicit null it
-    would need special-casing for.
+    _persist_user_settings(
+        {"effort": effort},
+        home_dir=home_dir,
+        preference="effort",
+    )
 
-    A missing or malformed existing file is tolerated the same way
-    :func:`_load_settings_file` tolerates one when reading -- persisting a new
-    preference must not fail (or silently discard the rest of the file) just
-    because the file was already broken. A write-side failure (unwritable
-    ``~/.wisp``, read-only home, full disk) is tolerated the same way -- this
-    is a best-effort preference write happening mid-session, after the
-    backend configuration it's recording has already taken effect, so it must
-    never crash the caller; it just warns and leaves the on-disk file as it
-    was.
 
-    A file that *exists* but can't be read (permission denied, I/O error --
-    anything other than simply not being there yet) aborts the write
-    entirely, rather than proceeding as if the file were empty: this
-    function's whole contract is preserving every other key, and writing a
-    fresh ``{"effort": ...}`` over an unread file would silently destroy
-    provider/model/auth/protected-paths/retry settings this function has no
-    way to recover, the opposite of "best-effort."
+def _persist_user_settings(
+    updates: Mapping[str, str | None],
+    *,
+    home_dir: Path | None,
+    preference: str,
+) -> None:
+    """Safely read, update, and atomically replace the user settings file.
+
+    A missing or malformed file is treated like an empty settings document, matching
+    the read path. An existing file that cannot be read aborts the update because
+    continuing would risk destroying unrelated settings. Write failures warn and do
+    not affect the already-applied runtime configuration.
     """
 
     path = user_settings_path(home_dir=home_dir)
@@ -243,7 +258,10 @@ def persist_user_effort(effort: str | None, *, home_dir: Path | None = None) -> 
     except FileNotFoundError:
         raw = None
     except OSError as exc:
-        _warn(f"could not read settings file {path} before writing, effort not persisted: {exc}")
+        _warn(
+            f"could not read settings file {path} before writing, "
+            f"{preference} not persisted: {exc}"
+        )
         return
     if raw is not None:
         try:
@@ -253,10 +271,11 @@ def persist_user_effort(effort: str | None, *, home_dir: Path | None = None) -> 
         if isinstance(parsed, dict):
             data = parsed
 
-    if effort is None:
-        data.pop("effort", None)
-    else:
-        data["effort"] = effort
+    for key, value in updates.items():
+        if value is None:
+            data.pop(key, None)
+        else:
+            data[key] = value
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

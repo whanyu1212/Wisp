@@ -11,6 +11,7 @@ from wisp.config import WispConfig
 from wisp.settings import (
     DEFAULT_PROTECTED_PATHS,
     persist_user_effort,
+    persist_user_model_selection,
     resolve_settings,
     user_settings_path,
 )
@@ -377,7 +378,48 @@ def test_retry_policy_prefers_environment_then_user_settings(
     assert config.retry_policy.max_delay_seconds == 30
 
 
-# --- persist_user_effort ---
+# --- persisted user preferences ---
+
+
+def test_persist_user_model_selection_writes_provider_model_and_effort(tmp_path: Path) -> None:
+    persist_user_model_selection(
+        "anthropic", "claude-opus-4-8", "high", home_dir=tmp_path
+    )
+
+    path = user_settings_path(home_dir=tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "provider": "anthropic",
+        "model": "claude-opus-4-8",
+        "effort": "high",
+    }
+
+
+def test_persist_user_model_selection_defaults_remove_model_and_effort(tmp_path: Path) -> None:
+    _write_settings(
+        tmp_path,
+        provider="anthropic",
+        model="claude-opus-4-8",
+        effort="high",
+        session_dir="/tmp/sessions",
+    )
+
+    persist_user_model_selection("openai", None, None, home_dir=tmp_path)
+
+    path = user_settings_path(home_dir=tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "provider": "openai",
+        "session_dir": "/tmp/sessions",
+    }
+
+
+def test_persist_user_model_selection_round_trips_through_settings(tmp_path: Path) -> None:
+    persist_user_model_selection("google", "gemini-3.5-flash", "HIGH", home_dir=tmp_path)
+
+    settings = resolve_settings(project_dir=tmp_path / "proj", home_dir=tmp_path)
+
+    assert settings.provider == "google"
+    assert settings.model == "gemini-3.5-flash"
+    assert settings.effort == "HIGH"
 
 
 def test_persist_user_effort_writes_a_new_file(tmp_path: Path) -> None:

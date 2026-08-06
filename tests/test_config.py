@@ -7,6 +7,7 @@ from pytest import MonkeyPatch
 
 from wisp import config as config_module
 from wisp.config import WispConfig, default_auth_path, default_session_dir
+from wisp.settings import persist_user_model_selection
 
 
 def test_config_defaults_to_default_provider(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -92,6 +93,24 @@ def test_config_reads_effort_from_env(tmp_path: Path, monkeypatch: MonkeyPatch) 
     config = WispConfig.from_env(session_dir=tmp_path)
 
     assert config.effort == "medium"
+
+
+def test_config_reuses_persisted_tui_model_selection_on_restart(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    for name in ("WISP_PROVIDER", "WISP_MODEL", "WISP_EFFORT"):
+        monkeypatch.delenv(name, raising=False)
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    persist_user_model_selection(
+        "anthropic", "claude-opus-4-8", "high", home_dir=home
+    )
+
+    config = WispConfig.from_env(session_dir=tmp_path)
+
+    assert config.provider == "anthropic"
+    assert config.model == "claude-opus-4-8"
+    assert config.effort == "high"
 
 
 def test_config_effort_from_user_settings_file(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
