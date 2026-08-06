@@ -97,20 +97,22 @@ class WispConfig(BaseModel):
         model_override = _first_non_empty(model, os.environ.get("WISP_MODEL"))
         effort_override = _first_non_empty(effort, os.environ.get("WISP_EFFORT"))
         provider_name = provider_override or settings.provider or DEFAULT_PROVIDER
+        user_defaults_provider = settings.user_provider or DEFAULT_PROVIDER
         selected_model = model_override or settings.model
         if (
             model_override is None
             and settings.model_from_user
-            and provider_name != settings.user_provider
+            and provider_name != user_defaults_provider
         ):
             selected_model = None
 
         non_user_model_selected = model_override is not None or (
             settings.model is not None and not settings.model_from_user
         )
+        user_defaults_have_provider = settings.user_provider is not None or settings.model_from_user
         provider_changes_user_defaults = (
-            settings.user_provider is not None
-            and provider_name != settings.user_provider
+            user_defaults_have_provider
+            and provider_name != user_defaults_provider
             and not non_user_model_selected
         )
         if effort_override is not None:

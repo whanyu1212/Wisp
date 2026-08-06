@@ -111,6 +111,40 @@ def test_config_reuses_persisted_tui_model_selection_on_restart(
     assert config.effort == "high"
 
 
+def test_model_only_user_setting_uses_default_provider(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    settings_dir = home / ".wisp"
+    settings_dir.mkdir(parents=True)
+    (settings_dir / "settings.json").write_text('{"model": "gpt-custom"}', encoding="utf-8")
+    monkeypatch.delenv("WISP_PROVIDER", raising=False)
+    monkeypatch.delenv("WISP_MODEL", raising=False)
+
+    config = WispConfig.from_env(session_dir=tmp_path)
+
+    assert config.provider == config_module.DEFAULT_PROVIDER
+    assert config.model == "gpt-custom"
+
+
+def test_provider_override_drops_model_only_user_setting(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    settings_dir = home / ".wisp"
+    settings_dir.mkdir(parents=True)
+    (settings_dir / "settings.json").write_text('{"model": "gpt-custom"}', encoding="utf-8")
+    monkeypatch.setenv("WISP_PROVIDER", "anthropic")
+    monkeypatch.delenv("WISP_MODEL", raising=False)
+
+    config = WispConfig.from_env(session_dir=tmp_path)
+
+    assert config.provider == "anthropic"
+    assert config.model is None
+
+
 def test_provider_env_override_drops_persisted_model_and_effort(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
