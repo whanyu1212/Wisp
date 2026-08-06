@@ -451,7 +451,7 @@ class CodingSession:
                 max_tool_iterations=self.max_tool_iterations,
                 effort=self.effort,
                 context_window=self._context_window(),
-                context_reserve_tokens=self.context_reserve_tokens,
+                context_reserve_tokens=self._effective_context_reserve_tokens(),
                 cost_estimator=self._cost_estimator,
             ),
             messages=(*prompt_messages, *self._conversation_history(history)),
@@ -769,7 +769,7 @@ class CodingSession:
         budget = build_context_budget(
             estimate,
             context_window=self._context_window(),
-            reserve_tokens=self.context_reserve_tokens,
+            reserve_tokens=self._effective_context_reserve_tokens(),
             observed_tokens=observed_tokens,
             observed_is_current=observed_is_current,
         )
@@ -1064,7 +1064,7 @@ class CodingSession:
                 provider_messages=provider_messages,
                 tools=self._effective_tools(),
                 context_window=self._context_window(),
-                reserve_tokens=self.context_reserve_tokens,
+                reserve_tokens=self._effective_context_reserve_tokens(),
                 observed_tokens=observed_tokens,
                 observed_is_current=observed_is_current,
                 observed_entry_id=observed_entry_id,
@@ -1145,6 +1145,16 @@ class CodingSession:
         return self.models.context_window(
             self.provider.name,
             self.model,
+            default_model=self.provider.default_model,
+        )
+
+    def _effective_context_reserve_tokens(self) -> int:
+        if self.models is None:
+            return self.context_reserve_tokens
+        return self.models.effective_context_reserve_tokens(
+            self.provider.name,
+            self.model,
+            reserve_tokens=self.context_reserve_tokens,
             default_model=self.provider.default_model,
         )
 

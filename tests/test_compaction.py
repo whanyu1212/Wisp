@@ -26,6 +26,7 @@ from wisp.coding.session import CodingSession
 from wisp.events import (
     CompactionCompleted,
     CompactionStarted,
+    ContextEstimated,
     ErrorEvent,
     KnownWispEventAdapter,
     MessageCompleted,
@@ -115,7 +116,11 @@ def _two_turn_replay() -> SessionReplay:
     return SessionReplay(rows=(*_turn("one"), *_turn("two")))
 
 
-def _model_registry(*, context_window: int = 100) -> ModelRegistry:
+def _model_registry(
+    *,
+    context_window: int = 100,
+    auto_compact_token_limit: int | None = None,
+) -> ModelRegistry:
     return ModelRegistry(
         ModelCatalog(
             schema_version=1,
@@ -127,6 +132,11 @@ def _model_registry(*, context_window: int = 100) -> ModelRegistry:
                     docs_url="https://example.com",
                     models=("model",),
                     context_windows={"model": context_window},
+                    auto_compact_token_limits=(
+                        {"model": auto_compact_token_limit}
+                        if auto_compact_token_limit is not None
+                        else {}
+                    ),
                 ),
             ),
         )
@@ -797,9 +807,9 @@ def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> No
             provider=provider,
             sessions=store,
             model="model",
-            models=_model_registry(),
+            models=_model_registry(auto_compact_token_limit=80),
             prompt_messages=(Message(role="system", content="system"),),
-            context_reserve_tokens=20,
+            context_reserve_tokens=10,
         )
         events = [event async for event in agent.run("question two", session=session)]
         record = next(
@@ -829,6 +839,8 @@ def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> No
     assert started.reason == "threshold"
     assert started.trigger_budget is not None
     assert started.trigger_budget.observed_tokens == 81
+    assert started.trigger_budget.context_window == 100
+    assert started.trigger_budget.reserve_tokens == 20
     completed = next(event for event in events if isinstance(event, CompactionCompleted))
     assert completed.reason == "threshold"
     assert completed.outcome == "completed"
@@ -846,6 +858,43 @@ def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> No
         "question two",
         "answer two",
     ]
+
+
+def test_coding_session_does_not_auto_compact_at_provider_limit(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer two",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=10, total_tokens=80),
+                ),
+            ]
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(auto_compact_token_limit=80),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=10,
+        )
+        return [event async for event in agent.run("question two", session=session)]
+
+    events = anyio.run(run)
+
+    estimated = next(event for event in events if isinstance(event, ContextEstimated))
+    assert estimated.budget.reserve_tokens == 20
+    assert not any(isinstance(event, CompactionStarted) for event in events)
+    assert len(provider.calls) == 1
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
 
 
 def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Path) -> None:

@@ -71,6 +71,7 @@ def test_minimal_catalog_parses() -> None:
 
     assert catalog.providers[0].name == "acme"
     assert catalog.providers[0].context_windows == {}
+    assert catalog.providers[0].auto_compact_token_limits == {}
     assert catalog.providers[0].model_aliases == {}
     assert catalog.providers[0].model_lifecycle == {}
     assert catalog.providers[0].effort_levels == {}
@@ -138,6 +139,34 @@ def test_context_window_must_be_positive() -> None:
                 "docs_url": "https://example.com/docs",
                 "models": ["acme-1"],
                 "context_windows": {"acme-1": 0},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("context_windows", "limits", "message"),
+    [
+        ({"acme-1": 1000}, {"acme-2": 800}, "unknown model"),
+        ({}, {"acme-1": 800}, "requires a context window"),
+        ({"acme-1": 1000}, {"acme-1": 1001}, "must not exceed context window"),
+        ({"acme-1": 1000}, {"acme-1": 0}, "must be positive"),
+    ],
+)
+def test_auto_compact_token_limit_is_validated(
+    context_windows: dict[str, int],
+    limits: dict[str, int],
+    message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ModelCatalogProviderEntry.model_validate(
+            {
+                "name": "acme",
+                "display_name": "Acme",
+                "default_model": "acme-1",
+                "docs_url": "https://example.com/docs",
+                "models": ["acme-1"],
+                "context_windows": context_windows,
+                "auto_compact_token_limits": limits,
             }
         )
 
@@ -354,6 +383,46 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
     assert providers["openai"].model_aliases == {"gpt-5.6": "gpt-5.6-sol"}
     assert providers["openai-codex"].model_aliases == {"gpt-5.6": "gpt-5.6-sol"}
     assert providers["google"].model_aliases == {"gemini-flash-latest": "gemini-3.5-flash"}
+    assert providers["openai"].context_windows["gpt-5.6-sol"] == 1_050_000
+    assert set(providers["openai"].auto_compact_token_limits) == set()
+    assert set(providers["openai-codex"].context_windows.values()) == {272_000}
+    assert providers["openai-codex"].auto_compact_token_limits == {
+        model: 244_800 for model in providers["openai-codex"].models
+    }
+
+
+def test_builtin_openai_surfaces_keep_distinct_context_and_compaction_policy() -> None:
+    registry = ModelRegistry(builtin_catalog())
+
+    assert registry.context_window("openai", "gpt-5.6-sol") == 1_050_000
+    assert registry.context_window("openai-codex", "gpt-5.6-sol") == 272_000
+    assert registry.context_window("openai-codex", "gpt-5.6") == 272_000
+    assert registry.auto_compact_token_limit("openai", "gpt-5.6-sol") is None
+    assert registry.auto_compact_token_limit("openai-codex", "gpt-5.6") == 244_800
+    assert (
+        registry.effective_context_reserve_tokens(
+            "openai-codex",
+            "gpt-5.6-sol",
+            reserve_tokens=16_384,
+        )
+        == 27_200
+    )
+    assert (
+        registry.effective_context_reserve_tokens(
+            "openai-codex",
+            "gpt-5.6-sol",
+            reserve_tokens=32_000,
+        )
+        == 32_000
+    )
+    assert (
+        registry.effective_context_reserve_tokens(
+            "openai",
+            "gpt-5.6-sol",
+            reserve_tokens=16_384,
+        )
+        == 16_384
+    )
 
 
 def test_builtin_catalog_defaults_match_provider_implementations() -> None:

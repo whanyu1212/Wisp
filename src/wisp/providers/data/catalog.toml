@@ -145,7 +145,9 @@ display_name = "OpenAI (Codex subscription)"
 default_model = "gpt-5.6-sol"
 docs_url = "https://developers.openai.com/codex/models"
 # Current Codex CLI subscription models verified against the Codex model guide
-# on 2026-07-18. The access-controlled gpt-5.3-codex-spark preview is excluded.
+# on 2026-07-18. Context metadata was verified against the Codex backend model
+# catalog and openai/codex models-manager metadata on 2026-08-06. The
+# access-controlled gpt-5.3-codex-spark preview is excluded.
 models = [
     "gpt-5.6-sol",
     "gpt-5.6-terra",
@@ -158,13 +160,26 @@ models = [
 [providers.model_aliases]
 "gpt-5.6" = "gpt-5.6-sol"
 
+# Codex subscription limits are provider-surface metadata and intentionally
+# differ from the direct OpenAI Responses API for several shared model ids.
 [providers.context_windows]
-"gpt-5.6-sol" = 1050000
-"gpt-5.6-terra" = 1050000
-"gpt-5.6-luna" = 1050000
+"gpt-5.6-sol" = 272000
+"gpt-5.6-terra" = 272000
+"gpt-5.6-luna" = 272000
 "gpt-5.5" = 272000
 "gpt-5.4" = 272000
-"gpt-5.4-mini" = 400000
+"gpt-5.4-mini" = 272000
+
+# Codex derives automatic compaction at 90% of its nominal context window.
+# Wisp treats these as upper bounds: a larger user reserve still triggers
+# compaction earlier, while a smaller reserve cannot weaken this safeguard.
+[providers.auto_compact_token_limits]
+"gpt-5.6-sol" = 244800
+"gpt-5.6-terra" = 244800
+"gpt-5.6-luna" = 244800
+"gpt-5.5" = 244800
+"gpt-5.4" = 244800
+"gpt-5.4-mini" = 244800
 
 [providers.model_lifecycle]
 "gpt-5.6-sol" = "stable"
