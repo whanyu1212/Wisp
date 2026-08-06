@@ -359,9 +359,8 @@ def test_tui_shell_first_ctrl_c_only_arms_then_second_quits_pending_approval() -
     from wisp.tui.state import _InputMode, _QuitPressed
 
     async def run() -> None:
-        clock = [10.0]
         controller = ScriptedController()
-        shell = TuiShell(controller, clock=lambda: clock[0])
+        shell = TuiShell(controller)
         shell.state.current_command_id = "prompt-1"
         shell.state.status = TuiStatus.waiting_for_approval
         shell.state.pending_approval = ToolApprovalRequested(
@@ -371,11 +370,14 @@ def test_tui_shell_first_ctrl_c_only_arms_then_second_quits_pending_approval() -
             safety="mutating",
         )
 
-        assert not await shell._handle_quit_pressed(_QuitPressed(mode=_InputMode.approval))
+        assert not await shell._handle_quit_pressed(
+            _QuitPressed(mode=_InputMode.approval, pressed_at=10.0)
+        )
         assert controller.approvals == []
 
-        clock[0] = 11.0
-        assert not await shell._handle_quit_pressed(_QuitPressed(mode=_InputMode.approval))
+        assert not await shell._handle_quit_pressed(
+            _QuitPressed(mode=_InputMode.approval, pressed_at=11.0)
+        )
         assert controller.approvals == [("call-1", False, "Denied from TUI: quit requested")]
         assert shell.state.exit_requested
 

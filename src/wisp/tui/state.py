@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from time import monotonic
 from typing import Literal
 
 from wisp.agent.mode import AgentMode
@@ -202,9 +203,10 @@ class _InputCancelled:
 
 @dataclass(frozen=True)
 class _QuitPressed:
-    """One Ctrl+C press in a frontend that supports double-press quit."""
+    """One timestamped Ctrl+C gesture from a double-press frontend."""
 
     mode: _InputMode
+    pressed_at: float
 
 
 class TuiCancelRequested(Exception):
@@ -213,6 +215,10 @@ class TuiCancelRequested(Exception):
 
 class TuiQuitRequested(Exception):
     """Prompt-reader signal for one Ctrl+C quit gesture."""
+
+    def __init__(self, *, pressed_at: float | None = None) -> None:
+        super().__init__()
+        self.pressed_at = monotonic() if pressed_at is None else pressed_at
 
 
 @dataclass(frozen=True)

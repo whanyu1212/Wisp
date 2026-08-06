@@ -357,6 +357,26 @@ def test_live_fullscreen_tui_ctrl_c_requests_quit_and_clears_draft() -> None:
     anyio.run(run)
 
 
+def test_live_fullscreen_tui_queues_rapid_second_ctrl_c_between_reads() -> None:
+    from wisp.tui.state import TuiQuitRequested
+
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        first_read = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+
+        renderer._quit_input()
+        renderer._quit_input()
+
+        with pytest.raises(TuiQuitRequested) as first:
+            await first_read
+        with pytest.raises(TuiQuitRequested) as second:
+            await renderer.read_prompt("wisp> ")
+        assert second.value.pressed_at >= first.value.pressed_at
+
+    anyio.run(run)
+
+
 def test_live_fullscreen_tui_ctrl_d_deletes_right_or_closes_when_empty() -> None:
     async def run() -> None:
         renderer = LiveFullscreenTui(run_application=False)

@@ -53,7 +53,7 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         self._visible_input_mode = "idle"
         self._buffer_input_mode = "idle"
         self._submitted_input_mode: str | None = None
-        self._queued_submissions: deque[tuple[str, str]] = deque()
+        self._queued_inputs: deque[tuple[str | BaseException, str]] = deque()
         self._last_buffer_text = ""
         self._buffer.on_text_changed += self._handle_buffer_text_changed
         self._key_bindings = self._build_key_bindings()
@@ -71,10 +71,12 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         self._refresh()
         if self.run_application:
             self._ensure_application_started()
-        if self._queued_submissions:
-            text, mode = self._queued_submissions.popleft()
+        if self._queued_inputs:
+            value, mode = self._queued_inputs.popleft()
             self._submitted_input_mode = mode
-            return text
+            if isinstance(value, BaseException):
+                raise value
+            return value
         loop = asyncio.get_running_loop()
         self._input_future = loop.create_future()
         return await self._input_future
@@ -252,7 +254,7 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
 
         mode = self._buffer_input_mode
         if self._input_future is None or self._input_future.done():
-            self._queued_submissions.append((text, mode))
+            self._queued_inputs.append((text, mode))
             return
         self._submitted_input_mode = mode
         self._input_future.set_result(text)
@@ -262,7 +264,7 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         mode = self._buffer_input_mode
         self._clear_buffer()
         if self._input_future is None or self._input_future.done():
-            self._queued_submissions.append((text, mode))
+            self._queued_inputs.append((text, mode))
             return
         self._submitted_input_mode = mode
         self._input_future.set_result(text)
@@ -281,11 +283,14 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         self._input_future.set_exception(LiveFullscreenInputInterrupted())
 
     def _quit_input(self) -> None:
-        if self._input_future is None or self._input_future.done():
-            return
-        self._submitted_input_mode = self._buffer_input_mode
+        mode = self._buffer_input_mode
+        signal = TuiQuitRequested()
         self._clear_buffer()
-        self._input_future.set_exception(TuiQuitRequested())
+        if self._input_future is None or self._input_future.done():
+            self._queued_inputs.append((signal, mode))
+            return
+        self._submitted_input_mode = mode
+        self._input_future.set_exception(signal)
 
     def _delete_right_or_close(self) -> None:
         if self._buffer.text:

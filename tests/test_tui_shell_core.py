@@ -3191,20 +3191,48 @@ def test_default_prompt_reader_hides_prompts_for_non_tty(monkeypatch: object) ->
     assert prompts == [""]
 
 
+def test_tui_shell_timestamps_ctrl_c_before_signal_queueing() -> None:
+    from wisp.tui.state import TuiQuitRequested, _InputClosed, _QuitPressed
+
+    async def run() -> None:
+        reads = 0
+
+        async def read(_prompt: str) -> str:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                raise TuiQuitRequested(pressed_at=42.5)
+            raise EOFError
+
+        shell = TuiShell(ScriptedController(), prompt_reader=read)
+        send, receive = anyio.create_memory_object_stream(2)
+        await shell._read_inputs(send)
+
+        pressed = await receive.receive()
+        closed = await receive.receive()
+        assert isinstance(pressed, _QuitPressed)
+        assert pressed.pressed_at == 42.5
+        assert isinstance(closed, _InputClosed)
+
+    anyio.run(run)
+
+
 def test_tui_shell_double_ctrl_c_quits_within_window() -> None:
     from wisp.tui.state import _InputMode, _QuitPressed
 
     async def run() -> None:
-        now = 10.0
         controller = ScriptedController()
-        shell = TuiShell(controller, console=_console()[0], clock=lambda: now)
+        shell = TuiShell(controller, console=_console()[0])
 
-        assert not await shell._handle_quit_pressed(_QuitPressed(mode=_InputMode.idle))
+        assert not await shell._handle_quit_pressed(
+            _QuitPressed(mode=_InputMode.idle, pressed_at=10.0)
+        )
         assert controller.shutdown_count == 0
         assert shell._quit_armed_at == 10.0
 
-        now = 11.0
-        assert not await shell._handle_quit_pressed(_QuitPressed(mode=_InputMode.idle))
+        assert not await shell._handle_quit_pressed(
+            _QuitPressed(mode=_InputMode.idle, pressed_at=11.0)
+        )
         assert controller.shutdown_count == 1
         assert shell._quit_armed_at is None
 
@@ -3215,13 +3243,11 @@ def test_tui_shell_ctrl_c_timeout_rearms_and_input_disarms() -> None:
     from wisp.tui.state import _InputLine, _InputMode, _QuitPressed
 
     async def run() -> None:
-        clock = [10.0]
         controller = ScriptedController()
-        shell = TuiShell(controller, console=_console()[0], clock=lambda: clock[0])
+        shell = TuiShell(controller, console=_console()[0])
 
-        await shell._handle_quit_pressed(_QuitPressed(mode=_InputMode.idle))
-        clock[0] = 12.0
-        await shell._handle_quit_pressed(_QuitPressed(mode=_InputMode.idle))
+        await shell._handle_quit_pressed(_QuitPressed(mode=_InputMode.idle, pressed_at=10.0))
+        await shell._handle_quit_pressed(_QuitPressed(mode=_InputMode.idle, pressed_at=12.0))
         assert controller.shutdown_count == 0
         assert shell._quit_armed_at == 12.0
 

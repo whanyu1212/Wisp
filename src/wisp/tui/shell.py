@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -239,7 +238,6 @@ class TuiShell:
         effort: str | None = None,
         auth_path: Path | None = None,
         settings_home_dir: Path | None = None,
-        clock: Callable[[], float] = time.monotonic,
         quit_press_window: float = 1.5,
     ) -> None:
         self.controller = controller
@@ -248,7 +246,6 @@ class TuiShell:
         )
         self.prompt_reader = prompt_reader or _default_prompt_reader
         self.state = state or TuiInteractionState()
-        self._clock = clock
         self._quit_press_window = quit_press_window
         self._quit_armed_at: float | None = None
         self.view = TuiViewState(provider=provider, model=model)
@@ -375,8 +372,13 @@ class TuiShell:
                 except EOFError:
                     await send.send(_InputClosed(mode=self._submitted_input_mode(mode)))
                     return
-                except TuiQuitRequested:
-                    await send.send(_QuitPressed(mode=self._submitted_input_mode(mode)))
+                except TuiQuitRequested as exc:
+                    await send.send(
+                        _QuitPressed(
+                            mode=self._submitted_input_mode(mode),
+                            pressed_at=exc.pressed_at,
+                        )
+                    )
                     continue
                 except (TuiCancelRequested, LiveFullscreenInputInterrupted):
                     await send.send(_InputCancelled(mode=self._submitted_input_mode(mode)))
@@ -949,12 +951,11 @@ class TuiShell:
     async def _handle_quit_pressed(self, signal: _QuitPressed) -> bool:
         """Arm graceful quit, or execute it on a second timely Ctrl+C press."""
 
-        now = self._clock()
         armed_at = self._quit_armed_at
-        if armed_at is not None and now - armed_at <= self._quit_press_window:
+        if armed_at is not None and 0 <= signal.pressed_at - armed_at <= self._quit_press_window:
             self._disarm_quit()
             return await self._handle_quit()
-        self._quit_armed_at = now
+        self._quit_armed_at = signal.pressed_at
         self.renderer.notice("Press Ctrl+C again to quit.")
         return False
 
