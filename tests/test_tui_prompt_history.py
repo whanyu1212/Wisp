@@ -20,6 +20,8 @@ from wisp.tui.state import _InputLine, _InputMode
 from wisp.tui.textual_app import TextualTui, create_textual_tui
 from wisp.tui.widgets import PASTE_DISPLAY_THRESHOLD, PromptEditor, Transcript
 
+pytestmark = pytest.mark.tui
+
 
 def test_prompt_history_is_bounded_unique_mru_with_exact_text() -> None:
     history = PromptHistory(capacity=3)

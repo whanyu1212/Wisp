@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import anyio
+import pytest
 
 from wisp.events import ToolApprovalRequested
 from wisp.tui import TuiViewSnapshot
@@ -15,6 +16,8 @@ from wisp.tui.overlay import (
 )
 from wisp.tui.textual_app import create_textual_tui
 from wisp.tui.widgets import CommandPalette, DecisionPanel, PromptEditor
+
+pytestmark = pytest.mark.tui
 
 
 @dataclass

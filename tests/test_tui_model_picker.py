@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest import mock
 
 import anyio
+import pytest
 from textual import events
 from textual.app import App
 from textual.widgets import OptionList, Static
@@ -11,6 +12,8 @@ from wisp.providers.catalog import ModelCatalogProviderEntry, builtin_catalog
 from wisp.tui.textual_app import create_textual_tui
 from wisp.tui.widgets import ModelPicker
 from wisp.tui.widgets import PromptEditor as Input
+
+pytestmark = pytest.mark.tui
 
 
 def _entry(

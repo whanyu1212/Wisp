@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import anyio
+import pytest
 from textual.widget import Widget
 
 from wisp.tui.history import TUI_HISTORY_PAGE_LIMIT
@@ -15,6 +16,8 @@ from wisp.tui.textual_transcript import (
     TextualTranscriptController,
 )
 from wisp.tui.widgets import LineMessage, ToolCard, WorkingIndicator
+
+pytestmark = pytest.mark.tui
 
 
 @dataclass

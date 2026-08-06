@@ -26,6 +26,8 @@ from wisp.tui.history import (
     history_from_rpc_messages,
 )
 
+pytestmark = pytest.mark.tui
+
 
 def test_renderers_clear_session_for_new_session() -> None:
     console, output = _console()

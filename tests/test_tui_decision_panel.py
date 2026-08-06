@@ -27,6 +27,8 @@ from wisp.tui.widgets import (
     PromptEditor as Input,
 )
 
+pytestmark = pytest.mark.tui
+
 
 def _approval(
     name: str,
