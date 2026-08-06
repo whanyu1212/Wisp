@@ -41,7 +41,7 @@ dev = [
 testpaths = ["tests"]
 markers = [
     "tui: headless Textual integration tests",
-    "process: tests that launch real subprocesses or exercise process trees",
+    "process: tests covering process-backed tools or process trees",
     "benchmark: deterministic performance and resource-bound scenarios",
     "slow: intentionally long-running tests outside the other categories",
 ]

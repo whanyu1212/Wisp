@@ -1475,6 +1475,7 @@ def test_rpc_controller_exposes_transport_events() -> None:
     anyio.run(run)
 
 
+@pytest.mark.process
 def test_jsonl_subprocess_rpc_transport_round_trips_events(tmp_path: Path) -> None:
     async def run() -> None:
         script = """
@@ -1519,6 +1520,7 @@ print(json.dumps(finished), flush=True)
     anyio.run(run)
 
 
+@pytest.mark.process
 def test_jsonl_subprocess_rpc_transport_does_not_block_on_stderr(tmp_path: Path) -> None:
     async def run() -> None:
         script = """
