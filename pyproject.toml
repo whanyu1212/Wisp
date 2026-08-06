@@ -1,5 +1,5 @@
 [project]
-name = "wisp"
+name = "wisp-ai"
 version = "0.1.0"
 description = "Python, Pi-inspired coding agent"
 authors = [
@@ -26,6 +26,9 @@ wisp = "wisp.cli:main"
 requires = ["uv_build>=0.9.8,<0.10.0"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+module-name = "wisp"
+
 [dependency-groups]
 dev = [
     "mypy>=2.1.0",
@@ -36,6 +39,12 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "tui: headless Textual integration tests",
+    "process: tests covering process-backed tools or process trees",
+    "benchmark: deterministic performance and resource-bound scenarios",
+    "slow: intentionally long-running tests outside the other categories",
+]
 
 [tool.ruff]
 line-length = 100

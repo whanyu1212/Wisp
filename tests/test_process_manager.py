@@ -21,6 +21,8 @@ from wisp.tools.process_manager import (
 )
 from wisp.tools.result import ToolError
 
+pytestmark = pytest.mark.process
+
 
 def _python_command(source: str) -> str:
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"

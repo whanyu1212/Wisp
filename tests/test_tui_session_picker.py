@@ -22,6 +22,8 @@ from wisp.tui.widgets import (
     Transcript,
 )
 
+pytestmark = pytest.mark.tui
+
 
 def _session(
     session_id: str,

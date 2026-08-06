@@ -34,6 +34,8 @@ from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.truncation import truncate_text_tail
 
+pytestmark = pytest.mark.process
+
 
 def run_tool(tool: object, arguments: dict[str, object], context: ToolContext) -> ToolResult:
     async def run() -> ToolResult:

@@ -20,6 +20,8 @@ from wisp.tui.context_widget import ContextStatusOverlay, context_status_present
 from wisp.tui.textual_app import create_textual_tui
 from wisp.tui.widgets import DecisionPanel, PromptEditor, Transcript
 
+pytestmark = pytest.mark.tui
+
 _DEFAULT_POLICY = CompactionPolicyStatus(
     threshold_eligible=True,
     threshold_ineligible_reason=None,

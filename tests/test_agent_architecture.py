@@ -4,6 +4,8 @@ import ast
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,15 @@ _CODING_FORBIDDEN_IMPORTS = (
     "wisp.tui",
 )
 _FRONTEND_MODULES = (Path("cli/__init__.py"), Path("cli/rpc.py"))
+_FRESH_IMPORT_MODULES = (
+    "wisp.agent.harness",
+    "wisp.coding.compaction",
+    "wisp.coding.session",
+    "wisp.coding.tool_execution",
+    "wisp.providers.base",
+    "wisp.runtime.api",
+)
+_FRESH_IMPORT_TIMEOUT_SECONDS = 30
 _RPC_COORDINATOR_FORBIDDEN_IMPORTS = (
     "os",
     "stat",
@@ -200,31 +211,38 @@ def test_coding_package_exports_session_coordinator() -> None:
     assert ExportedCodingSession is CodingSession
 
 
-@pytest.mark.parametrize(
-    "module",
-    [
-        "wisp.agent.harness",
-        "wisp.coding.compaction",
-        "wisp.coding.session",
-        "wisp.coding.tool_execution",
-        "wisp.providers.base",
-        "wisp.runtime.api",
-    ],
-)
-def test_layer_modules_import_cleanly_in_fresh_process(module: str) -> None:
+def _fresh_import_failure(module: str, *, root: Path, pythonpath: str) -> str | None:
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", f"import {module}"],
+            cwd=root,
+            env={**os.environ, "PYTHONPATH": pythonpath},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_FRESH_IMPORT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return f"{module}: timed out after {_FRESH_IMPORT_TIMEOUT_SECONDS} seconds"
+    if result.returncode == 0:
+        return None
+    return f"{module} (exit {result.returncode}):\n{result.stderr}"
+
+
+@pytest.mark.slow
+def test_layer_modules_import_cleanly_in_fresh_processes() -> None:
     root = Path(__file__).parents[1]
     existing_pythonpath = os.environ.get("PYTHONPATH")
     pythonpath = str(root / "src")
     if existing_pythonpath:
         pythonpath = f"{pythonpath}{os.pathsep}{existing_pythonpath}"
 
-    result = subprocess.run(
-        [sys.executable, "-c", f"import {module}"],
-        cwd=root,
-        env={**os.environ, "PYTHONPATH": pythonpath},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    check_import = partial(_fresh_import_failure, root=root, pythonpath=pythonpath)
+    with ThreadPoolExecutor(max_workers=len(_FRESH_IMPORT_MODULES)) as executor:
+        failures = [
+            failure
+            for failure in executor.map(check_import, _FRESH_IMPORT_MODULES)
+            if failure is not None
+        ]
 
-    assert result.returncode == 0, result.stderr
+    assert not failures, "\n\n".join(failures)

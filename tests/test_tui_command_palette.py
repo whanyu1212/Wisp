@@ -12,6 +12,8 @@ from wisp.tui.commands import TuiCommandCatalog
 from wisp.tui.textual_app import TextualTui
 from wisp.tui.widgets import CommandPalette, PromptEditor, SlashSuggest, Transcript
 
+pytestmark = pytest.mark.tui
+
 
 def _descriptor(
     name: str,

@@ -712,6 +712,7 @@ def test_in_process_sdk_reopens_admission_after_queued_shutdown_is_cancelled(
     anyio.run(scenario)
 
 
+@pytest.mark.slow
 def test_in_process_sdk_reopens_admission_after_shutdown_queue_rejection(
     tmp_path: Path,
 ) -> None:
@@ -856,6 +857,7 @@ def test_in_process_sdk_allows_one_event_consumer_and_idempotent_cleanup(
     anyio.run(scenario)
 
 
+@pytest.mark.slow
 def test_in_process_sdk_shutdown_cancels_prompt_final_state_refresh(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -963,6 +965,7 @@ def test_in_process_sdk_reports_prompt_final_state_refresh_errors(
     anyio.run(scenario)
 
 
+@pytest.mark.slow
 def test_in_process_sdk_shutdown_cancels_compact_final_state_refresh(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -1324,6 +1327,7 @@ def test_in_process_sdk_shutdown_cancels_session_name_load(
     anyio.run(scenario)
 
 
+@pytest.mark.slow
 def test_in_process_sdk_shutdown_cancels_prompt_start_snapshot(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

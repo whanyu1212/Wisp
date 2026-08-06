@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 from benchmarks.process_output import BenchmarkConfig, run_benchmark
 from wisp.tools.process_manager import DEFAULT_MAX_RETAINED_BYTES, DEFAULT_MAX_RETAINED_LINES
+
+pytestmark = pytest.mark.benchmark
 
 
 def test_process_output_benchmark_reports_production_tail_accounting() -> None:
