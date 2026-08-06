@@ -124,6 +124,40 @@ def plan_manual_compaction(replay: SessionReplay) -> ManualCompactionPlan:
     )
 
 
+def plan_preflight_compaction(replay: SessionReplay) -> ManualCompactionPlan:
+    """Replace completed history while retaining the active incomplete user turn."""
+
+    rows = replay.rows
+    user_turn_starts = tuple(
+        index
+        for index, row in enumerate(rows)
+        if row.message.role == "user" and not _is_compaction_summary(row)
+    )
+    if not user_turn_starts:
+        raise NothingToCompactError("No active user turn is available for preflight compaction")
+
+    active_turn_start = user_turn_starts[-1]
+    complete_turn_starts = _complete_user_turn_starts(rows)
+    if active_turn_start in complete_turn_starts:
+        raise NothingToCompactError("The active user turn is already complete")
+    if not complete_turn_starts:
+        raise NothingToCompactError("No completed turn is available before the active user turn")
+
+    # Preserve the established latest-complete-turn boundary when possible. A
+    # sole completed turn is the exceptional preflight case: summarize it and
+    # retain only the active prompt/tool cycle.
+    boundary = complete_turn_starts[-1] if len(complete_turn_starts) >= 2 else active_turn_start
+    replaced_rows = rows[:boundary]
+    retained_rows = rows[boundary:]
+    _validate_tool_boundary(rows, boundary)
+    return ManualCompactionPlan(
+        expected_context_entry_ids=replay.context_entry_ids,
+        replaced_entry_ids=tuple(row.entry_id for row in replaced_rows),
+        rows_to_summarize=replaced_rows,
+        retained_rows=retained_rows,
+    )
+
+
 def serialize_compaction_transcript(
     rows: Sequence[SessionContextRow],
 ) -> str:
@@ -328,6 +362,7 @@ __all__ = [
     "NothingToCompactError",
     "build_compaction_checkpoint_prompt",
     "plan_manual_compaction",
+    "plan_preflight_compaction",
     "serialize_compaction_transcript",
     "should_auto_compact",
     "summarize_manual_compaction",

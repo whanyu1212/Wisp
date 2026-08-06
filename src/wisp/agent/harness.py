@@ -299,12 +299,14 @@ class AgentHarness:
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
         defer_context_overflow_errors: bool = False,
+        pause_after_tool_round: bool = False,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
         """Continue from the current transcript without adding a user message."""
         return self._run(
             turn_offset=turn_offset,
             tool_iteration_offset=tool_iteration_offset,
             defer_context_overflow_errors=defer_context_overflow_errors,
+            pause_after_tool_round=pause_after_tool_round,
         )
 
     async def _run(
@@ -314,6 +316,7 @@ class AgentHarness:
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
         defer_context_overflow_errors: bool = False,
+        pause_after_tool_round: bool = False,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
         self.repair_interrupted_tool_calls()
         self._running = True
@@ -329,6 +332,7 @@ class AgentHarness:
         try:
             while True:
                 run_finished = False
+                segment_had_tool_calls = False
                 segment_outcome: str | None = None
                 stream_ended = False
                 restart_for_steering = False
@@ -396,6 +400,7 @@ class AgentHarness:
                             self._messages.append(message_from_completion_event(event))
                             run_finished = not event.tool_calls
                             if event.tool_calls:
+                                segment_had_tool_calls = True
                                 next_tool_iteration_offset += 1
                         elif isinstance(event, ToolExecutionEnded):
                             # ToolResultReady copies this terminal payload; retain it now so
@@ -406,6 +411,13 @@ class AgentHarness:
                             segment_outcome = event.outcome
                             run_finished = run_finished or event.outcome != "completed"
                         yield event
+                        if (
+                            pause_after_tool_round
+                            and isinstance(event, TurnCompleted)
+                            and event.outcome == "completed"
+                            and segment_had_tool_calls
+                        ):
+                            return
                         if (
                             isinstance(event, TurnCompleted)
                             and event.outcome == "completed"

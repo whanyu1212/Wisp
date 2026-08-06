@@ -30,6 +30,7 @@ from wisp.coding.compaction import (
     ManualCompactionPlan,
     NothingToCompactError,
     plan_manual_compaction,
+    plan_preflight_compaction,
     should_auto_compact,
     summarize_manual_compaction,
 )
@@ -483,13 +484,15 @@ class CodingSession:
         # A preflight compaction can only update a request that is actually
         # resuming persisted history. It is reserved for cataloged provider
         # limits; the existing generic reserve policy remains post-response.
-        if history and self._has_provider_auto_compaction_limit():
+        provider_auto_compaction = self._has_provider_auto_compaction_limit()
+        if history and provider_auto_compaction:
             prompt_compacted = False
             async for compaction_event in self._maybe_auto_compact(
                 session,
                 harness,
                 status=auto_compaction_status,
                 operation_id=operation_id,
+                preflight=True,
             ):
                 if (
                     isinstance(compaction_event, CompactionCompleted)
@@ -512,10 +515,12 @@ class CodingSession:
         tool_presentation_statuses: dict[str, ToolPresentationStatus] = {}
         harness_events = harness.continue_(
             defer_context_overflow_errors=True,
+            pause_after_tool_round=provider_auto_compaction,
         )
 
         while True:
             saw_loop_error = False
+            attempt_had_tool_round = False
             overflow_error: ContextOverflowError | None = None
             overflow_budget: ContextBudget | None = None
             attempt_had_delta = False
@@ -535,6 +540,7 @@ class CodingSession:
                         event.tool_calls or event.finish_reason == "tool_calls"
                     ):
                         had_tool_round = True
+                        attempt_had_tool_round = True
                         tool_iterations += 1
                     elif isinstance(event, ToolExecutionEnded) and self._tool_is_unsafe(event.name):
                         had_unsafe_tool_round = True
@@ -609,6 +615,35 @@ class CodingSession:
                         )
 
             if overflow_error is None:
+                if attempt_had_tool_round and provider_auto_compaction:
+                    tool_round_compacted = False
+                    async for compaction_event in self._maybe_auto_compact(
+                        session,
+                        harness,
+                        status=auto_compaction_status,
+                        operation_id=operation_id,
+                        preflight=True,
+                    ):
+                        if (
+                            isinstance(compaction_event, CompactionCompleted)
+                            and compaction_event.outcome == "completed"
+                        ):
+                            tool_round_compacted = True
+                        yield compaction_event
+                    if tool_round_compacted:
+                        active_history = await anyio.to_thread.run_sync(
+                            session.read_context_messages
+                        )
+                        harness.replace_messages(
+                            (*prompt_messages, *self._conversation_history(active_history))
+                        )
+                    harness_events = harness.continue_(
+                        turn_offset=turns,
+                        tool_iteration_offset=tool_iterations,
+                        defer_context_overflow_errors=True,
+                        pause_after_tool_round=True,
+                    )
+                    continue
                 break
 
             can_retry_overflow = (
@@ -721,6 +756,7 @@ class CodingSession:
                 turn_offset=turns,
                 tool_iteration_offset=tool_iterations,
                 defer_context_overflow_errors=True,
+                pause_after_tool_round=provider_auto_compaction,
             )
 
         self._accepting_queued_messages = False
@@ -778,6 +814,7 @@ class CodingSession:
         *,
         status: _AutoCompactionStatus,
         operation_id: str | None = None,
+        preflight: bool = False,
     ) -> AsyncIterator[WispEvent]:
         provider_messages = self._normalize_provider_messages(harness.messages)
         tools = tuple(harness.config.tools)
@@ -806,7 +843,9 @@ class CodingSession:
         replay: SessionReplay | None = None
         try:
             replay = await self._prepare_compaction_replay(session)
-            plan = plan_manual_compaction(replay)
+            plan = (
+                plan_preflight_compaction(replay) if preflight else plan_manual_compaction(replay)
+            )
         except NothingToCompactError:
             return
         except Exception as exc:
