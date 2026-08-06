@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import suppress
+from io import StringIO
+from typing import Any
 
 import pytest
 from pytest import MonkeyPatch
 from rich.cells import cell_len
+from rich.console import Console
 from textual import events
 from textual.content import Content
 from textual.widget import Widget
@@ -54,14 +57,49 @@ from wisp.tui.widgets import (
 pytestmark = pytest.mark.tui
 
 
+def _tool_card_contents(card: ToolCard) -> tuple[Content, ...]:
+    """Return visible styled title/detail content from a native Collapsible card."""
+
+    contents = [card._title.render()]
+    if not card.collapsed and card._detail_widget.display:
+        contents.append(card._detail_widget.render())
+    return tuple(contents)
+
+
+def _tool_card_text(card: ToolCard) -> str:
+    """Return visible ToolCard children as plain text for transcript assertions."""
+
+    lines = [content.plain for content in _tool_card_contents(card)]
+    if not card.collapsed and card._pretty_widget.display:
+        output = StringIO()
+        Console(file=output, force_terminal=False, color_system=None, width=80).print(
+            card._pretty_widget.render()
+        )
+        lines.append(output.getvalue().rstrip("\n"))
+    if not card.collapsed and card._truncation_widget.display:
+        lines.append(card._truncation_widget.render().plain)
+    return "\n".join(lines)
+
+
+async def _expand_tool_card(pilot: Any, card: ToolCard) -> None:
+    """Focus a card's native title and open it through its Enter binding."""
+
+    card.focus()
+    await pilot.pause()
+    await pilot.press("enter")
+    await pilot.pause()
+
+
 def _transcript_texts(app: TextualTui) -> list[str]:
     """Plain text of every mounted transcript message (line + streamed)."""
 
     transcript = app.query_one("#transcript", Transcript)
     texts: list[str] = []
     for child in transcript.children:
-        if isinstance(child, LineMessage | ToolCard):
-            texts.append(child.render().plain)  # Textual Content
+        if isinstance(child, LineMessage):
+            texts.append(child.render().plain)
+        elif isinstance(child, ToolCard):
+            texts.append(_tool_card_text(child))
         elif isinstance(child, StreamMessage):
             texts.append(child._markdown.source)
     return texts
@@ -101,8 +139,11 @@ def _transcript_styles(app: TextualTui) -> str:
     transcript = app.query_one("#transcript", Transcript)
     styles: list[str] = []
     for child in transcript.children:
-        if isinstance(child, LineMessage | ToolCard):
+        if isinstance(child, LineMessage):
             styles.extend(str(span.style) for span in child.render().spans)
+        elif isinstance(child, ToolCard):
+            for content in _tool_card_contents(child):
+                styles.extend(str(span.style) for span in content.spans)
     return "\n".join(styles)
 
 
@@ -1007,10 +1048,11 @@ def test_textual_tui_renderer_renders_historical_edit_with_structured_diff() -> 
                 )
             )
             await pilot.pause()
+            await _expand_tool_card(pilot, _first_tool_card(app_instance))
             return "\n".join(_transcript_texts(app_instance))
 
     rendered = anyio.run(scenario)
-    assert "M src/restored.py  +1 -1" in rendered
+    assert "M src/restored.py +1 -1" in rendered
     assert "- │ old" in rendered
     assert "+ │ new" in rendered
     assert "Applied 1 edit" not in rendered
@@ -1372,10 +1414,11 @@ def test_textual_renderer_dispatches_events_by_type() -> None:
     )
 
     assert "assistant: hello there" in rendered
-    # One card for c1: done glyph + name + the bounded multiline output preview.
+    # One card for c1: done glyph + name + one-line outer summary. The second
+    # output line remains in the native collapsible detail, not the scan layer.
     assert "✓ bash" in rendered
     assert "file-a" in rendered
-    assert "file-b" in rendered
+    assert "file-b" not in rendered
     # The denied card carries the reason. Issue #76: denied now uses the "⊘"
     # glyph (shared with cancelled — both mean "stopped by a decision, not a
     # failure"), distinct from a genuine tool error's "✗".
@@ -1419,11 +1462,11 @@ def test_textual_renderer_collapses_call_and_result_into_one_card() -> None:
             await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
             cards = [c for c in transcript.children if isinstance(c, ToolCard)]
-            return [c.render().plain for c in cards], len(cards)
+            return [_tool_card_text(c) for c in cards], len(cards)
 
     texts, count = anyio.run(scenario)
     assert count == 1  # one card carried the whole lifecycle
-    assert texts[0].startswith("✗ grep")
+    assert texts[0].lstrip().startswith("✗ grep")
     assert "match" in texts[0]
 
 
@@ -1459,7 +1502,7 @@ def test_textual_tool_card_shows_true_elapsed_from_event_timestamps() -> None:
                 for c in app_instance.query_one("#transcript", Transcript).children
                 if isinstance(c, ToolCard)
             )
-            return card.render().plain
+            return _tool_card_text(card)
 
     text = anyio.run(scenario)
     assert text.splitlines()[0].endswith("· 2.5s"), text
@@ -1491,9 +1534,9 @@ def test_textual_tool_card_bounds_large_multiline_output() -> None:
     )
 
     assert "line-0" in rendered
-    assert "line-7" in rendered
-    assert "line-8" not in rendered
-    assert "... 4 more lines" in rendered
+    assert "line-7" not in rendered
+    assert "... 4 more lines" not in rendered
+    assert "▶" in rendered
 
 
 def test_textual_tool_card_error_shows_tail_and_exit_code() -> None:
@@ -1595,13 +1638,14 @@ def test_textual_tool_card_edit_renders_colored_diff() -> None:
                 )
             )
             await pilot.pause()
+            await _expand_tool_card(pilot, _first_tool_card(app_instance))
             text = "\n".join(_transcript_texts(app_instance))
             styles = _transcript_styles(app_instance)
             return text, styles
 
     text, styles = anyio.run(scenario)
     assert "✓ edit" in text
-    assert "M src/foo.py  +1 -1" in text
+    assert "M src/foo.py +1 -1" in text
     assert "- │ return 1" in text  # deletion gutter + literal source
     assert "+ │ return 2" in text  # addition gutter + literal source
     # Diff spans carry the theme *variables* ($success/$error), not baked hex —
@@ -1645,8 +1689,11 @@ def test_textual_tool_card_edit_diff_rows_stay_unambiguous_at_supported_widths(
             )
             await pilot.pause()
             card = _first_tool_card(app_instance)
-            rows = tuple(cell_len(line) for line in card.render().plain.splitlines() if "│" in line)
-            return card.render().plain, rows, card.content_size.width, card.region.width
+            await _expand_tool_card(pilot, card)
+            rows = tuple(
+                cell_len(line) for line in _tool_card_text(card).splitlines() if "│" in line
+            )
+            return _tool_card_text(card), rows, card.content_size.width, card.region.width
 
     text, row_widths, content_width, card_width = anyio.run(scenario)
     assert "✓ edit" in text  # rendered without error at every supported width
@@ -1680,7 +1727,9 @@ def test_textual_tool_card_narrow_diff_keeps_tail_changed_tokens_visible() -> No
                 ToolResultReady(call_id="c1", name="edit", output="Applied", is_error=False)
             )
             await pilot.pause()
-            return _first_tool_card(app_instance).render().plain
+            card = _first_tool_card(app_instance)
+            await _expand_tool_card(pilot, card)
+            return _tool_card_text(card)
 
     text = anyio.run(scenario)
     assert "OLD" in text
@@ -1713,7 +1762,9 @@ def test_textual_tool_card_narrow_multiline_diff_keeps_tail_tokens_visible() -> 
                 ToolResultReady(call_id="c1", name="edit", output="Applied", is_error=False)
             )
             await pilot.pause()
-            return _first_tool_card(app_instance).render().plain
+            card = _first_tool_card(app_instance)
+            await _expand_tool_card(pilot, card)
+            return _tool_card_text(card)
 
     text = anyio.run(scenario)
     assert "OLD-0" in text
@@ -1748,7 +1799,9 @@ def test_textual_tool_card_narrow_unequal_diff_keeps_tail_tokens_visible() -> No
                 ToolResultReady(call_id="c1", name="edit", output="Applied", is_error=False)
             )
             await pilot.pause()
-            return _first_tool_card(app_instance).render().plain
+            card = _first_tool_card(app_instance)
+            await _expand_tool_card(pilot, card)
+            return _tool_card_text(card)
 
     text = anyio.run(scenario)
     assert "OLD" in text
@@ -1784,7 +1837,9 @@ def test_textual_tool_card_narrow_unequal_diff_keeps_prefix_tokens_visible() -> 
                 ToolResultReady(call_id="c1", name="edit", output="Applied", is_error=False)
             )
             await pilot.pause()
-            return _first_tool_card(app_instance).render().plain
+            card = _first_tool_card(app_instance)
+            await _expand_tool_card(pilot, card)
+            return _tool_card_text(card)
 
     text = anyio.run(scenario)
     assert "OLD-" in text
@@ -1823,7 +1878,7 @@ def test_textual_tool_card_narrow_write_keeps_source_before_newline_note() -> No
             await pilot.pause()
             await pilot.press("enter")
             await pilot.pause()
-            return card.render().plain
+            return _tool_card_text(card)
 
     text = anyio.run(scenario)
     assert "OLD" in text
@@ -1855,11 +1910,9 @@ def test_textual_tool_card_marks_omitted_newline_note_on_exact_source_width() ->
                 )
             )
             await pilot.pause()
-            rows = [
-                line.rstrip()
-                for line in _first_tool_card(app_instance).render().plain.splitlines()
-                if "│" in line
-            ]
+            card = _first_tool_card(app_instance)
+            await _expand_tool_card(pilot, card)
+            rows = [line.rstrip() for line in _tool_card_text(card).splitlines() if "│" in line]
             return rows[0], rows[1]
 
     deletion, addition = anyio.run(scenario)
@@ -1888,11 +1941,9 @@ def test_textual_tool_card_narrow_full_line_replace_marks_hidden_tail() -> None:
                 ToolResultReady(call_id="c1", name="edit", output="Applied", is_error=False)
             )
             await pilot.pause()
-            rows = [
-                line.rstrip()
-                for line in _first_tool_card(app_instance).render().plain.splitlines()
-                if "│" in line
-            ]
+            card = _first_tool_card(app_instance)
+            await _expand_tool_card(pilot, card)
+            rows = [line.rstrip() for line in _tool_card_text(card).splitlines() if "│" in line]
             return rows[0], rows[1]
 
     deletion, addition = anyio.run(scenario)
@@ -1927,13 +1978,14 @@ def test_textual_tool_card_write_renders_colored_diff() -> None:
                 )
             )
             await pilot.pause()
+            await _expand_tool_card(pilot, _first_tool_card(app_instance))
             text = "\n".join(_transcript_texts(app_instance))
             styles = _transcript_styles(app_instance)
             return text, styles
 
     text, styles = anyio.run(scenario)
     assert "✓ write" in text
-    assert "M src/foo.py  +1 -1" in text
+    assert "M src/foo.py +1 -1" in text
     assert "- │ line a" in text  # deletion line (prior content)
     assert "+ │ line b" in text  # addition line (new content)
     assert "$success" in styles  # additions
@@ -1969,8 +2021,8 @@ def test_textual_tool_card_write_create_renders_pure_addition() -> None:
 
     text = anyio.run(scenario)
     assert "✓ write" in text
-    assert "A new.py  +1 -0" in text
-    assert "+ │ fresh line" in text
+    assert "A new.py +1 -0" in text
+    assert "+ │ fresh line" not in text  # detail remains collapsed by default
 
 
 def test_textual_tool_card_expands_structured_diff_without_showing_acknowledgement() -> None:
@@ -2017,9 +2069,9 @@ def test_textual_tool_card_expands_structured_diff_without_showing_acknowledgeme
             return collapsed, expanded, recollapsed
 
     collapsed, expanded, recollapsed = anyio.run(scenario)
-    assert "- │ old 0" in collapsed and "+ │ new 0" in collapsed
+    assert "- │ old 0" not in collapsed and "+ │ new 0" not in collapsed
     assert "old 19" not in collapsed and "new 19" not in collapsed
-    assert "… 16 lines hidden" in collapsed
+    assert "M src/large.py +20 -20" in collapsed
     assert "- │ old 19" in expanded and "+ │ new 19" in expanded
     assert "Applied 1 edit" not in expanded
     assert "old 19" not in recollapsed and "new 19" not in recollapsed
@@ -2213,6 +2265,43 @@ def test_textual_tool_card_expands_to_full_output_on_enter() -> None:
     assert "read 30 lines from f.py" in recollapsed
 
 
+def test_textual_tool_card_pretty_formats_generic_json_on_native_expand() -> None:
+    async def scenario() -> tuple[str, bool, bool, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="extension", arguments={}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(
+                    call_id="c1",
+                    name="extension",
+                    output='{"paths": ["a.py"], "metadata": {"count": 1}}',
+                    is_error=False,
+                )
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            collapsed_title = _tool_card_text(card)
+            collapsed = card.collapsed
+            pretty_hidden = not card._pretty_widget.display
+
+            # Native CollapsibleTitle handles mouse activation; no custom click
+            # routing is needed for tool cards.
+            await pilot.click(card._title)
+            await pilot.pause()
+            return collapsed_title, collapsed, pretty_hidden, _tool_card_text(card)
+
+    collapsed_title, collapsed, pretty_hidden, expanded = anyio.run(scenario)
+
+    assert collapsed is True
+    assert pretty_hidden is True
+    assert "structured JSON object (2 keys)" in collapsed_title
+    assert "a.py" not in collapsed_title
+    assert "paths" in expanded
+    assert "a.py" in expanded
+    assert "metadata" in expanded
+
+
 def test_textual_bash_card_normalizes_collapsed_and_full_output() -> None:
     async def scenario() -> tuple[str, str, bool]:
         app_instance, renderer = create_textual_tui()
@@ -2280,7 +2369,7 @@ def test_textual_failed_bash_card_normalizes_collapsed_and_full_output() -> None
 
     assert detail == "exit 2\ndiagnostic"
     assert full_output == detail
-    assert can_expand is False
+    assert can_expand is True  # title shows a one-line error summary; detail is collapsible
 
 
 def test_textual_tool_card_expanded_shows_tool_truncation_marker() -> None:
@@ -2338,12 +2427,12 @@ def test_textual_tool_card_small_capped_output_shows_truncation_marker_collapsed
             )
             await pilot.pause()
             card = _first_tool_card(app_instance)
-            return card.render().plain, card._can_expand()
+            return _tool_card_text(card), card._can_expand()
 
     rendered, can_expand = anyio.run(scenario)
-    assert can_expand is False  # nothing more to expand than the collapsed preview
-    assert "▸" not in rendered  # so no affordance is offered
-    assert "truncated at the tool's limit" in rendered  # but truncation is still surfaced
+    assert can_expand is True  # the compact title conceals the later output lines
+    assert "▶" in rendered
+    assert "output truncated" in rendered
 
 
 def test_textual_tool_card_escape_returns_focus_to_input() -> None:
@@ -2512,9 +2601,13 @@ def test_textual_tool_card_expand_does_not_repin_after_user_scrolls_away() -> No
             await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
             card = _first_tool_card(app_instance)
-            card.focus()  # tall card: center-scroll drops follow, intent captured
+            card.focus()
             await pilot.pause()
-            await pilot.press("pageup")  # the reader deliberately scrolls away
+            # A compact collapsed header may fit the viewport, so establish the
+            # same deliberate-scroll precondition directly rather than depending
+            # on the old tall-preview geometry.
+            transcript.restore_viewport_state(TranscriptViewportState(scroll_y=0, following=False))
+            app_instance._transcript_controller.user_scrolled()
             await pilot.pause()
             following_after_scroll = transcript.is_following
             await pilot.press("enter")  # expand must NOT re-pin the tail now
@@ -2589,6 +2682,7 @@ def test_textual_tool_card_edit_content_is_not_markup_injectable() -> None:
                 ToolResultReady(call_id="c1", name="edit", output="Applied", is_error=False)
             )
             await pilot.pause()
+            await _expand_tool_card(pilot, _first_tool_card(app_instance))
             return "\n".join(_transcript_texts(app_instance))
 
     text = anyio.run(scenario)
@@ -2628,12 +2722,12 @@ def test_textual_renderer_escapes_untrusted_event_payloads() -> None:
                 for c in app_instance.query_one("#transcript", Transcript).children
                 if isinstance(c, ToolCard)
             )
-            pending = card.render().plain
+            pending = _tool_card_text(card)
             renderer.event(
                 ToolResultReady(call_id="c1", name="t", output="[bold]out[/bold]", is_error=False)
             )
             await pilot.pause()
-            return pending, card.render().plain
+            return pending, _tool_card_text(card)
 
     pending, done = anyio.run(scenario)
     # Rich markup control chars survive verbatim as literal text (rendered), which
@@ -3052,9 +3146,10 @@ def test_textual_no_color_env_var_keeps_transcript_legible(monkeypatch: MonkeyPa
             )
             renderer.notice("heads up")
             await pilot.pause()
+            await _expand_tool_card(pilot, _all_tool_cards(app_instance)[-1])
             transcript = app_instance.query_one("#transcript", Transcript)
             texts = [
-                child.render().plain
+                child.render().plain if isinstance(child, LineMessage) else _tool_card_text(child)
                 for child in transcript.children
                 if isinstance(child, LineMessage | ToolCard)
             ]
@@ -3069,7 +3164,7 @@ def test_textual_no_color_env_var_keeps_transcript_legible(monkeypatch: MonkeyPa
     assert "✓ bash" in rendered
     assert "⊘ write" in rendered
     assert "✗ bash" in rendered
-    assert "M plain.py  +1 -1" in rendered
+    assert "M plain.py +1 -1" in rendered
     assert "- │ old" in rendered
     assert "+ │ new" in rendered
     assert "heads up" in rendered
@@ -3501,10 +3596,10 @@ def test_textual_pending_tool_card_ticks_a_live_counter() -> None:
                 for c in app_instance.query_one("#transcript", Transcript).children
                 if isinstance(c, ToolCard)
             )
-            start = card.render().plain
+            start = _tool_card_text(card)
             for _ in range(3):
                 card._tick()
-            return start, card.render().plain
+            return start, _tool_card_text(card)
 
     start, ticked = anyio.run(scenario)
     assert start.endswith("· 0.0s")  # counter starts at zero on mount
@@ -3529,14 +3624,14 @@ def test_textual_cancel_drains_pending_tool_cards() -> None:
             renderer.cancelled()
             await pilot.pause()
             return (
-                [c.render().plain for c in cards],
+                [_tool_card_text(c) for c in cards],
                 [c._timer is None for c in cards],
                 app_instance._transcript_controller.pending_tool_count,
                 len(renderer._tool_started),
             )
 
     texts, timers_stopped, app_registry, started_registry = anyio.run(scenario)
-    assert all(t.startswith("⊘ ") and "cancelled" in t for t in texts)  # cancelled glyph + label
+    assert all(t.lstrip().startswith("⊘ ") and "cancelled" in t for t in texts)
     assert all(timers_stopped)  # no card keeps ticking
     assert app_registry == 0  # app _tool_cards drained
     assert started_registry == 0  # renderer _tool_started drained
@@ -6279,3 +6374,28 @@ def test_cli_tui_mode_invokes_tui_runner(tmp_path: Path, monkeypatch: object) ->
     assert captured[0].config.session_dir == tmp_path
     assert captured[0].continue_latest is True
     assert captured[0].renderer is TuiRendererKind.fullscreen
+
+
+def test_textual_tool_card_space_toggles_native_collapsible_detail() -> None:
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={}))
+            await pilot.pause()
+            renderer.event(
+                ToolResultReady(call_id="c1", name="bash", output="first\nsecond", is_error=False)
+            )
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            card.focus()
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.pause()
+            opened = not card.collapsed
+            await pilot.press("space")
+            await pilot.pause()
+            return opened, card.collapsed
+
+    opened, recollapsed = anyio.run(scenario)
+    assert opened is True
+    assert recollapsed is True

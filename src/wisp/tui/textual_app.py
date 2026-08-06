@@ -51,6 +51,7 @@ from wisp.tui.textual_input import TextualInputController
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.textual_transcript import TextualTranscriptController
 from wisp.tui.theme import WISP_THEMES, role_styles
+from wisp.tui.tool_detail import PrettyToolOutput
 from wisp.tui.widgets import (
     CommandPalette,
     DecisionPanel,
@@ -92,9 +93,9 @@ _SESSION_OPERATION_LABELS: dict[OverlayOperation, str] = {
 
 # Persistent, low-contrast keybinding reminder below the composer. Only real,
 # currently-hidden (show=False) affordances — not aspirational: `/` opens the
-# slash-command menu (detected from typed input, not a Binding); Enter/Space
-# toggle a focused ToolCard's expand/collapse (ToolCard.BINDINGS); Escape
-# returns focus from a card to the input (ToolCard.BINDINGS "leave" action).
+# slash-command menu (detected from typed input, not a Binding); Enter on a
+# focused native Collapsible title and Space on its ToolCard ancestor toggle
+# detail; Escape returns focus from that card to the input.
 # Textual-only chrome — deliberately not folded into format_tui_footer_lines,
 # which the line/fullscreen renderers also consume.
 _KEYBINDING_HINT = "shift+enter/ctrl+j newline   esc cancel   ctrl+c×2 quit   / commands"
@@ -251,7 +252,7 @@ class TextualTui(App[None]):
 
     /* A focused tool card (reached by Tab) is the expand/collapse target; a subtle
        fill marks it without competing with the role-colored left rule. */
-    ToolCard:focus {
+    ToolCard:focus-within {
         background: $boost;
     }
 
@@ -577,8 +578,8 @@ class TextualTui(App[None]):
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
         # Capture follow intent before Textual's deferred center-scroll of a tall
         # card can drop it; the controller clears this intent after user scrolling.
-        if isinstance(event.widget, ToolCard):
-            self._transcript_controller.tool_card_focused(event.widget)
+        if card := ToolCard.containing(event.widget):
+            self._transcript_controller.tool_card_focused(card)
 
     def on_tool_card_toggled(self, event: ToolCard.Toggled) -> None:
         # A card grew or shrank. Re-pin the tail only when the *newest* card (the
@@ -1490,7 +1491,7 @@ class TextualTui(App[None]):
         arguments: object,
         *,
         status: str,
-        detail: str | Content | DiffPresentation,
+        detail: str | Content | DiffPresentation | PrettyToolOutput,
         full_output: str,
         truncated: bool,
     ) -> bool:
@@ -1511,7 +1512,7 @@ class TextualTui(App[None]):
         call_id: str,
         status: str,
         *,
-        detail: str | Content | DiffPresentation = "",
+        detail: str | Content | DiffPresentation | PrettyToolOutput = "",
         elapsed: float | None = None,
         full_output: str = "",
         truncated: bool = False,

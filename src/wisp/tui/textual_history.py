@@ -28,6 +28,7 @@ from wisp.tui.history import (
     HistoricalTranscriptMessage,
     historical_tool_status,
 )
+from wisp.tui.tool_detail import PrettyToolOutput
 from wisp.tui.tool_output import full_tool_output_for_display, render_tool_result
 from wisp.tui.transcript_window import TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, TranscriptWindow
 
@@ -87,7 +88,7 @@ class TextualHistorySurface(Protocol):
         arguments: JsonObject,
         *,
         status: str,
-        detail: str | Content | DiffPresentation,
+        detail: str | Content | DiffPresentation | PrettyToolOutput,
         full_output: str,
         truncated: bool,
     ) -> bool: ...
@@ -97,7 +98,7 @@ class TextualHistorySurface(Protocol):
         call_id: str,
         status: str,
         *,
-        detail: str | Content | DiffPresentation = "",
+        detail: str | Content | DiffPresentation | PrettyToolOutput = "",
         full_output: str = "",
         truncated: bool = False,
     ) -> Widget | None: ...
@@ -596,7 +597,7 @@ class TextualHistoryController:
         *,
         name: str | None = None,
         arguments: JsonObject | None = None,
-    ) -> tuple[str, str | Content | DiffPresentation, str, bool]:
+    ) -> tuple[str, str | Content | DiffPresentation | PrettyToolOutput, str, bool]:
         status = historical_tool_status(entry)
         if status in {"cancelled", "denied"}:
             return status, entry.output, "", False

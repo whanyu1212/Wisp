@@ -39,6 +39,7 @@ with styles applied out-of-band — not through a markup parser.
 from __future__ import annotations
 
 import difflib
+import json
 import re
 import signal
 from collections.abc import Mapping, Sequence
@@ -60,6 +61,7 @@ from wisp.tui.diff_presentation import (
     DiffRowKind,
     select_diff_rows,
 )
+from wisp.tui.tool_detail import PrettyToolOutput
 from wisp.tui.widgets import (
     _TOOL_OUTPUT_PREVIEW_BYTES,
     _TOOL_OUTPUT_PREVIEW_LINES,
@@ -177,6 +179,14 @@ _SPLITLINES_SEPARATORS = (
 _ERROR_TAIL_LINES = _TOOL_OUTPUT_PREVIEW_LINES
 _ERROR_TAIL_BYTES = _TOOL_OUTPUT_PREVIEW_BYTES
 
+# ``Pretty`` is a presentation enhancement, never a reason to do unbounded work
+# on untrusted custom-tool output. The regular tool-output cap remains the first
+# boundary; these smaller structural caps additionally avoid pathological deeply
+# nested or huge JSON containers when the Textual UI parses the generic fallback.
+_PRETTY_TOOL_OUTPUT_MAX_CHARS = 64_000
+_PRETTY_TOOL_OUTPUT_MAX_DEPTH = 20
+_PRETTY_TOOL_OUTPUT_MAX_ITEMS = 2_000
+
 
 def render_tool_result(
     name: str,
@@ -190,7 +200,7 @@ def render_tool_result(
     created: bool = False,
     summary: str | None = None,
     process_state: ManagedProcessState | None = None,
-) -> str | Content | DiffPresentation:
+) -> str | Content | DiffPresentation | PrettyToolOutput:
     """Render terminal tool output into bounded card detail.
 
     ``name`` selects the renderer; ``arguments`` supplies structured context for
@@ -202,9 +212,10 @@ def render_tool_result(
     tools (read/grep/find/ls), or None. ``process_state`` is the promoted managed
     Bash state; terminal failure states use the error path even without an exit code.
 
-    Returns a plain ``str`` for the error/generic/summary paths (the widget escapes
-    it as untrusted markup), a Textual ``Content`` for legacy direct diff callers,
-    or a structured :class:`DiffPresentation` for edit/write cards. Unknown
+    Returns a plain ``str`` for the error/generic/summary paths (the widget renders
+    it as literal text), a Textual ``Content`` for legacy direct diff callers, a
+    structured :class:`DiffPresentation` for edit/write cards, or a
+    :class:`PrettyToolOutput` for complete JSON object/array fallback output. Unknown
     tools and successful results without a summary fall back to
     :func:`render_generic`.
     """
@@ -241,7 +252,48 @@ def render_tool_result(
         exit_code,
         output_has_exit_status=output_has_exit_status,
     )
-    return render_generic(display_output)
+    structured = _structured_tool_output(display_output)
+    return structured if structured is not None else render_generic(display_output)
+
+
+def _structured_tool_output(output: str) -> PrettyToolOutput | None:
+    """Return a local Pretty presentation for bounded JSON object/array output.
+
+    Structured rendering is deliberately a fallback: built-in read/search summaries,
+    diffs, and shell failure output retain their specialized displays. Only complete
+    JSON containers qualify; JSON scalars and ordinary text stay literal. The input
+    limit prevents a custom tool from making the TUI parse an unusually large payload
+    merely to improve presentation.
+    """
+
+    if len(output) > _PRETTY_TOOL_OUTPUT_MAX_CHARS:
+        return None
+    try:
+        value = json.loads(output)
+    except (json.JSONDecodeError, RecursionError, TypeError):
+        return None
+    if isinstance(value, dict) and _pretty_json_is_bounded(value):
+        return PrettyToolOutput(value=value, kind="object", item_count=len(value))
+    if isinstance(value, list) and _pretty_json_is_bounded(value):
+        return PrettyToolOutput(value=value, kind="array", item_count=len(value))
+    return None
+
+
+def _pretty_json_is_bounded(value: object) -> bool:
+    """Reject JSON containers whose Pretty rendering would be disproportionately large."""
+
+    pending: list[tuple[object, int]] = [(value, 1)]
+    item_count = 0
+    while pending:
+        current, depth = pending.pop()
+        item_count += 1
+        if item_count > _PRETTY_TOOL_OUTPUT_MAX_ITEMS or depth > _PRETTY_TOOL_OUTPUT_MAX_DEPTH:
+            return False
+        if isinstance(current, dict):
+            pending.extend((child, depth + 1) for child in current.values())
+        elif isinstance(current, list):
+            pending.extend((child, depth + 1) for child in current)
+    return True
 
 
 def render_error(

@@ -28,12 +28,14 @@ from textual.message import Message
 from textual.timer import Timer
 from textual.widget import AwaitMount, Widget
 from textual.widgets import (
+    Collapsible,
     DataTable,
     Input,
     Label,
     LoadingIndicator,
     Markdown,
     OptionList,
+    Pretty,
     RadioButton,
     RadioSet,
     Static,
@@ -75,6 +77,7 @@ from wisp.tui.rendering import (
     _truncate_to_cell_width,
     format_tui_footer_text,
 )
+from wisp.tui.tool_detail import PrettyToolOutput
 
 _TOOL_OUTPUT_PREVIEW_LINES = 8
 _TOOL_OUTPUT_PREVIEW_BYTES = 2_000
@@ -252,7 +255,7 @@ def _format_duration(seconds: float) -> str:
     return f"{minutes}m{secs:02d}s"
 
 
-def _has_detail(detail: str | Content | DiffPresentation) -> bool:
+def _has_detail(detail: str | Content | DiffPresentation | PrettyToolOutput) -> bool:
     """Whether a card detail carries content, for both str and Content forms.
 
     An empty ``str`` and an empty ``Content`` both mean "no detail", so a
@@ -264,6 +267,8 @@ def _has_detail(detail: str | Content | DiffPresentation) -> bool:
         return bool(detail.plain)
     if isinstance(detail, DiffPresentation):
         return bool(detail.rows)
+    if isinstance(detail, PrettyToolOutput):
+        return True
     return bool(detail)
 
 
@@ -570,21 +575,25 @@ def _preview_tool_output(
 def _summarize_arguments(arguments: object, *, limit: int = 48) -> str:
     """Render a tool call's arguments as a terse `k=v, k=v` summary.
 
-    Values are stringified and clipped so a card stays one line; a long single
-    value (a pasted blob, a big path) is truncated with an ellipsis rather than
-    wrapping the card. Non-mapping arguments fall back to their repr.
+    Values are whitespace-normalized and clipped, then the assembled summary is
+    bounded too, so a long value or many arguments cannot wrap the compact card
+    header. Non-mapping arguments fall back to their normalized repr.
     """
 
     if not isinstance(arguments, Mapping):
-        text = str(arguments)
+        text = " ".join(str(arguments).split())
         return text if len(text) <= limit else f"{text[: limit - 1]}…"
     parts: list[str] = []
     for key, value in arguments.items():
-        text = str(value)
+        # The card header is intentionally one scan line. Collapse any tool- or
+        # user-supplied whitespace before clipping so a multiline write payload
+        # cannot turn the compact layer back into a detail block.
+        text = " ".join(str(value).split())
         if len(text) > limit:
             text = f"{text[: limit - 1]}…"
         parts.append(f"{key}={text}")
-    return ", ".join(parts)
+    summary = ", ".join(parts)
+    return summary if len(summary) <= limit else f"{summary[: limit - 1]}…"
 
 
 class DecisionPanel(Vertical):
@@ -2308,33 +2317,73 @@ class LineMessage(Static):
             self.border_title = label
 
 
-class ToolCard(Static):
-    """One evolving transcript card for a single tool call, keyed by call_id.
+class ToolCard(Collapsible):
+    """One evolving, collapsed-by-default transcript card for a tool call.
 
-    A tool call emits up to three events sharing a call_id — request, an optional
-    approval resolution (only for safety-gated tools), and a result. Rather than
-    mint a separate line per event, one ``ToolCard`` is mounted on the request and
-    then *mutated in place* as the later events arrive. The card carries its status
-    in a leading glyph plus the role CSS class (which colors the left rule), so the
-    whole lifecycle reads as one card transitioning pending → running → done/error
-    instead of three stacked cards the reader has to reconcile. Resolved cards add
-    a bounded multiline output preview below their compact status row.
+    A card's title is the durable scan layer: tool name, compact arguments,
+    terminal status, duration, and a one-line result summary. Its detailed output
+    lives in Textual's native :class:`~textual.widgets.Collapsible` contents so
+    mouse users can click the title and keyboard users can press Enter or Space.
+    This keeps long tool runs readable without changing the event/RPC ownership
+    of card state.
 
-    Parallel calls each own a stable card regardless of finish order, because the
-    registry (in ``TextualTui``) routes every event to the card for its call_id.
+    The detail is deliberately lazy. A resolved card retains its bounded output
+    for later expansion but does not construct a large ``Content`` or ``Pretty``
+    renderable until the reader opens it. Specialized diffs retain their existing
+    structured painter; complete JSON object/array fallback output uses Textual's
+    ``Pretty`` widget; arbitrary text stays literal and dim.
+    """
+
+    DEFAULT_CSS = """
+    ToolCard {
+        height: auto;
+        margin: 1 0 0 0;
+        padding: 0 0 0 1;
+        border-top: none;
+        background: transparent;
+    }
+
+    ToolCard > CollapsibleTitle {
+        width: 1fr;
+        height: auto;
+        padding: 0 1;
+        background: transparent;
+    }
+
+    ToolCard > CollapsibleTitle:hover {
+        background: $boost;
+    }
+
+    ToolCard > CollapsibleTitle:focus {
+        background: $boost;
+    }
+
+    ToolCard > Contents {
+        width: 1fr;
+        height: auto;
+        padding: 0 0 0 3;
+    }
+
+    ToolCard .tool-card-detail {
+        width: 1fr;
+        height: auto;
+        color: $text-muted;
+    }
+
+    ToolCard .tool-card-pretty {
+        width: 1fr;
+        height: auto;
+    }
+
+    ToolCard .tool-card-truncation {
+        width: 1fr;
+        height: auto;
+        color: $text-muted;
+    }
     """
 
     # status → (leading glyph, role class). The role class drives the left-rule
     # color via the shared `.message--{role}` CSS in TextualTui.
-    #
-    # denied and error previously shared both the "✗" glyph AND the "denied"
-    # role class, making a user-denied tool call visually identical to a
-    # genuine execution failure (issue #76). denied now gets its own glyph
-    # ("⊘", already used for cancelled — both mean "stopped by a decision,
-    # not a failure") and error gets its own "error" role class (CSS already
-    # defines `.message--error`, it just was never applied here) — denied and
-    # error are now distinguishable by glyph, label (_ROLE_LABELS below), and
-    # color, not by color alone.
     _STATUS: dict[str, tuple[str, str]] = {
         "pending": ("⋯", "tool"),
         "denied": ("⊘", "denied"),
@@ -2342,80 +2391,105 @@ class ToolCard(Static):
         "cancelled": ("⊘", "denied"),
         "done": ("✓", "approved"),
     }
+    _STATUS_LABELS: dict[str, str] = {"cancelled": "cancelled"}
+    _TICK = 1.0
 
-    # Border-title override for statuses whose role class (above) is shared
-    # with another status that must read differently — "cancelled" reuses
-    # "denied"'s role (same color/glyph family), but a cancelled tool call
-    # was never actually denied, so its title must not say "denied". Statuses
-    # not listed here fall back to _ROLE_LABELS keyed by role, as normal.
-    _STATUS_LABELS: dict[str, str] = {
-        "cancelled": "cancelled",
-    }
-    _TICK = 1.0  # the running counter only needs whole-second granularity
-
-    # A resolved card is a keyboard target so the reader can expand its full output.
-    # Cards without expandable content still take focus (harmless on a one-liner) but
-    # their toggle is a no-op — simpler than making focusability conditional, which
-    # Textual evaluates statically at mount.
-    can_focus = True
     BINDINGS = [
-        Binding("enter", "toggle_expand", "Expand/collapse", show=False),
         Binding("space", "toggle_expand", "Expand/collapse", show=False),
         Binding("escape", "leave", "Back to input", show=False),
     ]
 
     def __init__(self, name: str, arguments: object) -> None:
-        super().__init__("")
-        # Not `_name`: Textual's DOMNode uses `self._name` to back the widget
-        # `name` property (typed str | None), so a distinct field avoids
-        # shadowing it and keeps this a plain str.
+        # These children are created before Collapsible so its compose path owns
+        # exactly one detail container. Their bodies stay empty/hidden until an
+        # expansion asks for them, keeping collapsed transcript cards lightweight.
+        self._detail_widget = Static("", markup=False, classes="tool-card-detail")
+        self._pretty_widget = Pretty({}, classes="tool-card-pretty")
+        self._truncation_widget = Static(
+            "⋯ output truncated at the tool's limit",
+            markup=False,
+            classes="tool-card-truncation",
+        )
+        self._detail_widget.display = False
+        self._pretty_widget.display = False
+        self._truncation_widget.display = False
+        self._initialized = False
+        super().__init__(
+            self._detail_widget,
+            self._pretty_widget,
+            self._truncation_widget,
+            title="",
+            collapsed=True,
+            collapsed_symbol="▶",
+            expanded_symbol="▼",
+        )
         self._tool_name = name
         self._summary = _summarize_arguments(arguments)
-        # A plain str is untrusted output escaped at repaint; a Content is an
-        # already-styled renderable (e.g. a colored diff) whose text is literal,
-        # so it is composed directly without markup escaping.
-        self._detail: str | Content | DiffPresentation = ""
-        # The full (tool-bounded) output, kept so the reader can expand past the
-        # collapsed preview/summary/diff. Untrusted text, rendered literally like a
-        # str detail. Empty when there is nothing more to show than the detail.
-        self._full_output: str = ""
-        self._expanded = False
-        # Whether the tool capped its own output; drives the honest "truncated at the
-        # tool's limit" marker on the expanded view.
+        self._detail: str | Content | DiffPresentation | PrettyToolOutput = ""
+        self._full_output = ""
         self._truncated = False
         self._role = ""
         self._glyph = "⋯"
-        # While running, `_elapsed` is a live whole-second tick count (looks alive,
-        # exact precision doesn't matter mid-flight). On resolve it's replaced by
-        # the true wall-clock duration derived from event timestamps (see
-        # `set_state(elapsed=…)`), so the number that rests on screen is honest.
         self._elapsed: float | None = None
         self._timer: Timer | None = None
+        self._initialized = True
         self.set_state("pending")
 
+    @property
+    def _expanded(self) -> bool:
+        """Compatibility view of the inherited collapse state for card callers."""
+
+        return not self.collapsed
+
+    @classmethod
+    def containing(cls, widget: Widget | None) -> ToolCard | None:
+        """Return the card owning a focused title/detail descendant, if any."""
+
+        if widget is None:
+            return None
+        if isinstance(widget, cls):
+            return widget
+        return next((ancestor for ancestor in widget.ancestors if isinstance(ancestor, cls)), None)
+
+    def focus(self, scroll_visible: bool = True) -> ToolCard:
+        """Focus the native collapsible title rather than its outer container."""
+
+        if self.is_mounted:
+            self._title.focus(scroll_visible=scroll_visible)
+        return self
+
     def on_mount(self) -> None:
-        # A pending card ticks a running counter; a card that mounts already
-        # resolved (e.g. rebuilt from history) has no timer to start.
         if self._role == "tool":
             self._elapsed = 0.0
             self._timer = self.set_interval(self._TICK, self._tick)
-            self._repaint()
+        self._refresh_header()
+        self._refresh_detail()
 
     def on_resize(self, event: events.Resize) -> None:
-        """Repaint structured rows when a terminal resize changes source width."""
+        """Repaint an open structured diff at its new source width."""
 
-        if isinstance(self._detail, DiffPresentation):
-            self._repaint()
+        if not self.collapsed and isinstance(self._detail, DiffPresentation):
+            self._refresh_detail()
+
+    def on_unmount(self) -> None:
+        self._stop_timer()
+
+    def _watch_collapsed(self, collapsed: bool) -> None:
+        """Keep lazy body widgets in sync with native title clicks and keys."""
+
+        super()._watch_collapsed(collapsed)
+        if self._initialized:
+            self._refresh_header()
+            self._refresh_detail()
+            if self.is_mounted:
+                self.post_message(self.Toggled(self))
 
     def update_call(self, name: str, arguments: object) -> None:
         """Enrich a historical result when its paged-in call arrives later."""
 
         self._tool_name = name
         self._summary = _summarize_arguments(arguments)
-        self._repaint()
-
-    def on_unmount(self) -> None:
-        self._stop_timer()
+        self._refresh_header()
 
     def _stop_timer(self) -> None:
         if self._timer is not None:
@@ -2425,32 +2499,18 @@ class ToolCard(Static):
     def _tick(self) -> None:
         previous = self._elapsed or 0.0
         self._elapsed = previous + self._TICK
-        self._repaint(
-            layout=len(_format_duration(previous)) != len(_format_duration(self._elapsed))
-        )
+        self._refresh_header()
 
     def set_state(
         self,
         status: str,
         *,
-        detail: str | Content | DiffPresentation = "",
+        detail: str | Content | DiffPresentation | PrettyToolOutput = "",
         elapsed: float | None = None,
         full_output: str = "",
         truncated: bool = False,
     ) -> None:
-        """Transition the card to a new status, swapping glyph, color, and detail.
-
-        ``detail`` overrides the argument summary (used to show a denial reason or
-        bounded result preview). A plain ``str`` is untrusted output escaped at
-        repaint; a Textual ``Content`` is a pre-styled renderable (e.g. a colored
-        diff) composed directly. ``elapsed`` is the true wall-clock duration (from
-        the request/result event timestamps); passing it freezes the live counter
-        at the honest value and stops the per-card timer. ``full_output`` is the
-        tool's full (tool-bounded) output, retained so the reader can expand past the
-        collapsed detail; ``truncated`` says the tool itself capped that output. The
-        role CSS class is swapped rather than added so the left-rule color reflects
-        only the current state.
-        """
+        """Transition the card while retaining bounded detail for later expansion."""
 
         glyph, role = self._STATUS.get(status, self._STATUS["pending"])
         self._glyph = glyph
@@ -2460,10 +2520,6 @@ class ToolCard(Static):
             self._full_output = full_output
         self._truncated = truncated
         if status != "pending":
-            # Any terminal state (done/error/denied/cancelled) ends the call: stop
-            # the live counter so a resolved card can never keep ticking. Freeze at
-            # the true wall-clock duration when we have it; otherwise leave the last
-            # ticked value (e.g. a cancel with no result timestamp to diff against).
             if elapsed is not None:
                 self._elapsed = elapsed
             self._stop_timer()
@@ -2473,52 +2529,34 @@ class ToolCard(Static):
             self.add_class("message", f"message--{role}")
             self._role = role
         self.border_title = self._STATUS_LABELS.get(status, _ROLE_LABELS.get(role, "tool"))
-        self._repaint()
+        if not self._can_expand() and not self.collapsed:
+            self.collapsed = True
+        self._refresh_header()
+        self._refresh_detail()
 
     def _can_expand(self) -> bool:
-        """Whether expanding would show anything the collapsed detail doesn't.
+        """Whether the collapsed summary conceals useful detail."""
 
-        True only when there is full output AND it differs from what the collapsed
-        detail already shows — a short output whose preview is the whole thing, or a
-        card with no retained output (pending, denied, error message), has nothing to
-        expand, so its toggle is a no-op and no affordance is shown.
-        """
-
-        if isinstance(self._detail, DiffPresentation):
-            return self._detail.can_expand
-        if not self._full_output:
-            return False
-        detail_text = self._detail.plain if isinstance(self._detail, Content) else self._detail
-        return self._full_output.strip() != detail_text.strip()
+        if isinstance(self._detail, (DiffPresentation, PrettyToolOutput)):
+            return _has_detail(self._detail)
+        body = self._full_output or (
+            self._detail.plain if isinstance(self._detail, Content) else self._detail
+        )
+        return bool(body.strip()) and body.strip() != self._detail_summary()
 
     def action_toggle_expand(self) -> None:
-        """Expand or collapse the full output (Enter/Space on a focused card).
+        """Toggle detail through the card's Space binding."""
 
-        Named ``toggle_expand`` rather than ``toggle`` because Textual's DOMNode
-        already defines an ``action_toggle`` (for reactive attributes) with a
-        different signature.
-        """
-
-        if not self._can_expand():
-            return
-        self._expanded = not self._expanded
-        self._repaint()
-        # A followed transcript should stay pinned to the tail when the *newest* card
-        # grows; the app decides using the follow intent captured at focus and this
-        # card's position (expanding a historical card must not yank the viewport).
-        self.post_message(self.Toggled(self))
+        if self._can_expand():
+            self.collapsed = not self.collapsed
 
     def action_leave(self) -> None:
-        """Return focus to the prompt input (Escape on a focused card)."""
+        """Return focus to the prompt input from a focused card title."""
 
         self.post_message(self.LeaveRequested())
 
     class Toggled(Message):
-        """A card expanded or collapsed; the transcript may need to re-pin its tail.
-
-        Carries the card so the app can re-pin only when the *newest* card grew —
-        expanding an older card leaves the viewport alone so its content stays in view.
-        """
+        """A card's native Collapsible state changed."""
 
         def __init__(self, card: ToolCard) -> None:
             super().__init__()
@@ -2527,60 +2565,99 @@ class ToolCard(Static):
     class LeaveRequested(Message):
         """A focused card asked to hand focus back to the prompt input."""
 
-    def _repaint(self, *, layout: bool = True) -> None:
-        # Build the whole card as Content, appending every untrusted value
-        # (name, summary, detail) as LITERAL styled text. Nothing untrusted is
-        # ever routed through a markup parser, so no escaping is needed and no
-        # content — however it is truncated or whatever brackets it contains —
-        # can inject or break a style span. Trusted chrome (glyph, `·`, indent)
-        # is plain literal too; styles are applied out-of-band.
-        content = Content(f"{self._glyph} ") + Content.styled(self._tool_name, "b")
-        if not _has_detail(self._detail) and self._summary:
-            content += Content("  ") + Content.styled(self._summary, "dim")
-        if self._elapsed is not None:
-            content += Content.styled(f" · {_format_duration(self._elapsed)}", "dim")
-        # A ▸/▾ affordance signals the card can be expanded and its current state,
-        # shown only when there is genuinely more to reveal than the collapsed detail.
-        if self._can_expand():
-            content += Content.styled(" ▾" if self._expanded else " ▸", "dim")
-
+    def _detail_summary(self) -> str:
+        if isinstance(self._detail, PrettyToolOutput):
+            return self._detail.summary
         if isinstance(self._detail, DiffPresentation):
-            # Structured edit/write cards retain diff rows for both states; unlike
-            # generic tools, expansion must never replace review evidence with the
-            # raw "Applied" or "Wrote" acknowledgement kept in _full_output.
-            content += Content("\n") + _render_diff_presentation(
+            return (
+                f"{self._detail.file_marker} {self._detail.file_label} "
+                f"+{self._detail.additions} -{self._detail.deletions}"
+            )
+        if isinstance(self._detail, Content):
+            return _one_line_tool_summary(self._detail.plain)
+        if self._detail:
+            return _one_line_tool_summary(self._detail)
+        return _one_line_tool_summary(self._full_output)
+
+    def _refresh_header(self) -> None:
+        if not self._initialized:
+            return
+        title = f"{self._glyph} {self._tool_name}"
+        if self._summary:
+            title += f" · {self._summary}"
+        if detail_summary := self._detail_summary():
+            title += f" — {detail_summary}"
+        if self._elapsed is not None:
+            title += f" · {_format_duration(self._elapsed)}"
+        can_expand = self._can_expand()
+        self._title.disabled = not can_expand
+        self._title.collapsed_symbol = "▶" if can_expand else ""
+        self._title.expanded_symbol = "▼" if can_expand else ""
+        if self._truncated:
+            title += " · output truncated"
+        # ``Collapsible.title`` accepts text that its child can interpret as
+        # markup. Tool names, argument summaries, and output-derived summaries
+        # are untrusted, so hand the native title an already-literal Content
+        # value instead of routing the assembled string through that parser.
+        self._title.label = Content(title)
+
+    def _refresh_detail(self) -> None:
+        """Build one expanded body only while the native Collapsible is open."""
+
+        if not self._initialized or self.collapsed:
+            self._detail_widget.display = False
+            self._pretty_widget.display = False
+            self._truncation_widget.display = False
+            return
+        if isinstance(self._detail, PrettyToolOutput):
+            self._detail_widget.display = False
+            self._pretty_widget.update(self._detail.value)
+            self._pretty_widget.display = True
+        else:
+            self._pretty_widget.display = False
+            detail = self._expanded_text_detail()
+            self._detail_widget.update(detail)
+            self._detail_widget.display = _has_detail(detail)
+        self._truncation_widget.display = self._truncated
+
+    def _expanded_text_detail(self) -> str | Content:
+        if isinstance(self._detail, DiffPresentation):
+            return _render_diff_presentation(
                 self._detail,
                 width=max(12, self.content_size.width or self.size.width or 80),
-                expanded=self._expanded,
+                expanded=True,
             )
-        elif self._expanded and self._full_output:
-            # Expanded: show the full (tool-bounded) output in place of the collapsed
-            # detail, so the reader sees what the preview/summary stood in for.
-            content += Content("\n") + self._indent_str(self._full_output)
-        elif isinstance(self._detail, Content):
-            # A pre-styled renderable is composed directly, preserving literal text.
-            content += Content("\n") + _indent_content(self._detail)
-        elif self._detail:
-            content += Content("\n") + self._indent_str(self._detail)
+        if self._full_output:
+            return Content.styled(self._full_output, "dim")
+        if isinstance(self._detail, Content):
+            return self._detail
+        if isinstance(self._detail, str) and self._detail:
+            return Content.styled(self._detail, "dim")
+        return ""
 
-        if self._truncated:
-            # The tool capped its own output before it ever reached here, so what the
-            # card shows — collapsed preview or expanded full output — isn't the whole
-            # story. Say so honestly regardless of expand state: a capped output that
-            # fits the preview budget (so there's nothing extra to expand) would
-            # otherwise present as complete, which is exactly the case this marks.
-            content += Content("\n") + Content.styled(
-                "  ⋯ output truncated at the tool's limit", "dim"
-            )
 
-        self.update(content, layout=layout)
+def _one_line_tool_summary(text: str, *, limit: int = 100) -> str:
+    """Return one literal scan-line from arbitrary tool text.
 
-    @staticmethod
-    def _indent_str(text: str) -> Content:
-        """Indent untrusted output two spaces and style it dim, as literal text."""
+    Failed command details lead with an exit/signal status, so retain that status
+    and add the final detail line rather than collapsing a useful error to only
+    ``exit 1``. Tail previews can lead with an omission marker; in that case the
+    actual final line is the useful scan-layer summary.
+    """
 
-        indented = "\n".join(f"  {line}" for line in text.split("\n"))
-        return Content.styled(indented, "dim")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    first = lines[0]
+    if first.startswith("... ") and len(lines) > 1:
+        line = lines[-1]
+    elif first.startswith(("exit ", "killed by ")) and len(lines) > 1:
+        line = f"{first}: {lines[-1]}"
+    else:
+        line = first
+    if len(line) <= limit:
+        return line
+    return f"{line[: limit - 1]}…"
 
 
 class WorkingIndicator(Static):

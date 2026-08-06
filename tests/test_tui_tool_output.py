@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import signal
 
+import pytest
+
 from wisp.tool_presentation import tool_result_status
+from wisp.tui.tool_detail import PrettyToolOutput
 from wisp.tui.tool_output import (
     _ERROR_TAIL_BYTES,
     _ERROR_TAIL_LINES,
@@ -390,3 +393,75 @@ def test_render_tool_result_failed_read_uses_error_not_summary() -> None:
     )
     assert result == render_error("read failed: file not found", exit_code=None)
     assert "read 40 lines" not in result
+
+
+def test_render_tool_result_uses_pretty_detail_for_complete_json_object() -> None:
+    result = render_tool_result(
+        "extension-tool",
+        {},
+        '{"files": ["a.py", "b.py"], "ok": true}',
+        is_error=False,
+        exit_code=None,
+    )
+
+    assert isinstance(result, PrettyToolOutput)
+    assert result.value == {"files": ["a.py", "b.py"], "ok": True}
+    assert result.kind == "object"
+    assert result.item_count == 2
+    assert result.summary == "structured JSON object (2 keys)"
+
+
+def test_render_tool_result_uses_pretty_detail_for_complete_json_array() -> None:
+    result = render_tool_result(
+        "extension-tool",
+        {},
+        '[{"path": "a.py"}, {"path": "b.py"}]',
+        is_error=False,
+        exit_code=None,
+    )
+
+    assert isinstance(result, PrettyToolOutput)
+    assert result.kind == "array"
+    assert result.item_count == 2
+    assert result.summary == "structured JSON array (2 items)"
+
+
+@pytest.mark.parametrize("output", ["null", '"text"', "42", "not json", "{broken}"])
+def test_render_tool_result_keeps_json_scalars_and_invalid_json_literal(output: str) -> None:
+    result = render_tool_result("extension-tool", {}, output, is_error=False, exit_code=None)
+
+    assert result == render_generic(output)
+
+
+def test_render_tool_result_keeps_specialized_summary_instead_of_pretty() -> None:
+    result = render_tool_result(
+        "read",
+        {"path": "data.json"},
+        '{"records": [1, 2]}',
+        is_error=False,
+        exit_code=None,
+        summary="read 1 line from data.json",
+    )
+
+    assert result == "read 1 line from data.json"
+
+
+def test_render_tool_result_keeps_failed_json_on_error_path() -> None:
+    result = render_tool_result(
+        "extension-tool",
+        {},
+        '{"error": "boom"}',
+        is_error=True,
+        exit_code=None,
+    )
+
+    assert result == render_error('{"error": "boom"}', exit_code=None)
+
+
+def test_render_tool_result_rejects_deep_json_pretty_fallback() -> None:
+    # The generic text fallback remains available for structurally hostile JSON;
+    # Pretty is a UI enhancement, not permission to recurse without a bound.
+    output = "[" * 21 + "0" + "]" * 21
+    result = render_tool_result("extension-tool", {}, output, is_error=False, exit_code=None)
+
+    assert result == render_generic(output)

@@ -20,6 +20,7 @@ from textual.widget import Widget
 
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.history import TUI_HISTORY_PAGE_LIMIT
+from wisp.tui.tool_detail import PrettyToolOutput
 from wisp.tui.widgets import ToolCard, WorkingIndicator
 
 # Keep an evicted widget inside the next durable latest-page reload, whose first
@@ -232,7 +233,7 @@ class TextualTranscriptController:
         arguments: object,
         *,
         status: str,
-        detail: str | Content | DiffPresentation,
+        detail: str | Content | DiffPresentation | PrettyToolOutput,
         full_output: str,
         truncated: bool,
     ) -> bool:
@@ -257,7 +258,7 @@ class TextualTranscriptController:
         call_id: str,
         status: str,
         *,
-        detail: str | Content | DiffPresentation = "",
+        detail: str | Content | DiffPresentation | PrettyToolOutput = "",
         elapsed: float | None = None,
         full_output: str = "",
         truncated: bool = False,

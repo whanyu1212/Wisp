@@ -345,8 +345,11 @@ Pi-style footer shows the current working directory/session plus status, queued 
 provider/model. It also shows current context use: `ctx 12k/128k` is a current provider
 observation, while `ctx ~12k/128k` is an explicit estimate (for example, immediately after
 compaction). Automatic threshold and overflow summaries use the same progress notices as
-`/compact` without changing the active prompt command. Completed tool cards include bounded
-multiline output previews. The footer also shows cumulative catalog-based list-price estimates:
+`/compact` without changing the active prompt command. Completed tool cards stay collapsed to a
+one-line status/summary by default; click a card title or focus it and press Enter/Space to reveal
+its bounded detail. Known file mutations retain diff views, while generic JSON object/array output
+uses a formatted structured view when expanded. The footer also shows cumulative catalog-based
+list-price estimates:
 `cost $0.042` is complete accounting, while `cost ≥$0.042` includes unpriced historical or
 unknown-model requests. Estimates are not invoices: subscription-backed Codex, custom pricing,
 unknown models, and provider charges outside token usage remain unpriced. Adjust runtime settings
