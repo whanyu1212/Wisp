@@ -206,40 +206,40 @@ class TextualTui(App[None]):
         align: right middle;
     }
 
-    /* Minimalist messages: a compact left rail in the role's color carries the
-       label; no top border, no fill. Quiet by default, colored only where it
+    /* Minimalist messages: a half-cell left rail in the role's color carries
+       the label; no top border, no fill. Quiet by default, colored only where it
        means something. Colors come only from theme vars present in both themes. */
     .message {
         height: auto;
         margin: 1 0 0 0;
         padding: 0 0 0 1;
-        border-left: thick $secondary;
+        border-left: outer $secondary;
         border-title-color: $text-muted;
     }
 
     .message--user {
-        border-left: thick $primary;
+        border-left: outer $primary;
     }
 
     .message--assistant {
-        border-left: thick $success;
+        border-left: outer $success;
     }
 
     .message--tool {
-        border-left: thick $accent;
+        border-left: outer $accent;
     }
 
     .message--notice {
-        border-left: thick $warning;
+        border-left: outer $warning;
     }
 
     .message--approved {
-        border-left: thick $success;
+        border-left: outer $success;
     }
 
     .message--denied,
     .message--error {
-        border-left: thick $error;
+        border-left: outer $error;
     }
 
     .message--dim,
