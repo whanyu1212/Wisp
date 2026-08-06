@@ -9,6 +9,7 @@ from __future__ import annotations
 from rich.console import Console
 
 from wisp.rpc import JsonlSubprocessRpcTransport, RpcController
+from wisp.tools.context import ToolContext
 
 from . import launch as _launch
 from . import live as _live
@@ -74,7 +75,14 @@ async def run_tui(
     # back to a line renderer and consume the injected reader, mirroring how the
     # fullscreen path declines to start the live UI when a reader is provided.
     if options.renderer is TuiRendererKind.textual and prompt_reader is None:
-        textual_tui, selected_renderer = create_textual_tui()
+        # Hand the picker the policy this process already resolved rather than
+        # letting it re-derive one. `options.config` reflects the `--auth-file`
+        # override and the parent's trust decision; a fresh resolution inside the
+        # app would see neither and could leave the real credential file listable.
+        # `from_config` also guarantees `auth_path` is in the returned globs.
+        textual_tui, selected_renderer = create_textual_tui(
+            protected_paths=ToolContext.from_config(options.config).protected_paths,
+        )
         selected_prompt_reader = textual_tui.read_prompt
     else:
         line_console_renderer = (

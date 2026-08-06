@@ -424,7 +424,10 @@ contents, so the model reads the file through its normal file tool and every rea
 to approval and the `protected_paths` guard. The listing itself honors that same policy, so
 secrets such as `.env` are never offered, and build directories (`.git`, `node_modules`,
 `__pycache__`, and friends) are skipped. Mentions are only recognized at the start of a line or
-after a space, so email addresses and decorators are unaffected; paths containing spaces are
+after a space, so an `@` inside a word — an email address such as `you@example.com` — never opens
+the picker. A Python decorator written at the start of a line does match that rule, so `@property`
+can open the picker if the project contains a similarly named path; press Escape to dismiss it and
+keep typing, or type the following space, which ends the mention. Paths containing spaces are
 inserted quoted. Note that `.gitignore` is not yet consulted, so untracked output in
 unconventional locations can still appear. Tree-style browsing and a persistent file sidebar
 remain future work.

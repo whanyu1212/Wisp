@@ -148,6 +148,44 @@ def test_context_protects_the_credential_file(tmp_path: Path) -> None:
     assert any(pattern.endswith("auth.json") for pattern in context.protected_paths)
 
 
+def test_context_prefers_the_caller_resolved_policy(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A resolved policy must be used verbatim, never re-derived from the environment.
+
+    Only the parent knows about an ``--auth-file`` override or a trusted project's
+    in-project ``auth_path``; re-resolving here would drop both and leave the real
+    credential file mentionable.
+    """
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("resolved policy supplied; must not re-resolve config")
+
+    monkeypatch.setattr("wisp.tui.textual_app.WispConfig.from_env", _boom)
+    _write(tmp_path, "creds.json", "{}")
+    _write(tmp_path, "app.py")
+
+    context = _file_index_context(tmp_path, (".env", "creds.json"))
+    paths = collect_paths(FileIndexConfig(root=tmp_path, context=context))
+
+    assert context.protected_paths == (".env", "creds.json")
+    assert "creds.json" not in paths
+    assert "app.py" in paths
+
+
+def test_run_tui_forwards_the_resolved_auth_path_to_the_picker(tmp_path: Path) -> None:
+    """The nonstandard credential file the parent resolved must reach the picker."""
+
+    from wisp.config import WispConfig
+
+    auth_path = tmp_path / "custom-auth.json"
+    config = WispConfig(auth_path=auth_path)
+    # Mirrors what run_tui hands create_textual_tui.
+    protected_paths = ToolContext.from_config(config).protected_paths
+
+    context = _file_index_context(tmp_path, protected_paths)
+
+    assert any(pattern.endswith("custom-auth.json") for pattern in context.protected_paths)
+
+
 def test_context_falls_back_to_secure_defaults(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Config resolution failing must not crash the TUI, and must not open the gate."""
 

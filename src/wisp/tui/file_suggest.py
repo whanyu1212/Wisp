@@ -93,9 +93,17 @@ class FileSuggest(OptionList):
         ``@`` and treat what follows as the query.
 
         The mention must start at a word boundary (line start or whitespace), so an
-        email address or a decorator (``foo@bar``, ``@property`` mid-word) doesn't
-        open the menu. The query itself stops at whitespace — once the user types a
-        space the mention is complete and the menu closes.
+        ``@`` inside a word — ``foo@bar``, an email address — doesn't open the menu.
+
+        A line-leading Python decorator (``@property``) *does* satisfy that boundary
+        rule and can open the menu when a similarly named path exists. That is
+        accepted rather than special-cased: excluding it would need to know the
+        prompt is source code, which this widget cannot, and the menu is dismissible
+        with Escape and closes on the following space. Enter completing a path
+        instead of submitting is the cost, and it is documented in the README.
+
+        The query itself stops at whitespace — once the user types a space the
+        mention is complete and the menu closes.
         """
 
         if cursor < 0 or cursor > len(value):

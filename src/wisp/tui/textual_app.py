@@ -332,8 +332,15 @@ class TextualTui(App[None]):
         Binding("end", "scroll_transcript_end", "Scroll to bottom", priority=True, show=False),
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, *, protected_paths: tuple[str, ...] | None = None) -> None:
         super().__init__()
+        # The parent's already-resolved protected-path policy, threaded down from
+        # `run_tui`. It is *not* re-derived here: the resolved policy reflects the
+        # `--auth-file` override and the trust decision the parent made before
+        # startup, neither of which a fresh `WispConfig.from_env` in this process
+        # can reconstruct. `None` means an embedded caller supplied nothing, and
+        # `_file_index_context` falls back to resolving on its own.
+        self._protected_paths = protected_paths
         self._input_controller = TextualInputController(self)
         self._transcript_controller = TextualTranscriptController(self)
         self._status: StatusBar | None = None
@@ -604,9 +611,32 @@ class TextualTui(App[None]):
     @work(thread=True, exclusive=True, group="file-suggest")
     def _collect_file_suggestions(self, cwd: str, picker: FileSuggest) -> None:
         root = Path(cwd)
-        paths = collect_paths(FileIndexConfig(root=root, context=_file_index_context(root)))
+        context = _file_index_context(root, self._protected_paths)
+        paths = collect_paths(FileIndexConfig(root=root, context=context))
         # Hop back to the event loop: widget state must not be mutated from a worker.
-        self.call_from_thread(picker.set_paths, paths)
+        self.call_from_thread(self._install_file_suggestions, picker, paths)
+
+    def _install_file_suggestions(self, picker: FileSuggest, paths: tuple[str, ...]) -> None:
+        """Install the corpus and re-evaluate any mention the user already typed.
+
+        The walk takes hundreds of milliseconds, so the user can easily type `@query`
+        before it lands. `show_for` hid the menu at the time because the corpus was
+        empty, and `set_paths` alone would not re-read the editor — the menu would
+        stay hidden until the next keystroke. Re-running the trigger scan here makes
+        simply waiting for indexing sufficient.
+
+        The scan is a no-op unless the caret is currently inside a mention, so this
+        never opens the menu on its own.
+        """
+
+        picker.set_paths(paths)
+        editor = self._input
+        if editor is None or not paths:
+            return
+        # Same precedence as on_text_area_changed: a live slash menu owns the line.
+        if self._suggest is not None and self._suggest.is_open:
+            return
+        picker.show_for(editor.text, self._file_offset_of_cursor(editor))
 
     def on_transcript_follow_changed(self, event: Transcript.FollowChanged) -> None:
         if event.following:
@@ -2049,27 +2079,37 @@ class TextualTui(App[None]):
         self.note_transcript_update(widget)
 
 
-def _file_index_context(root: Path) -> ToolContext:
+def _file_index_context(root: Path, protected_paths: tuple[str, ...] | None = None) -> ToolContext:
     """Resolve the protected-path policy governing what the `@` picker may list.
 
     A bare ``ToolContext(cwd=root)`` would hardcode ``DEFAULT_PROTECTED_PATHS`` and
     silently ignore the user's real policy: a configured ``protected_paths`` entry
     (say ``secrets.yaml``) would be denied by the agent's tools but still offered
     for ``@``-mention here, and a nonstandard ``auth_path`` would lose the
-    credential-file backstop that ``ToolContext.from_config`` guarantees. So resolve
-    config the same way the agent does (``coding/configuration.py``) and derive the
-    context from it.
+    credential-file backstop that ``ToolContext.from_config`` guarantees.
 
-    ``trusted=False`` is deliberate. ``protected_paths`` is a user-scoped security
-    setting that ``wisp.settings`` never reads from project-controlled config, so
-    omitting the project layer cannot weaken the policy — at worst the picker hides
-    a file the agent would have shown, which fails closed.
+    ``protected_paths`` is the parent's **already-resolved** policy and is preferred
+    whenever the caller has one. Re-resolving instead would silently drop two things
+    the parent alone knows: an ``--auth-file`` override (a CLI flag this process
+    never sees again) and a trusted project's in-project ``auth_path`` (which
+    ``WispConfig.from_env`` gates on ``trusted``). Either omission leaves the
+    credential file indexable and offerable for mention while the agent's real tool
+    context protects it.
+
+    The fallback path exists for embedded callers that construct the app directly and
+    have no resolved policy to hand over. There, resolving with ``trusted=False`` is
+    deliberate: ``protected_paths`` is a user-scoped security setting that
+    ``wisp.settings`` never reads from project-controlled config, so omitting the
+    project layer cannot weaken the policy — at worst the picker hides a file the
+    agent would have shown, which fails closed.
 
     Config resolution touches the filesystem, so this runs on the picker's worker
     thread, never the event loop. A failure here must not take the TUI down: the
     picker is advisory, and falling back to the secure defaults keeps secrets hidden.
     """
 
+    if protected_paths is not None:
+        return ToolContext(cwd=root, protected_paths=protected_paths)
     try:
         config = WispConfig.from_env(project_dir=root)
         return ToolContext.from_config(config, cwd=root)
@@ -2077,10 +2117,17 @@ def _file_index_context(root: Path) -> ToolContext:
         return ToolContext(cwd=root)
 
 
-def create_textual_tui() -> tuple[TextualTui, TuiRenderer]:
-    """Create a Textual app and renderer pair for `TuiShell`."""
+def create_textual_tui(
+    *, protected_paths: tuple[str, ...] | None = None
+) -> tuple[TextualTui, TuiRenderer]:
+    """Create a Textual app and renderer pair for `TuiShell`.
 
-    app = TextualTui()
+    ``protected_paths`` is the caller's already-resolved policy, forwarded to the
+    `@`-picker so it hides exactly what the agent's tools deny. See
+    ``_file_index_context`` for why re-deriving it here would be wrong.
+    """
+
+    app = TextualTui(protected_paths=protected_paths)
     return app, TextualTuiRenderer(app)
 
 

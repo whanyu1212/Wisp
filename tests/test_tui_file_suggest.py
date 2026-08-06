@@ -235,6 +235,68 @@ def test_slash_menu_still_works_and_menus_are_exclusive() -> None:
     assert file_open is False
 
 
+def test_late_corpus_opens_a_mention_typed_while_indexing() -> None:
+    """Typing `@query` before the walk lands must not require an extra keystroke.
+
+    `show_for` hides while the corpus is empty, so installing it later has to
+    re-evaluate the editor or the picker stays hidden until the user types again.
+    """
+
+    async def scenario() -> bool:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            picker = app.query_one("#file-suggest", FileSuggest)
+            # Corpus deliberately not installed yet: the walk is still running.
+            for key in "@app":
+                await pilot.press(key)
+            await pilot.pause()
+            assert picker.is_open is False
+
+            app._install_file_suggestions(picker, _CORPUS)  # noqa: SLF001 - worker callback
+            await pilot.pause()
+            return picker.is_open
+
+    assert anyio.run(scenario) is True
+
+
+def test_late_corpus_does_not_open_the_picker_without_a_mention() -> None:
+    """Installing the corpus is not itself a trigger — the caret must be in a mention."""
+
+    async def scenario() -> bool:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            picker = app.query_one("#file-suggest", FileSuggest)
+            for key in "hello":
+                await pilot.press(key)
+            await pilot.pause()
+
+            app._install_file_suggestions(picker, _CORPUS)  # noqa: SLF001 - worker callback
+            await pilot.pause()
+            return picker.is_open
+
+    assert anyio.run(scenario) is False
+
+
+def test_late_corpus_yields_to_a_live_slash_menu() -> None:
+    """Menu exclusivity survives the late-install path."""
+
+    async def scenario() -> tuple[bool, bool]:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            picker = app.query_one("#file-suggest", FileSuggest)
+            suggest = app.query_one("#suggest", SlashSuggest)
+            await pilot.press("/")
+            await pilot.pause()
+
+            app._install_file_suggestions(picker, _CORPUS)  # noqa: SLF001 - worker callback
+            await pilot.pause()
+            return suggest.is_open, picker.is_open
+
+    slash_open, file_open = anyio.run(scenario)
+    assert slash_open is True
+    assert file_open is False
+
+
 def test_protected_paths_never_reach_the_picker(tmp_path: Path) -> None:
     """End-to-end: a real walk must not surface `.env` as mentionable."""
 
