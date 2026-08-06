@@ -1692,6 +1692,70 @@ def test_tui_shell_keeps_text_stream_open_across_thinking_deltas() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_finalizes_partial_stream_when_prompt_fails_without_completion() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.completions: list[str | None] = []
+
+        def end_token_stream(self, completed_content: str | None = None) -> None:
+            self.completions.append(completed_content)
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.current_command_type = "prompt"
+
+        await shell._handle_rpc_event(MessageDelta(turn=1, delta="partial response"))
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id="prompt-1",
+                command_type="prompt",
+                ok=False,
+                error="provider failed",
+            )
+        )
+
+        assert renderer.completions == [None]
+        assert not shell.state.token_stream_started
+        assert not shell.state.rendered_tokens
+
+    anyio.run(run)
+
+
+def test_tui_shell_finalizes_partial_stream_when_prompt_is_cancelled() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.completions: list[str | None] = []
+
+        def end_token_stream(self, completed_content: str | None = None) -> None:
+            self.completions.append(completed_content)
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+        shell.state.current_command_id = "prompt-1"
+        shell.state.current_command_type = "prompt"
+
+        await shell._handle_rpc_event(MessageDelta(turn=1, delta="partial response"))
+        await shell._handle_rpc_event(
+            RpcCommandFinished(
+                command_id="prompt-1",
+                command_type="prompt",
+                ok=False,
+                error="cancelled",
+            )
+        )
+
+        assert renderer.completions == [None]
+        assert not shell.state.token_stream_started
+        assert not shell.state.rendered_tokens
+
+    anyio.run(run)
+
+
 def test_tui_shell_hydrates_resume_history_before_reading_prompt() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:

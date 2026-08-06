@@ -1704,7 +1704,12 @@ class TuiShell:
         self.state.current_command_id = None
         self.state.current_command_type = None
         self.state.pending_approval = None
-        self.state.token_stream_started = False
+        if self.state.token_stream_started:
+            # Failed and cancelled provider turns may terminate without a
+            # MessageCompleted event. Settle their partial output before the next
+            # prompt can reuse the renderer's active stream.
+            self.renderer.end_token_stream()
+            self.state.token_stream_started = False
         self.state.rendered_tokens = False
         if finished_command_type in {"prompt", "compact"}:
             await self._request_session_stats()
