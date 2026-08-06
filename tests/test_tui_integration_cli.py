@@ -2944,6 +2944,26 @@ def test_textual_line_messages_carry_role_classes() -> None:
     ]
 
 
+def test_textual_turn_rails_use_single_thick_border() -> None:
+    async def scenario() -> list[tuple[str, str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(completed_message(content="hi"))
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={}))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            return [
+                (role, child.styles.border_left[0])
+                for child in transcript.children
+                if (role := _transcript_role_class(child)) is not None
+            ]
+
+    assert anyio.run(scenario) == [
+        ("message--assistant", "thick"),
+        ("message--tool", "thick"),
+    ]
+
+
 def test_textual_denied_and_error_tool_cards_render_distinct_glyphs() -> None:
     # Issue #76, live-rendering counterpart to the pure-dict test in
     # test_tui_rendering.py: drives an actual denial and an actual error
