@@ -1373,16 +1373,21 @@ class TuiShell:
             return False
         if isinstance(event, MessageStarted):
             self._sync_view()
-        if isinstance(event, MessageDelta) and event.content_kind == "text":
-            self.state.token_stream_started = True
-            self.state.rendered_tokens = True
-            self.renderer.token_delta(event.delta)
+        if isinstance(event, MessageDelta):
+            if event.content_kind == "text":
+                self.state.token_stream_started = True
+                self.state.rendered_tokens = True
+                self.renderer.token_delta(event.delta)
+            # Thinking deltas may be interleaved with visible text. They are not a
+            # message boundary and must not finalize the active Markdown widget.
             return False
-        if self.state.token_stream_started:
-            self.renderer.end_token_stream()
-            self.state.token_stream_started = False
         if isinstance(event, MessageCompleted):
             suppress_completed_message = self.state.rendered_tokens
+            if self.state.token_stream_started:
+                # The terminal event is authoritative: reconcile the incremental
+                # renderer with its complete content before retaining the widget.
+                self.renderer.end_token_stream(event.content)
+                self.state.token_stream_started = False
             self.state.rendered_tokens = False
             if suppress_completed_message:
                 self._call_renderer_optional("record_streamed_message_completed", event)

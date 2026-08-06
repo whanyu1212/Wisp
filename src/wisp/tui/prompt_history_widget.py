@@ -51,7 +51,8 @@ class PromptHistoryPicker(Vertical):
     }
 
     PromptHistoryPicker #prompt-history-options > .option-list--option-highlighted {
-        background: $accent 30%;
+        background: transparent;
+        color: $accent;
     }
 
     PromptHistoryPicker #prompt-history-hint {

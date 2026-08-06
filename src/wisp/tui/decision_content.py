@@ -80,12 +80,12 @@ def _bounded_decision_preview(
 # out of the visible viewport with nothing to scroll it back into view. This
 # cap keeps the option unwrapped at the project's supported narrow-terminal
 # floor (72 columns, see test_decision_panel_fits_above_footer_in_narrow_
-# terminal) — it is a character count, not a terminal-column/display-width
-# measurement, so it does not guarantee no wrap at every possible width (very
-# narrow terminals, or names with wide/multi-column characters, can still
-# wrap); logical option selection is unaffected either way (Textual indexes
-# by option, not rendered line).
-_TOOL_SESSION_OPTION_NAME_CHARS = 40
+# terminal), including the panel's restrained 90% width. It is a character
+# count, not a terminal-column/display-width measurement, so it does not
+# guarantee no wrap at every possible width (very narrow terminals, or names
+# with wide/multi-column characters, can still wrap); logical option selection
+# is unaffected either way (Textual indexes by option, not rendered line).
+_TOOL_SESSION_OPTION_NAME_CHARS = 30
 
 
 def _bounded_tool_session_option_name(name: str) -> str:

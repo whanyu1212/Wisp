@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from textual.widgets._markdown import MarkdownStream
+from textual.widget import AwaitMount
 
 from wisp.tui.widgets import StreamMessage
 
@@ -17,7 +17,8 @@ if TYPE_CHECKING:
 @dataclass
 class _StreamTurn:
     widget: StreamMessage
-    stream: MarkdownStream
+    mounted: AwaitMount
+    source: str = ""
     pending: list[str] = field(default_factory=list)
     pending_bytes: int = 0
     deferred: list[str] = field(default_factory=list)
@@ -31,10 +32,18 @@ class _StreamTurn:
     has_written: bool = False
     write_count: int = 0
     discarded: bool = False
+    incremental_write_failed: bool = False
 
 
 class MarkdownStreamController:
-    """Bridge synchronous renderer calls to Textual's async MarkdownStream API."""
+    """Bridge synchronous renderer calls to Textual's async Markdown API.
+
+    Provider fragments are retained in ``source`` until the turn settles. Textual's
+    public ``Markdown.append`` API is awaited directly, avoiding the private
+    ``MarkdownStream`` background queue. Finalization replaces the document from
+    the completed message, so an interrupted incremental render cannot leave a
+    permanently partial response.
+    """
 
     _DRAIN_INTERVAL_SECONDS = 1 / 30
     _DRAIN_IMMEDIATE_BYTES = 4 * 1024
@@ -64,13 +73,14 @@ class MarkdownStreamController:
             if transcript is None:
                 return
             widget = StreamMessage()
-            transcript.mount_message(widget)
-            turn = _StreamTurn(widget=widget, stream=widget.get_stream())
+            mounted = transcript.mount_message(widget)
+            turn = _StreamTurn(widget=widget, mounted=mounted)
             if transcript.is_following:
                 turn.follow_generation = transcript.follow_generation
             self._turn = turn
             self._last_completed_widget = None
 
+        turn.source += delta
         if transcript is None or not transcript.is_following:
             turn.deferred.append(delta)
             self._app.note_transcript_update(turn.widget)
@@ -79,22 +89,24 @@ class MarkdownStreamController:
         turn.pending_bytes += len(delta.encode("utf-8"))
         self._queue_drain(turn, immediate=not turn.has_written)
 
-    def flush(self) -> None:
-        """Finish the active turn without blocking the synchronous renderer."""
+    def flush(self, completed_content: str | None = None) -> None:
+        """Finish the active turn and reconcile it with completed provider content."""
 
         self._app.hide_working_indicator()
         turn = self._turn
         self._turn = None
         if turn is not None:
-            # The shell records MessageCompleted immediately after flush(), before
-            # this turn's async finalizer runs, so publish its widget synchronously.
+            if completed_content is not None:
+                turn.source = completed_content
+            # History reconciliation runs synchronously after flush(), before the
+            # async finalizer, so publish the stable widget identity immediately.
             self._last_completed_widget = turn.widget
             turn.finalize_requested = True
             if not self._cancel_drain(turn):
                 self._queue_finalize(turn)
 
     def discard(self) -> None:
-        """Stop a replaced transcript's native stream without rendering stale output."""
+        """Stop a replaced transcript without rendering stale output."""
 
         turn = self._turn
         self._turn = None
@@ -123,7 +135,7 @@ class MarkdownStreamController:
 
     @property
     def last_completed_write_count(self) -> int:
-        """Return native Markdown writes used by the most recently completed turn."""
+        """Return Markdown writes used by the most recently completed turn."""
 
         return self._last_completed_write_count
 
@@ -134,7 +146,7 @@ class MarkdownStreamController:
         await self.wait_until_idle()
 
     async def wait_until_idle(self) -> None:
-        """Wait for scheduled writes and native-stream finalization to complete."""
+        """Wait for scheduled writes and final reconciliation to complete."""
 
         await self._idle.wait()
 
@@ -203,11 +215,22 @@ class MarkdownStreamController:
                 self._app.note_transcript_update(turn.widget)
                 return
             turn.follow_generation = transcript.follow_generation
-            await turn.stream.write(text)
-            turn.has_written = True
-            turn.write_count += 1
-            self._app.note_transcript_update(turn.widget)
-            self._queue_follow_tail(turn)
+            try:
+                # The first provider fragment can arrive in the same event-loop
+                # tick as the StreamMessage mount. Wait for compose() to mount its
+                # Markdown child before calling the public append API.
+                await turn.mounted
+                await turn.widget.append_markdown(text)
+            except Exception:
+                # Keep the authoritative full source and repair the widget during
+                # finalization instead of allowing one incremental parser/layout
+                # failure to terminate the app or strand all later fragments.
+                turn.incremental_write_failed = True
+            else:
+                turn.has_written = True
+                turn.write_count += 1
+                self._app.note_transcript_update(turn.widget)
+                self._queue_follow_tail(turn)
         finally:
             turn.drain_running = False
             turn.drain_scheduled = False
@@ -235,17 +258,19 @@ class MarkdownStreamController:
         try:
             if turn.discarded:
                 return
-            text = "".join((*turn.pending, *turn.deferred))
             turn.pending.clear()
             turn.pending_bytes = 0
             turn.deferred.clear()
             transcript = self._app.transcript
             if transcript is not None and transcript.is_following:
                 turn.follow_generation = transcript.follow_generation
-            if text:
-                await turn.stream.write(text)
-                turn.write_count += 1
-            await self._stop(turn)
+
+            # Always reconcile from authoritative source. Besides repairing failed
+            # incremental writes, this replaces provider deltas with the exact
+            # MessageCompleted content when providers normalize their final text.
+            await turn.mounted
+            await turn.widget.replace_markdown(turn.source)
+            turn.write_count += 1
             self._last_completed_write_count = turn.write_count
             self._app.settle_stream_widget(turn.widget)
             self._app.note_transcript_update(turn.widget)
@@ -253,6 +278,3 @@ class MarkdownStreamController:
         finally:
             turn.finalize_scheduled = False
             self._finish_callback()
-
-    async def _stop(self, turn: _StreamTurn) -> None:
-        await turn.stream.stop()

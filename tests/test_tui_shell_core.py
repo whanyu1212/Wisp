@@ -18,6 +18,7 @@ from wisp.events import (
     ContextEstimate,
     ContextEstimated,
     MessageCompleted,
+    MessageDelta,
     MessageRole,
     MessageStarted,
     ProviderRetrying,
@@ -1651,6 +1652,42 @@ def test_tui_shell_updates_context_before_suppressing_streamed_completion() -> N
         assert renderer.snapshots[-1].context.observed_tokens == 12_000
         assert renderer.snapshots[-1].context.observed_is_current is True
         assert [event.content for event in renderer.streamed_messages] == ["streamed answer"]
+
+    anyio.run(run)
+
+
+def test_tui_shell_keeps_text_stream_open_across_thinking_deltas() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.deltas: list[str] = []
+            self.completions: list[str | None] = []
+
+        def token_delta(self, delta: str) -> None:
+            self.deltas.append(delta)
+
+        def end_token_stream(self, completed_content: str | None = None) -> None:
+            self.completions.append(completed_content)
+
+    async def run() -> None:
+        renderer = RecordingRenderer()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+
+        await shell._handle_rpc_event(MessageDelta(turn=1, delta="first "))
+        await shell._handle_rpc_event(
+            MessageDelta(turn=1, delta="private thought", content_kind="thinking")
+        )
+        assert shell.state.token_stream_started
+        assert renderer.completions == []
+
+        await shell._handle_rpc_event(MessageDelta(turn=1, delta="second"))
+        await shell._handle_rpc_event(
+            MessageCompleted(turn=1, content="first second", finish_reason="stop")
+        )
+
+        assert renderer.deltas == ["first ", "second"]
+        assert renderer.completions == ["first second"]
+        assert not shell.state.token_stream_started
 
     anyio.run(run)
 

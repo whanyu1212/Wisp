@@ -29,7 +29,6 @@ from textual.timer import Timer
 from textual.widget import AwaitMount, Widget
 from textual.widgets import (
     DataTable,
-    Input,
     Label,
     LoadingIndicator,
     Markdown,
@@ -39,15 +38,11 @@ from textual.widgets import (
     Static,
     TextArea,
 )
-from textual.widgets._markdown import MarkdownStream
 from textual.widgets.option_list import Option
 
 from wisp.events import RpcSessionSummary, ToolApprovalRequested, TrustRequested
 from wisp.providers.catalog import ModelCatalogProviderEntry
-from wisp.runtime.commands import CommandDescriptor
-from wisp.tui.command_palette import search_command_catalog
 from wisp.tui.commands import (
-    DEFAULT_TUI_COMMAND_CATALOG,
     MODEL_COMMAND_CLEAR_EFFORT_TOKEN,
     SLASH_COMMAND_SPECS,
     SlashCommandSpec,
@@ -599,6 +594,8 @@ class DecisionPanel(Vertical):
     DEFAULT_CSS = """
     DecisionPanel {
         display: none;
+        width: 72;
+        max-width: 90%;
         height: auto;
         max-height: 15;
         margin: 0 1;
@@ -1563,7 +1560,7 @@ class TranscriptEmptyState(Vertical):
         yield self._centered(Label(self._hint, id="transcript-empty-hint", markup=False))
         yield self._centered(
             Static(
-                "/resume session  ·  Ctrl+O actions",
+                "/ commands  ·  /resume session",
                 id="transcript-empty-actions",
                 markup=False,
             )
@@ -1927,205 +1924,6 @@ class Transcript(VerticalScroll):
             self.post_message(self.FollowChanged(True))
 
 
-class CommandPalette(Vertical):
-    """Searchable overlay backed by the TUI's executable command catalog."""
-
-    DEFAULT_CSS = """
-    CommandPalette {
-        overlay: screen;
-        constrain: inside;
-        display: none;
-        width: 72;
-        max-width: 90%;
-        height: auto;
-        max-height: 18;
-        offset: 0 -100%;
-        border: round $accent;
-        background: $panel;
-        padding: 0 1;
-    }
-
-    CommandPalette #command-palette-query {
-        height: 3;
-        border: none;
-        border-bottom: solid $secondary;
-        background: transparent;
-        padding: 0 1;
-    }
-
-    CommandPalette #command-palette-options {
-        height: auto;
-        max-height: 12;
-        border: none;
-        background: transparent;
-        padding: 0;
-        scrollbar-size-vertical: 1;
-    }
-
-    CommandPalette #command-palette-options > .option-list--option-highlighted {
-        background: $accent 30%;
-    }
-
-    CommandPalette #command-palette-hint {
-        height: 1;
-        color: $text-muted;
-        text-align: right;
-        text-style: dim;
-    }
-    """
-
-    class Selected(Message):
-        """One command explicitly selected from the palette."""
-
-        def __init__(self, descriptor: CommandDescriptor) -> None:
-            super().__init__()
-            self.descriptor = descriptor
-
-    class Cancelled(Message):
-        """The palette was dismissed without invoking a command."""
-
-    def __init__(self, id: str | None = None) -> None:  # noqa: A002
-        super().__init__(id=id)
-        self._query = Input(placeholder="Search commands", id="command-palette-query")
-        self._options = OptionList(id="command-palette-options")
-        self._hint = Static(
-            "↑↓ navigate · enter run · esc cancel",
-            id="command-palette-hint",
-            markup=False,
-        )
-        self._catalog = DEFAULT_TUI_COMMAND_CATALOG
-        self._visible: tuple[CommandDescriptor, ...] = ()
-        self._submitted = False
-        self._opened_at = 0.0
-
-    def compose(self) -> ComposeResult:
-        yield self._query
-        yield self._options
-        yield self._hint
-
-    @property
-    def is_open(self) -> bool:
-        return self.display
-
-    def set_catalog(self, catalog: TuiCommandCatalog) -> None:
-        self._catalog = catalog
-        if self.is_open:
-            self._refresh_options()
-
-    def move_highlight_page_up(self) -> None:
-        self._options.action_page_up()  # type: ignore[no-untyped-call]
-
-    def move_highlight_page_down(self) -> None:
-        self._options.action_page_down()  # type: ignore[no-untyped-call]
-
-    def move_highlight_first(self) -> None:
-        self._options.action_first()
-
-    def move_highlight_last(self) -> None:
-        self._options.action_last()
-
-    def show(self) -> None:
-        self._submitted = False
-        self._opened_at = time.monotonic()
-        self._query.value = ""
-        self.display = True
-        self._refresh_options()
-        self._query.focus()
-
-    def hide(self) -> None:
-        self.display = False
-        self._submitted = False
-
-    def _refresh_options(self) -> None:
-        matches = search_command_catalog(self._catalog, self._query.value)
-        self._visible = tuple(match.descriptor for match in matches)
-        self._options.clear_options()
-        for descriptor in self._visible:
-            self._options.add_option(
-                Option(
-                    Content(self._option_label(descriptor)),
-                    id=descriptor.name,
-                )
-            )
-        if self._visible:
-            self._options.highlighted = 0
-            self._hint.update("↑↓ navigate · enter run · esc cancel")
-        else:
-            self._options.add_option(Option("No matching commands.", disabled=True))
-            self._hint.update("esc close")
-
-    @staticmethod
-    def _option_label(descriptor: CommandDescriptor) -> str:
-        arguments = " ".join(
-            f"<{argument.name}>" if argument.required else f"[{argument.name}]"
-            for argument in descriptor.arguments
-        )
-        invocation = descriptor.slash_command
-        if arguments:
-            invocation = f"{invocation} {arguments}"
-        aliases = ", ".join(descriptor.slash_aliases)
-        alias_text = f" · aliases {aliases}" if aliases else ""
-        return (
-            f"{descriptor.title}  {invocation} · {descriptor.category}\n"
-            f"  {descriptor.description}{alias_text}"
-        )
-
-    def _move(self, action: str) -> None:
-        getattr(self._options, action)()
-
-    def submit_current_selection(self) -> None:
-        if self._submitted or not self.is_open:
-            return
-        highlighted = self._options.highlighted
-        if highlighted is None or highlighted >= len(self._visible):
-            return
-        self._submitted = True
-        self.post_message(self.Selected(self._visible[highlighted]))
-
-    def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input is not self._query:
-            return
-        event.stop()
-        self._refresh_options()
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        if event.option_list is not self._options:
-            return
-        event.stop()
-        if event.time < self._opened_at:
-            return
-        self.submit_current_selection()
-
-    def on_key(self, event: events.Key) -> None:
-        if not self.is_open:
-            return
-        if event.time < self._opened_at:
-            event.prevent_default()
-            event.stop()
-            return
-        actions = {
-            "down": "action_cursor_down",
-            "up": "action_cursor_up",
-            "pagedown": "action_page_down",
-            "pageup": "action_page_up",
-            "home": "action_first",
-            "end": "action_last",
-        }
-        action = actions.get(event.key)
-        if action is not None:
-            self._move(action)
-            event.prevent_default()
-            event.stop()
-        elif event.key == "enter":
-            self.submit_current_selection()
-            event.prevent_default()
-            event.stop()
-        elif event.key == "escape":
-            self.post_message(self.Cancelled())
-            event.prevent_default()
-            event.stop()
-
-
 class SlashSuggest(OptionList):
     """Inline slash-command completion menu, Claude-Code style.
 
@@ -2165,12 +1963,13 @@ class SlashSuggest(OptionList):
         max-height: 8;
         offset: 0 -100%;
         border: round $accent;
-        background: $panel;
+        background: $background;
         padding: 0 1;
         scrollbar-size-vertical: 1;
     }
     SlashSuggest > .option-list--option-highlighted {
-        background: $accent 30%;
+        background: transparent;
+        color: $accent;
     }
     """
 
@@ -2686,7 +2485,7 @@ class StatusBar(Static):
 
 
 class StreamMessage(Widget):
-    """The streaming assistant turn, backed by Textual's native Markdown stream."""
+    """One assistant turn rendered through Textual's public Markdown API."""
 
     DEFAULT_CSS = """
     StreamMessage {
@@ -2709,5 +2508,12 @@ class StreamMessage(Widget):
     def compose(self) -> ComposeResult:
         yield self._markdown
 
-    def get_stream(self) -> MarkdownStream:
-        return Markdown.get_stream(self._markdown)
+    async def append_markdown(self, fragment: str) -> None:
+        """Append one provider fragment after Textual has applied its layout update."""
+
+        await self._markdown.append(fragment)
+
+    async def replace_markdown(self, content: str) -> None:
+        """Replace the document from the authoritative completed message."""
+
+        await self._markdown.update(content)
