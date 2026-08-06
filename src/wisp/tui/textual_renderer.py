@@ -110,6 +110,11 @@ class TextualTuiRenderer:
 
     def view_updated(self, snapshot: TuiViewSnapshot) -> None:
         self._visible_input_mode = snapshot.input_mode
+        # Rebuild the `@`-picker corpus only when the project root actually moves.
+        # view_updated fires on every snapshot, and the walk is a threaded worker —
+        # kicking one off per redraw would thrash the pool for no benefit.
+        if snapshot.cwd != self._visible_cwd:
+            self.app.load_file_suggestions(snapshot.cwd)
         self._visible_cwd = snapshot.cwd
         self.app.set_input_hint(snapshot.input_hint)
         self.app.set_status(snapshot)
