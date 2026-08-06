@@ -435,6 +435,29 @@ def test_persist_user_model_selection_round_trips_through_settings(tmp_path: Pat
     assert settings.effort == "HIGH"
 
 
+def test_persist_user_model_selection_removes_invalid_recognized_settings(
+    tmp_path: Path,
+) -> None:
+    _write_settings(
+        tmp_path,
+        context_reserve_tokens=-1,
+        session_dir="/tmp/sessions",
+        future_setting={"enabled": True},
+    )
+
+    persist_user_model_selection("anthropic", "claude-opus-4-8", "high", home_dir=tmp_path)
+
+    path = user_settings_path(home_dir=tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert "context_reserve_tokens" not in data
+    assert data["session_dir"] == "/tmp/sessions"
+    assert data["future_setting"] == {"enabled": True}
+    settings = resolve_settings(project_dir=tmp_path / "proj", home_dir=tmp_path)
+    assert settings.provider == "anthropic"
+    assert settings.model == "claude-opus-4-8"
+    assert settings.effort == "high"
+
+
 def test_persist_user_effort_writes_a_new_file(tmp_path: Path) -> None:
     persist_user_effort("high", home_dir=tmp_path)
 

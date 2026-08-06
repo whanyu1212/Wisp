@@ -282,6 +282,19 @@ def _persist_user_settings(
         if isinstance(parsed, dict):
             data = parsed
 
+    # A valid JSON object can still contain values rejected by WispSettings. If
+    # those values survive this write, the next startup rejects the entire file and
+    # loses the newly persisted selection. Remove only invalid recognized top-level
+    # fields; preserve valid and unknown keys for forward compatibility.
+    try:
+        WispSettings.model_validate(data)
+    except ValidationError as exc:
+        for error in exc.errors():
+            location = error.get("loc", ())
+            field = location[0] if location else None
+            if isinstance(field, str) and field in WispSettings.model_fields:
+                data.pop(field, None)
+
     for key, value in updates.items():
         if value is None:
             data.pop(key, None)
