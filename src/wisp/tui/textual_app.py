@@ -25,6 +25,7 @@ from textual.content import Content
 from textual.widget import AwaitMount, Widget
 from textual.widgets import Static, TextArea
 
+from wisp.config import WispConfig
 from wisp.events import (
     RpcSessionSummary,
     SessionStats,
@@ -603,8 +604,7 @@ class TextualTui(App[None]):
     @work(thread=True, exclusive=True, group="file-suggest")
     def _collect_file_suggestions(self, cwd: str, picker: FileSuggest) -> None:
         root = Path(cwd)
-        config = FileIndexConfig(root=root, context=ToolContext(cwd=root))
-        paths = collect_paths(config)
+        paths = collect_paths(FileIndexConfig(root=root, context=_file_index_context(root)))
         # Hop back to the event loop: widget state must not be mutated from a worker.
         self.call_from_thread(picker.set_paths, paths)
 
@@ -2047,6 +2047,34 @@ class TextualTui(App[None]):
         """Surface live-controller updates through the history-prepend guard."""
 
         self.note_transcript_update(widget)
+
+
+def _file_index_context(root: Path) -> ToolContext:
+    """Resolve the protected-path policy governing what the `@` picker may list.
+
+    A bare ``ToolContext(cwd=root)`` would hardcode ``DEFAULT_PROTECTED_PATHS`` and
+    silently ignore the user's real policy: a configured ``protected_paths`` entry
+    (say ``secrets.yaml``) would be denied by the agent's tools but still offered
+    for ``@``-mention here, and a nonstandard ``auth_path`` would lose the
+    credential-file backstop that ``ToolContext.from_config`` guarantees. So resolve
+    config the same way the agent does (``coding/configuration.py``) and derive the
+    context from it.
+
+    ``trusted=False`` is deliberate. ``protected_paths`` is a user-scoped security
+    setting that ``wisp.settings`` never reads from project-controlled config, so
+    omitting the project layer cannot weaken the policy — at worst the picker hides
+    a file the agent would have shown, which fails closed.
+
+    Config resolution touches the filesystem, so this runs on the picker's worker
+    thread, never the event loop. A failure here must not take the TUI down: the
+    picker is advisory, and falling back to the secure defaults keeps secrets hidden.
+    """
+
+    try:
+        config = WispConfig.from_env(project_dir=root)
+        return ToolContext.from_config(config, cwd=root)
+    except Exception:
+        return ToolContext(cwd=root)
 
 
 def create_textual_tui() -> tuple[TextualTui, TuiRenderer]:

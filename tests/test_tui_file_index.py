@@ -8,6 +8,7 @@ import pytest
 
 from wisp.tools.context import ToolContext
 from wisp.tui.file_index import FileIndexConfig, collect_paths, filter_paths, score_path
+from wisp.tui.textual_app import _file_index_context
 
 pytestmark = pytest.mark.tui
 
@@ -115,6 +116,49 @@ def test_unreadable_directory_is_skipped(tmp_path: Path) -> None:
         assert "readable/file.txt" in paths
     finally:
         blocked.chmod(0o755)
+
+
+# --- policy resolution -----------------------------------------------------
+
+
+def test_context_honors_user_configured_protected_paths(tmp_path: Path) -> None:
+    """A bare ToolContext would hardcode the defaults and leak a configured secret."""
+
+    settings = Path.home() / ".wisp"
+    settings.mkdir(parents=True, exist_ok=True)
+    (settings / "settings.json").write_text(
+        '{"protected_paths": [".env", "secrets.yaml"]}', encoding="utf-8"
+    )
+    _write(tmp_path, "secrets.yaml", "TOKEN=1")
+    _write(tmp_path, "app.py")
+
+    context = _file_index_context(tmp_path)
+    paths = collect_paths(FileIndexConfig(root=tmp_path, context=context))
+
+    assert "secrets.yaml" in context.protected_paths
+    assert "secrets.yaml" not in paths
+    assert "app.py" in paths
+
+
+def test_context_protects_the_credential_file(tmp_path: Path) -> None:
+    """ToolContext.from_config appends auth_path; a bare context would not."""
+
+    context = _file_index_context(tmp_path)
+
+    assert any(pattern.endswith("auth.json") for pattern in context.protected_paths)
+
+
+def test_context_falls_back_to_secure_defaults(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Config resolution failing must not crash the TUI, and must not open the gate."""
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("settings unreadable")
+
+    monkeypatch.setattr("wisp.tui.textual_app.WispConfig.from_env", _boom)
+
+    context = _file_index_context(tmp_path)
+
+    assert ".env" in context.protected_paths
 
 
 # --- matching --------------------------------------------------------------

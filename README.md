@@ -415,6 +415,20 @@ and selected commands use the existing TUI command handler so approval, trust, a
 active-operation restrictions remain unchanged. Dynamic availability reasons, suggested actions,
 configurable bindings, and extension command handlers remain future work.
 
+Type `@` in the Textual composer to reference a project file. An inline picker opens above the
+input and filters as you keep typing, matching loosely so `@tuiapp` finds
+`src/wisp/tui/textual_app.py`; contiguous matches, filename matches, and shorter paths rank
+highest. Use Up/Down to move, Enter or Tab to insert the highlighted path, and Escape to dismiss
+without changing what you typed. Only the relative path is inserted — Wisp does not inline file
+contents, so the model reads the file through its normal file tool and every read stays subject
+to approval and the `protected_paths` guard. The listing itself honors that same policy, so
+secrets such as `.env` are never offered, and build directories (`.git`, `node_modules`,
+`__pycache__`, and friends) are skipped. Mentions are only recognized at the start of a line or
+after a space, so email addresses and decorators are unaffected; paths containing spaces are
+inserted quoted. Note that `.gitignore` is not yet consulted, so untracked output in
+unconventional locations can still appear. Tree-style browsing and a persistent file sidebar
+remain future work.
+
 TUI login currently uses the `openai-codex` device-code flow; browser login is available from the
 CLI (`uv run wisp auth login openai-codex`). `/model` with no arguments opens a model picker in
 the Textual TUI and lists every catalog model grouped by provider in line mode. Textual keeps the
