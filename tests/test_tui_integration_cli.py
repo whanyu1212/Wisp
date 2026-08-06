@@ -48,6 +48,8 @@ from wisp.tui.widgets import (
     PromptEditor as Input,
 )
 
+pytestmark = pytest.mark.tui
+
 
 def _transcript_texts(app: TextualTui) -> list[str]:
     """Plain text of every mounted transcript message (line + streamed)."""
@@ -922,11 +924,10 @@ def test_textual_tui_renderer_can_be_constructed() -> None:
 def test_textual_tui_preserves_brackets_in_streamed_output() -> None:
     async def scenario() -> str:
         app_instance = TextualTui()
-        async with app_instance.run_test() as pilot:
+        async with app_instance.run_test():
             app_instance.append_stream("code has [brackets] and [/close] tags")
             app_instance.flush_stream()
-            await pilot.pause()
-            await pilot.pause()
+            await app_instance.wait_for_stream_idle()
             # Streamed assistant text renders as Markdown; bracketed text must
             # survive intact (Markdown source is not Rich-markup-interpreted).
             return "\n".join(_transcript_texts(app_instance))
@@ -2755,8 +2756,7 @@ def _stream_deltas(deltas: list[str], *, pause_between: bool) -> tuple[list[str]
                 if pause_between:
                     await pilot.pause()
             renderer.end_token_stream()
-            await pilot.pause()
-            await pilot.pause()  # let the deferred finalize settle
+            await app_instance.wait_for_stream_idle()
             transcript = app_instance.query_one("#transcript", Transcript)
             streams = sum(1 for c in transcript.children if isinstance(c, StreamMessage))
             return _transcript_texts(app_instance), streams
@@ -2901,8 +2901,8 @@ def test_textual_streamed_and_line_messages_use_distinct_widgets() -> None:
         async with app_instance.run_test() as pilot:
             renderer.token_delta("streamed reply")
             renderer.end_token_stream()
+            await app_instance.wait_for_stream_idle()
             renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={}))
-            await pilot.pause()
             await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
             return [type(c).__name__ for c in transcript.children]
@@ -4119,8 +4119,8 @@ def test_textual_streaming_keeps_the_growing_tail_visible() -> None:
                 renderer.token_delta(chunk)
                 await pilot.pause()
             renderer.end_token_stream()
-            await pilot.pause()
-            await pilot.pause()  # second pass: catch the settled max_scroll_y
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()  # settle the final layout and follow callback
             return transcript.scroll_y, transcript.max_scroll_y
 
     scroll_y, max_scroll_y = anyio.run(scenario)
@@ -4130,8 +4130,14 @@ def test_textual_streaming_keeps_the_growing_tail_visible() -> None:
 
 def test_textual_streaming_keeps_a_large_many_block_reply_pinned_to_the_tail() -> None:
     # A large, many-block Markdown reply (headings + lists) must still end pinned to
-    # the tail after the native stream drains its queued incremental renders.
-    async def scenario() -> tuple[float, float]:
+    # the tail when a burst of provider deltas is coalesced into one native write.
+    blocks: list[str] = []
+    for i in range(80):
+        blocks.append(f"## Section {i}")
+        blocks.append(f"- point a {i}\n- point b {i}")
+    body = "\n\n".join(blocks)
+
+    async def scenario() -> tuple[float, float, str, int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(60, 12)) as pilot:
             transcript = app_instance.query_one("#transcript", Transcript)
@@ -4139,20 +4145,25 @@ def test_textual_streaming_keeps_a_large_many_block_reply_pinned_to_the_tail() -
             await pilot.pause()
             transcript.scroll_end(animate=False)
             await pilot.pause()
-            blocks: list[str] = []
-            for i in range(80):
-                blocks.append(f"## Section {i}")
-                blocks.append(f"- point a {i}\n- point b {i}")
-            body = "\n\n".join(blocks)
             for chunk in (body[i : i + 80] for i in range(0, len(body), 80)):
                 renderer.token_delta(chunk)
-                await pilot.pause()
             renderer.end_token_stream()
+            await app_instance.wait_for_stream_idle()
             await pilot.pause()
-            await pilot.pause()
-            return transcript.scroll_y, transcript.max_scroll_y
+            with anyio.fail_after(2):
+                while transcript.scroll_y < transcript.max_scroll_y - 3:
+                    await pilot.pause()
+            stream = transcript.query_one(StreamMessage)
+            return (
+                transcript.scroll_y,
+                transcript.max_scroll_y,
+                stream._markdown.source,
+                app_instance.last_stream_write_count,
+            )
 
-    scroll_y, max_scroll_y = anyio.run(scenario)
+    scroll_y, max_scroll_y, rendered, write_count = anyio.run(scenario)
+    assert rendered == body
+    assert write_count == 1
     assert max_scroll_y > 100  # a genuinely large, overflowing reply
     assert scroll_y >= max_scroll_y - 3  # still pinned to the tail
 
@@ -4174,7 +4185,7 @@ def test_textual_streaming_does_not_yank_a_reader_who_scrolled_up() -> None:
                 renderer.token_delta(f"new line {i}\n\n")
                 await pilot.pause()
             renderer.end_token_stream()
-            await pilot.pause()
+            await app_instance.wait_for_stream_idle()
             await pilot.pause()
             return transcript.scroll_y, transcript._follow
 
@@ -4473,7 +4484,7 @@ def test_textual_returning_to_the_bottom_resumes_following() -> None:
             await pilot.pause()
             renderer.token_delta("resumed answer\n\n")
             renderer.end_token_stream()
-            await pilot.pause()
+            await app_instance.wait_for_stream_idle()
             await pilot.pause()
             return transcript.scroll_y, transcript.max_scroll_y
 
@@ -4510,7 +4521,7 @@ def test_textual_scrollback_keys_reach_transcript_and_compose_with_follow() -> N
 
             renderer.token_delta("tail line\n\n")
             renderer.end_token_stream()
-            await pilot.pause()
+            await app_instance.wait_for_stream_idle()
             await pilot.pause()
 
             return {
@@ -6154,7 +6165,7 @@ def test_textual_transcript_autocopy_skips_while_streaming() -> None:
 
             # Flush the stream: the guard lifts and a later selection copies again.
             app_instance.flush_stream()
-            await pilot.pause()
+            await app_instance.wait_for_stream_idle()
             assert not app_instance._is_streaming()
             app_instance.on_text_selected()
             after_flush = list(copied)

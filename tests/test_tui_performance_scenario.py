@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import anyio
+import pytest
 
 from benchmarks.tui_long_session import ScenarioConfig, run_scenario
 from wisp.tui.transcript_window import (
     TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
     TUI_TRANSCRIPT_WINDOW_SIZE,
 )
+
+pytestmark = pytest.mark.benchmark
 
 
 def test_tui_long_session_scenario_reports_bounded_widget_growth() -> None:

@@ -15,10 +15,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Lint, type-check, and test
+  quality:
+    name: Format, lint, and type-check
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -46,10 +46,42 @@ jobs:
       - name: Type-check
         run: uv run mypy
 
-      - name: Test
+  test:
+    name: Test (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: core
+            marker: not (slow or tui or process or benchmark)
+          - suite: tui
+            marker: tui
+          - suite: system-and-slow
+            marker: (slow or process or benchmark) and not tui
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Test ${{ matrix.suite }} suite
         env:
           WISP_TRUST: "1"
           WISP_EFFORT: xhigh
           WISP_CONTEXT_RESERVE_TOKENS: "4096"
           WISP_AUTO_COMPACTION: "0"
-        run: uv run pytest tests
+        run: uv run pytest tests -m '${{ matrix.marker }}' --durations=20

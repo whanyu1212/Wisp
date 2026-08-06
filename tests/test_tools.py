@@ -941,6 +941,7 @@ def test_bash_tool_does_not_kill_process_at_exact_output_limit(tmp_path: Path) -
     assert marker.read_text(encoding="utf-8") == "ok"
 
 
+@pytest.mark.process
 def test_bash_tool_reports_timeout_and_kills_child_processes(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     python = shlex.quote(sys.executable)
@@ -1673,6 +1674,7 @@ def test_posix_shell_spawn_cancellation_cleans_tracking_resources(
     assert len(removed_files) == 1
 
 
+@pytest.mark.process
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
 def test_bash_timeout_kills_background_child_after_shell_exits(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
@@ -1686,6 +1688,7 @@ def test_bash_timeout_kills_background_child_after_shell_exits(tmp_path: Path) -
     assert not marker.exists()
 
 
+@pytest.mark.process
 def test_bash_tool_cancellation_kills_child_processes(tmp_path: Path) -> None:
     if os.name != "posix":
         pytest.skip("POSIX process-group cancellation regression")

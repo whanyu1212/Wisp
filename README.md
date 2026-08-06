@@ -900,9 +900,12 @@ normalize expected transport and provider failures into a failed terminal event.
 `ScriptedProvider` to exercise deterministic multi-turn and failure cases without a live model.
 
 ```bash
-uv sync            # install
-uv run pytest      # test
+uv sync                                                              # install
+uv run pytest tests                                                   # complete suite
+uv run pytest tests -m 'not (slow or tui or process or benchmark)'   # faster core checks
 ```
 
-The test suite runs against the deterministic `fake` provider, so the agent core, CLI, and JSONL
-sessions can be exercised without API keys or network access.
+The complete test suite runs against the deterministic `fake` provider, so the agent core, CLI,
+and JSONL sessions can be exercised without API keys or network access. The optional marker
+selection excludes headless TUI, real-process, benchmark, and other intentionally slow tests for
+faster local feedback; run the complete command before considering a change fully verified.
