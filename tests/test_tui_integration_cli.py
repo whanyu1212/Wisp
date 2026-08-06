@@ -2947,7 +2947,7 @@ def test_textual_line_messages_carry_role_classes() -> None:
     ]
 
 
-def test_textual_turn_rails_use_single_thick_border() -> None:
+def test_textual_turn_rails_use_half_cell_border() -> None:
     async def scenario() -> list[tuple[str, str]]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
@@ -2962,8 +2962,8 @@ def test_textual_turn_rails_use_single_thick_border() -> None:
             ]
 
     assert anyio.run(scenario) == [
-        ("message--assistant", "thick"),
-        ("message--tool", "thick"),
+        ("message--assistant", "outer"),
+        ("message--tool", "outer"),
     ]
 
 

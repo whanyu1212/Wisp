@@ -551,19 +551,61 @@ class CodingSession:
             # Steering queued while preflight compaction was running must affect
             # the first provider request, not wait for that request to finish.
             self._accepting_queued_messages = False
-            for queue_event in harness.drain_steering():
-                if isinstance(queue_event, QueueMessageInjected):
-                    self._queue_message(
+            try:
+                steering_injected = False
+                for queue_event in harness.drain_steering():
+                    if isinstance(queue_event, QueueMessageInjected):
+                        steering_injected = True
+                        self._queue_message(
+                            session,
+                            Message(
+                                role="user",
+                                content=queue_event.content,
+                                created_at=queue_event.timestamp,
+                            ),
+                            operation_id=operation_id,
+                        )
+                    yield await emit(queue_event)
+                if steering_injected:
+                    steering_compacted = False
+                    async for compaction_event in self._maybe_auto_compact(
                         session,
-                        Message(
-                            role="user",
-                            content=queue_event.content,
-                            created_at=queue_event.timestamp,
-                        ),
+                        harness,
+                        status=auto_compaction_status,
                         operation_id=operation_id,
-                    )
-                yield await emit(queue_event)
-            self._accepting_queued_messages = True
+                        preflight_active_entry_id=user_entry.id,
+                    ):
+                        if (
+                            isinstance(compaction_event, CompactionCompleted)
+                            and compaction_event.outcome == "completed"
+                        ):
+                            steering_compacted = True
+                        yield compaction_event
+                    if steering_compacted:
+                        active_history = await anyio.to_thread.run_sync(
+                            session.read_context_messages
+                        )
+                        harness.replace_messages(
+                            (*prompt_messages, *self._conversation_history(active_history))
+                        )
+                    remaining_budget = self._harness_context_budget(harness)
+                    if self._exceeds_provider_auto_compaction_limit(remaining_budget):
+                        error_message = (
+                            "Active prompt and steering exceed the provider "
+                            "auto-compaction limit after compacting all eligible history"
+                        )
+                        await rollback_active_prompt()
+                        yield await emit(ErrorEvent(message=error_message))
+                        yield await emit(
+                            AgentCompleted(
+                                session_id=session.session_id,
+                                turns=0,
+                                outcome="failed",
+                            )
+                        )
+                        raise ContextOverflowError(error_message)
+            finally:
+                self._accepting_queued_messages = True
 
         turns = 0
         had_tool_round = False
@@ -761,6 +803,7 @@ class CodingSession:
                         trigger_budget=overflow_budget,
                     ),
                     session=session,
+                    operation_id=operation_id,
                 )
                 yield await self._emit_recoverable_event(
                     CompactionCompleted(
@@ -774,6 +817,7 @@ class CodingSession:
                         error=str(exc),
                     ),
                     session=session,
+                    operation_id=operation_id,
                 )
                 recovery_error = f"Context overflow recovery failed: {exc}"
                 yield await emit(ErrorEvent(message=recovery_error))
@@ -957,6 +1001,7 @@ class CodingSession:
                     trigger_budget=budget,
                 ),
                 session=session,
+                operation_id=operation_id,
             )
             yield await self._emit_recoverable_event(
                 CompactionCompleted(
@@ -970,6 +1015,7 @@ class CodingSession:
                     error=str(exc),
                 ),
                 session=session,
+                operation_id=operation_id,
             )
             return
         async for event in self._compact_locked(
@@ -1024,9 +1070,13 @@ class CodingSession:
         summary: CompactionSummary | None = None
         try:
             if recover_failure:
-                yield await self._emit_recoverable_event(started, session=session)
+                yield await self._emit_recoverable_event(
+                    started,
+                    session=session,
+                    operation_id=operation_id,
+                )
             else:
-                yield await self._emit(started, session=session)
+                yield await self._emit(started, session=session, operation_id=operation_id)
             summary = await summarize_manual_compaction(
                 plan,
                 provider=self.provider,
@@ -1075,7 +1125,7 @@ class CodingSession:
                 self._context_observations.pop(session.session_id, None)
                 saved = SessionSaved(session_id=session.session_id, path=session.path)
                 try:
-                    await self._emit(saved, session=session)
+                    await self._emit(saved, session=session, operation_id=operation_id)
                 except Exception as exc:
                     publication_errors.append(str(exc))
 
@@ -1108,7 +1158,7 @@ class CodingSession:
             )
             with anyio.CancelScope(shield=True):
                 try:
-                    await self._emit(completed, session=session)
+                    await self._emit(completed, session=session, operation_id=operation_id)
                 except Exception as exc:
                     publication_errors.append(str(exc))
                 if publication_errors and recover_failure:
@@ -1134,7 +1184,11 @@ class CodingSession:
                 summary_usage = summary_usage if summary_usage is not None else summary.usage
                 summary_cost = summary_cost if summary_cost is not None else summary.cost
             if not recover_failure:
-                yield await self._emit(ErrorEvent(message=error), session=session)
+                yield await self._emit(
+                    ErrorEvent(message=error),
+                    session=session,
+                    operation_id=operation_id,
+                )
             failed = CompactionCompleted(
                 session_id=session.session_id,
                 reason=reason,
@@ -1154,9 +1208,13 @@ class CodingSession:
                     if not recover_failure:
                         raise
             if recover_failure:
-                yield await self._emit_recoverable_event(failed, session=session)
+                yield await self._emit_recoverable_event(
+                    failed,
+                    session=session,
+                    operation_id=operation_id,
+                )
             else:
-                yield await self._emit(failed, session=session)
+                yield await self._emit(failed, session=session, operation_id=operation_id)
             if not recover_failure:
                 raise
         except BaseException as exc:
@@ -1175,9 +1233,17 @@ class CodingSession:
                 )
                 cancelled: WispEvent
                 if recover_failure:
-                    cancelled = await self._emit_recoverable_event(cancelled_event, session=session)
+                    cancelled = await self._emit_recoverable_event(
+                        cancelled_event,
+                        session=session,
+                        operation_id=operation_id,
+                    )
                 else:
-                    cancelled = await self._emit(cancelled_event, session=session)
+                    cancelled = await self._emit(
+                        cancelled_event,
+                        session=session,
+                        operation_id=operation_id,
+                    )
             yield cancelled
             raise
 
@@ -1186,9 +1252,14 @@ class CodingSession:
         event: WispEvent,
         *,
         session: JsonlSession,
+        operation_id: str | None = None,
     ) -> WispEvent:
         try:
-            return await self._emit(event, session=session)
+            return await self._emit(
+                event,
+                session=session,
+                operation_id=operation_id,
+            )
         except Exception:
             return event
 

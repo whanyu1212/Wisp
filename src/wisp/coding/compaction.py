@@ -5,11 +5,19 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 
 from wisp.agent.execution import ToolExecutionEvent
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
-from wisp.events import ContextBudget, MessageCompleted, TokenUsage, TurnCompleted, UsageCost
+from wisp.events import (
+    BillableTokenUsage,
+    ContextBudget,
+    MessageCompleted,
+    TokenUsage,
+    TurnCompleted,
+    UsageCost,
+)
 from wisp.providers.base import Provider
 from wisp.providers.events import ToolCall
 from wisp.sessions.replay import SessionContextRow, SessionReplay
@@ -304,10 +312,11 @@ async def summarize_manual_compaction(
         instructions=instructions,
         cost_estimator=cost_estimator,
     )
+    summaries = (*partials, final)
     return CompactionSummary(
         summary=final.summary,
-        usage=_sum_token_usage(tuple(partial.usage for partial in partials) + (final.usage,)),
-        cost=final.cost,
+        usage=_sum_token_usage(tuple(summary.usage for summary in summaries)),
+        cost=_sum_usage_cost(tuple(summary.cost for summary in summaries)),
     )
 
 
@@ -431,6 +440,60 @@ def _sum_token_usage(usages: Sequence[TokenUsage | None]) -> TokenUsage | None:
         cache_read_input_tokens=optional_sum("cache_read_input_tokens"),
         cache_write_input_tokens=optional_sum("cache_write_input_tokens"),
         reasoning_output_tokens=optional_sum("reasoning_output_tokens"),
+    )
+
+
+def _sum_usage_cost(costs: Sequence[UsageCost | None]) -> UsageCost | None:
+    present = tuple(cost for cost in costs if cost is not None)
+    if not present:
+        return None
+
+    final = present[-1]
+    billables = tuple(cost.billable for cost in present)
+    billable = (
+        BillableTokenUsage(
+            input_tokens=sum(item.input_tokens for item in billables if item is not None),
+            cache_read_input_tokens=sum(
+                item.cache_read_input_tokens for item in billables if item is not None
+            ),
+            cache_write_input_tokens=sum(
+                item.cache_write_input_tokens for item in billables if item is not None
+            ),
+            output_tokens=sum(item.output_tokens for item in billables if item is not None),
+        )
+        if len(present) == len(costs) and all(item is not None for item in billables)
+        else None
+    )
+    compatible = (
+        len(present) == len(costs)
+        and all(cost.provider == final.provider for cost in present)
+        and all(cost.requested_model == final.requested_model for cost in present)
+        and all(cost.model == final.model for cost in present)
+        and all(cost.rates == final.rates for cost in present)
+    )
+    if (
+        compatible
+        and billable is not None
+        and final.rates is not None
+        and all(cost.estimated_usd is not None for cost in present)
+    ):
+        return UsageCost(
+            provider=final.provider,
+            requested_model=final.requested_model,
+            model=final.model,
+            billable=billable,
+            rates=final.rates,
+            estimated_usd=sum(
+                (cost.estimated_usd for cost in present if cost.estimated_usd is not None),
+                Decimal(),
+            ),
+        )
+    return UsageCost(
+        provider=final.provider,
+        requested_model=final.requested_model,
+        model=final.model,
+        billable=billable,
+        unavailable_reason="estimation_failed",
     )
 
 

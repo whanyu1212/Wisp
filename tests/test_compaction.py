@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Sequence
+from decimal import Decimal
 from pathlib import Path
 
 import anyio
@@ -25,6 +26,7 @@ from wisp.coding.compaction import (
 )
 from wisp.coding.session import CodingSession
 from wisp.events import (
+    BillableTokenUsage,
     CompactionCompleted,
     CompactionStarted,
     ContextEstimated,
@@ -38,6 +40,8 @@ from wisp.events import (
     ToolExecutionEnded,
     TurnCompleted,
     TurnStarted,
+    UsageCost,
+    UsageCostRates,
     WispEvent,
     wisp_event_from_dict,
     wisp_event_from_json,
@@ -166,6 +170,34 @@ class BlockingSummaryProvider:
         yield ProviderResponseStarted(model=model or self.default_model or self.name)
         self.started.set()
         await anyio.sleep_forever()
+
+
+class GatedPreflightSummaryProvider:
+    name = "scripted"
+    default_model: str | None = "model"
+
+    def __init__(self, summary_started: anyio.Event, release_summary: anyio.Event) -> None:
+        self.summary_started = summary_started
+        self.release_summary = release_summary
+        self.calls: list[tuple[Message, ...]] = []
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+        effort: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        del tools, tool_results, previous_response_id, effort
+        self.calls.append(tuple(messages))
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        if len(self.calls) == 1:
+            self.summary_started.set()
+            await self.release_summary.wait()
+        yield ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY)
 
 
 class BlockingAutoCompactionProvider:
@@ -602,7 +634,10 @@ def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:
             del tools, tool_results, previous_response_id, effort
             self.calls.append(tuple(messages))
             yield ProviderResponseStarted(model=model or self.default_model or self.name)
-            yield ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY)
+            yield ProviderResponseCompleted(
+                content=VALID_COMPACTION_SUMMARY,
+                usage=ProviderUsage(input_tokens=10, output_tokens=2, total_tokens=12),
+            )
 
     provider = RecordingSummaryProvider()
     oversized = SessionReplay(
@@ -614,12 +649,36 @@ def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:
     )
     plan = plan_manual_compaction(oversized)
 
+    def estimate_cost(
+        provider_name: str,
+        requested_model: str | None,
+        response_model: str | None,
+        usage: TokenUsage,
+    ) -> UsageCost:
+        return UsageCost(
+            provider=provider_name,
+            requested_model=requested_model,
+            model=response_model,
+            billable=BillableTokenUsage(
+                input_tokens=usage.input_tokens,
+                cache_read_input_tokens=0,
+                cache_write_input_tokens=0,
+                output_tokens=usage.output_tokens,
+            ),
+            rates=UsageCostRates(
+                input_usd_per_million=Decimal("1"),
+                output_usd_per_million=Decimal("1"),
+            ),
+            estimated_usd=Decimal("0.25"),
+        )
+
     async def run() -> CompactionSummary:
         return await summarize_manual_compaction(
             plan,
             provider=provider,
             context_window=2_000,
             reserve_tokens=400,
+            cost_estimator=estimate_cost,
         )
 
     summary = anyio.run(run)
@@ -627,6 +686,15 @@ def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:
     assert summary.summary == VALID_COMPACTION_SUMMARY
     assert len(provider.calls) > 2
     assert all(len(call[-1].content) <= 4_800 for call in provider.calls)
+    assert summary.usage == TokenUsage(
+        input_tokens=10 * len(provider.calls),
+        output_tokens=2 * len(provider.calls),
+        total_tokens=12 * len(provider.calls),
+    )
+    assert summary.cost is not None
+    assert summary.cost.estimated_usd == Decimal("0.25") * len(provider.calls)
+    assert summary.cost.billable is not None
+    assert summary.cost.billable.input_tokens == 10 * len(provider.calls)
 
 
 @pytest.mark.parametrize(
@@ -1228,6 +1296,68 @@ def test_coding_session_preflight_compacts_one_completed_turn(tmp_path: Path) ->
     assert record.replaced_entry_ids == first_turn_ids
     assert len(provider.calls) == 2
     assert provider.calls[1].messages[-1].content == "question two"
+
+
+def test_coding_session_rechecks_limit_after_preflight_steering(tmp_path: Path) -> None:
+    summary_started = anyio.Event()
+    release_summary = anyio.Event()
+    provider = GatedPreflightSummaryProvider(summary_started, release_summary)
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    history = (
+        Message(role="user", content="question one " + "a" * 3_500),
+        Message(
+            role="assistant",
+            content="answer one " + "b" * 3_500,
+            finish_reason="stop",
+        ),
+    )
+
+    async def run() -> None:
+        for message in history:
+            await session.append_message(message)
+        entry_start = len(session.read_entries())
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(
+                context_window=4_000,
+                auto_compact_token_limit=1_600,
+            ),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=100,
+        )
+
+        async def consume() -> None:
+            with pytest.raises(ContextOverflowError, match="prompt and steering exceed"):
+                _events = [
+                    event
+                    async for event in agent.run(
+                        "question two",
+                        session=session,
+                        history=history,
+                        operation_id="prompt-1",
+                    )
+                ]
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(consume)
+            await summary_started.wait()
+            agent.steer("x" * 8_000)
+            release_summary.set()
+
+        assert session.read_context_messages() == history
+        assert all(
+            entry.operation_id == "prompt-1" for entry in session.read_entries()[entry_start:]
+        )
+
+    anyio.run(run)
+
+    # The only provider call is the initial compaction summary. The oversized
+    # steering is rejected after injection and before the agent turn begins.
+    assert len(provider.calls) == 1
+    assert provider.calls[0][0].content.startswith("Create a concise")
 
 
 def test_coding_session_rejects_oversized_fresh_prompt_before_provider(
