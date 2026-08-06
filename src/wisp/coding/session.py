@@ -489,6 +489,7 @@ class CodingSession:
                 session,
                 harness,
                 status=auto_compaction_status,
+                operation_id=operation_id,
             ):
                 if (
                     isinstance(compaction_event, CompactionCompleted)
@@ -729,6 +730,7 @@ class CodingSession:
                 session,
                 harness,
                 status=auto_compaction_status,
+                operation_id=operation_id,
             ):
                 if isinstance(compaction_event, SessionSaved):
                     auto_compaction_saved = True
@@ -775,6 +777,7 @@ class CodingSession:
         harness: AgentHarness,
         *,
         status: _AutoCompactionStatus,
+        operation_id: str | None = None,
     ) -> AsyncIterator[WispEvent]:
         provider_messages = self._normalize_provider_messages(harness.messages)
         tools = tuple(harness.config.tools)
@@ -841,6 +844,7 @@ class CodingSession:
             instructions=None,
             trigger_budget=budget,
             recover_failure=True,
+            operation_id=operation_id,
         ):
             yield event
 

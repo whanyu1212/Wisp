@@ -947,11 +947,12 @@ def test_coding_session_compacts_before_provider_limit_request(
     store = JsonlSessionStore(tmp_path)
     session = store.create()
 
-    async def run() -> tuple[list[WispEvent], tuple[str, str]]:
+    async def run() -> tuple[list[WispEvent], tuple[str, str], int]:
         first = await session.append_message(first_user)
         second = await session.append_message(first_assistant)
         await session.append_message(second_user)
         await session.append_message(second_assistant)
+        entry_start = len(session.read_entries())
         agent = CodingSession(
             provider=provider,
             sessions=store,
@@ -963,10 +964,18 @@ def test_coding_session_compacts_before_provider_limit_request(
             prompt_messages=prompt_messages,
             context_reserve_tokens=100,
         )
-        events = [event async for event in agent.run(prompt, session=session, history=history)]
-        return events, (first.id, second.id)
+        events = [
+            event
+            async for event in agent.run(
+                prompt,
+                session=session,
+                history=history,
+                operation_id="prompt-1",
+            )
+        ]
+        return events, (first.id, second.id), entry_start
 
-    events, first_turn_ids = anyio.run(run)
+    events, first_turn_ids, entry_start = anyio.run(run)
 
     history_budget = estimate_context((*prompt_messages, *history))
     assert (history_budget.total_tokens > compaction_limit) is history_exceeds_limit
@@ -989,6 +998,7 @@ def test_coding_session_compacts_before_provider_limit_request(
         if isinstance(entry, CompactionSessionEntry)
     )
     assert record.replaced_entry_ids == first_turn_ids
+    assert all(entry.operation_id == "prompt-1" for entry in session.read_entries()[entry_start:])
     assert len(provider.calls) == 2
     assert provider.calls[0].messages[0].content.startswith("Create a concise")
     request = provider.calls[1]
