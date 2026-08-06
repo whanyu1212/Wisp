@@ -121,15 +121,22 @@ class TextualInputController:
             return False
         return True
 
-    def signal(self, signal: BaseException, *, action: str) -> bool:
-        """Queue an interrupt/EOF signal and clear the editor only on success."""
+    def signal(
+        self,
+        signal: BaseException,
+        *,
+        action: str,
+        clear_editor: bool = True,
+    ) -> bool:
+        """Queue a control signal and optionally clear the editor on success."""
 
         try:
             self._send.send_nowait(signal)
         except anyio.WouldBlock:
             self._surface.write_input_error(f"input buffer full; {action} ignored")
             return False
-        self._surface.clear_prompt_editor()
+        if clear_editor:
+            self._surface.clear_prompt_editor()
         return True
 
     def register_compact_echo(self, prompt: str, display: str) -> None:

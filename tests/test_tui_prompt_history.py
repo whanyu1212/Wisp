@@ -122,7 +122,7 @@ def test_ctrl_r_cancel_preserves_draft_selection_and_focus() -> None:
     assert focused is True
 
 
-def test_ctrl_c_closes_history_instead_of_signalling_interrupt() -> None:
+def test_escape_closes_history_instead_of_signalling_cancel() -> None:
     async def scenario() -> tuple[bool, bool, str]:
         app = TextualTui()
         async with app.run_test(size=(80, 24)) as pilot:
@@ -131,7 +131,7 @@ def test_ctrl_c_closes_history_instead_of_signalling_interrupt() -> None:
             app.record_prompt("remember me")
             await pilot.press("ctrl+r")
             await pilot.pause()
-            await pilot.press("ctrl+c")
+            await pilot.press("escape")
             await pilot.pause()
             picker = app.query_one("#prompt-history", PromptHistoryPicker)
             with pytest.raises(anyio.WouldBlock):

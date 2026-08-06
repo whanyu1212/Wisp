@@ -188,7 +188,31 @@ class _InputClosed:
 
 @dataclass(frozen=True)
 class _InputInterrupted:
+    """Legacy line-renderer interrupt (normally ``KeyboardInterrupt``)."""
+
     mode: _InputMode
+
+
+@dataclass(frozen=True)
+class _InputCancelled:
+    """Escape cancellation requested by a fullscreen frontend."""
+
+    mode: _InputMode
+
+
+@dataclass(frozen=True)
+class _QuitPressed:
+    """One Ctrl+C press in a frontend that supports double-press quit."""
+
+    mode: _InputMode
+
+
+class TuiCancelRequested(Exception):
+    """Prompt-reader signal for an Escape cancellation request."""
+
+
+class TuiQuitRequested(Exception):
+    """Prompt-reader signal for one Ctrl+C quit gesture."""
 
 
 @dataclass(frozen=True)
@@ -201,7 +225,15 @@ class _RpcEventsClosed:
     error: str | None = None
 
 
-type _TuiSignal = _InputLine | _InputClosed | _InputInterrupted | _RpcEvent | _RpcEventsClosed
+type _TuiSignal = (
+    _InputLine
+    | _InputClosed
+    | _InputInterrupted
+    | _InputCancelled
+    | _QuitPressed
+    | _RpcEvent
+    | _RpcEventsClosed
+)
 
 
 def _coerce_input_mode(value: str, *, fallback: _InputMode) -> _InputMode:

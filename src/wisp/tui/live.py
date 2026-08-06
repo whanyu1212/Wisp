@@ -23,6 +23,7 @@ from wisp.tui.rendering import (
     _RenderedTranscriptLine,
     format_tui_footer_lines,
 )
+from wisp.tui.state import TuiQuitRequested
 
 _HEADER_FRAME_HEIGHT = 3
 _FOOTER_HEIGHT = 5
@@ -31,7 +32,7 @@ _TRANSCRIPT_FRAME_BORDER_WIDTH = 2
 
 
 class LiveFullscreenInputInterrupted(Exception):
-    """Raised by the live input adapter for Ctrl-C interrupts."""
+    """Raised by the live input adapter for Escape cancellation."""
 
 
 class LiveFullscreenTui(FullscreenTuiRenderer):
@@ -45,7 +46,7 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
     def __init__(self, *, run_application: bool = True) -> None:
         super().__init__(clear_screen=False)
         self.run_application = run_application
-        self._buffer = Buffer(multiline=False)
+        self._buffer = Buffer(multiline=True)
         self._input_future: asyncio.Future[str] | None = None
         self._application: Application[None] | None = None
         self._application_task: asyncio.Task[None] | None = None
@@ -203,18 +204,24 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
             self._accept_input()
             event.app.invalidate()
 
-        @bindings.add("c-c")
-        def _interrupt(event: KeyPressEvent) -> None:
+        @bindings.add("c-j")
+        def _newline(event: KeyPressEvent) -> None:
+            self._insert_newline()
+            event.app.invalidate()
+
+        @bindings.add("escape")
+        def _cancel(event: KeyPressEvent) -> None:
             self._interrupt_input()
+            event.app.invalidate()
+
+        @bindings.add("c-c")
+        def _quit(event: KeyPressEvent) -> None:
+            self._quit_input()
             event.app.invalidate()
 
         @bindings.add("c-d")
         def _eof(event: KeyPressEvent) -> None:
-            if self._buffer.text:
-                self._buffer.delete()
-                event.app.invalidate()
-                return
-            self._close_input()
+            self._delete_right_or_close()
             event.app.invalidate()
 
         @bindings.add(Keys.BackTab)
@@ -260,22 +267,31 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         self._submitted_input_mode = mode
         self._input_future.set_result(text)
 
+    def _insert_newline(self) -> None:
+        self._buffer.insert_text("\n")
+
     def _paste_input(self, text: str) -> None:
         normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-        parts = normalized.split("\n")
-        for index, part in enumerate(parts):
-            is_last = index == len(parts) - 1
-            if part:
-                self._buffer.insert_text(part)
-            if not is_last:
-                self._accept_input()
+        self._buffer.insert_text(normalized)
 
     def _interrupt_input(self) -> None:
         if self._input_future is None or self._input_future.done():
             return
         self._submitted_input_mode = self._buffer_input_mode
-        self._clear_buffer()
         self._input_future.set_exception(LiveFullscreenInputInterrupted())
+
+    def _quit_input(self) -> None:
+        if self._input_future is None or self._input_future.done():
+            return
+        self._submitted_input_mode = self._buffer_input_mode
+        self._clear_buffer()
+        self._input_future.set_exception(TuiQuitRequested())
+
+    def _delete_right_or_close(self) -> None:
+        if self._buffer.text:
+            self._buffer.delete()
+            return
+        self._close_input()
 
     def _close_input(self) -> None:
         if self._input_future is None or self._input_future.done():

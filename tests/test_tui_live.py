@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tests.tui_support import *
 
 
@@ -189,7 +191,7 @@ def test_live_fullscreen_tui_queues_submission_accepted_between_reads() -> None:
     anyio.run(run)
 
 
-def test_live_fullscreen_tui_splits_bracketed_paste_into_submissions() -> None:
+def test_live_fullscreen_tui_preserves_bracketed_paste_newlines() -> None:
     async def run() -> None:
         renderer = LiveFullscreenTui(run_application=False)
         renderer.view_updated(
@@ -199,23 +201,33 @@ def test_live_fullscreen_tui_splits_bracketed_paste_into_submissions() -> None:
                 input_mode="running",
             )
         )
-        first_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
+        read_task = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
         await anyio.sleep(0)
 
-        renderer._paste_input("first\nsecond\nthird")
-
-        assert await first_read == "first"
-        assert renderer.consume_submitted_input_mode("idle") == "running"
-        assert await renderer.read_prompt("wisp(running)> ") == "second"
-        assert renderer.consume_submitted_input_mode("idle") == "running"
-        second_read = asyncio.create_task(renderer.read_prompt("wisp(running)> "))
-        await anyio.sleep(0)
-        assert renderer._buffer.text == "third"
+        renderer._paste_input("first\r\nsecond\rthird")
+        assert renderer._buffer.text == "first\nsecond\nthird"
+        assert not read_task.done()
 
         renderer._accept_input()
-
-        assert await second_read == "third"
+        assert await read_task == "first\nsecond\nthird"
         assert renderer.consume_submitted_input_mode("idle") == "running"
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_ctrl_j_builds_multiline_prompt() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+
+        renderer._buffer.insert_text("first")
+        renderer._insert_newline()
+        renderer._buffer.insert_text("second")
+        assert not read_task.done()
+
+        renderer._accept_input()
+        assert await read_task == "first\nsecond"
 
     anyio.run(run)
 
@@ -312,6 +324,7 @@ def test_live_fullscreen_tui_interrupts_input() -> None:
         renderer = LiveFullscreenTui(run_application=False)
         read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
         await anyio.sleep(0)
+        renderer._buffer.insert_text("keep draft")
 
         renderer._interrupt_input()
 
@@ -320,7 +333,46 @@ def test_live_fullscreen_tui_interrupts_input() -> None:
         except LiveFullscreenInputInterrupted:
             pass
         else:  # pragma: no cover - defensive assertion branch
-            raise AssertionError("expected KeyboardInterrupt")
+            raise AssertionError("expected cancellation")
+        assert renderer._buffer.text == "keep draft"
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_ctrl_c_requests_quit_and_clears_draft() -> None:
+    from wisp.tui.state import TuiQuitRequested
+
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+        renderer._buffer.insert_text("discard me")
+
+        renderer._quit_input()
+
+        with pytest.raises(TuiQuitRequested):
+            await read_task
+        assert renderer._buffer.text == ""
+
+    anyio.run(run)
+
+
+def test_live_fullscreen_tui_ctrl_d_deletes_right_or_closes_when_empty() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+        renderer._buffer.insert_text("ab")
+        renderer._buffer.cursor_position = 1
+
+        renderer._delete_right_or_close()
+        assert renderer._buffer.text == "a"
+        assert not read_task.done()
+
+        renderer._buffer.reset()
+        renderer._delete_right_or_close()
+        with pytest.raises(EOFError):
+            await read_task
 
     anyio.run(run)
 

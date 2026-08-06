@@ -188,7 +188,7 @@ class LineTuiRenderer:
 
     def startup(self) -> None:
         self.console.print("[bold cyan]Wisp TUI MVP[/bold cyan]")
-        self.console.print("Type a prompt, /help, /quit, Ctrl-C to interrupt, or Ctrl-D to exit.")
+        self.console.print("Type a prompt, /help, or /quit. Ctrl-C interrupts; Ctrl-D exits.")
 
     def help(self) -> None:
         self.console.print(_tui_help_text(), markup=False)
@@ -1374,6 +1374,9 @@ def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? 
         "  /new                     start a fresh session and clear the screen\n"
         "  /resume [session-id]     browse or resume a previous session\n"
         "  /quit, /exit             quit the TUI\n"
+        "Fullscreen controls: Esc cancels; press Ctrl+C twice within 1.5s to quit.\n"
+        "Enter submits; Shift+Enter (Textual) or Ctrl+J inserts a newline.\n"
+        "The line renderer retains terminal Ctrl+C interrupt and Ctrl+D EOF behavior.\n"
         "While a prompt or compaction is running, submitted input is queued as a follow-up.\n"
         f"{approval_hint}"
     )
