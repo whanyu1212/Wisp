@@ -34,17 +34,30 @@ def test_resolve_settings_empty_when_no_files(tmp_path: Path) -> None:
     assert settings.retry is None
 
 
-def test_project_settings_override_user_settings(tmp_path: Path) -> None:
+def test_project_provider_override_drops_user_model_and_effort(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "proj"
-    _write_settings(home, provider="user-provider", model="user-model")
+    _write_settings(home, provider="user-provider", model="user-model", effort="high")
     _write_settings(project, provider="project-provider")
 
     settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
 
-    # Project wins where it sets a key; user fills the rest.
     assert settings.provider == "project-provider"
+    assert settings.model is None
+    assert settings.effort is None
+
+
+def test_same_project_provider_keeps_user_model_and_effort(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "proj"
+    _write_settings(home, provider="shared-provider", model="user-model", effort="high")
+    _write_settings(project, provider="shared-provider")
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.provider == "shared-provider"
     assert settings.model == "user-model"
+    assert settings.effort == "high"
 
 
 def test_user_settings_used_when_no_project_file(tmp_path: Path) -> None:

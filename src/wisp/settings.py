@@ -124,6 +124,10 @@ class ResolvedSettings(BaseModel):
     effort: str | None = None
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
+    # Provenance used only while applying higher-precedence provider overrides.
+    # Excluded from serialization because these are resolver details, not settings.
+    user_provider: str | None = Field(default=None, exclude=True)
+    model_from_user: bool = Field(default=False, exclude=True)
 
 
 def resolve_settings(
@@ -171,9 +175,17 @@ def resolve_settings(
         else WispSettings()
     )
 
-    # Project layer wins over user layer, key by key. ``_coalesce`` keeps the first
-    # non-None value, so a key absent from the project file falls through to the
-    # user file, and a key absent from both stays None.
+    # Project layer normally wins over user layer key by key. Provider/model are
+    # coupled, though: if a project changes the provider without naming a model,
+    # carrying the user's model and effort into the new provider can produce an
+    # invalid request. In that case the new provider starts from its own defaults.
+    project_provider = _coalesce(project_settings.provider)
+    user_provider = _coalesce(user_settings.provider)
+    project_model = _coalesce(project_settings.model)
+    user_model = _coalesce(user_settings.model)
+    provider_changed_without_model = (
+        project_provider is not None and project_provider != user_provider and project_model is None
+    )
     #
     # ``protected_paths`` is a SECURITY policy and is deliberately taken from the
     # USER layer only — even for a trusted project. A project ``.wisp/settings.json``
@@ -187,15 +199,19 @@ def resolve_settings(
     # project must not be able to force an expensive tier on every prompt just by
     # being trusted for read/write access.
     return ResolvedSettings(
-        provider=_coalesce(project_settings.provider, user_settings.provider),
-        model=_coalesce(project_settings.model, user_settings.model),
+        provider=project_provider or user_provider,
+        model=(None if provider_changed_without_model else project_model or user_model),
         session_dir=_coalesce(project_settings.session_dir, user_settings.session_dir),
         auth_path=_coalesce(project_settings.auth_path, user_settings.auth_path),
         protected_paths=_coalesce_paths(user_settings.protected_paths),
         retry=user_settings.retry,
-        effort=user_settings.effort,
+        effort=None if provider_changed_without_model else user_settings.effort,
         context_reserve_tokens=user_settings.context_reserve_tokens,
         auto_compaction_enabled=user_settings.auto_compaction_enabled,
+        user_provider=user_provider,
+        model_from_user=(
+            not provider_changed_without_model and project_model is None and user_model is not None
+        ),
     )
 
 

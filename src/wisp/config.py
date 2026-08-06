@@ -85,23 +85,35 @@ class WispConfig(BaseModel):
         ``effort`` never consults the project settings layer, trusted or not —
         it is resolved from the USER settings file only (see
         :func:`wisp.settings.resolve_settings`), the same way ``retry_policy`` is,
-        since it directly controls per-request cost/latency.
+        since it directly controls per-request cost/latency. Persisted user
+        provider/model defaults are coupled: a higher-precedence provider override
+        without a model drops the saved user model and effort rather than sending
+        them to another provider.
         """
 
         settings = resolve_settings(project_dir=project_dir, trust_project=trusted)
 
-        provider_name = _first_non_empty(
-            provider,
-            os.environ.get("WISP_PROVIDER"),
-            settings.provider,
-            default=DEFAULT_PROVIDER,
+        provider_override = _first_non_empty(provider, os.environ.get("WISP_PROVIDER"))
+        model_override = _first_non_empty(model, os.environ.get("WISP_MODEL"))
+        effort_override = _first_non_empty(effort, os.environ.get("WISP_EFFORT"))
+        provider_changes_user_defaults = (
+            provider_override is not None
+            and provider_override != settings.user_provider
+            and model_override is None
         )
-        assert provider_name is not None
+        provider_name = provider_override or settings.provider or DEFAULT_PROVIDER
+        selected_model = model_override or settings.model
+        if provider_changes_user_defaults:
+            if settings.model_from_user:
+                selected_model = None
+            selected_effort = effort_override
+        else:
+            selected_effort = effort_override or settings.effort
 
         return cls(
             provider=provider_name,
-            model=_first_non_empty(model, os.environ.get("WISP_MODEL"), settings.model),
-            effort=_first_non_empty(effort, os.environ.get("WISP_EFFORT"), settings.effort),
+            model=selected_model,
+            effort=selected_effort,
             session_dir=session_dir or default_session_dir(settings=settings),
             auth_path=auth_path or default_auth_path(settings=settings),
             protected_paths=_resolve_protected_paths(settings),

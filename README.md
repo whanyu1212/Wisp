@@ -202,8 +202,10 @@ CLI flag > environment variable > project ./.wisp/settings.json > user ~/.wisp/s
 
 After a successful TUI `/model` or `/provider` change, Wisp atomically records the active
 provider, model, and reasoning effort as user defaults. They are reused on the next launch unless
-a higher-precedence source overrides them. Selecting a provider default removes the saved model
-and effort instead of copying a catalog default. Failed changes, trusted-project configuration,
+a higher-precedence source overrides them. A higher-precedence provider without its own model
+starts from that provider's default instead of inheriting the saved model or effort. Selecting a
+provider default likewise removes the saved model and effort instead of copying a catalog default.
+Failed changes, trusted-project configuration,
 CLI flags, and external RPC configuration do not rewrite these preferences; Wisp does not infer
 them from the newest session file.
 

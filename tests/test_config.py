@@ -111,6 +111,41 @@ def test_config_reuses_persisted_tui_model_selection_on_restart(
     assert config.effort == "high"
 
 
+def test_provider_env_override_drops_persisted_model_and_effort(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    persist_user_model_selection("openai", "gpt-5.6-sol", "high", home_dir=home)
+    monkeypatch.setenv("WISP_PROVIDER", "anthropic")
+    monkeypatch.delenv("WISP_MODEL", raising=False)
+    monkeypatch.delenv("WISP_EFFORT", raising=False)
+
+    config = WispConfig.from_env(session_dir=tmp_path)
+
+    assert config.provider == "anthropic"
+    assert config.model is None
+    assert config.effort is None
+
+
+def test_trusted_project_provider_override_drops_persisted_model_and_effort(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    persist_user_model_selection("openai", "gpt-5.6-sol", "high", home_dir=home)
+    settings_dir = project / ".wisp"
+    settings_dir.mkdir(parents=True)
+    (settings_dir / "settings.json").write_text('{"provider": "anthropic"}', encoding="utf-8")
+
+    config = WispConfig.from_env(session_dir=tmp_path, project_dir=project, trusted=True)
+
+    assert config.provider == "anthropic"
+    assert config.model is None
+    assert config.effort is None
+
+
 def test_config_effort_from_user_settings_file(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     monkeypatch.delenv("WISP_EFFORT", raising=False)
     home = tmp_path / "home"
