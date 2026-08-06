@@ -476,6 +476,32 @@ class CodingSession:
 
         user_message = Message(role="user", content=prompt)
         await session.append_message(user_message, operation_id=operation_id)
+        # Add the persisted prompt before checking the threshold so provider limits
+        # apply to the complete next request, not only the resumed history.
+        harness.append_message(user_message)
+        auto_compaction_status = _AutoCompactionStatus()
+        # A preflight compaction can only update a request that is actually
+        # resuming persisted history. It is reserved for cataloged provider
+        # limits; the existing generic reserve policy remains post-response.
+        if history and self._has_provider_auto_compaction_limit():
+            prompt_compacted = False
+            async for compaction_event in self._maybe_auto_compact(
+                session,
+                harness,
+                status=auto_compaction_status,
+            ):
+                if (
+                    isinstance(compaction_event, CompactionCompleted)
+                    and compaction_event.outcome == "completed"
+                ):
+                    prompt_compacted = True
+                yield compaction_event
+            if prompt_compacted:
+                active_history = await anyio.to_thread.run_sync(session.read_context_messages)
+                harness.replace_messages(
+                    (*prompt_messages, *self._conversation_history(active_history))
+                )
+
         turns = 0
         had_tool_round = False
         tool_iterations = 0
@@ -483,8 +509,7 @@ class CodingSession:
         overflow_recovery_attempted = False
         recovered_from_overflow = False
         tool_presentation_statuses: dict[str, ToolPresentationStatus] = {}
-        harness_events = harness.prompt_message(
-            user_message,
+        harness_events = harness.continue_(
             defer_context_overflow_errors=True,
         )
 
@@ -699,7 +724,6 @@ class CodingSession:
 
         self._accepting_queued_messages = False
         auto_compaction_saved = False
-        auto_compaction_status = _AutoCompactionStatus()
         if not recovered_from_overflow:
             async for compaction_event in self._maybe_auto_compact(
                 session,
@@ -1156,6 +1180,18 @@ class CodingSession:
             self.model,
             reserve_tokens=self.context_reserve_tokens,
             default_model=self.provider.default_model,
+        )
+
+    def _has_provider_auto_compaction_limit(self) -> bool:
+        if self.models is None:
+            return False
+        return (
+            self.models.auto_compact_token_limit(
+                self.provider.name,
+                self.model,
+                default_model=self.provider.default_model,
+            )
+            is not None
         )
 
     async def _emit(

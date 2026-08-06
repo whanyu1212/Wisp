@@ -36,6 +36,7 @@ from wisp.events import (
     ToolCallSnapshot,
     ToolExecutionEnded,
     TurnCompleted,
+    TurnStarted,
     WispEvent,
     wisp_event_from_dict,
     wisp_event_from_json,
@@ -895,6 +896,105 @@ def test_coding_session_does_not_auto_compact_at_provider_limit(tmp_path: Path) 
     assert not any(isinstance(event, CompactionStarted) for event in events)
     assert len(provider.calls) == 1
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
+
+
+@pytest.mark.parametrize(
+    ("history_chars", "prompt_chars", "history_exceeds_limit"),
+    [
+        pytest.param(1_600, 0, True, id="resumed-history"),
+        pytest.param(1_500, 300, False, id="prompt-inclusive-history"),
+    ],
+)
+def test_coding_session_compacts_before_provider_limit_request(
+    tmp_path: Path,
+    history_chars: int,
+    prompt_chars: int,
+    history_exceeds_limit: bool,
+) -> None:
+    context_window = 2_000
+    compaction_limit = 1_600
+    first_user = Message(role="user", content="question one " + "a" * history_chars)
+    first_assistant = Message(
+        role="assistant",
+        content="answer one " + "b" * history_chars,
+        finish_reason="stop",
+    )
+    second_user = Message(role="user", content="question two " + "c" * history_chars)
+    second_assistant = Message(
+        role="assistant",
+        content="answer two " + "d" * history_chars,
+        finish_reason="stop",
+    )
+    prompt = "question three " + "e" * prompt_chars
+    prompt_messages = (Message(role="system", content="system"),)
+    history = (first_user, first_assistant, second_user, second_assistant)
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer three",
+                    usage=ProviderUsage(input_tokens=900, output_tokens=100, total_tokens=1_000),
+                ),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> tuple[list[WispEvent], tuple[str, str]]:
+        first = await session.append_message(first_user)
+        second = await session.append_message(first_assistant)
+        await session.append_message(second_user)
+        await session.append_message(second_assistant)
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(
+                context_window=context_window,
+                auto_compact_token_limit=compaction_limit,
+            ),
+            prompt_messages=prompt_messages,
+            context_reserve_tokens=100,
+        )
+        events = [event async for event in agent.run(prompt, session=session, history=history)]
+        return events, (first.id, second.id)
+
+    events, first_turn_ids = anyio.run(run)
+
+    history_budget = estimate_context((*prompt_messages, *history))
+    assert (history_budget.total_tokens > compaction_limit) is history_exceeds_limit
+    started_index = next(
+        index for index, event in enumerate(events) if isinstance(event, CompactionStarted)
+    )
+    turn_started_index = next(
+        index for index, event in enumerate(events) if isinstance(event, TurnStarted)
+    )
+    assert started_index < turn_started_index
+    started = events[started_index]
+    assert isinstance(started, CompactionStarted)
+    assert started.reason == "threshold"
+    assert started.trigger_budget is not None
+    assert started.trigger_budget.estimate.total_tokens > compaction_limit
+    assert started.trigger_budget.reserve_tokens == context_window - compaction_limit
+    record = next(
+        entry.compaction
+        for entry in session.read_entries()
+        if isinstance(entry, CompactionSessionEntry)
+    )
+    assert record.replaced_entry_ids == first_turn_ids
+    assert len(provider.calls) == 2
+    assert provider.calls[0].messages[0].content.startswith("Create a concise")
+    request = provider.calls[1]
+    assert request.messages[-1].content == prompt
+    assert first_user.content not in {message.content for message in request.messages}
+    assert not any(isinstance(event, ErrorEvent) for event in events)
 
 
 def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Path) -> None:
