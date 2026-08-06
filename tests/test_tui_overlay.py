@@ -65,6 +65,9 @@ class _Transcript:
 class _Harness:
     composer: _Composer = field(default_factory=_Composer)
     suggestion: _Suggestion = field(default_factory=_Suggestion)
+    # The `@`-file picker: a second composer-anchored menu that must be torn down
+    # by the same transitions as the slash menu.
+    file_suggestion: _Suggestion = field(default_factory=_Suggestion)
     transcript: _Transcript = field(default_factory=_Transcript)
     decision: _Overlay = field(default_factory=_Overlay)
     model: _Overlay = field(default_factory=_Overlay)
@@ -76,7 +79,7 @@ class _Harness:
         selected_clock = clock or (lambda: 10.0)
         return TextualOverlayController(
             composer=self.composer,
-            suggestion=self.suggestion,
+            suggestions=(self.suggestion, self.file_suggestion),
             transcript=self.transcript,
             overlays={
                 OverlayKind.decision: self.decision,
@@ -112,6 +115,34 @@ def test_open_raises_barrier_before_hiding_competing_surfaces() -> None:
     assert harness.decision.hide_count == 1
     assert harness.suggestion.hide_count == 1
     assert harness.composer.display is False
+
+
+def test_opening_an_overlay_hides_every_suggestion_menu() -> None:
+    """Both composer-anchored menus must go, not just the slash menu.
+
+    A surviving `@` picker floats over the overlay and wins Escape/navigation keys
+    that belong to the active workflow.
+    """
+
+    harness = _Harness()
+    controller = harness.controller()
+
+    controller.open(OverlayKind.decision)
+
+    assert harness.suggestion.hide_count == 1
+    assert harness.file_suggestion.hide_count == 1
+
+
+def test_starting_an_operation_hides_every_suggestion_menu() -> None:
+    """Non-visual operations hide the composer too, so its menus must follow."""
+
+    harness = _Harness()
+    controller = harness.controller()
+
+    controller.start_operation(OverlayOperation.session_switch)
+
+    assert harness.suggestion.hide_count == 1
+    assert harness.file_suggestion.hide_count == 1
 
 
 def test_only_matching_operation_completion_restores_composer() -> None:

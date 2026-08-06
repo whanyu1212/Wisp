@@ -7,6 +7,7 @@ from pathlib import Path
 import anyio
 import pytest
 
+from wisp.events import TrustRequested
 from wisp.tui.file_suggest import FileSuggest
 from wisp.tui.textual_app import TextualTui
 from wisp.tui.widgets import PromptEditor, SlashSuggest
@@ -295,6 +296,51 @@ def test_late_corpus_yields_to_a_live_slash_menu() -> None:
     slash_open, file_open = anyio.run(scenario)
     assert slash_open is True
     assert file_open is False
+
+
+def test_opening_an_overlay_hides_the_open_picker() -> None:
+    """An overlay hides the composer, so its `@` picker must not float over it."""
+
+    async def scenario() -> bool:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            picker = app.query_one("#file-suggest", FileSuggest)
+            picker.set_paths(_CORPUS)
+            for key in "@app":
+                await pilot.press(key)
+            await pilot.pause()
+            assert picker.is_open is True
+
+            app.show_trust(TrustRequested(request_id="trust-1", project_path=Path("/work/project")))
+            await pilot.pause()
+            return picker.is_open
+
+    assert anyio.run(scenario) is False
+
+
+def test_late_corpus_does_not_reopen_the_picker_under_an_overlay() -> None:
+    """A background walk landing mid-overlay must not revive the picker.
+
+    The worker's arrival is not user intent; reviving here would put the picker
+    back over an active approval and steal its Escape.
+    """
+
+    async def scenario() -> bool:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            picker = app.query_one("#file-suggest", FileSuggest)
+            for key in "@app":
+                await pilot.press(key)
+            await pilot.pause()
+
+            app.show_trust(TrustRequested(request_id="trust-1", project_path=Path("/work/project")))
+            await pilot.pause()
+
+            app._install_file_suggestions(picker, _CORPUS)  # noqa: SLF001 - worker callback
+            await pilot.pause()
+            return picker.is_open
+
+    assert anyio.run(scenario) is False
 
 
 def test_protected_paths_never_reach_the_picker(tmp_path: Path) -> None:

@@ -475,7 +475,10 @@ class TextualTui(App[None]):
         self._operation_indicator = self.query_one("#operation-indicator", OperationIndicator)
         self._overlay_controller = TextualOverlayController(
             composer=self._input,
-            suggestion=self._suggest,
+            # Both composer-anchored menus, so an overlay opening tears down each
+            # of them; the `@` picker would otherwise float over the overlay and
+            # win the Escape/navigation keys that belong to the active workflow.
+            suggestions=(self._suggest, self._file_suggest),
             transcript=self._transcript,
             overlays={
                 OverlayKind.decision: self._decision_panel,
@@ -632,6 +635,14 @@ class TextualTui(App[None]):
         picker.set_paths(paths)
         editor = self._input
         if editor is None or not paths:
+            return
+        # An overlay or pending operation has already torn the composer down. The
+        # worker is a background arrival, not user intent, so it must never revive
+        # a composer-anchored menu on top of an active approval or picker.
+        controller = self._overlay_controller
+        if controller is not None and (
+            controller.active_overlay is not None or controller.active_operation is not None
+        ):
             return
         # Same precedence as on_text_area_changed: a live slash menu owns the line.
         if self._suggest is not None and self._suggest.is_open:

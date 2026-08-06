@@ -11,7 +11,7 @@ widgets, the RPC shell, providers, sessions, or approval policy.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -61,7 +61,11 @@ class ComposerSurface(Protocol):
 
 
 class SuggestionSurface(Protocol):
-    """Slash-command suggestion operation needed during transitions."""
+    """Inline suggestion-menu operation needed during transitions.
+
+    Implemented by every menu anchored to the composer — the slash-command menu and
+    the ``@``-file picker — since all of them must vanish when the composer does.
+    """
 
     def hide(self) -> None: ...
 
@@ -81,14 +85,18 @@ class TextualOverlayController:
         self,
         *,
         composer: ComposerSurface,
-        suggestion: SuggestionSurface,
+        suggestions: Sequence[SuggestionSurface],
         transcript: TranscriptViewport,
         overlays: Mapping[OverlayKind, OverlaySurface],
         defer_after_refresh: Callable[[Callable[[], None]], None],
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._composer = composer
-        self._suggestion = suggestion
+        # A sequence, not a single surface: every composer-anchored menu must be
+        # torn down together. This was a scalar while the slash menu was the only
+        # one, which silently left the later `@`-file picker floating over
+        # overlays and stealing Escape. Adding a menu must mean registering it.
+        self._suggestions = tuple(suggestions)
         self._transcript = transcript
         self._overlays = dict(overlays)
         self._defer_after_refresh = defer_after_refresh
@@ -190,7 +198,8 @@ class TextualOverlayController:
         # This must happen before hiding or moving focus. Input already read by
         # Textual's driver then remains older than the new barrier.
         self._stale_event_barrier = self._clock()
-        self._suggestion.hide()
+        for suggestion in self._suggestions:
+            suggestion.hide()
 
     def _hide_all_overlays(self) -> None:
         for surface in self._overlays.values():
