@@ -250,6 +250,32 @@ class AgentHarness:
         self._follow_up_queue.clear()
         return cleared
 
+    def drain_steering(self) -> tuple[QueueMessageInjected | QueueUpdated, ...]:
+        """Inject the next steering batch before a provider request starts."""
+
+        self._ensure_idle()
+        drain_batch = tuple(self._steering_queue)
+        if self._config.steering_mode == "one_at_a_time":
+            drain_batch = drain_batch[:1]
+        if not drain_batch:
+            return ()
+
+        events: list[QueueMessageInjected | QueueUpdated] = []
+        for message in drain_batch:
+            if not self._steering_queue or self._steering_queue[0] is not message:
+                continue
+            self._steering_queue.popleft()
+            self._messages.append(message)
+            events.append(
+                QueueMessageInjected(
+                    kind="steering",
+                    content=message.content,
+                    timestamp=message.created_at,
+                )
+            )
+        events.append(self.queue_updated_event())
+        return tuple(events)
+
     def queue_updated_event(self) -> QueueUpdated:
         """Return current queue state as a portable versioned event."""
         return QueueUpdated(
@@ -299,12 +325,14 @@ class AgentHarness:
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
         defer_context_overflow_errors: bool = False,
+        pause_after_tool_round: bool = False,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
         """Continue from the current transcript without adding a user message."""
         return self._run(
             turn_offset=turn_offset,
             tool_iteration_offset=tool_iteration_offset,
             defer_context_overflow_errors=defer_context_overflow_errors,
+            pause_after_tool_round=pause_after_tool_round,
         )
 
     async def _run(
@@ -314,6 +342,7 @@ class AgentHarness:
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
         defer_context_overflow_errors: bool = False,
+        pause_after_tool_round: bool = False,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
         self.repair_interrupted_tool_calls()
         self._running = True
@@ -329,6 +358,7 @@ class AgentHarness:
         try:
             while True:
                 run_finished = False
+                segment_had_tool_calls = False
                 segment_outcome: str | None = None
                 stream_ended = False
                 restart_for_steering = False
@@ -396,6 +426,7 @@ class AgentHarness:
                             self._messages.append(message_from_completion_event(event))
                             run_finished = not event.tool_calls
                             if event.tool_calls:
+                                segment_had_tool_calls = True
                                 next_tool_iteration_offset += 1
                         elif isinstance(event, ToolExecutionEnded):
                             # ToolResultReady copies this terminal payload; retain it now so
@@ -406,6 +437,14 @@ class AgentHarness:
                             segment_outcome = event.outcome
                             run_finished = run_finished or event.outcome != "completed"
                         yield event
+                        if (
+                            pause_after_tool_round
+                            and isinstance(event, TurnCompleted)
+                            and event.outcome == "completed"
+                            and segment_had_tool_calls
+                            and not self._steering_queue
+                        ):
+                            return
                         if (
                             isinstance(event, TurnCompleted)
                             and event.outcome == "completed"
@@ -447,6 +486,8 @@ class AgentHarness:
                             timestamp=message.created_at,
                         )
                     yield self.queue_updated_event()
+                    if pause_after_tool_round and segment_had_tool_calls:
+                        return
                     continue
 
                 if (

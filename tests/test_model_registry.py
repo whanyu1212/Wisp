@@ -26,6 +26,7 @@ def _provider(
     model_aliases: dict[str, str] | None = None,
     model_lifecycle: dict[str, str] | None = None,
     context_windows: dict[str, int] | None = None,
+    auto_compact_token_limits: dict[str, int] | None = None,
 ) -> dict[str, object]:
     return {
         "name": name,
@@ -37,6 +38,7 @@ def _provider(
         "model_aliases": model_aliases or {},
         "model_lifecycle": model_lifecycle or {},
         "context_windows": context_windows or {},
+        "auto_compact_token_limits": auto_compact_token_limits or {},
     }
 
 
@@ -147,6 +149,7 @@ def test_alias_resolves_to_canonical_metadata_without_being_listed() -> None:
                 model_aliases={"acme-latest": "acme-1"},
                 model_lifecycle={"acme-1": "preview"},
                 context_windows={"acme-1": 1000},
+                auto_compact_token_limits={"acme-1": 800},
                 effort_levels={"acme-1": ["low", "high"]},
             )
         )
@@ -159,6 +162,13 @@ def test_alias_resolves_to_canonical_metadata_without_being_listed() -> None:
     assert registry.list_models() == (("acme", "acme-1"),)
     assert registry.knows_model("acme", "acme-latest") is True
     assert registry.context_window("acme", "acme-latest") == 1000
+    assert registry.auto_compact_token_limit("acme", "acme-latest") == 800
+    assert (
+        registry.effective_context_reserve_tokens("acme", "acme-latest", reserve_tokens=100) == 200
+    )
+    assert (
+        registry.effective_context_reserve_tokens("acme", "acme-latest", reserve_tokens=300) == 300
+    )
     assert registry.model_lifecycle("acme", "acme-latest") == "preview"
     assert registry.supports_effort("acme", "acme-latest", "high") is True
 

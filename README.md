@@ -170,7 +170,7 @@ Wisp reads configuration from CLI flags, environment variables, and JSON setting
 | `WISP_RETRY_MAX_RETRIES` | Provider retry count; defaults to `2`, set `0` to disable |
 | `WISP_RETRY_BASE_DELAY_SECONDS` | Initial retry delay; defaults to `0.5` |
 | `WISP_RETRY_MAX_DELAY_SECONDS` | Maximum retry delay; defaults to `30` |
-| `WISP_CONTEXT_RESERVE_TOKENS` | Tokens reserved outside the estimated input context; defaults to `16384` |
+| `WISP_CONTEXT_RESERVE_TOKENS` | Minimum tokens reserved outside the estimated input context; defaults to `16384` (provider catalog policy may reserve more) |
 | `WISP_AUTO_COMPACTION` | Enable automatic threshold compaction and overflow recovery; defaults to `true` |
 | `OPENAI_API_KEY` | Required only for the `openai` provider |
 | `ANTHROPIC_API_KEY` | Required only for the `anthropic` provider |
@@ -436,10 +436,15 @@ documented aliases such as `gpt-5.6` and `gemini-flash-latest` remain valid conf
 
 Catalog entries are advisory rather than access control. Model access varies by account and region,
 and explicitly configured unknown models continue to pass through to the selected provider. The
-picker labels supported preview and legacy models. Catalog pricing is optional, effective-dated,
-and provider-scoped; it is used only to estimate new request costs, which then retain their rate
-snapshot in the session. Add account-specific models or negotiated rates in the user-only
-`~/.wisp/catalog.toml` overlay; Wisp never reads a project-local catalog.
+picker labels supported preview and legacy models. Context windows and proactive compaction limits
+are provider-scoped: the direct `openai` API and the `openai-codex` subscription can expose the same
+model id with different limits. Wisp uses the earlier of the provider-recommended compaction limit
+and the configured reserve threshold; provider metadata can make the reserve more conservative but
+never weaken a larger user reserve. Overflow compact-and-retry remains available as a bounded
+fallback. Catalog pricing is optional, effective-dated, and provider-scoped; it is used only to
+estimate new request costs, which then retain their rate snapshot in the session. Add
+account-specific models or negotiated rates in the user-only `~/.wisp/catalog.toml` overlay; Wisp
+never reads a project-local catalog.
 
 Unlike print mode, the interactive TUI exposes the **full tool registry by
 default** — otherwise it would be a chatbot that can't read files or run

@@ -124,6 +124,57 @@ def plan_manual_compaction(replay: SessionReplay) -> ManualCompactionPlan:
     )
 
 
+def plan_preflight_compaction(
+    replay: SessionReplay,
+    *,
+    active_turn_entry_id: str,
+) -> ManualCompactionPlan:
+    """Replace completed history while retaining the identified active user turn."""
+
+    rows = replay.rows
+    user_turn_starts = tuple(
+        index
+        for index, row in enumerate(rows)
+        if row.message.role == "user" and not _is_compaction_summary(row)
+    )
+    if not user_turn_starts:
+        raise NothingToCompactError("No active user turn is available for preflight compaction")
+
+    active_turn_start = next(
+        (index for index, row in enumerate(rows) if row.entry_id == active_turn_entry_id),
+        None,
+    )
+    if active_turn_start is None:
+        raise NothingToCompactError("The active user turn is not present in replay context")
+    if rows[active_turn_start].message.role != "user":
+        raise ValueError("The active preflight boundary must be a user message")
+
+    complete_turn_starts = _complete_user_turn_starts(rows)
+    if active_turn_start in complete_turn_starts:
+        raise NothingToCompactError("The active user turn is already complete")
+    completed_prefix_starts = tuple(
+        start for start in complete_turn_starts if start < active_turn_start
+    )
+    if not completed_prefix_starts:
+        raise NothingToCompactError("No completed turn is available before the active user turn")
+
+    # Preserve the established latest-complete-turn boundary when possible. A
+    # sole completed turn is the exceptional preflight case: summarize it and
+    # retain the first active prompt/tool cycle plus any later steering input.
+    boundary = (
+        completed_prefix_starts[-1] if len(completed_prefix_starts) >= 2 else active_turn_start
+    )
+    replaced_rows = rows[:boundary]
+    retained_rows = rows[boundary:]
+    _validate_tool_boundary(rows, boundary)
+    return ManualCompactionPlan(
+        expected_context_entry_ids=replay.context_entry_ids,
+        replaced_entry_ids=tuple(row.entry_id for row in replaced_rows),
+        rows_to_summarize=replaced_rows,
+        retained_rows=retained_rows,
+    )
+
+
 def serialize_compaction_transcript(
     rows: Sequence[SessionContextRow],
 ) -> str:
@@ -190,9 +241,85 @@ async def summarize_manual_compaction(
     effort: str | None = None,
     instructions: str | None = None,
     cost_estimator: Callable[[str, str | None, str | None, TokenUsage], UsageCost] | None = None,
+    context_window: int | None = None,
+    reserve_tokens: int = 16_384,
 ) -> CompactionSummary:
-    """Generate one checkpoint without exposing internal agent-loop lifecycle events."""
+    """Generate a bounded checkpoint without exposing internal loop events."""
 
+    usable_tokens = context_window - reserve_tokens if context_window is not None else None
+    max_transcript_chars = (
+        max(4_000, usable_tokens * 3) if usable_tokens is not None and usable_tokens > 0 else None
+    )
+    transcript = serialize_compaction_transcript(plan.rows_to_summarize)
+    if max_transcript_chars is None or len(transcript) <= max_transcript_chars:
+        return await _summarize_compaction_once(
+            plan,
+            provider=provider,
+            model=model,
+            effort=effort,
+            instructions=instructions,
+            cost_estimator=cost_estimator,
+        )
+
+    partials: list[CompactionSummary] = []
+    for chunk_index, chunk in enumerate(
+        _chunk_compaction_rows(plan.rows_to_summarize, max_transcript_chars),
+        start=1,
+    ):
+        chunk_plan = ManualCompactionPlan(
+            expected_context_entry_ids=tuple(row.entry_id for row in chunk),
+            replaced_entry_ids=tuple(row.entry_id for row in chunk),
+            rows_to_summarize=chunk,
+            retained_rows=(),
+        )
+        partials.append(
+            await _summarize_compaction_once(
+                chunk_plan,
+                provider=provider,
+                model=model,
+                effort=effort,
+                instructions=f"Checkpoint chunk {chunk_index}. {instructions or ''}".strip(),
+                cost_estimator=cost_estimator,
+            )
+        )
+
+    aggregate_rows = tuple(
+        SessionContextRow(
+            entry_id=f"checkpoint-chunk-{index}",
+            message=Message(role="user", content=partial.summary),
+        )
+        for index, partial in enumerate(partials, start=1)
+    )
+    aggregate_plan = ManualCompactionPlan(
+        expected_context_entry_ids=tuple(row.entry_id for row in aggregate_rows),
+        replaced_entry_ids=tuple(row.entry_id for row in aggregate_rows),
+        rows_to_summarize=aggregate_rows,
+        retained_rows=(),
+    )
+    final = await _summarize_compaction_once(
+        aggregate_plan,
+        provider=provider,
+        model=model,
+        effort=effort,
+        instructions=instructions,
+        cost_estimator=cost_estimator,
+    )
+    return CompactionSummary(
+        summary=final.summary,
+        usage=_sum_token_usage(tuple(partial.usage for partial in partials) + (final.usage,)),
+        cost=final.cost,
+    )
+
+
+async def _summarize_compaction_once(
+    plan: ManualCompactionPlan,
+    *,
+    provider: Provider,
+    model: str | None,
+    effort: str | None,
+    instructions: str | None,
+    cost_estimator: Callable[[str, str | None, str | None, TokenUsage], UsageCost] | None,
+) -> CompactionSummary:
     messages = (
         Message(
             role="system",
@@ -246,6 +373,65 @@ async def summarize_manual_compaction(
     except CompactionSummaryError as exc:
         raise _summary_error(str(exc), completion) from exc
     return CompactionSummary(summary=summary, usage=completion.usage, cost=completion.cost)
+
+
+def _chunk_compaction_rows(
+    rows: Sequence[SessionContextRow],
+    max_transcript_chars: int,
+) -> tuple[tuple[SessionContextRow, ...], ...]:
+    content_limit = max(1_000, max_transcript_chars // 2)
+    fragments: list[SessionContextRow] = []
+    for row in rows:
+        content = row.message.content
+        if not content:
+            fragments.append(row)
+            continue
+        for offset in range(0, len(content), content_limit):
+            fragments.append(
+                SessionContextRow(
+                    entry_id=f"{row.entry_id}:{offset // content_limit}",
+                    message=row.message.model_copy(
+                        update={"content": content[offset : offset + content_limit]}
+                    ),
+                    source_kind=row.source_kind,
+                )
+            )
+
+    chunks: list[tuple[SessionContextRow, ...]] = []
+    current: list[SessionContextRow] = []
+    for fragment in fragments:
+        candidate = (*current, fragment)
+        if current and len(serialize_compaction_transcript(candidate)) > max_transcript_chars:
+            chunks.append(tuple(current))
+            current = [fragment]
+        else:
+            current.append(fragment)
+    if current:
+        chunks.append(tuple(current))
+    return tuple(chunks)
+
+
+def _sum_token_usage(usages: Sequence[TokenUsage | None]) -> TokenUsage | None:
+    present = tuple(usage for usage in usages if usage is not None)
+    if not present:
+        return None
+
+    def optional_sum(field: str) -> int | None:
+        values = tuple(getattr(usage, field) for usage in present)
+        return (
+            sum(value for value in values if value is not None)
+            if any(value is not None for value in values)
+            else None
+        )
+
+    return TokenUsage(
+        input_tokens=sum(usage.input_tokens for usage in present),
+        output_tokens=sum(usage.output_tokens for usage in present),
+        total_tokens=sum(usage.total_tokens for usage in present),
+        cache_read_input_tokens=optional_sum("cache_read_input_tokens"),
+        cache_write_input_tokens=optional_sum("cache_write_input_tokens"),
+        reasoning_output_tokens=optional_sum("reasoning_output_tokens"),
+    )
 
 
 def _summary_error(message: str, completion: MessageCompleted) -> CompactionSummaryError:
@@ -328,6 +514,7 @@ __all__ = [
     "NothingToCompactError",
     "build_compaction_checkpoint_prompt",
     "plan_manual_compaction",
+    "plan_preflight_compaction",
     "serialize_compaction_transcript",
     "should_auto_compact",
     "summarize_manual_compaction",

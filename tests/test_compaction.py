@@ -19,6 +19,7 @@ from wisp.coding.compaction import (
     NothingToCompactError,
     build_compaction_checkpoint_prompt,
     plan_manual_compaction,
+    plan_preflight_compaction,
     serialize_compaction_transcript,
     summarize_manual_compaction,
 )
@@ -26,6 +27,7 @@ from wisp.coding.session import CodingSession
 from wisp.events import (
     CompactionCompleted,
     CompactionStarted,
+    ContextEstimated,
     ErrorEvent,
     KnownWispEventAdapter,
     MessageCompleted,
@@ -35,6 +37,7 @@ from wisp.events import (
     ToolCallSnapshot,
     ToolExecutionEnded,
     TurnCompleted,
+    TurnStarted,
     WispEvent,
     wisp_event_from_dict,
     wisp_event_from_json,
@@ -115,7 +118,11 @@ def _two_turn_replay() -> SessionReplay:
     return SessionReplay(rows=(*_turn("one"), *_turn("two")))
 
 
-def _model_registry(*, context_window: int = 100) -> ModelRegistry:
+def _model_registry(
+    *,
+    context_window: int = 100,
+    auto_compact_token_limit: int | None = None,
+) -> ModelRegistry:
     return ModelRegistry(
         ModelCatalog(
             schema_version=1,
@@ -127,6 +134,11 @@ def _model_registry(*, context_window: int = 100) -> ModelRegistry:
                     docs_url="https://example.com",
                     models=("model",),
                     context_windows={"model": context_window},
+                    auto_compact_token_limits=(
+                        {"model": auto_compact_token_limit}
+                        if auto_compact_token_limit is not None
+                        else {}
+                    ),
                 ),
             ),
         )
@@ -244,6 +256,120 @@ def test_manual_compaction_plan_replaces_prefix_and_retains_latest_complete_turn
     assert plan.replaced_entry_ids == ("one-user", "one-assistant")
     assert plan.messages_to_summarize == tuple(row.message for row in replay.rows[:2])
     assert plan.retained_rows == replay.rows[2:]
+
+
+def test_preflight_compaction_retains_tool_turn_before_later_steering() -> None:
+    call = ToolCallSnapshot(call_id="call-1", name="read", arguments={})
+    current_turn = (
+        _row("current-user", Message(role="user", content="use the tool")),
+        _row(
+            "current-assistant",
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(call,),
+                finish_reason="tool_calls",
+            ),
+        ),
+        _row(
+            "current-tool",
+            Message(
+                role="tool",
+                content="large result",
+                tool_call_id="call-1",
+                tool_name="read",
+            ),
+        ),
+        _row("steering-user", Message(role="user", content="change direction")),
+    )
+
+    plan = plan_preflight_compaction(
+        SessionReplay(rows=(*_turn("one"), *current_turn)),
+        active_turn_entry_id="current-user",
+    )
+
+    assert plan.replaced_entry_ids == ("one-user", "one-assistant")
+    assert plan.retained_rows == current_turn
+
+
+def test_preflight_compaction_ignores_stale_incomplete_turn_before_completed_history() -> None:
+    stale_call = ToolCallSnapshot(call_id="stale-call", name="read", arguments={})
+    stale_turn = (
+        _row("stale-user", Message(role="user", content="old interrupted turn")),
+        _row(
+            "stale-assistant",
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(stale_call,),
+                finish_reason="tool_calls",
+            ),
+        ),
+        _row(
+            "stale-tool",
+            Message(
+                role="tool",
+                content="cancelled",
+                tool_call_id="stale-call",
+                tool_name="read",
+            ),
+        ),
+    )
+    active = _row("active-user", Message(role="user", content="current prompt"))
+
+    plan = plan_preflight_compaction(
+        SessionReplay(rows=(*stale_turn, *_turn("completed"), active)),
+        active_turn_entry_id="active-user",
+    )
+
+    assert plan.replaced_entry_ids == (
+        "stale-user",
+        "stale-assistant",
+        "stale-tool",
+        "completed-user",
+        "completed-assistant",
+    )
+    assert plan.retained_rows == (active,)
+
+
+def test_preflight_compaction_uses_explicit_prompt_after_consecutive_incomplete_turns() -> None:
+    stale_call = ToolCallSnapshot(call_id="stale-call", name="read", arguments={})
+    stale_turn = (
+        _row("stale-user", Message(role="user", content="old interrupted turn")),
+        _row(
+            "stale-assistant",
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(stale_call,),
+                finish_reason="tool_calls",
+            ),
+        ),
+        _row(
+            "stale-tool",
+            Message(
+                role="tool",
+                content="cancelled",
+                tool_call_id="stale-call",
+                tool_name="read",
+            ),
+        ),
+    )
+    active = _row("active-user", Message(role="user", content="replacement prompt"))
+
+    plan = plan_preflight_compaction(
+        SessionReplay(rows=(*_turn("completed"), *stale_turn, active)),
+        active_turn_entry_id="active-user",
+    )
+
+    assert plan.replaced_entry_ids == (
+        "completed-user",
+        "completed-assistant",
+        "stale-user",
+        "stale-assistant",
+        "stale-tool",
+    )
+    assert plan.retained_rows == (active,)
 
 
 def test_manual_compaction_plan_recompacts_summary_and_aged_out_turn() -> None:
@@ -453,6 +579,54 @@ def test_provider_summary_uses_no_tools_no_continuation_and_captures_usage() -> 
     assert "## Additional focus\nFocus on tests" in request.messages[0].content
     assert request.messages[1].role == "user"
     assert "<historical_transcript>" in request.messages[1].content
+
+
+def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:
+    class RecordingSummaryProvider:
+        name = "recording-summary"
+        default_model: str | None = "summary-model"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[Message, ...]] = []
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            *,
+            model: str | None = None,
+            tools: Sequence[ToolSpec] = (),
+            tool_results: Sequence[ToolCallResult] = (),
+            previous_response_id: str | None = None,
+            effort: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del tools, tool_results, previous_response_id, effort
+            self.calls.append(tuple(messages))
+            yield ProviderResponseStarted(model=model or self.default_model or self.name)
+            yield ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY)
+
+    provider = RecordingSummaryProvider()
+    oversized = SessionReplay(
+        rows=(
+            _row("huge-user", Message(role="user", content="x" * 30_000)),
+            _row("huge-answer", Message(role="assistant", content="done", finish_reason="stop")),
+            *_turn("retained"),
+        )
+    )
+    plan = plan_manual_compaction(oversized)
+
+    async def run() -> CompactionSummary:
+        return await summarize_manual_compaction(
+            plan,
+            provider=provider,
+            context_window=2_000,
+            reserve_tokens=400,
+        )
+
+    summary = anyio.run(run)
+
+    assert summary.summary == VALID_COMPACTION_SUMMARY
+    assert len(provider.calls) > 2
+    assert all(len(call[-1].content) <= 4_800 for call in provider.calls)
 
 
 @pytest.mark.parametrize(
@@ -797,9 +971,9 @@ def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> No
             provider=provider,
             sessions=store,
             model="model",
-            models=_model_registry(),
+            models=_model_registry(auto_compact_token_limit=80),
             prompt_messages=(Message(role="system", content="system"),),
-            context_reserve_tokens=20,
+            context_reserve_tokens=10,
         )
         events = [event async for event in agent.run("question two", session=session)]
         record = next(
@@ -829,6 +1003,8 @@ def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> No
     assert started.reason == "threshold"
     assert started.trigger_budget is not None
     assert started.trigger_budget.observed_tokens == 81
+    assert started.trigger_budget.context_window == 100
+    assert started.trigger_budget.reserve_tokens == 20
     completed = next(event for event in events if isinstance(event, CompactionCompleted))
     assert completed.reason == "threshold"
     assert completed.outcome == "completed"
@@ -846,6 +1022,516 @@ def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> No
         "question two",
         "answer two",
     ]
+
+
+def test_coding_session_does_not_auto_compact_at_provider_limit(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer two",
+                    usage=ProviderUsage(input_tokens=70, output_tokens=10, total_tokens=80),
+                ),
+            ]
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        await _append_turn(session, "one")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(auto_compact_token_limit=80),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=10,
+        )
+        return [event async for event in agent.run("question two", session=session)]
+
+    events = anyio.run(run)
+
+    estimated = next(event for event in events if isinstance(event, ContextEstimated))
+    assert estimated.budget.reserve_tokens == 20
+    assert not any(isinstance(event, CompactionStarted) for event in events)
+    assert len(provider.calls) == 1
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
+
+
+@pytest.mark.parametrize(
+    ("history_chars", "prompt_chars", "history_exceeds_limit"),
+    [
+        pytest.param(1_600, 0, True, id="resumed-history"),
+        pytest.param(1_500, 300, False, id="prompt-inclusive-history"),
+    ],
+)
+def test_coding_session_compacts_before_provider_limit_request(
+    tmp_path: Path,
+    history_chars: int,
+    prompt_chars: int,
+    history_exceeds_limit: bool,
+) -> None:
+    context_window = 2_000
+    compaction_limit = 1_600
+    first_user = Message(role="user", content="question one " + "a" * history_chars)
+    first_assistant = Message(
+        role="assistant",
+        content="answer one " + "b" * history_chars,
+        finish_reason="stop",
+    )
+    second_user = Message(role="user", content="question two " + "c" * history_chars)
+    second_assistant = Message(
+        role="assistant",
+        content="answer two " + "d" * history_chars,
+        finish_reason="stop",
+    )
+    prompt = "question three " + "e" * prompt_chars
+    prompt_messages = (Message(role="system", content="system"),)
+    history = (first_user, first_assistant, second_user, second_assistant)
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(
+                    content="answer three",
+                    usage=ProviderUsage(input_tokens=900, output_tokens=100, total_tokens=1_000),
+                ),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> tuple[list[WispEvent], tuple[str, str], int]:
+        first = await session.append_message(first_user)
+        second = await session.append_message(first_assistant)
+        await session.append_message(second_user)
+        await session.append_message(second_assistant)
+        entry_start = len(session.read_entries())
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(
+                context_window=context_window,
+                auto_compact_token_limit=compaction_limit,
+            ),
+            prompt_messages=prompt_messages,
+            context_reserve_tokens=100,
+        )
+        events = [
+            event
+            async for event in agent.run(
+                prompt,
+                session=session,
+                history=history,
+                operation_id="prompt-1",
+            )
+        ]
+        return events, (first.id, second.id), entry_start
+
+    events, first_turn_ids, entry_start = anyio.run(run)
+
+    history_budget = estimate_context((*prompt_messages, *history))
+    assert (history_budget.total_tokens > compaction_limit) is history_exceeds_limit
+    started_index = next(
+        index for index, event in enumerate(events) if isinstance(event, CompactionStarted)
+    )
+    turn_started_index = next(
+        index for index, event in enumerate(events) if isinstance(event, TurnStarted)
+    )
+    assert started_index < turn_started_index
+    started = events[started_index]
+    assert isinstance(started, CompactionStarted)
+    assert started.reason == "threshold"
+    assert started.trigger_budget is not None
+    assert started.trigger_budget.estimate.total_tokens > compaction_limit
+    assert started.trigger_budget.reserve_tokens == context_window - compaction_limit
+    record = next(
+        entry.compaction
+        for entry in session.read_entries()
+        if isinstance(entry, CompactionSessionEntry)
+    )
+    assert record.replaced_entry_ids == first_turn_ids
+    assert all(entry.operation_id == "prompt-1" for entry in session.read_entries()[entry_start:])
+    assert len(provider.calls) == 2
+    assert provider.calls[0].messages[0].content.startswith("Create a concise")
+    request = provider.calls[1]
+    assert request.messages[-1].content == prompt
+    assert first_user.content not in {message.content for message in request.messages}
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+
+
+def test_coding_session_preflight_compacts_one_completed_turn(tmp_path: Path) -> None:
+    context_window = 4_000
+    compaction_limit = 1_600
+    first_user = Message(role="user", content="question one " + "a" * 3_500)
+    first_assistant = Message(
+        role="assistant",
+        content="answer one " + "b" * 3_500,
+        finish_reason="stop",
+    )
+    history = (first_user, first_assistant)
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer two"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> tuple[list[WispEvent], tuple[str, str]]:
+        user_entry = await session.append_message(first_user)
+        assistant_entry = await session.append_message(first_assistant)
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(
+                context_window=context_window,
+                auto_compact_token_limit=compaction_limit,
+            ),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=100,
+        )
+        events = [
+            event async for event in agent.run("question two", session=session, history=history)
+        ]
+        return events, (user_entry.id, assistant_entry.id)
+
+    events, first_turn_ids = anyio.run(run)
+
+    started = next(event for event in events if isinstance(event, CompactionStarted))
+    assert started.trigger_budget is not None
+    assert started.trigger_budget.estimate.total_tokens > compaction_limit
+    record = next(
+        entry.compaction
+        for entry in session.read_entries()
+        if isinstance(entry, CompactionSessionEntry)
+    )
+    assert record.replaced_entry_ids == first_turn_ids
+    assert len(provider.calls) == 2
+    assert provider.calls[1].messages[-1].content == "question two"
+
+
+def test_coding_session_rejects_oversized_fresh_prompt_before_provider(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider([], default_model="model")
+    store = JsonlSessionStore(tmp_path)
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        model="model",
+        models=_model_registry(
+            context_window=2_000,
+            auto_compact_token_limit=1_600,
+        ),
+        prompt_messages=(Message(role="system", content="system"),),
+        context_reserve_tokens=100,
+    )
+
+    async def run() -> list[WispEvent]:
+        return [event async for event in agent.run("x" * 8_000)]
+
+    with pytest.raises(ContextOverflowError, match="Active prompt exceeds"):
+        anyio.run(run)
+    assert provider.calls == []
+    assert store.latest().read_context_messages() == ()
+
+
+def test_coding_session_rejects_provider_reserve_that_consumes_window(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider([], default_model="model")
+    store = JsonlSessionStore(tmp_path)
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        model="model",
+        models=_model_registry(
+            context_window=2_000,
+            auto_compact_token_limit=1_600,
+        ),
+        prompt_messages=(Message(role="system", content="system"),),
+        context_reserve_tokens=2_000,
+    )
+
+    async def run() -> list[WispEvent]:
+        return [event async for event in agent.run("small prompt")]
+
+    with pytest.raises(ContextOverflowError, match="Active prompt exceeds"):
+        anyio.run(run)
+    assert provider.calls == []
+    assert store.latest().read_context_messages() == ()
+
+
+def test_coding_session_stops_when_prompt_remains_over_provider_limit(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ]
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    history = (
+        Message(role="user", content="question one"),
+        Message(role="assistant", content="answer one", finish_reason="stop"),
+    )
+
+    async def run() -> list[WispEvent]:
+        for message in history:
+            await session.append_message(message)
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(
+                context_window=2_000,
+                auto_compact_token_limit=1_600,
+            ),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=100,
+        )
+        return [
+            event
+            async for event in agent.run(
+                "question two " + "x" * 8_000,
+                session=session,
+                history=history,
+            )
+        ]
+
+    with pytest.raises(ContextOverflowError, match="Active prompt exceeds"):
+        anyio.run(run)
+    assert len(provider.calls) == 1
+    assert session.read_context_messages() == history
+
+
+def test_coding_session_rechecks_provider_limit_after_tool_round(tmp_path: Path) -> None:
+    class LargeReadTool:
+        name = "large_read"
+        safety = "read"
+        description = "Return a large deterministic result."
+        input_schema = {"type": "object", "properties": {}}
+
+        async def run(self, arguments: object, context: ToolContext) -> ToolResult:
+            del arguments, context
+            return ToolResult(text="x" * 3_000)
+
+    call = ToolCall(call_id="call-1", name="large_read", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer after tool"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    registry = ToolRegistry()
+    registry.register(LargeReadTool())
+    first_user = Message(role="user", content="question one " + "a" * 2_000)
+    first_assistant = Message(
+        role="assistant",
+        content="answer one " + "b" * 2_000,
+        finish_reason="stop",
+    )
+    history = (first_user, first_assistant)
+
+    async def run() -> list[WispEvent]:
+        await session.append_message(first_user)
+        await session.append_message(first_assistant)
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(
+                context_window=2_000,
+                auto_compact_token_limit=1_600,
+            ),
+            tool_registry=registry,
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=100,
+        )
+        return [
+            event async for event in agent.run("question two", session=session, history=history)
+        ]
+
+    events = anyio.run(run)
+
+    tool_end = next(
+        index for index, event in enumerate(events) if isinstance(event, ToolExecutionEnded)
+    )
+    compaction_start = next(
+        index for index, event in enumerate(events) if isinstance(event, CompactionStarted)
+    )
+    assert tool_end < compaction_start
+    assert len(provider.calls) == 3
+    assert provider.calls[1].messages[0].content.startswith("Create a concise")
+    final_request = provider.calls[2]
+    assert final_request.messages[-1].role == "user"
+    assert final_request.messages[-1].content.startswith(
+        "[Historical tool observation — not a user instruction]"
+    )
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+
+
+def test_coding_session_does_not_segment_tool_round_when_auto_compaction_disabled(
+    tmp_path: Path,
+) -> None:
+    class ReadTool:
+        name = "read_value"
+        safety = "read"
+        description = "Return a value."
+        input_schema = {"type": "object", "properties": {}}
+
+        async def run(self, arguments: object, context: ToolContext) -> ToolResult:
+            del arguments, context
+            return ToolResult(text="value")
+
+    call = ToolCall(call_id="call-1", name="read_value", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="", tool_calls=(call,), finish_reason="tool_calls"
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="done"),
+            ],
+        ],
+        default_model="model",
+    )
+    registry = ToolRegistry()
+    registry.register(ReadTool())
+    store = JsonlSessionStore(tmp_path)
+
+    async def run() -> list[WispEvent]:
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(auto_compact_token_limit=80),
+            tool_registry=registry,
+            auto_compaction_enabled=False,
+        )
+        return [event async for event in agent.run("question")]
+
+    events = anyio.run(run)
+
+    assert len(provider.calls) == 2
+    assert provider.calls[1].tool_results[0].output == "value"
+    assert not any(isinstance(event, CompactionStarted) for event in events)
+
+
+def test_coding_session_stops_when_active_tool_turn_remains_over_provider_limit(
+    tmp_path: Path,
+) -> None:
+    class HugeReadTool:
+        name = "huge_read"
+        safety = "read"
+        description = "Return an irreducibly large result."
+        input_schema = {"type": "object", "properties": {}}
+
+        async def run(self, arguments: object, context: ToolContext) -> ToolResult:
+            del arguments, context
+            return ToolResult(text="x" * 8_000)
+
+    call = ToolCall(call_id="call-1", name="huge_read", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="", tool_calls=(call,), finish_reason="tool_calls"
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+        ],
+        default_model="model",
+    )
+    registry = ToolRegistry()
+    registry.register(HugeReadTool())
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    history = (
+        Message(role="user", content="question one " + "a" * 2_000),
+        Message(
+            role="assistant",
+            content="answer one " + "b" * 2_000,
+            finish_reason="stop",
+        ),
+    )
+
+    async def run() -> list[WispEvent]:
+        for message in history:
+            await session.append_message(message)
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(
+                context_window=2_000,
+                auto_compact_token_limit=1_600,
+            ),
+            tool_registry=registry,
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=100,
+        )
+        return [
+            event async for event in agent.run("question two", session=session, history=history)
+        ]
+
+    with pytest.raises(ContextOverflowError, match="Active tool result exceeds"):
+        anyio.run(run)
+    assert len(provider.calls) == 2
+    assert session.read_context_messages() == history
 
 
 def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Path) -> None:

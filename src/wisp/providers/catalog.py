@@ -89,6 +89,10 @@ class ModelCatalogProviderEntry(BaseModel):
     docs_url: str
     models: tuple[str, ...]
     context_windows: dict[str, int] = {}
+    # Optional provider-recommended proactive compaction limits. These are
+    # distinct from nominal context windows and can differ across provider
+    # surfaces that expose the same model id.
+    auto_compact_token_limits: dict[str, int] = {}
     # Aliases stay valid in configuration while ``models`` remains the canonical
     # picker list. This avoids showing both an alias and its target as choices.
     model_aliases: dict[str, str] = {}
@@ -142,6 +146,28 @@ class ModelCatalogProviderEntry(BaseModel):
                 raise ValueError(
                     f"provider {self.name!r} context_windows[{model_id!r}] "
                     f"must be positive, got {window}"
+                )
+        for model_id, limit in self.auto_compact_token_limits.items():
+            if model_id not in model_set:
+                raise ValueError(
+                    f"provider {self.name!r} auto_compact_token_limits references "
+                    f"unknown model {model_id!r}"
+                )
+            if limit <= 0:
+                raise ValueError(
+                    f"provider {self.name!r} auto_compact_token_limits[{model_id!r}] "
+                    f"must be positive, got {limit}"
+                )
+            context_window = self.context_windows.get(model_id)
+            if context_window is None:
+                raise ValueError(
+                    f"provider {self.name!r} auto_compact_token_limits[{model_id!r}] "
+                    "requires a context window"
+                )
+            if limit > context_window:
+                raise ValueError(
+                    f"provider {self.name!r} auto_compact_token_limits[{model_id!r}] "
+                    f"must not exceed context window {context_window}, got {limit}"
                 )
         for model_id in self.model_lifecycle:
             if model_id not in model_set:
@@ -460,6 +486,52 @@ class ModelRegistry:
                 return None
             return entry.model_lifecycle.get(canonical_model)
         return None
+
+    def auto_compact_token_limit(
+        self,
+        provider_name: str,
+        model: str | None,
+        *,
+        default_model: str | None = None,
+    ) -> int | None:
+        """Return a provider-recommended proactive compaction limit, if cataloged."""
+
+        effective_model = model if model is not None else default_model
+        if effective_model is None:
+            return None
+        for entry in self._catalog.providers:
+            if entry.name == provider_name:
+                canonical_model = entry.canonical_model(effective_model)
+                if canonical_model is None:
+                    return None
+                return entry.auto_compact_token_limits.get(canonical_model)
+        return None
+
+    def effective_context_reserve_tokens(
+        self,
+        provider_name: str,
+        model: str | None,
+        *,
+        reserve_tokens: int,
+        default_model: str | None = None,
+    ) -> int:
+        """Apply a provider compaction limit without weakening the user's reserve."""
+
+        if reserve_tokens < 0:
+            raise ValueError("reserve_tokens must be non-negative")
+        context_window = self.context_window(
+            provider_name,
+            model,
+            default_model=default_model,
+        )
+        compact_limit = self.auto_compact_token_limit(
+            provider_name,
+            model,
+            default_model=default_model,
+        )
+        if context_window is None or compact_limit is None:
+            return reserve_tokens
+        return max(reserve_tokens, context_window - compact_limit)
 
     def context_window(
         self,

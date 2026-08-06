@@ -30,6 +30,7 @@ from wisp.coding.compaction import (
     ManualCompactionPlan,
     NothingToCompactError,
     plan_manual_compaction,
+    plan_preflight_compaction,
     should_auto_compact,
     summarize_manual_compaction,
 )
@@ -451,7 +452,7 @@ class CodingSession:
                 max_tool_iterations=self.max_tool_iterations,
                 effort=self.effort,
                 context_window=self._context_window(),
-                context_reserve_tokens=self.context_reserve_tokens,
+                context_reserve_tokens=self._effective_context_reserve_tokens(),
                 cost_estimator=self._cost_estimator,
             ),
             messages=(*prompt_messages, *self._conversation_history(history)),
@@ -468,6 +469,28 @@ class CodingSession:
         self._active_harness = harness
         self._accepting_queued_messages = True
         await self._repair_and_flush(session, harness)
+        if session.path.is_file():
+            run_entry_start = len(await anyio.to_thread.run_sync(session.read_entries))
+            run_start_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
+        else:
+            run_entry_start = 0
+            run_start_leaf_id = None
+
+        async def rollback_active_prompt() -> None:
+            if operation_id is not None:
+                await session.restore_active_leaf_for_operation(
+                    run_entry_start,
+                    run_start_leaf_id,
+                    operation_id=operation_id,
+                )
+                return
+            current_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
+            if current_leaf_id != run_start_leaf_id:
+                await session.select_active_leaf(
+                    run_start_leaf_id,
+                    expected_active_leaf_id=current_leaf_id,
+                    operation_id=operation_id,
+                )
 
         yield await emit(AgentStarted(session_id=session.session_id))
 
@@ -475,7 +498,73 @@ class CodingSession:
             await session.append_message(prompt_message, operation_id=operation_id)
 
         user_message = Message(role="user", content=prompt)
-        await session.append_message(user_message, operation_id=operation_id)
+        user_entry = await session.append_message(user_message, operation_id=operation_id)
+        # Add the persisted prompt before checking the threshold so provider limits
+        # apply to the complete next request, not only the resumed history.
+        harness.append_message(user_message)
+        auto_compaction_status = _AutoCompactionStatus()
+        # A preflight compaction can only update a request that is actually
+        # resuming persisted history. It is reserved for cataloged provider
+        # limits; the existing generic reserve policy remains post-response.
+        provider_auto_compaction = (
+            self.auto_compaction_enabled and self._has_provider_auto_compaction_limit()
+        )
+        if provider_auto_compaction:
+            if history:
+                prompt_compacted = False
+                async for compaction_event in self._maybe_auto_compact(
+                    session,
+                    harness,
+                    status=auto_compaction_status,
+                    operation_id=operation_id,
+                    preflight_active_entry_id=user_entry.id,
+                ):
+                    if (
+                        isinstance(compaction_event, CompactionCompleted)
+                        and compaction_event.outcome == "completed"
+                    ):
+                        prompt_compacted = True
+                    yield compaction_event
+                if prompt_compacted:
+                    active_history = await anyio.to_thread.run_sync(session.read_context_messages)
+                    harness.replace_messages(
+                        (*prompt_messages, *self._conversation_history(active_history))
+                    )
+            remaining_budget = self._harness_context_budget(harness)
+            if self._exceeds_provider_auto_compaction_limit(remaining_budget):
+                error_message = (
+                    "Active prompt exceeds the provider auto-compaction limit "
+                    "after compacting all eligible history"
+                )
+                await rollback_active_prompt()
+                yield await emit(ErrorEvent(message=error_message))
+                yield await emit(
+                    AgentCompleted(
+                        session_id=session.session_id,
+                        turns=0,
+                        outcome="failed",
+                    )
+                )
+                raise ContextOverflowError(error_message)
+
+        if provider_auto_compaction:
+            # Steering queued while preflight compaction was running must affect
+            # the first provider request, not wait for that request to finish.
+            self._accepting_queued_messages = False
+            for queue_event in harness.drain_steering():
+                if isinstance(queue_event, QueueMessageInjected):
+                    self._queue_message(
+                        session,
+                        Message(
+                            role="user",
+                            content=queue_event.content,
+                            created_at=queue_event.timestamp,
+                        ),
+                        operation_id=operation_id,
+                    )
+                yield await emit(queue_event)
+            self._accepting_queued_messages = True
+
         turns = 0
         had_tool_round = False
         tool_iterations = 0
@@ -483,13 +572,14 @@ class CodingSession:
         overflow_recovery_attempted = False
         recovered_from_overflow = False
         tool_presentation_statuses: dict[str, ToolPresentationStatus] = {}
-        harness_events = harness.prompt_message(
-            user_message,
+        harness_events = harness.continue_(
             defer_context_overflow_errors=True,
+            pause_after_tool_round=provider_auto_compaction,
         )
 
         while True:
             saw_loop_error = False
+            attempt_had_tool_round = False
             overflow_error: ContextOverflowError | None = None
             overflow_budget: ContextBudget | None = None
             attempt_had_delta = False
@@ -509,6 +599,7 @@ class CodingSession:
                         event.tool_calls or event.finish_reason == "tool_calls"
                     ):
                         had_tool_round = True
+                        attempt_had_tool_round = True
                         tool_iterations += 1
                     elif isinstance(event, ToolExecutionEnded) and self._tool_is_unsafe(event.name):
                         had_unsafe_tool_round = True
@@ -583,6 +674,51 @@ class CodingSession:
                         )
 
             if overflow_error is None:
+                if attempt_had_tool_round and provider_auto_compaction:
+                    tool_round_compacted = False
+                    async for compaction_event in self._maybe_auto_compact(
+                        session,
+                        harness,
+                        status=auto_compaction_status,
+                        operation_id=operation_id,
+                        preflight_active_entry_id=user_entry.id,
+                    ):
+                        if (
+                            isinstance(compaction_event, CompactionCompleted)
+                            and compaction_event.outcome == "completed"
+                        ):
+                            tool_round_compacted = True
+                        yield compaction_event
+                    if tool_round_compacted:
+                        active_history = await anyio.to_thread.run_sync(
+                            session.read_context_messages
+                        )
+                        harness.replace_messages(
+                            (*prompt_messages, *self._conversation_history(active_history))
+                        )
+                    remaining_budget = self._harness_context_budget(harness)
+                    if self._exceeds_provider_auto_compaction_limit(remaining_budget):
+                        error_message = (
+                            "Active tool result exceeds the provider auto-compaction limit "
+                            "after compacting all eligible history"
+                        )
+                        await rollback_active_prompt()
+                        yield await emit(ErrorEvent(message=error_message))
+                        yield await emit(
+                            AgentCompleted(
+                                session_id=session.session_id,
+                                turns=turns,
+                                outcome="failed",
+                            )
+                        )
+                        raise ContextOverflowError(error_message)
+                    harness_events = harness.continue_(
+                        turn_offset=turns,
+                        tool_iteration_offset=tool_iterations,
+                        defer_context_overflow_errors=True,
+                        pause_after_tool_round=True,
+                    )
+                    continue
                 break
 
             can_retry_overflow = (
@@ -695,16 +831,17 @@ class CodingSession:
                 turn_offset=turns,
                 tool_iteration_offset=tool_iterations,
                 defer_context_overflow_errors=True,
+                pause_after_tool_round=provider_auto_compaction,
             )
 
         self._accepting_queued_messages = False
         auto_compaction_saved = False
-        auto_compaction_status = _AutoCompactionStatus()
         if not recovered_from_overflow:
             async for compaction_event in self._maybe_auto_compact(
                 session,
                 harness,
                 status=auto_compaction_status,
+                operation_id=operation_id,
             ):
                 if isinstance(compaction_event, SessionSaved):
                     auto_compaction_saved = True
@@ -745,12 +882,30 @@ class CodingSession:
             finally:
                 self._operation_active = False
 
+    @staticmethod
+    def _exceeds_provider_auto_compaction_limit(budget: ContextBudget) -> bool:
+        return (
+            budget.context_window is not None and budget.reserve_tokens >= budget.context_window
+        ) or should_auto_compact(budget, enabled=True)
+
+    def _harness_context_budget(self, harness: AgentHarness) -> ContextBudget:
+        return build_context_budget(
+            estimate_context(
+                self._normalize_provider_messages(harness.messages),
+                tuple(harness.config.tools),
+            ),
+            context_window=self._context_window(),
+            reserve_tokens=self._effective_context_reserve_tokens(),
+        )
+
     async def _maybe_auto_compact(
         self,
         session: JsonlSession,
         harness: AgentHarness,
         *,
         status: _AutoCompactionStatus,
+        operation_id: str | None = None,
+        preflight_active_entry_id: str | None = None,
     ) -> AsyncIterator[WispEvent]:
         provider_messages = self._normalize_provider_messages(harness.messages)
         tools = tuple(harness.config.tools)
@@ -769,7 +924,7 @@ class CodingSession:
         budget = build_context_budget(
             estimate,
             context_window=self._context_window(),
-            reserve_tokens=self.context_reserve_tokens,
+            reserve_tokens=self._effective_context_reserve_tokens(),
             observed_tokens=observed_tokens,
             observed_is_current=observed_is_current,
         )
@@ -779,7 +934,14 @@ class CodingSession:
         replay: SessionReplay | None = None
         try:
             replay = await self._prepare_compaction_replay(session)
-            plan = plan_manual_compaction(replay)
+            plan = (
+                plan_preflight_compaction(
+                    replay,
+                    active_turn_entry_id=preflight_active_entry_id,
+                )
+                if preflight_active_entry_id is not None
+                else plan_manual_compaction(replay)
+            )
         except NothingToCompactError:
             return
         except Exception as exc:
@@ -817,6 +979,7 @@ class CodingSession:
             instructions=None,
             trigger_budget=budget,
             recover_failure=True,
+            operation_id=operation_id,
         ):
             yield event
 
@@ -871,6 +1034,8 @@ class CodingSession:
                 effort=self.effort,
                 instructions=instructions,
                 cost_estimator=self._cost_estimator,
+                context_window=self._context_window(),
+                reserve_tokens=self.context_reserve_tokens,
             )
             normalized_instructions = (
                 instructions.strip() if instructions is not None and instructions.strip() else None
@@ -1064,7 +1229,7 @@ class CodingSession:
                 provider_messages=provider_messages,
                 tools=self._effective_tools(),
                 context_window=self._context_window(),
-                reserve_tokens=self.context_reserve_tokens,
+                reserve_tokens=self._effective_context_reserve_tokens(),
                 observed_tokens=observed_tokens,
                 observed_is_current=observed_is_current,
                 observed_entry_id=observed_entry_id,
@@ -1146,6 +1311,28 @@ class CodingSession:
             self.provider.name,
             self.model,
             default_model=self.provider.default_model,
+        )
+
+    def _effective_context_reserve_tokens(self) -> int:
+        if self.models is None:
+            return self.context_reserve_tokens
+        return self.models.effective_context_reserve_tokens(
+            self.provider.name,
+            self.model,
+            reserve_tokens=self.context_reserve_tokens,
+            default_model=self.provider.default_model,
+        )
+
+    def _has_provider_auto_compaction_limit(self) -> bool:
+        if self.models is None:
+            return False
+        return (
+            self.models.auto_compact_token_limit(
+                self.provider.name,
+                self.model,
+                default_model=self.provider.default_model,
+            )
+            is not None
         )
 
     async def _emit(

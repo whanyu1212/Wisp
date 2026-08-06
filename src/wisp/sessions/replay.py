@@ -288,7 +288,10 @@ def _replay_session_path(entries: Sequence[SessionTreeEntry]) -> SessionReplay:
             raise SessionReplayError(f"Compaction {entry.id} must retain a complete user turn")
         if retained_rows[0].message.role != "user":
             raise SessionReplayError(f"Compaction {entry.id} splits a conversation turn")
-        if not _first_retained_turn_is_complete(retained_rows):
+        if (
+            not _first_retained_turn_is_complete(retained_rows)
+            and entry.compaction.reason != "threshold"
+        ):
             raise SessionReplayError(f"Compaction {entry.id} must retain a complete user turn")
 
         summary = Message(
