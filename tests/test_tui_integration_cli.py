@@ -5887,9 +5887,9 @@ def test_textual_composer_frame_clicks_focus_prompt_editor() -> None:
 
 
 def test_textual_wheel_uses_one_row_sensitivity() -> None:
-    app_instance = TextualTui()
+    transcript = Transcript()
 
-    assert app_instance.scroll_sensitivity_y == 1.0
+    assert transcript.scroll_sensitivity_y == 1.0
 
 
 def test_textual_run_shell_enables_mouse_for_wheel_scrolling() -> None:

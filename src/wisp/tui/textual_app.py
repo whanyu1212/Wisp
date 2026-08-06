@@ -329,9 +329,6 @@ class TextualTui(App[None]):
 
     def __init__(self) -> None:
         super().__init__()
-        # Textual defaults to two rows per wheel event. A one-row step is the
-        # finest terminal-native movement and keeps scrolling immediate but less jagged.
-        self.scroll_sensitivity_y = 1.0
         self._input_controller = TextualInputController(self)
         self._transcript_controller = TextualTranscriptController(self)
         self._status: StatusBar | None = None
@@ -649,7 +646,7 @@ class TextualTui(App[None]):
         if jump is None or transcript is None or target not in {jump, jump.parent}:
             return
         transcript.scroll_to(
-            y=transcript.scroll_target_y + direction * self.scroll_sensitivity_y,
+            y=transcript.scroll_target_y + direction * transcript.scroll_sensitivity_y,
             animate=False,
         )
         event.stop()

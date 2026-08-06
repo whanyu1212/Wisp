@@ -18,7 +18,8 @@ if TYPE_CHECKING:
 class _StreamTurn:
     widget: StreamMessage
     mounted: AwaitMount
-    source: str = ""
+    source_fragments: list[str] = field(default_factory=list)
+    completed_content: str | None = None
     pending: list[str] = field(default_factory=list)
     pending_bytes: int = 0
     deferred: list[str] = field(default_factory=list)
@@ -38,8 +39,8 @@ class _StreamTurn:
 class MarkdownStreamController:
     """Bridge synchronous renderer calls to Textual's async Markdown API.
 
-    Provider fragments are retained in ``source`` until the turn settles. Textual's
-    public ``Markdown.append`` API is awaited directly, avoiding the private
+    Provider fragments are retained in an amortized buffer until the turn settles.
+    Textual's public ``Markdown.append`` API is awaited directly, avoiding the private
     ``MarkdownStream`` background queue. Finalization replaces the document from
     the completed message, so an interrupted incremental render cannot leave a
     permanently partial response.
@@ -80,7 +81,7 @@ class MarkdownStreamController:
             self._turn = turn
             self._last_completed_widget = None
 
-        turn.source += delta
+        turn.source_fragments.append(delta)
         if transcript is None or not transcript.is_following:
             turn.deferred.append(delta)
             self._app.note_transcript_update(turn.widget)
@@ -97,7 +98,7 @@ class MarkdownStreamController:
         self._turn = None
         if turn is not None:
             if completed_content is not None:
-                turn.source = completed_content
+                turn.completed_content = completed_content
             # History reconciliation runs synchronously after flush(), before the
             # async finalizer, so publish the stable widget identity immediately.
             self._last_completed_widget = turn.widget
@@ -268,8 +269,13 @@ class MarkdownStreamController:
             # Always reconcile from authoritative source. Besides repairing failed
             # incremental writes, this replaces provider deltas with the exact
             # MessageCompleted content when providers normalize their final text.
+            source = (
+                turn.completed_content
+                if turn.completed_content is not None
+                else "".join(turn.source_fragments)
+            )
             await turn.mounted
-            await turn.widget.replace_markdown(turn.source)
+            await turn.widget.replace_markdown(source)
             turn.write_count += 1
             self._last_completed_write_count = turn.write_count
             self._app.settle_stream_widget(turn.widget)

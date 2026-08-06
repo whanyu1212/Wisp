@@ -1726,6 +1726,9 @@ class Transcript(VerticalScroll):
         **kwargs: object,
     ) -> None:
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        # Textual defaults to two rows per wheel event. Keep ordinary transcript
+        # scrolling and the forwarded jump-overlay path on the same one-row step.
+        self.scroll_sensitivity_y = 1.0
         self._follow = True
         self._follow_generation = 0
         self._empty_wordmark = empty_wordmark

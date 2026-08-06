@@ -1392,6 +1392,13 @@ class TuiShell:
             if suppress_completed_message:
                 self._call_renderer_optional("record_streamed_message_completed", event)
                 return False
+        if isinstance(event, ErrorEvent) and self.state.token_stream_started:
+            # Provider failures and cancellations can omit MessageCompleted. Close
+            # the partial assistant output before rendering the terminal error so
+            # line and fullscreen renderers preserve transcript order.
+            self.renderer.end_token_stream()
+            self.state.token_stream_started = False
+            self.state.rendered_tokens = False
         if isinstance(event, ToolApprovalRequested):
             self.state.pending_approval = event
             self.state.status = TuiStatus.waiting_for_approval
@@ -1509,6 +1516,13 @@ class TuiShell:
                 self._render_event(event)
                 return True
             if event.command_id == self.state.current_command_id:
+                # A malformed or abruptly closed RPC stream may reach its command
+                # boundary without either MessageCompleted or ErrorEvent. Preserve
+                # the partial response before rendering the boundary as a fallback.
+                if self.state.token_stream_started:
+                    self.renderer.end_token_stream()
+                    self.state.token_stream_started = False
+                    self.state.rendered_tokens = False
                 self._render_event(event)
                 return await self._finish_current_prompt(event)
         self._render_event(event)
