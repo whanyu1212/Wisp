@@ -339,6 +339,25 @@ def test_live_fullscreen_tui_interrupts_input() -> None:
     anyio.run(run)
 
 
+def test_live_fullscreen_tui_queues_escape_between_reads_and_preserves_draft() -> None:
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        first_read = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+        renderer._buffer.insert_text("submitted")
+
+        renderer._accept_input()
+        renderer._buffer.insert_text("next draft")
+        renderer._interrupt_input()
+
+        assert await first_read == "submitted"
+        with pytest.raises(LiveFullscreenInputInterrupted):
+            await renderer.read_prompt("wisp> ")
+        assert renderer._buffer.text == "next draft"
+
+    anyio.run(run)
+
+
 def test_live_fullscreen_tui_ctrl_c_requests_quit_and_clears_draft() -> None:
     from wisp.tui.state import TuiQuitRequested
 

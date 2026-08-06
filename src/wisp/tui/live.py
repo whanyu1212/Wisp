@@ -279,10 +279,13 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         self._buffer.insert_text(normalized)
 
     def _interrupt_input(self) -> None:
+        mode = self._buffer_input_mode
+        signal = LiveFullscreenInputInterrupted()
         if self._input_future is None or self._input_future.done():
+            self._queued_inputs.append((signal, mode))
             return
-        self._submitted_input_mode = self._buffer_input_mode
-        self._input_future.set_exception(LiveFullscreenInputInterrupted())
+        self._submitted_input_mode = mode
+        self._input_future.set_exception(signal)
 
     def _copy_selection(self, clipboard: Clipboard) -> bool:
         """Copy an active editor selection instead of treating Ctrl+C as quit."""
