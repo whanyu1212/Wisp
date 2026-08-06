@@ -137,8 +137,12 @@ def plan_preflight_compaction(replay: SessionReplay) -> ManualCompactionPlan:
         raise NothingToCompactError("No active user turn is available for preflight compaction")
 
     complete_turn_starts = _complete_user_turn_starts(rows)
+    if not complete_turn_starts:
+        raise NothingToCompactError("No completed turn is available before the active user turn")
     incomplete_turn_starts = tuple(
-        start for start in user_turn_starts if start not in complete_turn_starts
+        start
+        for start in user_turn_starts
+        if start not in complete_turn_starts and start > complete_turn_starts[-1]
     )
     if not incomplete_turn_starts:
         raise NothingToCompactError("The active user turn is already complete")
@@ -146,8 +150,6 @@ def plan_preflight_compaction(replay: SessionReplay) -> ManualCompactionPlan:
     completed_prefix_starts = tuple(
         start for start in complete_turn_starts if start < active_turn_start
     )
-    if not completed_prefix_starts:
-        raise NothingToCompactError("No completed turn is available before the active user turn")
 
     # Preserve the established latest-complete-turn boundary when possible. A
     # sole completed turn is the exceptional preflight case: summarize it and

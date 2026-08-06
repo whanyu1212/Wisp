@@ -289,6 +289,43 @@ def test_preflight_compaction_retains_tool_turn_before_later_steering() -> None:
     assert plan.retained_rows == current_turn
 
 
+def test_preflight_compaction_ignores_stale_incomplete_turn_before_completed_history() -> None:
+    stale_call = ToolCallSnapshot(call_id="stale-call", name="read", arguments={})
+    stale_turn = (
+        _row("stale-user", Message(role="user", content="old interrupted turn")),
+        _row(
+            "stale-assistant",
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(stale_call,),
+                finish_reason="tool_calls",
+            ),
+        ),
+        _row(
+            "stale-tool",
+            Message(
+                role="tool",
+                content="cancelled",
+                tool_call_id="stale-call",
+                tool_name="read",
+            ),
+        ),
+    )
+    active = _row("active-user", Message(role="user", content="current prompt"))
+
+    plan = plan_preflight_compaction(SessionReplay(rows=(*stale_turn, *_turn("completed"), active)))
+
+    assert plan.replaced_entry_ids == (
+        "stale-user",
+        "stale-assistant",
+        "stale-tool",
+        "completed-user",
+        "completed-assistant",
+    )
+    assert plan.retained_rows == (active,)
+
+
 def test_manual_compaction_plan_recompacts_summary_and_aged_out_turn() -> None:
     summary = _summary_row("compact-one", "Prior checkpoint.")
     replay = SessionReplay(rows=(summary, *_turn("two"), *_turn("three")))
