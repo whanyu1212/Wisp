@@ -1159,6 +1159,7 @@ def test_coding_session_rejects_oversized_fresh_prompt_before_provider(
     with pytest.raises(ContextOverflowError, match="Active prompt exceeds"):
         anyio.run(run)
     assert provider.calls == []
+    assert store.latest().read_context_messages() == ()
 
 
 def test_coding_session_rejects_provider_reserve_that_consumes_window(
@@ -1184,6 +1185,7 @@ def test_coding_session_rejects_provider_reserve_that_consumes_window(
     with pytest.raises(ContextOverflowError, match="Active prompt exceeds"):
         anyio.run(run)
     assert provider.calls == []
+    assert store.latest().read_context_messages() == ()
 
 
 def test_coding_session_stops_when_prompt_remains_over_provider_limit(
@@ -1231,6 +1233,7 @@ def test_coding_session_stops_when_prompt_remains_over_provider_limit(
     with pytest.raises(ContextOverflowError, match="Active prompt exceeds"):
         anyio.run(run)
     assert len(provider.calls) == 1
+    assert session.read_context_messages() == history
 
 
 def test_coding_session_rechecks_provider_limit_after_tool_round(tmp_path: Path) -> None:
@@ -1434,6 +1437,7 @@ def test_coding_session_stops_when_active_tool_turn_remains_over_provider_limit(
     with pytest.raises(ContextOverflowError, match="Active tool result exceeds"):
         anyio.run(run)
     assert len(provider.calls) == 2
+    assert session.read_context_messages() == history
 
 
 def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Path) -> None:

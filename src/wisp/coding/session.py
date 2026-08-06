@@ -469,6 +469,28 @@ class CodingSession:
         self._active_harness = harness
         self._accepting_queued_messages = True
         await self._repair_and_flush(session, harness)
+        if session.path.is_file():
+            run_entry_start = len(await anyio.to_thread.run_sync(session.read_entries))
+            run_start_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
+        else:
+            run_entry_start = 0
+            run_start_leaf_id = None
+
+        async def rollback_active_prompt() -> None:
+            if operation_id is not None:
+                await session.restore_active_leaf_for_operation(
+                    run_entry_start,
+                    run_start_leaf_id,
+                    operation_id=operation_id,
+                )
+                return
+            current_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
+            if current_leaf_id != run_start_leaf_id:
+                await session.select_active_leaf(
+                    run_start_leaf_id,
+                    expected_active_leaf_id=current_leaf_id,
+                    operation_id=operation_id,
+                )
 
         yield await emit(AgentStarted(session_id=session.session_id))
 
@@ -514,6 +536,7 @@ class CodingSession:
                     "Active prompt exceeds the provider auto-compaction limit "
                     "after compacting all eligible history"
                 )
+                await rollback_active_prompt()
                 yield await emit(ErrorEvent(message=error_message))
                 yield await emit(
                     AgentCompleted(
@@ -661,6 +684,7 @@ class CodingSession:
                             "Active tool result exceeds the provider auto-compaction limit "
                             "after compacting all eligible history"
                         )
+                        await rollback_active_prompt()
                         yield await emit(ErrorEvent(message=error_message))
                         yield await emit(
                             AgentCompleted(
