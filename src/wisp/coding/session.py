@@ -484,7 +484,9 @@ class CodingSession:
         # A preflight compaction can only update a request that is actually
         # resuming persisted history. It is reserved for cataloged provider
         # limits; the existing generic reserve policy remains post-response.
-        provider_auto_compaction = self._has_provider_auto_compaction_limit()
+        provider_auto_compaction = (
+            self.auto_compaction_enabled and self._has_provider_auto_compaction_limit()
+        )
         if history and provider_auto_compaction:
             prompt_compacted = False
             async for compaction_event in self._maybe_auto_compact(
@@ -637,6 +639,28 @@ class CodingSession:
                         harness.replace_messages(
                             (*prompt_messages, *self._conversation_history(active_history))
                         )
+                    remaining_budget = build_context_budget(
+                        estimate_context(
+                            self._normalize_provider_messages(harness.messages),
+                            tuple(harness.config.tools),
+                        ),
+                        context_window=self._context_window(),
+                        reserve_tokens=self._effective_context_reserve_tokens(),
+                    )
+                    if should_auto_compact(remaining_budget, enabled=True):
+                        error_message = (
+                            "Active tool result exceeds the provider auto-compaction limit "
+                            "after compacting all eligible history"
+                        )
+                        yield await emit(ErrorEvent(message=error_message))
+                        yield await emit(
+                            AgentCompleted(
+                                session_id=session.session_id,
+                                turns=turns,
+                                outcome="failed",
+                            )
+                        )
+                        raise ContextOverflowError(error_message)
                     harness_events = harness.continue_(
                         turn_offset=turns,
                         tool_iteration_offset=tool_iterations,

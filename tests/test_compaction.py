@@ -1151,6 +1151,125 @@ def test_coding_session_rechecks_provider_limit_after_tool_round(tmp_path: Path)
     assert not any(isinstance(event, ErrorEvent) for event in events)
 
 
+def test_coding_session_does_not_segment_tool_round_when_auto_compaction_disabled(
+    tmp_path: Path,
+) -> None:
+    class ReadTool:
+        name = "read_value"
+        safety = "read"
+        description = "Return a value."
+        input_schema = {"type": "object", "properties": {}}
+
+        async def run(self, arguments: object, context: ToolContext) -> ToolResult:
+            del arguments, context
+            return ToolResult(text="value")
+
+    call = ToolCall(call_id="call-1", name="read_value", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="", tool_calls=(call,), finish_reason="tool_calls"
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="done"),
+            ],
+        ],
+        default_model="model",
+    )
+    registry = ToolRegistry()
+    registry.register(ReadTool())
+    store = JsonlSessionStore(tmp_path)
+
+    async def run() -> list[WispEvent]:
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(auto_compact_token_limit=80),
+            tool_registry=registry,
+            auto_compaction_enabled=False,
+        )
+        return [event async for event in agent.run("question")]
+
+    events = anyio.run(run)
+
+    assert len(provider.calls) == 2
+    assert provider.calls[1].tool_results[0].output == "value"
+    assert not any(isinstance(event, CompactionStarted) for event in events)
+
+
+def test_coding_session_stops_when_active_tool_turn_remains_over_provider_limit(
+    tmp_path: Path,
+) -> None:
+    class HugeReadTool:
+        name = "huge_read"
+        safety = "read"
+        description = "Return an irreducibly large result."
+        input_schema = {"type": "object", "properties": {}}
+
+        async def run(self, arguments: object, context: ToolContext) -> ToolResult:
+            del arguments, context
+            return ToolResult(text="x" * 8_000)
+
+    call = ToolCall(call_id="call-1", name="huge_read", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="", tool_calls=(call,), finish_reason="tool_calls"
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+        ],
+        default_model="model",
+    )
+    registry = ToolRegistry()
+    registry.register(HugeReadTool())
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    history = (
+        Message(role="user", content="question one " + "a" * 2_000),
+        Message(
+            role="assistant",
+            content="answer one " + "b" * 2_000,
+            finish_reason="stop",
+        ),
+    )
+
+    async def run() -> list[WispEvent]:
+        for message in history:
+            await session.append_message(message)
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(
+                context_window=2_000,
+                auto_compact_token_limit=1_600,
+            ),
+            tool_registry=registry,
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=100,
+        )
+        return [
+            event async for event in agent.run("question two", session=session, history=history)
+        ]
+
+    with pytest.raises(ContextOverflowError, match="Active tool result exceeds"):
+        anyio.run(run)
+    assert len(provider.calls) == 2
+
+
 def test_coding_session_recovers_one_overflow_with_compaction_retry(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [

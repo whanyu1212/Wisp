@@ -416,6 +416,7 @@ class AgentHarness:
                             and isinstance(event, TurnCompleted)
                             and event.outcome == "completed"
                             and segment_had_tool_calls
+                            and not self._steering_queue
                         ):
                             return
                         if (
@@ -459,6 +460,8 @@ class AgentHarness:
                             timestamp=message.created_at,
                         )
                     yield self.queue_updated_event()
+                    if pause_after_tool_round and segment_had_tool_calls:
+                        return
                     continue
 
                 if (

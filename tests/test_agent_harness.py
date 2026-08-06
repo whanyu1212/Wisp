@@ -872,6 +872,41 @@ def test_harness_follow_up_preserves_tool_iteration_limit_across_segments() -> N
     assert events[-1].outcome == "failed"
 
 
+def test_harness_pause_after_tool_round_injects_steering_before_returning() -> None:
+    tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=tool_call),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=(tool_call,),
+                    finish_reason="tool_calls",
+                ),
+            ]
+        ]
+    )
+    harness = _harness(
+        provider,
+        tools=(ToolSpec(name="lookup", description="Look up", input_schema={"type": "object"}),),
+    )
+    harness.append_message(Message(role="user", content="initial"))
+    harness.steer("change direction")
+
+    async def run() -> list[object]:
+        return [event async for event in harness.continue_(pause_after_tool_round=True)]
+
+    events = anyio.run(run)
+
+    assert len(provider.calls) == 1
+    assert any(isinstance(event, QueueMessageInjected) for event in events)
+    assert [(message.role, message.content) for message in harness.messages[-2:]] == [
+        ("tool", "tool output"),
+        ("user", "change direction"),
+    ]
+
+
 def test_queue_message_injected_event_requires_schema_14_and_round_trips() -> None:
     event = QueueMessageInjected(kind="follow_up", content="continue")
 
