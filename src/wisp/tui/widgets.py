@@ -34,6 +34,8 @@ from textual.widgets import (
     LoadingIndicator,
     Markdown,
     OptionList,
+    RadioButton,
+    RadioSet,
     Static,
     TextArea,
 )
@@ -828,16 +830,12 @@ class DecisionPanel(Vertical):
 
 
 class ModelPicker(Vertical):
-    """Interactive `/model` selector: pick a model, arrow-adjust its effort.
+    """Interactive `/model` selector with a model list and effort radio group.
 
-    A single unified list (Claude Code style), not two separate screens —
-    left/right arrow keys cycle an effort tier for whichever model row is
-    currently highlighted, when that model has one (``effort_levels`` in the
-    catalog; a model with no entry there shows no effort control at all).
-    Confirming posts a synthesized ``/model <id> [effort]`` command text
-    through the same answer-is-a-text-line mechanism `DecisionPanel` already
-    uses for approval/trust — reusing 100% of the existing prompt-submission
-    plumbing rather than adding a second, structured return path.
+    The provider-grouped catalog remains an ``OptionList`` because it is long and
+    scrollable. The highlighted model's small mutually-exclusive effort vocabulary
+    is presented as a ``RadioSet``. The model list keeps keyboard focus so up/down
+    select a model, left/right stage effort, Enter applies both, and Escape cancels.
     """
 
     DEFAULT_CSS = """
@@ -874,9 +872,35 @@ class ModelPicker(Vertical):
     }
 
     ModelPicker #model-picker-effort {
+        display: none;
         height: 1;
-        color: $text-muted;
+        layout: horizontal;
         padding: 0 1;
+    }
+
+    ModelPicker #model-picker-effort-label {
+        width: auto;
+        height: 1;
+        margin-right: 1;
+        color: $text-muted;
+    }
+
+    ModelPicker #model-picker-effort > RadioSet {
+        width: auto;
+        height: 1;
+        layout: horizontal;
+        border: none;
+        padding: 0;
+        background: transparent;
+    }
+
+    ModelPicker #model-picker-effort > RadioSet > RadioButton {
+        width: auto;
+        height: 1;
+        margin-right: 1;
+        padding: 0;
+        background: transparent;
+        border: none;
     }
     """
 
@@ -894,7 +918,14 @@ class ModelPicker(Vertical):
         super().__init__(id=id)
         self._title = Static("Select a model", id="model-picker-title", markup=False)
         self._options = OptionList(id="model-picker-options")
-        self._effort_line = Static("", id="model-picker-effort", markup=False)
+        self._effort_row = Horizontal(
+            Static("Effort:", id="model-picker-effort-label", markup=False),
+            id="model-picker-effort",
+        )
+        self._effort_radio: RadioSet | None = None
+        self._effort_radio_row: tuple[str, str] | None = None
+        self._effort_values: dict[RadioButton, str | None] = {}
+        self._effort_radio_ready = False
         self._submitted = False
         self._opened_at = 0.0
         # (provider_name, model_id) per enabled option, in the same order as
@@ -919,7 +950,7 @@ class ModelPicker(Vertical):
     def compose(self) -> ComposeResult:
         yield self._title
         yield self._options
-        yield self._effort_line
+        yield self._effort_row
 
     @property
     def is_open(self) -> bool:
@@ -993,7 +1024,7 @@ class ModelPicker(Vertical):
         self._options.highlighted = (
             default_index if default_index is not None else first_selectable_index
         )
-        self._update_effort_line()
+        self._update_effort_control()
         self.display = True
         self.focus_options()
 
@@ -1014,22 +1045,53 @@ class ModelPicker(Vertical):
             return ()
         return entry.effort_levels.get(model_id, ())
 
-    def _update_effort_line(self) -> None:
+    def _update_effort_control(self) -> None:
+        """Show a fresh radio group for the highlighted model's effort tiers."""
+
         row = self._highlighted_row()
-        if row is None:
-            self._effort_line.update("")
+        levels = self._effort_levels_for(row) if row is not None else ()
+        if self._effort_radio is not None:
+            self._effort_radio.remove()
+        self._effort_radio = None
+        self._effort_radio_row = None
+        self._effort_values = {}
+        self._effort_radio_ready = False
+        if row is None or not levels:
+            self._effort_row.display = False
             return
-        levels = self._effort_levels_for(row)
-        if not levels:
-            self._effort_line.update("")
+
+        chosen = self._effort_choice.get(row)
+        choices: tuple[str | None, ...] = (None, *levels)
+        buttons = tuple(
+            RadioButton("Default" if value is None else value, value=value == chosen)
+            for value in choices
+        )
+        radio = RadioSet(*buttons, name="reasoning-effort", compact=True)
+        # The model OptionList remains the keyboard owner. Radio buttons are still
+        # clickable, while ModelPicker routes left/right itself.
+        radio.can_focus = False
+        for button in buttons:
+            button.can_focus = False
+        self._effort_radio = radio
+        self._effort_radio_row = row
+        self._effort_values = dict(zip(buttons, choices, strict=True))
+        self._effort_row.display = True
+        self._effort_row.mount(radio)
+        self.call_after_refresh(self._mark_effort_radio_ready, radio)
+
+    def _mark_effort_radio_ready(self, radio: RadioSet) -> None:
+        if self._effort_radio is radio:
+            self._effort_radio_ready = True
+
+    def _sync_effort_radio(self) -> None:
+        row = self._highlighted_row()
+        if row is None or row != self._effort_radio_row:
             return
         chosen = self._effort_choice.get(row)
-        parts = []
-        for level in levels:
-            parts.append(f"[{level}]" if level == chosen else level)
-        prefix = "(default)" if chosen is None else ""
-        line = "effort:  " + "  ".join(([prefix] if prefix else []) + parts)
-        self._effort_line.update(line.strip())
+        for button, value in self._effort_values.items():
+            if value == chosen:
+                button.value = True
+                return
 
     def cycle_effort(self, *, direction: int) -> None:
         """Move the highlighted model's effort choice by one step.
@@ -1062,7 +1124,7 @@ class ModelPicker(Vertical):
             new_index = len(levels) - 1
         self._effort_choice[row] = None if new_index == -1 else levels[new_index]
         self._effort_touched.add(row)
-        self._update_effort_line()
+        self._sync_effort_radio()
 
     def submit_current_selection(self) -> None:
         if self._submitted or not self.is_open:
@@ -1094,7 +1156,23 @@ class ModelPicker(Vertical):
         if event.option_list is not self._options:
             return
         event.stop()
-        self._update_effort_line()
+        self._update_effort_control()
+
+    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        if event.radio_set is not self._effort_radio:
+            return
+        event.stop()
+        row = self._highlighted_row()
+        if (
+            not self._effort_radio_ready
+            or row is None
+            or row != self._effort_radio_row
+            or event.pressed not in self._effort_values
+        ):
+            return
+        self._effort_choice[row] = self._effort_values[event.pressed]
+        self._effort_touched.add(row)
+        self.focus_options()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if event.option_list is not self._options:

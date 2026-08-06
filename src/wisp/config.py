@@ -85,23 +85,47 @@ class WispConfig(BaseModel):
         ``effort`` never consults the project settings layer, trusted or not —
         it is resolved from the USER settings file only (see
         :func:`wisp.settings.resolve_settings`), the same way ``retry_policy`` is,
-        since it directly controls per-request cost/latency.
+        since it directly controls per-request cost/latency. Persisted user
+        provider/model defaults are coupled: a higher-precedence provider override
+        without a model drops the saved user model and effort rather than sending
+        them to another provider.
         """
 
         settings = resolve_settings(project_dir=project_dir, trust_project=trusted)
 
-        provider_name = _first_non_empty(
-            provider,
-            os.environ.get("WISP_PROVIDER"),
-            settings.provider,
-            default=DEFAULT_PROVIDER,
+        provider_override = _first_non_empty(provider, os.environ.get("WISP_PROVIDER"))
+        model_override = _first_non_empty(model, os.environ.get("WISP_MODEL"))
+        effort_override = _first_non_empty(effort, os.environ.get("WISP_EFFORT"))
+        provider_name = provider_override or settings.provider or DEFAULT_PROVIDER
+        user_defaults_provider = settings.user_provider or DEFAULT_PROVIDER
+        selected_model = model_override or settings.model
+        if (
+            model_override is None
+            and settings.model_from_user
+            and provider_name != user_defaults_provider
+        ):
+            selected_model = None
+
+        non_user_model_selected = model_override is not None or (
+            settings.model is not None and not settings.model_from_user
         )
-        assert provider_name is not None
+        user_defaults_have_provider = settings.user_provider is not None or settings.model_from_user
+        provider_changes_user_defaults = (
+            user_defaults_have_provider
+            and provider_name != user_defaults_provider
+            and not non_user_model_selected
+        )
+        if effort_override is not None:
+            selected_effort = effort_override
+        elif provider_changes_user_defaults:
+            selected_effort = None
+        else:
+            selected_effort = settings.effort
 
         return cls(
             provider=provider_name,
-            model=_first_non_empty(model, os.environ.get("WISP_MODEL"), settings.model),
-            effort=_first_non_empty(effort, os.environ.get("WISP_EFFORT"), settings.effort),
+            model=selected_model,
+            effort=selected_effort,
             session_dir=session_dir or default_session_dir(settings=settings),
             auth_path=auth_path or default_auth_path(settings=settings),
             protected_paths=_resolve_protected_paths(settings),

@@ -6,7 +6,7 @@ import anyio
 import pytest
 from textual import events
 from textual.app import App
-from textual.widgets import OptionList, Static
+from textual.widgets import OptionList, RadioButton, RadioSet
 
 from wisp.providers.catalog import ModelCatalogProviderEntry, builtin_catalog
 from wisp.tui.textual_app import create_textual_tui
@@ -202,7 +202,7 @@ def test_model_picker_enter_selects_highlighted_model_without_effort() -> None:
     assert anyio.run(scenario) == "/model openai::gpt-5.5"
 
 
-def test_model_picker_arrow_keys_cycle_effort_and_submit_it() -> None:
+def test_model_picker_uses_radio_set_and_arrow_keys_cycle_effort() -> None:
     async def scenario() -> tuple[str, str, str]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
@@ -213,12 +213,14 @@ def test_model_picker_arrow_keys_cycle_effort_and_submit_it() -> None:
                 current_effort=None,
             )
             await pilot.pause()
-            effort_line = app.query_one("#model-picker-effort", Static)
-            before = str(effort_line.render())
+            radio = app.query_one("#model-picker-effort RadioSet", RadioSet)
+            before = next(str(button.label) for button in radio.query(RadioButton) if button.value)
 
             await pilot.press("right")
             await pilot.pause()
-            after_one_right = str(effort_line.render())
+            after_one_right = next(
+                str(button.label) for button in radio.query(RadioButton) if button.value
+            )
 
             await pilot.press("enter")
             with anyio.fail_after(1):
@@ -227,17 +229,17 @@ def test_model_picker_arrow_keys_cycle_effort_and_submit_it() -> None:
             return before, after_one_right, answer
 
     before, after_one_right, answer = anyio.run(scenario)
-    assert "(default)" in before
-    assert "[low]" in after_one_right
+    assert before == "Default"
+    assert after_one_right == "low"
     assert answer == "/model anthropic::claude-opus-4-8 low"
 
 
 def test_model_picker_displays_effort_for_every_builtin_codex_model() -> None:
     codex = next(entry for entry in builtin_catalog().providers if entry.name == "openai-codex")
 
-    async def scenario() -> dict[str, str]:
+    async def scenario() -> dict[str, tuple[str, ...]]:
         app, renderer = create_textual_tui()
-        rendered: dict[str, str] = {}
+        rendered: dict[str, tuple[str, ...]] = {}
         async with app.run_test(size=(80, 24)) as pilot:
             for model in codex.models:
                 renderer.model_picker_request(
@@ -247,19 +249,50 @@ def test_model_picker_displays_effort_for_every_builtin_codex_model() -> None:
                     current_effort=None,
                 )
                 await pilot.pause()
-                effort_line = app.query_one("#model-picker-effort", Static)
-                rendered[model] = str(effort_line.render())
+                radio = app.query_one("#model-picker-effort RadioSet", RadioSet)
+                rendered[model] = tuple(str(button.label) for button in radio.query(RadioButton))
         return rendered
 
     rendered = anyio.run(scenario)
     assert set(rendered) == set(codex.models)
-    assert all(line.startswith("effort:") and "(default)" in line for line in rendered.values())
+    assert all(labels[0] == "Default" for labels in rendered.values())
     assert "max" in rendered["gpt-5.6-terra"]
     assert "max" not in rendered["gpt-5.4"]
 
 
+def test_model_picker_mouse_selects_effort_without_taking_model_list_focus() -> None:
+    async def scenario() -> tuple[str, bool]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(80, 24)) as pilot:
+            renderer.model_picker_request(
+                _ENTRIES,
+                current_provider="anthropic",
+                current_model="claude-opus-4-8",
+                current_effort=None,
+            )
+            await pilot.pause()
+            options = app.query_one("#model-picker-options", OptionList)
+            radio = app.query_one("#model-picker-effort RadioSet", RadioSet)
+            high = next(
+                button for button in radio.query(RadioButton) if str(button.label) == "high"
+            )
+
+            assert await pilot.click(high)
+            await pilot.pause()
+            model_list_focused = app.focused is options
+            await pilot.press("enter")
+            with anyio.fail_after(1):
+                answer = await app._input_controller.receive_stream.receive()
+            assert isinstance(answer, str)
+            return answer, model_list_focused
+
+    answer, model_list_focused = anyio.run(scenario)
+    assert answer == "/model anthropic::claude-opus-4-8 high"
+    assert model_list_focused
+
+
 def test_model_picker_left_right_ignored_for_model_without_effort_levels() -> None:
-    async def scenario() -> str:
+    async def scenario() -> tuple[str, bool]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
             renderer.model_picker_request(
@@ -269,15 +302,18 @@ def test_model_picker_left_right_ignored_for_model_without_effort_levels() -> No
                 current_effort=None,
             )
             await pilot.pause()
+            effort_hidden = not app.query_one("#model-picker-effort").display
             await pilot.press("right")
             await pilot.pause()
             await pilot.press("enter")
             with anyio.fail_after(1):
                 answer = await app._input_controller.receive_stream.receive()
             assert isinstance(answer, str)
-            return answer
+            return answer, effort_hidden
 
-    assert anyio.run(scenario) == "/model openai::gpt-5.5"
+    answer, effort_hidden = anyio.run(scenario)
+    assert answer == "/model openai::gpt-5.5"
+    assert effort_hidden
 
 
 def test_model_picker_escape_cancels_without_submitting_and_restores_composer() -> None:

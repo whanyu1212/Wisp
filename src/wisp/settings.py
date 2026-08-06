@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -123,6 +124,10 @@ class ResolvedSettings(BaseModel):
     effort: str | None = None
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
+    # Provenance used only while applying higher-precedence provider overrides.
+    # Excluded from serialization because these are resolver details, not settings.
+    user_provider: str | None = Field(default=None, exclude=True)
+    model_from_user: bool = Field(default=False, exclude=True)
 
 
 def resolve_settings(
@@ -170,9 +175,15 @@ def resolve_settings(
         else WispSettings()
     )
 
-    # Project layer wins over user layer, key by key. ``_coalesce`` keeps the first
-    # non-None value, so a key absent from the project file falls through to the
-    # user file, and a key absent from both stays None.
+    # Project layer wins over user layer key by key. Keep provenance for a model
+    # inherited from the user layer so WispConfig can couple it to the user provider
+    # only after explicit/environment provider overrides have also been applied.
+    # Discarding it here would prevent a later WISP_PROVIDER override from restoring
+    # the saved provider and its model.
+    project_provider = _coalesce(project_settings.provider)
+    user_provider = _coalesce(user_settings.provider)
+    project_model = _coalesce(project_settings.model)
+    user_model = _coalesce(user_settings.model)
     #
     # ``protected_paths`` is a SECURITY policy and is deliberately taken from the
     # USER layer only — even for a trusted project. A project ``.wisp/settings.json``
@@ -186,8 +197,8 @@ def resolve_settings(
     # project must not be able to force an expensive tier on every prompt just by
     # being trusted for read/write access.
     return ResolvedSettings(
-        provider=_coalesce(project_settings.provider, user_settings.provider),
-        model=_coalesce(project_settings.model, user_settings.model),
+        provider=project_provider or user_provider,
+        model=project_model or user_model,
         session_dir=_coalesce(project_settings.session_dir, user_settings.session_dir),
         auth_path=_coalesce(project_settings.auth_path, user_settings.auth_path),
         protected_paths=_coalesce_paths(user_settings.protected_paths),
@@ -195,6 +206,8 @@ def resolve_settings(
         effort=user_settings.effort,
         context_reserve_tokens=user_settings.context_reserve_tokens,
         auto_compaction_enabled=user_settings.auto_compaction_enabled,
+        user_provider=user_provider,
+        model_from_user=project_model is None and user_model is not None,
     )
 
 
@@ -205,35 +218,49 @@ def user_settings_path(*, home_dir: Path | None = None) -> Path:
     return (home / ".wisp" / PROJECT_SETTINGS_FILENAME).expanduser()
 
 
+def persist_user_model_selection(
+    provider: str,
+    model: str | None,
+    effort: str | None,
+    *,
+    home_dir: Path | None = None,
+) -> None:
+    """Persist the last successful TUI model selection as user defaults.
+
+    ``None`` removes ``model`` or ``effort`` so provider defaults remain defaults
+    rather than being copied into the settings file. The update is best-effort and
+    preserves every unrelated user setting.
+    """
+
+    _persist_user_settings(
+        {"provider": provider, "model": model, "effort": effort},
+        home_dir=home_dir,
+        preference="model selection",
+    )
+
+
 def persist_user_effort(effort: str | None, *, home_dir: Path | None = None) -> None:
-    """Write ``effort`` into the user settings file, preserving other keys.
+    """Persist only ``effort`` while preserving the compatibility API."""
 
-    Effort is the only setting Wisp writes back from inside a running session
-    (see :func:`resolve_settings`'s docstring for why -- every other key is
-    read-only from the app's perspective, set by hand-editing the file). Scoped
-    to just this key rather than a general "persist current config" mechanism,
-    since nothing else asked for one yet. ``effort=None`` clears a previously
-    persisted tier rather than writing a ``null`` -- the key is dropped so an
-    older Wisp build reading this file sees "unset," not an explicit null it
-    would need special-casing for.
+    _persist_user_settings(
+        {"effort": effort},
+        home_dir=home_dir,
+        preference="effort",
+    )
 
-    A missing or malformed existing file is tolerated the same way
-    :func:`_load_settings_file` tolerates one when reading -- persisting a new
-    preference must not fail (or silently discard the rest of the file) just
-    because the file was already broken. A write-side failure (unwritable
-    ``~/.wisp``, read-only home, full disk) is tolerated the same way -- this
-    is a best-effort preference write happening mid-session, after the
-    backend configuration it's recording has already taken effect, so it must
-    never crash the caller; it just warns and leaves the on-disk file as it
-    was.
 
-    A file that *exists* but can't be read (permission denied, I/O error --
-    anything other than simply not being there yet) aborts the write
-    entirely, rather than proceeding as if the file were empty: this
-    function's whole contract is preserving every other key, and writing a
-    fresh ``{"effort": ...}`` over an unread file would silently destroy
-    provider/model/auth/protected-paths/retry settings this function has no
-    way to recover, the opposite of "best-effort."
+def _persist_user_settings(
+    updates: Mapping[str, str | None],
+    *,
+    home_dir: Path | None,
+    preference: str,
+) -> None:
+    """Safely read, update, and atomically replace the user settings file.
+
+    A missing or malformed file is treated like an empty settings document, matching
+    the read path. An existing file that cannot be read aborts the update because
+    continuing would risk destroying unrelated settings. Write failures warn and do
+    not affect the already-applied runtime configuration.
     """
 
     path = user_settings_path(home_dir=home_dir)
@@ -243,7 +270,9 @@ def persist_user_effort(effort: str | None, *, home_dir: Path | None = None) -> 
     except FileNotFoundError:
         raw = None
     except OSError as exc:
-        _warn(f"could not read settings file {path} before writing, effort not persisted: {exc}")
+        _warn(
+            f"could not read settings file {path} before writing, {preference} not persisted: {exc}"
+        )
         return
     if raw is not None:
         try:
@@ -253,10 +282,24 @@ def persist_user_effort(effort: str | None, *, home_dir: Path | None = None) -> 
         if isinstance(parsed, dict):
             data = parsed
 
-    if effort is None:
-        data.pop("effort", None)
-    else:
-        data["effort"] = effort
+    # A valid JSON object can still contain values rejected by WispSettings. If
+    # those values survive this write, the next startup rejects the entire file and
+    # loses the newly persisted selection. Remove only invalid recognized top-level
+    # fields; preserve valid and unknown keys for forward compatibility.
+    try:
+        WispSettings.model_validate(data)
+    except ValidationError as exc:
+        for error in exc.errors():
+            location = error.get("loc", ())
+            field = location[0] if location else None
+            if isinstance(field, str) and field in WispSettings.model_fields:
+                data.pop(field, None)
+
+    for key, value in updates.items():
+        if value is None:
+            data.pop(key, None)
+        else:
+            data[key] = value
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

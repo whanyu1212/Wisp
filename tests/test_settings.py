@@ -11,6 +11,7 @@ from wisp.config import WispConfig
 from wisp.settings import (
     DEFAULT_PROTECTED_PATHS,
     persist_user_effort,
+    persist_user_model_selection,
     resolve_settings,
     user_settings_path,
 )
@@ -33,17 +34,32 @@ def test_resolve_settings_empty_when_no_files(tmp_path: Path) -> None:
     assert settings.retry is None
 
 
-def test_project_settings_override_user_settings(tmp_path: Path) -> None:
+def test_project_provider_override_retains_user_selection_provenance(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "proj"
-    _write_settings(home, provider="user-provider", model="user-model")
+    _write_settings(home, provider="user-provider", model="user-model", effort="high")
     _write_settings(project, provider="project-provider")
 
     settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
 
-    # Project wins where it sets a key; user fills the rest.
     assert settings.provider == "project-provider"
     assert settings.model == "user-model"
+    assert settings.effort == "high"
+    assert settings.user_provider == "user-provider"
+    assert settings.model_from_user is True
+
+
+def test_same_project_provider_keeps_user_model_and_effort(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "proj"
+    _write_settings(home, provider="shared-provider", model="user-model", effort="high")
+    _write_settings(project, provider="shared-provider")
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.provider == "shared-provider"
+    assert settings.model == "user-model"
+    assert settings.effort == "high"
 
 
 def test_user_settings_used_when_no_project_file(tmp_path: Path) -> None:
@@ -377,7 +393,69 @@ def test_retry_policy_prefers_environment_then_user_settings(
     assert config.retry_policy.max_delay_seconds == 30
 
 
-# --- persist_user_effort ---
+# --- persisted user preferences ---
+
+
+def test_persist_user_model_selection_writes_provider_model_and_effort(tmp_path: Path) -> None:
+    persist_user_model_selection("anthropic", "claude-opus-4-8", "high", home_dir=tmp_path)
+
+    path = user_settings_path(home_dir=tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "provider": "anthropic",
+        "model": "claude-opus-4-8",
+        "effort": "high",
+    }
+
+
+def test_persist_user_model_selection_defaults_remove_model_and_effort(tmp_path: Path) -> None:
+    _write_settings(
+        tmp_path,
+        provider="anthropic",
+        model="claude-opus-4-8",
+        effort="high",
+        session_dir="/tmp/sessions",
+    )
+
+    persist_user_model_selection("openai", None, None, home_dir=tmp_path)
+
+    path = user_settings_path(home_dir=tmp_path)
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "provider": "openai",
+        "session_dir": "/tmp/sessions",
+    }
+
+
+def test_persist_user_model_selection_round_trips_through_settings(tmp_path: Path) -> None:
+    persist_user_model_selection("google", "gemini-3.5-flash", "HIGH", home_dir=tmp_path)
+
+    settings = resolve_settings(project_dir=tmp_path / "proj", home_dir=tmp_path)
+
+    assert settings.provider == "google"
+    assert settings.model == "gemini-3.5-flash"
+    assert settings.effort == "HIGH"
+
+
+def test_persist_user_model_selection_removes_invalid_recognized_settings(
+    tmp_path: Path,
+) -> None:
+    _write_settings(
+        tmp_path,
+        context_reserve_tokens=-1,
+        session_dir="/tmp/sessions",
+        future_setting={"enabled": True},
+    )
+
+    persist_user_model_selection("anthropic", "claude-opus-4-8", "high", home_dir=tmp_path)
+
+    path = user_settings_path(home_dir=tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert "context_reserve_tokens" not in data
+    assert data["session_dir"] == "/tmp/sessions"
+    assert data["future_setting"] == {"enabled": True}
+    settings = resolve_settings(project_dir=tmp_path / "proj", home_dir=tmp_path)
+    assert settings.provider == "anthropic"
+    assert settings.model == "claude-opus-4-8"
+    assert settings.effort == "high"
 
 
 def test_persist_user_effort_writes_a_new_file(tmp_path: Path) -> None:

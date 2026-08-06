@@ -47,7 +47,7 @@ from wisp.providers.catalog import (
     startup_effort,
 )
 from wisp.rpc.commands import ApprovalScope
-from wisp.settings import persist_user_effort
+from wisp.settings import persist_user_model_selection
 from wisp.tui.auth_commands import AuthCommands
 from wisp.tui.commands import (
     DEFAULT_TUI_COMMAND_CATALOG,
@@ -289,8 +289,8 @@ class TuiShell:
             self._request_latest_history_page,
         )
         self.auth_store = JsonAuthStore(auth_path or default_auth_path())
-        # Overrides ~/.wisp for /model picker effort persistence in tests; None
-        # in production so persist_user_effort resolves the real home dir.
+        # Overrides ~/.wisp for model-selection persistence in tests; None in
+        # production resolves the real home directory.
         self._settings_home_dir = settings_home_dir
         # Credential commands read auth_store lazily (it is rebound on a trusted-
         # project rebuild) and the default provider from live shell state.
@@ -1587,7 +1587,13 @@ class TuiShell:
                 self.renderer.notice(f"Model set to {pending.model}")
             if pending.has_effort:
                 self.current_effort = pending.effort
-                persist_user_effort(pending.effort, home_dir=self._settings_home_dir)
+            if pending.provider is not None or pending.model is not None:
+                persist_user_model_selection(
+                    self.current_provider,
+                    self.current_model,
+                    self.current_effort,
+                    home_dir=self._settings_home_dir,
+                )
             if pending.has_auto_compaction_enabled:
                 self.renderer.notice(
                     "Automatic compaction "

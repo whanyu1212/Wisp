@@ -2257,6 +2257,7 @@ def test_tui_shell_adopts_trusted_project_config(tmp_path: Path) -> None:
             provider="startup-provider",
             model=None,
             auth_path=startup_auth,
+            settings_home_dir=tmp_path / "home",
         )
 
         await shell._handle_rpc_event(
@@ -2269,6 +2270,7 @@ def test_tui_shell_adopts_trusted_project_config(tmp_path: Path) -> None:
         assert shell.current_model == "trusted-model"
         assert shell.auth_store.path == trusted_auth
         assert shell.view.provider == "trusted-provider"  # header resynced
+        assert not (tmp_path / "home" / ".wisp" / "settings.json").exists()
 
     anyio.run(run)
 
@@ -2730,7 +2732,11 @@ def test_tui_shell_model_command_with_effort_configures_and_persists() -> None:
         assert "Configuring model: claude-opus-4-8, effort high" in rendered
         assert "Model set to claude-opus-4-8" in rendered
         settings_path = tmp_path / ".wisp" / "settings.json"
-        assert json.loads(settings_path.read_text(encoding="utf-8"))["effort"] == "high"
+        assert json.loads(settings_path.read_text(encoding="utf-8")) == {
+            "provider": "anthropic",
+            "model": "claude-opus-4-8",
+            "effort": "high",
+        }
 
     with TemporaryDirectory() as tmp_dir:
         anyio.run(run, Path(tmp_dir))
@@ -2889,8 +2895,10 @@ def test_tui_shell_model_command_without_effort_arg_also_clears_stale_effort() -
         assert shell.current_model == "claude-haiku-4-5"
         assert shell.current_effort is None
         settings_path = tmp_path / ".wisp" / "settings.json"
-        if settings_path.exists():
-            assert "effort" not in json.loads(settings_path.read_text(encoding="utf-8"))
+        assert json.loads(settings_path.read_text(encoding="utf-8")) == {
+            "provider": "anthropic",
+            "model": "claude-haiku-4-5",
+        }
 
     with TemporaryDirectory() as tmp_dir:
         anyio.run(run, Path(tmp_dir))
@@ -2916,8 +2924,7 @@ def test_tui_shell_provider_command_clears_stale_effort() -> None:
         assert shell.current_provider == "openai"
         assert shell.current_effort is None
         settings_path = tmp_path / ".wisp" / "settings.json"
-        if settings_path.exists():
-            assert "effort" not in json.loads(settings_path.read_text(encoding="utf-8"))
+        assert json.loads(settings_path.read_text(encoding="utf-8")) == {"provider": "openai"}
 
     with TemporaryDirectory() as tmp_dir:
         anyio.run(run, Path(tmp_dir))
@@ -3016,14 +3023,16 @@ def test_tui_shell_model_command_clear_effort_token_clears_persisted_effort() ->
         assert shell.current_model == "claude-opus-4-8"
         assert shell.current_effort is None
         settings_path = tmp_path / ".wisp" / "settings.json"
-        if settings_path.exists():
-            assert "effort" not in json.loads(settings_path.read_text(encoding="utf-8"))
+        assert json.loads(settings_path.read_text(encoding="utf-8")) == {
+            "provider": "anthropic",
+            "model": "claude-opus-4-8",
+        }
 
     with TemporaryDirectory() as tmp_dir:
         anyio.run(run, Path(tmp_dir))
 
 
-def test_tui_shell_adopts_server_side_auto_switched_provider() -> None:
+def test_tui_shell_adopts_server_side_auto_switched_provider(tmp_path: Path) -> None:
     # Regression test: a model-only /model <id> can resolve server-side to a
     # different provider than the one the TUI thinks is active (see
     # _auto_switch_provider_for_model in wisp.cli.rpc). Without handling
@@ -3047,6 +3056,7 @@ def test_tui_shell_adopts_server_side_auto_switched_provider() -> None:
             console=console,
             prompt_reader=await _reader_from(["/model gpt-5.5-pro", "/quit"]),
             provider="fake",
+            settings_home_dir=tmp_path,
         )
 
         await shell.run()
@@ -3059,6 +3069,11 @@ def test_tui_shell_adopts_server_side_auto_switched_provider() -> None:
         # The model was not "reset" by the auto-switch -- it was explicitly
         # requested, so the reset-to-default wording must not appear.
         assert "reset to provider default" not in rendered
+        settings_path = tmp_path / ".wisp" / "settings.json"
+        assert json.loads(settings_path.read_text(encoding="utf-8")) == {
+            "provider": "openai",
+            "model": "gpt-5.5-pro",
+        }
 
     anyio.run(run)
 
@@ -3094,7 +3109,7 @@ def test_tui_shell_provider_and_model_updates_footer_snapshots() -> None:
     anyio.run(run)
 
 
-def test_tui_shell_provider_command_waits_for_configure_success() -> None:
+def test_tui_shell_failed_configure_does_not_persist_model_selection(tmp_path: Path) -> None:
     async def run() -> None:
         controller = ScriptedController(
             configure_events=[
@@ -3115,6 +3130,7 @@ def test_tui_shell_provider_command_waits_for_configure_success() -> None:
             console=console,
             prompt_reader=await _reader_from(["/provider missing", "/provider", "/quit"]),
             provider="fake",
+            settings_home_dir=tmp_path,
         )
 
         await shell.run()
@@ -3125,6 +3141,7 @@ def test_tui_shell_provider_command_waits_for_configure_success() -> None:
         assert "Configuring provider: missing" in rendered
         assert "Provider unchanged (fake): Unknown provider: missing" in rendered
         assert "Provider set to missing" not in rendered
+        assert not (tmp_path / ".wisp" / "settings.json").exists()
 
     anyio.run(run)
 
