@@ -19,6 +19,7 @@ from wisp.coding.compaction import (
     NothingToCompactError,
     build_compaction_checkpoint_prompt,
     plan_manual_compaction,
+    plan_preflight_compaction,
     serialize_compaction_transcript,
     summarize_manual_compaction,
 )
@@ -255,6 +256,37 @@ def test_manual_compaction_plan_replaces_prefix_and_retains_latest_complete_turn
     assert plan.replaced_entry_ids == ("one-user", "one-assistant")
     assert plan.messages_to_summarize == tuple(row.message for row in replay.rows[:2])
     assert plan.retained_rows == replay.rows[2:]
+
+
+def test_preflight_compaction_retains_tool_turn_before_later_steering() -> None:
+    call = ToolCallSnapshot(call_id="call-1", name="read", arguments={})
+    current_turn = (
+        _row("current-user", Message(role="user", content="use the tool")),
+        _row(
+            "current-assistant",
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(call,),
+                finish_reason="tool_calls",
+            ),
+        ),
+        _row(
+            "current-tool",
+            Message(
+                role="tool",
+                content="large result",
+                tool_call_id="call-1",
+                tool_name="read",
+            ),
+        ),
+        _row("steering-user", Message(role="user", content="change direction")),
+    )
+
+    plan = plan_preflight_compaction(SessionReplay(rows=(*_turn("one"), *current_turn)))
+
+    assert plan.replaced_entry_ids == ("one-user", "one-assistant")
+    assert plan.retained_rows == current_turn
 
 
 def test_manual_compaction_plan_recompacts_summary_and_aged_out_turn() -> None:
@@ -1065,6 +1097,31 @@ def test_coding_session_preflight_compacts_one_completed_turn(tmp_path: Path) ->
     assert record.replaced_entry_ids == first_turn_ids
     assert len(provider.calls) == 2
     assert provider.calls[1].messages[-1].content == "question two"
+
+
+def test_coding_session_rejects_oversized_fresh_prompt_before_provider(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider([], default_model="model")
+    store = JsonlSessionStore(tmp_path)
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        model="model",
+        models=_model_registry(
+            context_window=2_000,
+            auto_compact_token_limit=1_600,
+        ),
+        prompt_messages=(Message(role="system", content="system"),),
+        context_reserve_tokens=100,
+    )
+
+    async def run() -> list[WispEvent]:
+        return [event async for event in agent.run("x" * 8_000)]
+
+    with pytest.raises(ContextOverflowError, match="Active prompt exceeds"):
+        anyio.run(run)
+    assert provider.calls == []
 
 
 def test_coding_session_stops_when_prompt_remains_over_provider_limit(

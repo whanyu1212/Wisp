@@ -136,17 +136,25 @@ def plan_preflight_compaction(replay: SessionReplay) -> ManualCompactionPlan:
     if not user_turn_starts:
         raise NothingToCompactError("No active user turn is available for preflight compaction")
 
-    active_turn_start = user_turn_starts[-1]
     complete_turn_starts = _complete_user_turn_starts(rows)
-    if active_turn_start in complete_turn_starts:
+    incomplete_turn_starts = tuple(
+        start for start in user_turn_starts if start not in complete_turn_starts
+    )
+    if not incomplete_turn_starts:
         raise NothingToCompactError("The active user turn is already complete")
-    if not complete_turn_starts:
+    active_turn_start = incomplete_turn_starts[0]
+    completed_prefix_starts = tuple(
+        start for start in complete_turn_starts if start < active_turn_start
+    )
+    if not completed_prefix_starts:
         raise NothingToCompactError("No completed turn is available before the active user turn")
 
     # Preserve the established latest-complete-turn boundary when possible. A
     # sole completed turn is the exceptional preflight case: summarize it and
-    # retain only the active prompt/tool cycle.
-    boundary = complete_turn_starts[-1] if len(complete_turn_starts) >= 2 else active_turn_start
+    # retain the first active prompt/tool cycle plus any later steering input.
+    boundary = (
+        completed_prefix_starts[-1] if len(completed_prefix_starts) >= 2 else active_turn_start
+    )
     replaced_rows = rows[:boundary]
     retained_rows = rows[boundary:]
     _validate_tool_boundary(rows, boundary)

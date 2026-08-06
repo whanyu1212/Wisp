@@ -487,26 +487,27 @@ class CodingSession:
         provider_auto_compaction = (
             self.auto_compaction_enabled and self._has_provider_auto_compaction_limit()
         )
-        if history and provider_auto_compaction:
-            prompt_compacted = False
-            async for compaction_event in self._maybe_auto_compact(
-                session,
-                harness,
-                status=auto_compaction_status,
-                operation_id=operation_id,
-                preflight=True,
-            ):
-                if (
-                    isinstance(compaction_event, CompactionCompleted)
-                    and compaction_event.outcome == "completed"
+        if provider_auto_compaction:
+            if history:
+                prompt_compacted = False
+                async for compaction_event in self._maybe_auto_compact(
+                    session,
+                    harness,
+                    status=auto_compaction_status,
+                    operation_id=operation_id,
+                    preflight=True,
                 ):
-                    prompt_compacted = True
-                yield compaction_event
-            if prompt_compacted:
-                active_history = await anyio.to_thread.run_sync(session.read_context_messages)
-                harness.replace_messages(
-                    (*prompt_messages, *self._conversation_history(active_history))
-                )
+                    if (
+                        isinstance(compaction_event, CompactionCompleted)
+                        and compaction_event.outcome == "completed"
+                    ):
+                        prompt_compacted = True
+                    yield compaction_event
+                if prompt_compacted:
+                    active_history = await anyio.to_thread.run_sync(session.read_context_messages)
+                    harness.replace_messages(
+                        (*prompt_messages, *self._conversation_history(active_history))
+                    )
             remaining_budget = self._harness_context_budget(harness)
             if should_auto_compact(remaining_budget, enabled=True):
                 error_message = (
