@@ -907,6 +907,20 @@ def test_harness_pause_after_tool_round_injects_steering_before_returning() -> N
     ]
 
 
+def test_harness_drains_steering_before_first_provider_request() -> None:
+    harness = _harness(ScriptedProvider([]))
+    harness.append_message(Message(role="user", content="initial"))
+    harness.steer("preflight steering")
+
+    events = harness.drain_steering()
+
+    assert isinstance(events[0], QueueMessageInjected)
+    assert events[0].content == "preflight steering"
+    assert isinstance(events[-1], QueueUpdated)
+    assert harness.messages[-1].content == "preflight steering"
+    assert harness.queued_messages.steering == ()
+
+
 def test_queue_message_injected_event_requires_schema_14_and_round_trips() -> None:
     event = QueueMessageInjected(kind="follow_up", content="continue")
 

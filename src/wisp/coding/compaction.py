@@ -124,8 +124,12 @@ def plan_manual_compaction(replay: SessionReplay) -> ManualCompactionPlan:
     )
 
 
-def plan_preflight_compaction(replay: SessionReplay) -> ManualCompactionPlan:
-    """Replace completed history while retaining the active incomplete user turn."""
+def plan_preflight_compaction(
+    replay: SessionReplay,
+    *,
+    active_turn_entry_id: str,
+) -> ManualCompactionPlan:
+    """Replace completed history while retaining the identified active user turn."""
 
     rows = replay.rows
     user_turn_starts = tuple(
@@ -136,20 +140,23 @@ def plan_preflight_compaction(replay: SessionReplay) -> ManualCompactionPlan:
     if not user_turn_starts:
         raise NothingToCompactError("No active user turn is available for preflight compaction")
 
-    complete_turn_starts = _complete_user_turn_starts(rows)
-    if not complete_turn_starts:
-        raise NothingToCompactError("No completed turn is available before the active user turn")
-    incomplete_turn_starts = tuple(
-        start
-        for start in user_turn_starts
-        if start not in complete_turn_starts and start > complete_turn_starts[-1]
+    active_turn_start = next(
+        (index for index, row in enumerate(rows) if row.entry_id == active_turn_entry_id),
+        None,
     )
-    if not incomplete_turn_starts:
+    if active_turn_start is None:
+        raise NothingToCompactError("The active user turn is not present in replay context")
+    if rows[active_turn_start].message.role != "user":
+        raise ValueError("The active preflight boundary must be a user message")
+
+    complete_turn_starts = _complete_user_turn_starts(rows)
+    if active_turn_start in complete_turn_starts:
         raise NothingToCompactError("The active user turn is already complete")
-    active_turn_start = incomplete_turn_starts[0]
     completed_prefix_starts = tuple(
         start for start in complete_turn_starts if start < active_turn_start
     )
+    if not completed_prefix_starts:
+        raise NothingToCompactError("No completed turn is available before the active user turn")
 
     # Preserve the established latest-complete-turn boundary when possible. A
     # sole completed turn is the exceptional preflight case: summarize it and

@@ -498,7 +498,7 @@ class CodingSession:
             await session.append_message(prompt_message, operation_id=operation_id)
 
         user_message = Message(role="user", content=prompt)
-        await session.append_message(user_message, operation_id=operation_id)
+        user_entry = await session.append_message(user_message, operation_id=operation_id)
         # Add the persisted prompt before checking the threshold so provider limits
         # apply to the complete next request, not only the resumed history.
         harness.append_message(user_message)
@@ -517,7 +517,7 @@ class CodingSession:
                     harness,
                     status=auto_compaction_status,
                     operation_id=operation_id,
-                    preflight=True,
+                    preflight_active_entry_id=user_entry.id,
                 ):
                     if (
                         isinstance(compaction_event, CompactionCompleted)
@@ -546,6 +546,24 @@ class CodingSession:
                     )
                 )
                 raise ContextOverflowError(error_message)
+
+        if provider_auto_compaction:
+            # Steering queued while preflight compaction was running must affect
+            # the first provider request, not wait for that request to finish.
+            self._accepting_queued_messages = False
+            for queue_event in harness.drain_steering():
+                if isinstance(queue_event, QueueMessageInjected):
+                    self._queue_message(
+                        session,
+                        Message(
+                            role="user",
+                            content=queue_event.content,
+                            created_at=queue_event.timestamp,
+                        ),
+                        operation_id=operation_id,
+                    )
+                yield await emit(queue_event)
+            self._accepting_queued_messages = True
 
         turns = 0
         had_tool_round = False
@@ -663,7 +681,7 @@ class CodingSession:
                         harness,
                         status=auto_compaction_status,
                         operation_id=operation_id,
-                        preflight=True,
+                        preflight_active_entry_id=user_entry.id,
                     ):
                         if (
                             isinstance(compaction_event, CompactionCompleted)
@@ -887,7 +905,7 @@ class CodingSession:
         *,
         status: _AutoCompactionStatus,
         operation_id: str | None = None,
-        preflight: bool = False,
+        preflight_active_entry_id: str | None = None,
     ) -> AsyncIterator[WispEvent]:
         provider_messages = self._normalize_provider_messages(harness.messages)
         tools = tuple(harness.config.tools)
@@ -917,7 +935,12 @@ class CodingSession:
         try:
             replay = await self._prepare_compaction_replay(session)
             plan = (
-                plan_preflight_compaction(replay) if preflight else plan_manual_compaction(replay)
+                plan_preflight_compaction(
+                    replay,
+                    active_turn_entry_id=preflight_active_entry_id,
+                )
+                if preflight_active_entry_id is not None
+                else plan_manual_compaction(replay)
             )
         except NothingToCompactError:
             return

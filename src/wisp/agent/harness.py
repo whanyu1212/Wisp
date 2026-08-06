@@ -250,6 +250,32 @@ class AgentHarness:
         self._follow_up_queue.clear()
         return cleared
 
+    def drain_steering(self) -> tuple[QueueMessageInjected | QueueUpdated, ...]:
+        """Inject the next steering batch before a provider request starts."""
+
+        self._ensure_idle()
+        drain_batch = tuple(self._steering_queue)
+        if self._config.steering_mode == "one_at_a_time":
+            drain_batch = drain_batch[:1]
+        if not drain_batch:
+            return ()
+
+        events: list[QueueMessageInjected | QueueUpdated] = []
+        for message in drain_batch:
+            if not self._steering_queue or self._steering_queue[0] is not message:
+                continue
+            self._steering_queue.popleft()
+            self._messages.append(message)
+            events.append(
+                QueueMessageInjected(
+                    kind="steering",
+                    content=message.content,
+                    timestamp=message.created_at,
+                )
+            )
+        events.append(self.queue_updated_event())
+        return tuple(events)
+
     def queue_updated_event(self) -> QueueUpdated:
         """Return current queue state as a portable versioned event."""
         return QueueUpdated(

@@ -283,7 +283,10 @@ def test_preflight_compaction_retains_tool_turn_before_later_steering() -> None:
         _row("steering-user", Message(role="user", content="change direction")),
     )
 
-    plan = plan_preflight_compaction(SessionReplay(rows=(*_turn("one"), *current_turn)))
+    plan = plan_preflight_compaction(
+        SessionReplay(rows=(*_turn("one"), *current_turn)),
+        active_turn_entry_id="current-user",
+    )
 
     assert plan.replaced_entry_ids == ("one-user", "one-assistant")
     assert plan.retained_rows == current_turn
@@ -314,7 +317,10 @@ def test_preflight_compaction_ignores_stale_incomplete_turn_before_completed_his
     )
     active = _row("active-user", Message(role="user", content="current prompt"))
 
-    plan = plan_preflight_compaction(SessionReplay(rows=(*stale_turn, *_turn("completed"), active)))
+    plan = plan_preflight_compaction(
+        SessionReplay(rows=(*stale_turn, *_turn("completed"), active)),
+        active_turn_entry_id="active-user",
+    )
 
     assert plan.replaced_entry_ids == (
         "stale-user",
@@ -322,6 +328,46 @@ def test_preflight_compaction_ignores_stale_incomplete_turn_before_completed_his
         "stale-tool",
         "completed-user",
         "completed-assistant",
+    )
+    assert plan.retained_rows == (active,)
+
+
+def test_preflight_compaction_uses_explicit_prompt_after_consecutive_incomplete_turns() -> None:
+    stale_call = ToolCallSnapshot(call_id="stale-call", name="read", arguments={})
+    stale_turn = (
+        _row("stale-user", Message(role="user", content="old interrupted turn")),
+        _row(
+            "stale-assistant",
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(stale_call,),
+                finish_reason="tool_calls",
+            ),
+        ),
+        _row(
+            "stale-tool",
+            Message(
+                role="tool",
+                content="cancelled",
+                tool_call_id="stale-call",
+                tool_name="read",
+            ),
+        ),
+    )
+    active = _row("active-user", Message(role="user", content="replacement prompt"))
+
+    plan = plan_preflight_compaction(
+        SessionReplay(rows=(*_turn("completed"), *stale_turn, active)),
+        active_turn_entry_id="active-user",
+    )
+
+    assert plan.replaced_entry_ids == (
+        "completed-user",
+        "completed-assistant",
+        "stale-user",
+        "stale-assistant",
+        "stale-tool",
     )
     assert plan.retained_rows == (active,)
 
