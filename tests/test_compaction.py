@@ -1161,6 +1161,31 @@ def test_coding_session_rejects_oversized_fresh_prompt_before_provider(
     assert provider.calls == []
 
 
+def test_coding_session_rejects_provider_reserve_that_consumes_window(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider([], default_model="model")
+    store = JsonlSessionStore(tmp_path)
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        model="model",
+        models=_model_registry(
+            context_window=2_000,
+            auto_compact_token_limit=1_600,
+        ),
+        prompt_messages=(Message(role="system", content="system"),),
+        context_reserve_tokens=2_000,
+    )
+
+    async def run() -> list[WispEvent]:
+        return [event async for event in agent.run("small prompt")]
+
+    with pytest.raises(ContextOverflowError, match="Active prompt exceeds"):
+        anyio.run(run)
+    assert provider.calls == []
+
+
 def test_coding_session_stops_when_prompt_remains_over_provider_limit(
     tmp_path: Path,
 ) -> None:

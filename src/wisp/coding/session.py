@@ -509,7 +509,7 @@ class CodingSession:
                         (*prompt_messages, *self._conversation_history(active_history))
                     )
             remaining_budget = self._harness_context_budget(harness)
-            if should_auto_compact(remaining_budget, enabled=True):
+            if self._exceeds_provider_auto_compaction_limit(remaining_budget):
                 error_message = (
                     "Active prompt exceeds the provider auto-compaction limit "
                     "after compacting all eligible history"
@@ -656,7 +656,7 @@ class CodingSession:
                             (*prompt_messages, *self._conversation_history(active_history))
                         )
                     remaining_budget = self._harness_context_budget(harness)
-                    if should_auto_compact(remaining_budget, enabled=True):
+                    if self._exceeds_provider_auto_compaction_limit(remaining_budget):
                         error_message = (
                             "Active tool result exceeds the provider auto-compaction limit "
                             "after compacting all eligible history"
@@ -839,6 +839,12 @@ class CodingSession:
                     yield event
             finally:
                 self._operation_active = False
+
+    @staticmethod
+    def _exceeds_provider_auto_compaction_limit(budget: ContextBudget) -> bool:
+        return (
+            budget.context_window is not None and budget.reserve_tokens >= budget.context_window
+        ) or should_auto_compact(budget, enabled=True)
 
     def _harness_context_budget(self, harness: AgentHarness) -> ContextBudget:
         return build_context_budget(
