@@ -357,6 +357,31 @@ def test_live_fullscreen_tui_ctrl_c_requests_quit_and_clears_draft() -> None:
     anyio.run(run)
 
 
+def test_live_fullscreen_tui_ctrl_c_copies_selection_without_quit() -> None:
+    from prompt_toolkit.clipboard import InMemoryClipboard
+
+    async def run() -> None:
+        renderer = LiveFullscreenTui(run_application=False)
+        read_task = asyncio.create_task(renderer.read_prompt("wisp> "))
+        await anyio.sleep(0)
+        renderer._buffer.insert_text("copy me")
+        renderer._buffer.cursor_position = 0
+        renderer._buffer.start_selection()
+        renderer._buffer.cursor_position = 4
+        clipboard = InMemoryClipboard()
+
+        assert renderer._copy_selection(clipboard)
+        assert clipboard.get_data().text == "copy"
+        assert renderer._buffer.text == "copy me"
+        assert not read_task.done()
+
+        read_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await read_task
+
+    anyio.run(run)
+
+
 def test_live_fullscreen_tui_queues_rapid_second_ctrl_c_between_reads() -> None:
     from wisp.tui.state import TuiQuitRequested
 

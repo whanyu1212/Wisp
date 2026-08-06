@@ -8,6 +8,7 @@ from contextlib import suppress
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.clipboard.base import Clipboard
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
@@ -218,7 +219,8 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
 
         @bindings.add("c-c")
         def _quit(event: KeyPressEvent) -> None:
-            self._quit_input()
+            if not self._copy_selection(event.app.clipboard):
+                self._quit_input()
             event.app.invalidate()
 
         @bindings.add("c-d")
@@ -281,6 +283,14 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
             return
         self._submitted_input_mode = self._buffer_input_mode
         self._input_future.set_exception(LiveFullscreenInputInterrupted())
+
+    def _copy_selection(self, clipboard: Clipboard) -> bool:
+        """Copy an active editor selection instead of treating Ctrl+C as quit."""
+
+        if self._buffer.selection_state is None:
+            return False
+        clipboard.set_data(self._buffer.copy_selection())
+        return True
 
     def _quit_input(self) -> None:
         mode = self._buffer_input_mode
