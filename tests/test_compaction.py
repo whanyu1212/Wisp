@@ -1067,6 +1067,53 @@ def test_coding_session_preflight_compacts_one_completed_turn(tmp_path: Path) ->
     assert provider.calls[1].messages[-1].content == "question two"
 
 
+def test_coding_session_stops_when_prompt_remains_over_provider_limit(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ]
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    history = (
+        Message(role="user", content="question one"),
+        Message(role="assistant", content="answer one", finish_reason="stop"),
+    )
+
+    async def run() -> list[WispEvent]:
+        for message in history:
+            await session.append_message(message)
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(
+                context_window=2_000,
+                auto_compact_token_limit=1_600,
+            ),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=100,
+        )
+        return [
+            event
+            async for event in agent.run(
+                "question two " + "x" * 8_000,
+                session=session,
+                history=history,
+            )
+        ]
+
+    with pytest.raises(ContextOverflowError, match="Active prompt exceeds"):
+        anyio.run(run)
+    assert len(provider.calls) == 1
+
+
 def test_coding_session_rechecks_provider_limit_after_tool_round(tmp_path: Path) -> None:
     class LargeReadTool:
         name = "large_read"

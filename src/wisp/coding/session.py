@@ -507,6 +507,21 @@ class CodingSession:
                 harness.replace_messages(
                     (*prompt_messages, *self._conversation_history(active_history))
                 )
+            remaining_budget = self._harness_context_budget(harness)
+            if should_auto_compact(remaining_budget, enabled=True):
+                error_message = (
+                    "Active prompt exceeds the provider auto-compaction limit "
+                    "after compacting all eligible history"
+                )
+                yield await emit(ErrorEvent(message=error_message))
+                yield await emit(
+                    AgentCompleted(
+                        session_id=session.session_id,
+                        turns=0,
+                        outcome="failed",
+                    )
+                )
+                raise ContextOverflowError(error_message)
 
         turns = 0
         had_tool_round = False
@@ -639,14 +654,7 @@ class CodingSession:
                         harness.replace_messages(
                             (*prompt_messages, *self._conversation_history(active_history))
                         )
-                    remaining_budget = build_context_budget(
-                        estimate_context(
-                            self._normalize_provider_messages(harness.messages),
-                            tuple(harness.config.tools),
-                        ),
-                        context_window=self._context_window(),
-                        reserve_tokens=self._effective_context_reserve_tokens(),
-                    )
+                    remaining_budget = self._harness_context_budget(harness)
                     if should_auto_compact(remaining_budget, enabled=True):
                         error_message = (
                             "Active tool result exceeds the provider auto-compaction limit "
@@ -830,6 +838,16 @@ class CodingSession:
                     yield event
             finally:
                 self._operation_active = False
+
+    def _harness_context_budget(self, harness: AgentHarness) -> ContextBudget:
+        return build_context_budget(
+            estimate_context(
+                self._normalize_provider_messages(harness.messages),
+                tuple(harness.config.tools),
+            ),
+            context_window=self._context_window(),
+            reserve_tokens=self._effective_context_reserve_tokens(),
+        )
 
     async def _maybe_auto_compact(
         self,
