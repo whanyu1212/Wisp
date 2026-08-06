@@ -2804,6 +2804,47 @@ def test_textual_streaming_coalesces_one_pending_drain_per_turn() -> None:
     assert text == "first batched stream output"
 
 
+def test_textual_stream_completion_reconciles_authoritative_content() -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            renderer.token_delta("partial response")
+            renderer.end_token_stream_with_content("complete authoritative response")
+            await app_instance.wait_for_stream_idle()
+            stream = app_instance.query_one(StreamMessage)
+            return stream._markdown.source
+
+    assert anyio.run(scenario) == "complete authoritative response"
+
+
+def test_textual_stream_completion_repairs_an_incremental_render_failure(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            original_append = StreamMessage.append_markdown
+            failed_once = False
+
+            async def fail_first_append(widget: StreamMessage, fragment: str) -> None:
+                nonlocal failed_once
+                if not failed_once:
+                    failed_once = True
+                    raise RuntimeError("simulated incremental Markdown failure")
+                await original_append(widget, fragment)
+
+            monkeypatch.setattr(StreamMessage, "append_markdown", fail_first_append)
+            renderer.token_delta("first half ")
+            await pilot.pause()
+            renderer.token_delta("second half")
+            renderer.end_token_stream_with_content("first half second half")
+            await app_instance.wait_for_stream_idle()
+            stream = app_instance.query_one(StreamMessage)
+            return stream._markdown.source
+
+    assert anyio.run(scenario) == "first half second half"
+
+
 def test_textual_end_token_stream_finalizes_the_bubble() -> None:
     # end_token_stream() is the ONLY place a streamed assistant turn is finalized
     # (the shell suppresses the trailing MessageCompleted when tokens rendered).
@@ -5055,8 +5096,7 @@ def test_textual_leading_slash_is_typable_as_text() -> None:
 
 
 def test_textual_framework_command_palette_is_disabled() -> None:
-    # Wisp owns a typed Ctrl+O palette, so Textual's framework Ctrl+P palette must
-    # remain off (it clashes with terminal history).
+    # Wisp uses inline slash commands, so Textual's separate Ctrl+P palette remains off.
     assert TextualTui.ENABLE_COMMAND_PALETTE is False
 
 
@@ -5616,7 +5656,7 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
     assert wordmark == "W  I  S  P"
     assert tagline == "A coding agent that stays in sync"
     assert hint == "Type a prompt or / for commands."
-    assert actions == "/resume session  ·  Ctrl+O actions"
+    assert actions == "/ commands  ·  /resume session"
     assert len(set(centers)) == 1
     assert initial_children == ["TranscriptEmptyState"]
     assert final_children == ["LineMessage"]
@@ -5675,8 +5715,8 @@ def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
 
     styles = anyio.run(scenario)
     expected = {
-        "wisp": ("#0E1216", "#151B21", "#3FB8B8"),
-        "wisp-light": ("#FBFCFD", "#FFFFFF", "#2E7676"),
+        "wisp": ("#0E1216", "#3FB8B8"),
+        "wisp-light": ("#FBFCFD", "#2E7676"),
     }
     for theme, (
         idle_background,
@@ -5685,9 +5725,9 @@ def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
         focused_border,
         delay,
     ) in styles.items():
-        expected_idle, expected_focused, expected_accent = expected[theme]
-        assert idle_background == expected_idle
-        assert focused_background == expected_focused
+        expected_background, expected_accent = expected[theme]
+        assert idle_background == expected_background
+        assert focused_background == expected_background
         assert idle_border != focused_border
         assert focused_border == expected_accent
         assert delay == 0.2
@@ -5820,6 +5860,36 @@ def test_textual_composer_frames_input_and_status_as_one_panel() -> None:
     assert composer_border.bottom[0] == "round"
     assert composer_border.left[0] == "round"
     assert composer_border.right[0] == "round"
+
+
+def test_textual_composer_frame_clicks_focus_prompt_editor() -> None:
+    async def scenario() -> list[bool]:
+        app_instance = TextualTui()
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            input_widget = app_instance.query_one("#input", Input)
+            composer = app_instance.query_one("#composer")
+            width = composer.region.width
+            height = composer.region.height
+            focused: list[bool] = []
+            for offset in (
+                (width // 2, 0),
+                (width // 2, height - 1),
+                (0, height // 2),
+                (width - 1, height // 2),
+            ):
+                app_instance.screen.set_focus(None)
+                assert await pilot.click("#composer", offset=offset)
+                focused.append(input_widget.has_focus)
+            return focused
+
+    assert anyio.run(scenario) == [True, True, True, True]
+
+
+def test_textual_wheel_uses_one_row_sensitivity() -> None:
+    transcript = Transcript()
+
+    assert transcript.scroll_sensitivity_y == 1.0
 
 
 def test_textual_run_shell_enables_mouse_for_wheel_scrolling() -> None:

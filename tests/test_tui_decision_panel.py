@@ -59,9 +59,9 @@ def test_bounded_tool_session_option_name_truncates_long_names() -> None:
     assert _bounded_tool_session_option_name("bash") == "bash"
     long_name = "a" * 71
     truncated = _bounded_tool_session_option_name(long_name)
-    assert len(truncated) == 40
+    assert len(truncated) == 30
     assert truncated.endswith("…")
-    assert truncated[:-1] == long_name[:39]
+    assert truncated[:-1] == long_name[:29]
 
 
 def test_bounded_tool_session_option_name_collapses_embedded_newlines() -> None:
@@ -689,6 +689,21 @@ def test_trust_panel_uses_deny_first_project_wording() -> None:
     assert "Trust project" in approve
     assert "Keep untrusted (default)" in deny
     assert highlighted == 1
+
+
+@pytest.mark.parametrize("size", [(72, 20), (80, 24), (120, 40)])
+def test_decision_panel_leaves_transcript_scrollbar_gutter(size: tuple[int, int]) -> None:
+    async def scenario() -> tuple[int, int]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=size) as pilot:
+            renderer.approval_request(_approval("bash", {"command": "echo ok"}, safety="command"))
+            await pilot.pause()
+            panel = app.query_one("#decision-panel", DecisionPanel)
+            transcript = app.query_one("#transcript")
+            return panel.region.right, transcript.region.right
+
+    panel_right, transcript_right = anyio.run(scenario)
+    assert panel_right < transcript_right
 
 
 @pytest.mark.parametrize("theme", ["wisp", "wisp-light"])

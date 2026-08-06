@@ -765,6 +765,16 @@ class TuiShell:
         if callable(method):
             method(*args, **kwargs)
 
+    def _end_token_stream(self, completed_content: str | None = None) -> None:
+        """Finalize streaming while preserving the original renderer contract."""
+
+        if completed_content is not None:
+            reconcile = getattr(self.renderer, "end_token_stream_with_content", None)
+            if callable(reconcile):
+                reconcile(completed_content)
+                return
+        self.renderer.end_token_stream()
+
     async def _handle_provider_command(self, args: tuple[str, ...]) -> None:
         if len(args) > 1:
             self.renderer.command_error("Usage: /provider [provider]")
@@ -1373,20 +1383,32 @@ class TuiShell:
             return False
         if isinstance(event, MessageStarted):
             self._sync_view()
-        if isinstance(event, MessageDelta) and event.content_kind == "text":
-            self.state.token_stream_started = True
-            self.state.rendered_tokens = True
-            self.renderer.token_delta(event.delta)
+        if isinstance(event, MessageDelta):
+            if event.content_kind == "text":
+                self.state.token_stream_started = True
+                self.state.rendered_tokens = True
+                self.renderer.token_delta(event.delta)
+            # Thinking deltas may be interleaved with visible text. They are not a
+            # message boundary and must not finalize the active Markdown widget.
             return False
-        if self.state.token_stream_started:
-            self.renderer.end_token_stream()
-            self.state.token_stream_started = False
         if isinstance(event, MessageCompleted):
             suppress_completed_message = self.state.rendered_tokens
+            if self.state.token_stream_started:
+                # The terminal event is authoritative: reconcile the incremental
+                # renderer with its complete content before retaining the widget.
+                self._end_token_stream(event.content)
+                self.state.token_stream_started = False
             self.state.rendered_tokens = False
             if suppress_completed_message:
                 self._call_renderer_optional("record_streamed_message_completed", event)
                 return False
+        if isinstance(event, ErrorEvent) and self.state.token_stream_started:
+            # Provider failures and cancellations can omit MessageCompleted. Close
+            # the partial assistant output before rendering the terminal error so
+            # line and fullscreen renderers preserve transcript order.
+            self.renderer.end_token_stream()
+            self.state.token_stream_started = False
+            self.state.rendered_tokens = False
         if isinstance(event, ToolApprovalRequested):
             self.state.pending_approval = event
             self.state.status = TuiStatus.waiting_for_approval
@@ -1504,6 +1526,13 @@ class TuiShell:
                 self._render_event(event)
                 return True
             if event.command_id == self.state.current_command_id:
+                # A malformed or abruptly closed RPC stream may reach its command
+                # boundary without either MessageCompleted or ErrorEvent. Preserve
+                # the partial response before rendering the boundary as a fallback.
+                if self.state.token_stream_started:
+                    self.renderer.end_token_stream()
+                    self.state.token_stream_started = False
+                    self.state.rendered_tokens = False
                 self._render_event(event)
                 return await self._finish_current_prompt(event)
         self._render_event(event)
@@ -1699,7 +1728,12 @@ class TuiShell:
         self.state.current_command_id = None
         self.state.current_command_type = None
         self.state.pending_approval = None
-        self.state.token_stream_started = False
+        if self.state.token_stream_started:
+            # Failed and cancelled provider turns may terminate without a
+            # MessageCompleted event. Settle their partial output before the next
+            # prompt can reuse the renderer's active stream.
+            self.renderer.end_token_stream()
+            self.state.token_stream_started = False
         self.state.rendered_tokens = False
         if finished_command_type in {"prompt", "compact"}:
             await self._request_session_stats()

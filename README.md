@@ -409,13 +409,11 @@ cursor-key recall. Wisp intentionally uses a searchable overlay so Up/Down remai
 cursor controls in the composer. Durable prompt history, draft stashing, deletion controls, and
 configurable retention remain future work.
 
-In the Textual TUI, press `Ctrl+O` to open Wisp's searchable command palette. The palette and
-inline `/` suggestions consume the same executable catalog loaded through RPC `get_commands`.
-Selecting an action routes its canonical slash spelling through the existing TUI command handler,
-so approval, trust, and active-operation restrictions remain unchanged. Opening or dismissing the
-palette preserves the composer draft and transcript position. Textual's framework `Ctrl+P` palette
-remains disabled. Dynamic availability reasons, suggested actions, configurable bindings, and
-extension command handlers remain future work.
+In the Textual TUI, type `/` to list commands and continue typing to filter the inline
+suggestions. The suggestions consume the executable catalog loaded through RPC `get_commands`,
+and selected commands use the existing TUI command handler so approval, trust, and
+active-operation restrictions remain unchanged. Dynamic availability reasons, suggested actions,
+configurable bindings, and extension command handlers remain future work.
 
 TUI login currently uses the `openai-codex` device-code flow; browser login is available from the
 CLI (`uv run wisp auth login openai-codex`). `/model` with no arguments opens a model picker in

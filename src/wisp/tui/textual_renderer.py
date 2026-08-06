@@ -373,9 +373,14 @@ class TextualTuiRenderer:
 
     def token_delta(self, delta: str) -> None:
         # Stream live into the assistant Markdown widget. The app bridges this
-        # synchronous renderer surface to Textual's async MarkdownStream API.
+        # synchronous renderer surface to Textual's awaited public Markdown API.
         self._suspend_progress()
         self.app.append_stream(delta)
+
+    def end_token_stream_with_content(self, completed_content: str) -> None:
+        """Finalize streamed output using authoritative completed content."""
+
+        self.app.flush_stream(completed_content)
 
     def end_token_stream(self) -> None:
         self.app.flush_stream()

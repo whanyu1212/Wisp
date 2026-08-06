@@ -494,18 +494,3 @@ def test_shell_records_queued_prompt_immediately_and_queue_clear_does_not_erase_
     assert before == ("submitted follow-up",)
     assert queued == ("submitted follow-up",)
     assert after == before
-
-
-def test_command_palette_history_selection_uses_typed_slash_path() -> None:
-    async def scenario() -> str:
-        app = TextualTui()
-        async with app.run_test(size=(80, 24)) as pilot:
-            await pilot.press("ctrl+o")
-            await pilot.pause()
-            query = app.query_one("#command-palette-query", Input)
-            query.value = "prompt history"
-            await pilot.pause()
-            await pilot.press("enter")
-            return await app.read_prompt("wisp> ")
-
-    assert anyio.run(scenario) == "/history"

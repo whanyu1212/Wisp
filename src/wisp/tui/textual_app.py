@@ -52,7 +52,6 @@ from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.textual_transcript import TextualTranscriptController
 from wisp.tui.theme import WISP_THEMES, role_styles
 from wisp.tui.widgets import (
-    CommandPalette,
     DecisionPanel,
     JumpToLatest,
     LineMessage,
@@ -256,9 +255,9 @@ class TextualTui(App[None]):
     }
 
     /* One bordered panel frames the editor and its status line as a single
-       card — quiet ($secondary) at rest, accent when the editor has focus,
-       matching the focus-driven color the old underline-only input used
-       (kept as a CSS variable swap, not a new interaction pattern). */
+       card — quiet ($secondary) at rest, accent when the editor has focus.
+       Keep the background stable so focus feedback does not create a
+       disjointed block around the composer. */
     #composer {
         height: auto;
         border: round $secondary;
@@ -268,7 +267,7 @@ class TextualTui(App[None]):
 
     #composer:focus-within {
         border: round $accent;
-        background: $surface;
+        background: $background;
     }
 
     #status-bar {
@@ -315,7 +314,6 @@ class TextualTui(App[None]):
     # the transcript. Ctrl+C uses Wisp's double-press quit flow; terminal-native
     # selection remains available through the emulator's mouse-bypass modifier.
     BINDINGS = [
-        Binding("ctrl+o", "open_command_palette", "Actions", priority=True),
         Binding("ctrl+r", "open_prompt_history", "History", priority=True),
         Binding("shift+tab", "toggle_agent_mode", "Plan/build", priority=True, show=False),
         Binding("ctrl+c", "interrupt", "Quit", priority=True),
@@ -338,7 +336,6 @@ class TextualTui(App[None]):
         self._jump_to_latest: JumpToLatest | None = None
         self._input: PromptEditor | None = None
         self._suggest: SlashSuggest | None = None
-        self._command_palette: CommandPalette | None = None
         self._prompt_history_picker: PromptHistoryPicker | None = None
         self._decision_panel: DecisionPanel | None = None
         self._model_picker: ModelPicker | None = None
@@ -412,7 +409,6 @@ class TextualTui(App[None]):
             # The slash-command menu floats on the overlay layer anchored near the
             # input; yielded here so it shares the Vertical's coordinate space.
             yield SlashSuggest(id="suggest")
-            yield CommandPalette(id="command-palette")
             yield PromptHistoryPicker(id="prompt-history")
             yield DecisionPanel(id="decision-panel")
             yield ModelPicker(id="model-picker")
@@ -433,6 +429,13 @@ class TextualTui(App[None]):
                     yield StatusBar(id="status")
             yield Static(_KEYBINDING_HINT, id="keybinding-hint", markup=False)
 
+    @on(events.Click, "#composer")
+    def focus_prompt_editor_from_composer(self, event: events.Click) -> None:
+        """Make the composer's frame and status area focus the prompt editor."""
+
+        if event.button == 1 and self._input is not None:
+            self._input.focus()
+
     async def on_mount(self) -> None:
         # Retain an application title for terminal metadata without spending a
         # permanent screen row on Textual's Header. The disposable welcome state
@@ -447,7 +450,6 @@ class TextualTui(App[None]):
         self._status = self.query_one("#status", StatusBar)
         self._input = self.query_one("#input", PromptEditor)
         self._suggest = self.query_one("#suggest", SlashSuggest)
-        self._command_palette = self.query_one("#command-palette", CommandPalette)
         self._prompt_history_picker = self.query_one("#prompt-history", PromptHistoryPicker)
         self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
         self._model_picker = self.query_one("#model-picker", ModelPicker)
@@ -462,7 +464,6 @@ class TextualTui(App[None]):
                 OverlayKind.decision: self._decision_panel,
                 OverlayKind.model_picker: self._model_picker,
                 OverlayKind.session_picker: self._session_picker,
-                OverlayKind.command_palette: self._command_palette,
                 OverlayKind.prompt_history: self._prompt_history_picker,
                 OverlayKind.context_status: self._context_status,
                 OverlayKind.operation_indicator: self._operation_indicator,
@@ -645,13 +646,13 @@ class TextualTui(App[None]):
         if jump is None or transcript is None or target not in {jump, jump.parent}:
             return
         transcript.scroll_to(
-            y=transcript.scroll_target_y + direction * self.scroll_sensitivity_y,
+            y=transcript.scroll_target_y + direction * transcript.scroll_sensitivity_y,
             animate=False,
         )
         event.stop()
 
     def submit_command_line(self, text: str) -> None:
-        """Submit a typed/command-palette line through the input controller."""
+        """Submit a typed slash-command line through the input controller."""
 
         self._input_controller.submit_line(text, clear_editor=True)
 
@@ -686,19 +687,6 @@ class TextualTui(App[None]):
         event.stop()
         self.hide_session_picker()
 
-    def on_command_palette_selected(self, event: CommandPalette.Selected) -> None:
-        event.stop()
-        descriptor = event.descriptor
-        self.hide_command_palette()
-        if any(argument.required for argument in descriptor.arguments):
-            self.prefill_command(f"{descriptor.slash_command} ")
-            return
-        self._submit_decision_line(descriptor.slash_command)
-
-    def on_command_palette_cancelled(self, event: CommandPalette.Cancelled) -> None:
-        event.stop()
-        self.hide_command_palette()
-
     def on_prompt_history_picker_selected(self, event: PromptHistoryPicker.Selected) -> None:
         event.stop()
         if not self.hide_prompt_history():
@@ -716,13 +704,16 @@ class TextualTui(App[None]):
         self.hide_context_status()
 
     def set_command_catalog(self, catalog: TuiCommandCatalog) -> None:
-        """Apply one executable catalog to both Textual command surfaces."""
+        """Apply the executable catalog to inline slash suggestions."""
 
         self._command_catalog = catalog
         if self._suggest is not None:
             self._suggest.set_catalog(catalog)
-        if self._command_palette is not None:
-            self._command_palette.set_catalog(catalog)
+            # Catalog discovery can complete just after the user starts typing at
+            # startup. Reproject the current editor value so an already-open `/`
+            # menu is refreshed instead of being dismissed by the catalog swap.
+            if self._input is not None and self._input.display:
+                self._suggest.show_for(self._input.text)
 
     def prefill_command(self, prefix: str) -> None:
         """Put a command prefix in the editor, cursor at the end, without submitting.
@@ -969,23 +960,6 @@ class TextualTui(App[None]):
         command = "/build" if self._agent_mode == "plan" else "/plan"
         self._input_controller.submit_line(command, clear_editor=False)
 
-    def action_open_command_palette(self) -> None:
-        palette = self._command_palette
-        if palette is None:
-            return
-        if palette.is_open:
-            self.hide_command_palette()
-            return
-        if self._input is None or not self._input.display:
-            return
-        overlays = self._overlay_controller
-        if overlays is None:
-            return
-        overlays.open(OverlayKind.command_palette, preserve_viewport=True)
-        composer = self.query_one("#composer")
-        palette.styles.max_height = max(4, composer.region.y)
-        palette.show()
-
     def action_open_prompt_history(self) -> None:
         picker = self._prompt_history_picker
         if picker is None:
@@ -1019,9 +993,6 @@ class TextualTui(App[None]):
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_page_up()
             return
-        if self._command_palette is not None and self._command_palette.is_open:
-            self._command_palette.move_highlight_page_up()
-            return
         if self._prompt_history_picker is not None and self._prompt_history_picker.is_open:
             self._prompt_history_picker.move_highlight_page_up()
             return
@@ -1036,9 +1007,6 @@ class TextualTui(App[None]):
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_page_down()
             return
-        if self._command_palette is not None and self._command_palette.is_open:
-            self._command_palette.move_highlight_page_down()
-            return
         if self._prompt_history_picker is not None and self._prompt_history_picker.is_open:
             self._prompt_history_picker.move_highlight_page_down()
             return
@@ -1052,9 +1020,6 @@ class TextualTui(App[None]):
     def action_scroll_transcript_home(self) -> None:
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_first()
-            return
-        if self._command_palette is not None and self._command_palette.is_open:
-            self._command_palette.move_highlight_first()
             return
         if self._prompt_history_picker is not None and self._prompt_history_picker.is_open:
             self._prompt_history_picker.move_highlight_first()
@@ -1074,9 +1039,6 @@ class TextualTui(App[None]):
     def action_scroll_transcript_end(self) -> None:
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_last()
-            return
-        if self._command_palette is not None and self._command_palette.is_open:
-            self._command_palette.move_highlight_last()
             return
         if self._prompt_history_picker is not None and self._prompt_history_picker.is_open:
             self._prompt_history_picker.move_highlight_last()
@@ -1141,11 +1103,6 @@ class TextualTui(App[None]):
 
     def _defer_overlay_restore(self, callback: Callable[[], None]) -> None:
         self.call_after_refresh(callback)
-
-    def hide_command_palette(self) -> None:
-        overlays = self._overlay_controller
-        if overlays is not None:
-            overlays.close(OverlayKind.command_palette)
 
     def record_prompt(self, prompt: str) -> None:
         """Retain one shell-accepted prompt for this TUI process only."""
@@ -1916,8 +1873,8 @@ class TextualTui(App[None]):
     def append_stream(self, delta: str) -> None:
         self._stream.append(delta)
 
-    def flush_stream(self) -> None:
-        self._stream.flush()
+    def flush_stream(self, completed_content: str | None = None) -> None:
+        self._stream.flush(completed_content)
 
     def stream_widget_for_completed_message(self) -> Widget | None:
         """Return the completed stream widget represented by a suppressed message event."""
@@ -1926,12 +1883,12 @@ class TextualTui(App[None]):
 
     @property
     def last_stream_write_count(self) -> int:
-        """Return native Markdown writes used by the latest completed stream turn."""
+        """Return Markdown writes used by the latest completed stream turn."""
 
         return self._stream.last_completed_write_count
 
     async def wait_for_stream_idle(self) -> None:
-        """Wait for scheduled native Markdown streaming work to finish."""
+        """Wait for scheduled Markdown rendering work to finish."""
 
         await self._stream.wait_until_idle()
 

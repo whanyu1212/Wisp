@@ -681,6 +681,12 @@ class FullscreenTuiRenderer:
         # append repeated frames when clear_screen is disabled, so coalesce
         # streamed text until end_token_stream() can render one updated frame.
 
+    def end_token_stream_with_content(self, completed_content: str) -> None:
+        """Finalize buffered output using authoritative completed content."""
+
+        self.state.streaming_text = completed_content
+        self.end_token_stream()
+
     def end_token_stream(self) -> None:
         if self.state.streaming_text:
             streaming_text = self.state.streaming_text
