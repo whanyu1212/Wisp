@@ -1666,8 +1666,11 @@ def test_tui_shell_keeps_text_stream_open_across_thinking_deltas() -> None:
         def token_delta(self, delta: str) -> None:
             self.deltas.append(delta)
 
-        def end_token_stream(self, completed_content: str | None = None) -> None:
+        def end_token_stream_with_content(self, completed_content: str) -> None:
             self.completions.append(completed_content)
+
+        def end_token_stream(self) -> None:
+            self.completions.append(None)
 
     async def run() -> None:
         renderer = RecordingRenderer()
@@ -1687,6 +1690,30 @@ def test_tui_shell_keeps_text_stream_open_across_thinking_deltas() -> None:
 
         assert renderer.deltas == ["first ", "second"]
         assert renderer.completions == ["first second"]
+        assert not shell.state.token_stream_started
+
+    anyio.run(run)
+
+
+def test_tui_shell_preserves_no_argument_stream_finalizer_compatibility() -> None:
+    class LegacyRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.finalized = 0
+
+        def end_token_stream(self) -> None:
+            self.finalized += 1
+
+    async def run() -> None:
+        renderer = LegacyRenderer()
+        shell = TuiShell(ScriptedController(), renderer=renderer)
+
+        await shell._handle_rpc_event(MessageDelta(turn=1, delta="streamed response"))
+        await shell._handle_rpc_event(
+            MessageCompleted(turn=1, content="authoritative response", finish_reason="stop")
+        )
+
+        assert renderer.finalized == 1
         assert not shell.state.token_stream_started
 
     anyio.run(run)

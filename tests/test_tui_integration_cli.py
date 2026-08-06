@@ -2809,7 +2809,7 @@ def test_textual_stream_completion_reconciles_authoritative_content() -> None:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test():
             renderer.token_delta("partial response")
-            renderer.end_token_stream("complete authoritative response")
+            renderer.end_token_stream_with_content("complete authoritative response")
             await app_instance.wait_for_stream_idle()
             stream = app_instance.query_one(StreamMessage)
             return stream._markdown.source
@@ -2837,7 +2837,7 @@ def test_textual_stream_completion_repairs_an_incremental_render_failure(
             renderer.token_delta("first half ")
             await pilot.pause()
             renderer.token_delta("second half")
-            renderer.end_token_stream("first half second half")
+            renderer.end_token_stream_with_content("first half second half")
             await app_instance.wait_for_stream_idle()
             stream = app_instance.query_one(StreamMessage)
             return stream._markdown.source

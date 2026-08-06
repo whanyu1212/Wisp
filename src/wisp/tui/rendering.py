@@ -120,7 +120,7 @@ class TuiRenderer(Protocol):
 
     def token_delta(self, delta: str) -> None: ...
 
-    def end_token_stream(self, completed_content: str | None = None) -> None: ...
+    def end_token_stream(self) -> None: ...
 
     def approval_request(self, event: ToolApprovalRequested) -> None: ...
 
@@ -296,7 +296,7 @@ class LineTuiRenderer:
     def token_delta(self, delta: str) -> None:
         self.console.print(delta, end="", markup=False, highlight=False)
 
-    def end_token_stream(self, completed_content: str | None = None) -> None:
+    def end_token_stream(self) -> None:
         self.console.print()
 
     def approval_request(self, event: ToolApprovalRequested) -> None:
@@ -681,9 +681,13 @@ class FullscreenTuiRenderer:
         # append repeated frames when clear_screen is disabled, so coalesce
         # streamed text until end_token_stream() can render one updated frame.
 
-    def end_token_stream(self, completed_content: str | None = None) -> None:
-        if completed_content is not None:
-            self.state.streaming_text = completed_content
+    def end_token_stream_with_content(self, completed_content: str) -> None:
+        """Finalize buffered output using authoritative completed content."""
+
+        self.state.streaming_text = completed_content
+        self.end_token_stream()
+
+    def end_token_stream(self) -> None:
         if self.state.streaming_text:
             streaming_text = self.state.streaming_text
             self.state.streaming_text = ""

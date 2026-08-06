@@ -377,8 +377,13 @@ class TextualTuiRenderer:
         self._suspend_progress()
         self.app.append_stream(delta)
 
-    def end_token_stream(self, completed_content: str | None = None) -> None:
+    def end_token_stream_with_content(self, completed_content: str) -> None:
+        """Finalize streamed output using authoritative completed content."""
+
         self.app.flush_stream(completed_content)
+
+    def end_token_stream(self) -> None:
+        self.app.flush_stream()
 
     def approval_request(self, event: ToolApprovalRequested) -> None:
         self._suspend_progress()

@@ -765,6 +765,16 @@ class TuiShell:
         if callable(method):
             method(*args, **kwargs)
 
+    def _end_token_stream(self, completed_content: str | None = None) -> None:
+        """Finalize streaming while preserving the original renderer contract."""
+
+        if completed_content is not None:
+            reconcile = getattr(self.renderer, "end_token_stream_with_content", None)
+            if callable(reconcile):
+                reconcile(completed_content)
+                return
+        self.renderer.end_token_stream()
+
     async def _handle_provider_command(self, args: tuple[str, ...]) -> None:
         if len(args) > 1:
             self.renderer.command_error("Usage: /provider [provider]")
@@ -1386,7 +1396,7 @@ class TuiShell:
             if self.state.token_stream_started:
                 # The terminal event is authoritative: reconcile the incremental
                 # renderer with its complete content before retaining the widget.
-                self.renderer.end_token_stream(event.content)
+                self._end_token_stream(event.content)
                 self.state.token_stream_started = False
             self.state.rendered_tokens = False
             if suppress_completed_message:
