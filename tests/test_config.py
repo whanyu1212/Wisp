@@ -102,9 +102,7 @@ def test_config_reuses_persisted_tui_model_selection_on_restart(
         monkeypatch.delenv(name, raising=False)
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    persist_user_model_selection(
-        "anthropic", "claude-opus-4-8", "high", home_dir=home
-    )
+    persist_user_model_selection("anthropic", "claude-opus-4-8", "high", home_dir=home)
 
     config = WispConfig.from_env(session_dir=tmp_path)
 

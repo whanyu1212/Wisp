@@ -259,8 +259,7 @@ def _persist_user_settings(
         raw = None
     except OSError as exc:
         _warn(
-            f"could not read settings file {path} before writing, "
-            f"{preference} not persisted: {exc}"
+            f"could not read settings file {path} before writing, {preference} not persisted: {exc}"
         )
         return
     if raw is not None:

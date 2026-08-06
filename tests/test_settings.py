@@ -382,9 +382,7 @@ def test_retry_policy_prefers_environment_then_user_settings(
 
 
 def test_persist_user_model_selection_writes_provider_model_and_effort(tmp_path: Path) -> None:
-    persist_user_model_selection(
-        "anthropic", "claude-opus-4-8", "high", home_dir=tmp_path
-    )
+    persist_user_model_selection("anthropic", "claude-opus-4-8", "high", home_dir=tmp_path)
 
     path = user_settings_path(home_dir=tmp_path)
     assert json.loads(path.read_text(encoding="utf-8")) == {
