@@ -350,8 +350,9 @@ multiline output previews. The footer also shows cumulative catalog-based list-p
 `cost $0.042` is complete accounting, while `cost ≥$0.042` includes unpriced historical or
 unknown-model requests. Estimates are not invoices: subscription-backed Codex, custom pricing,
 unknown models, and provider charges outside token usage remain unpriced. Adjust runtime settings
-with slash commands instead of up-front flags. The prompt editor accepts multiline text: press Enter to submit, or
-Shift+Enter / Ctrl+J to insert a newline. Pasted newlines are preserved.
+with slash commands instead of up-front flags. In the Textual prompt editor, Enter submits and
+Shift+Enter or Ctrl+J inserts a newline; pasted newlines are preserved. The live fullscreen renderer
+also supports multiline prompts through Ctrl+J (terminals do not portably distinguish Shift+Enter).
 
 Available slash commands:
 
@@ -478,6 +479,14 @@ current-session information command.
 
 The legacy `--mode tui` entrypoint remains for compatibility and honors
 `--tui-renderer line|fullscreen|textual` plus `WISP_TUI_RENDERER`.
+
+In fullscreen TUIs, Escape dismisses the nearest menu or overlay before cancelling an active prompt
+or compaction. Ctrl+C copies selected composer text; otherwise, press it twice within 1.5 seconds to
+quit gracefully. The first press clears the current draft and arms quit. `/quit` and `/exit` remain
+immediate explicit graceful-quit paths. Ctrl+D deletes to the right while a draft is non-empty and
+acts as EOF only from an empty editor. The blocking `--line` fallback cannot reliably receive a
+standalone Escape without replacing its input system, so it intentionally retains terminal Ctrl+C
+interrupt and Ctrl+D EOF behavior.
 
 ### Terminal capabilities
 

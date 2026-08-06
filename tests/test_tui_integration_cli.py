@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+from contextlib import suppress
 
 import pytest
 from pytest import MonkeyPatch
@@ -27,6 +29,7 @@ from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.compact_echo import MAX_PENDING_ECHOES as _MAX_PENDING_ECHOES
 from wisp.tui.history import HistoricalToolCard, HistoricalTranscriptMessage
 from wisp.tui.overlay import TranscriptViewportState
+from wisp.tui.state import TuiCancelRequested, TuiQuitRequested
 from wisp.tui.textual_app import (
     TextualTui,
     TextualTuiRenderer,
@@ -5764,8 +5767,9 @@ def test_textual_keybinding_hint_lists_only_real_bindings() -> None:
 
     text, displayed = anyio.run(scenario)
     assert "/ commands" in text
-    assert "enter expand" in text
-    assert "esc back" in text
+    assert "shift+enter/ctrl+j newline" in text
+    assert "esc cancel" in text
+    assert "ctrl+c×2 quit" in text
     assert displayed
 
 
@@ -5911,13 +5915,60 @@ def _read_prompt_signal_for_key(key: str) -> type[BaseException] | None:
     return anyio.run(scenario)
 
 
-def test_textual_tui_ctrl_c_interrupts_read_prompt() -> None:
-    assert _read_prompt_signal_for_key("ctrl+c") is KeyboardInterrupt
+def test_textual_tui_ctrl_c_emits_quit_press() -> None:
+    from wisp.tui.state import TuiQuitRequested
+
+    assert _read_prompt_signal_for_key("ctrl+c") is TuiQuitRequested
 
 
 def test_textual_tui_ctrl_d_closes_read_prompt() -> None:
     # ctrl+d must reach the app binding even though the Input widget is focused.
     assert _read_prompt_signal_for_key("ctrl+d") is EOFError
+
+
+def test_textual_tui_ctrl_d_deletes_right_without_closing_nonempty_draft() -> None:
+    async def scenario() -> tuple[str, bool]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            editor = app_instance.query_one("#input", Input)
+            editor.value = "ab"
+            editor.cursor_position = 1
+            read_task = asyncio.create_task(app_instance.read_prompt("wisp> "))
+            await pilot.pause()
+
+            await pilot.press("ctrl+d")
+            await pilot.pause()
+            result = (editor.value, read_task.done())
+            read_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await read_task
+            return result
+
+    assert anyio.run(scenario) == ("a", False)
+
+
+def test_textual_tui_escape_emits_cancel_without_clearing_draft() -> None:
+    async def scenario() -> tuple[type[BaseException] | None, str]:
+        app_instance = TextualTui()
+        async with app_instance.run_test() as pilot:
+            editor = app_instance.query_one("#input", Input)
+            editor.value = "keep draft"
+            captured: list[BaseException] = []
+
+            async def read() -> None:
+                try:
+                    await app_instance.read_prompt("wisp> ")
+                except BaseException as exc:  # noqa: BLE001 - asserted below
+                    captured.append(exc)
+
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(read)
+                await pilot.pause()
+                await pilot.press("escape")
+                await pilot.pause()
+            return (type(captured[0]) if captured else None, editor.value)
+
+    assert anyio.run(scenario) == (TuiCancelRequested, "keep draft")
 
 
 def test_textual_renderer_captures_mode_at_submit_time() -> None:
@@ -5981,9 +6032,11 @@ def test_textual_tui_ctrl_c_clears_partial_input() -> None:
             async with anyio.create_task_group() as tg:
 
                 async def read() -> None:
+                    from wisp.tui.state import TuiQuitRequested
+
                     try:
                         await app_instance.read_prompt("wisp> ")
-                    except KeyboardInterrupt:
+                    except TuiQuitRequested:
                         pass
 
                 tg.start_soon(read)
@@ -6038,12 +6091,12 @@ def test_textual_ctrl_c_interrupts_approval_despite_stale_editor_selection() -> 
                 await pilot.pause()
             return type(captured[0]) if captured else None
 
-    assert anyio.run(scenario) is KeyboardInterrupt
+    assert anyio.run(scenario) is TuiQuitRequested
 
 
 def test_textual_ctrl_c_copies_when_editor_is_focused_with_selection() -> None:
     # Complement to the approval regression: when the editor IS visible and
-    # focused with a selection, Ctrl+C keeps its "copy, don't interrupt" behavior.
+    # focused with a selection, Ctrl+C keeps its "copy, don't quit" behavior.
     async def scenario() -> bool:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
@@ -6060,14 +6113,14 @@ def test_textual_ctrl_c_copies_when_editor_is_focused_with_selection() -> None:
                     nonlocal interrupted
                     try:
                         await app_instance.read_prompt("wisp> ")
-                    except KeyboardInterrupt:
+                    except TuiQuitRequested:
                         interrupted = True
 
                 tg.start_soon(read)
                 await pilot.pause()
                 app_instance.action_interrupt()
                 await pilot.pause()
-                # No interrupt was queued, so the read is still pending — cancel it
+                # No quit press was queued, so the read is still pending — cancel it
                 # so the task group can exit.
                 tg.cancel_scope.cancel()
             return interrupted
@@ -6075,11 +6128,11 @@ def test_textual_ctrl_c_copies_when_editor_is_focused_with_selection() -> None:
     assert anyio.run(scenario) is False
 
 
-def test_textual_ctrl_c_copy_failure_does_not_fire_interrupt() -> None:
+def test_textual_ctrl_c_copy_failure_does_not_fire_quit() -> None:
     # Regression (verification P1): the copy-branch return must sit OUTSIDE the
     # suppress block. If copy_to_clipboard raises (e.g. broken terminal OSC52
-    # write), an editor-owned ctrl+c copy gesture must NOT fall through to
-    # KeyboardInterrupt — that would interrupt the agent and wipe the draft line.
+    # write), an editor-owned ctrl+c copy gesture must NOT fall through to a
+    # quit press — that would arm quit and wipe the draft line.
     async def scenario() -> tuple[bool, str]:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
@@ -6101,7 +6154,7 @@ def test_textual_ctrl_c_copy_failure_does_not_fire_interrupt() -> None:
                     nonlocal interrupted
                     try:
                         await app_instance.read_prompt("wisp> ")
-                    except KeyboardInterrupt:
+                    except TuiQuitRequested:
                         interrupted = True
 
                 tg.start_soon(read)

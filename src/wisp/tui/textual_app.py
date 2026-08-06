@@ -45,6 +45,7 @@ from wisp.tui.rendering import (
     TuiViewSnapshot,
     _markup_escape,
 )
+from wisp.tui.state import TuiCancelRequested, TuiQuitRequested
 from wisp.tui.stream_buffer import MarkdownStreamController
 from wisp.tui.textual_input import TextualInputController
 from wisp.tui.textual_renderer import TextualTuiRenderer
@@ -96,9 +97,7 @@ _SESSION_OPERATION_LABELS: dict[OverlayOperation, str] = {
 # returns focus from a card to the input (ToolCard.BINDINGS "leave" action).
 # Textual-only chrome — deliberately not folded into format_tui_footer_lines,
 # which the line/fullscreen renderers also consume.
-_KEYBINDING_HINT = (
-    "shift+tab plan/build   ctrl+o actions   ctrl+r history   / commands   enter expand   esc back"
-)
+_KEYBINDING_HINT = "shift+enter/ctrl+j newline   esc cancel   ctrl+c×2 quit   / commands"
 
 # The input's prompt glyph. The shell hands the Textual renderer a semantic hint
 # (`wisp> `, `wisp(running)> `, `approve? [y/N] `) shared with the line/fullscreen
@@ -303,8 +302,9 @@ class TextualTui(App[None]):
     }
     """
 
-    # priority=True so these fire even while the PromptEditor has focus;
-    # otherwise the editor swallows ctrl+d before it reaches the app bindings.
+    # Ctrl+C and Ctrl+D are priority bindings so they fire while PromptEditor has
+    # focus. Escape is deliberately non-priority: the nearest focused widget or
+    # overlay gets the first chance to dismiss itself.
     #
     # Scrollback: the transcript is not in the focused editor's ancestor chain, so
     # its own scroll bindings never fire — forward the keys from the app instead.
@@ -312,14 +312,15 @@ class TextualTui(App[None]):
     # Ctrl+E remain available for moving within the prompt.
     #
     # Mouse reporting is enabled in run_shell so wheel and trackpad events reach
-    # the transcript. Ctrl+C remains the traditional interrupt; terminal-native
-    # selection is still available through the emulator's mouse-bypass modifier.
+    # the transcript. Ctrl+C uses Wisp's double-press quit flow; terminal-native
+    # selection remains available through the emulator's mouse-bypass modifier.
     BINDINGS = [
         Binding("ctrl+o", "open_command_palette", "Actions", priority=True),
         Binding("ctrl+r", "open_prompt_history", "History", priority=True),
         Binding("shift+tab", "toggle_agent_mode", "Plan/build", priority=True, show=False),
-        Binding("ctrl+c", "interrupt", "Interrupt", priority=True),
+        Binding("ctrl+c", "interrupt", "Quit", priority=True),
         Binding("ctrl+d", "eof", "EOF", priority=True),
+        Binding("escape", "cancel", "Cancel", priority=False, show=False),
         Binding("pageup", "scroll_transcript_page_up", "Scroll up", priority=True, show=False),
         Binding(
             "pagedown", "scroll_transcript_page_down", "Scroll down", priority=True, show=False
@@ -922,11 +923,6 @@ class TextualTui(App[None]):
             self.notify("Copied selection to clipboard.")
 
     def action_interrupt(self) -> None:
-        # Session pickers and their sequential RPC reads own Ctrl-C as a
-        # presentation cancellation/guard, not an agent interruption.
-        overlays = self._overlay_controller
-        if overlays is not None and overlays.consume_interrupt():
-            return
         # If the prompt editor owns the keystroke AND has selected text, ctrl+c
         # means "copy", not "interrupt". Because this binding is priority=True (so
         # it fires before TextArea's own handler and would otherwise swallow copy),
@@ -943,9 +939,28 @@ class TextualTui(App[None]):
                 self.copy_to_clipboard(selected)
                 self.notify(f"Copied {len(selected)} chars to clipboard.")
             return
-        self._signal_input(KeyboardInterrupt(), action="interrupt")
+        self._signal_input(TuiQuitRequested(), action="quit")
+
+    def action_cancel(self) -> None:
+        """Dismiss the nearest UI layer, then fall back to shell cancellation."""
+
+        suggest = self._suggest
+        if suggest is not None and suggest.is_open:
+            suggest.hide()
+            return
+        overlays = self._overlay_controller
+        if overlays is not None and overlays.consume_cancel():
+            return
+        self._signal_input(TuiCancelRequested(), action="cancel", clear_editor=False)
 
     def action_eof(self) -> None:
+        editor = self._input
+        if editor is not None and editor.text:
+            # A draft remains authoritative even while an overlay temporarily
+            # hides the composer; Ctrl+D must never turn that non-empty state into
+            # EOF merely because focus moved.
+            editor.action_delete_right()
+            return
         self._signal_input(EOFError(), action="EOF")
 
     def action_toggle_agent_mode(self) -> None:
@@ -1087,10 +1102,21 @@ class TextualTui(App[None]):
             self._transcript.return_to_latest()
         self._transcript_controller.clear_unseen_output()
 
-    def _signal_input(self, signal: BaseException, *, action: str) -> None:
-        # Pending compact echoes remain intact here. Ctrl+C/EOF can merely deny an
-        # approval; the shell clears them only when it actually drops follow-ups.
-        self._input_controller.signal(signal, action=action)
+    def _signal_input(
+        self,
+        signal: BaseException,
+        *,
+        action: str,
+        clear_editor: bool = True,
+    ) -> None:
+        # Pending compact echoes remain intact here. Control signals can merely
+        # affect presentation or arm quit; the shell reclaims echoes only when it
+        # definitively drops queued follow-ups.
+        self._input_controller.signal(
+            signal,
+            action=action,
+            clear_editor=clear_editor,
+        )
 
     def set_status(self, snapshot: TuiViewSnapshot) -> None:
         self._agent_mode = snapshot.mode

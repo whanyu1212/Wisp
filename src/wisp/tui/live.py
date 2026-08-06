@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections import deque
+from collections.abc import Callable
 from contextlib import suppress
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.clipboard import InMemoryClipboard
+from prompt_toolkit.clipboard.base import Clipboard, ClipboardData
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame
 
@@ -23,6 +28,7 @@ from wisp.tui.rendering import (
     _RenderedTranscriptLine,
     format_tui_footer_lines,
 )
+from wisp.tui.state import TuiQuitRequested
 
 _HEADER_FRAME_HEIGHT = 3
 _FOOTER_HEIGHT = 5
@@ -31,7 +37,27 @@ _TRANSCRIPT_FRAME_BORDER_WIDTH = 2
 
 
 class LiveFullscreenInputInterrupted(Exception):
-    """Raised by the live input adapter for Ctrl-C interrupts."""
+    """Raised by the live input adapter for Escape cancellation."""
+
+
+class _Osc52Clipboard(InMemoryClipboard):
+    """Keep copied text locally and publish it through terminal OSC 52."""
+
+    def __init__(
+        self,
+        *,
+        write_raw: Callable[[str], None],
+        flush: Callable[[], None],
+    ) -> None:
+        super().__init__()
+        self._write_raw = write_raw
+        self._flush = flush
+
+    def set_data(self, data: ClipboardData) -> None:
+        super().set_data(data)
+        encoded = base64.b64encode(data.text.encode("utf-8")).decode("ascii")
+        self._write_raw(f"\x1b]52;c;{encoded}\x07")
+        self._flush()
 
 
 class LiveFullscreenTui(FullscreenTuiRenderer):
@@ -45,14 +71,14 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
     def __init__(self, *, run_application: bool = True) -> None:
         super().__init__(clear_screen=False)
         self.run_application = run_application
-        self._buffer = Buffer(multiline=False)
+        self._buffer = Buffer(multiline=True)
         self._input_future: asyncio.Future[str] | None = None
         self._application: Application[None] | None = None
         self._application_task: asyncio.Task[None] | None = None
         self._visible_input_mode = "idle"
         self._buffer_input_mode = "idle"
         self._submitted_input_mode: str | None = None
-        self._queued_submissions: deque[tuple[str, str]] = deque()
+        self._queued_inputs: deque[tuple[str | BaseException, str]] = deque()
         self._last_buffer_text = ""
         self._buffer.on_text_changed += self._handle_buffer_text_changed
         self._key_bindings = self._build_key_bindings()
@@ -70,10 +96,12 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         self._refresh()
         if self.run_application:
             self._ensure_application_started()
-        if self._queued_submissions:
-            text, mode = self._queued_submissions.popleft()
+        if self._queued_inputs:
+            value, mode = self._queued_inputs.popleft()
             self._submitted_input_mode = mode
-            return text
+            if isinstance(value, BaseException):
+                raise value
+            return value
         loop = asyncio.get_running_loop()
         self._input_future = loop.create_future()
         return await self._input_future
@@ -141,6 +169,8 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
 
     def _build_application(self) -> Application[None]:
         input_control = BufferControl(buffer=self._buffer)
+        output = create_output()
+        clipboard = _Osc52Clipboard(write_raw=output.write_raw, flush=output.flush)
         root = HSplit(
             [
                 Frame(
@@ -179,6 +209,8 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         return Application(
             layout=Layout(root, focused_element=input_control),
             key_bindings=self._key_bindings,
+            clipboard=clipboard,
+            output=output,
             full_screen=True,
             mouse_support=False,
             style=Style.from_dict(
@@ -203,18 +235,25 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
             self._accept_input()
             event.app.invalidate()
 
-        @bindings.add("c-c")
-        def _interrupt(event: KeyPressEvent) -> None:
+        @bindings.add("c-j")
+        def _newline(event: KeyPressEvent) -> None:
+            self._insert_newline()
+            event.app.invalidate()
+
+        @bindings.add("escape")
+        def _cancel(event: KeyPressEvent) -> None:
             self._interrupt_input()
+            event.app.invalidate()
+
+        @bindings.add("c-c")
+        def _quit(event: KeyPressEvent) -> None:
+            if not self._copy_selection(event.app.clipboard):
+                self._quit_input()
             event.app.invalidate()
 
         @bindings.add("c-d")
         def _eof(event: KeyPressEvent) -> None:
-            if self._buffer.text:
-                self._buffer.delete()
-                event.app.invalidate()
-                return
-            self._close_input()
+            self._delete_right_or_close()
             event.app.invalidate()
 
         @bindings.add(Keys.BackTab)
@@ -245,7 +284,7 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
 
         mode = self._buffer_input_mode
         if self._input_future is None or self._input_future.done():
-            self._queued_submissions.append((text, mode))
+            self._queued_inputs.append((text, mode))
             return
         self._submitted_input_mode = mode
         self._input_future.set_result(text)
@@ -255,27 +294,50 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         mode = self._buffer_input_mode
         self._clear_buffer()
         if self._input_future is None or self._input_future.done():
-            self._queued_submissions.append((text, mode))
+            self._queued_inputs.append((text, mode))
             return
         self._submitted_input_mode = mode
         self._input_future.set_result(text)
 
+    def _insert_newline(self) -> None:
+        self._buffer.insert_text("\n")
+
     def _paste_input(self, text: str) -> None:
         normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-        parts = normalized.split("\n")
-        for index, part in enumerate(parts):
-            is_last = index == len(parts) - 1
-            if part:
-                self._buffer.insert_text(part)
-            if not is_last:
-                self._accept_input()
+        self._buffer.insert_text(normalized)
 
     def _interrupt_input(self) -> None:
+        mode = self._buffer_input_mode
+        signal = LiveFullscreenInputInterrupted()
         if self._input_future is None or self._input_future.done():
+            self._queued_inputs.append((signal, mode))
             return
-        self._submitted_input_mode = self._buffer_input_mode
+        self._submitted_input_mode = mode
+        self._input_future.set_exception(signal)
+
+    def _copy_selection(self, clipboard: Clipboard) -> bool:
+        """Copy an active editor selection instead of treating Ctrl+C as quit."""
+
+        if self._buffer.selection_state is None:
+            return False
+        clipboard.set_data(self._buffer.copy_selection())
+        return True
+
+    def _quit_input(self) -> None:
+        mode = self._buffer_input_mode
+        signal = TuiQuitRequested()
         self._clear_buffer()
-        self._input_future.set_exception(LiveFullscreenInputInterrupted())
+        if self._input_future is None or self._input_future.done():
+            self._queued_inputs.append((signal, mode))
+            return
+        self._submitted_input_mode = mode
+        self._input_future.set_exception(signal)
+
+    def _delete_right_or_close(self) -> None:
+        if self._buffer.text:
+            self._buffer.delete()
+            return
+        self._close_input()
 
     def _close_input(self) -> None:
         if self._input_future is None or self._input_future.done():

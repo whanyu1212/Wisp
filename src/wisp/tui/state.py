@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from time import monotonic
 from typing import Literal
 
 from wisp.agent.mode import AgentMode
@@ -188,7 +189,36 @@ class _InputClosed:
 
 @dataclass(frozen=True)
 class _InputInterrupted:
+    """Legacy line-renderer interrupt (normally ``KeyboardInterrupt``)."""
+
     mode: _InputMode
+
+
+@dataclass(frozen=True)
+class _InputCancelled:
+    """Escape cancellation requested by a fullscreen frontend."""
+
+    mode: _InputMode
+
+
+@dataclass(frozen=True)
+class _QuitPressed:
+    """One timestamped Ctrl+C gesture from a double-press frontend."""
+
+    mode: _InputMode
+    pressed_at: float
+
+
+class TuiCancelRequested(Exception):
+    """Prompt-reader signal for an Escape cancellation request."""
+
+
+class TuiQuitRequested(Exception):
+    """Prompt-reader signal for one Ctrl+C quit gesture."""
+
+    def __init__(self, *, pressed_at: float | None = None) -> None:
+        super().__init__()
+        self.pressed_at = monotonic() if pressed_at is None else pressed_at
 
 
 @dataclass(frozen=True)
@@ -201,7 +231,15 @@ class _RpcEventsClosed:
     error: str | None = None
 
 
-type _TuiSignal = _InputLine | _InputClosed | _InputInterrupted | _RpcEvent | _RpcEventsClosed
+type _TuiSignal = (
+    _InputLine
+    | _InputClosed
+    | _InputInterrupted
+    | _InputCancelled
+    | _QuitPressed
+    | _RpcEvent
+    | _RpcEventsClosed
+)
 
 
 def _coerce_input_mode(value: str, *, fallback: _InputMode) -> _InputMode:

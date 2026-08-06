@@ -74,17 +74,21 @@ from wisp.tui.rendering import (
     create_tui_renderer,
 )
 from wisp.tui.state import (
+    TuiCancelRequested,
     TuiInteractionState,
+    TuiQuitRequested,
     TuiStatus,
     TuiViewState,
     _coerce_input_mode,
     _input_mode_for_status,
+    _InputCancelled,
     _InputClosed,
     _InputInterrupted,
     _InputLine,
     _InputMode,
     _prompt_for_mode,
     _prompt_for_status,
+    _QuitPressed,
     _RpcEvent,
     _RpcEventsClosed,
     _TuiSignal,
@@ -234,6 +238,7 @@ class TuiShell:
         effort: str | None = None,
         auth_path: Path | None = None,
         settings_home_dir: Path | None = None,
+        quit_press_window: float = 1.5,
     ) -> None:
         self.controller = controller
         self.renderer = (
@@ -241,6 +246,8 @@ class TuiShell:
         )
         self.prompt_reader = prompt_reader or _default_prompt_reader
         self.state = state or TuiInteractionState()
+        self._quit_press_window = quit_press_window
+        self._quit_armed_at: float | None = None
         self.view = TuiViewState(provider=provider, model=model)
         self.current_provider = provider
         self.current_mode: AgentMode = "build"
@@ -365,7 +372,18 @@ class TuiShell:
                 except EOFError:
                     await send.send(_InputClosed(mode=self._submitted_input_mode(mode)))
                     return
-                except (KeyboardInterrupt, LiveFullscreenInputInterrupted):
+                except TuiQuitRequested as exc:
+                    await send.send(
+                        _QuitPressed(
+                            mode=self._submitted_input_mode(mode),
+                            pressed_at=exc.pressed_at,
+                        )
+                    )
+                    continue
+                except (TuiCancelRequested, LiveFullscreenInputInterrupted):
+                    await send.send(_InputCancelled(mode=self._submitted_input_mode(mode)))
+                    continue
+                except KeyboardInterrupt:
                     await send.send(_InputInterrupted(mode=self._submitted_input_mode(mode)))
                     continue
                 await send.send(_InputLine(text=text, mode=self._submitted_input_mode(mode)))
@@ -516,6 +534,10 @@ class TuiShell:
             return await self._handle_input_line(signal)
         if isinstance(signal, _InputClosed):
             return await self._handle_input_closed(signal)
+        if isinstance(signal, _QuitPressed):
+            return await self._handle_quit_pressed(signal)
+        if isinstance(signal, _InputCancelled):
+            return await self._handle_input_cancelled(signal)
         if isinstance(signal, _InputInterrupted):
             return await self._handle_input_interrupted(signal)
         if isinstance(signal, _RpcEvent):
@@ -546,6 +568,7 @@ class TuiShell:
             prompt_accepted(prompt)
 
     async def _handle_input_line(self, signal: _InputLine) -> bool:
+        self._disarm_quit()
         text = signal.text
         has_content = bool(text.strip())
         if self.state.status is TuiStatus.exiting:
@@ -893,6 +916,7 @@ class TuiShell:
         return None
 
     async def _handle_input_closed(self, signal: _InputClosed) -> bool:
+        self._disarm_quit()
         self.state.input_closed = True
         if self.state.status is TuiStatus.exiting:
             return False
@@ -924,7 +948,46 @@ class TuiShell:
             return False
         return await self._request_shutdown()
 
+    async def _handle_quit_pressed(self, signal: _QuitPressed) -> bool:
+        """Arm graceful quit, or execute it on a second timely Ctrl+C press."""
+
+        armed_at = self._quit_armed_at
+        if armed_at is not None and 0 <= signal.pressed_at - armed_at <= self._quit_press_window:
+            self._disarm_quit()
+            return await self._handle_quit()
+        self._quit_armed_at = signal.pressed_at
+        self.renderer.notice("Press Ctrl+C again to quit.")
+        return False
+
+    async def _handle_input_cancelled(self, signal: _InputCancelled) -> bool:
+        """Cancel the nearest shell-owned operation in response to Escape."""
+
+        self._disarm_quit()
+        if self.state.pending_trust is not None:
+            return await self._answer_pending_trust(
+                "",
+                trusted=False,
+                reason="Trust prompt cancelled",
+                transient=True,
+            )
+        if self.state.pending_approval is not None:
+            return await self._answer_pending_approval(
+                "",
+                approved=False,
+                reason="Denied from TUI: cancelled",
+                exit_after_denial=False,
+            )
+        if self.state.current_command_id is not None:
+            message = (
+                "Cancelling compaction..."
+                if self.state.current_command_type == "compact"
+                else "Cancelling current prompt..."
+            )
+            return await self._cancel_current(message)
+        return False
+
     async def _handle_input_interrupted(self, signal: _InputInterrupted) -> bool:
+        self._disarm_quit()
         if self.state.pending_trust is not None:
             return await self._answer_pending_trust(
                 "",
@@ -951,7 +1014,11 @@ class TuiShell:
         self.renderer.input_cleared()
         return False
 
+    def _disarm_quit(self) -> None:
+        self._quit_armed_at = None
+
     async def _handle_quit(self) -> bool:
+        self._disarm_quit()
         self.state.exit_requested = True
         self._clear_queued_prompts()
         self._update_view(queued_follow_ups=0)

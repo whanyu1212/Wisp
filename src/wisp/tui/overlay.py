@@ -170,16 +170,22 @@ class TextualOverlayController:
             self._restore_composer()
         return True
 
-    def consume_interrupt(self) -> bool:
-        """Handle interrupts owned by transient session presentation."""
+    def consume_cancel(self) -> bool:
+        """Dismiss the nearest presentation layer, or guard an active transition.
 
-        if self._active_overlay in {
-            OverlayKind.session_picker,
-            OverlayKind.prompt_history,
-        }:
+        Decision panels intentionally remain widget-owned because Escape must post
+        their conservative deny/cancel answer rather than merely hide the panel.
+        """
+
+        if self._active_overlay is not None and self._active_overlay is not OverlayKind.decision:
             self.close(self._active_overlay)
             return True
         return self._active_operation is not None
+
+    def consume_interrupt(self) -> bool:
+        """Backward-compatible alias for the former presentation interrupt hook."""
+
+        return self.consume_cancel()
 
     def _begin_transition(self) -> None:
         # This must happen before hiding or moving focus. Input already read by

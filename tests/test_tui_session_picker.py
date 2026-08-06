@@ -226,7 +226,7 @@ def test_session_catalog_loading_hides_composer_and_preserves_draft() -> None:
             content = label.render()
             assert isinstance(content, Content)
             assert spinner.display
-            await pilot.press("enter", "ctrl+c")
+            await pilot.press("enter", "escape")
             await pilot.pause()
             draft = editor.value
             renderer.session_catalog_finished()
@@ -443,7 +443,7 @@ def test_session_picker_selection_uses_resume_command_and_preserves_draft() -> N
     assert focused is True
 
 
-def test_session_picker_selection_guards_draft_before_shell_starts() -> None:
+def test_session_picker_selection_escape_guards_draft_before_shell_starts() -> None:
     async def scenario() -> tuple[str, str, bool, bool]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
@@ -454,7 +454,7 @@ def test_session_picker_selection_guards_draft_before_shell_starts() -> None:
             await pilot.press("enter")
             await pilot.pause()
             picker = app.query_one("#session-picker", SessionPicker)
-            await pilot.press("ctrl+c")
+            await pilot.press("escape")
             await pilot.pause()
             guarded_draft = editor.value
             answer = await app.read_prompt("wisp> ")
@@ -489,7 +489,7 @@ def test_session_picker_escape_restores_draft_without_submission() -> None:
     assert open_ is False
 
 
-def test_session_picker_ctrl_c_restores_draft_without_interrupting() -> None:
+def test_session_picker_escape_restores_draft_without_cancelling_agent() -> None:
     async def scenario() -> tuple[str, bool, bool]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
@@ -497,7 +497,7 @@ def test_session_picker_ctrl_c_restores_draft_without_interrupting() -> None:
             editor.value = "keep me too"
             renderer.session_picker_request((_session("target"),), selected_session_id=None)
             await pilot.pause()
-            await pilot.press("ctrl+c")
+            await pilot.press("escape")
             await pilot.pause()
             picker = app.query_one("#session-picker", SessionPicker)
             return editor.value, editor.has_focus, picker.is_open
@@ -508,7 +508,7 @@ def test_session_picker_ctrl_c_restores_draft_without_interrupting() -> None:
     assert open_ is False
 
 
-def test_session_switch_ctrl_c_preserves_hidden_draft_until_finished() -> None:
+def test_session_switch_escape_preserves_hidden_draft_until_finished() -> None:
     async def scenario() -> tuple[str, str, bool, bool]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=(80, 24)) as pilot:
@@ -517,7 +517,7 @@ def test_session_switch_ctrl_c_preserves_hidden_draft_until_finished() -> None:
             renderer.session_switch_started("target")
             await pilot.pause()
             hidden_before = not editor.display
-            await pilot.press("ctrl+c")
+            await pilot.press("escape")
             await pilot.pause()
             draft_while_pending = editor.value
             still_hidden = not editor.display

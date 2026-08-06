@@ -80,6 +80,21 @@ def test_signal_clears_editor_only_after_queueing_and_receive_reraises() -> None
     assert surface.clear_count == 2
 
 
+def test_cancel_signal_can_preserve_editor_after_successful_queueing() -> None:
+    surface = _Surface()
+    controller = TextualInputController(surface)
+    signal = RuntimeError("cancel")
+
+    assert controller.signal(signal, action="cancel", clear_editor=False)
+    assert surface.clear_count == 0
+
+    async def receive() -> None:
+        with pytest.raises(RuntimeError, match="cancel"):
+            await controller.receive()
+
+    anyio.run(receive)
+
+
 def test_compact_echoes_and_prompt_history_have_one_controller_owner() -> None:
     surface = _Surface()
     controller = TextualInputController(surface, compact_echoes=CompactEchoLog(max_pending=2))
