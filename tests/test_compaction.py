@@ -581,6 +581,54 @@ def test_provider_summary_uses_no_tools_no_continuation_and_captures_usage() -> 
     assert "<historical_transcript>" in request.messages[1].content
 
 
+def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:
+    class RecordingSummaryProvider:
+        name = "recording-summary"
+        default_model: str | None = "summary-model"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[Message, ...]] = []
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            *,
+            model: str | None = None,
+            tools: Sequence[ToolSpec] = (),
+            tool_results: Sequence[ToolCallResult] = (),
+            previous_response_id: str | None = None,
+            effort: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del tools, tool_results, previous_response_id, effort
+            self.calls.append(tuple(messages))
+            yield ProviderResponseStarted(model=model or self.default_model or self.name)
+            yield ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY)
+
+    provider = RecordingSummaryProvider()
+    oversized = SessionReplay(
+        rows=(
+            _row("huge-user", Message(role="user", content="x" * 30_000)),
+            _row("huge-answer", Message(role="assistant", content="done", finish_reason="stop")),
+            *_turn("retained"),
+        )
+    )
+    plan = plan_manual_compaction(oversized)
+
+    async def run() -> CompactionSummary:
+        return await summarize_manual_compaction(
+            plan,
+            provider=provider,
+            context_window=2_000,
+            reserve_tokens=400,
+        )
+
+    summary = anyio.run(run)
+
+    assert summary.summary == VALID_COMPACTION_SUMMARY
+    assert len(provider.calls) > 2
+    assert all(len(call[-1].content) <= 4_800 for call in provider.calls)
+
+
 @pytest.mark.parametrize(
     ("terminal", "match"),
     [
@@ -1123,7 +1171,7 @@ def test_coding_session_compacts_before_provider_limit_request(
 
 
 def test_coding_session_preflight_compacts_one_completed_turn(tmp_path: Path) -> None:
-    context_window = 2_000
+    context_window = 4_000
     compaction_limit = 1_600
     first_user = Message(role="user", content="question one " + "a" * 3_500)
     first_assistant = Message(

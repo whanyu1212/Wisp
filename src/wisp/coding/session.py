@@ -1034,6 +1034,8 @@ class CodingSession:
                 effort=self.effort,
                 instructions=instructions,
                 cost_estimator=self._cost_estimator,
+                context_window=self._context_window(),
+                reserve_tokens=self.context_reserve_tokens,
             )
             normalized_instructions = (
                 instructions.strip() if instructions is not None and instructions.strip() else None
