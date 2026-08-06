@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections import deque
+from collections.abc import Callable
 from contextlib import suppress
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.clipboard.base import Clipboard
+from prompt_toolkit.clipboard import InMemoryClipboard
+from prompt_toolkit.clipboard.base import Clipboard, ClipboardData
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame
 
@@ -34,6 +38,26 @@ _TRANSCRIPT_FRAME_BORDER_WIDTH = 2
 
 class LiveFullscreenInputInterrupted(Exception):
     """Raised by the live input adapter for Escape cancellation."""
+
+
+class _Osc52Clipboard(InMemoryClipboard):
+    """Keep copied text locally and publish it through terminal OSC 52."""
+
+    def __init__(
+        self,
+        *,
+        write_raw: Callable[[str], None],
+        flush: Callable[[], None],
+    ) -> None:
+        super().__init__()
+        self._write_raw = write_raw
+        self._flush = flush
+
+    def set_data(self, data: ClipboardData) -> None:
+        super().set_data(data)
+        encoded = base64.b64encode(data.text.encode("utf-8")).decode("ascii")
+        self._write_raw(f"\x1b]52;c;{encoded}\x07")
+        self._flush()
 
 
 class LiveFullscreenTui(FullscreenTuiRenderer):
@@ -145,6 +169,8 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
 
     def _build_application(self) -> Application[None]:
         input_control = BufferControl(buffer=self._buffer)
+        output = create_output()
+        clipboard = _Osc52Clipboard(write_raw=output.write_raw, flush=output.flush)
         root = HSplit(
             [
                 Frame(
@@ -183,6 +209,8 @@ class LiveFullscreenTui(FullscreenTuiRenderer):
         return Application(
             layout=Layout(root, focused_element=input_control),
             key_bindings=self._key_bindings,
+            clipboard=clipboard,
+            output=output,
             full_screen=True,
             mouse_support=False,
             style=Style.from_dict(

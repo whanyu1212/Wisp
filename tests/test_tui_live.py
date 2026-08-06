@@ -376,6 +376,35 @@ def test_live_fullscreen_tui_ctrl_c_requests_quit_and_clears_draft() -> None:
     anyio.run(run)
 
 
+def test_live_fullscreen_tui_application_uses_osc52_clipboard() -> None:
+    from wisp.tui.live import _Osc52Clipboard
+
+    renderer = LiveFullscreenTui(run_application=False)
+    application = renderer._build_application()
+
+    assert isinstance(application.clipboard, _Osc52Clipboard)
+
+
+def test_live_fullscreen_tui_osc52_clipboard_writes_terminal_sequence() -> None:
+    from prompt_toolkit.clipboard.base import ClipboardData
+
+    from wisp.tui.live import _Osc52Clipboard
+
+    writes: list[str] = []
+    flushes = 0
+
+    def flush() -> None:
+        nonlocal flushes
+        flushes += 1
+
+    clipboard = _Osc52Clipboard(write_raw=writes.append, flush=flush)
+    clipboard.set_data(ClipboardData("copy me"))
+
+    assert clipboard.get_data().text == "copy me"
+    assert writes == ["\x1b]52;c;Y29weSBtZQ==\x07"]
+    assert flushes == 1
+
+
 def test_live_fullscreen_tui_ctrl_c_copies_selection_without_quit() -> None:
     from prompt_toolkit.clipboard import InMemoryClipboard
 
