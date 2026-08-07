@@ -10,9 +10,11 @@ from typing import Any
 import anyio
 import httpx
 import pytest
+from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message
 from wisp.auth.storage import JsonAuthStore, OAuthCredential
+from wisp.providers import openai_codex as openai_codex_module
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
@@ -80,6 +82,7 @@ def test_openai_codex_provider_streams_text_with_subscription_headers(tmp_path: 
             {"type": "response.created", "response": {"id": "response-id"}},
             {"type": "response.output_text.delta", "delta": "hello"},
             {"type": "response.output_text.delta", "delta": " world"},
+            _completed_event("response-id"),
         ],
         auth_resolver=StoredProviderAuthResolver(store),
     )
@@ -105,7 +108,10 @@ def test_openai_codex_provider_streams_text_with_subscription_headers(tmp_path: 
 def test_openai_codex_provider_sends_reasoning_effort_when_provided(tmp_path: Path) -> None:
     store = _store_with_oauth(tmp_path)
     provider = StubOpenAICodexProvider(
-        [{"type": "response.created", "response": {"id": "response-id"}}],
+        [
+            {"type": "response.created", "response": {"id": "response-id"}},
+            _completed_event("response-id"),
+        ],
         auth_resolver=StoredProviderAuthResolver(store),
     )
 
@@ -126,7 +132,10 @@ def test_openai_codex_provider_omits_reasoning_when_effort_is_not_provided(
 ) -> None:
     store = _store_with_oauth(tmp_path)
     provider = StubOpenAICodexProvider(
-        [{"type": "response.created", "response": {"id": "response-id"}}],
+        [
+            {"type": "response.created", "response": {"id": "response-id"}},
+            _completed_event("response-id"),
+        ],
         auth_resolver=StoredProviderAuthResolver(store),
     )
 
@@ -162,6 +171,7 @@ def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path)
                     "arguments": '{"query":"wisp"}',
                 },
             },
+            _completed_event("response-id"),
         ],
         auth_resolver=StoredProviderAuthResolver(store),
     )
@@ -182,7 +192,7 @@ def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path)
         ]
         assert isinstance(first_events[-1], ProviderResponseCompleted)
         assert first_events[-1].response_id == "response-id"
-        provider.events = []
+        provider.events = [_completed_event("response-id")]
         assert [
             event
             async for event in provider.stream(
@@ -263,6 +273,7 @@ def test_openai_codex_provider_preserves_continuation_after_opening_failure(
                     "arguments": '{"query":"wisp"}',
                 },
             },
+            _completed_event("response-1"),
         ],
         auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
         retry_policy=RetryPolicy(max_retries=0),
@@ -286,6 +297,7 @@ def test_openai_codex_provider_preserves_continuation_after_opening_failure(
         provider.events = [
             {"type": "response.created", "response": {"id": "response-2"}},
             {"type": "response.output_text.delta", "delta": "recovered"},
+            _completed_event("response-2"),
         ]
         assert [
             event
@@ -333,6 +345,7 @@ def test_openai_codex_provider_yields_tool_calls(tmp_path: Path) -> None:
                     "arguments": '{"query":"wisp"}',
                 },
             },
+            _completed_event("response-id"),
         ],
         auth_resolver=StoredProviderAuthResolver(store),
     )
@@ -382,6 +395,7 @@ def test_openai_codex_provider_replays_multi_round_tool_history(tmp_path: Path) 
                     "arguments": '{"query":"first"}',
                 },
             },
+            _completed_event("response-1"),
         ],
         auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
     )
@@ -411,6 +425,7 @@ def test_openai_codex_provider_replays_multi_round_tool_history(tmp_path: Path) 
                     "arguments": '{"query":"second"}',
                 },
             },
+            _completed_event("response-2"),
         ]
         async for _event in provider.stream(
             messages,
@@ -422,6 +437,7 @@ def test_openai_codex_provider_replays_multi_round_tool_history(tmp_path: Path) 
         provider.events = [
             {"type": "response.created", "response": {"id": "response-3"}},
             {"type": "response.output_text.delta", "delta": "done"},
+            _completed_event("response-3"),
         ]
         async for _event in provider.stream(
             messages,
@@ -506,7 +522,10 @@ def test_openai_codex_provider_retries_transient_http_opening_failure(tmp_path: 
             return httpx.Response(503, headers={"retry-after": "0"})
         return httpx.Response(
             200,
-            text='data: {"type":"response.output_text.delta","delta":"recovered"}\n\n',
+            text=(
+                'data: {"type":"response.output_text.delta","delta":"recovered"}\n\n'
+                'data: {"type":"response.completed","response":{}}\n\n'
+            ),
             headers={"content-type": "text/event-stream"},
         )
 
@@ -534,6 +553,184 @@ def test_openai_codex_provider_retries_transient_http_opening_failure(tmp_path: 
         ProviderTextDelta(delta="recovered"),
         ProviderResponseCompleted(content="recovered"),
     ]
+
+
+def test_openai_codex_provider_rejects_eof_without_native_completion(tmp_path: Path) -> None:
+    provider = StubOpenAICodexProvider(
+        [
+            {"type": "response.created", "response": {"id": "response-id"}},
+            {"type": "response.output_text.delta", "delta": "partial"},
+        ],
+        auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
+    )
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hi")])]
+
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="gpt-test"),
+        ProviderTextDelta(delta="partial"),
+        ProviderResponseFailed(
+            message="OpenAI Codex stream ended before response.completed was received",
+            partial_content="partial",
+            response_id="response-id",
+        ),
+    ]
+
+
+def test_openai_codex_provider_does_not_expose_tool_calls_before_completion(
+    tmp_path: Path,
+) -> None:
+    provider = StubOpenAICodexProvider(
+        [
+            {"type": "response.created", "response": {"id": "response-id"}},
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "item-id",
+                    "call_id": "call-id",
+                    "name": "lookup",
+                    "arguments": '{"query":"wisp"}',
+                },
+            },
+        ],
+        auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
+    )
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hi")])]
+
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="gpt-test"),
+        ProviderResponseFailed(
+            message="OpenAI Codex stream ended before response.completed was received",
+            response_id="response-id",
+        ),
+    ]
+
+
+def test_openai_codex_provider_rejects_done_without_native_completion(tmp_path: Path) -> None:
+    store = _store_with_oauth(tmp_path)
+
+    async def run() -> list[object]:
+        transport = httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                text=(
+                    'data: {"type":"response.created","response":{"id":"response-id"}}\n\n'
+                    'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+                    "data: [DONE]\n\n"
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            provider = OpenAICodexProvider(
+                auth_resolver=StoredProviderAuthResolver(store),
+                client=client,
+            )
+            return [event async for event in provider.stream([Message(role="user", content="hi")])]
+
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="gpt-5.6-sol"),
+        ProviderTextDelta(delta="partial"),
+        ProviderResponseFailed(
+            message="OpenAI Codex stream ended before response.completed was received",
+            partial_content="partial",
+            response_id="response-id",
+        ),
+    ]
+
+
+class _ReadTimeoutStream(httpx.AsyncByteStream):
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield (
+            b'data: {"type":"response.created","response":{"id":"response-id"}}\n\n'
+            b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+        )
+        raise httpx.ReadTimeout("Codex stream stalled")
+
+
+def test_openai_codex_provider_does_not_retry_post_start_read_timeout(tmp_path: Path) -> None:
+    attempts = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            200,
+            stream=_ReadTimeoutStream(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def run() -> list[object]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAICodexProvider(
+                auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
+                client=client,
+                retry_policy=RetryPolicy(
+                    max_retries=1,
+                    base_delay_seconds=0.0001,
+                    max_delay_seconds=1,
+                ),
+            )
+            return [event async for event in provider.stream([Message(role="user", content="hi")])]
+
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="gpt-5.6-sol"),
+        ProviderTextDelta(delta="partial"),
+        ProviderResponseFailed(
+            message="Codex stream stalled",
+            partial_content="partial",
+            response_id="response-id",
+        ),
+    ]
+    assert attempts == 1
+
+
+def test_openai_codex_provider_configures_owned_client_timeouts(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    real_async_client = httpx.AsyncClient
+    created_client: httpx.AsyncClient | None = None
+    seen_timeout: httpx.Timeout | None = None
+
+    def create_client(*, timeout: httpx.Timeout) -> httpx.AsyncClient:
+        nonlocal created_client, seen_timeout
+        seen_timeout = timeout
+        created_client = real_async_client(
+            timeout=timeout,
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    200,
+                    text='data: {"type":"response.completed","response":{}}\n\n',
+                    headers={"content-type": "text/event-stream"},
+                )
+            ),
+        )
+        return created_client
+
+    monkeypatch.setattr(openai_codex_module.httpx, "AsyncClient", create_client)
+    provider = OpenAICodexProvider(
+        auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path))
+    )
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hi")])]
+
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="gpt-5.6-sol"),
+        ProviderResponseCompleted(content=""),
+    ]
+    assert seen_timeout is not None
+    assert seen_timeout.connect == 10.0
+    assert seen_timeout.read == 300.0
+    assert seen_timeout.write == 30.0
+    assert seen_timeout.pool == 10.0
+    assert created_client is not None
+    assert created_client.is_closed
 
 
 def test_openai_codex_provider_does_not_retry_terminal_quota_error(tmp_path: Path) -> None:
@@ -683,6 +880,10 @@ def _store_with_oauth(tmp_path: Path) -> JsonAuthStore:
         ),
     )
     return store
+
+
+def _completed_event(response_id: str) -> dict[str, object]:
+    return {"type": "response.completed", "response": {"id": response_id}}
 
 
 def _fake_codex_token() -> str:

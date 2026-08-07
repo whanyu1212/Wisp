@@ -6,7 +6,7 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from copy import deepcopy
 from json import JSONDecodeError, loads
-from typing import Literal, cast
+from typing import Literal, Protocol, cast, runtime_checkable
 
 import anyio
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, OpenAIError
@@ -51,6 +51,11 @@ from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_de
 
 DEFAULT_OPENAI_MODEL = "gpt-5.6-sol"
 OpenAIRole = Literal["user", "assistant", "system", "developer"]
+
+
+@runtime_checkable
+class _ClosableResponseStream(Protocol):
+    async def close(self) -> None: ...
 
 
 class OpenAIProvider:
@@ -130,6 +135,7 @@ class OpenAIProvider:
         tool_calls: list[ToolCall] = []
         usage: ProviderUsage | None = None
         failure: ProviderResponseFailed | None = None
+        stream_completed = False
 
         yield ProviderResponseStarted(model=selected_model)
 
@@ -140,6 +146,8 @@ class OpenAIProvider:
                 elif isinstance(event, ResponseCompletedEvent):
                     response_id = event.response.id
                     usage = _usage_from_openai(event.response)
+                    stream_completed = True
+                    break
                 elif isinstance(event, ResponseTextDeltaEvent | ResponseRefusalDeltaEvent):
                     chunks.append(event.delta)
                     yield ProviderTextDelta(
@@ -157,10 +165,6 @@ class OpenAIProvider:
                             response_id=response_id,
                         )
                         tool_calls.append(tool_call)
-                        yield ProviderToolCallCompleted(
-                            tool_call=tool_call,
-                            content_index=len(tool_calls) - 1,
-                        )
                         emitted_tool_item_ids.add(event.item_id)
                 elif isinstance(event, ResponseOutputItemAddedEvent | ResponseOutputItemDoneEvent):
                     if isinstance(event.item, ResponseFunctionToolCall):
@@ -181,10 +185,6 @@ class OpenAIProvider:
                                 response_id=response_id,
                             )
                             tool_calls.append(tool_call)
-                            yield ProviderToolCallCompleted(
-                                tool_call=tool_call,
-                                content_index=len(tool_calls) - 1,
-                            )
                             if item_id is not None:
                                 emitted_tool_item_ids.add(item_id)
                 elif isinstance(event, ResponseErrorEvent):
@@ -214,10 +214,23 @@ class OpenAIProvider:
                 partial_content="".join(chunks),
                 response_id=response_id,
             )
+        finally:
+            if isinstance(stream, _ClosableResponseStream):
+                await stream.close()
+
+        if failure is None and not stream_completed:
+            failure = ProviderResponseFailed(
+                message="OpenAI stream ended before response.completed was received",
+                partial_content="".join(chunks),
+                response_id=response_id,
+            )
 
         if failure is not None:
             yield failure
             return
+
+        for content_index, tool_call in enumerate(tool_calls):
+            yield ProviderToolCallCompleted(tool_call=tool_call, content_index=content_index)
 
         yield ProviderResponseCompleted(
             content="".join(chunks),
