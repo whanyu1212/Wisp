@@ -105,6 +105,17 @@ def test_isolates_yaml_recursion_failures_without_hiding_valid_skills(tmp_path: 
     assert "nesting depth" in catalog.diagnostics[0].message
 
 
+def test_isolates_yaml_constructor_value_errors(tmp_path: Path) -> None:
+    root = tmp_path / ".wisp" / "skills"
+    _write_skill(root, "valid")
+    _write_skill(root, "invalid-date", extra="future: 2022-02-31\n")
+
+    catalog = _discover(tmp_path)
+
+    assert catalog.names() == ("valid",)
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["invalid-yaml"]
+
+
 @pytest.mark.parametrize(
     ("directory", "metadata", "message"),
     [
@@ -310,6 +321,25 @@ def test_path_fallback_rejects_intermediate_root_symlink(
     _write_skill(outside / "skills", "escaped")
     (home / ".wisp").symlink_to(outside, target_is_directory=True)
     monkeypatch.setattr(discovery_module, "_USE_DESCRIPTOR_TRAVERSAL", False)
+
+    catalog = _discover(home)
+
+    assert catalog.entries == ()
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["root-symlink"]
+
+
+def test_path_fallback_rejects_windows_junctions(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    _write_skill(home / ".wisp" / "skills", "escaped")
+    monkeypatch.setattr(discovery_module, "_USE_DESCRIPTOR_TRAVERSAL", False)
+    monkeypatch.setattr(
+        discovery_module,
+        "_is_link_like",
+        lambda path: path == home / ".wisp",
+    )
 
     catalog = _discover(home)
 

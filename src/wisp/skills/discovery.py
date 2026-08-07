@@ -275,7 +275,7 @@ def _open_skill_root(root: _SkillRoot) -> tuple[_OpenedRoot | None, SkillDiagnos
     current_path = root.base
     for component in root.components:
         candidate = current_path / component
-        if candidate.is_symlink():
+        if _is_link_like(candidate):
             os.close(current_fd)
             return (
                 None,
@@ -355,6 +355,17 @@ def _open_skill_root_by_path(
 
     for component in root.components:
         candidate = current_path / component
+        if _is_link_like(candidate):
+            return (
+                None,
+                _diagnostic(
+                    "root-symlink",
+                    "error",
+                    "skill source root components must not be symlinks or junctions",
+                    root.source,
+                    candidate,
+                ),
+            )
         try:
             candidate_stat = candidate.stat(follow_symlinks=False)
         except FileNotFoundError:
@@ -366,17 +377,6 @@ def _open_skill_root_by_path(
                     "root-unreadable",
                     "error",
                     f"cannot inspect skill source root: {_os_error_message(exc)}",
-                    root.source,
-                    candidate,
-                ),
-            )
-        if stat.S_ISLNK(candidate_stat.st_mode):
-            return (
-                None,
-                _diagnostic(
-                    "root-symlink",
-                    "error",
-                    "skill source root components must not be symlinks",
                     root.source,
                     candidate,
                 ),
@@ -425,7 +425,7 @@ def _read_skill_entry(
 ) -> tuple[SkillEntry | None, int, tuple[SkillDiagnostic, ...]]:
     skill_root = root.path / directory_name
     skill_file = skill_root / "SKILL.md"
-    if skill_file.is_symlink():
+    if _is_link_like(skill_root) or _is_link_like(skill_file):
         return (
             None,
             0,
@@ -433,7 +433,7 @@ def _read_skill_entry(
                 _diagnostic(
                     "entry-symlink",
                     "error",
-                    "SKILL.md must not be a symlink",
+                    "skill directories and metadata files must not be symlinks or junctions",
                     root.source,
                     skill_file,
                 ),
@@ -631,6 +631,10 @@ def _diagnostic(
 
 def _os_error_message(exc: OSError) -> str:
     return exc.strerror or type(exc).__name__
+
+
+def _is_link_like(path: Path) -> bool:
+    return path.is_symlink() or path.is_junction()
 
 
 def _open_relative(

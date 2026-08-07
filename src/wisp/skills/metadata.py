@@ -174,6 +174,11 @@ def _parse_entry(
             "invalid-yaml",
             "YAML frontmatter exceeds the supported nesting depth",
         ) from exc
+    except ValueError as exc:
+        raise SkillMetadataError(
+            "invalid-yaml",
+            f"invalid YAML scalar value: {exc}",
+        ) from exc
     except yaml.YAMLError as exc:
         raise SkillMetadataError("invalid-yaml", f"invalid YAML frontmatter: {exc}") from exc
 
