@@ -45,7 +45,7 @@ from wisp.tui.history import (
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
 )
-from wisp.tui.state import TuiViewState
+from wisp.tui.state import TuiCancelRequested, TuiViewState
 from wisp.update_check import UpdateAvailable
 
 
@@ -2698,6 +2698,54 @@ def test_tui_shell_connect_and_disconnect_openai_codex(
         assert "openai-codex: oauth configured" in rendered
         assert "Disconnected: openai-codex" in rendered
         assert "access-token" not in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_escape_cancels_non_textual_device_authorization(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    started = anyio.Event()
+    cancelled = anyio.Event()
+
+    async def fake_login(*_args: object, **_kwargs: object) -> OAuthCredential:
+        started.set()
+        try:
+            await anyio.sleep_forever()
+        finally:
+            cancelled.set()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex_device_code", fake_login)
+
+    async def run() -> None:
+        calls = 0
+
+        async def reader(_prompt: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "/connect openai-codex"
+            if calls == 2:
+                await started.wait()
+                raise TuiCancelRequested
+            return "/quit"
+
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=reader,
+            provider="openai-codex",
+            auth_path=tmp_path / "auth.json",
+        )
+
+        await shell.run()
+
+        assert cancelled.is_set()
+        assert "Provider connection cancelled." in output.getvalue()
 
     anyio.run(run)
 
