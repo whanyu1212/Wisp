@@ -954,8 +954,8 @@ def test_textual_tui_renderer_renders_hydrated_history_in_order_and_escapes() ->
             return _transcript_texts(app_instance)
 
     assert anyio.run(scenario) == [
-        "you: old [red]prompt[/red]",
-        "assistant: old answer",
+        "old [red]prompt[/red]",
+        "old answer",
     ]
 
 
@@ -983,7 +983,7 @@ def test_textual_tui_renderer_renders_historical_tool_cards() -> None:
 
     rendered, card_count = anyio.run(scenario)
     assert card_count == 1
-    assert "you: old prompt" in rendered
+    assert "old prompt" in rendered
     assert "✗ bash" in rendered
     assert "[red]boom[/red]" in rendered
 
@@ -1371,7 +1371,7 @@ def test_textual_renderer_dispatches_events_by_type() -> None:
         ]
     )
 
-    assert "assistant: hello there" in rendered
+    assert "hello there" in rendered
     # One card for c1: done glyph + name + the bounded multiline output preview.
     assert "✓ bash" in rendered
     assert "file-a" in rendered
@@ -1398,7 +1398,7 @@ def test_textual_renderer_suppresses_rpc_framing_events() -> None:
         ]
     )
 
-    assert rendered == "assistant: the answer"  # framing events produced no lines
+    assert rendered == "the answer"  # framing events produced no lines
     assert "RpcCommand" not in rendered
     assert "AgentStarted" not in rendered
     assert "command_id" not in rendered
@@ -2682,16 +2682,22 @@ def test_textual_tui_registers_and_activates_wisp_theme() -> None:
 
 
 def test_textual_transcript_uses_theme_colors() -> None:
-    # LineMessage/StreamMessage carry their color as a role-styled Rich span.
-    styles = _rendered_segment_styles(
-        [
-            completed_message(content="hi"),
-            ErrorEvent(message="boom"),
-        ]
-    )
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(completed_message(content="hi"))
+            renderer.event(ErrorEvent(message="boom"))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            assistant, error = transcript.children
+            return (
+                assistant.styles.border_left[1].hex.lower(),
+                error.styles.border_left[1].hex.lower(),
+            )
 
-    assert "#5cc9a7" in styles  # assistant -> success
-    assert "#d16a7c" in styles  # error -> error
+    # Textual's CSS color conversion rounds the configured #d16a7c error rail
+    # to #d06a7c; assert the resolved widget colors rather than Rich span colors.
+    assert anyio.run(scenario) == ("#5cc9a7", "#d06a7c")
 
 
 def test_textual_tool_card_carries_role_class_for_left_rule_color() -> None:
@@ -2708,12 +2714,12 @@ def test_textual_theme_switch_rederives_transcript_styles() -> None:
             app_instance.theme = "wisp-light"
             renderer.event(completed_message(content="after switch"))
             await pilot.pause()
-            return _transcript_styles(app_instance)
+            transcript = app_instance.query_one("#transcript", Transcript)
+            (assistant,) = transcript.children
+            return assistant.styles.border_left[1].hex.lower()
 
-    rendered = anyio.run(scenario)
-    # The post-switch line uses the light theme's success color, not dark's.
-    assert "#2b8164" in rendered  # light wisp assistant/success
-    assert "#5cc9a7" not in rendered  # dark wisp success must be gone
+    # The post-switch rail uses the light theme's success color, not dark's.
+    assert anyio.run(scenario) == "#2b8164"
 
 
 def test_textual_theme_switch_rederives_muted_text_color() -> None:
@@ -2988,10 +2994,11 @@ def test_textual_line_messages_carry_role_classes() -> None:
     ]
 
 
-def test_textual_turn_rails_use_half_cell_border() -> None:
+def test_textual_turn_rails_distinguish_conversation_roles_without_color() -> None:
     async def scenario() -> list[tuple[str, str]]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
+            renderer.prompt_submitted("hello")
             renderer.event(completed_message(content="hi"))
             renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={}))
             await pilot.pause()
@@ -3003,6 +3010,7 @@ def test_textual_turn_rails_use_half_cell_border() -> None:
             ]
 
     assert anyio.run(scenario) == [
+        ("message--user", "heavy"),
         ("message--assistant", "outer"),
         ("message--tool", "outer"),
     ]
@@ -3116,9 +3124,9 @@ def test_textual_no_color_env_var_keeps_transcript_legible(monkeypatch: MonkeyPa
     assert "heads up" in rendered
 
 
-def test_textual_line_message_border_title_from_role_labels() -> None:
-    # Stage 3: the card's role label comes ONLY from _ROLE_LABELS (fixed literals),
-    # never from untrusted payload — so it's safe as border chrome.
+def test_textual_conversation_messages_have_no_role_title() -> None:
+    # Conversation roles remain attached as CSS classes, but their titles are
+    # intentionally absent. Operational cards retain their visible titles.
     cards = _cards_for_events(
         [
             completed_message(content="hi"),
@@ -3127,7 +3135,7 @@ def test_textual_line_message_border_title_from_role_labels() -> None:
         ]
     )
     titles = [title for _, title in cards]
-    assert titles == [_ROLE_LABELS["assistant"], _ROLE_LABELS["tool"], _ROLE_LABELS["error"]]
+    assert titles == [None, _ROLE_LABELS["tool"], _ROLE_LABELS["error"]]
 
 
 def test_textual_running_uses_transcript_heartbeat_and_stable_status_bar() -> None:
@@ -3618,9 +3626,9 @@ def test_textual_session_saved_is_not_rendered() -> None:
     assert has_empty_state is True
 
 
-def test_textual_stream_message_carries_the_assistant_card() -> None:
-    # The streamed turn wears the same card as a finalized assistant line, so the
-    # bubble looks identical before and after finalize.
+def test_textual_stream_message_carries_the_label_free_assistant_role() -> None:
+    # The streamed turn retains assistant role styling without a visible title,
+    # matching a settled assistant line.
     async def scenario() -> tuple[str | None, object]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
@@ -3631,7 +3639,7 @@ def test_textual_stream_message_carries_the_assistant_card() -> None:
 
     role, title = anyio.run(scenario)
     assert role == "message--assistant"
-    assert title == _ROLE_LABELS["assistant"]
+    assert title is None
 
 
 def test_textual_card_css_resolves_under_the_light_theme() -> None:
@@ -3996,9 +4004,9 @@ def test_textual_history_page_prepend_preserves_viewport_and_session_marker() ->
         following,
     ) = anyio.run(scenario)
     assert "resumed session: Paged session" in texts[0]
-    assert texts[1:13] == [f"you: older {index}" for index in range(12)]
-    assert texts[13] == "assistant: current 0"
-    assert texts[-1] == "assistant: concurrent tail output"
+    assert texts[1:13] == [f"older {index}" for index in range(12)]
+    assert texts[13] == "current 0"
+    assert texts[-1] == "concurrent tail output"
     assert scroll_y_after > scroll_y_before, (
         scroll_y_before,
         scroll_y_after,
@@ -4116,10 +4124,10 @@ def test_textual_history_window_shifts_without_evicting_live_output() -> None:
             )
 
     newest_texts, older_texts, initial_count, older_count, newest_count = anyio.run(scenario)
-    assert "you: older 0" in older_texts
-    assert "you: older 0" not in newest_texts
-    assert "assistant: current 299" in newest_texts
-    assert "assistant: live output" in newest_texts
+    assert "older 0" in older_texts
+    assert "older 0" not in newest_texts
+    assert "current 299" in newest_texts
+    assert "live output" in newest_texts
     # Marker and one live line sit outside the bounded persisted-history window.
     assert initial_count == older_count == newest_count == 302
 

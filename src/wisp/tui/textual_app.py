@@ -210,9 +210,10 @@ class TextualTui(App[None]):
         align: right middle;
     }
 
-    /* Minimalist messages: a half-cell left rail in the role's color carries
-       the label; no top border, no fill. Quiet by default, colored only where it
-       means something. Colors come only from theme vars present in both themes. */
+    /* Minimalist messages: left rails distinguish conversation roles without
+       visible role labels; user turns use a heavier rail so authorship remains
+       legible without color. No top border or fill. Colors come only from theme
+       vars present in both themes. */
     .message {
         height: auto;
         margin: 1 0 0 0;
@@ -222,7 +223,7 @@ class TextualTui(App[None]):
     }
 
     .message--user {
-        border-left: outer $primary;
+        border-left: heavy $primary;
     }
 
     .message--assistant {
@@ -1767,19 +1768,16 @@ class TextualTui(App[None]):
         self._history_marker = widget
 
     def write_user(self, message: str) -> LineMessage | None:
-        return self.write_labeled("you:", message, role="user")
+        return self.write_message(message, role="user")
 
     def write_assistant(self, message: str) -> LineMessage | None:
-        return self.write_labeled("assistant:", message, role="assistant")
+        return self.write_message(message, role="assistant")
 
-    def write_labeled(self, label: str, message: str = "", *, role: str) -> LineMessage | None:
-        # `label` is a fixed literal styled with the role's theme color; `message`
-        # is untrusted and escaped, preserving the escape-at-boundary invariant.
-        style = self._style(role)
-        text = f"[{style}]{label}[/{style}]" if style else label
-        if message:
-            text += f" {_markup_escape(message)}"
-        return self._mount_line(role, text)
+    def write_message(self, message: str, *, role: str) -> LineMessage | None:
+        # Message content is untrusted and escaped at the rendering boundary.
+        # The role remains attached to the widget for styling and reconciliation,
+        # but conversation cards intentionally show no textual role prefix.
+        return self._mount_line(role, _markup_escape(message))
 
     def _mount_line(self, role: str, markup: str) -> LineMessage | None:
         # Mount one role-styled LineMessage. Transcript owns the transcript and
@@ -1808,12 +1806,7 @@ class TextualTui(App[None]):
 
         if self._transcript is None:
             return None
-        label = "you:" if role == "user" else "assistant:"
-        style = self._style(role)
-        markup = f"[{style}]{label}[/{style}]" if style else label
-        if message:
-            markup += f" {_markup_escape(message)}"
-        widget = LineMessage(markup, role=role)
+        widget = LineMessage(_markup_escape(message), role=role)
         self._mount_transcript_message(widget, before=before)
         return widget
 

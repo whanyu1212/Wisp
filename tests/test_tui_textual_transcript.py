@@ -122,7 +122,7 @@ def test_history_marker_falls_back_to_the_attached_transcript_head() -> None:
                 for child in transcript.children
                 if isinstance(child, LineMessage)
             ]
-            assert lines == ["resumed session: Restored", "assistant: current"]
+            assert lines == ["resumed session: Restored", "current"]
 
     anyio.run(run)
 
