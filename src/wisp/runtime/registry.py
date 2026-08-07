@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from wisp.providers.base import Provider, ToolSpec
-from wisp.tools.base import Tool
+from wisp.tools.base import Tool, ToolPromptMetadata
 
 
 class UnknownProviderError(KeyError):
@@ -79,14 +79,25 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._prompt_metadata: dict[str, ToolPromptMetadata] = {}
 
-    def register(self, tool: Tool, *, replace: bool = True) -> None:
+    def register(
+        self,
+        tool: Tool,
+        *,
+        prompt: ToolPromptMetadata | None = None,
+        replace: bool = True,
+    ) -> None:
         """Register a tool by its declared name."""
 
         if not replace and tool.name in self._tools:
             msg = f"Tool already registered: {tool.name}"
             raise ValueError(msg)
         self._tools[tool.name] = tool
+        if prompt is None:
+            self._prompt_metadata.pop(tool.name, None)
+        else:
+            self._prompt_metadata[tool.name] = prompt
 
     def get(self, name: str) -> Tool:
         """Return a registered tool by name."""
@@ -110,3 +121,18 @@ class ToolRegistry:
         """Return provider-facing specs for registered tools."""
 
         return tuple(ToolSpec.from_tool(tool) for tool in self._tools.values())
+
+    def prompt_metadata(self, names: Iterable[str]) -> tuple[ToolPromptMetadata, ...]:
+        """Return prompt metadata for selected tools in registration order."""
+
+        selected = frozenset(names)
+        return tuple(
+            metadata
+            for name in self._tools
+            if name in selected and (metadata := self._prompt_metadata.get(name)) is not None
+        )
+
+    def prompt_metadata_for(self, name: str) -> ToolPromptMetadata | None:
+        """Return prompt metadata for one registered tool, if present."""
+
+        return self._prompt_metadata.get(name)

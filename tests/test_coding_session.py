@@ -62,7 +62,7 @@ from wisp.sessions.entries import (
 )
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.approval import ToolApprovalPolicy
-from wisp.tools.base import ToolArguments, ToolInputSchema
+from wisp.tools.base import ToolArguments, ToolInputSchema, ToolPromptMetadata
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolResult
@@ -1818,6 +1818,35 @@ def test_coding_session_filters_provider_tool_specs_by_policy(tmp_path: Path) ->
 
     assert provider.seen_tools is not None
     assert [tool.name for tool in provider.seen_tools] == ["echo"]
+
+
+def test_coding_session_filters_tool_prompt_metadata_by_policy(tmp_path: Path) -> None:
+    provider = CapturingProvider()
+    tools = ToolRegistry()
+    tools.register(
+        EchoTool(),
+        prompt=ToolPromptMetadata(prompt_snippet="Visible read guidance."),
+    )
+    tools.register(
+        MutatingTool(),
+        prompt=ToolPromptMetadata(prompt_snippet="Blocked mutation guidance."),
+    )
+
+    async def run_agent() -> None:
+        agent = CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tool_registry=tools,
+            tool_policy=ToolPolicy.allow_read_tools(),
+        )
+        _ = [event async for event in agent.run("hello")]
+
+    anyio.run(run_agent)
+
+    assert provider.seen_messages is not None
+    prompt = "\n".join(message.content for message in provider.seen_messages)
+    assert "Visible read guidance." in prompt
+    assert "Blocked mutation guidance." not in prompt
 
 
 def test_coding_session_plan_mode_exposes_only_read_tools_and_restores_build_tools(

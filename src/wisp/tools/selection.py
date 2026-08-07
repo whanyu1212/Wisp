@@ -55,5 +55,5 @@ def select_tools(
     filtered = ToolRegistry()
     for tool in tools.all():
         if all_tools or tool.name in allowed_names or (allow_read_tools and tool.safety == "read"):
-            filtered.register(tool)
+            filtered.register(tool, prompt=tools.prompt_metadata_for(tool.name))
     return filtered
