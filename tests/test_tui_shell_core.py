@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from pytest import MonkeyPatch
 
 from tests.tui_support import *
-from wisp.auth.storage import OAuthCredential
+from wisp.auth.storage import JsonAuthStore, OAuthCredential
 from wisp.events import (
     BillableTokenUsage,
     CompactionPolicyStatus,
@@ -2718,6 +2718,14 @@ def test_tui_shell_escape_cancels_non_textual_device_authorization(
         raise AssertionError("unreachable")
 
     monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex_device_code", fake_login)
+    auth_path = tmp_path / "auth.json"
+    existing_credential = OAuthCredential(
+        access="existing-access",
+        refresh="existing-refresh",
+        expires=4_102_444_800_000,
+        account_id="existing-account",
+    )
+    JsonAuthStore(auth_path).set("openai-codex", existing_credential)
 
     async def run() -> None:
         calls = 0
@@ -2729,8 +2737,10 @@ def test_tui_shell_escape_cancels_non_textual_device_authorization(
                 return "/connect openai-codex"
             if calls == 2:
                 await started.wait()
-                return "prompt must not race reconnect"
+                return "/disconnect openai-codex"
             if calls == 3:
+                return "prompt must not race reconnect"
+            if calls == 4:
                 raise TuiCancelRequested
             return "/quit"
 
@@ -2741,14 +2751,16 @@ def test_tui_shell_escape_cancels_non_textual_device_authorization(
             console=console,
             prompt_reader=reader,
             provider="openai-codex",
-            auth_path=tmp_path / "auth.json",
+            auth_path=auth_path,
         )
 
         await shell.run()
 
         assert cancelled.is_set()
         assert controller.prompts == []
+        assert JsonAuthStore(auth_path).get("openai-codex") == existing_credential
         rendered = output.getvalue()
+        assert "Cannot disconnect while a provider connection is in progress." in rendered
         assert "Cannot submit prompts while a provider connection is in progress." in rendered
         assert "Provider connection cancelled." in rendered
 

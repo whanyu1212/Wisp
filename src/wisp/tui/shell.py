@@ -662,6 +662,14 @@ class TuiShell:
             return False
         if command.name is TuiSlashCommandName.quit:
             return await self._handle_quit()
+        if (
+            command.name is TuiSlashCommandName.disconnect
+            and self._connect_cancel_scope is not None
+        ):
+            self.renderer.command_error(
+                "Cannot disconnect while a provider connection is in progress."
+            )
+            return False
         if self.state.pending_approval is not None:
             self.renderer.command_error("Cannot run slash commands while approval is pending.")
             return False
