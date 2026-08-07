@@ -35,6 +35,8 @@ from wisp.events import (
 from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tools.context import ToolContext
 from wisp.tui.commands import DEFAULT_TUI_COMMAND_CATALOG, TuiCommandCatalog
+from wisp.tui.connect_widget import ConnectPanel, ConnectPanelMode
+from wisp.tui.connections import ConnectionProviderStatus
 from wisp.tui.context_widget import ContextStatusOverlay
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.file_index import FileIndexConfig, collect_paths
@@ -387,6 +389,7 @@ class TextualTui(App[None]):
         self._file_suggest: FileSuggest | None = None
         self._prompt_history_picker: PromptHistoryPicker | None = None
         self._decision_panel: DecisionPanel | None = None
+        self._connect_panel: ConnectPanel | None = None
         self._model_picker: ModelPicker | None = None
         self._session_picker: SessionPicker | None = None
         self._context_status: ContextStatusOverlay | None = None
@@ -401,6 +404,8 @@ class TextualTui(App[None]):
         self._runner_error: Exception | None = None
         self._history_page_request_hook: Callable[[], Awaitable[None]] | None = None
         self._history_latest_request_hook: Callable[[], Awaitable[None]] | None = None
+        self._connect_api_key_hook: Callable[[str, str], Awaitable[None]] | None = None
+        self._connect_oauth_hook: Callable[[str], Awaitable[None]] | None = None
         self._history_window_older_hook: Callable[[], bool] | None = None
         self._history_window_latest_hook: Callable[[], bool] | None = None
         self._live_widget_evicted_hook: Callable[[Widget], None] | None = None
@@ -465,6 +470,7 @@ class TextualTui(App[None]):
             yield FileSuggest(id="file-suggest")
             yield PromptHistoryPicker(id="prompt-history")
             yield DecisionPanel(id="decision-panel")
+            yield ConnectPanel(id="connect-panel")
             yield ModelPicker(id="model-picker")
             yield SessionPicker(id="session-picker")
             # #composer frames the editor and status line as one bordered panel
@@ -507,6 +513,7 @@ class TextualTui(App[None]):
         self._file_suggest = self.query_one("#file-suggest", FileSuggest)
         self._prompt_history_picker = self.query_one("#prompt-history", PromptHistoryPicker)
         self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
+        self._connect_panel = self.query_one("#connect-panel", ConnectPanel)
         self._model_picker = self.query_one("#model-picker", ModelPicker)
         self._session_picker = self.query_one("#session-picker", SessionPicker)
         self._context_status = self.query_one("#context-status", ContextStatusOverlay)
@@ -520,6 +527,7 @@ class TextualTui(App[None]):
             transcript=self._transcript,
             overlays={
                 OverlayKind.decision: self._decision_panel,
+                OverlayKind.connect: self._connect_panel,
                 OverlayKind.model_picker: self._model_picker,
                 OverlayKind.session_picker: self._session_picker,
                 OverlayKind.prompt_history: self._prompt_history_picker,
@@ -840,6 +848,43 @@ class TextualTui(App[None]):
     def on_decision_panel_selected(self, event: DecisionPanel.Selected) -> None:
         event.stop()
         self._submit_decision_line(event.answer)
+
+    def on_connect_panel_method_selected(self, event: ConnectPanel.MethodSelected) -> None:
+        event.stop()
+        hook = self._connect_oauth_hook
+        if hook is None:
+            self.hide_connect_panel()
+            return
+        self.run_worker(
+            hook(event.method.provider),
+            group="connect-oauth",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    def on_connect_panel_api_key_submitted(self, event: ConnectPanel.ApiKeySubmitted) -> None:
+        event.stop()
+        panel = self._connect_panel
+        hook = self._connect_api_key_hook
+        api_key = panel.take_api_key() if panel is not None else None
+        if hook is None or api_key is None:
+            self.hide_connect_panel()
+            return
+        self.run_worker(
+            hook(event.provider, api_key),
+            group="connect-api-key",
+            exit_on_error=False,
+        )
+
+    def on_connect_panel_disconnect_selected(self, event: ConnectPanel.DisconnectSelected) -> None:
+        event.stop()
+        if not self._submit_decision_line(f"/disconnect {event.provider}"):
+            self.hide_connect_panel()
+
+    def on_connect_panel_cancelled(self, event: ConnectPanel.Cancelled) -> None:
+        event.stop()
+        self.workers.cancel_group(self, "connect-oauth")
+        self.hide_connect_panel()
 
     def on_model_picker_selected(self, event: ModelPicker.Selected) -> None:
         event.stop()
@@ -1255,6 +1300,8 @@ class TextualTui(App[None]):
             self.refresh_bindings()
             return
         overlays = self._overlay_controller
+        if overlays is not None and overlays.active_overlay is OverlayKind.connect:
+            self.workers.cancel_group(self, "connect-oauth")
         if overlays is not None and overlays.consume_cancel():
             return
         self._signal_input(TuiCancelRequested(), action="cancel", clear_editor=False)
@@ -1474,6 +1521,43 @@ class TextualTui(App[None]):
         if overlays is not None:
             overlays.close(OverlayKind.decision)
 
+    def show_connect_panel(
+        self,
+        providers: tuple[ConnectionProviderStatus, ...],
+        *,
+        mode: ConnectPanelMode = "connect",
+        provider: str | None = None,
+    ) -> None:
+        panel = self._connect_panel
+        overlays = self._overlay_controller
+        if panel is None or overlays is None:
+            return
+        overlays.open(OverlayKind.connect)
+        panel.show(
+            providers,
+            mode=mode,
+            provider=provider,
+        )
+
+    def show_connect_device_code(self, verification_uri: str, user_code: str) -> None:
+        panel = self._connect_panel
+        if panel is None or not panel.is_open:
+            return
+        panel.query_one("#connect-title", Static).update("Authorize ChatGPT Plus/Pro")
+        panel.query_one("#connect-hint", Static).update(
+            f"{verification_uri} · code {user_code} · esc cancel"
+        )
+
+    def show_connect_error(self, message: str) -> None:
+        panel = self._connect_panel
+        if panel is not None and panel.is_open:
+            panel.show_error(message)
+
+    def hide_connect_panel(self) -> None:
+        overlays = self._overlay_controller
+        if overlays is not None:
+            overlays.close(OverlayKind.connect)
+
     def show_model_picker(
         self,
         entries: tuple[ModelCatalogProviderEntry, ...],
@@ -1606,6 +1690,22 @@ class TextualTui(App[None]):
 
         self._history_window_older_hook = shift_older
         self._history_window_latest_hook = show_latest
+
+    def set_connect_api_key_hook(
+        self,
+        hook: Callable[[str, str], Awaitable[None]],
+    ) -> None:
+        """Install the shell-owned secret-storage callback."""
+
+        self._connect_api_key_hook = hook
+
+    def set_connect_oauth_hook(
+        self,
+        hook: Callable[[str], Awaitable[None]],
+    ) -> None:
+        """Install the shell-owned device-authorization callback."""
+
+        self._connect_oauth_hook = hook
 
     def request_latest_history(self) -> bool:
         """Schedule a durable latest-page reload requested by history retention."""

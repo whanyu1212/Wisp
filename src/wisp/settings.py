@@ -41,6 +41,7 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "effort",
         "context_reserve_tokens",
         "auto_compaction_enabled",
+        "update_check_enabled",
     }
 )
 
@@ -102,6 +103,7 @@ class WispSettings(BaseModel):
     effort: str | None = None
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
+    update_check_enabled: bool | None = None
 
 
 class ResolvedSettings(BaseModel):
@@ -124,6 +126,7 @@ class ResolvedSettings(BaseModel):
     effort: str | None = None
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
+    update_check_enabled: bool | None = None
     # Provenance used only while applying higher-precedence provider overrides.
     # Excluded from serialization because these are resolver details, not settings.
     user_provider: str | None = Field(default=None, exclude=True)
@@ -206,6 +209,7 @@ def resolve_settings(
         effort=user_settings.effort,
         context_reserve_tokens=user_settings.context_reserve_tokens,
         auto_compaction_enabled=user_settings.auto_compaction_enabled,
+        update_check_enabled=user_settings.update_check_enabled,
         user_provider=user_provider,
         model_from_user=project_model is None and user_model is not None,
     )

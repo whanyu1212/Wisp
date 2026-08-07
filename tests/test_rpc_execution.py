@@ -572,8 +572,8 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
             "resume",
             "provider",
             "auth",
-            "login",
-            "logout",
+            "connect",
+            "disconnect",
             "quit",
         ]
         finished = fixture.events[-1]

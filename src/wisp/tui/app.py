@@ -6,10 +6,13 @@ state, shell, and launch helpers live in focused sibling modules.
 
 from __future__ import annotations
 
+from functools import partial
+
 from rich.console import Console
 
 from wisp.rpc import JsonlSubprocessRpcTransport, RpcController
 from wisp.tools.context import ToolContext
+from wisp.update_check import check_for_update
 
 from . import launch as _launch
 from . import live as _live
@@ -109,6 +112,10 @@ async def run_tui(
         model=options.config.model,
         effort=options.config.effort,
         auth_path=options.config.auth_path,
+        update_checker=partial(
+            check_for_update,
+            enabled=options.config.update_check_enabled,
+        ),
     )
     try:
         if textual_tui is not None:

@@ -62,6 +62,10 @@ To run Wisp without installing it:
 uvx --from "wisp-ai==0.1.0a1" wisp
 ```
 
+Installed builds check PyPI once per day after TUI startup. When a newer applicable release is
+available, Wisp prints a non-blocking update command; it never installs updates automatically. Set
+`WISP_UPDATE_CHECK=0` to disable the check.
+
 ## Quickstart
 
 Run Wisp from the project you want it to work on:
@@ -71,14 +75,14 @@ cd path/to/project
 wisp
 ```
 
-Wisp defaults to OpenAI Codex subscription access. From the TUI, connect your account with:
+Wisp defaults to OpenAI Codex subscription access. From the TUI, open the provider connection panel:
 
 ```text
-/login openai-codex
+/connect
 ```
 
-You can also authenticate before launch with `wisp auth login openai-codex`. Then enter a request
-such as:
+Select **OpenAI**, then **ChatGPT Plus/Pro**, and complete the displayed device-code flow. The same
+panel accepts masked API keys for OpenAI, Anthropic, and Google. Then enter a request such as:
 
 ```text
 explain the architecture of this repository
@@ -134,18 +138,20 @@ same command, event, session, trust, and approval contracts used by the built-in
 
 | Provider | Credentials |
 |---|---|
-| `openai-codex` *(default)* | ChatGPT Plus/Pro via OAuth — `wisp auth login openai-codex` |
-| `openai` | `OPENAI_API_KEY` |
-| `anthropic` | `ANTHROPIC_API_KEY` |
-| `google` | `GOOGLE_API_KEY` |
+| `openai-codex` *(default)* | ChatGPT Plus/Pro via device-code OAuth — TUI `/connect` |
+| `openai` | Stored API key or `OPENAI_API_KEY` |
+| `anthropic` | Stored API key or `ANTHROPIC_API_KEY` |
+| `google` | Stored API key, `GOOGLE_API_KEY`, or `GEMINI_API_KEY` |
 | `fake` | None — deterministic offline provider for tests and smoke runs |
 
 ```bash
 wisp -p "hello" --provider anthropic --model claude-sonnet-5
 ```
 
-Codex credentials are stored in `WISP_AUTH_FILE` (default `~/.wisp/auth.json`) with private
-permissions.
+Credentials entered through `/connect` are stored in `WISP_AUTH_FILE` (default
+`~/.wisp/auth.json`) with private permissions. Explicit provider constructor keys take precedence,
+followed by environment variables and then stored keys. Secrets entered in the panel are masked and
+never enter prompt history, transcripts, RPC events, or session JSONL.
 
 In the TUI, `/model` with no arguments lists every catalog model grouped by provider. If a model id
 belongs to only one registered provider, `/model <id>` switches providers to match; otherwise use
@@ -260,7 +266,8 @@ CLI flag > environment variable > project ./.wisp/settings.json > user ~/.wisp/s
 | `WISP_RETRY_MAX_DELAY_SECONDS` | Maximum retry delay; defaults to `30` |
 | `WISP_CONTEXT_RESERVE_TOKENS` | Minimum tokens reserved outside estimated input context; defaults to `16384` |
 | `WISP_AUTO_COMPACTION` | Automatic threshold compaction and overflow recovery; defaults to `true` |
-| `OPENAI_API_KEY` · `ANTHROPIC_API_KEY` · `GOOGLE_API_KEY` | Required only for the matching provider |
+| `WISP_UPDATE_CHECK` | Daily non-blocking PyPI update notice; defaults to `true` |
+| `OPENAI_API_KEY` · `ANTHROPIC_API_KEY` · `GOOGLE_API_KEY` · `GEMINI_API_KEY` | Required only for the matching provider |
 
 ### Settings files
 
@@ -275,13 +282,15 @@ project may add `./.wisp/settings.json`, applied only after you trust the projec
   "session_dir": "~/.wisp/sessions",
   "context_reserve_tokens": 16384,
   "auto_compaction_enabled": true,
+  "update_check_enabled": true,
   "retry": { "max_retries": 2, "base_delay_seconds": 0.5, "max_delay_seconds": 30 }
 }
 ```
 
 Some fields are **user-only** and a project file can never set them: `protected_paths`, `retry`,
-`effort`, `context_reserve_tokens`, and `auto_compaction_enabled`. A repository cannot increase your
-API spending, prolong waits, or weaken the secret guard.
+`effort`, `context_reserve_tokens`, `auto_compaction_enabled`, and `update_check_enabled`. A
+repository cannot increase your API spending, prolong waits, trigger network update checks, or
+weaken the secret guard.
 
 After a successful TUI `/model` or `/provider` change, Wisp atomically records the active provider,
 model, and effort as user defaults, reused next launch unless a higher-precedence source overrides
@@ -405,8 +414,8 @@ approve once, allow that tool for the session, YOLO all mutating/command tools f
 ```text
 /help                       show help
 /auth [provider]            show credential status
-/login [provider] [device-code]
-/logout [provider]
+/connect [provider]          connect a provider or open the provider panel
+/disconnect [provider]       remove stored credentials (`/logout` alias)
 /provider [provider]        switch provider (resets model to default)
 /model [model] [effort]     switch model and optional reasoning effort
 /new                        start a fresh session and clear the screen

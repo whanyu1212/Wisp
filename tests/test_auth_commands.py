@@ -9,6 +9,7 @@ auth_store rebind and a changing default provider.
 from __future__ import annotations
 
 import anyio
+from pytest import MonkeyPatch
 
 from wisp.auth.storage import ApiKeyCredential, AuthStorageError, OAuthCredential
 from wisp.tui.auth_commands import AuthCommands
@@ -84,23 +85,109 @@ def test_status_rejects_extra_args_and_surfaces_storage_errors() -> None:
     assert renderer.errors[-1].startswith("Auth storage error:")
 
 
-def test_logout_deletes_and_reports_presence() -> None:
+def test_disconnect_deletes_and_reports_presence() -> None:
     store = _FakeStore({"openai": ApiKeyCredential(key="sk-1")})
     commands, renderer = _commands(store)
-    commands.logout(("openai",))
-    assert renderer.notices == ["Logged out: openai"]
-    commands.logout(("openai",))  # already gone
-    assert renderer.notices[-1] == "Not logged in: openai"
+    commands.disconnect(("openai",))
+    assert renderer.notices == ["Disconnected: openai"]
+    commands.disconnect(("openai",))  # already gone
+    assert renderer.notices[-1] == "Not connected: openai"
 
 
-def test_login_rejects_non_codex_providers() -> None:
+def test_connect_rejects_unknown_providers() -> None:
     commands, renderer = _commands(_FakeStore(), default="openai")
 
     async def run() -> None:
-        await commands.login(())  # defaults to "openai" -> unsupported
+        await commands.connect(("missing",))
 
     anyio.run(run)
-    assert renderer.errors == ["TUI login currently supports only openai-codex."]
+    assert renderer.errors == [
+        "Unknown provider. Choose one of: openai-codex, openai, anthropic, google."
+    ]
+
+
+def test_connect_rejects_extra_arguments() -> None:
+    commands, renderer = _commands(_FakeStore(), default="openai-codex")
+
+    async def run() -> None:
+        await commands.connect(("openai-codex", "device-code"))
+
+    anyio.run(run)
+    assert renderer.errors == ["Usage: /connect [provider]"]
+
+
+def test_connect_api_key_stores_secret_without_rendering_it() -> None:
+    store = _FakeStore()
+    commands, renderer = _commands(store)
+
+    async def run() -> None:
+        await commands.connect_api_key("anthropic", "  sentinel-secret  ")
+
+    anyio.run(run)
+    assert store.credentials == {"anthropic": ApiKeyCredential(key="sentinel-secret")}
+    assert renderer.notices == ["Connected: anthropic"]
+    assert "sentinel-secret" not in repr(renderer.notices)
+
+
+def test_connect_api_key_reports_environment_precedence(monkeypatch: MonkeyPatch) -> None:
+    store = _FakeStore()
+    commands, renderer = _commands(store)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "environment")
+
+    async def run() -> None:
+        await commands.connect_api_key("anthropic", "stored-key")
+
+    anyio.run(run)
+
+    assert store.credentials == {"anthropic": ApiKeyCredential(key="stored-key")}
+    assert renderer.notices == [
+        "Stored API key for anthropic; ANTHROPIC_API_KEY still takes precedence. "
+        "Unset it in your shell to use the stored key."
+    ]
+
+
+def test_disconnect_removes_stored_credentials_hidden_by_environment(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    store = _FakeStore({"openai": ApiKeyCredential(key="stored")})
+    commands, renderer = _commands(store)
+    monkeypatch.setenv("OPENAI_API_KEY", "environment")
+
+    commands.disconnect(("openai",))
+
+    assert store.credentials == {}
+    assert renderer.notices == [
+        "Removed stored credentials for openai; still connected through OPENAI_API_KEY. "
+        "Unset it in your shell to disconnect."
+    ]
+
+
+def test_disconnect_cannot_remove_environment_only_credentials(monkeypatch: MonkeyPatch) -> None:
+    store = _FakeStore()
+    commands, renderer = _commands(store)
+    monkeypatch.setenv("OPENAI_API_KEY", "environment")
+
+    commands.disconnect(("openai",))
+
+    assert renderer.errors == [
+        "openai is connected through OPENAI_API_KEY; unset it in your shell."
+    ]
+
+
+def test_google_auth_status_recognizes_gemini_api_key(monkeypatch: MonkeyPatch) -> None:
+    commands, renderer = _commands(_FakeStore(), default="google")
+    monkeypatch.setenv("GEMINI_API_KEY", "environment")
+
+    commands.status(())
+
+    assert renderer.notices == ["google: api key configured via GEMINI_API_KEY"]
+    google = next(
+        family
+        for family in commands._connection_catalog()
+        if family.id == "google"  # noqa: SLF001
+    )
+    assert google.methods[0].source == "environment"
+    assert google.methods[0].environment_variable == "GEMINI_API_KEY"
 
 
 def test_default_provider_is_read_lazily_each_call() -> None:

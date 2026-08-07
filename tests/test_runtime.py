@@ -7,10 +7,15 @@ import anyio
 import pytest
 
 import wisp.runtime.extensions as runtime_extensions
+from wisp.auth.storage import JsonAuthStore
 from wisp.events import AgentStarted
+from wisp.providers.anthropic import AnthropicProvider
+from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.providers.fake import FakeProvider
+from wisp.providers.google import GoogleProvider
 from wisp.providers.openai import OpenAIProvider
+from wisp.providers.openai_codex import OpenAICodexProvider
 from wisp.retry import RetryPolicy
 from wisp.runtime import (
     CommandDescriptor,
@@ -235,8 +240,8 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
             "resume",
             "provider",
             "auth",
-            "login",
-            "logout",
+            "connect",
+            "disconnect",
             "quit",
         ),
     )
@@ -354,6 +359,33 @@ def test_build_runtime_passes_retry_policy_to_builtin_providers() -> None:
         return provider._retry_policy  # noqa: SLF001
 
     assert anyio.run(run) == policy
+
+
+def test_build_runtime_passes_stored_auth_resolver_to_builtin_providers(
+    tmp_path: Path,
+) -> None:
+    auth_path = tmp_path / "auth.json"
+
+    async def run() -> None:
+        runtime = await build_runtime(auth_path=auth_path)
+        providers = (
+            (runtime.providers.get("openai"), OpenAIProvider),
+            (runtime.providers.get("openai-codex"), OpenAICodexProvider),
+            (runtime.providers.get("anthropic"), AnthropicProvider),
+            (runtime.providers.get("google"), GoogleProvider),
+        )
+        resolvers = []
+        for provider, provider_type in providers:
+            assert isinstance(provider, provider_type)
+            resolver = provider._auth_resolver  # noqa: SLF001
+            assert isinstance(resolver, StoredProviderAuthResolver)
+            assert isinstance(resolver.store, JsonAuthStore)
+            assert resolver.store.path == auth_path
+            resolvers.append(resolver)
+        assert all(resolver is resolvers[0] for resolver in resolvers[1:])
+        await runtime.aclose()
+
+    anyio.run(run)
 
 
 def test_direct_runtime_construction_captures_configured_providers() -> None:

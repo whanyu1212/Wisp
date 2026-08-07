@@ -13,6 +13,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message
+from wisp.auth import openai_codex as openai_codex_auth_module
 from wisp.auth.storage import JsonAuthStore, OAuthCredential
 from wisp.providers import openai_codex as openai_codex_module
 from wisp.providers.auth import StoredProviderAuthResolver
@@ -34,6 +35,49 @@ from wisp.providers.events import (
 )
 from wisp.providers.openai_codex import OpenAICodexProvider
 from wisp.retry import RetryPolicy
+
+
+def test_device_code_login_shields_owned_client_cleanup_from_cancellation(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    clients: list[StubDeviceCodeClient] = []
+
+    class StubDeviceCodeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.poll_started = anyio.Event()
+            self.close_finished = anyio.Event()
+            clients.append(self)
+
+        async def post(self, url: str, **_kwargs: object) -> httpx.Response:
+            if url == openai_codex_auth_module.DEVICE_USER_CODE_URL:
+                return httpx.Response(
+                    200,
+                    json={
+                        "device_auth_id": "device-id",
+                        "user_code": "user-code",
+                        "interval": 1,
+                    },
+                )
+            self.poll_started.set()
+            await anyio.sleep_forever()
+            raise AssertionError("unreachable")
+
+        async def aclose(self) -> None:
+            await anyio.sleep(0)
+            self.close_finished.set()
+
+    monkeypatch.setattr(openai_codex_auth_module.httpx, "AsyncClient", StubDeviceCodeClient)
+
+    async def run() -> bool:
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(openai_codex_auth_module.login_openai_codex_device_code)
+            while not clients:
+                await anyio.sleep(0)
+            await clients[0].poll_started.wait()
+            task_group.cancel_scope.cancel()
+        return clients[0].close_finished.is_set()
+
+    assert anyio.run(run) is True
 
 
 class StubOpenAICodexProvider(OpenAICodexProvider):
@@ -486,7 +530,7 @@ def test_openai_codex_provider_requires_login(tmp_path: Path) -> None:
     async def run() -> list[object]:
         return [event async for event in provider.stream([Message(role="user", content="hi")])]
 
-    with pytest.raises(ProviderConfigurationError, match="wisp auth login openai-codex"):
+    with pytest.raises(ProviderConfigurationError, match=r"/connect openai-codex"):
         anyio.run(run)
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
 from typing import Any, cast
 
 import anyio
@@ -12,6 +13,8 @@ from google.genai import types as genai_types
 from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message as WispMessage
+from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
+from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
     ToolCall,
@@ -456,9 +459,106 @@ def test_wisp_owned_google_client_leaves_sdk_retries_unset() -> None:
     # max_retries=0 construction AnthropicProvider/OpenAIProvider require.
     provider = GoogleProvider(api_key="test-key")
 
-    client = provider._client_or_create()  # noqa: SLF001
+    async def run() -> genai.Client:
+        return await provider._client_or_create()  # noqa: SLF001
+
+    client = anyio.run(run)
 
     assert client._api_client._http_options.retry_options is None  # noqa: SLF001
+    client.close()
+
+
+def test_google_provider_uses_and_rotates_stored_api_key(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    store = JsonAuthStore(tmp_path / "auth.json")
+    store.set("google", ApiKeyCredential(key="old-stored-key"))
+    provider = GoogleProvider(auth_resolver=StoredProviderAuthResolver(store))
+
+    async def run() -> tuple[genai.Client, genai.Client]:
+        old_client = await provider._client_or_create()  # noqa: SLF001
+        store.set("google", ApiKeyCredential(key="new-stored-key"))
+        new_client = await provider._client_or_create()  # noqa: SLF001
+        return old_client, new_client
+
+    old_client, new_client = anyio.run(run)
+
+    assert old_client._api_client.api_key == "old-stored-key"  # noqa: SLF001
+    assert new_client._api_client.api_key == "new-stored-key"  # noqa: SLF001
+    assert new_client is not old_client
+    assert old_client.aio._api_client._async_httpx_client.is_closed  # noqa: SLF001
+    new_client.close()
+
+
+def test_google_provider_api_key_precedence(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    store = JsonAuthStore(tmp_path / "auth.json")
+    store.set("google", ApiKeyCredential(key="stored-key"))
+    resolver = StoredProviderAuthResolver(store)
+    monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+
+    async def run() -> tuple[genai.Client, genai.Client, genai.Client]:
+        explicit_client = await GoogleProvider(
+            api_key="explicit-key", auth_resolver=resolver
+        )._client_or_create()  # noqa: SLF001
+        env_client = await GoogleProvider(auth_resolver=resolver)._client_or_create()  # noqa: SLF001
+        monkeypatch.delenv("GOOGLE_API_KEY")
+        monkeypatch.delenv("GEMINI_API_KEY")
+        stored_client = await GoogleProvider(auth_resolver=resolver)._client_or_create()  # noqa: SLF001
+        return explicit_client, env_client, stored_client
+
+    explicit_client, env_client, stored_client = anyio.run(run)
+
+    assert explicit_client._api_client.api_key == "explicit-key"  # noqa: SLF001
+    assert env_client._api_client.api_key == "env-key"  # noqa: SLF001
+    assert stored_client._api_client.api_key == "stored-key"  # noqa: SLF001
+    explicit_client.close()
+    env_client.close()
+    stored_client.close()
+
+
+def test_google_provider_does_not_read_store_for_higher_priority_api_keys(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{invalid", encoding="utf-8")
+    resolver = StoredProviderAuthResolver(JsonAuthStore(auth_path))
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    async def run() -> tuple[genai.Client, genai.Client]:
+        explicit_client = await GoogleProvider(
+            api_key="explicit-key", auth_resolver=resolver
+        )._client_or_create()  # noqa: SLF001
+        monkeypatch.setenv("GEMINI_API_KEY", "env-key")
+        env_client = await GoogleProvider(auth_resolver=resolver)._client_or_create()  # noqa: SLF001
+        return explicit_client, env_client
+
+    explicit_client, env_client = anyio.run(run)
+
+    assert explicit_client._api_client.api_key == "explicit-key"  # noqa: SLF001
+    assert env_client._api_client.api_key == "env-key"  # noqa: SLF001
+    explicit_client.close()
+    env_client.close()
+
+
+def test_google_provider_does_not_replace_injected_client(tmp_path: Path) -> None:
+    store = JsonAuthStore(tmp_path / "auth.json")
+    store.set("google", ApiKeyCredential(key="old-stored-key"))
+    injected = cast(genai.Client, StubGenaiClient(StubModels()))
+    provider = GoogleProvider(
+        client=injected,
+        auth_resolver=StoredProviderAuthResolver(store),
+    )
+
+    async def run() -> None:
+        assert await provider._client_or_create() is injected  # noqa: SLF001
+        store.set("google", ApiKeyCredential(key="new-stored-key"))
+        assert await provider._client_or_create() is injected  # noqa: SLF001
+
+    anyio.run(run)
 
 
 def test_google_provider_requires_api_key(monkeypatch: MonkeyPatch) -> None:
@@ -472,7 +572,7 @@ def test_google_provider_requires_api_key(monkeypatch: MonkeyPatch) -> None:
         ]
 
     with pytest.raises(
-        ProviderConfigurationError, match="GOOGLE_API_KEY or GEMINI_API_KEY is required"
+        ProviderConfigurationError, match=r"/connect.*GOOGLE_API_KEY or GEMINI_API_KEY"
     ):
         anyio.run(run)
 
@@ -485,9 +585,13 @@ def test_google_provider_falls_back_to_gemini_api_key(monkeypatch: MonkeyPatch) 
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-env-key")
     provider = GoogleProvider()
 
-    client = provider._client_or_create()  # noqa: SLF001
+    async def run() -> genai.Client:
+        return await provider._client_or_create()  # noqa: SLF001
+
+    client = anyio.run(run)
 
     assert client._api_client.api_key == "gemini-env-key"  # noqa: SLF001
+    client.close()
 
 
 def test_google_provider_prefers_google_api_key_over_gemini_api_key(
@@ -497,9 +601,13 @@ def test_google_provider_prefers_google_api_key_over_gemini_api_key(
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-env-key")
     provider = GoogleProvider()
 
-    client = provider._client_or_create()  # noqa: SLF001
+    async def run() -> genai.Client:
+        return await provider._client_or_create()  # noqa: SLF001
+
+    client = anyio.run(run)
 
     assert client._api_client.api_key == "google-env-key"  # noqa: SLF001
+    client.close()
 
 
 def test_google_provider_splits_system_messages_from_conversation() -> None:

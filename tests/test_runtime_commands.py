@@ -167,7 +167,5 @@ def test_builtin_command_descriptors_capture_supported_arguments() -> None:
         "model",
         "effort",
     )
-    assert tuple(argument.name for argument in descriptors["login"].arguments) == (
-        "provider",
-        "method",
-    )
+    assert tuple(argument.name for argument in descriptors["connect"].arguments) == ("provider",)
+    assert descriptors["disconnect"].aliases == ("logout",)

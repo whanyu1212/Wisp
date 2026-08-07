@@ -135,6 +135,14 @@ def test_parse_tui_slash_command_aliases_quit() -> None:
     assert parse_tui_slash_command("/:q") is None
 
 
+def test_parse_tui_slash_command_aliases_logout_to_disconnect() -> None:
+    command = parse_tui_slash_command("/logout openai-codex")
+
+    assert command is not None
+    assert command.name is TuiSlashCommandName.disconnect
+    assert command.args == ("openai-codex",)
+
+
 def test_parse_tui_slash_command_rejects_unknown_command() -> None:
     # A bare slash-word that isn't known is a mistyped command → error (helpful).
     with pytest.raises(TuiSlashCommandError, match="Unknown command"):

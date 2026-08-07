@@ -1099,8 +1099,8 @@ def test_rpc_mode_reports_commands_before_prompt(tmp_path: Path) -> None:
         "resume",
         "provider",
         "auth",
-        "login",
-        "logout",
+        "connect",
+        "disconnect",
         "quit",
     ]
     compact = report["commands"][1]

@@ -137,26 +137,22 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=60,
         ),
         CommandDescriptor(
-            name="login",
-            title="Login",
-            description="Log in to a provider",
+            name="connect",
+            title="Connect",
+            description="Connect a model provider",
             category=CommandCategory.auth,
             arguments=(
                 CommandArgument(
                     name="provider",
                     description="Optional provider name",
                 ),
-                CommandArgument(
-                    name="method",
-                    description="Optional login method, such as device-code",
-                ),
             ),
             accepts_arguments=True,
             order=70,
         ),
         CommandDescriptor(
-            name="logout",
-            title="Logout",
+            name="disconnect",
+            title="Disconnect",
             description="Remove stored credentials",
             category=CommandCategory.auth,
             arguments=(
@@ -166,7 +162,7 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
                 ),
             ),
             accepts_arguments=True,
-            prefill_on_partial_enter=True,
+            aliases=("logout",),
             order=80,
         ),
         CommandDescriptor(

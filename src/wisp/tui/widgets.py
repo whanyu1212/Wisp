@@ -2036,7 +2036,7 @@ class SlashSuggest(OptionList):
         constrain: inside;
         display: none;
         width: auto;
-        max-width: 60;
+        max-width: 64;
         height: auto;
         max-height: 8;
         offset: 0 -100%;
@@ -2056,7 +2056,7 @@ class SlashSuggest(OptionList):
     # can't fit it. Tracked here too (not read back from styles.max_width,
     # a Scalar) so show_for's column-alignment truncation has a plain int
     # content-width budget to compute against.
-    _MAX_WIDTH_CEILING = 60
+    _MAX_WIDTH_CEILING = 64
 
     def __init__(self, id: str | None = None) -> None:  # noqa: A002 - Textual's param name
         super().__init__(id=id)

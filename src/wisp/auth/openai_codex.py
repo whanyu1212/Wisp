@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
-import secrets
 import time
-import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Any, cast
 
 import anyio
@@ -20,23 +16,13 @@ from wisp.auth.storage import OAuthCredential
 
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 AUTH_BASE_URL = "https://auth.openai.com"
-AUTHORIZE_URL = f"{AUTH_BASE_URL}/oauth/authorize"
 TOKEN_URL = f"{AUTH_BASE_URL}/oauth/token"
-REDIRECT_URI = "http://localhost:1455/auth/callback"
 DEVICE_USER_CODE_URL = f"{AUTH_BASE_URL}/api/accounts/deviceauth/usercode"
 DEVICE_TOKEN_URL = f"{AUTH_BASE_URL}/api/accounts/deviceauth/token"
 DEVICE_VERIFICATION_URI = f"{AUTH_BASE_URL}/codex/device"
 DEVICE_REDIRECT_URI = f"{AUTH_BASE_URL}/deviceauth/callback"
 DEVICE_CODE_TIMEOUT_SECONDS = 15 * 60
-OPENAI_CODEX_SCOPE = "openid profile email offline_access"
 JWT_CLAIM_PATH = "https://api.openai.com/auth"
-
-
-class OpenAICodexLoginMethod(StrEnum):
-    """Supported OpenAI Codex login methods."""
-
-    browser = "browser"
-    device_code = "device-code"
 
 
 @dataclass(frozen=True)
@@ -49,67 +35,7 @@ class DeviceCodeInfo:
     expires_in_seconds: int
 
 
-type AuthUrlCallback = Callable[[str], None]
 type DeviceCodeCallback = Callable[[DeviceCodeInfo], None]
-type PromptCallback = Callable[[str], str]
-
-
-async def login_openai_codex(
-    *,
-    method: OpenAICodexLoginMethod = OpenAICodexLoginMethod.browser,
-    on_auth_url: AuthUrlCallback | None = None,
-    on_device_code: DeviceCodeCallback | None = None,
-    prompt: PromptCallback | None = None,
-    open_browser: bool = True,
-    client: httpx.AsyncClient | None = None,
-) -> OAuthCredential:
-    """Run an OpenAI Codex login flow and return OAuth credentials.
-
-    The browser flow intentionally supports manual code/redirect URL paste so it
-    can work even when the local callback port is unavailable.
-    """
-
-    if method is OpenAICodexLoginMethod.device_code:
-        return await login_openai_codex_device_code(
-            on_device_code=on_device_code,
-            client=client,
-        )
-    return await login_openai_codex_browser(
-        on_auth_url=on_auth_url,
-        prompt=prompt,
-        open_browser=open_browser,
-        client=client,
-    )
-
-
-async def login_openai_codex_browser(
-    *,
-    on_auth_url: AuthUrlCallback | None = None,
-    prompt: PromptCallback | None = None,
-    open_browser: bool = True,
-    client: httpx.AsyncClient | None = None,
-) -> OAuthCredential:
-    verifier, challenge = _generate_pkce()
-    state = secrets.token_hex(16)
-    authorize_url = _authorization_url(challenge=challenge, state=state)
-    if on_auth_url is not None:
-        on_auth_url(authorize_url)
-    if open_browser:
-        webbrowser.open(authorize_url)
-    if prompt is None:
-        raise RuntimeError("OpenAI Codex browser login requires a prompt callback")
-    raw_code = prompt("Paste the authorization code or full redirect URL")
-    parsed_code, parsed_state = _parse_authorization_input(raw_code)
-    if parsed_state is not None and parsed_state != state:
-        raise RuntimeError("OpenAI Codex login failed: state mismatch")
-    if not parsed_code:
-        raise RuntimeError("OpenAI Codex login failed: missing authorization code")
-    return await _exchange_authorization_code(
-        parsed_code,
-        verifier,
-        redirect_uri=REDIRECT_URI,
-        client=client,
-    )
 
 
 async def login_openai_codex_device_code(
@@ -126,9 +52,7 @@ async def login_openai_codex_device_code(
             headers={"Content-Type": "application/json"},
         )
         if response.status_code == 404:
-            raise RuntimeError(
-                "OpenAI Codex device code login is not enabled; use browser login instead"
-            )
+            raise RuntimeError("OpenAI Codex device code login is not enabled")
         _raise_for_token_response(response, operation="device code request")
         payload = response.json()
         device_auth_id = payload.get("device_auth_id")
@@ -163,7 +87,7 @@ async def login_openai_codex_device_code(
         )
     finally:
         if owns_client:
-            await active_client.aclose()
+            await _close_client(active_client)
 
 
 async def refresh_openai_codex_token(
@@ -186,7 +110,7 @@ async def refresh_openai_codex_token(
         return _read_token_response(response, operation="refresh")
     finally:
         if owns_client:
-            await active_client.aclose()
+            await _close_client(active_client)
 
 
 def account_id_from_access_token(access_token: str) -> str:
@@ -259,7 +183,7 @@ async def _exchange_authorization_code(
         return _read_token_response(response, operation="exchange")
     finally:
         if owns_client:
-            await active_client.aclose()
+            await _close_client(active_client)
 
 
 def _read_token_response(response: httpx.Response, *, operation: str) -> OAuthCredential:
@@ -291,49 +215,6 @@ def _raise_for_token_response(response: httpx.Response, *, operation: str) -> No
     )
 
 
-def _authorization_url(*, challenge: str, state: str) -> str:
-    params = {
-        "response_type": "code",
-        "client_id": CLIENT_ID,
-        "redirect_uri": REDIRECT_URI,
-        "scope": OPENAI_CODEX_SCOPE,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-        "state": state,
-        "id_token_add_organizations": "true",
-        "codex_cli_simplified_flow": "true",
-        "originator": "wisp",
-    }
-    return f"{AUTHORIZE_URL}?{httpx.QueryParams(params)}"
-
-
-def _generate_pkce() -> tuple[str, str]:
-    verifier = _base64url(secrets.token_bytes(32))
-    digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    return verifier, _base64url(digest)
-
-
-def _parse_authorization_input(value: str) -> tuple[str | None, str | None]:
-    stripped = value.strip()
-    if not stripped:
-        return None, None
-    try:
-        url = httpx.URL(stripped)
-        code = url.params.get("code")
-        state = url.params.get("state")
-        if code or state:
-            return code, state
-    except httpx.InvalidURL:
-        pass
-    if "#" in stripped:
-        code, state = stripped.split("#", 1)
-        return code or None, state or None
-    if "code=" in stripped:
-        params = httpx.QueryParams(stripped)
-        return params.get("code"), params.get("state")
-    return stripped, None
-
-
 def _decode_jwt_payload(token: str) -> dict[str, Any]:
     parts = token.split(".")
     if len(parts) != 3:
@@ -350,10 +231,6 @@ def _decode_jwt_payload(token: str) -> dict[str, Any]:
     return cast(dict[str, Any], raw)
 
 
-def _base64url(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
-
-
 def _safe_json(response: httpx.Response) -> object:
     try:
         return response.json()
@@ -361,12 +238,14 @@ def _safe_json(response: httpx.Response) -> object:
         return None
 
 
+async def _close_client(client: httpx.AsyncClient) -> None:
+    with anyio.CancelScope(shield=True):
+        await client.aclose()
+
+
 __all__ = [
     "DeviceCodeInfo",
-    "OpenAICodexLoginMethod",
     "account_id_from_access_token",
-    "login_openai_codex",
-    "login_openai_codex_browser",
     "login_openai_codex_device_code",
     "refresh_openai_codex_token",
 ]

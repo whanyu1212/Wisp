@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
 from typing import Any, cast
 
 import anyio
@@ -27,6 +28,8 @@ from openai.types.responses.response import IncompleteDetails
 from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message
+from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
+from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
     ToolCall,
@@ -752,7 +755,98 @@ def test_openai_provider_stops_retrying_when_cancelled_during_backoff() -> None:
 def test_wisp_owned_openai_client_disables_sdk_retries() -> None:
     provider = OpenAIProvider(api_key="test-key")
 
-    assert provider._client_or_create().max_retries == 0  # noqa: SLF001
+    async def run() -> None:
+        client = await provider._client_or_create()  # noqa: SLF001
+        assert client.max_retries == 0
+        await client.close()
+
+    anyio.run(run)
+
+
+def test_openai_provider_uses_and_rotates_stored_api_key(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    store = JsonAuthStore(tmp_path / "auth.json")
+    store.set("openai", ApiKeyCredential(key="old-stored-key"))
+    provider = OpenAIProvider(auth_resolver=StoredProviderAuthResolver(store))
+
+    async def run() -> None:
+        old_client = await provider._client_or_create()  # noqa: SLF001
+        store.set("openai", ApiKeyCredential(key="new-stored-key"))
+        new_client = await provider._client_or_create()  # noqa: SLF001
+
+        assert old_client.api_key == "old-stored-key"
+        assert new_client.api_key == "new-stored-key"
+        assert new_client is not old_client
+        assert old_client.is_closed()
+        await new_client.close()
+
+    anyio.run(run)
+
+
+def test_openai_provider_api_key_precedence(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    store = JsonAuthStore(tmp_path / "auth.json")
+    store.set("openai", ApiKeyCredential(key="stored-key"))
+    resolver = StoredProviderAuthResolver(store)
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+
+    async def run() -> None:
+        explicit_client = await OpenAIProvider(
+            api_key="explicit-key", auth_resolver=resolver
+        )._client_or_create()  # noqa: SLF001
+        env_client = await OpenAIProvider(auth_resolver=resolver)._client_or_create()  # noqa: SLF001
+        monkeypatch.delenv("OPENAI_API_KEY")
+        stored_client = await OpenAIProvider(auth_resolver=resolver)._client_or_create()  # noqa: SLF001
+
+        assert explicit_client.api_key == "explicit-key"
+        assert env_client.api_key == "env-key"
+        assert stored_client.api_key == "stored-key"
+        await explicit_client.close()
+        await env_client.close()
+        await stored_client.close()
+
+    anyio.run(run)
+
+
+def test_openai_provider_does_not_read_store_for_higher_priority_api_keys(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{invalid", encoding="utf-8")
+    resolver = StoredProviderAuthResolver(JsonAuthStore(auth_path))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    async def run() -> None:
+        explicit_client = await OpenAIProvider(
+            api_key="explicit-key", auth_resolver=resolver
+        )._client_or_create()  # noqa: SLF001
+        monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+        env_client = await OpenAIProvider(auth_resolver=resolver)._client_or_create()  # noqa: SLF001
+
+        assert explicit_client.api_key == "explicit-key"
+        assert env_client.api_key == "env-key"
+        await explicit_client.close()
+        await env_client.close()
+
+    anyio.run(run)
+
+
+def test_openai_provider_does_not_replace_injected_client(tmp_path: Path) -> None:
+    store = JsonAuthStore(tmp_path / "auth.json")
+    store.set("openai", ApiKeyCredential(key="old-stored-key"))
+    injected = cast(AsyncOpenAI, StubAsyncOpenAI(StubResponsesResource()))
+    provider = OpenAIProvider(
+        client=injected,
+        auth_resolver=StoredProviderAuthResolver(store),
+    )
+
+    async def run() -> None:
+        assert await provider._client_or_create() is injected  # noqa: SLF001
+        store.set("openai", ApiKeyCredential(key="new-stored-key"))
+        assert await provider._client_or_create() is injected  # noqa: SLF001
+
+    anyio.run(run)
 
 
 def test_openai_provider_requires_api_key(monkeypatch: MonkeyPatch) -> None:
@@ -762,7 +856,7 @@ def test_openai_provider_requires_api_key(monkeypatch: MonkeyPatch) -> None:
     async def run() -> list[str]:
         return [delta async for delta in provider.stream([Message(role="user", content="hello")])]
 
-    with pytest.raises(ProviderConfigurationError, match="OPENAI_API_KEY is required"):
+    with pytest.raises(ProviderConfigurationError, match=r"/connect.*OPENAI_API_KEY"):
         anyio.run(run)
 
 

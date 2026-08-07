@@ -22,6 +22,7 @@ def test_config_defaults_to_default_provider(tmp_path: Path, monkeypatch: Monkey
     assert config.effort is None
     assert config.context_reserve_tokens == 16_384
     assert config.auto_compaction_enabled is True
+    assert config.update_check_enabled is True
     assert config.session_dir == tmp_path
     assert config.auth_path == default_auth_path()
 
@@ -270,4 +271,45 @@ def test_config_rejects_invalid_auto_compaction_env(
     monkeypatch.setenv("WISP_AUTO_COMPACTION", "sometimes")
 
     with pytest.raises(ValueError, match="WISP_AUTO_COMPACTION must be one of"):
+        WispConfig.from_env(session_dir=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("1", True),
+        ("true", True),
+        ("YES", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("NO", False),
+        ("off", False),
+    ],
+)
+def test_config_parses_update_check_env(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    value: str,
+    expected: bool,
+) -> None:
+    monkeypatch.setenv("WISP_UPDATE_CHECK", value)
+
+    assert WispConfig.from_env(session_dir=tmp_path).update_check_enabled is expected
+
+
+def test_explicit_update_check_setting_overrides_env(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WISP_UPDATE_CHECK", "off")
+
+    config = WispConfig.from_env(session_dir=tmp_path, update_check_enabled=True)
+
+    assert config.update_check_enabled is True
+
+
+def test_config_rejects_invalid_update_check_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("WISP_UPDATE_CHECK", "sometimes")
+
+    with pytest.raises(ValueError, match="WISP_UPDATE_CHECK must be one of"):
         WispConfig.from_env(session_dir=tmp_path)

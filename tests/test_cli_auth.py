@@ -6,17 +6,11 @@ from pathlib import Path
 from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
-from wisp.auth.openai_codex import OpenAICodexLoginMethod
-from wisp.auth.storage import OAuthCredential
+from wisp.auth.storage import ApiKeyCredential, JsonAuthStore, OAuthCredential
 from wisp.cli import app
-from wisp.cli import auth as cli_auth_module
 
 
-async def _fake_oauth_login(
-    method: OpenAICodexLoginMethod,
-    *_args: object,
-) -> OAuthCredential:
-    assert method is OpenAICodexLoginMethod.device_code
+def _oauth_credential() -> OAuthCredential:
     return OAuthCredential(
         access="access-token",
         refresh="refresh-token",
@@ -45,31 +39,10 @@ def test_auth_status_reports_no_credentials(tmp_path: Path) -> None:
     assert result.stdout == "no credentials configured\n"
 
 
-def test_auth_login_status_and_logout_openai_codex(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
+def test_auth_status_and_logout_openai_codex(tmp_path: Path) -> None:
     auth_file = tmp_path / "auth.json"
-
-    monkeypatch.setattr(cli_auth_module, "_login_openai_codex", _fake_oauth_login)
+    JsonAuthStore(auth_file).set("openai-codex", _oauth_credential())
     runner = CliRunner()
-
-    login = runner.invoke(
-        app,
-        [
-            "auth",
-            "login",
-            "openai-codex",
-            "--method",
-            "device-code",
-            "--auth-file",
-            str(auth_file),
-        ],
-    )
-
-    assert login.exit_code == 0, login.output
-    assert "logged in: openai-codex" in login.stdout
-    assert "access-token" not in login.stdout
 
     status = runner.invoke(app, ["auth", "status", "openai-codex", "--auth-file", str(auth_file)])
 
@@ -83,14 +56,13 @@ def test_auth_login_status_and_logout_openai_codex(
     assert logout.stdout == "logged out: openai-codex\n"
 
 
-def test_auth_login_rejects_unknown_provider(tmp_path: Path) -> None:
-    result = CliRunner().invoke(
-        app,
-        ["auth", "login", "missing", "--auth-file", str(tmp_path / "auth.json")],
-    )
+def test_auth_help_omits_login_command() -> None:
+    result = CliRunner().invoke(app, ["auth", "--help"])
 
-    assert result.exit_code != 0
-    assert "unsupported login provider" in result.output
+    assert result.exit_code == 0, result.output
+    assert "login" not in result.output
+    assert "status" in result.output
+    assert "logout" in result.output
 
 
 def test_auth_commands_use_trusted_project_auth_path(
@@ -102,18 +74,9 @@ def test_auth_commands_use_trusted_project_auth_path(
     project_auth = project / ".wisp" / "auth.json"
     _write_project_settings(project, auth_path=str(project_auth))
     _trust_project(project, tmp_path / "trust.json", monkeypatch)
+    JsonAuthStore(project_auth).set("openai-codex", _oauth_credential())
     monkeypatch.chdir(project)
-    monkeypatch.setattr(cli_auth_module, "_login_openai_codex", _fake_oauth_login)
     runner = CliRunner()
-
-    login = runner.invoke(
-        app,
-        ["auth", "login", "openai-codex", "--method", "device-code"],
-    )
-
-    assert login.exit_code == 0, login.output
-    assert f"credentials saved: {project_auth}" in login.stdout
-    assert project_auth.exists()
 
     status = runner.invoke(app, ["auth", "status", "openai-codex"])
 
@@ -137,17 +100,16 @@ def test_auth_commands_use_trusted_root_settings_from_subdirectory(
     project_auth = project / ".wisp" / "auth.json"
     _write_project_settings(project, auth_path=str(project_auth))
     _trust_project(project, tmp_path / "trust.json", monkeypatch)
+    JsonAuthStore(project_auth).set("openai-codex", _oauth_credential())
     monkeypatch.chdir(nested)
-    monkeypatch.setattr(cli_auth_module, "_login_openai_codex", _fake_oauth_login)
 
     result = CliRunner().invoke(
         app,
-        ["auth", "login", "openai-codex", "--method", "device-code"],
+        ["auth", "status", "openai-codex"],
     )
 
     assert result.exit_code == 0, result.output
-    assert f"credentials saved: {project_auth}" in result.stdout
-    assert project_auth.exists()
+    assert "openai-codex: oauth configured" in result.stdout
 
 
 def test_auth_commands_ignore_untrusted_project_auth_path(
@@ -158,19 +120,16 @@ def test_auth_commands_ignore_untrusted_project_auth_path(
     project.mkdir()
     project_auth = project / ".wisp" / "auth.json"
     _write_project_settings(project, auth_path=str(project_auth))
+    JsonAuthStore(project_auth).set("openai-codex", _oauth_credential())
     monkeypatch.chdir(project)
-    monkeypatch.setattr(cli_auth_module, "_login_openai_codex", _fake_oauth_login)
-    default_auth = Path.home() / ".wisp" / "auth.json"
 
     result = CliRunner().invoke(
         app,
-        ["auth", "login", "openai-codex", "--method", "device-code"],
+        ["auth", "status", "openai-codex"],
     )
 
     assert result.exit_code == 0, result.output
-    assert f"credentials saved: {default_auth}" in result.stdout
-    assert default_auth.exists()
-    assert not project_auth.exists()
+    assert result.stdout == "openai-codex: not logged in\n"
 
 
 def test_auth_file_option_overrides_trusted_project_auth_path(
@@ -183,23 +142,20 @@ def test_auth_file_option_overrides_trusted_project_auth_path(
     explicit_auth = tmp_path / "explicit-auth.json"
     _write_project_settings(project, auth_path=str(project_auth))
     _trust_project(project, tmp_path / "trust.json", monkeypatch)
+    JsonAuthStore(project_auth).set("openai-codex", _oauth_credential())
+    JsonAuthStore(explicit_auth).set("openai-codex", ApiKeyCredential(key="explicit-key"))
     monkeypatch.chdir(project)
-    monkeypatch.setattr(cli_auth_module, "_login_openai_codex", _fake_oauth_login)
 
     result = CliRunner().invoke(
         app,
         [
             "auth",
-            "login",
+            "status",
             "openai-codex",
-            "--method",
-            "device-code",
             "--auth-file",
             str(explicit_auth),
         ],
     )
 
     assert result.exit_code == 0, result.output
-    assert f"credentials saved: {explicit_auth}" in result.stdout
-    assert explicit_auth.exists()
-    assert not project_auth.exists()
+    assert result.stdout == "openai-codex: api key configured\n"

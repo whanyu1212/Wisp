@@ -37,6 +37,7 @@ from wisp.events import (
 from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tool_presentation import tool_result_status
 from wisp.tui.commands import TuiCommandCatalog
+from wisp.tui.connections import ConnectionProviderStatus
 from wisp.tui.history import HistoricalTranscriptEntry, HistoricalTranscriptMessage
 from wisp.tui.rendering import (
     TuiViewSnapshot,
@@ -411,6 +412,41 @@ class TextualTuiRenderer:
 
     def command_catalog_updated(self, catalog: TuiCommandCatalog) -> None:
         self.app.set_command_catalog(catalog)
+
+    def set_connect_api_key_hook(
+        self,
+        hook: Callable[[str, str], Awaitable[None]],
+    ) -> None:
+        self.app.set_connect_api_key_hook(hook)
+
+    def set_connect_oauth_hook(
+        self,
+        hook: Callable[[str], Awaitable[None]],
+    ) -> None:
+        self.app.set_connect_oauth_hook(hook)
+
+    def connect_picker_request(
+        self,
+        providers: tuple[ConnectionProviderStatus, ...],
+        *,
+        provider: str | None = None,
+    ) -> None:
+        self.app.show_connect_panel(providers, provider=provider)
+
+    def disconnect_picker_request(
+        self,
+        providers: tuple[ConnectionProviderStatus, ...],
+    ) -> None:
+        self.app.show_connect_panel(providers, mode="disconnect")
+
+    def connect_device_code(self, verification_uri: str, user_code: str) -> None:
+        self.app.show_connect_device_code(verification_uri, user_code)
+
+    def connect_completed(self, _provider: str) -> None:
+        self.app.hide_connect_panel()
+
+    def connect_failed(self, message: str) -> None:
+        self.app.show_connect_error(message)
 
     def model_picker_request(
         self,

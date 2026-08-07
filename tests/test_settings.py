@@ -212,6 +212,27 @@ def test_auto_compaction_is_user_only_even_for_trusted_projects(tmp_path: Path) 
     assert settings.auto_compaction_enabled is False
 
 
+def test_update_check_is_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(home, update_check_enabled=False)
+    _write_settings(project, update_check_enabled=True)
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.update_check_enabled is False
+
+
+def test_project_cannot_introduce_update_check_setting(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(project, update_check_enabled=False)
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.update_check_enabled is None
+
+
 def test_project_cannot_introduce_effort(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"

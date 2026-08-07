@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from pytest import MonkeyPatch
 
 from tests.tui_support import *
-from wisp.auth.storage import OAuthCredential
+from wisp.auth.storage import JsonAuthStore, OAuthCredential
 from wisp.events import (
     BillableTokenUsage,
     CompactionPolicyStatus,
@@ -45,7 +45,8 @@ from wisp.tui.history import (
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
 )
-from wisp.tui.state import TuiViewState
+from wisp.tui.state import TuiCancelRequested, TuiViewState
+from wisp.update_check import UpdateAvailable
 
 
 def _context_budget(
@@ -2378,7 +2379,7 @@ def test_tui_shell_help_renders_approval_hint_literally() -> None:
 def test_tui_shell_adopts_trusted_project_config(tmp_path: Path) -> None:
     # A ProjectConfigApplied event (first-run trust approval applied the project's
     # settings.json on the RPC side) must update the TUI's provider/model/auth so the
-    # header and /provider,/model,/auth,/login stop showing the untrusted-startup ones.
+    # header and /provider,/model,/auth,/connect stop showing the untrusted-startup ones.
     async def run() -> None:
         controller = ScriptedController()
         startup_auth = tmp_path / "startup-auth.json"
@@ -2613,14 +2614,14 @@ def test_tui_shell_logout_reports_storage_errors(tmp_path: Path) -> None:
 
         rendered = output.getvalue()
         assert "Auth storage error: Invalid auth file JSON:" in rendered
-        assert "Logged out: openai-codex" not in rendered
+        assert "Disconnected: openai-codex" not in rendered
         assert "Not logged in: openai-codex" not in rendered
         assert controller.prompts == []
 
     anyio.run(run)
 
 
-def test_tui_shell_login_reports_storage_errors(
+def test_tui_shell_connect_reports_storage_errors(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -2632,7 +2633,7 @@ def test_tui_shell_login_reports_storage_errors(
             account_id="account-id",
         )
 
-    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex", fake_login)
+    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex_device_code", fake_login)
     auth_path = tmp_path / "auth.json"
     auth_path.write_text("{not json", encoding="utf-8")
 
@@ -2642,7 +2643,7 @@ def test_tui_shell_login_reports_storage_errors(
         shell = TuiShell(
             controller,
             console=console,
-            prompt_reader=await _reader_from(["/login openai-codex", "/quit"]),
+            prompt_reader=await _reader_from(["/connect openai-codex", "/quit"]),
             provider="openai-codex",
             auth_path=auth_path,
         )
@@ -2650,15 +2651,15 @@ def test_tui_shell_login_reports_storage_errors(
         await shell.run()
 
         rendered = output.getvalue()
-        assert "Starting openai-codex device-code login..." in rendered
+        assert "Starting openai-codex device-code login..." not in rendered
         assert "Auth storage error: Invalid auth file JSON:" in rendered
-        assert "Logged in: openai-codex" not in rendered
+        assert "Connected: openai-codex" not in rendered
         assert "access-token" not in rendered
 
     anyio.run(run)
 
 
-def test_tui_shell_login_and_logout_openai_codex(
+def test_tui_shell_connect_and_disconnect_openai_codex(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -2670,7 +2671,7 @@ def test_tui_shell_login_and_logout_openai_codex(
             account_id="account-id",
         )
 
-    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex", fake_login)
+    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex_device_code", fake_login)
 
     async def run() -> None:
         controller = ScriptedController()
@@ -2679,7 +2680,12 @@ def test_tui_shell_login_and_logout_openai_codex(
             controller,
             console=console,
             prompt_reader=await _reader_from(
-                ["/login openai-codex", "/auth openai-codex", "/logout openai-codex", "/quit"]
+                [
+                    "/connect openai-codex",
+                    "/auth openai-codex",
+                    "/disconnect openai-codex",
+                    "/quit",
+                ]
             ),
             provider="openai-codex",
             auth_path=tmp_path / "auth.json",
@@ -2688,15 +2694,80 @@ def test_tui_shell_login_and_logout_openai_codex(
         await shell.run()
 
         rendered = output.getvalue()
-        assert "Logged in: openai-codex" in rendered
+        assert "Connected: openai-codex" in rendered
         assert "openai-codex: oauth configured" in rendered
-        assert "Logged out: openai-codex" in rendered
+        assert "Disconnected: openai-codex" in rendered
         assert "access-token" not in rendered
 
     anyio.run(run)
 
 
-def test_tui_shell_login_defaults_to_pending_provider(
+def test_tui_shell_escape_cancels_non_textual_device_authorization(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    started = anyio.Event()
+    cancelled = anyio.Event()
+
+    async def fake_login(*_args: object, **_kwargs: object) -> OAuthCredential:
+        started.set()
+        try:
+            await anyio.sleep_forever()
+        finally:
+            cancelled.set()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex_device_code", fake_login)
+    auth_path = tmp_path / "auth.json"
+    existing_credential = OAuthCredential(
+        access="existing-access",
+        refresh="existing-refresh",
+        expires=4_102_444_800_000,
+        account_id="existing-account",
+    )
+    JsonAuthStore(auth_path).set("openai-codex", existing_credential)
+
+    async def run() -> None:
+        calls = 0
+
+        async def reader(_prompt: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "/connect openai-codex"
+            if calls == 2:
+                await started.wait()
+                return "/disconnect openai-codex"
+            if calls == 3:
+                return "prompt must not race reconnect"
+            if calls == 4:
+                raise TuiCancelRequested
+            return "/quit"
+
+        controller = ScriptedController()
+        console, output = _console()
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=reader,
+            provider="openai-codex",
+            auth_path=auth_path,
+        )
+
+        await shell.run()
+
+        assert cancelled.is_set()
+        assert controller.prompts == []
+        assert JsonAuthStore(auth_path).get("openai-codex") == existing_credential
+        rendered = output.getvalue()
+        assert "Cannot disconnect while a provider connection is in progress." in rendered
+        assert "Cannot submit prompts while a provider connection is in progress." in rendered
+        assert "Provider connection cancelled." in rendered
+
+    anyio.run(run)
+
+
+def test_tui_shell_connects_pending_provider(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -2708,7 +2779,7 @@ def test_tui_shell_login_defaults_to_pending_provider(
             account_id="account-id",
         )
 
-    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex", fake_login)
+    monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex_device_code", fake_login)
 
     async def run() -> None:
         controller = ScriptedController(
@@ -2730,7 +2801,7 @@ def test_tui_shell_login_defaults_to_pending_provider(
             controller,
             console=console,
             prompt_reader=await _reader_from(
-                ["/provider openai-codex", "/login", "/auth", "/quit"]
+                ["/provider openai-codex", "/connect openai-codex", "/auth", "/quit"]
             ),
             provider="fake",
             auth_path=tmp_path / "auth.json",
@@ -2740,9 +2811,9 @@ def test_tui_shell_login_defaults_to_pending_provider(
 
         rendered = output.getvalue()
         assert "Configuring provider: openai-codex" in rendered
-        assert "Logged in: openai-codex" in rendered
+        assert "Connected: openai-codex" in rendered
         assert "openai-codex: oauth configured" in rendered
-        assert "TUI login currently supports only openai-codex" not in rendered
+        assert "Unknown provider" not in rendered
         assert "fake: oauth configured" not in rendered
 
     anyio.run(run)
@@ -3493,7 +3564,9 @@ def test_tui_shell_preserves_remaining_fullscreen_follow_up_count() -> None:
         async def read(_prompt: str) -> str:
             if inputs:
                 return inputs.popleft()
-            await anyio.sleep(0.2)
+            with anyio.fail_after(2):
+                while len(controller.prompts) < 3:
+                    await anyio.sleep(0.01)
             raise EOFError
 
         class RecordingFullscreenRenderer(FullscreenTuiRenderer):
@@ -3856,5 +3929,37 @@ def test_tui_shell_reloads_latest_history_after_a_compaction_send_failure() -> N
         assert renderer.latest_history_captures == 1
         assert shell._history_pagination is not None
         assert not shell._history_pagination.latest_reload_pending
+
+    anyio.run(run)
+
+
+def test_tui_shell_renders_available_update_without_blocking_input() -> None:
+    async def update_checker() -> UpdateAvailable:
+        return UpdateAvailable(
+            current_version="0.1.0a1",
+            latest_version="0.1.0a2",
+            update_command='uv tool install --force "wisp-ai==0.1.0a2"',
+        )
+
+    async def run() -> None:
+        controller = ScriptedController()
+        console, output = _console()
+
+        async def reader(_prompt: str) -> str:
+            await anyio.sleep(0.01)
+            return "/quit"
+
+        shell = TuiShell(
+            controller,
+            console=console,
+            prompt_reader=reader,
+            update_checker=update_checker,
+        )
+
+        await shell.run()
+
+        rendered = output.getvalue()
+        assert "Wisp 0.1.0a2 is available (current 0.1.0a1)." in rendered
+        assert 'uv tool install --force "wisp-ai==0.1.0a2"' in rendered
 
     anyio.run(run)
