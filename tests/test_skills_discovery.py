@@ -126,6 +126,7 @@ def test_isolates_yaml_constructor_value_errors(tmp_path: Path) -> None:
         ("-demo", "name: -demo\ndescription: test\n", "name must be"),
         ("demo-", "name: demo-\ndescription: test\n", "name must be"),
         ("demo--skill", "name: demo--skill\ndescription: test\n", "name must be"),
+        ("demo", 'name: " demo "\ndescription: test\n', "name must be"),
         ("other", "name: demo\ndescription: test\n", "does not match"),
         ("demo", "name: demo\ndescription: 42\n", "description is required"),
         ("demo", "name: demo\ndescription: test\nmetadata: []\n", "metadata must"),
@@ -410,6 +411,44 @@ def test_unreadable_root_is_diagnostic(
 
     assert catalog.entries == ()
     assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["root-unreadable"]
+
+
+def test_link_inspection_error_closes_root_and_does_not_hide_later_sources(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    _write_skill(tmp_path / ".wisp" / "skills", "blocked")
+    _write_skill(tmp_path / ".agents" / "skills", "valid")
+    original_open = discovery_module.os.open
+    original_close = discovery_module.os.close
+    original_is_link_like = discovery_module._is_link_like
+    base_fds: list[int] = []
+    closed_fds: list[int] = []
+
+    def recording_open(path: str | Path, flags: int, *, dir_fd: int | None = None) -> int:
+        fd = original_open(path, flags, dir_fd=dir_fd)
+        if Path(path) == tmp_path and dir_fd is None:
+            base_fds.append(fd)
+        return fd
+
+    def recording_close(fd: int) -> None:
+        closed_fds.append(fd)
+        original_close(fd)
+
+    def fail_wisp_inspection(path: Path) -> bool:
+        if path == tmp_path / ".wisp":
+            raise PermissionError("denied")
+        return original_is_link_like(path)
+
+    monkeypatch.setattr(discovery_module.os, "open", recording_open)
+    monkeypatch.setattr(discovery_module.os, "close", recording_close)
+    monkeypatch.setattr(discovery_module, "_is_link_like", fail_wisp_inspection)
+
+    catalog = _discover(tmp_path)
+
+    assert catalog.names() == ("valid",)
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["root-unreadable"]
+    assert base_fds[0] in closed_fds
 
 
 def test_scan_error_is_isolated_from_later_roots(

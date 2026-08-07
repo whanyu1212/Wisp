@@ -275,7 +275,21 @@ def _open_skill_root(root: _SkillRoot) -> tuple[_OpenedRoot | None, SkillDiagnos
     current_path = root.base
     for component in root.components:
         candidate = current_path / component
-        if _is_link_like(candidate):
+        try:
+            is_link = _is_link_like(candidate)
+        except OSError as exc:
+            os.close(current_fd)
+            return (
+                None,
+                _diagnostic(
+                    "root-unreadable",
+                    "error",
+                    f"cannot inspect skill source root: {_os_error_message(exc)}",
+                    root.source,
+                    candidate,
+                ),
+            )
+        if is_link:
             os.close(current_fd)
             return (
                 None,
@@ -355,7 +369,20 @@ def _open_skill_root_by_path(
 
     for component in root.components:
         candidate = current_path / component
-        if _is_link_like(candidate):
+        try:
+            is_link = _is_link_like(candidate)
+        except OSError as exc:
+            return (
+                None,
+                _diagnostic(
+                    "root-unreadable",
+                    "error",
+                    f"cannot inspect skill source root: {_os_error_message(exc)}",
+                    root.source,
+                    candidate,
+                ),
+            )
+        if is_link:
             return (
                 None,
                 _diagnostic(

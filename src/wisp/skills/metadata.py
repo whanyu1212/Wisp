@@ -187,7 +187,7 @@ def _parse_entry(
     if not all(type(key) is str for key in raw):
         raise SkillMetadataError("invalid-metadata", "frontmatter keys must be strings")
 
-    name = _required_string(raw, "name")
+    name = _required_string(raw, "name", strip=False)
     if len(name) > 64 or _SKILL_NAME.fullmatch(name) is None:
         raise SkillMetadataError(
             "invalid-metadata",
@@ -235,14 +235,14 @@ def _parse_entry(
     )
 
 
-def _required_string(raw: dict[object, object], field: str) -> str:
+def _required_string(raw: dict[object, object], field: str, *, strip: bool = True) -> str:
     value = raw.get(field)
     if type(value) is not str or not value.strip():
         raise SkillMetadataError(
             "invalid-metadata",
             f"{field} is required and must be a non-empty string",
         )
-    return value.strip()
+    return value.strip() if strip else value
 
 
 def _optional_string(raw: dict[object, object], field: str) -> str | None:
