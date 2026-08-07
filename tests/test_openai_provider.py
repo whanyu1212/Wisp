@@ -9,6 +9,7 @@ import pytest
 from openai import APIConnectionError, AsyncOpenAI
 from openai.types.responses import (
     Response,
+    ResponseCompletedEvent,
     ResponseCreatedEvent,
     ResponseError,
     ResponseErrorEvent,
@@ -126,6 +127,7 @@ class FlakyOpenAIProvider(OpenAIProvider):
 
         async def stream() -> AsyncIterator[ResponseStreamEvent]:
             yield _text_delta("recovered")
+            yield _completed_event()
 
         return stream()
 
@@ -135,6 +137,7 @@ def test_openai_provider_streams_text_deltas() -> None:
         [
             _text_delta("hello"),
             _text_delta(" world", content_index=1, sequence_number=1),
+            _completed_event(),
         ]
     )
     messages = [Message(role="user", content="Say hello")]
@@ -146,14 +149,14 @@ def test_openai_provider_streams_text_deltas() -> None:
         ProviderResponseStarted(model="gpt-test"),
         ProviderTextDelta(delta="hello"),
         ProviderTextDelta(delta=" world", content_index=1),
-        ProviderResponseCompleted(content="hello world"),
+        ProviderResponseCompleted(content="hello world", response_id="response-id"),
     ]
     assert provider.seen_model == "gpt-test"
     assert provider.seen_messages == messages
 
 
 def test_openai_provider_uses_default_model_when_model_is_not_provided() -> None:
-    provider = StubOpenAIProvider([_text_delta("hello")])
+    provider = StubOpenAIProvider([_text_delta("hello"), _completed_event()])
 
     async def run() -> list[object]:
         return [event async for event in provider.stream([Message(role="user", content="hello")])]
@@ -161,13 +164,13 @@ def test_openai_provider_uses_default_model_when_model_is_not_provided() -> None
     assert anyio.run(run) == [
         ProviderResponseStarted(model="default-test-model"),
         ProviderTextDelta(delta="hello"),
-        ProviderResponseCompleted(content="hello"),
+        ProviderResponseCompleted(content="hello", response_id="response-id"),
     ]
     assert provider.seen_model == "default-test-model"
 
 
 def test_openai_provider_accepts_provider_tool_specs() -> None:
-    provider = StubOpenAIProvider([_text_delta("hello")])
+    provider = StubOpenAIProvider([_text_delta("hello"), _completed_event()])
     tool = ToolSpec(
         name="lookup",
         description="Look something up.",
@@ -186,7 +189,7 @@ def test_openai_provider_accepts_provider_tool_specs() -> None:
     assert anyio.run(run) == [
         ProviderResponseStarted(model="default-test-model"),
         ProviderTextDelta(delta="hello"),
-        ProviderResponseCompleted(content="hello"),
+        ProviderResponseCompleted(content="hello", response_id="response-id"),
     ]
     assert provider.seen_tools == [tool]
 
@@ -286,7 +289,7 @@ def test_openai_provider_omits_reasoning_when_effort_is_not_provided() -> None:
 
 
 def test_openai_provider_stream_forwards_effort_to_create_stream() -> None:
-    provider = StubOpenAIProvider([_text_delta("hi")])
+    provider = StubOpenAIProvider([_text_delta("hi"), _completed_event()])
 
     async def run() -> list[object]:
         return [
@@ -414,6 +417,7 @@ def test_openai_provider_uses_buffered_item_metadata_for_argument_done_events() 
         [
             _function_call_output_item_added_event("lookup"),
             _function_call_arguments_done_event("wrong-name", '{"query": "wisp"}'),
+            _completed_event(),
         ]
     )
 
@@ -434,6 +438,7 @@ def test_openai_provider_uses_buffered_item_metadata_for_argument_done_events() 
         ProviderResponseCompleted(
             content="",
             tool_calls=(tool_call,),
+            response_id="response-id",
             finish_reason="tool_calls",
         ),
     ]
@@ -444,6 +449,7 @@ def test_openai_provider_waits_for_output_item_done_when_arguments_done_lacks_me
         [
             _function_call_arguments_done_event_without_name('{"query": "wisp"}'),
             _function_call_output_item_done_event("lookup", arguments="{}"),
+            _completed_event(),
         ]
     )
 
@@ -464,6 +470,7 @@ def test_openai_provider_waits_for_output_item_done_when_arguments_done_lacks_me
         ProviderResponseCompleted(
             content="",
             tool_calls=(tool_call,),
+            response_id="response-id",
             finish_reason="tool_calls",
         ),
     ]
@@ -474,6 +481,7 @@ def test_openai_provider_streams_function_tool_calls() -> None:
         [
             _created_event("response-id"),
             _function_call_output_item_done_event("lookup", arguments='{"query": "wisp"}'),
+            _completed_event(),
         ]
     )
     tool = ToolSpec(
@@ -517,6 +525,7 @@ def test_openai_provider_streams_tool_call_parse_errors() -> None:
         [
             _function_call_output_item_added_event("lookup"),
             _function_call_arguments_done_event("lookup", "not-json"),
+            _completed_event(),
         ]
     )
 
@@ -538,13 +547,16 @@ def test_openai_provider_streams_tool_call_parse_errors() -> None:
         ProviderResponseCompleted(
             content="",
             tool_calls=(tool_call,),
+            response_id="response-id",
             finish_reason="tool_calls",
         ),
     ]
 
 
 def test_openai_provider_streams_refusal_deltas() -> None:
-    provider = StubOpenAIProvider([_refusal_delta("I can't help with that", content_index=2)])
+    provider = StubOpenAIProvider(
+        [_refusal_delta("I can't help with that", content_index=2), _completed_event()]
+    )
 
     async def run() -> list[object]:
         return [event async for event in provider.stream([Message(role="user", content="hello")])]
@@ -552,7 +564,44 @@ def test_openai_provider_streams_refusal_deltas() -> None:
     assert anyio.run(run) == [
         ProviderResponseStarted(model="default-test-model"),
         ProviderTextDelta(delta="I can't help with that", content_index=2),
-        ProviderResponseCompleted(content="I can't help with that"),
+        ProviderResponseCompleted(content="I can't help with that", response_id="response-id"),
+    ]
+
+
+def test_openai_provider_rejects_eof_without_native_completion() -> None:
+    provider = StubOpenAIProvider([_created_event("response-id"), _text_delta("partial")])
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
+
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderTextDelta(delta="partial"),
+        ProviderResponseFailed(
+            message="OpenAI stream ended before response.completed was received",
+            partial_content="partial",
+            response_id="response-id",
+        ),
+    ]
+
+
+def test_openai_provider_does_not_expose_tool_calls_before_native_completion() -> None:
+    provider = StubOpenAIProvider(
+        [
+            _created_event("response-id"),
+            _function_call_output_item_done_event("lookup", arguments='{"query": "wisp"}'),
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
+
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderResponseFailed(
+            message="OpenAI stream ended before response.completed was received",
+            response_id="response-id",
+        ),
     ]
 
 
@@ -629,7 +678,7 @@ def test_openai_provider_retries_request_opening_failure_before_start() -> None:
     assert events[1:] == [
         ProviderResponseStarted(model="default-test-model"),
         ProviderTextDelta(delta="recovered"),
-        ProviderResponseCompleted(content="recovered"),
+        ProviderResponseCompleted(content="recovered", response_id="response-id"),
     ]
 
 
@@ -744,6 +793,14 @@ def _created_event(response_id: str) -> ResponseCreatedEvent:
         response=_response(response_id=response_id),
         sequence_number=0,
         type="response.created",
+    )
+
+
+def _completed_event(response_id: str = "response-id") -> ResponseCompletedEvent:
+    return ResponseCompletedEvent(
+        response=_response(response_id=response_id),
+        sequence_number=0,
+        type="response.completed",
     )
 
 

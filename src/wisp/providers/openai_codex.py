@@ -43,6 +43,7 @@ from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_de
 
 DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
+_CODEX_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
 
 
 class _CodexHTTPError(ProviderError):
@@ -130,6 +131,7 @@ class OpenAICodexProvider:
         tool_calls: list[ToolCall] = []
         usage: ProviderUsage | None = None
         failure: ProviderResponseFailed | None = None
+        stream_completed = False
         for retry_number in range(self._retry_policy.max_retries + 1):
             response_started = False
             try:
@@ -163,10 +165,6 @@ class OpenAICodexProvider:
                                         response_id=response_id,
                                     )
                                     tool_calls.append(tool_call)
-                                    yield ProviderToolCallCompleted(
-                                        tool_call=tool_call,
-                                        content_index=len(tool_calls) - 1,
-                                    )
                                     emitted_tool_item_ids.add(item_id)
                         elif event_type in {
                             "response.output_item.added",
@@ -205,10 +203,6 @@ class OpenAICodexProvider:
                                         response_id=response_id,
                                     )
                                     tool_calls.append(tool_call)
-                                    yield ProviderToolCallCompleted(
-                                        tool_call=tool_call,
-                                        content_index=len(tool_calls) - 1,
-                                    )
                                     if item_id is not None:
                                         emitted_tool_item_ids.add(item_id)
                         elif event_type == "response.completed":
@@ -227,6 +221,8 @@ class OpenAICodexProvider:
                                             item_key = f"anonymous-{anonymous_output_item}"
                                             anonymous_output_item += 1
                                         output_items[item_key] = deepcopy(item)
+                            stream_completed = True
+                            break
                         elif event_type == "error":
                             failure = ProviderResponseFailed(
                                 message=_codex_error_message(event),
@@ -277,6 +273,13 @@ class OpenAICodexProvider:
                 continue
             break
 
+        if failure is None and not stream_completed:
+            failure = ProviderResponseFailed(
+                message="OpenAI Codex stream ended before response.completed was received",
+                partial_content="".join(chunks),
+                response_id=response_id,
+            )
+
         if failure is not None:
             self._continuations.discard(previous_response_id)
             yield failure
@@ -296,6 +299,9 @@ class OpenAICodexProvider:
             )
         elif previous_response_id is not None:
             self._continuations.consume(previous_response_id)
+
+        for content_index, tool_call in enumerate(tool_calls):
+            yield ProviderToolCallCompleted(tool_call=tool_call, content_index=content_index)
 
         yield ProviderResponseCompleted(
             content="".join(chunks),
@@ -326,7 +332,7 @@ class OpenAICodexProvider:
         headers: Mapping[str, str],
     ) -> AsyncIterator[AsyncIterator[dict[str, object]]]:
         owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(timeout=None)
+        client = self._client or httpx.AsyncClient(timeout=_CODEX_TIMEOUT)
         try:
             async with client.stream(
                 "POST",
