@@ -393,6 +393,7 @@ class TextualTui(App[None]):
         self._operation_indicator: OperationIndicator | None = None
         self._overlay_controller: TextualOverlayController | None = None
         self._help_viewport_state: TranscriptViewportState | None = None
+        self._help_viewport_baseline: TranscriptViewportState | None = None
         self._command_catalog = DEFAULT_TUI_COMMAND_CATALOG
         self._agent_mode = "build"
         self._current_prompt = "wisp> "
@@ -1202,21 +1203,35 @@ class TextualTui(App[None]):
         if not self.is_running:
             return
         if self.screen.query(HelpPanel):
-            self.action_hide_help_panel()
+            transcript = self._transcript
             viewport_state = self._help_viewport_state
+            baseline = self._help_viewport_baseline
+            should_restore = bool(
+                transcript is not None
+                and viewport_state is not None
+                and (baseline is None or transcript.viewport_state() == baseline)
+            )
+            self.action_hide_help_panel()
             self._help_viewport_state = None
-            if self._transcript is not None and viewport_state is not None:
-                self.call_after_refresh(self._transcript.restore_viewport_state, viewport_state)
+            self._help_viewport_baseline = None
+            if should_restore and transcript is not None and viewport_state is not None:
+                self.call_after_refresh(transcript.restore_viewport_state, viewport_state)
             return
 
         if self._transcript is not None:
             self._help_viewport_state = self._transcript.viewport_state()
+            self._help_viewport_baseline = None
         self.action_show_help_panel()
         if self._transcript is not None and self._help_viewport_state is not None:
-            self.call_after_refresh(
-                self._transcript.restore_viewport_state,
-                self._help_viewport_state,
-            )
+            self.call_after_refresh(self._stabilize_help_viewport)
+
+    def _stabilize_help_viewport(self) -> None:
+        transcript = self._transcript
+        viewport_state = self._help_viewport_state
+        if transcript is None or viewport_state is None or not self.screen.query(HelpPanel):
+            return
+        transcript.restore_viewport_state(viewport_state)
+        self._help_viewport_baseline = transcript.viewport_state()
 
     def _help_key_panel(self) -> KeyPanel | None:
         if not self.is_running:

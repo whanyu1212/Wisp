@@ -41,6 +41,26 @@ def test_ctrl_g_toggles_native_help_without_moving_focus_or_draft() -> None:
     anyio.run(scenario)
 
 
+def test_closing_help_preserves_navigation_performed_while_open() -> None:
+    async def scenario() -> None:
+        app, _renderer = create_textual_tui()
+        async with app.run_test() as pilot:
+            transcript = app.query_one("#transcript", Transcript)
+            assert transcript.is_following
+
+            await pilot.press("ctrl+g")
+            await pilot.pause()
+            transcript.stop_following()
+            assert not transcript.is_following
+
+            await pilot.press("ctrl+g")
+            await pilot.pause()
+
+            assert not transcript.is_following
+
+    anyio.run(scenario)
+
+
 def test_textual_help_command_uses_the_same_contextual_panel() -> None:
     async def scenario() -> None:
         app, renderer = create_textual_tui()
