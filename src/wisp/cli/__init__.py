@@ -10,6 +10,7 @@ import anyio
 import typer
 from rich.console import Console
 
+from wisp import __version__
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.auth import auth_app
 from wisp.coding import CodingSession, resolve_coding_session_configuration
@@ -105,6 +106,12 @@ _rpc_command_id = _cli_rpc._rpc_command_id
 _parse_rpc_command = _cli_rpc._parse_rpc_command
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"wisp {__version__}")
+        raise typer.Exit()
+
+
 app = typer.Typer(
     add_completion=False,
     help="Wisp: a terminal-first coding agent. Run without arguments to launch the TUI.",
@@ -118,6 +125,15 @@ app.add_typer(_cli_trust.trust_app, name="trust")
 @app.callback()
 def cli_callback(
     ctx: typer.Context,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show the installed Wisp version and exit.",
+        ),
+    ] = False,
     prompt: Annotated[
         str | None,
         typer.Option("--prompt", "-p", help="Run one prompt and exit."),

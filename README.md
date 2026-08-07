@@ -62,6 +62,8 @@ To run Wisp without installing it:
 uvx --from "wisp-ai==0.1.0a2" wisp
 ```
 
+Check the installed version with `wisp --version`.
+
 Installed builds check PyPI once per day after TUI startup. When a newer applicable release is
 available, Wisp prints a non-blocking update command; it never installs updates automatically. Set
 `WISP_UPDATE_CHECK=0` to disable the check.

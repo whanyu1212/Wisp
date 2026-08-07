@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 
 from tests.cli_support import *
+from wisp import __version__
 from wisp.agent.messages import CompactionRecord
 from wisp.cli.output import _print_event_line
 from wisp.events import (
@@ -42,6 +43,13 @@ def _trigger_budget() -> ContextBudget:
         estimated_percent=81,
         over_budget=True,
     )
+
+
+def test_cli_version_flag() -> None:
+    result = CliRunner().invoke(app, ["--version"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output == f"wisp {__version__}\n"
 
 
 def test_bare_interactive_cli_launches_textual_tui(monkeypatch: MonkeyPatch) -> None:
