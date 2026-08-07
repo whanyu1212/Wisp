@@ -30,6 +30,7 @@ from openai.types.responses import (
 from openai.types.responses.response_input_param import ResponseInputParam
 
 from wisp.agent.messages import Message, Role
+from wisp.providers.auth import ProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
     ToolCallResult,
@@ -69,11 +70,15 @@ class OpenAIProvider:
         api_key: str | None = None,
         default_model: str = DEFAULT_OPENAI_MODEL,
         client: AsyncOpenAI | None = None,
+        auth_resolver: ProviderAuthResolver | None = None,
         retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.default_model: str | None = default_model
         self._api_key = _normalize_optional(api_key)
         self._client = client
+        self._client_is_injected = client is not None
+        self._client_api_key: str | None = None
+        self._auth_resolver = auth_resolver
         self._retry_policy = retry_policy or RetryPolicy()
 
     async def stream(
@@ -250,7 +255,7 @@ class OpenAIProvider:
         previous_response_id: str | None = None,
         effort: str | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
-        client = self._client_or_create()
+        client = await self._client_or_create()
         openai_tools = _tool_specs_to_openai_tools(tools)
         response_input = (
             _tool_results_to_response_input(tool_results)
@@ -282,18 +287,31 @@ class OpenAIProvider:
         stream = await create(**kwargs)
         return cast(AsyncIterator[ResponseStreamEvent], stream)
 
-    def _client_or_create(self) -> AsyncOpenAI:
-        if self._client is not None:
+    async def _client_or_create(self) -> AsyncOpenAI:
+        if self._client_is_injected:
+            assert self._client is not None
             return self._client
 
-        api_key = self._api_key or _normalize_optional(os.environ.get("OPENAI_API_KEY"))
+        stored_api_key = (
+            await self._auth_resolver.api_key(self.name)
+            if self._auth_resolver is not None
+            else None
+        )
+        api_key = (
+            self._api_key or _normalize_optional(os.environ.get("OPENAI_API_KEY")) or stored_api_key
+        )
         if api_key is None:
             raise ProviderConfigurationError(
-                "OPENAI_API_KEY is required when using the openai provider"
+                "openai credentials are required; run `/connect` in the TUI or set OPENAI_API_KEY"
             )
+        if self._client is not None and self._client_api_key == api_key:
+            return self._client
 
-        # Wisp emits retry progress itself. A caller-injected client stays caller-owned.
+        # Wisp emits retry progress itself. Key changes replace only Wisp-owned clients.
+        if self._client is not None:
+            await self._client.close()
         self._client = AsyncOpenAI(api_key=api_key, max_retries=0)
+        self._client_api_key = api_key
         return self._client
 
 

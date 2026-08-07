@@ -551,7 +551,7 @@ class ProjectConfigApplied(WispEvent):
     Emitted by the RPC process after a first-run trust approval rebuilds the runtime
     from the project's ``.wisp/settings.json``. It lets an out-of-process front-end
     (the TUI) refresh the provider/model/auth it displays and mutates, so its header
-    and ``/provider`` / ``/model`` / ``/auth`` / ``/login`` commands match the config
+    and ``/provider`` / ``/model`` / ``/auth`` / ``/connect`` commands match the config
     the agent is actually running with. It also carries the effective automatic-
     compaction setting so frontends do not infer policy from their own startup state.
 

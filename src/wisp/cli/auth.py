@@ -6,19 +6,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
-import anyio
 import typer
-from rich.console import Console
 
 from wisp.agent.prompt import resolve_project_context_root
-from wisp.auth.openai_codex import OpenAICodexLoginMethod, login_openai_codex
 from wisp.auth.storage import ApiKeyCredential, AuthCredential, JsonAuthStore, OAuthCredential
 from wisp.config import WispConfig
 
 from . import trust as _cli_trust
-
-SUPPORTED_LOGIN_PROVIDERS = ("openai-codex",)
-
 
 auth_app = typer.Typer(help="Manage Wisp provider credentials.")
 
@@ -43,40 +37,6 @@ def auth_status(
         typer.echo(_status_line(provider_name, credential))
 
 
-@auth_app.command("login")
-def auth_login(
-    provider: Annotated[str, typer.Argument(help="Provider to authenticate.")],
-    method: Annotated[
-        OpenAICodexLoginMethod,
-        typer.Option("--method", help="Login method for providers that support OAuth."),
-    ] = OpenAICodexLoginMethod.browser,
-    auth_file: Annotated[
-        Path | None,
-        typer.Option("--auth-file", help="Path to Wisp's private auth JSON file."),
-    ] = None,
-    open_browser: Annotated[
-        bool,
-        typer.Option("--open-browser/--no-open-browser", help="Open the browser login URL."),
-    ] = True,
-) -> None:
-    """Authenticate a provider and store credentials privately."""
-
-    if provider not in SUPPORTED_LOGIN_PROVIDERS:
-        supported = ", ".join(SUPPORTED_LOGIN_PROVIDERS)
-        raise typer.BadParameter(f"unsupported login provider: {provider} (supported: {supported})")
-    store = _store_from_options(auth_file)
-    console = Console(stderr=True)
-    credential = anyio.run(
-        _login_openai_codex,
-        method,
-        console,
-        open_browser,
-    )
-    store.set(provider, credential)
-    typer.echo(f"logged in: {provider}")
-    typer.echo(f"credentials saved: {store.path}")
-
-
 @auth_app.command("logout")
 def auth_logout(
     provider: Annotated[str, typer.Argument(help="Provider to forget.")],
@@ -94,27 +54,11 @@ def auth_logout(
         typer.echo(f"not logged in: {provider}")
 
 
-async def _login_openai_codex(
-    method: OpenAICodexLoginMethod,
-    console: Console,
-    open_browser: bool,
-) -> OAuthCredential:
-    return await login_openai_codex(
-        method=method,
-        on_auth_url=lambda url: console.print(f"Open this URL to authenticate:\n{url}"),
-        on_device_code=lambda info: console.print(
-            f"Open {info.verification_uri} and enter code {info.user_code}"
-        ),
-        prompt=lambda message: typer.prompt(message),
-        open_browser=open_browser,
-    )
-
-
 def _store_from_options(auth_file: Path | None) -> JsonAuthStore:
     # Auth commands are non-interactive: honor only safe existing trust signals
     # (WISP_TRUST or the global trust store), never prompt from a credential command.
     # Untrusted remains fail-closed, while an already trusted project can direct
-    # auth status/login/logout to its configured auth_path.
+    # auth status/logout to its configured auth_path.
     project_root = resolve_project_context_root(Path.cwd())
     trusted = _cli_trust.trusted_noninteractive(project_root)
     config = WispConfig.from_env(

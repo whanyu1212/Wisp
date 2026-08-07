@@ -105,7 +105,7 @@ class OpenAICodexProvider:
         )
         if auth is None:
             raise ProviderConfigurationError(
-                "openai-codex credentials are required; run `wisp auth login openai-codex`"
+                "openai-codex credentials are required; start Wisp and run `/connect openai-codex`"
             )
         account_id = auth.account_id or account_id_from_access_token(auth.token)
         headers = _codex_headers(token=auth.token, account_id=account_id)

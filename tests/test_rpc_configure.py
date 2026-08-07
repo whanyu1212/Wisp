@@ -40,7 +40,8 @@ def test_configure_model_auto_switches_provider_when_unambiguous(tmp_path: Path)
     )
     assert configure_finished["ok"] is True
     assert any(
-        record.get("message") == "OPENAI_API_KEY is required when using the openai provider"
+        record.get("message")
+        == "openai credentials are required; run `/connect` in the TUI or set OPENAI_API_KEY"
         for record in records
     )
 
@@ -74,7 +75,8 @@ def test_configure_model_auto_switches_provider_when_provider_is_explicit_null(
     assert len(auto_switched) == 1
     assert auto_switched[0]["provider"] == "openai"
     assert any(
-        record.get("message") == "OPENAI_API_KEY is required when using the openai provider"
+        record.get("message")
+        == "openai credentials are required; run `/connect` in the TUI or set OPENAI_API_KEY"
         for record in records
     )
 
@@ -105,7 +107,8 @@ def test_configure_model_alias_auto_switches_to_its_provider(tmp_path: Path) -> 
     assert auto_switched[0]["model"] == "gemini-flash-latest"
     assert any(
         record.get("message")
-        == "GOOGLE_API_KEY or GEMINI_API_KEY is required when using the google provider"
+        == "google credentials are required; run `/connect` in the TUI or set "
+        "GOOGLE_API_KEY or GEMINI_API_KEY"
         for record in records
     )
 
@@ -133,7 +136,8 @@ def test_configure_model_leaves_provider_alone_when_model_belongs_to_current_pro
     assert not any(r["type"] == "model.provider_auto_switched" for r in records)
     assert records[1]["ok"] is True
     assert any(
-        record.get("message") == "OPENAI_API_KEY is required when using the openai provider"
+        record.get("message")
+        == "openai credentials are required; run `/connect` in the TUI or set OPENAI_API_KEY"
         for record in records
     )
 

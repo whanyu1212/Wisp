@@ -84,3 +84,20 @@ def test_stored_provider_auth_resolver_refreshes_expired_oauth(tmp_path: Path) -
         expires=4_102_444_800_000,
         account_id="new-account",
     )
+
+
+def test_stored_provider_auth_resolver_resolves_only_api_keys(tmp_path: Path) -> None:
+    store = JsonAuthStore(tmp_path / "auth.json")
+    store.set("openai", ApiKeyCredential(key="stored-key"))
+    store.set(
+        "openai-codex",
+        OAuthCredential(access="access", refresh="refresh", expires=4_102_444_800_000),
+    )
+    resolver = StoredProviderAuthResolver(store)
+
+    async def run() -> None:
+        assert await resolver.api_key("openai") == "stored-key"
+        assert await resolver.api_key("openai-codex") is None
+        assert await resolver.api_key("missing") is None
+
+    anyio.run(run)

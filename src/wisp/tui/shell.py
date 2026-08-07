@@ -94,6 +94,7 @@ from wisp.tui.state import (
     _TuiSignal,
     _view_status_for_status,
 )
+from wisp.update_check import UpdateAvailable
 
 
 class TuiController(Protocol):
@@ -169,6 +170,7 @@ class TuiController(Protocol):
 
 
 PromptReader = Callable[[str], Awaitable[str]]
+UpdateChecker = Callable[[], Awaitable[UpdateAvailable | None]]
 _TRUST_ANSWERS = {"y", "yes", "n", "no"}
 
 
@@ -238,6 +240,7 @@ class TuiShell:
         effort: str | None = None,
         auth_path: Path | None = None,
         settings_home_dir: Path | None = None,
+        update_checker: UpdateChecker | None = None,
         quit_press_window: float = 1.5,
     ) -> None:
         self.controller = controller
@@ -299,12 +302,21 @@ class TuiShell:
         # Overrides ~/.wisp for model-selection persistence in tests; None in
         # production resolves the real home directory.
         self._settings_home_dir = settings_home_dir
+        self._update_checker = update_checker
         # Credential commands read auth_store lazily (it is rebound on a trusted-
         # project rebuild) and the default provider from live shell state.
         self._auth = AuthCommands(
             self.renderer,
             lambda: self.auth_store,
             self._default_auth_provider,
+        )
+        self._call_renderer_optional(
+            "set_connect_api_key_hook",
+            self._auth.connect_api_key,
+        )
+        self._call_renderer_optional(
+            "set_connect_oauth_hook",
+            self._auth.connect_oauth,
         )
 
     async def run(self) -> None:
@@ -322,6 +334,8 @@ class TuiShell:
                 task_group.cancel_scope.cancel()
                 return
             await self._request_session_stats()
+            if self._update_checker is not None:
+                task_group.start_soon(self._check_for_update)
             task_group.start_soon(self._read_inputs, send.clone())
             while True:
                 signal = await receive.receive()
@@ -329,6 +343,21 @@ class TuiShell:
                 if should_exit:
                     task_group.cancel_scope.cancel()
                     return
+
+    async def _check_for_update(self) -> None:
+        checker = self._update_checker
+        if checker is None:
+            return
+        try:
+            update = await checker()
+        except Exception:  # noqa: BLE001 - update checks are optional TUI chrome
+            return
+        if update is None:
+            return
+        self.renderer.notice(
+            f"Wisp {update.latest_version} is available (current {update.current_version}). "
+            f"Update with: {update.update_command}"
+        )
 
     def _sync_view(self) -> None:
         self.view.provider = self.current_provider
@@ -665,11 +694,11 @@ class TuiShell:
         if command.name is TuiSlashCommandName.auth:
             self._auth.status(command.args)
             return False
-        if command.name is TuiSlashCommandName.login:
-            await self._auth.login(command.args)
+        if command.name is TuiSlashCommandName.connect:
+            await self._auth.connect(command.args)
             return False
-        if command.name is TuiSlashCommandName.logout:
-            self._auth.logout(command.args)
+        if command.name is TuiSlashCommandName.disconnect:
+            self._auth.disconnect(command.args)
             return False
         if command.name is TuiSlashCommandName.provider:
             await self._handle_provider_command(command.args)
@@ -1443,7 +1472,7 @@ class TuiShell:
         if isinstance(event, ProjectConfigApplied):
             # The RPC side applied a trusted project's config mid-session (first-run
             # approval). Adopt the provider/model/auth it now runs with, so the header
-            # and /provider,/model,/auth,/login stop showing the untrusted-startup ones.
+            # and /provider,/model,/auth,/connect stop showing the untrusted-startup ones.
             self.current_provider = event.provider
             self.current_model = event.model
             # Adopt the RPC agent's own already-filtered, authoritative effort

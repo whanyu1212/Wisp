@@ -23,6 +23,10 @@ class BearerTokenAuth:
 class ProviderAuthResolver(Protocol):
     """Resolves provider credentials for request-time use."""
 
+    async def api_key(self, provider: str) -> str | None:
+        """Return a stored API key for a provider, if present."""
+        ...
+
     async def bearer_token(
         self,
         provider: str,
@@ -44,6 +48,12 @@ class StoredProviderAuthResolver:
     ) -> None:
         self.store = store
         self.expiry_skew_seconds = expiry_skew_seconds
+
+    async def api_key(self, provider: str) -> str | None:
+        credential = self.store.get(provider)
+        if isinstance(credential, ApiKeyCredential):
+            return credential.key
+        return None
 
     async def bearer_token(
         self,

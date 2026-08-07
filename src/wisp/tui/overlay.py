@@ -21,6 +21,7 @@ class OverlayKind(StrEnum):
     """Visible Textual surfaces that temporarily replace the composer."""
 
     decision = "decision"
+    connect = "connect"
     model_picker = "model_picker"
     session_picker = "session_picker"
     prompt_history = "prompt_history"

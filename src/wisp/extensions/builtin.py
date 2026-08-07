@@ -51,18 +51,17 @@ def activate(
 ) -> None:
     """Register Wisp's baseline capabilities."""
 
+    auth_resolver = StoredProviderAuthResolver(auth_store) if auth_store is not None else None
     api.register_provider(FakeProvider())
-    api.register_provider(OpenAIProvider(retry_policy=retry_policy))
+    api.register_provider(OpenAIProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
     api.register_provider(
         OpenAICodexProvider(
-            auth_resolver=StoredProviderAuthResolver(auth_store)
-            if auth_store is not None
-            else None,
+            auth_resolver=auth_resolver,
             retry_policy=retry_policy,
         )
     )
-    api.register_provider(AnthropicProvider(retry_policy=retry_policy))
-    api.register_provider(GoogleProvider(retry_policy=retry_policy))
+    api.register_provider(AnthropicProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
+    api.register_provider(GoogleProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
     for tool in builtin_tools(process_supervisor=process_supervisor):
         api.register_tool(tool, prompt=_BUILTIN_TOOL_PROMPTS.get(tool.name))
     for command in builtin_command_descriptors():

@@ -16,6 +16,7 @@ from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 
 from wisp.agent.messages import Message
+from wisp.providers.auth import ProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
     ToolCallResult,
@@ -84,11 +85,15 @@ class GoogleProvider:
         api_key: str | None = None,
         default_model: str = DEFAULT_GOOGLE_MODEL,
         client: genai.Client | None = None,
+        auth_resolver: ProviderAuthResolver | None = None,
         retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.default_model: str | None = default_model
         self._api_key = _normalize_optional(api_key)
         self._client = client
+        self._client_is_injected = client is not None
+        self._client_api_key: str | None = None
+        self._auth_resolver = auth_resolver
         self._retry_policy = retry_policy or RetryPolicy()
         self._replays = ContinuationStore[tuple[genai_types.Content, ...]]()
         # Gemini's functionResponse.name is required and must match the
@@ -294,7 +299,7 @@ class GoogleProvider:
         previous_response_id: str | None = None,
         effort: str | None = None,
     ) -> AsyncIterator[genai_types.GenerateContentResponse]:
-        client = self._client_or_create()
+        client = await self._client_or_create()
         system_instruction = _system_from_messages(messages)
         contents = _messages_to_google(messages)
         if tool_results:
@@ -329,8 +334,9 @@ class GoogleProvider:
         )
         return stream
 
-    def _client_or_create(self) -> genai.Client:
-        if self._client is not None:
+    async def _client_or_create(self) -> genai.Client:
+        if self._client_is_injected:
+            assert self._client is not None
             return self._client
 
         # Mirrors google.genai's own env-var resolution order (get_env_api_key
@@ -338,19 +344,31 @@ class GoogleProvider:
         # is the accepted fallback -- a user who already has Gemini configured
         # with only GEMINI_API_KEY (the SDK's own recognized variable) should
         # not be rejected here before the SDK ever gets a chance to use it.
+        stored_api_key = (
+            await self._auth_resolver.api_key(self.name)
+            if self._auth_resolver is not None
+            else None
+        )
         api_key = (
             self._api_key
             or _normalize_optional(os.environ.get("GOOGLE_API_KEY"))
             or _normalize_optional(os.environ.get("GEMINI_API_KEY"))
+            or stored_api_key
         )
         if api_key is None:
             raise ProviderConfigurationError(
-                "GOOGLE_API_KEY or GEMINI_API_KEY is required when using the google provider"
+                "google credentials are required; run `/connect` in the TUI or set "
+                "GOOGLE_API_KEY or GEMINI_API_KEY"
             )
+        if self._client is not None and self._client_api_key == api_key:
+            return self._client
 
         # Wisp emits retry progress itself; leave the SDK's own retry_options
         # unset (its default is a single attempt, no retries).
+        if self._client is not None:
+            await self._client.aio.aclose()
         self._client = genai.Client(api_key=api_key)
+        self._client_api_key = api_key
         return self._client
 
     def _get_replay(self, previous_response_id: str | None) -> tuple[genai_types.Content, ...]:

@@ -5498,7 +5498,7 @@ def test_textual_enter_on_partial_model_command_opens_model_picker() -> None:
 
 def test_textual_enter_runs_fully_typed_optional_arg_command_bare() -> None:
     # REGRESSION: "takes_args" means the command *optionally* takes an argument —
-    # bare `/model`, `/provider`, `/login` are valid (show current / use defaults).
+    # bare `/model`, `/provider`, `/connect` are valid (show current / open pickers).
     # When the command name is already fully typed, Enter must run it as-is on the
     # first press, NOT prefill "/model " and demand a second Enter. Only a strict
     # prefix (still-typing suggestion) gets the fill-and-wait treatment.
@@ -5564,11 +5564,8 @@ def test_textual_enter_executes_highlighted_optional_arg_command() -> None:
     assert anyio.run(scenario) == ("", "/auth")
 
 
-def test_textual_partial_logout_selection_waits_for_provider() -> None:
-    # Bare /logout deletes the default provider credential immediately. Selecting
-    # it from a partial palette query must therefore prefill its provider argument
-    # instead of dispatching the destructive command.
-    async def scenario() -> tuple[str, bool]:
+def test_textual_disconnect_selection_opens_picker_command() -> None:
+    async def scenario() -> tuple[str, str]:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
             input_widget = app_instance.query_one("#input", Input)
@@ -5577,20 +5574,13 @@ def test_textual_partial_logout_selection_waits_for_provider() -> None:
             await pilot.pause()
             await pilot.press("/")
             await pilot.pause()
-            await _navigate_menu_to(pilot, suggest, "/logout")
+            await _navigate_menu_to(pilot, suggest, "/disconnect")
             await pilot.press("enter")
             await pilot.pause()
-            try:
-                app_instance._input_controller.receive_stream.receive_nowait()
-            except anyio.WouldBlock:
-                submitted = False
-            else:
-                submitted = True
+            submitted = await app_instance._input_controller.receive_stream.receive()
             return input_widget.value, submitted
 
-    value, submitted = anyio.run(scenario)
-    assert value == "/logout "
-    assert submitted is False
+    assert anyio.run(scenario) == ("", "/disconnect")
 
 
 def test_textual_enter_on_fully_typed_command_runs_it_once() -> None:

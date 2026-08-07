@@ -486,7 +486,7 @@ def test_openai_codex_provider_requires_login(tmp_path: Path) -> None:
     async def run() -> list[object]:
         return [event async for event in provider.stream([Message(role="user", content="hi")])]
 
-    with pytest.raises(ProviderConfigurationError, match="wisp auth login openai-codex"):
+    with pytest.raises(ProviderConfigurationError, match=r"/connect openai-codex"):
         anyio.run(run)
 
 
