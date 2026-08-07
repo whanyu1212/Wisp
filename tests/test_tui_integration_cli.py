@@ -2823,6 +2823,20 @@ def test_textual_stream_completion_reconciles_authoritative_content() -> None:
     assert anyio.run(scenario) == "complete authoritative response"
 
 
+def test_textual_stream_completion_does_not_erase_deltas_with_empty_content() -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("response that was streamed")
+            await pilot.pause()
+            renderer.end_token_stream_with_content("")
+            await app_instance.wait_for_stream_idle()
+            stream = app_instance.query_one(StreamMessage)
+            return stream._markdown.source
+
+    assert anyio.run(scenario) == "response that was streamed"
+
+
 def test_textual_stream_completion_repairs_an_incremental_render_failure(
     monkeypatch: MonkeyPatch,
 ) -> None:

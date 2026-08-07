@@ -269,11 +269,10 @@ class MarkdownStreamController:
             # Always reconcile from authoritative source. Besides repairing failed
             # incremental writes, this replaces provider deltas with the exact
             # MessageCompleted content when providers normalize their final text.
-            source = (
-                turn.completed_content
-                if turn.completed_content is not None
-                else "".join(turn.source_fragments)
-            )
+            streamed_source = "".join(turn.source_fragments)
+            # Some providers stream the full response but leave the terminal
+            # completion payload empty. Do not let that erase visible output.
+            source = turn.completed_content or streamed_source
             await turn.mounted
             await turn.widget.replace_markdown(source)
             turn.write_count += 1

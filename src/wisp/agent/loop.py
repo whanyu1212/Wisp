@@ -251,6 +251,7 @@ async def run_agent_loop(
             response_started = False
             terminal_response: ProviderResponseCompleted | ProviderResponseFailed | None = None
             streamed_tool_calls: list[ToolCall] = []
+            streamed_text: list[str] = []
             streamed_thinking: list[str] = []
             response_model: str | None = None
 
@@ -327,6 +328,7 @@ async def run_agent_loop(
                     )
                 elif isinstance(provider_event, ProviderTextDelta):
                     _require_provider_response_started(response_started)
+                    streamed_text.append(provider_event.delta)
                     yield MessageDelta(
                         turn=turn,
                         delta=provider_event.delta,
@@ -370,6 +372,7 @@ async def run_agent_loop(
                 )
 
             response = terminal_response
+            completed_content = response.content or "".join(streamed_text)
             tool_calls = response.tool_calls
             response_id = response.response_id
             if response_id is None:
@@ -425,7 +428,7 @@ async def run_agent_loop(
                     )
             yield MessageCompleted(
                 turn=turn,
-                content=response.content,
+                content=completed_content,
                 finish_reason=response.finish_reason,
                 response_id=response_id,
                 usage=usage,
@@ -443,7 +446,7 @@ async def run_agent_loop(
             continuation_messages.append(
                 Message(
                     role="assistant",
-                    content=response.content + "".join(streamed_thinking),
+                    content=completed_content + "".join(streamed_thinking),
                     response_id=response_id,
                     finish_reason=response.finish_reason,
                     usage=usage,
