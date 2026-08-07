@@ -164,6 +164,33 @@ def test_pure_loop_streams_without_application_dependencies() -> None:
     assert provider.calls[0].messages == messages
 
 
+def test_pure_loop_recovers_empty_completion_from_streamed_text() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderTextDelta(delta="complete "),
+                ProviderTextDelta(delta="streamed response"),
+                ProviderResponseCompleted(content=""),
+            ]
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+                messages=(Message(role="user", content="hi"),),
+            )
+        ]
+
+    events = anyio.run(run)
+
+    completed = next(event for event in events if isinstance(event, MessageCompleted))
+    assert completed.content == "complete streamed response"
+
+
 def test_pure_loop_passes_the_provider_response_model_to_cost_estimator() -> None:
     provider = ScriptedProvider(
         [
