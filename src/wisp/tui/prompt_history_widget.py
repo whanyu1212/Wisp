@@ -6,6 +6,7 @@ import time
 
 from textual import events
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical
 from textual.content import Content
 from textual.message import Message
@@ -17,6 +18,25 @@ from wisp.tui.prompt_history import PromptHistoryEntry, search_prompt_history
 
 class PromptHistoryPicker(Vertical):
     """Search recent prompts and restore one to the editor without submitting."""
+
+    BINDING_GROUP_TITLE = "Prompt history"
+    HELP = """
+    # Prompt history
+
+    Type to filter prompts submitted during this TUI process. Navigation changes
+    the highlight; Enter restores the selected prompt to the editor for review and
+    never submits it. Escape closes history without changing the draft.
+    """
+    BINDINGS = [
+        Binding("up", "move('action_cursor_up')", "Previous prompt", show=False, priority=True),
+        Binding("down", "move('action_cursor_down')", "Next prompt", show=False, priority=True),
+        Binding("pageup", "move('action_page_up')", "Previous page", show=False, priority=True),
+        Binding("pagedown", "move('action_page_down')", "Next page", show=False, priority=True),
+        Binding("home", "move('action_first')", "First prompt", show=False, priority=True),
+        Binding("end", "move('action_last')", "Last prompt", show=False, priority=True),
+        Binding("enter", "restore", "Restore prompt", show=False, priority=True),
+        Binding("escape", "cancel", "Cancel", show=False, priority=True),
+    ]
 
     DEFAULT_CSS = """
     PromptHistoryPicker {
@@ -184,17 +204,26 @@ class PromptHistoryPicker(Vertical):
         }
         action = actions.get(event.key)
         if action is not None:
-            self._move(action)
+            self.action_move(action)
             event.prevent_default()
             event.stop()
         elif event.key == "enter":
-            self.submit_current_selection()
+            self.action_restore()
             event.prevent_default()
             event.stop()
         elif event.key == "escape":
-            self.post_message(self.Cancelled())
+            self.action_cancel()
             event.prevent_default()
             event.stop()
+
+    def action_move(self, action: str) -> None:
+        self._move(action)
+
+    def action_restore(self) -> None:
+        self.submit_current_selection()
+
+    def action_cancel(self) -> None:
+        self.post_message(self.Cancelled())
 
 
 __all__ = ["PromptHistoryPicker"]

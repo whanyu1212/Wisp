@@ -4,8 +4,8 @@ Notable changes to Wisp, with an emphasis on the **event-schema contract** that 
 consumers integrate against.
 
 Every outbound `WispEvent` carries a `schema_version`. Consumers should branch on it and reject
-versions they do not support; Wisp's typed RPC client does this automatically. For the current
-contract, see [`docs/reference/events.md`](docs/reference/events.md).
+versions they do not support; Wisp's typed RPC client does this automatically. The current typed
+contract lives in `src/wisp/events.py`.
 
 This log starts at schema v27. Earlier history is in the git log.
 

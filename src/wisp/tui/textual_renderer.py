@@ -43,7 +43,6 @@ from wisp.tui.rendering import (
     _compaction_completed_text,
     _compaction_started_text,
     _truncate_to_cell_width,
-    _tui_help_text,
 )
 from wisp.tui.textual_history import TextualHistoryController
 from wisp.tui.tool_output import full_tool_output_for_display, render_tool_result
@@ -230,14 +229,8 @@ class TextualTuiRenderer:
         pass
 
     def help(self) -> None:
-        self.app.write_notice(
-            _tui_help_text(
-                approval_hint=(
-                    "Tool approvals default to 1 (Approve once) — Enter approves; "
-                    "Escape or 4 denies."
-                )
-            )
-        )
+        if self.app.is_running:
+            self.app.action_toggle_contextual_help()
 
     def notice(self, message: str) -> None:
         self.app.write_notice(message)

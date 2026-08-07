@@ -34,8 +34,7 @@ and extension surface in Python.
 [Configuration](#configuration) · [Project trust](#project-trust) ·
 [Context](#context--compaction) · [TUI](#tui) · [Development](#development)
 
-**Reference docs** · [Events](docs/reference/events.md) · [RPC & SDK](docs/reference/rpc.md) ·
-[Changelog](CHANGELOG.md)
+**Reference** · [Changelog](CHANGELOG.md)
 
 ## Quickstart
 
@@ -66,8 +65,8 @@ JSON mode writes every `WispEvent` as one object per line on stdout — includin
 tool lifecycle events, errors, and `session.saved`. Assistant text is not written as raw text in
 this mode.
 
-RPC mode, the typed Python client, and the in-process SDK are documented in
-[`docs/reference/rpc.md`](docs/reference/rpc.md).
+RPC mode, the typed Python client, and the in-process SDK share the same event and session
+contracts as the CLI interfaces.
 
 ## Providers & auth
 
@@ -336,7 +335,7 @@ approve once, allow that tool for the session, YOLO all mutating/command tools f
 ### Slash commands
 
 ```text
-/help                       show commands
+/help                       show help
 /auth [provider]            show credential status
 /login [provider] [device-code]
 /logout [provider]
@@ -364,10 +363,17 @@ policy, so secrets are never offered.
 | `Enter` | Submit |
 | `Shift+Enter` / `Ctrl+J` | Insert newline (`Ctrl+J` in the live fullscreen renderer) |
 | `Shift+Tab` | Toggle plan/build mode |
+| `Ctrl+G` | Toggle contextual help for the focused Textual surface |
 | `Ctrl+R` | Search prompt history for this TUI run |
 | `Escape` | Dismiss nearest menu or overlay, then cancel an active prompt |
 | `Ctrl+C` | Copy selection; otherwise press twice within 1.5s to quit |
 | `Ctrl+D` | Delete right; EOF only from an empty editor |
+
+In the Textual TUI, `Ctrl+G` and `/help` open the same native contextual guide. It follows focus
+across the editor, tool cards, pickers, context reports, and safety decisions; its key reference is
+derived from live bindings. The panel moves below the conversation on narrow terminals and never
+runs a tool, changes the session, or resolves an approval. Line and fallback fullscreen modes keep
+their textual `/help` summary.
 
 Prompt history holds up to 100 unique prompts and is **memory-only** — never written to session
 JSONL, configuration, or a cache, so prompts containing secrets are not silently persisted.

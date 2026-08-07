@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from textual import events
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import Button, Label, ProgressBar, Static
@@ -104,6 +104,16 @@ def _format_cost(cost: SessionCostSummary) -> str:
 
 class ContextStatusOverlay(Vertical):
     """Dismissible visual report for one explicitly requested context snapshot."""
+
+    BINDING_GROUP_TITLE = "Context status"
+    HELP = """
+    # Context status
+
+    This report shows the latest authoritative token usage, reserve, compaction
+    policy, overflow recovery state, and estimated cost. It is informational and
+    does not compact or otherwise change the active session. Escape closes it.
+    """
+    BINDINGS = [Binding("escape", "close", "Close", show=False)]
 
     DEFAULT_CSS = """
     ContextStatusOverlay {
@@ -237,8 +247,6 @@ class ContextStatusOverlay(Vertical):
             event.stop()
             self.post_message(self.Cancelled())
 
-    def on_key(self, event: events.Key) -> None:
-        if self.is_open and event.key == "escape":
-            event.prevent_default()
-            event.stop()
+    def action_close(self) -> None:
+        if self.is_open:
             self.post_message(self.Cancelled())

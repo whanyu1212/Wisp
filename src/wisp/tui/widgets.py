@@ -79,6 +79,21 @@ PASTE_DISPLAY_THRESHOLD = 2_000
 class PromptEditor(TextArea):
     """Multiline prompt editor with Pi-compatible submission keys."""
 
+    BINDING_GROUP_TITLE = "Prompt editor"
+    HELP = """
+    # Prompt editor
+
+    Write a prompt and press **Enter** to send it. Use **Shift+Enter** or
+    **Ctrl+J** for a newline. Type `/` for commands or `@` to reference a project
+    path; when a suggestion menu is visible, Enter accepts its highlighted item.
+    Tool approval panels default to **1 (Approve once)**; their own contextual help
+    explains every permission scope before you decide.
+    """
+    BINDINGS = [
+        Binding("enter", "submit", "Send / accept suggestion", show=False),
+        Binding("shift+enter,ctrl+j", "newline", "Newline", show=False),
+    ]
+
     class Submitted(Message):
         """The prompt accepted by the editor.
 
@@ -215,18 +230,24 @@ class PromptEditor(TextArea):
         return text
 
     async def on_key(self, event: events.Key) -> None:
-        """Submit on Enter and reserve Pi's newline keys for multiline input."""
+        """Claim submission keys before TextArea's inherited editing bindings."""
 
         if event.key == "enter":
+            self.action_submit()
             event.stop()
             event.prevent_default()
-            # Full expansion for the model; the raw editor text (placeholders
-            # intact) for the compact transcript echo.
-            self.post_message(self.Submitted(self.text_for_submission(), self.text))
         elif event.key in {"shift+enter", "ctrl+j"}:
+            self.action_newline()
             event.stop()
             event.prevent_default()
-            self.insert("\n")
+
+    def action_submit(self) -> None:
+        """Submit the expanded value while retaining a compact transcript echo."""
+
+        self.post_message(self.Submitted(self.text_for_submission(), self.text))
+
+    def action_newline(self) -> None:
+        self.insert("\n")
 
 
 def _format_duration(seconds: float) -> str:
@@ -591,6 +612,24 @@ class DecisionPanel(Vertical):
     regardless of which option is highlighted.
     """
 
+    BINDING_GROUP_TITLE = "Safety decision"
+    HELP = """
+    # Safety decision
+
+    **Approve once** permits only this request. A tool-session choice permits the
+    named tool until this Wisp process exits. **YOLO** permits every mutating and
+    command tool for the process. Project trust permits loading that project's
+    local configuration. Escape always chooses the conservative deny or go-back
+    result.
+    """
+    BINDINGS = [
+        Binding("1", "choose(1)", "Choose option 1", show=False),
+        Binding("2", "choose(2)", "Choose option 2", show=False),
+        Binding("3", "choose(3)", "Choose option 3", show=False),
+        Binding("4", "choose(4)", "Choose option 4", show=False),
+        Binding("escape", "conservative_cancel", "Deny / go back", show=False),
+    ]
+
     DEFAULT_CSS = """
     DecisionPanel {
         display: none;
@@ -753,6 +792,7 @@ class DecisionPanel(Vertical):
         self._options.add_options(options)
         self._options.highlighted = default_index
         self.display = True
+        self.refresh_bindings()
         self.focus_options()
 
     def hide(self) -> None:
@@ -807,23 +847,25 @@ class DecisionPanel(Vertical):
             event.stop()
             event.prevent_default()
             return
-        key = event.key.lower()
-        answer: str | None = None
-        if self._mode == "approval":
-            answer = {"1": "y", "2": "t", "3": "a", "4": "n", "escape": "n"}.get(key)
-        elif self._mode == "all_confirmation":
-            answer = {
-                "1": "confirm-all",
-                "2": "cancel-all",
-                "escape": "cancel-all",
-            }.get(key)
-        elif self._mode == "trust":
-            answer = {"1": "y", "2": "n", "escape": "n"}.get(key)
-        if answer is None:
-            return
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action != "choose" or not parameters or not isinstance(parameters[0], int):
+            return True
+        option_count = 4 if self._mode == "approval" else 2
+        return 1 <= parameters[0] <= option_count
+
+    def action_choose(self, number: int) -> None:
+        answers = {
+            "approval": {1: "y", 2: "t", 3: "a", 4: "n"},
+            "all_confirmation": {1: "confirm-all", 2: "cancel-all"},
+            "trust": {1: "y", 2: "n"},
+        }
+        if answer := answers.get(self._mode, {}).get(number):
+            self.submit_answer(answer)
+
+    def action_conservative_cancel(self) -> None:
+        answer = "cancel-all" if self._mode == "all_confirmation" else "n"
         self.submit_answer(answer)
-        event.prevent_default()
-        event.stop()
 
 
 class ModelPicker(Vertical):
@@ -834,6 +876,20 @@ class ModelPicker(Vertical):
     is presented as a ``RadioSet``. The model list keeps keyboard focus so up/down
     select a model, left/right stage effort, Enter applies both, and Escape cancels.
     """
+
+    BINDING_GROUP_TITLE = "Model picker"
+    HELP = """
+    # Model picker
+
+    Move through provider models with the arrow keys. For models that expose
+    reasoning effort, use Left and Right to stage a level. Enter applies the
+    highlighted model and Escape closes the picker without changing it.
+    """
+    BINDINGS = [
+        Binding("left", "cycle_effort(-1)", "Lower effort", show=False),
+        Binding("right", "cycle_effort(1)", "Raise effort", show=False),
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
 
     DEFAULT_CSS = """
     ModelPicker {
@@ -1154,6 +1210,7 @@ class ModelPicker(Vertical):
             return
         event.stop()
         self._update_effort_control()
+        self.refresh_bindings()
 
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
         if event.radio_set is not self._effort_radio:
@@ -1191,18 +1248,18 @@ class ModelPicker(Vertical):
             event.stop()
             event.prevent_default()
             return
-        if event.key == "left":
-            self.cycle_effort(direction=-1)
-            event.prevent_default()
-            event.stop()
-        elif event.key == "right":
-            self.cycle_effort(direction=1)
-            event.prevent_default()
-            event.stop()
-        elif event.key == "escape":
-            self.post_message(self.Cancelled())
-            event.prevent_default()
-            event.stop()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "cycle_effort":
+            row = self._highlighted_row()
+            return row is not None and bool(self._effort_levels_for(row))
+        return True
+
+    def action_cycle_effort(self, direction: int) -> None:
+        self.cycle_effort(direction=direction)
+
+    def action_cancel(self) -> None:
+        self.post_message(self.Cancelled())
 
 
 _SESSION_TABLE_MIN_WIDTH = 96
@@ -1226,6 +1283,16 @@ class _SessionPickerRow:
 
 class SessionPicker(Vertical):
     """Interactive newest-first RPC session selector used by bare ``/resume``."""
+
+    BINDING_GROUP_TITLE = "Session picker"
+    HELP = """
+    # Session picker
+
+    Browse persisted sessions with the navigation keys. Enter resumes the
+    highlighted session; Escape closes the picker without changing sessions.
+    Wide terminals use a table and narrow terminals use the same data as a list.
+    """
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
 
     DEFAULT_CSS = """
     SessionPicker {
@@ -1409,11 +1476,7 @@ class SessionPicker(Vertical):
             event.prevent_default()
             event.stop()
             return
-        if event.key == "escape":
-            self.post_message(self.Cancelled())
-            event.prevent_default()
-            event.stop()
-        elif event.key == "pageup":
+        if event.key == "pageup":
             self.move_highlight_page_up()
             event.prevent_default()
             event.stop()
@@ -1429,6 +1492,9 @@ class SessionPicker(Vertical):
             self.move_highlight_last()
             event.prevent_default()
             event.stop()
+
+    def action_cancel(self) -> None:
+        self.post_message(self.Cancelled())
 
     def _populate_options(self) -> None:
         self._options.clear_options()
@@ -1705,6 +1771,15 @@ class Transcript(VerticalScroll):
     re-derives to ``True`` — self-consistent, so no guard is needed. After each
     append the app calls ``follow_tail()``, which scrolls to the end iff the flag
     is set.
+    """
+
+    BINDING_GROUP_TITLE = "Conversation"
+    HELP = """
+    # Conversation
+
+    Page through the transcript with PageUp and PageDown. Home loads the oldest
+    available history and End returns to live output. Wisp follows new output only
+    while the viewport is resting at the latest message.
     """
 
     class FollowChanged(Message):
@@ -2122,6 +2197,15 @@ class ToolCard(Static):
     registry (in ``TextualTui``) routes every event to the card for its call_id.
     """
 
+    BINDING_GROUP_TITLE = "Tool result"
+    HELP = """
+    # Tool result
+
+    Review one tool request and its bounded result. Enter or Space expands extra
+    output when available; expansion changes presentation only and never reruns the
+    tool. Escape returns focus to the prompt or active safety decision.
+    """
+
     # status → (leading glyph, role class). The role class drives the left-rule
     # color via the shared `.message--{role}` CSS in TextualTui.
     #
@@ -2272,6 +2356,7 @@ class ToolCard(Static):
             self._role = role
         self.border_title = self._STATUS_LABELS.get(status, _ROLE_LABELS.get(role, "tool"))
         self._repaint()
+        self.refresh_bindings()
 
     def _can_expand(self) -> bool:
         """Whether expanding would show anything the collapsed detail doesn't.
@@ -2305,6 +2390,11 @@ class ToolCard(Static):
         # grows; the app decides using the follow intent captured at focus and this
         # card's position (expanding a historical card must not yank the viewport).
         self.post_message(self.Toggled(self))
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "toggle_expand":
+            return self._can_expand()
+        return True
 
     def action_leave(self) -> None:
         """Return focus to the prompt input (Escape on a focused card)."""
