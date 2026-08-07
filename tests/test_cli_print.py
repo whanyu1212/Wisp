@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from tests.cli_support import *
 from wisp.agent.messages import CompactionRecord
 from wisp.cli.output import _print_event_line
@@ -40,6 +42,57 @@ def _trigger_budget() -> ContextBudget:
         estimated_percent=81,
         over_budget=True,
     )
+
+
+def test_bare_interactive_cli_launches_textual_tui(monkeypatch: MonkeyPatch) -> None:
+    launched: dict[str, object] = {}
+
+    monkeypatch.setattr(cli_module, "_terminal_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        cli_module,
+        "_run_tui_from_cli_options",
+        lambda **kwargs: launched.update(kwargs),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert launched["renderer"] is cli_module.TuiRendererKind.textual
+    assert launched["all_tools"] is True
+
+
+def test_bare_noninteractive_cli_shows_help(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(cli_module, "_terminal_is_interactive", lambda: False)
+    monkeypatch.setattr(
+        cli_module,
+        "_run_tui_from_cli_options",
+        lambda **_kwargs: pytest.fail("non-interactive bare invocation must not launch the TUI"),
+    )
+
+    result = CliRunner().invoke(app, [])
+
+    assert result.exit_code == 0, result.output
+    assert "Usage:" in result.output
+
+
+def test_bare_interactive_cli_honors_explicit_text_mode_env(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli_module, "_terminal_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        cli_module,
+        "_run_tui_from_cli_options",
+        lambda **_kwargs: pytest.fail("WISP_MODE=text must override the interactive default"),
+    )
+
+    result = CliRunner().invoke(app, [], env={"WISP_MODE": "text"})
+
+    assert result.exit_code == 0, result.output
+    assert "Usage:" in result.output
 
 
 def test_print_output_renders_threshold_compaction_as_automatic_notices() -> None:

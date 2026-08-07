@@ -1,3 +1,3 @@
-"""Wisp: a Python, Pi-inspired coding agent."""
+"""Wisp: a terminal-first coding agent."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.0a1"

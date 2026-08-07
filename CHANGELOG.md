@@ -13,6 +13,16 @@ This log starts at schema v27. Earlier history is in the git log.
 
 _Nothing yet._
 
+## 0.1.0a1 — 2026-08-07
+
+Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI runtime.
+
+- Installs the `wisp` command through the `wisp-ai` package.
+- Launches the fullscreen TUI from a bare interactive `wisp` invocation.
+- Includes provider integrations, local tools, persistent sessions, compaction, project trust,
+  protected paths, and explicit unsafe-tool approvals.
+- Publishes provider-neutral lifecycle events at schema v27.
+
 ## Schema v27 — current
 
 Adds `mode` (`"plan" | "build"`, default `"build"`) to `CodingSessionState`, so RPC `get_state`

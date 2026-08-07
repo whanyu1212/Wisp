@@ -1,11 +1,34 @@
 [project]
 name = "wisp-ai"
-version = "0.1.0"
-description = "Python, Pi-inspired coding agent"
+version = "0.1.0a1"
+description = "Terminal-first coding agent with typed CLI, TUI, RPC, and SDK interfaces"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "whanyu1212", email = "whanyu1212@hotmail.com" }
 ]
 requires-python = ">=3.12"
+keywords = [
+    "agent",
+    "ai",
+    "cli",
+    "coding-agent",
+    "llm",
+    "tui",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
 dependencies = [
     "anthropic>=0.116.0",
     "anyio>=4.14.1",
@@ -18,6 +41,12 @@ dependencies = [
     "textual>=8.2.8",
     "typer>=0.26.8",
 ]
+
+[project.urls]
+Homepage = "https://github.com/whanyu1212/Wisp"
+Repository = "https://github.com/whanyu1212/Wisp"
+Changelog = "https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md"
+Issues = "https://github.com/whanyu1212/Wisp/issues"
 
 [project.scripts]
 wisp = "wisp.cli:main"

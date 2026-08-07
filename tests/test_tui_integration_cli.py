@@ -481,7 +481,7 @@ def test_cli_no_args_shows_help_without_tui_env() -> None:
 
     assert result.exit_code == 0, result.output
     assert "Usage:" in result.output
-    assert "Wisp: a Python, Pi-inspired coding agent." in result.output
+    assert "Wisp: a terminal-first coding agent." in result.output
 
 
 def test_cli_no_args_uses_env_tui_defaults(monkeypatch: object) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import typer
 from rich.console import Console
@@ -20,6 +21,14 @@ def _option_was_provided(ctx: typer.Context, name: str) -> bool:
 
 def _has_callback_cli_args(ctx: typer.Context) -> bool:
     return any(_option_was_provided(ctx, name) for name in ctx.params)
+
+
+def _terminal_is_interactive() -> bool:
+    for stream in (sys.stdin, sys.stdout):
+        isatty = getattr(stream, "isatty", None)
+        if not callable(isatty) or not isatty():
+            return False
+    return True
 
 
 def _resolve_cli_mode(
