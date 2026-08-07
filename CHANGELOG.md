@@ -11,10 +11,16 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+_Nothing yet._
+
+## 0.1.0a2 — 2026-08-07
+
 - Replaced TUI `/login` with an OpenCode-style `/connect` panel for ChatGPT subscription access and
   masked OpenAI, Anthropic, and Google API-key entry; `/disconnect` removes stored credentials.
 - Removed the standalone browser-based `wisp auth login` command and its unusable localhost callback
   flow. ChatGPT subscription authentication now uses device-code OAuth exclusively.
+- Added request-time stored API-key resolution for OpenAI, Anthropic, and Google while preserving
+  explicit and environment credential precedence.
 - Added a cached, non-blocking TUI notice when a newer applicable Wisp release is available on PyPI.
 
 ## 0.1.0a1 — 2026-08-07
