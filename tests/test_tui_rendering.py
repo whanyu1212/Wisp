@@ -1238,9 +1238,7 @@ def test_monochrome_operational_role_collisions_still_have_distinct_non_color_cu
     from wisp.tui.theme import _ROLE_COLOR_ATTR, WISP_THEME_DARK, WISP_THEME_LIGHT
     from wisp.tui.widgets import _ROLE_LABELS
 
-    comparable_roles = sorted(
-        set(_ROLE_COLOR_ATTR) - {"assistant", "dim", "session", "user"}
-    )
+    comparable_roles = sorted(set(_ROLE_COLOR_ATTR) - {"assistant", "dim", "session", "user"})
     collision_threshold = 5  # gray levels; "near-collision" per the issue's audit
 
     for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
