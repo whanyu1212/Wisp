@@ -6,7 +6,7 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from copy import deepcopy
 from json import JSONDecodeError, loads
-from typing import Literal, cast
+from typing import Literal, Protocol, cast, runtime_checkable
 
 import anyio
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, OpenAIError
@@ -51,6 +51,11 @@ from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_de
 
 DEFAULT_OPENAI_MODEL = "gpt-5.6-sol"
 OpenAIRole = Literal["user", "assistant", "system", "developer"]
+
+
+@runtime_checkable
+class _ClosableResponseStream(Protocol):
+    async def close(self) -> None: ...
 
 
 class OpenAIProvider:
@@ -209,6 +214,9 @@ class OpenAIProvider:
                 partial_content="".join(chunks),
                 response_id=response_id,
             )
+        finally:
+            if isinstance(stream, _ClosableResponseStream):
+                await stream.close()
 
         if failure is None and not stream_completed:
             failure = ProviderResponseFailed(

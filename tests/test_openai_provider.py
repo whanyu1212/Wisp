@@ -45,6 +45,24 @@ from wisp.providers.openai import OpenAIProvider
 from wisp.retry import RetryPolicy
 
 
+class _ClosableStubStream:
+    def __init__(self, events: Sequence[ResponseStreamEvent]) -> None:
+        self._events = iter(events)
+        self.closed = False
+
+    def __aiter__(self) -> _ClosableStubStream:
+        return self
+
+    async def __anext__(self) -> ResponseStreamEvent:
+        try:
+            return next(self._events)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 class StubOpenAIProvider(OpenAIProvider):
     def __init__(self, events: Sequence[ResponseStreamEvent]) -> None:
         super().__init__(api_key="test-key", default_model="default-test-model")
@@ -55,6 +73,7 @@ class StubOpenAIProvider(OpenAIProvider):
         self.seen_tool_results: Sequence[ToolCallResult] | None = None
         self.seen_previous_response_id: str | None = None
         self.seen_effort: str | None = None
+        self.created_stream: _ClosableStubStream | None = None
 
     async def _create_stream(
         self,
@@ -73,11 +92,8 @@ class StubOpenAIProvider(OpenAIProvider):
         self.seen_previous_response_id = previous_response_id
         self.seen_effort = effort
 
-        async def stream() -> AsyncIterator[ResponseStreamEvent]:
-            for event in self.events:
-                yield event
-
-        return stream()
+        self.created_stream = _ClosableStubStream(self.events)
+        return self.created_stream
 
 
 class FailingOpenAIProvider(OpenAIProvider):
@@ -153,6 +169,20 @@ def test_openai_provider_streams_text_deltas() -> None:
     ]
     assert provider.seen_model == "gpt-test"
     assert provider.seen_messages == messages
+
+
+def test_openai_provider_closes_stream_after_native_completion() -> None:
+    provider = StubOpenAIProvider([_completed_event(), _text_delta("must not be consumed")])
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hello")])]
+
+    assert anyio.run(run) == [
+        ProviderResponseStarted(model="default-test-model"),
+        ProviderResponseCompleted(content="", response_id="response-id"),
+    ]
+    assert provider.created_stream is not None
+    assert provider.created_stream.closed
 
 
 def test_openai_provider_uses_default_model_when_model_is_not_provided() -> None:
