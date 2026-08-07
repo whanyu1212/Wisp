@@ -23,7 +23,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.widget import AwaitMount, Widget
-from textual.widgets import Static, TextArea
+from textual.widgets import HelpPanel, KeyPanel, Static, TextArea
 
 from wisp.config import WispConfig
 from wisp.events import (
@@ -43,6 +43,7 @@ from wisp.tui.overlay import (
     OverlayKind,
     OverlayOperation,
     TextualOverlayController,
+    TranscriptViewportState,
 )
 from wisp.tui.prompt_history_widget import PromptHistoryPicker
 from wisp.tui.rendering import (
@@ -101,7 +102,9 @@ _SESSION_OPERATION_LABELS: dict[OverlayOperation, str] = {
 # returns focus from a card to the input (ToolCard.BINDINGS "leave" action).
 # Textual-only chrome — deliberately not folded into format_tui_footer_lines,
 # which the line/fullscreen renderers also consume.
-_KEYBINDING_HINT = "shift+enter/ctrl+j newline   esc cancel   ctrl+c×2 quit   / commands"
+_KEYBINDING_HINT = (
+    "shift+enter/ctrl+j newline   esc cancel   ctrl+g guide   ctrl+c×2 quit   / commands"
+)
 
 # The input's prompt glyph. The shell hands the Textual renderer a semantic hint
 # (`wisp> `, `wisp(running)> `, `approve? [y/N] `) shared with the line/fullscreen
@@ -305,6 +308,24 @@ class TextualTui(App[None]):
         padding: 0 1;
         background: transparent;
     }
+
+    HelpPanel {
+        width: 36%;
+        min-width: 30;
+        max-width: 60;
+    }
+
+    Screen.-compact-help HelpPanel {
+        split: bottom;
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+        height: 50%;
+        min-height: 8;
+        max-height: 18;
+        border-left: none;
+        border-top: vkey $foreground 30%;
+    }
     """
 
     # Ctrl+C and Ctrl+D are priority bindings so they fire while PromptEditor has
@@ -320,6 +341,16 @@ class TextualTui(App[None]):
     # the transcript. Ctrl+C uses Wisp's double-press quit flow; terminal-native
     # selection remains available through the emulator's mouse-bypass modifier.
     BINDINGS = [
+        Binding(
+            "ctrl+g",
+            "toggle_contextual_help",
+            "Guide",
+            priority=True,
+            id="wisp.contextual_help",
+        ),
+        Binding("up", "menu_move(-1)", "Previous suggestion", priority=True, show=False),
+        Binding("down", "menu_move(1)", "Next suggestion", priority=True, show=False),
+        Binding("tab", "menu_complete", "Complete suggestion", priority=True, show=False),
         Binding("ctrl+r", "open_prompt_history", "History", priority=True),
         Binding("shift+tab", "toggle_agent_mode", "Plan/build", priority=True, show=False),
         Binding("ctrl+c", "interrupt", "Quit", priority=True),
@@ -361,6 +392,7 @@ class TextualTui(App[None]):
         self._context_status: ContextStatusOverlay | None = None
         self._operation_indicator: OperationIndicator | None = None
         self._overlay_controller: TextualOverlayController | None = None
+        self._help_viewport_state: TranscriptViewportState | None = None
         self._command_catalog = DEFAULT_TUI_COMMAND_CATALOG
         self._agent_mode = "build"
         self._current_prompt = "wisp> "
@@ -500,6 +532,11 @@ class TextualTui(App[None]):
         if self._runner is not None:
             self.run_worker(self._run_and_exit(), exclusive=True)
 
+    def on_resize(self, event: events.Resize) -> None:
+        """Move contextual help below the conversation on narrow terminals."""
+
+        self.screen.set_class(event.size.width < 80, "-compact-help")
+
     def watch_theme(self, theme_name: str) -> None:
         # `theme` is a Textual reactive; re-derive transcript role colors so
         # message widgets mounted after a switch track the new palette. Already-
@@ -548,6 +585,7 @@ class TextualTui(App[None]):
         if spec is None:
             return False
         suggest.hide()
+        self.refresh_bindings()
         is_partial = typed.lower() != spec.command.lower()
         if spec.prefill_on_partial_enter and is_partial:
             self.prefill_command(f"{spec.command} ")
@@ -576,17 +614,24 @@ class TextualTui(App[None]):
         # behavior exactly; the file menu is offered only when no slash menu is live.
         if event.text_area is not self._input:
             return
+        menu_was_open = self._suggestion_menu_is_open()
         slash_matches = 0
         if self._suggest is not None:
             slash_matches = self._suggest.show_for(event.text_area.text)
         if self._file_suggest is None:
+            if menu_was_open != self._suggestion_menu_is_open():
+                self.refresh_bindings()
             return
         if slash_matches:
             self._file_suggest.hide()
+            if menu_was_open != self._suggestion_menu_is_open():
+                self.refresh_bindings()
             return
         self._file_suggest.show_for(
             event.text_area.text, self._file_offset_of_cursor(event.text_area)
         )
+        if menu_was_open != self._suggestion_menu_is_open():
+            self.refresh_bindings()
 
     @staticmethod
     def _file_offset_of_cursor(editor: TextArea) -> int:
@@ -912,6 +957,7 @@ class TextualTui(App[None]):
                 else:
                     # Dismiss but keep whatever the user typed.
                     file_suggest.hide()
+                    self.refresh_bindings()
                 event.prevent_default()
                 event.stop()
             return
@@ -934,8 +980,40 @@ class TextualTui(App[None]):
         elif event.key == "escape":
             # Dismiss but keep whatever the user typed.
             suggest.hide()
+            self.refresh_bindings()
             event.prevent_default()
             event.stop()
+
+    def _suggestion_menu_is_open(self) -> bool:
+        return bool(
+            (self._file_suggest is not None and self._file_suggest.is_open)
+            or (self._suggest is not None and self._suggest.is_open)
+        )
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in {"menu_move", "menu_complete"}:
+            return self._suggestion_menu_is_open()
+        return super().check_action(action, parameters)
+
+    def action_menu_move(self, direction: int) -> None:
+        menu = (
+            self._file_suggest
+            if self._file_suggest is not None and self._file_suggest.is_open
+            else self._suggest
+        )
+        if menu is None or not menu.is_open:
+            return
+        if direction < 0:
+            menu.action_cursor_up()
+        else:
+            menu.action_cursor_down()
+
+    def action_menu_complete(self) -> None:
+        if self._file_suggest is not None and self._file_suggest.is_open:
+            self._complete_path_from_menu()
+        else:
+            self._complete_from_menu()
+        self.refresh_bindings()
 
     def _complete_from_menu(self) -> None:
         # Fill the highlighted command into the input. Arg-taking commands get a
@@ -950,6 +1028,7 @@ class TextualTui(App[None]):
             return
         self.prefill_command(f"{spec.command} " if spec.takes_args else spec.command)
         suggest.hide()
+        self.refresh_bindings()
 
     def _complete_path_from_menu(self) -> bool:
         """Replace the in-progress `@query` with the highlighted path.
@@ -986,6 +1065,7 @@ class TextualTui(App[None]):
         editor.value = f"{value[:start]}{replacement}{value[cursor:]}"
         editor.cursor_position = start + len(replacement)
         picker.hide()
+        self.refresh_bindings()
         return True
 
     def set_history_page_request_hook(
@@ -1116,16 +1196,48 @@ class TextualTui(App[None]):
             return
         self._signal_input(TuiQuitRequested(), action="quit")
 
+    def action_toggle_contextual_help(self) -> None:
+        """Toggle Textual's focus-aware help without moving keyboard focus."""
+
+        if not self.is_running:
+            return
+        if self.screen.query(HelpPanel):
+            self.action_hide_help_panel()
+            viewport_state = self._help_viewport_state
+            self._help_viewport_state = None
+            if self._transcript is not None and viewport_state is not None:
+                self.call_after_refresh(self._transcript.restore_viewport_state, viewport_state)
+            return
+
+        if self._transcript is not None:
+            self._help_viewport_state = self._transcript.viewport_state()
+        self.action_show_help_panel()
+        if self._transcript is not None and self._help_viewport_state is not None:
+            self.call_after_refresh(
+                self._transcript.restore_viewport_state,
+                self._help_viewport_state,
+            )
+
+    def _help_key_panel(self) -> KeyPanel | None:
+        if not self.is_running:
+            return None
+        panels = self.screen.query(HelpPanel)
+        if not panels:
+            return None
+        return panels.first().query_one(KeyPanel)
+
     def action_cancel(self) -> None:
         """Dismiss the nearest UI layer, then fall back to shell cancellation."""
 
         file_suggest = self._file_suggest
         if file_suggest is not None and file_suggest.is_open:
             file_suggest.hide()
+            self.refresh_bindings()
             return
         suggest = self._suggest
         if suggest is not None and suggest.is_open:
             suggest.hide()
+            self.refresh_bindings()
             return
         overlays = self._overlay_controller
         if overlays is not None and overlays.consume_cancel():
@@ -1178,6 +1290,9 @@ class TextualTui(App[None]):
     # next Enter into an unintended approval. Delegate to the panel's own
     # OptionList navigation in that case instead.
     def action_scroll_transcript_page_up(self) -> None:
+        if help_keys := self._help_key_panel():
+            help_keys.action_page_up()
+            return
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_page_up()
             return
@@ -1192,6 +1307,9 @@ class TextualTui(App[None]):
             self._transcript.page_up()
 
     def action_scroll_transcript_page_down(self) -> None:
+        if help_keys := self._help_key_panel():
+            help_keys.action_page_down()
+            return
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_page_down()
             return
@@ -1206,6 +1324,9 @@ class TextualTui(App[None]):
             self._transcript.page_down()
 
     def action_scroll_transcript_home(self) -> None:
+        if help_keys := self._help_key_panel():
+            help_keys.action_scroll_home()
+            return
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_first()
             return
@@ -1225,6 +1346,9 @@ class TextualTui(App[None]):
             self._transcript.request_history_at_top()
 
     def action_scroll_transcript_end(self) -> None:
+        if help_keys := self._help_key_panel():
+            help_keys.action_scroll_end()
+            return
         if self._decision_panel is not None and self._decision_panel.is_open:
             self._decision_panel.move_highlight_last()
             return
