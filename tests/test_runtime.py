@@ -18,6 +18,7 @@ from wisp.runtime import (
     EventBus,
     ExtensionAPI,
     ProviderRegistry,
+    ToolPromptMetadata,
     ToolRegistry,
     UnknownProviderError,
     UnknownToolError,
@@ -26,6 +27,7 @@ from wisp.runtime import (
 from wisp.runtime.extensions import activate_builtin_extensions, activate_extensions, build_runtime
 from wisp.tools.builtin import ReadTool
 from wisp.tools.search import FindTool, GrepTool
+from wisp.tools.selection import select_tools
 from wisp.tools.shell import BashTool
 
 
@@ -57,6 +59,13 @@ def test_tool_registry_registers_and_resolves_tool() -> None:
     assert registry.all() == (tool,)
 
 
+def test_tool_prompt_metadata_rejects_non_string_guidance() -> None:
+    with pytest.raises(TypeError, match="snippet must be a string"):
+        ToolPromptMetadata(prompt_snippet=object())  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="guidelines must be strings"):
+        ToolPromptMetadata(guidelines=(object(),))  # type: ignore[arg-type]
+
+
 def test_tool_registry_returns_provider_tool_specs() -> None:
     registry = ToolRegistry()
     tool = ReadTool()
@@ -66,6 +75,47 @@ def test_tool_registry_returns_provider_tool_specs() -> None:
     assert registry.specs()[0].name == "read"
     assert registry.specs()[0].description == tool.description
     assert registry.specs()[0].input_schema == tool.input_schema
+
+
+def test_tool_registry_keeps_prompt_metadata_separate_from_provider_specs() -> None:
+    registry = ToolRegistry()
+    tool = ReadTool()
+    prompt = ToolPromptMetadata(
+        prompt_snippet="Read only the relevant section.",
+        guidelines=("Prefer dedicated tools.",),
+    )
+
+    registry.register(tool, prompt=prompt)
+
+    assert registry.prompt_metadata(("read",)) == (prompt,)
+    assert registry.prompt_metadata(("missing",)) == ()
+    assert registry.specs()[0].description == tool.description
+    assert not hasattr(registry.specs()[0], "prompt_snippet")
+
+
+def test_tool_registry_replacement_clears_stale_prompt_metadata() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        ReadTool(),
+        prompt=ToolPromptMetadata(prompt_snippet="Old guidance."),
+    )
+
+    registry.register(ReadTool())
+
+    assert registry.prompt_metadata(("read",)) == ()
+
+
+def test_tool_selection_preserves_metadata_only_for_selected_tools() -> None:
+    registry = ToolRegistry()
+    read_prompt = ToolPromptMetadata(prompt_snippet="Read narrowly.")
+    bash_prompt = ToolPromptMetadata(prompt_snippet="Check command status.")
+    registry.register(ReadTool(), prompt=read_prompt)
+    registry.register(BashTool(), prompt=bash_prompt)
+
+    filtered = select_tools(registry, allow_read_tools=True)
+
+    assert filtered.names() == ("read",)
+    assert filtered.prompt_metadata(("read", "bash")) == (read_prompt,)
 
 
 def test_tool_registry_raises_for_unknown_tool() -> None:
@@ -83,7 +133,8 @@ def test_extension_api_registers_provider_and_tool() -> None:
     api = ExtensionAPI(providers=providers, tools=tools, commands=commands, events=event_bus)
 
     api.register_provider(FakeProvider())
-    api.register_tool(ReadTool())
+    prompt = ToolPromptMetadata(prompt_snippet="Read narrowly.")
+    api.register_tool(ReadTool(), prompt=prompt)
     api.register_command(
         CommandDescriptor(
             name="help",
@@ -94,6 +145,7 @@ def test_extension_api_registers_provider_and_tool() -> None:
 
     assert providers.names() == ("fake",)
     assert tools.names() == ("read",)
+    assert tools.prompt_metadata(("read",)) == (prompt,)
     assert commands.names() == ("help",)
 
 

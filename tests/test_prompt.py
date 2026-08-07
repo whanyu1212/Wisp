@@ -14,6 +14,7 @@ from wisp.agent.prompt import (
     resolve_project_context_root,
 )
 from wisp.providers.base import ToolSpec
+from wisp.tools.base import ToolPromptMetadata
 
 
 def test_build_prompt_messages_includes_default_instructions_and_context(tmp_path: Path) -> None:
@@ -32,6 +33,40 @@ def test_build_prompt_messages_includes_default_instructions_and_context(tmp_pat
     assert f"cwd: {tmp_path.resolve(strict=False)}" in messages[1].content
     assert "project files:\n  pyproject.toml" in messages[1].content
     assert "allowed tools:\n  - read: Read a UTF-8 text file." in messages[1].content
+
+
+def test_build_prompt_messages_deduplicates_and_bounds_tool_guidance(tmp_path: Path) -> None:
+    shared = "Prefer dedicated tools over shell commands."
+    metadata = (
+        ToolPromptMetadata(
+            prompt_snippet="Read only the relevant section.",
+            guidelines=(shared, "  Prefer   dedicated tools over shell commands.  "),
+        ),
+        ToolPromptMetadata(
+            prompt_snippet="Read only the relevant section.",
+            guidelines=("G" * 5_000,),
+        ),
+    )
+
+    messages = build_prompt_messages(cwd=tmp_path, tool_prompt_metadata=metadata)
+
+    assert [message.role for message in messages] == ["system", "system", "system"]
+    guidance = messages[2].content
+    assert guidance.startswith("[WISP TOOL GUIDANCE]")
+    assert guidance.count("Read only the relevant section.") == 1
+    assert guidance.count(shared) == 1
+    assert "actual availability, sandboxing" in guidance
+    assert len(guidance) <= prompt_module.DEFAULT_TOOL_GUIDANCE_MAX_CHARS
+    assert guidance.endswith("[tool guidance truncated]")
+
+
+def test_build_prompt_messages_omits_empty_tool_guidance(tmp_path: Path) -> None:
+    messages = build_prompt_messages(
+        cwd=tmp_path,
+        tool_prompt_metadata=(ToolPromptMetadata(prompt_snippet="  ", guidelines=("",)),),
+    )
+
+    assert len(messages) == 2
 
 
 @pytest.mark.parametrize("include_project_context", [True, False])

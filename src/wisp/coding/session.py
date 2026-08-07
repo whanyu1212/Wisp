@@ -1352,6 +1352,11 @@ class CodingSession:
         return build_prompt_messages(
             cwd=self.tool_context.cwd,
             tools=effective_tools,
+            tool_prompt_metadata=self.tool_registry.prompt_metadata(
+                tool.name for tool in effective_tools
+            )
+            if self.tool_registry is not None
+            else (),
             mode=self.mode,
             max_context_chars=self.project_context_max_chars,
             include_project_context=self.trusted,

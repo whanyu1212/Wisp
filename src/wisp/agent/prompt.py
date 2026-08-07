@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from wisp.agent.messages import Message
 from wisp.agent.mode import DEFAULT_AGENT_MODE, PLAN_MODE_SYSTEM_PROMPT, AgentMode
 from wisp.providers.base import ToolSpec
 from wisp.settings import DEFAULT_PROTECTED_PATHS
+from wisp.tools.base import ToolPromptMetadata
 from wisp.tools.context import ToolContext
 from wisp.tools.paths import is_protected_path
 
 DEFAULT_CONTEXT_MAX_CHARS = 32_768
 DEFAULT_CONTEXT_FILE_MAX_CHARS = 28_000
+DEFAULT_TOOL_GUIDANCE_MAX_CHARS = 4_096
 MAX_GIT_STATUS_LINES = 12
 MAX_PROJECT_FILES = 16
 
@@ -64,6 +66,7 @@ def build_prompt_messages(
     *,
     cwd: Path,
     tools: Sequence[ToolSpec] = (),
+    tool_prompt_metadata: Sequence[ToolPromptMetadata] = (),
     mode: AgentMode = DEFAULT_AGENT_MODE,
     max_context_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
     max_context_file_chars: int = DEFAULT_CONTEXT_FILE_MAX_CHARS,
@@ -89,6 +92,8 @@ def build_prompt_messages(
         Message(role="system", content=DEFAULT_SYSTEM_PROMPT),
         Message(role="system", content=context),
     ]
+    if tool_guidance := _tool_guidance(tool_prompt_metadata):
+        messages.append(Message(role="system", content=tool_guidance))
     if mode == "plan":
         messages.append(Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT))
     return tuple(messages)
@@ -333,6 +338,45 @@ def _tool_summary(tools: Sequence[ToolSpec]) -> str:
     return "\n".join(lines)
 
 
+def _tool_guidance(metadata: Sequence[ToolPromptMetadata]) -> str:
+    snippets = _unique_guidance(
+        item.prompt_snippet for item in metadata if item.prompt_snippet is not None
+    )
+    guidelines = _unique_guidance(
+        guideline for item in metadata for guideline in item.guidelines
+    )
+    if not snippets and not guidelines:
+        return ""
+
+    lines = [
+        "[WISP TOOL GUIDANCE]",
+        "Tool guidance is descriptive only; Wisp enforces actual availability, sandboxing, "
+        "and approval requirements.",
+    ]
+    if snippets:
+        lines.append("tool usage:")
+        lines.extend(f"- {snippet}" for snippet in snippets)
+    if guidelines:
+        lines.append("guidelines:")
+        lines.extend(f"- {guideline}" for guideline in guidelines)
+    return _truncate_text(
+        "\n".join(lines),
+        DEFAULT_TOOL_GUIDANCE_MAX_CHARS,
+        marker="[tool guidance truncated]",
+    )
+
+
+def _unique_guidance(values: Iterable[str]) -> tuple[str, ...]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = " ".join(value.split())
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            unique.append(normalized)
+    return tuple(unique)
+
+
 def _run_git(cwd: Path, *args: str) -> str | None:
     try:
         result = subprocess.run(
@@ -351,11 +395,14 @@ def _run_git(cwd: Path, *args: str) -> str | None:
 
 
 def _truncate_context(text: str, max_chars: int) -> str:
+    return _truncate_text(text, max_chars, marker="[context truncated]")
+
+
+def _truncate_text(text: str, max_chars: int, *, marker: str) -> str:
     if max_chars < 1:
         return ""
     if len(text) <= max_chars:
         return text
-    marker = "[context truncated]"
     if max_chars <= len(marker):
         return marker[:max_chars]
     budget = max_chars - len(marker) - 1

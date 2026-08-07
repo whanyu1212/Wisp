@@ -9,7 +9,7 @@ from wisp.providers.catalog import ModelRegistry
 from wisp.runtime.commands import CommandDescriptor, CommandRegistry
 from wisp.runtime.event_bus import EventBus, EventHandler
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
-from wisp.tools.base import Tool
+from wisp.tools.base import Tool, ToolPromptMetadata
 from wisp.tools.process_manager import ProcessSupervisor
 
 
@@ -36,10 +36,16 @@ class ExtensionAPI:
 
         self._providers.register(provider, replace=replace)
 
-    def register_tool(self, tool: Tool, *, replace: bool = True) -> None:
+    def register_tool(
+        self,
+        tool: Tool,
+        *,
+        prompt: ToolPromptMetadata | None = None,
+        replace: bool = True,
+    ) -> None:
         """Register a local tool with the runtime."""
 
-        self._tools.register(tool, replace=replace)
+        self._tools.register(tool, prompt=prompt, replace=replace)
 
     def register_command(self, descriptor: CommandDescriptor, *, replace: bool = False) -> None:
         """Register a frontend-neutral command descriptor with the runtime."""
