@@ -2408,6 +2408,40 @@ def test_tui_shell_adopts_trusted_project_config(tmp_path: Path) -> None:
     anyio.run(run)
 
 
+def test_tui_shell_notifies_the_renderer_of_the_adopted_auth_path(tmp_path: Path) -> None:
+    # The `@`-picker snapshots its protected-path policy at startup. Deferred trust
+    # can move auth_path mid-session, so the shell must tell the renderer or the
+    # picker keeps offering the new credential file that the agent's tools protect.
+    class _RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.adopted: list[Path] = []
+
+        def project_auth_path_changed(self, auth_path: Path) -> None:
+            self.adopted.append(auth_path)
+
+    async def run() -> None:
+        renderer = _RecordingRenderer()
+        trusted_auth = tmp_path / "trusted-auth.json"
+        shell = TuiShell(
+            ScriptedController(),
+            renderer=renderer,
+            prompt_reader=await _reader_from([]),
+            provider="startup-provider",
+            model=None,
+            auth_path=tmp_path / "startup-auth.json",
+            settings_home_dir=tmp_path / "home",
+        )
+
+        await shell._handle_rpc_event(
+            ProjectConfigApplied(provider="trusted-provider", auth_path=trusted_auth)
+        )
+
+        assert renderer.adopted == [trusted_auth]
+
+    anyio.run(run)
+
+
 def test_tui_shell_init_drops_effort_invalid_for_the_startup_provider() -> None:
     # Regression test (Codex review on #125): TuiShell resolves its own
     # config.effort independently, via its own WispConfig.from_env() call in

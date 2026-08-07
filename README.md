@@ -415,6 +415,27 @@ and selected commands use the existing TUI command handler so approval, trust, a
 active-operation restrictions remain unchanged. Dynamic availability reasons, suggested actions,
 configurable bindings, and extension command handlers remain future work.
 
+Type `@` in the Textual composer to reference a project file. An inline picker opens above the
+input and filters as you keep typing, matching loosely so `@tuiapp` finds
+`src/wisp/tui/textual_app.py`; contiguous matches, filename matches, and shorter paths rank
+highest. Use Up/Down to move, Enter or Tab to insert the highlighted path, and Escape to dismiss
+without changing what you typed. Only the relative path is inserted — Wisp does not inline file
+contents, so mentioning a file does not read it. The model reads it through its normal file tool,
+which still has to be exposed for the session (read tools are off unless enabled) and still
+resolves the path through the `protected_paths` guard and the working-directory boundary. Note
+that read-only tools do not raise an approval prompt the way mutating and command tools do, so
+the guard and tool exposure — not a per-read confirmation — are what constrain this. The listing
+itself honors that same protected-path policy, so
+secrets such as `.env` are never offered, and build directories (`.git`, `node_modules`,
+`__pycache__`, and friends) are skipped. Mentions are only recognized at the start of a line or
+after a space, so an `@` inside a word — an email address such as `you@example.com` — never opens
+the picker. A Python decorator written at the start of a line does match that rule, so `@property`
+can open the picker if the project contains a similarly named path; press Escape to dismiss it and
+keep typing, or type the following space, which ends the mention. Paths containing spaces are
+inserted quoted. Note that `.gitignore` is not yet consulted, so untracked output in
+unconventional locations can still appear. Tree-style browsing and a persistent file sidebar
+remain future work.
+
 TUI login currently uses the `openai-codex` device-code flow; browser login is available from the
 CLI (`uv run wisp auth login openai-codex`). `/model` with no arguments opens a model picker in
 the Textual TUI and lists every catalog model grouped by provider in line mode. Textual keeps the

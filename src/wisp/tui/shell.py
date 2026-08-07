@@ -1456,6 +1456,12 @@ class TuiShell:
             # ProjectConfigApplied.effort's docstring explains in more detail.
             self.current_effort = event.effort
             self.auth_store = JsonAuthStore(event.auth_path)
+            # The credential file just moved, so the `@`-picker's startup policy
+            # snapshot is now stale and would keep offering the new auth file for
+            # mention while the agent's tool context protects it. Hand the renderer
+            # the new path; Textual rebuilds its corpus, other renderers have no
+            # picker and ignore this.
+            self._call_renderer_optional("project_auth_path_changed", event.auth_path)
             self.renderer.notice(
                 f"Applied trusted project config: provider {event.provider}"
                 f"{f', model {event.model}' if event.model else ''}."

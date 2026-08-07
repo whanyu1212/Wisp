@@ -15,8 +15,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager, suppress
+from pathlib import Path
 
-from textual import events, on
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -24,6 +25,7 @@ from textual.content import Content
 from textual.widget import AwaitMount, Widget
 from textual.widgets import Static, TextArea
 
+from wisp.config import WispConfig
 from wisp.events import (
     RpcSessionSummary,
     SessionStats,
@@ -31,9 +33,12 @@ from wisp.events import (
     TrustRequested,
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
+from wisp.tools.context import ToolContext
 from wisp.tui.commands import DEFAULT_TUI_COMMAND_CATALOG, TuiCommandCatalog
 from wisp.tui.context_widget import ContextStatusOverlay
 from wisp.tui.diff_presentation import DiffPresentation
+from wisp.tui.file_index import FileIndexConfig, collect_paths
+from wisp.tui.file_suggest import FileSuggest
 from wisp.tui.overlay import (
     OverlayKind,
     OverlayOperation,
@@ -327,8 +332,19 @@ class TextualTui(App[None]):
         Binding("end", "scroll_transcript_end", "Scroll to bottom", priority=True, show=False),
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, *, protected_paths: tuple[str, ...] | None = None) -> None:
         super().__init__()
+        # The parent's already-resolved protected-path policy, threaded down from
+        # `run_tui`. It is *not* re-derived here: the resolved policy reflects the
+        # `--auth-file` override and the trust decision the parent made before
+        # startup, neither of which a fresh `WispConfig.from_env` in this process
+        # can reconstruct. `None` means an embedded caller supplied nothing, and
+        # `_file_index_context` falls back to resolving on its own.
+        self._protected_paths = protected_paths
+        # Credential files adopted after startup, when a trusted project's config is
+        # applied mid-session. Held apart from the snapshot above so `None` keeps
+        # meaning "nothing supplied"; see `set_picker_auth_path`.
+        self._adopted_auth_paths: tuple[str, ...] = ()
         self._input_controller = TextualInputController(self)
         self._transcript_controller = TextualTranscriptController(self)
         self._status: StatusBar | None = None
@@ -336,6 +352,7 @@ class TextualTui(App[None]):
         self._jump_to_latest: JumpToLatest | None = None
         self._input: PromptEditor | None = None
         self._suggest: SlashSuggest | None = None
+        self._file_suggest: FileSuggest | None = None
         self._prompt_history_picker: PromptHistoryPicker | None = None
         self._decision_panel: DecisionPanel | None = None
         self._model_picker: ModelPicker | None = None
@@ -409,6 +426,9 @@ class TextualTui(App[None]):
             # The slash-command menu floats on the overlay layer anchored near the
             # input; yielded here so it shares the Vertical's coordinate space.
             yield SlashSuggest(id="suggest")
+            # Same anchored slot as the slash menu; only one is ever open at a time
+            # (the `/` and `@` triggers are mutually exclusive by construction).
+            yield FileSuggest(id="file-suggest")
             yield PromptHistoryPicker(id="prompt-history")
             yield DecisionPanel(id="decision-panel")
             yield ModelPicker(id="model-picker")
@@ -450,6 +470,7 @@ class TextualTui(App[None]):
         self._status = self.query_one("#status", StatusBar)
         self._input = self.query_one("#input", PromptEditor)
         self._suggest = self.query_one("#suggest", SlashSuggest)
+        self._file_suggest = self.query_one("#file-suggest", FileSuggest)
         self._prompt_history_picker = self.query_one("#prompt-history", PromptHistoryPicker)
         self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
         self._model_picker = self.query_one("#model-picker", ModelPicker)
@@ -458,7 +479,10 @@ class TextualTui(App[None]):
         self._operation_indicator = self.query_one("#operation-indicator", OperationIndicator)
         self._overlay_controller = TextualOverlayController(
             composer=self._input,
-            suggestion=self._suggest,
+            # Both composer-anchored menus, so an overlay opening tears down each
+            # of them; the `@` picker would otherwise float over the overlay and
+            # win the Escape/navigation keys that belong to the active workflow.
+            suggestions=(self._suggest, self._file_suggest),
             transcript=self._transcript,
             overlays={
                 OverlayKind.decision: self._decision_panel,
@@ -509,6 +533,13 @@ class TextualTui(App[None]):
         typed name before Enter dispatches them.
         """
 
+        # An open file menu claims Enter first: the user is picking a path, not
+        # submitting the prompt. Completion leaves the line intact for further
+        # typing, so this always swallows the keypress.
+        if self._file_suggest is not None and self._file_suggest.is_open:
+            if self._complete_path_from_menu():
+                return True
+
         suggest = self._suggest
         if suggest is None or not suggest.is_open:
             return False
@@ -534,13 +565,111 @@ class TextualTui(App[None]):
         return self._input_controller.compact_echo_for(prompt)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        # Keep the inline slash menu in sync with the input WITHOUT ever touching
-        # the input value — the line is the single source of truth (Claude-Code
-        # model), so a leading `/` is always typable as text (`/etc/hosts`). The
-        # menu shows only while the value is a bare slash token still being typed;
-        # show_for() hides it otherwise (no `/`, a space, or no match).
-        if event.text_area is self._input and self._suggest is not None:
-            self._suggest.show_for(event.text_area.text)
+        # Keep the inline menus in sync with the input WITHOUT ever touching the
+        # input value — the line is the single source of truth (Claude-Code model),
+        # so a leading `/` is always typable as text (`/etc/hosts`).
+        #
+        # The two menus are mutually exclusive: a slash command owns the whole line
+        # (anchored at position 0), while an `@` mention is cursor-relative and can
+        # appear anywhere. Consulting the slash menu first preserves its existing
+        # behavior exactly; the file menu is offered only when no slash menu is live.
+        if event.text_area is not self._input:
+            return
+        slash_matches = 0
+        if self._suggest is not None:
+            slash_matches = self._suggest.show_for(event.text_area.text)
+        if self._file_suggest is None:
+            return
+        if slash_matches:
+            self._file_suggest.hide()
+            return
+        self._file_suggest.show_for(
+            event.text_area.text, self._file_offset_of_cursor(event.text_area)
+        )
+
+    @staticmethod
+    def _file_offset_of_cursor(editor: TextArea) -> int:
+        """Flat character offset of the caret, for the `@` trigger scan.
+
+        TextArea reports the cursor as (row, column); the mention scan needs a flat
+        index into the same string it is handed. PromptEditor exposes exactly this
+        conversion as its Input-compatibility shim, so reuse it rather than
+        recomputing the line offsets here.
+        """
+
+        cursor_position = getattr(editor, "cursor_position", None)
+        if isinstance(cursor_position, int):
+            return cursor_position
+        return len(editor.text)
+
+    def set_picker_auth_path(self, auth_path: Path) -> None:
+        """Protect a credential file the session adopted after startup.
+
+        A trusted project's config can move ``auth_path`` mid-session (deferred
+        trust), after ``__init__`` captured the startup policy. These paths are kept
+        *beside* that snapshot rather than merged into it, so the `None` case still
+        means "no policy supplied" and embedded callers keep their fallback
+        resolution instead of collapsing to just this one pattern.
+
+        Accumulating rather than replacing is deliberate: a previously active
+        credential file must stay hidden, since a config change should never widen
+        what the picker is willing to offer.
+        """
+
+        pattern = auth_path.expanduser().resolve(strict=False).as_posix()
+        if pattern not in self._adopted_auth_paths:
+            self._adopted_auth_paths = (*self._adopted_auth_paths, pattern)
+
+    def load_file_suggestions(self, cwd: str) -> None:
+        """Collect the `@`-picker corpus for `cwd`, off the event loop.
+
+        Walking a real project costs hundreds of milliseconds of `os.scandir`, which
+        would visibly freeze every keystroke and animation if run inline. The walk is
+        syscall-bound, so a thread gives genuine concurrency here.
+        """
+
+        picker = self._file_suggest
+        if picker is None:
+            return
+        self._collect_file_suggestions(cwd, picker)
+
+    @work(thread=True, exclusive=True, group="file-suggest")
+    def _collect_file_suggestions(self, cwd: str, picker: FileSuggest) -> None:
+        root = Path(cwd)
+        context = _file_index_context(root, self._protected_paths, self._adopted_auth_paths)
+        paths = collect_paths(FileIndexConfig(root=root, context=context))
+        # Hop back to the event loop: widget state must not be mutated from a worker.
+        self.call_from_thread(self._install_file_suggestions, picker, paths)
+
+    def _install_file_suggestions(self, picker: FileSuggest, paths: tuple[str, ...]) -> None:
+        """Install the corpus and re-evaluate any mention the user already typed.
+
+        The walk takes hundreds of milliseconds, so the user can easily type `@query`
+        before it lands. `show_for` hid the menu at the time because the corpus was
+        empty, and `set_paths` alone would not re-read the editor — the menu would
+        stay hidden until the next keystroke. Re-running the trigger scan here makes
+        simply waiting for indexing sufficient.
+
+        The scan is a no-op unless the caret is currently inside a mention, so this
+        never opens the menu on its own.
+        """
+
+        picker.set_paths(paths)
+        editor = self._input
+        if editor is None or not paths:
+            return
+        # An overlay or pending operation has already torn the composer down. The
+        # worker is a background arrival, not user intent, so it must never revive
+        # a composer-anchored menu on top of an active approval or picker.
+        controller = self._overlay_controller
+        if controller is not None and (
+            controller.active_overlay is not None or controller.active_operation is not None
+        ):
+            return
+        # Same precedence as on_text_area_changed: a live slash menu owns the line.
+        if self._suggest is not None and self._suggest.is_open:
+            return
+        picker.show_for(editor.text, self._file_offset_of_cursor(editor))
 
     def on_transcript_follow_changed(self, event: Transcript.FollowChanged) -> None:
         if event.following:
@@ -766,9 +895,26 @@ class TextualTui(App[None]):
         await super().on_event(event)
 
     async def on_key(self, event: events.Key) -> None:
-        # Menu-scoped keys, handled only while the slash menu is open so normal
-        # input (Tab focus, Escape, arrows in the editor) is untouched otherwise.
-        # Enter is intentionally NOT intercepted — on_input_submitted runs the line.
+        # Menu-scoped keys, handled only while a menu is open so normal input (Tab
+        # focus, Escape, arrows in the editor) is untouched otherwise. Enter is
+        # intentionally NOT intercepted — on_input_submitted runs the line, and
+        # _accept_menu_highlight_on_enter decides whether a menu claims it first.
+        file_suggest = self._file_suggest
+        if file_suggest is not None and file_suggest.is_open:
+            if event.key in {"down", "up", "tab", "escape"}:
+                if event.key == "down":
+                    file_suggest.action_cursor_down()
+                elif event.key == "up":
+                    file_suggest.action_cursor_up()
+                elif event.key == "tab":
+                    self._complete_path_from_menu()
+                else:
+                    # Dismiss but keep whatever the user typed.
+                    file_suggest.hide()
+                event.prevent_default()
+                event.stop()
+            return
+
         suggest = self._suggest
         if suggest is None or not suggest.is_open:
             return
@@ -803,6 +949,43 @@ class TextualTui(App[None]):
             return
         self.prefill_command(f"{spec.command} " if spec.takes_args else spec.command)
         suggest.hide()
+
+    def _complete_path_from_menu(self) -> bool:
+        """Replace the in-progress `@query` with the highlighted path.
+
+        Unlike `_complete_from_menu`, this must NOT use `prefill_command` — that
+        replaces the whole buffer, which is right for a slash command that owns the
+        line but would destroy the surrounding prose of a mid-prompt mention. Only
+        the `@…` span itself is spliced, and the caret lands after the inserted
+        path so typing continues naturally.
+
+        Returns whether a completion was applied.
+        """
+
+        picker = self._file_suggest
+        editor = self._input
+        if picker is None or editor is None or not picker.is_open:
+            return False
+        path = picker.highlighted_path()
+        if path is None:
+            return False
+
+        value = editor.text
+        cursor = self._file_offset_of_cursor(editor)
+        query = picker.query_from_value(value, cursor)
+        if query is None:
+            return False
+
+        # The mention spans from its `@` through the fragment typed so far. A path
+        # containing a space would break the single-token grammar the trigger
+        # relies on, so quote it — mirroring how Toad emits `@"my file.py"`.
+        start = cursor - len(query) - 1
+        rendered = f'@"{path}"' if " " in path else f"@{path}"
+        replacement = f"{rendered} "
+        editor.value = f"{value[:start]}{replacement}{value[cursor:]}"
+        editor.cursor_position = start + len(replacement)
+        picker.hide()
+        return True
 
     def set_history_page_request_hook(
         self,
@@ -935,6 +1118,10 @@ class TextualTui(App[None]):
     def action_cancel(self) -> None:
         """Dismiss the nearest UI layer, then fall back to shell cancellation."""
 
+        file_suggest = self._file_suggest
+        if file_suggest is not None and file_suggest.is_open:
+            file_suggest.hide()
+            return
         suggest = self._suggest
         if suggest is not None and suggest.is_open:
             suggest.hide()
@@ -1925,10 +2112,80 @@ class TextualTui(App[None]):
         self.note_transcript_update(widget)
 
 
-def create_textual_tui() -> tuple[TextualTui, TuiRenderer]:
-    """Create a Textual app and renderer pair for `TuiShell`."""
+def _file_index_context(
+    root: Path,
+    protected_paths: tuple[str, ...] | None = None,
+    adopted_auth_paths: tuple[str, ...] = (),
+) -> ToolContext:
+    """Resolve the protected-path policy governing what the `@` picker may list.
 
-    app = TextualTui()
+    A bare ``ToolContext(cwd=root)`` would hardcode ``DEFAULT_PROTECTED_PATHS`` and
+    silently ignore the user's real policy: a configured ``protected_paths`` entry
+    (say ``secrets.yaml``) would be denied by the agent's tools but still offered
+    for ``@``-mention here, and a nonstandard ``auth_path`` would lose the
+    credential-file backstop that ``ToolContext.from_config`` guarantees.
+
+    ``protected_paths`` is the parent's **already-resolved** policy and is preferred
+    whenever the caller has one. Re-resolving instead would silently drop two things
+    the parent alone knows: an ``--auth-file`` override (a CLI flag this process
+    never sees again) and a trusted project's in-project ``auth_path`` (which
+    ``WispConfig.from_env`` gates on ``trusted``). Either omission leaves the
+    credential file indexable and offerable for mention while the agent's real tool
+    context protects it.
+
+    The fallback path exists for embedded callers that construct the app directly and
+    have no resolved policy to hand over. There, resolving with ``trusted=False`` is
+    deliberate: ``protected_paths`` is a user-scoped security setting that
+    ``wisp.settings`` never reads from project-controlled config, so omitting the
+    project layer cannot weaken the policy — at worst the picker hides a file the
+    agent would have shown, which fails closed.
+
+    ``adopted_auth_paths`` are credential files the session started protecting after
+    startup, when a trusted project's config was applied mid-session. They union into
+    whichever base policy the two branches above produced, since a deferred-trust
+    approval moves the real auth file regardless of how the base was obtained.
+
+    Config resolution touches the filesystem, so this runs on the picker's worker
+    thread, never the event loop. A failure here must not take the TUI down: the
+    picker is advisory, and falling back to the secure defaults keeps secrets hidden.
+    """
+
+    if protected_paths is not None:
+        return ToolContext(
+            cwd=root, protected_paths=_with_adopted(protected_paths, adopted_auth_paths)
+        )
+    try:
+        config = WispConfig.from_env(project_dir=root)
+        base = ToolContext.from_config(config, cwd=root)
+    except Exception:
+        base = ToolContext(cwd=root)
+    # The adopted credential paths apply to the fallback branch too: a mid-session
+    # trust approval moves the real auth file regardless of how the base policy
+    # was obtained.
+    if not adopted_auth_paths:
+        return base
+    return ToolContext(
+        cwd=root, protected_paths=_with_adopted(base.protected_paths, adopted_auth_paths)
+    )
+
+
+def _with_adopted(base: tuple[str, ...], adopted: tuple[str, ...]) -> tuple[str, ...]:
+    """Union the base policy with credential paths adopted after startup."""
+
+    return (*base, *(pattern for pattern in adopted if pattern not in base))
+
+
+def create_textual_tui(
+    *, protected_paths: tuple[str, ...] | None = None
+) -> tuple[TextualTui, TuiRenderer]:
+    """Create a Textual app and renderer pair for `TuiShell`.
+
+    ``protected_paths`` is the caller's already-resolved policy, forwarded to the
+    `@`-picker so it hides exactly what the agent's tools deny. See
+    ``_file_index_context`` for why re-deriving it here would be wrong.
+    """
+
+    app = TextualTui(protected_paths=protected_paths)
     return app, TextualTuiRenderer(app)
 
 
