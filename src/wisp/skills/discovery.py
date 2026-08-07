@@ -29,6 +29,13 @@ _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_
 _FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _SCANDIR_SUPPORTS_FD = os.scandir in os.supports_fd
+_USE_DESCRIPTOR_TRAVERSAL = (
+    os.name != "nt"
+    and hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and _OPEN_SUPPORTS_DIR_FD
+    and _SCANDIR_SUPPORTS_FD
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +53,11 @@ class _SkillRoot:
 class _RootScan:
     entries: tuple[SkillEntry, ...] = ()
     diagnostics: tuple[SkillDiagnostic, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _OpenedRoot:
+    fd: int | None
 
 
 class _RootLimitError(ValueError):
@@ -130,11 +142,12 @@ def discover_skills(
 
 def _scan_root(root: _SkillRoot, *, context: ToolContext) -> _RootScan:
     path = root.path
-    root_fd, open_diagnostic = _open_skill_root(root)
-    if root_fd is None:
+    opened_root, open_diagnostic = _open_skill_root(root)
+    if opened_root is None:
         if open_diagnostic is None:
             return _RootScan()
         return _RootScan(diagnostics=(open_diagnostic,))
+    root_fd = opened_root.fd
 
     try:
         try:
@@ -151,8 +164,33 @@ def _scan_root(root: _SkillRoot, *, context: ToolContext) -> _RootScan:
                     ),
                 )
             )
+        except OSError as exc:
+            return _RootScan(
+                diagnostics=(
+                    _diagnostic(
+                        "root-unreadable",
+                        "error",
+                        f"cannot scan skill source root: {_os_error_message(exc)}",
+                        root.source,
+                        path,
+                    ),
+                )
+            )
 
-        resolved_root = path.resolve(strict=False)
+        try:
+            resolved_root = path.resolve(strict=False)
+        except OSError as exc:
+            return _RootScan(
+                diagnostics=(
+                    _diagnostic(
+                        "root-unreadable",
+                        "error",
+                        f"cannot resolve skill source root: {_os_error_message(exc)}",
+                        root.source,
+                        path,
+                    ),
+                )
+            )
         entries: list[SkillEntry] = []
         diagnostics: list[SkillDiagnostic] = []
         frontmatter_bytes = 0
@@ -171,13 +209,25 @@ def _scan_root(root: _SkillRoot, *, context: ToolContext) -> _RootScan:
                 continue
             if not is_directory:
                 continue
-            result, consumed, entry_diagnostics = _read_skill_entry(
-                root,
-                root_fd=root_fd,
-                resolved_root=resolved_root,
-                directory_name=name,
-                context=context,
-            )
+            try:
+                result, consumed, entry_diagnostics = _read_skill_entry(
+                    root,
+                    root_fd=root_fd,
+                    resolved_root=resolved_root,
+                    directory_name=name,
+                    context=context,
+                )
+            except (OSError, RuntimeError) as exc:
+                diagnostics.append(
+                    _diagnostic(
+                        "file-unreadable",
+                        "error",
+                        f"cannot inspect skill metadata: {exc}",
+                        root.source,
+                        candidate / "SKILL.md",
+                    )
+                )
+                continue
             frontmatter_bytes += consumed
             if frontmatter_bytes > MAX_ROOT_FRONTMATTER_BYTES:
                 diagnostics.append(
@@ -198,10 +248,14 @@ def _scan_root(root: _SkillRoot, *, context: ToolContext) -> _RootScan:
                 entries.append(result)
         return _RootScan(entries=tuple(entries), diagnostics=tuple(diagnostics))
     finally:
-        os.close(root_fd)
+        if root_fd is not None:
+            os.close(root_fd)
 
 
-def _open_skill_root(root: _SkillRoot) -> tuple[int | None, SkillDiagnostic | None]:
+def _open_skill_root(root: _SkillRoot) -> tuple[_OpenedRoot | None, SkillDiagnostic | None]:
+    if not _USE_DESCRIPTOR_TRAVERSAL:
+        return _open_skill_root_by_path(root)
+
     try:
         current_fd = os.open(root.base, _DIRECTORY_FLAGS)
     except FileNotFoundError:
@@ -265,12 +319,86 @@ def _open_skill_root(root: _SkillRoot) -> tuple[int | None, SkillDiagnostic | No
         os.close(current_fd)
         current_fd = next_fd
         current_path = candidate
-    return current_fd, None
+    return _OpenedRoot(current_fd), None
 
 
-def _bounded_root_names(root_fd: int, *, path: Path) -> tuple[tuple[str, bool, bool], ...]:
+def _open_skill_root_by_path(
+    root: _SkillRoot,
+) -> tuple[_OpenedRoot | None, SkillDiagnostic | None]:
+    current_path = root.base
+    try:
+        base_stat = current_path.stat()
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        return (
+            None,
+            _diagnostic(
+                "root-unreadable",
+                "error",
+                f"cannot inspect skill source base: {_os_error_message(exc)}",
+                root.source,
+                current_path,
+            ),
+        )
+    if not stat.S_ISDIR(base_stat.st_mode):
+        return (
+            None,
+            _diagnostic(
+                "root-not-directory",
+                "error",
+                "skill source base is not a directory",
+                root.source,
+                current_path,
+            ),
+        )
+
+    for component in root.components:
+        candidate = current_path / component
+        try:
+            candidate_stat = candidate.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return None, None
+        except OSError as exc:
+            return (
+                None,
+                _diagnostic(
+                    "root-unreadable",
+                    "error",
+                    f"cannot inspect skill source root: {_os_error_message(exc)}",
+                    root.source,
+                    candidate,
+                ),
+            )
+        if stat.S_ISLNK(candidate_stat.st_mode):
+            return (
+                None,
+                _diagnostic(
+                    "root-symlink",
+                    "error",
+                    "skill source root components must not be symlinks",
+                    root.source,
+                    candidate,
+                ),
+            )
+        if not stat.S_ISDIR(candidate_stat.st_mode):
+            return (
+                None,
+                _diagnostic(
+                    "root-not-directory",
+                    "error",
+                    "skill source root component is not a directory",
+                    root.source,
+                    candidate,
+                ),
+            )
+        current_path = candidate
+    return _OpenedRoot(None), None
+
+
+def _bounded_root_names(root_fd: int | None, *, path: Path) -> tuple[tuple[str, bool, bool], ...]:
     entries: list[tuple[str, bool, bool]] = []
-    scan_target: int | Path = root_fd if _SCANDIR_SUPPORTS_FD else path
+    scan_target: int | Path = root_fd if root_fd is not None else path
     with os.scandir(scan_target) as iterator:
         for item in iterator:
             entries.append(
@@ -290,7 +418,7 @@ def _bounded_root_names(root_fd: int, *, path: Path) -> tuple[tuple[str, bool, b
 def _read_skill_entry(
     root: _SkillRoot,
     *,
-    root_fd: int,
+    root_fd: int | None,
     resolved_root: Path,
     directory_name: str,
     context: ToolContext,
@@ -344,6 +472,24 @@ def _read_skill_entry(
             ),
         )
 
+    if root_fd is None:
+        try:
+            metadata_fd = os.open(skill_file, _FILE_FLAGS)
+        except FileNotFoundError:
+            return None, 0, ()
+        except OSError as exc:
+            return _metadata_open_error(root.source, skill_file, exc)
+        try:
+            return _read_open_metadata(
+                metadata_fd,
+                source=root.source,
+                resolved_skill_root=resolved_file.parent,
+                directory_name=directory_name,
+                skill_file=skill_file,
+            )
+        finally:
+            os.close(metadata_fd)
+
     try:
         skill_fd = _open_relative(
             directory_name,
@@ -380,66 +526,91 @@ def _read_skill_entry(
         except FileNotFoundError:
             return None, 0, ()
         except OSError as exc:
-            metadata_code: SkillDiagnosticCode = (
-                "entry-symlink" if exc.errno == errno.ELOOP else "file-unreadable"
-            )
-            return (
-                None,
-                0,
-                (
-                    _diagnostic(
-                        metadata_code,
-                        "error",
-                        f"cannot open SKILL.md: {_os_error_message(exc)}",
-                        root.source,
-                        skill_file,
-                    ),
-                ),
-            )
+            return _metadata_open_error(root.source, skill_file, exc)
 
         try:
-            if not stat.S_ISREG(os.fstat(metadata_fd).st_mode):
-                return (
-                    None,
-                    0,
-                    (
-                        _diagnostic(
-                            "file-unreadable",
-                            "error",
-                            "SKILL.md is not a regular file",
-                            root.source,
-                            skill_file,
-                        ),
-                    ),
-                )
-            try:
-                entry, consumed, diagnostics = read_skill_metadata(
-                    metadata_fd,
-                    source=root.source,
-                    skill_root=resolved_file.parent,
-                    directory_name=directory_name,
-                    skill_file=skill_file,
-                    max_frontmatter_bytes=MAX_FRONTMATTER_BYTES,
-                )
-            except SkillMetadataError as exc:
-                return (
-                    None,
-                    exc.bytes_read,
-                    (
-                        _diagnostic(
-                            exc.code,
-                            "error",
-                            str(exc),
-                            root.source,
-                            skill_file,
-                        ),
-                    ),
-                )
+            return _read_open_metadata(
+                metadata_fd,
+                source=root.source,
+                resolved_skill_root=resolved_file.parent,
+                directory_name=directory_name,
+                skill_file=skill_file,
+            )
         finally:
             os.close(metadata_fd)
     finally:
         os.close(skill_fd)
+
+
+def _read_open_metadata(
+    metadata_fd: int,
+    *,
+    source: SkillSource,
+    resolved_skill_root: Path,
+    directory_name: str,
+    skill_file: Path,
+) -> tuple[SkillEntry | None, int, tuple[SkillDiagnostic, ...]]:
+    if not stat.S_ISREG(os.fstat(metadata_fd).st_mode):
+        return (
+            None,
+            0,
+            (
+                _diagnostic(
+                    "file-unreadable",
+                    "error",
+                    "SKILL.md is not a regular file",
+                    source,
+                    skill_file,
+                ),
+            ),
+        )
+    try:
+        entry, consumed, diagnostics = read_skill_metadata(
+            metadata_fd,
+            source=source,
+            skill_root=resolved_skill_root,
+            directory_name=directory_name,
+            skill_file=skill_file,
+            max_frontmatter_bytes=MAX_FRONTMATTER_BYTES,
+        )
+    except SkillMetadataError as exc:
+        return (
+            None,
+            exc.bytes_read,
+            (
+                _diagnostic(
+                    exc.code,
+                    "error",
+                    str(exc),
+                    source,
+                    skill_file,
+                ),
+            ),
+        )
     return entry, consumed, diagnostics
+
+
+def _metadata_open_error(
+    source: SkillSource,
+    skill_file: Path,
+    exc: OSError,
+) -> tuple[None, int, tuple[SkillDiagnostic, ...]]:
+    metadata_code: SkillDiagnosticCode = (
+        "entry-symlink" if exc.errno == errno.ELOOP else "file-unreadable"
+    )
+    return (
+        None,
+        0,
+        (
+            _diagnostic(
+                metadata_code,
+                "error",
+                f"cannot open SKILL.md: {_os_error_message(exc)}",
+                source,
+                skill_file,
+            ),
+        ),
+    )
 
 
 def _diagnostic(
@@ -466,9 +637,9 @@ def _open_relative(
     name: str,
     flags: int,
     *,
-    directory_fd: int,
+    directory_fd: int | None,
     directory_path: Path,
 ) -> int:
-    if _OPEN_SUPPORTS_DIR_FD:
+    if directory_fd is not None and _OPEN_SUPPORTS_DIR_FD:
         return os.open(name, flags, dir_fd=directory_fd)
     return os.open(directory_path / name, flags)

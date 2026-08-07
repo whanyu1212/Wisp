@@ -288,6 +288,35 @@ def test_rejects_intermediate_project_skill_root_symlink(tmp_path: Path) -> None
     assert catalog.diagnostics[0].path == project / ".wisp"
 
 
+def test_path_fallback_discovers_skills_without_opening_directories(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    _write_skill(tmp_path / ".wisp" / "skills", "windows-compatible")
+    monkeypatch.setattr(discovery_module, "_USE_DESCRIPTOR_TRAVERSAL", False)
+
+    catalog = _discover(tmp_path)
+
+    assert catalog.names() == ("windows-compatible",)
+
+
+def test_path_fallback_rejects_intermediate_root_symlink(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    outside = tmp_path / "outside-wisp"
+    _write_skill(outside / "skills", "escaped")
+    (home / ".wisp").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(discovery_module, "_USE_DESCRIPTOR_TRAVERSAL", False)
+
+    catalog = _discover(home)
+
+    assert catalog.entries == ()
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["root-symlink"]
+
+
 def test_catalog_stores_canonical_skill_root_through_symlinked_home_parent(
     tmp_path: Path,
 ) -> None:
@@ -350,6 +379,28 @@ def test_unreadable_root_is_diagnostic(
     catalog = _discover(tmp_path)
 
     assert catalog.entries == ()
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["root-unreadable"]
+
+
+def test_scan_error_is_isolated_from_later_roots(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    wisp_root = tmp_path / ".wisp" / "skills"
+    wisp_root.mkdir(parents=True)
+    _write_skill(tmp_path / ".agents" / "skills", "valid")
+    original = discovery_module._bounded_root_names
+
+    def fail_wisp_root(root_fd: int | None, *, path: Path):
+        if path == wisp_root:
+            raise OSError("disconnected")
+        return original(root_fd, path=path)
+
+    monkeypatch.setattr(discovery_module, "_bounded_root_names", fail_wisp_root)
+
+    catalog = _discover(tmp_path)
+
+    assert catalog.names() == ("valid",)
     assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["root-unreadable"]
 
 
