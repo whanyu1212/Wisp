@@ -2729,6 +2729,8 @@ def test_tui_shell_escape_cancels_non_textual_device_authorization(
                 return "/connect openai-codex"
             if calls == 2:
                 await started.wait()
+                return "prompt must not race reconnect"
+            if calls == 3:
                 raise TuiCancelRequested
             return "/quit"
 
@@ -2745,7 +2747,10 @@ def test_tui_shell_escape_cancels_non_textual_device_authorization(
         await shell.run()
 
         assert cancelled.is_set()
-        assert "Provider connection cancelled." in output.getvalue()
+        assert controller.prompts == []
+        rendered = output.getvalue()
+        assert "Cannot submit prompts while a provider connection is in progress." in rendered
+        assert "Provider connection cancelled." in rendered
 
     anyio.run(run)
 

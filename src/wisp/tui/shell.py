@@ -615,6 +615,12 @@ class TuiShell:
             return False
         if command is not None:
             return await self._handle_slash_command(command)
+        if self._connect_cancel_scope is not None:
+            if has_content:
+                self.renderer.command_error(
+                    "Cannot submit prompts while a provider connection is in progress."
+                )
+            return False
         if self._session_operation_active():
             if has_content:
                 self.renderer.command_error(
