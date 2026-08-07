@@ -847,6 +847,7 @@ class DecisionPanel(Vertical):
             event.stop()
             event.prevent_default()
             return
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action != "choose" or not parameters or not isinstance(parameters[0], int):
             return True
@@ -1247,6 +1248,7 @@ class ModelPicker(Vertical):
             event.stop()
             event.prevent_default()
             return
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "cycle_effort":
             row = self._highlighted_row()

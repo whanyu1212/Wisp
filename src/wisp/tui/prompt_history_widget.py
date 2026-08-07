@@ -28,9 +28,7 @@ class PromptHistoryPicker(Vertical):
     never submits it. Escape closes history without changing the draft.
     """
     BINDINGS = [
-        Binding(
-            "up", "move('action_cursor_up')", "Previous prompt", show=False, priority=True
-        ),
+        Binding("up", "move('action_cursor_up')", "Previous prompt", show=False, priority=True),
         Binding("down", "move('action_cursor_down')", "Next prompt", show=False, priority=True),
         Binding("pageup", "move('action_page_up')", "Previous page", show=False, priority=True),
         Binding("pagedown", "move('action_page_down')", "Next page", show=False, priority=True),

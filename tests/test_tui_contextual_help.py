@@ -72,16 +72,12 @@ def test_help_tracks_tool_card_focus_and_hides_unavailable_expand_binding() -> N
             await pilot.pause()
 
             assert "# Tool result" in _help_source(app)
-            actions = {
-                binding.binding.action for binding in app.screen.active_bindings.values()
-            }
+            actions = {binding.binding.action for binding in app.screen.active_bindings.values()}
             assert "toggle_expand" not in actions
 
             card.set_state("done", detail="preview", full_output="preview\nmore")
             await pilot.pause()
-            actions = {
-                binding.binding.action for binding in app.screen.active_bindings.values()
-            }
+            actions = {binding.binding.action for binding in app.screen.active_bindings.values()}
             assert "toggle_expand" in actions
 
     anyio.run(scenario)
@@ -108,9 +104,7 @@ def test_help_tracks_safety_panel_and_exposes_only_available_decisions() -> None
             assert "# Safety decision" in source
             assert "Approve once" in source
             assert "until this Wisp process exits" in source
-            actions = {
-                binding.binding.action for binding in app.screen.active_bindings.values()
-            }
+            actions = {binding.binding.action for binding in app.screen.active_bindings.values()}
             assert {"choose(1)", "choose(2)", "choose(3)", "choose(4)"} <= actions
 
     anyio.run(scenario)
@@ -125,18 +119,14 @@ def test_suggestion_bindings_appear_only_while_a_menu_is_open() -> None:
             editor.text = "/"
             await pilot.pause()
 
-            actions = {
-                binding.binding.action for binding in app.screen.active_bindings.values()
-            }
+            actions = {binding.binding.action for binding in app.screen.active_bindings.values()}
             assert "menu_move(-1)" in actions
             assert "menu_move(1)" in actions
             assert "menu_complete" in actions
 
             editor.text = "ordinary prompt"
             await pilot.pause()
-            actions = {
-                binding.binding.action for binding in app.screen.active_bindings.values()
-            }
+            actions = {binding.binding.action for binding in app.screen.active_bindings.values()}
             assert not any(action.startswith("menu_") for action in actions)
 
     anyio.run(scenario)
@@ -147,9 +137,7 @@ def test_suggestion_bindings_appear_only_while_a_menu_is_open() -> None:
     [((100, 30), False), ((60, 20), True)],
 )
 @pytest.mark.parametrize("theme", ["wisp", "wisp-light"])
-def test_help_uses_responsive_split(
-    size: tuple[int, int], compact: bool, theme: str
-) -> None:
+def test_help_uses_responsive_split(size: tuple[int, int], compact: bool, theme: str) -> None:
     async def scenario() -> None:
         app, _renderer = create_textual_tui()
         async with app.run_test(size=size) as pilot:
