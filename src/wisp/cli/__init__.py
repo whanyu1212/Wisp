@@ -33,6 +33,7 @@ from wisp.tui.rendering import TuiRendererKind
 from . import options as _cli_options
 from . import output as _cli_output
 from . import rpc as _cli_rpc
+from . import skills as _cli_skills
 from . import tools as _cli_tools
 from . import trust as _cli_trust
 from .types import OutputMode, _JsonOutputModeError, _RenderedPrintError
@@ -120,6 +121,7 @@ app = typer.Typer(
 )
 app.add_typer(auth_app, name="auth")
 app.add_typer(_cli_trust.trust_app, name="trust")
+app.command("skills")(_cli_skills.skills_command)
 
 
 @app.callback()

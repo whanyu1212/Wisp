@@ -161,7 +161,7 @@ def _text_trust_prompter(project_path: Path) -> bool | None:
         return typer.confirm(
             f"Do you trust the files in {project_path}?\n"
             "Trusting lets Wisp load this project's local configuration "
-            "(its .wisp/settings.json, context files, project extensions). "
+            "(its .wisp/settings.json, context files, skills, and project extensions). "
             "You can still use Wisp either way.",
             default=False,
             err=True,
