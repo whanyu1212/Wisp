@@ -3547,7 +3547,9 @@ def test_tui_shell_preserves_remaining_fullscreen_follow_up_count() -> None:
         async def read(_prompt: str) -> str:
             if inputs:
                 return inputs.popleft()
-            await anyio.sleep(0.2)
+            with anyio.fail_after(2):
+                while len(controller.prompts) < 3:
+                    await anyio.sleep(0.01)
             raise EOFError
 
         class RecordingFullscreenRenderer(FullscreenTuiRenderer):
