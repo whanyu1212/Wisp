@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type-check
+        run: uv run mypy
+
+      - name: Test
+        env:
+          WISP_TRUST: "1"
+          WISP_EFFORT: xhigh
+          WISP_CONTEXT_RESERVE_TOKENS: "4096"
+          WISP_AUTO_COMPACTION: "0"
+        run: uv run pytest tests
+
+  build:
+    name: Build distributions
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      # A tag can point at any commit, so the tag must be reconciled against the
+      # version actually baked into the distributions before anything is uploaded.
+      # PyPI versions are immutable; a mismatch here is unrecoverable after upload.
+      - name: Check tag matches project version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          project_version="$(uv version --short)"
+          runtime_version="$(PYTHONPATH=src python -c 'import wisp; print(wisp.__version__)')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$project_version" != "$runtime_version" ]; then
+            echo "Project version ${project_version} does not match runtime version ${runtime_version}." >&2
+            exit 1
+          fi
+          if [ "$project_version" != "$tag_version" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match project version ${project_version}." >&2
+            exit 1
+          fi
+
+      - name: Build
+        run: uv build --no-sources
+
+      - name: Check distribution metadata
+        run: uvx twine check dist/*
+
+      - name: Smoke-test packaged commands
+        env:
+          WISP_TRUST: "1"
+        run: |
+          wheels=(dist/*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "Expected exactly one wheel, found ${#wheels[@]}." >&2
+            exit 1
+          fi
+          wheel="${wheels[0]}"
+          uvx --from "$wheel" wisp --help
+          UV_TOOL_DIR="$RUNNER_TEMP/wisp-tools" \
+            UV_TOOL_BIN_DIR="$RUNNER_TEMP/wisp-bin" \
+            uv tool install "$wheel"
+          pushd "$RUNNER_TEMP"
+          HOME="$RUNNER_TEMP/wisp-home" \
+            "$RUNNER_TEMP/wisp-bin/wisp" -p "hello" --provider fake
+          popd
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Trusted Publishing exchanges this short-lived OIDC token for an upload
+    # credential, so no PyPI API token is stored in repository secrets.
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        run: uv publish --trusted-publishing always
+
+  github-release:
+    name: Create GitHub release
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --prerelease \
+            --generate-notes \
+            --title "Wisp $GITHUB_REF_NAME"

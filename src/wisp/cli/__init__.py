@@ -44,6 +44,7 @@ _option_was_provided = _cli_options._option_was_provided
 _output_mode_from_env = _cli_options._output_mode_from_env
 _resolve_cli_mode = _cli_options._resolve_cli_mode
 _resolve_tui_renderer = _cli_options._resolve_tui_renderer
+_terminal_is_interactive = _cli_options._terminal_is_interactive
 _tui_renderer_from_env = _cli_options._tui_renderer_from_env
 
 _exit_with_error = _cli_output._exit_with_error
@@ -106,7 +107,7 @@ _parse_rpc_command = _cli_rpc._parse_rpc_command
 
 app = typer.Typer(
     add_completion=False,
-    help="Wisp: a Python, Pi-inspired coding agent.",
+    help="Wisp: a terminal-first coding agent. Run without arguments to launch the TUI.",
     invoke_without_command=True,
     no_args_is_help=False,
 )
@@ -139,7 +140,14 @@ def cli_callback(
     ] = None,
     mode: Annotated[
         OutputMode,
-        typer.Option("--mode", help="Output mode: text, JSONL events, RPC, or TUI."),
+        typer.Option(
+            "--mode",
+            help=(
+                "Output mode: text, JSONL events, RPC, or TUI. A bare interactive invocation "
+                "defaults to TUI; other invocations default to text."
+            ),
+            show_default=False,
+        ),
     ] = OutputMode.text,
     tui_renderer: Annotated[
         TuiRendererKind,
@@ -154,7 +162,7 @@ def cli_callback(
             "--all-tools/--no-all-tools",
             help=(
                 "Expose the full tool registry in agent modes (unsafe calls still prompt). "
-                "Defaults on for --mode tui, off otherwise."
+                "Defaults on for TUI modes, off otherwise."
             ),
         ),
     ] = False,
@@ -195,32 +203,34 @@ def cli_callback(
         ),
     ] = None,
 ) -> None:
-    """Run Wisp in the initial print-mode CLI."""
+    """Run Wisp through its selected or interactive-default interface."""
 
     if ctx.invoked_subcommand is not None:
         return
 
     console = Console(stderr=True)
-    # Mode is resolved from CLI flags / real-env WISP_MODE only, before trust is
-    # resolved and project-local config is applied.
+    # Explicit CLI/env modes still win; only a bare interactive terminal defaults
+    # to the fullscreen TUI before trust and project config are resolved.
     mode_was_provided = _option_was_provided(ctx, "mode")
+    bare_interactive_invocation = (
+        prompt is None and not _has_callback_cli_args(ctx) and _terminal_is_interactive()
+    )
     resolved_mode = _resolve_cli_mode(
-        mode,
+        OutputMode.tui if bare_interactive_invocation else mode,
         prompt=prompt,
         mode_was_provided=mode_was_provided,
         console=console,
     )
-    resolved_tui_renderer = tui_renderer
+    resolved_tui_renderer = TuiRendererKind.textual if bare_interactive_invocation else tui_renderer
     resolved_all_tools = all_tools
     if resolved_mode is OutputMode.tui:
         resolved_tui_renderer = _resolve_tui_renderer(
-            tui_renderer,
+            resolved_tui_renderer,
             renderer_was_provided=_option_was_provided(ctx, "tui_renderer"),
             console=console,
         )
-        # The interactive TUI defaults to the full toolset — matching the dedicated
-        # `tui` command — so the legacy `--mode tui` / WISP_MODE=tui path isn't a
-        # toolless agent. An explicit --all-tools/--no-all-tools still wins.
+        # Every interactive TUI path defaults to the full toolset, matching the
+        # dedicated `tui` command. An explicit --all-tools/--no-all-tools still wins.
         if not _option_was_provided(ctx, "all_tools"):
             resolved_all_tools = True
 

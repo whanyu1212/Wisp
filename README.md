@@ -1,85 +1,147 @@
 <p align="center">
-  <img src="assets/wisp-banner.png" alt="Wisp — A Python coding agent that stays in sync." width="100%">
+  <img src="https://raw.githubusercontent.com/whanyu1212/Wisp/main/assets/wisp-banner.png" alt="Wisp — A Python coding agent that stays in sync." width="100%">
 </p>
 
 # Wisp
 
-[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
-[![Package manager](https://img.shields.io/badge/package%20manager-uv-purple.svg)](https://docs.astral.sh/uv/)
-[![Code style](https://img.shields.io/badge/code%20style-ruff-black.svg)](https://docs.astral.sh/ruff/)
+<p align="center">
+  <strong>A terminal-first coding agent with one typed, event-driven core.</strong>
+</p>
 
-**A Python-native coding agent with CLI, JSON, RPC, and TUI interfaces.**
+<p align="center">
+  <a href="#install">Install</a>
+  ·
+  <a href="#quickstart">Quickstart</a>
+  ·
+  <a href="#architecture">Architecture</a>
+  ·
+  <a href="https://pypi.org/project/wisp-ai/">PyPI</a>
+  ·
+  <a href="https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md">Changelog</a>
+  ·
+  <a href="https://github.com/whanyu1212/Wisp/issues">Issues</a>
+</p>
 
-Wisp is an event-driven coding-agent runtime designed for local tool use, persistent
-sessions, explicit approval flows, and embeddable integrations. The same core powers
-interactive CLI use, machine-readable JSON output, long-lived RPC sessions, and the TUI.
+<p align="center">
+  <a href="https://pypi.org/project/wisp-ai/"><img src="https://img.shields.io/pypi/v/wisp-ai?label=PyPI" alt="PyPI version" /></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.12%2B-blue" alt="Python 3.12+" /></a>
+  <a href="https://github.com/whanyu1212/Wisp/actions/workflows/ci.yml"><img src="https://github.com/whanyu1212/Wisp/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/whanyu1212/Wisp/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License" /></a>
+</p>
 
-Wisp uses Pi as a behavioral reference while implementing its runtime, safety model,
-and extension surface in Python.
+> **Alpha status:** Wisp is under active development. Interfaces may change while the runtime and
+> TUI stabilize.
 
-- **Event-driven** — agent activity is exposed as structured `WispEvent` streams.
-- **Auditable** — provider-visible messages and key runtime events are persisted as JSONL.
-- **Safe by default** — tools are opt-in, and mutating or command execution requires approval.
-- **Embeddable** — a typed RPC client/controller provides a stable integration boundary.
+## What is Wisp?
 
-> **Status:** Wisp is early-stage software. APIs and CLI behavior may change while the
-> agent loop, session model, RPC layer, and TUI stabilize.
->
-> Requires **Python 3.12+** and [`uv`](https://docs.astral.sh/uv/).
+**Wisp is a coding agent that runs in your terminal.** Ask it to inspect a repository, explain an
+architecture, edit code, run commands, or continue a previous session. Wisp streams its work into a
+fullscreen Textual interface and keeps an inspectable JSONL record of the conversation and tool
+activity.
 
----
+Wisp is also an embeddable Python runtime. Its CLI, TUI, JSONL RPC process, and in-process SDK all
+drive the same typed command host and agent loop rather than maintaining separate implementations.
 
-**Contents** · [Quickstart](#quickstart) · [Usage modes](#usage-modes) ·
-[Providers](#providers--auth) · [Tools & safety](#tools-and-safety) · [Sessions](#sessions) ·
-[Configuration](#configuration) · [Project trust](#project-trust) ·
-[Context](#context--compaction) · [TUI](#tui) · [Development](#development)
+Wisp takes behavioral inspiration from Pi while putting explicit trust, protected-path, approval,
+and persistence boundaries around local coding-agent work.
 
-**Reference** · [Changelog](CHANGELOG.md)
+## Install
+
+Wisp is published on PyPI as `wisp-ai`, installs a `wisp` command, and requires Python 3.12 or
+newer. The current release is an alpha, so request it explicitly:
+
+```bash
+uv tool install "wisp-ai==0.1.0a1"
+```
+
+If `wisp` is not on your `PATH`, run `uv tool update-shell` once and restart your shell.
+
+To run Wisp without installing it:
+
+```bash
+uvx --from "wisp-ai==0.1.0a1" wisp
+```
 
 ## Quickstart
 
-```bash
-uv sync
-uv run wisp auth login openai-codex
-uv run wisp -p "hello"
-```
-
-Wisp defaults to the `openai-codex` provider. For an offline smoke test that needs no credentials:
+Run Wisp from the project you want it to work on:
 
 ```bash
-uv run wisp -p "hello" --provider fake
+cd path/to/project
+wisp
 ```
 
-## Usage modes
+Wisp defaults to OpenAI Codex subscription access. From the TUI, connect your account with:
 
-Wisp runs the same agent core in four modes:
+```text
+/login openai-codex
+```
+
+You can also authenticate before launch with `wisp auth login openai-codex`. Then enter a request
+such as:
+
+```text
+explain the architecture of this repository
+```
+
+For one-shot prompts and scripts, use print mode:
+
+```bash
+wisp -p "summarize the current changes"
+```
+
+An offline smoke test is available without credentials or network model calls:
+
+```bash
+wisp -p "hello" --provider fake
+```
+
+## What Wisp can do
+
+- Fullscreen Textual TUI plus text, JSONL, and RPC modes.
+- Built-in `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls` tools.
+- OpenAI Codex, OpenAI API, Anthropic, Google, and deterministic fake providers.
+- Append-only JSONL sessions with resume, branching, compaction, usage, and cost accounting.
+- Project instructions from trusted `AGENTS.md` and `CLAUDE.md` files.
+- Protected secret paths, cwd-constrained file tools, and explicit unsafe-tool approvals.
+- Typed RPC and in-process SDK surfaces for custom frontends and integrations.
+
+## Architecture
+
+Wisp has one event-driven runtime shared by every interface:
+
+```text
+CLI / JSONL-RPC / SDK adapters → RPC command host → CodingSession → AgentHarness → run_agent_loop
+```
+
+Each layer adds one concern. The provider/tool cycle does not know about sessions or frontends; the
+harness owns in-memory conversation state; the coding session adds persistence and safety policy;
+and interfaces consume typed `WispEvent` values. The TUI is an RPC client, not a second agent loop.
+
+## Interfaces
 
 | Mode | Command | Output | Best for |
 |------|---------|--------|----------|
-| **Print** (default) | `wisp -p "…"` | Assistant text on stdout, events on stderr | One-shot prompts and shell workflows |
-| **JSON** | `wisp -p "…" --mode json` | One `WispEvent` JSON object per line | Scripts and event consumers |
-| **RPC** | `wisp --mode rpc` | JSONL commands in, `WispEvent` JSONL out | Long-lived integrations |
-| **TUI** | `wisp tui` | Fullscreen Textual UI | Interactive development sessions |
+| **TUI** | `wisp` (or `wisp tui`) | Fullscreen Textual UI | Interactive development |
+| **Print** | `wisp -p "…"` | Assistant text on stdout, events on stderr | One-shot prompts and scripts |
+| **JSON** | `wisp -p "…" --mode json` | One `WispEvent` JSON object per line | Machine-readable automation |
+| **RPC** | `wisp --mode rpc` | Typed JSONL commands and events | Long-lived integrations |
 
-JSON mode writes every `WispEvent` as one object per line on stdout — including `message.delta`,
-tool lifecycle events, errors, and `session.saved`. Assistant text is not written as raw text in
-this mode.
-
-RPC mode, the typed Python client, and the in-process SDK share the same event and session
-contracts as the CLI interfaces.
+JSON mode writes every event as one JSON object per line. RPC mode and the in-process SDK expose the
+same command, event, session, trust, and approval contracts used by the built-in interfaces.
 
 ## Providers & auth
 
 | Provider | Credentials |
 |---|---|
-| `openai-codex` *(default)* | ChatGPT Plus/Pro via OAuth — `uv run wisp auth login openai-codex` |
+| `openai-codex` *(default)* | ChatGPT Plus/Pro via OAuth — `wisp auth login openai-codex` |
 | `openai` | `OPENAI_API_KEY` |
 | `anthropic` | `ANTHROPIC_API_KEY` |
 | `google` | `GOOGLE_API_KEY` |
 | `fake` | None — deterministic offline provider for tests and smoke runs |
 
 ```bash
-uv run wisp -p "hello" --provider anthropic --model claude-sonnet-5
+wisp -p "hello" --provider anthropic --model claude-sonnet-5
 ```
 
 Codex credentials are stored in `WISP_AUTH_FILE` (default `~/.wisp/auth.json`) with private
@@ -124,8 +186,8 @@ the same safety category and approval policy.
 command tools require per-tool opt-in:
 
 ```bash
-uv run wisp -p "list files" --allow-read-tools
-uv run wisp -p "run tests"  --allow-tool bash --yes
+wisp -p "list files" --allow-read-tools
+wisp -p "run tests"  --allow-tool bash --yes
 ```
 
 Because print mode is non-interactive, mutating and command tools are also blocked at execution
@@ -145,9 +207,9 @@ descriptive — it cannot alter tool policy, sandboxing, protected paths, or app
 Wisp persists each run as a JSONL session and can continue an existing one:
 
 ```bash
-uv run wisp -p "continue the work" --continue
-uv run wisp -p "continue the work" --resume path/to/session.jsonl
-uv run wisp -p "continue the work" --resume <session-id-prefix>
+wisp -p "continue the work" --continue
+wisp -p "continue the work" --resume path/to/session.jsonl
+wisp -p "continue the work" --resume <session-id-prefix>
 ```
 
 - `--continue` resumes the newest session in the active session directory.
@@ -254,10 +316,10 @@ The first run in an untrusted directory asks `Do you trust the files in /path/to
 yes and the decision is remembered globally in `~/.wisp/trust.json`, keyed by resolved path.
 
 ```bash
-uv run wisp trust status [path]   # trusted, untrusted, or undecided
-uv run wisp trust allow [path]    # persistently trust a project
-uv run wisp trust revoke [path]   # persistently mark a project untrusted
-uv run wisp trust forget [path]   # remove the decision so Wisp can prompt again
+wisp trust status [path]   # trusted, untrusted, or undecided
+wisp trust allow [path]    # persistently trust a project
+wisp trust revoke [path]   # persistently mark a project untrusted
+wisp trust forget [path]   # remove the decision so Wisp can prompt again
 ```
 
 Security notes:
@@ -322,7 +384,7 @@ reached an interface, because side effects and partial responses cannot be safel
 ## TUI
 
 ```bash
-uv run wisp tui
+wisp
 ```
 
 A fullscreen Textual TUI built on the same RPC controller other integrations use. The footer shows
@@ -395,11 +457,11 @@ compaction settings are retained.
 ### Flags and renderers
 
 ```bash
-uv run wisp tui --continue
-uv run wisp tui --resume <session-id-prefix>
-uv run wisp tui --no-all-tools                  # opt-in tool filter instead of the full registry
-uv run wisp tui --yes                           # auto-approve mutating/command tools
-uv run wisp tui --line                          # simple line renderer, for fallback/debugging
+wisp tui --continue
+wisp tui --resume <session-id-prefix>
+wisp tui --no-all-tools                  # opt-in tool filter instead of the full registry
+wisp tui --yes                           # auto-approve mutating/command tools
+wisp tui --line                          # simple line renderer, for fallback/debugging
 ```
 
 On `--continue` or `--resume`, the TUI hydrates up to 500 active-path persisted messages through the
@@ -425,16 +487,9 @@ The complete suite runs against the deterministic `fake` provider, so the agent 
 sessions are exercised without API keys or network access. Run the complete command before
 considering a change verified.
 
-The coding runtime is split into explicit inward-facing layers:
-
-```text
-CLI / JSONL-RPC / SDK adapters → RPC command host → CodingSession → AgentHarness → run_agent_loop
-```
-
-Each layer adds exactly one concern, and the TUI consumes the same runtime through RPC events —
-there is only ever one agent loop. Local agent instruction files remain untracked so contributors
-can tailor them to their own workflows.
+Changes should preserve the layer boundaries described in [Architecture](#architecture). Local
+agent instruction files remain untracked so contributors can tailor them to their own workflows.
 
 ## License
 
-See [LICENSE](LICENSE).
+See [LICENSE](https://github.com/whanyu1212/Wisp/blob/main/LICENSE).
