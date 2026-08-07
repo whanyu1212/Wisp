@@ -92,6 +92,19 @@ def test_isolates_invalid_frontmatter(
     assert [diagnostic.code for diagnostic in catalog.diagnostics] == [code]
 
 
+def test_isolates_yaml_recursion_failures_without_hiding_valid_skills(tmp_path: Path) -> None:
+    root = tmp_path / ".wisp" / "skills"
+    _write_skill(root, "valid")
+    nested = "[" * 1_200 + "]" * 1_200
+    _write_skill(root, "nested", extra=f"metadata:\n  nested: {nested}\n")
+
+    catalog = _discover(tmp_path)
+
+    assert catalog.names() == ("valid",)
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["invalid-yaml"]
+    assert "nesting depth" in catalog.diagnostics[0].message
+
+
 @pytest.mark.parametrize(
     ("directory", "metadata", "message"),
     [
@@ -128,6 +141,15 @@ def test_rejects_invalid_metadata(
     assert len(catalog.diagnostics) == 1
     assert catalog.diagnostics[0].code == "invalid-metadata"
     assert message in catalog.diagnostics[0].message
+
+
+@pytest.mark.parametrize("name", ["on", "off", "yes", "no"])
+def test_accepts_yaml_12_plain_scalar_skill_names(tmp_path: Path, name: str) -> None:
+    _write_skill(tmp_path / ".wisp" / "skills", name)
+
+    catalog = _discover(tmp_path)
+
+    assert catalog.names() == (name,)
 
 
 def test_enforces_string_length_limits(tmp_path: Path) -> None:
@@ -250,6 +272,22 @@ def test_rejects_symlinked_roots_directories_and_files(tmp_path: Path) -> None:
     ]
 
 
+def test_rejects_intermediate_project_skill_root_symlink(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside-wisp"
+    _write_skill(outside / "skills", "escaped")
+    (project / ".wisp").symlink_to(outside, target_is_directory=True)
+
+    catalog = _discover(home, project)
+
+    assert catalog.entries == ()
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["root-symlink"]
+    assert catalog.diagnostics[0].path == project / ".wisp"
+
+
 def test_catalog_stores_canonical_skill_root_through_symlinked_home_parent(
     tmp_path: Path,
 ) -> None:
@@ -289,14 +327,25 @@ def test_unreadable_root_is_diagnostic(
 ) -> None:
     root = tmp_path / ".wisp" / "skills"
     root.mkdir(parents=True)
-    original_open = discovery_module.os.open
+    original_open_relative = discovery_module._open_relative
 
-    def deny_root(path: object, flags: int, *args: object, **kwargs: object) -> int:
-        if path == root:
+    def deny_root(
+        name: str,
+        flags: int,
+        *,
+        directory_fd: int,
+        directory_path: Path,
+    ) -> int:
+        if name == "skills" and directory_path == root.parent:
             raise PermissionError("denied")
-        return original_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+        return original_open_relative(
+            name,
+            flags,
+            directory_fd=directory_fd,
+            directory_path=directory_path,
+        )
 
-    monkeypatch.setattr(discovery_module.os, "open", deny_root)
+    monkeypatch.setattr(discovery_module, "_open_relative", deny_root)
 
     catalog = _discover(tmp_path)
 

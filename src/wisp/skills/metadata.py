@@ -18,6 +18,8 @@ _SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SUPPORTED_FIELDS = frozenset(
     {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
 )
+_YAML_BOOL_TAG = "tag:yaml.org,2002:bool"
+_YAML_12_BOOL = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
 
 
 class SkillMetadataError(ValueError):
@@ -64,6 +66,19 @@ class _StrictSafeLoader(yaml.SafeLoader):
                 )
             mapping[key] = self.construct_object(value_node, deep=deep)
         return mapping
+
+
+# PyYAML defaults to YAML 1.1, where valid skill names such as ``on`` and ``no``
+# become booleans. Keep real true/false values typed while treating the legacy
+# spellings as ordinary YAML 1.2 strings.
+_StrictSafeLoader.yaml_implicit_resolvers = {
+    key: [(tag, resolver) for tag, resolver in resolvers if tag != _YAML_BOOL_TAG]
+    for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+for _first_character in "tTfF":
+    _StrictSafeLoader.yaml_implicit_resolvers.setdefault(_first_character, []).append(
+        (_YAML_BOOL_TAG, _YAML_12_BOOL)
+    )
 
 
 def read_skill_metadata(
@@ -154,6 +169,11 @@ def _parse_entry(
         raw: Any = yaml.load(frontmatter, Loader=_StrictSafeLoader)
     except SkillMetadataError:
         raise
+    except RecursionError as exc:
+        raise SkillMetadataError(
+            "invalid-yaml",
+            "YAML frontmatter exceeds the supported nesting depth",
+        ) from exc
     except yaml.YAMLError as exc:
         raise SkillMetadataError("invalid-yaml", f"invalid YAML frontmatter: {exc}") from exc
 

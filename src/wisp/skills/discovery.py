@@ -34,7 +34,12 @@ _SCANDIR_SUPPORTS_FD = os.scandir in os.supports_fd
 @dataclass(frozen=True, slots=True)
 class _SkillRoot:
     source: SkillSource
-    path: Path
+    base: Path
+    components: tuple[str, str]
+
+    @property
+    def path(self) -> Path:
+        return self.base.joinpath(*self.components)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,20 +64,20 @@ def discover_skills(
     constructed, much less inspected, until the caller has resolved project trust.
     """
 
-    home = home_dir.expanduser()
+    home = home_dir.expanduser().resolve(strict=False)
     roots: list[_SkillRoot] = []
     if project_root is not None:
-        project = project_root.expanduser()
+        project = project_root.expanduser().resolve(strict=False)
         roots.extend(
             (
-                _SkillRoot("project:wisp", project / ".wisp" / "skills"),
-                _SkillRoot("project:agents", project / ".agents" / "skills"),
+                _SkillRoot("project:wisp", project, (".wisp", "skills")),
+                _SkillRoot("project:agents", project, (".agents", "skills")),
             )
         )
     roots.extend(
         (
-            _SkillRoot("user:wisp", home / ".wisp" / "skills"),
-            _SkillRoot("user:agents", home / ".agents" / "skills"),
+            _SkillRoot("user:wisp", home, (".wisp", "skills")),
+            _SkillRoot("user:agents", home, (".agents", "skills")),
         )
     )
 
@@ -125,47 +130,11 @@ def discover_skills(
 
 def _scan_root(root: _SkillRoot, *, context: ToolContext) -> _RootScan:
     path = root.path
-    if path.is_symlink():
-        return _RootScan(
-            diagnostics=(
-                _diagnostic(
-                    "root-symlink",
-                    "error",
-                    "skill source root must not be a symlink",
-                    root.source,
-                    path,
-                ),
-            )
-        )
-
-    try:
-        root_fd = os.open(path, _DIRECTORY_FLAGS)
-    except FileNotFoundError:
-        return _RootScan()
-    except NotADirectoryError:
-        return _RootScan(
-            diagnostics=(
-                _diagnostic(
-                    "root-not-directory",
-                    "error",
-                    "skill source root is not a directory",
-                    root.source,
-                    path,
-                ),
-            )
-        )
-    except OSError as exc:
-        return _RootScan(
-            diagnostics=(
-                _diagnostic(
-                    "root-unreadable",
-                    "error",
-                    f"cannot open skill source root: {_os_error_message(exc)}",
-                    root.source,
-                    path,
-                ),
-            )
-        )
+    root_fd, open_diagnostic = _open_skill_root(root)
+    if root_fd is None:
+        if open_diagnostic is None:
+            return _RootScan()
+        return _RootScan(diagnostics=(open_diagnostic,))
 
     try:
         try:
@@ -230,6 +199,73 @@ def _scan_root(root: _SkillRoot, *, context: ToolContext) -> _RootScan:
         return _RootScan(entries=tuple(entries), diagnostics=tuple(diagnostics))
     finally:
         os.close(root_fd)
+
+
+def _open_skill_root(root: _SkillRoot) -> tuple[int | None, SkillDiagnostic | None]:
+    try:
+        current_fd = os.open(root.base, _DIRECTORY_FLAGS)
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        return (
+            None,
+            _diagnostic(
+                "root-unreadable",
+                "error",
+                f"cannot open skill source base: {_os_error_message(exc)}",
+                root.source,
+                root.base,
+            ),
+        )
+
+    current_path = root.base
+    for component in root.components:
+        candidate = current_path / component
+        if candidate.is_symlink():
+            os.close(current_fd)
+            return (
+                None,
+                _diagnostic(
+                    "root-symlink",
+                    "error",
+                    "skill source root components must not be symlinks",
+                    root.source,
+                    candidate,
+                ),
+            )
+        try:
+            next_fd = _open_relative(
+                component,
+                _DIRECTORY_FLAGS,
+                directory_fd=current_fd,
+                directory_path=current_path,
+            )
+        except FileNotFoundError:
+            os.close(current_fd)
+            return None, None
+        except OSError as exc:
+            os.close(current_fd)
+            code: SkillDiagnosticCode = (
+                "root-symlink"
+                if exc.errno == errno.ELOOP
+                else "root-not-directory"
+                if exc.errno == errno.ENOTDIR
+                else "root-unreadable"
+            )
+            return (
+                None,
+                _diagnostic(
+                    code,
+                    "error",
+                    f"cannot open skill source root: {_os_error_message(exc)}",
+                    root.source,
+                    candidate,
+                ),
+            )
+        os.close(current_fd)
+        current_fd = next_fd
+        current_path = candidate
+    return current_fd, None
 
 
 def _bounded_root_names(root_fd: int, *, path: Path) -> tuple[tuple[str, bool, bool], ...]:
