@@ -2994,10 +2994,11 @@ def test_textual_line_messages_carry_role_classes() -> None:
     ]
 
 
-def test_textual_turn_rails_use_half_cell_border() -> None:
+def test_textual_turn_rails_distinguish_conversation_roles_without_color() -> None:
     async def scenario() -> list[tuple[str, str]]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
+            renderer.prompt_submitted("hello")
             renderer.event(completed_message(content="hi"))
             renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={}))
             await pilot.pause()
@@ -3009,6 +3010,7 @@ def test_textual_turn_rails_use_half_cell_border() -> None:
             ]
 
     assert anyio.run(scenario) == [
+        ("message--user", "heavy"),
         ("message--assistant", "outer"),
         ("message--tool", "outer"),
     ]

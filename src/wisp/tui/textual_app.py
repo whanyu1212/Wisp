@@ -210,10 +210,10 @@ class TextualTui(App[None]):
         align: right middle;
     }
 
-    /* Minimalist messages: a half-cell left rail distinguishes conversation
-       roles without visible role labels; no top border, no fill. Quiet by default,
-       colored only where it means something. Colors come only from theme vars
-       present in both themes. */
+    /* Minimalist messages: left rails distinguish conversation roles without
+       visible role labels; user turns use a heavier rail so authorship remains
+       legible without color. No top border or fill. Colors come only from theme
+       vars present in both themes. */
     .message {
         height: auto;
         margin: 1 0 0 0;
@@ -223,7 +223,7 @@ class TextualTui(App[None]):
     }
 
     .message--user {
-        border-left: outer $primary;
+        border-left: heavy $primary;
     }
 
     .message--assistant {
