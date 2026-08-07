@@ -2074,16 +2074,13 @@ class SlashSuggest(OptionList):
         return self._by_command.get(option.id or "")
 
 
-# CSS role classes are applied per message so Stage 3 can style cards purely in
-# CSS; the role also names the border_title label — with one exception:
-# ToolCard.set_state() checks its own _STATUS_LABELS (below _STATUS on the
-# class) before falling back to this dict by role, since it intentionally
-# reuses the "denied" CSS role class for both "denied" and "cancelled" (same
-# left-rule color and glyph family — both mean "stopped by a decision, not a
-# failure") while still needing their border titles to read differently.
+# CSS role classes style every message independently of visible labels.
+# Conversation roles intentionally have no border title; their role metadata and
+# colored left rail remain. ToolCard.set_state() uses the remaining labels, with
+# its own _STATUS_LABELS override for statuses such as cancelled.
 _ROLE_LABELS: dict[str, str] = {
-    "user": "you",
-    "assistant": "assistant",
+    "user": "",
+    "assistant": "",
     "tool": "tool",
     "approved": "tool",
     "denied": "denied",
@@ -2098,13 +2095,12 @@ class LineMessage(Static):
     """A single role-styled transcript line for non-streamed content."""
 
     def __init__(self, markup: str, *, role: str) -> None:
-        # `markup` is already-composed Rich markup (label styled, payload escaped
-        # by the caller). Static renders it with markup enabled by default.
+        # `markup` is escaped message content composed by the caller. Static
+        # renders it with markup enabled by default.
         super().__init__(markup)
         self.add_class("message", f"message--{role}")
-        # The role label is a fixed literal from _ROLE_LABELS — never untrusted
-        # payload — so it's safe as border chrome. Quiet meta roles (dim/session)
-        # map to "" and get no title, staying borderless per the card CSS.
+        # Fixed labels are safe as border chrome. Conversation and quiet metadata
+        # roles map to "" and intentionally receive no title.
         label = _ROLE_LABELS.get(role, "")
         if label:
             self.border_title = label
@@ -2503,9 +2499,8 @@ class StreamMessage(Widget):
     def __init__(self) -> None:
         super().__init__()
         self.add_class("message", "message--assistant")
-        # Match the finalized-assistant card so the streamed and settled turns
-        # look identical (same role label + card CSS).
-        self.border_title = _ROLE_LABELS["assistant"]
+        # Match settled assistant turns: role styling remains, but conversation
+        # cards intentionally have no visible role title.
         self._markdown = Markdown()
 
     def compose(self) -> ComposeResult:

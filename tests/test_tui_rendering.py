@@ -1228,21 +1228,19 @@ def test_light_theme_semantic_text_colors_keep_contrast_under_no_color(
     assert contrast_ratio(color, background) >= 4.5
 
 
-def test_monochrome_role_color_collisions_still_have_distinct_non_color_cues() -> None:
+def test_monochrome_operational_role_collisions_still_have_distinct_non_color_cues() -> None:
     # Issue #76: NO_COLOR runs every rendered color through Textual's built-in
-    # Monochrome filter (a fixed Rec. 709 luma conversion), which Wisp gets
-    # for free but never explicitly verified. Roles that collide (or land
-    # within a couple of gray levels of each other) once color is gone must
-    # still be told apart some other way — a border-title label is Wisp's
-    # primary mechanism (ToolCard also adds a glyph on top). "dim"/"session"
-    # are deliberately excluded from cross-role comparison: they're quiet,
-    # borderless metadata (no label at all, by design — see _ROLE_LABELS)
-    # that never appears as a competing alternative to a labeled role like
-    # "error" or "denied", so a shared gray with them carries no ambiguity.
+    # Monochrome filter (a fixed Rec. 709 luma conversion). Operational roles
+    # that collide once color is gone must retain distinct border-title labels;
+    # ToolCard also adds a glyph. Conversation roles are deliberately label-free
+    # and are distinguished by their rail color only, so they are excluded along
+    # with quiet, borderless metadata roles.
     from wisp.tui.theme import _ROLE_COLOR_ATTR, WISP_THEME_DARK, WISP_THEME_LIGHT
     from wisp.tui.widgets import _ROLE_LABELS
 
-    comparable_roles = sorted(set(_ROLE_COLOR_ATTR) - {"dim", "session"})
+    comparable_roles = sorted(
+        set(_ROLE_COLOR_ATTR) - {"assistant", "dim", "session", "user"}
+    )
     collision_threshold = 5  # gray levels; "near-collision" per the issue's audit
 
     for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
