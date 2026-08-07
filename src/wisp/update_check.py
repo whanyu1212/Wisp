@@ -68,7 +68,12 @@ async def check_for_update(
         checked_at = time.time() if now is None else now
         cache_path = _cache_path(home_dir=home_dir)
         try:
-            releases = await anyio.to_thread.run_sync(_read_cache, cache_path, checked_at)
+            releases = await anyio.to_thread.run_sync(
+                _read_cache,
+                cache_path,
+                checked_at,
+                interpreter,
+            )
         except Exception:
             releases = None
         if releases is None:
@@ -77,7 +82,13 @@ async def check_for_update(
                 python_version=interpreter,
             )
             try:
-                await anyio.to_thread.run_sync(_write_cache, cache_path, checked_at, releases)
+                await anyio.to_thread.run_sync(
+                    _write_cache,
+                    cache_path,
+                    checked_at,
+                    interpreter,
+                    releases,
+                )
             except Exception:
                 pass
 
@@ -130,7 +141,7 @@ def _cache_path(*, home_dir: Path | None) -> Path:
     return home.expanduser() / ".wisp" / _CACHE_FILENAME
 
 
-def _read_cache(path: Path, now: float) -> tuple[str, ...] | None:
+def _read_cache(path: Path, now: float, python_version: Version) -> tuple[str, ...] | None:
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -141,12 +152,15 @@ def _read_cache(path: Path, now: float) -> tuple[str, ...] | None:
         raise ValueError("update cache must be a JSON object")
 
     checked_at = payload.get("checked_at")
+    cached_python_version = payload.get("python_version")
     releases = payload.get("releases")
     if isinstance(checked_at, bool) or not isinstance(checked_at, (int, float)):
         raise ValueError("update cache has an invalid timestamp")
     if not isinstance(releases, list) or not all(isinstance(item, str) for item in releases):
         raise ValueError("update cache has invalid releases")
     _parse_versions(releases)
+    if cached_python_version != str(python_version):
+        return None
 
     age = now - checked_at
     if age < 0 or age >= CACHE_TTL_SECONDS:
@@ -198,10 +212,19 @@ def _file_supports_python(file: object, python_version: Version) -> bool:
         return False
 
 
-def _write_cache(path: Path, checked_at: float, releases: tuple[str, ...]) -> None:
+def _write_cache(
+    path: Path,
+    checked_at: float,
+    python_version: Version,
+    releases: tuple[str, ...],
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
-        {"checked_at": checked_at, "releases": list(releases)},
+        {
+            "checked_at": checked_at,
+            "python_version": str(python_version),
+            "releases": list(releases),
+        },
         indent=2,
         sort_keys=True,
     )

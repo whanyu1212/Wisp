@@ -158,7 +158,13 @@ def test_fresh_cache_avoids_network(tmp_path: Path) -> None:
     cache_path = tmp_path / ".wisp" / "update-check.json"
     cache_path.parent.mkdir(parents=True)
     cache_path.write_text(
-        json.dumps({"checked_at": 9_999.0, "releases": ["1.0.0", "1.3.0"]}),
+        json.dumps(
+            {
+                "checked_at": 9_999.0,
+                "python_version": "3.12.0",
+                "releases": ["1.0.0", "1.3.0"],
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -171,11 +177,53 @@ def test_fresh_cache_avoids_network(tmp_path: Path) -> None:
     assert result.latest_version == "1.3.0"
 
 
+def test_cache_from_another_python_version_is_refreshed(tmp_path: Path) -> None:
+    cache_path = tmp_path / ".wisp" / "update-check.json"
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "checked_at": 9_999.0,
+                "python_version": "3.13.0",
+                "releases": ["2.0.0"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(
+            200,
+            json=_pypi_response({"1.5.0": _available("1.5.0")}),
+            request=request,
+        )
+
+    result = _check(
+        home_dir=tmp_path,
+        python_version="3.12.0",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert requests == 1
+    assert result is not None
+    assert result.latest_version == "1.5.0"
+    assert json.loads(cache_path.read_text(encoding="utf-8"))["python_version"] == "3.12.0"
+
+
 def test_stale_cache_is_refreshed(tmp_path: Path) -> None:
     cache_path = tmp_path / ".wisp" / "update-check.json"
     cache_path.parent.mkdir(parents=True)
     cache_path.write_text(
-        json.dumps({"checked_at": 10_000.0 - CACHE_TTL_SECONDS, "releases": ["1.1.0"]}),
+        json.dumps(
+            {
+                "checked_at": 10_000.0 - CACHE_TTL_SECONDS,
+                "python_version": "3.12.0",
+                "releases": ["1.1.0"],
+            }
+        ),
         encoding="utf-8",
     )
     requests = 0
