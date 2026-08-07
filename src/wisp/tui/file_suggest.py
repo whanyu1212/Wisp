@@ -10,6 +10,11 @@ Selecting a candidate inserts a *relative path only*. The file's contents are
 never read here: the model reads the file through its normal tool call, so every
 real read stays behind ``resolve_tool_path``/``is_protected_path`` rather than
 this widget becoming a second, ungated read path.
+
+Note that those two checks, plus whether read tools are exposed at all, are the
+whole gate. Read-safety tools are not in ``APPROVAL_REQUIRED_SAFETY``, so a read
+raises no approval prompt — mentioning a path must not be described as protected
+by user confirmation.
 """
 
 from __future__ import annotations

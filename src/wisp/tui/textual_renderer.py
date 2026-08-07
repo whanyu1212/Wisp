@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from wisp.events import (
@@ -124,6 +125,20 @@ class TextualTuiRenderer:
             self._finish_progress()
         if snapshot.input_mode not in {"approval", "trust"}:
             self.app.hide_decision()
+
+    def project_auth_path_changed(self, auth_path: Path) -> None:
+        """Re-protect and re-index after a trusted project moved the credential file.
+
+        Deferred trust (``project_trusted=None``) means the RPC side can adopt a
+        project's own ``auth_path`` mid-session, after the picker already captured
+        its startup policy. Without this the stale snapshot would keep offering the
+        new credential filename for mention while the agent's tool context protects
+        it. Update the policy first, then rebuild the corpus with it.
+        """
+
+        self.app.set_picker_auth_path(auth_path)
+        if self._visible_cwd:
+            self.app.load_file_suggestions(self._visible_cwd)
 
     def _begin_progress(self) -> None:
         self._progress_active = True

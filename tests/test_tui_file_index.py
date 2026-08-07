@@ -186,6 +186,34 @@ def test_run_tui_forwards_the_resolved_auth_path_to_the_picker(tmp_path: Path) -
     assert any(pattern.endswith("custom-auth.json") for pattern in context.protected_paths)
 
 
+def test_adopted_auth_path_is_added_to_a_supplied_policy(tmp_path: Path) -> None:
+    """A credential file adopted mid-session must join the startup policy."""
+
+    _write(tmp_path, "project-auth.json", "{}")
+    _write(tmp_path, "app.py")
+    adopted = (tmp_path / "project-auth.json").resolve().as_posix()
+
+    context = _file_index_context(tmp_path, (".env",), (adopted,))
+    paths = collect_paths(FileIndexConfig(root=tmp_path, context=context))
+
+    assert ".env" in context.protected_paths
+    assert "project-auth.json" not in paths
+    assert "app.py" in paths
+
+
+def test_adopted_auth_path_applies_to_the_fallback_policy(tmp_path: Path) -> None:
+    """Deferred trust protects the new credential however the base policy was found."""
+
+    _write(tmp_path, "project-auth.json", "{}")
+    adopted = (tmp_path / "project-auth.json").resolve().as_posix()
+
+    context = _file_index_context(tmp_path, None, (adopted,))
+    paths = collect_paths(FileIndexConfig(root=tmp_path, context=context))
+
+    assert ".env" in context.protected_paths  # base policy survives
+    assert "project-auth.json" not in paths
+
+
 def test_context_falls_back_to_secure_defaults(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Config resolution failing must not crash the TUI, and must not open the gate."""
 

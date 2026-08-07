@@ -341,6 +341,10 @@ class TextualTui(App[None]):
         # can reconstruct. `None` means an embedded caller supplied nothing, and
         # `_file_index_context` falls back to resolving on its own.
         self._protected_paths = protected_paths
+        # Credential files adopted after startup, when a trusted project's config is
+        # applied mid-session. Held apart from the snapshot above so `None` keeps
+        # meaning "nothing supplied"; see `set_picker_auth_path`.
+        self._adopted_auth_paths: tuple[str, ...] = ()
         self._input_controller = TextualInputController(self)
         self._transcript_controller = TextualTranscriptController(self)
         self._status: StatusBar | None = None
@@ -598,6 +602,24 @@ class TextualTui(App[None]):
             return cursor_position
         return len(editor.text)
 
+    def set_picker_auth_path(self, auth_path: Path) -> None:
+        """Protect a credential file the session adopted after startup.
+
+        A trusted project's config can move ``auth_path`` mid-session (deferred
+        trust), after ``__init__`` captured the startup policy. These paths are kept
+        *beside* that snapshot rather than merged into it, so the `None` case still
+        means "no policy supplied" and embedded callers keep their fallback
+        resolution instead of collapsing to just this one pattern.
+
+        Accumulating rather than replacing is deliberate: a previously active
+        credential file must stay hidden, since a config change should never widen
+        what the picker is willing to offer.
+        """
+
+        pattern = auth_path.expanduser().resolve(strict=False).as_posix()
+        if pattern not in self._adopted_auth_paths:
+            self._adopted_auth_paths = (*self._adopted_auth_paths, pattern)
+
     def load_file_suggestions(self, cwd: str) -> None:
         """Collect the `@`-picker corpus for `cwd`, off the event loop.
 
@@ -614,7 +636,7 @@ class TextualTui(App[None]):
     @work(thread=True, exclusive=True, group="file-suggest")
     def _collect_file_suggestions(self, cwd: str, picker: FileSuggest) -> None:
         root = Path(cwd)
-        context = _file_index_context(root, self._protected_paths)
+        context = _file_index_context(root, self._protected_paths, self._adopted_auth_paths)
         paths = collect_paths(FileIndexConfig(root=root, context=context))
         # Hop back to the event loop: widget state must not be mutated from a worker.
         self.call_from_thread(self._install_file_suggestions, picker, paths)
@@ -2090,7 +2112,11 @@ class TextualTui(App[None]):
         self.note_transcript_update(widget)
 
 
-def _file_index_context(root: Path, protected_paths: tuple[str, ...] | None = None) -> ToolContext:
+def _file_index_context(
+    root: Path,
+    protected_paths: tuple[str, ...] | None = None,
+    adopted_auth_paths: tuple[str, ...] = (),
+) -> ToolContext:
     """Resolve the protected-path policy governing what the `@` picker may list.
 
     A bare ``ToolContext(cwd=root)`` would hardcode ``DEFAULT_PROTECTED_PATHS`` and
@@ -2114,18 +2140,39 @@ def _file_index_context(root: Path, protected_paths: tuple[str, ...] | None = No
     project layer cannot weaken the policy — at worst the picker hides a file the
     agent would have shown, which fails closed.
 
+    ``adopted_auth_paths`` are credential files the session started protecting after
+    startup, when a trusted project's config was applied mid-session. They union into
+    whichever base policy the two branches above produced, since a deferred-trust
+    approval moves the real auth file regardless of how the base was obtained.
+
     Config resolution touches the filesystem, so this runs on the picker's worker
     thread, never the event loop. A failure here must not take the TUI down: the
     picker is advisory, and falling back to the secure defaults keeps secrets hidden.
     """
 
     if protected_paths is not None:
-        return ToolContext(cwd=root, protected_paths=protected_paths)
+        return ToolContext(
+            cwd=root, protected_paths=_with_adopted(protected_paths, adopted_auth_paths)
+        )
     try:
         config = WispConfig.from_env(project_dir=root)
-        return ToolContext.from_config(config, cwd=root)
+        base = ToolContext.from_config(config, cwd=root)
     except Exception:
-        return ToolContext(cwd=root)
+        base = ToolContext(cwd=root)
+    # The adopted credential paths apply to the fallback branch too: a mid-session
+    # trust approval moves the real auth file regardless of how the base policy
+    # was obtained.
+    if not adopted_auth_paths:
+        return base
+    return ToolContext(
+        cwd=root, protected_paths=_with_adopted(base.protected_paths, adopted_auth_paths)
+    )
+
+
+def _with_adopted(base: tuple[str, ...], adopted: tuple[str, ...]) -> tuple[str, ...]:
+    """Union the base policy with credential paths adopted after startup."""
+
+    return (*base, *(pattern for pattern in adopted if pattern not in base))
 
 
 def create_textual_tui(

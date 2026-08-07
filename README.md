@@ -420,8 +420,12 @@ input and filters as you keep typing, matching loosely so `@tuiapp` finds
 `src/wisp/tui/textual_app.py`; contiguous matches, filename matches, and shorter paths rank
 highest. Use Up/Down to move, Enter or Tab to insert the highlighted path, and Escape to dismiss
 without changing what you typed. Only the relative path is inserted — Wisp does not inline file
-contents, so the model reads the file through its normal file tool and every read stays subject
-to approval and the `protected_paths` guard. The listing itself honors that same policy, so
+contents, so mentioning a file does not read it. The model reads it through its normal file tool,
+which still has to be exposed for the session (read tools are off unless enabled) and still
+resolves the path through the `protected_paths` guard and the working-directory boundary. Note
+that read-only tools do not raise an approval prompt the way mutating and command tools do, so
+the guard and tool exposure — not a per-read confirmation — are what constrain this. The listing
+itself honors that same protected-path policy, so
 secrets such as `.env` are never offered, and build directories (`.git`, `node_modules`,
 `__pycache__`, and friends) are skipped. Mentions are only recognized at the start of a line or
 after a space, so an `@` inside a word — an email address such as `you@example.com` — never opens

@@ -343,6 +343,29 @@ def test_late_corpus_does_not_reopen_the_picker_under_an_overlay() -> None:
     assert anyio.run(scenario) is False
 
 
+def test_adopted_auth_paths_accumulate_and_keep_the_snapshot_tristate() -> None:
+    """Mid-session credential changes must narrow, never widen or clobber.
+
+    They are held beside `_protected_paths` so `None` keeps meaning "nothing was
+    supplied" — merging would silently collapse an embedded caller's fallback
+    resolution into a single glob.
+    """
+
+    async def scenario() -> tuple[object, tuple[str, ...]]:
+        app = TextualTui()
+        async with app.run_test(size=(80, 24)):
+            app.set_picker_auth_path(Path("/work/first-auth.json"))
+            app.set_picker_auth_path(Path("/work/second-auth.json"))
+            # Idempotent: re-adopting must not duplicate.
+            app.set_picker_auth_path(Path("/work/second-auth.json"))
+            return app._protected_paths, app._adopted_auth_paths  # noqa: SLF001
+
+    snapshot, adopted = anyio.run(scenario)
+    assert snapshot is None
+    # The superseded credential stays protected: a config change never widens.
+    assert adopted == ("/work/first-auth.json", "/work/second-auth.json")
+
+
 def test_protected_paths_never_reach_the_picker(tmp_path: Path) -> None:
     """End-to-end: a real walk must not surface `.env` as mentionable."""
 
