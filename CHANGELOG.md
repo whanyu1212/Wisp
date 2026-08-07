@@ -11,7 +11,7 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
-_Nothing yet._
+- Added `wisp --version` to print the installed package version without starting the TUI.
 
 ## 0.1.0a2 — 2026-08-07
 
