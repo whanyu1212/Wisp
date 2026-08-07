@@ -87,7 +87,7 @@ async def login_openai_codex_device_code(
         )
     finally:
         if owns_client:
-            await active_client.aclose()
+            await _close_client(active_client)
 
 
 async def refresh_openai_codex_token(
@@ -110,7 +110,7 @@ async def refresh_openai_codex_token(
         return _read_token_response(response, operation="refresh")
     finally:
         if owns_client:
-            await active_client.aclose()
+            await _close_client(active_client)
 
 
 def account_id_from_access_token(access_token: str) -> str:
@@ -183,7 +183,7 @@ async def _exchange_authorization_code(
         return _read_token_response(response, operation="exchange")
     finally:
         if owns_client:
-            await active_client.aclose()
+            await _close_client(active_client)
 
 
 def _read_token_response(response: httpx.Response, *, operation: str) -> OAuthCredential:
@@ -236,6 +236,11 @@ def _safe_json(response: httpx.Response) -> object:
         return response.json()
     except json.JSONDecodeError:
         return None
+
+
+async def _close_client(client: httpx.AsyncClient) -> None:
+    with anyio.CancelScope(shield=True):
+        await client.aclose()
 
 
 __all__ = [
