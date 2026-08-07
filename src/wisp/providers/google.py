@@ -344,17 +344,13 @@ class GoogleProvider:
         # is the accepted fallback -- a user who already has Gemini configured
         # with only GEMINI_API_KEY (the SDK's own recognized variable) should
         # not be rejected here before the SDK ever gets a chance to use it.
-        stored_api_key = (
-            await self._auth_resolver.api_key(self.name)
-            if self._auth_resolver is not None
-            else None
-        )
         api_key = (
             self._api_key
             or _normalize_optional(os.environ.get("GOOGLE_API_KEY"))
             or _normalize_optional(os.environ.get("GEMINI_API_KEY"))
-            or stored_api_key
         )
+        if api_key is None and self._auth_resolver is not None:
+            api_key = await self._auth_resolver.api_key(self.name)
         if api_key is None:
             raise ProviderConfigurationError(
                 "google credentials are required; run `/connect` in the TUI or set "

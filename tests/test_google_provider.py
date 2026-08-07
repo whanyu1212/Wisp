@@ -519,6 +519,31 @@ def test_google_provider_api_key_precedence(tmp_path: Path, monkeypatch: MonkeyP
     stored_client.close()
 
 
+def test_google_provider_does_not_read_store_for_higher_priority_api_keys(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{invalid", encoding="utf-8")
+    resolver = StoredProviderAuthResolver(JsonAuthStore(auth_path))
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    async def run() -> tuple[genai.Client, genai.Client]:
+        explicit_client = await GoogleProvider(
+            api_key="explicit-key", auth_resolver=resolver
+        )._client_or_create()  # noqa: SLF001
+        monkeypatch.setenv("GEMINI_API_KEY", "env-key")
+        env_client = await GoogleProvider(auth_resolver=resolver)._client_or_create()  # noqa: SLF001
+        return explicit_client, env_client
+
+    explicit_client, env_client = anyio.run(run)
+
+    assert explicit_client._api_client.api_key == "explicit-key"  # noqa: SLF001
+    assert env_client._api_client.api_key == "env-key"  # noqa: SLF001
+    explicit_client.close()
+    env_client.close()
+
+
 def test_google_provider_does_not_replace_injected_client(tmp_path: Path) -> None:
     store = JsonAuthStore(tmp_path / "auth.json")
     store.set("google", ApiKeyCredential(key="old-stored-key"))

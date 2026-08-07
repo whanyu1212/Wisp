@@ -508,6 +508,29 @@ def test_anthropic_provider_api_key_precedence(tmp_path: Path, monkeypatch: Monk
     anyio.run(run)
 
 
+def test_anthropic_provider_does_not_read_store_for_higher_priority_api_keys(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text("{invalid", encoding="utf-8")
+    resolver = StoredProviderAuthResolver(JsonAuthStore(auth_path))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    async def run() -> None:
+        explicit_client = await AnthropicProvider(
+            api_key="explicit-key", auth_resolver=resolver
+        )._client_or_create()  # noqa: SLF001
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
+        env_client = await AnthropicProvider(auth_resolver=resolver)._client_or_create()  # noqa: SLF001
+
+        assert explicit_client.api_key == "explicit-key"
+        assert env_client.api_key == "env-key"
+        await explicit_client.close()
+        await env_client.close()
+
+    anyio.run(run)
+
+
 def test_anthropic_provider_does_not_replace_injected_client(tmp_path: Path) -> None:
     store = JsonAuthStore(tmp_path / "auth.json")
     store.set("anthropic", ApiKeyCredential(key="old-stored-key"))

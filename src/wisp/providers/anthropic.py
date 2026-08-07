@@ -435,16 +435,9 @@ class AnthropicProvider:
             assert self._client is not None
             return self._client
 
-        stored_api_key = (
-            await self._auth_resolver.api_key(self.name)
-            if self._auth_resolver is not None
-            else None
-        )
-        api_key = (
-            self._api_key
-            or _normalize_optional(os.environ.get("ANTHROPIC_API_KEY"))
-            or stored_api_key
-        )
+        api_key = self._api_key or _normalize_optional(os.environ.get("ANTHROPIC_API_KEY"))
+        if api_key is None and self._auth_resolver is not None:
+            api_key = await self._auth_resolver.api_key(self.name)
         if api_key is None:
             raise ProviderConfigurationError(
                 "anthropic credentials are required; run `/connect` in the TUI "
