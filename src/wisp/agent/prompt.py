@@ -342,9 +342,7 @@ def _tool_guidance(metadata: Sequence[ToolPromptMetadata]) -> str:
     snippets = _unique_guidance(
         item.prompt_snippet for item in metadata if item.prompt_snippet is not None
     )
-    guidelines = _unique_guidance(
-        guideline for item in metadata for guideline in item.guidelines
-    )
+    guidelines = _unique_guidance(guideline for item in metadata for guideline in item.guidelines)
     if not snippets and not guidelines:
         return ""
 
