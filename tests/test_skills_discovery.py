@@ -557,6 +557,36 @@ def test_unreadable_skill_file_does_not_hide_other_entries(
     assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["file-unreadable"]
 
 
+def test_metadata_files_are_opened_nonblocking(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    if not hasattr(discovery_module.os, "O_NONBLOCK"):
+        pytest.skip("platform has no nonblocking file-open flag")
+    _write_skill(tmp_path / ".wisp" / "skills", "demo")
+    original_open_relative = discovery_module._open_relative
+
+    def require_nonblocking(
+        name: str,
+        flags: int,
+        *,
+        directory_fd: int,
+        directory_path: Path,
+    ) -> int:
+        if name == "SKILL.md":
+            assert flags & discovery_module.os.O_NONBLOCK
+        return original_open_relative(
+            name,
+            flags,
+            directory_fd=directory_fd,
+            directory_path=directory_path,
+        )
+
+    monkeypatch.setattr(discovery_module, "_open_relative", require_nonblocking)
+
+    assert _discover(tmp_path).names() == ("demo",)
+
+
 def test_non_regular_skill_file_is_diagnostic(tmp_path: Path) -> None:
     skill_file = tmp_path / ".wisp" / "skills" / "demo" / "SKILL.md"
     skill_file.mkdir(parents=True)

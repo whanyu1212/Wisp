@@ -26,7 +26,7 @@ MAX_ROOT_FRONTMATTER_BYTES = 256 * 1024
 MAX_CATALOG_SKILLS = 256
 
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-_FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+_FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 _OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 _SCANDIR_SUPPORTS_FD = os.scandir in os.supports_fd
 _USE_DESCRIPTOR_TRAVERSAL = (
