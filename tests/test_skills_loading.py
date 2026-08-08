@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import get_ident
+from typing import BinaryIO, cast
 
 import anyio
 import pytest
 
+import wisp.skills.loading as loading_module
 from wisp.skills.loading import load_skill_resource
 from wisp.skills.models import SkillCatalog, SkillEntry
 from wisp.skills.tool import SkillTool
@@ -102,6 +104,62 @@ def test_bounds_resource_bytes_and_lines(tmp_path: Path) -> None:
     assert resource.text.endswith("[truncated]")
     assert "three" not in resource.text
     assert resource.truncated is True
+
+
+def test_resource_reader_bounds_each_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "resource"
+    path.write_bytes(b"unused")
+    file_fd = loading_module.os.open(path, loading_module.FILE_FLAGS)
+    read_sizes: list[int] = []
+
+    class BoundedStream:
+        def __init__(self, duplicate_fd: int) -> None:
+            self.duplicate_fd = duplicate_fd
+
+        def __enter__(self) -> BoundedStream:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            loading_module.os.close(self.duplicate_fd)
+
+        def readline(self, size: int = -1) -> bytes:
+            read_sizes.append(size)
+            if size < 0:
+                raise AssertionError("skill resource reads must be size-limited")
+            return b"x" * size
+
+        def read(self, size: int = -1) -> bytes:
+            read_sizes.append(size)
+            if size < 0:
+                raise AssertionError("skill resource probes must be size-limited")
+            return b"x" * size
+
+    def bounded_fdopen(
+        duplicate_fd: int,
+        mode: str,
+        buffering: int = -1,
+    ) -> BinaryIO:
+        assert mode == "rb"
+        assert buffering == 0
+        return cast(BinaryIO, BoundedStream(duplicate_fd))
+
+    monkeypatch.setattr(loading_module.os, "fdopen", bounded_fdopen)
+    try:
+        text, truncated = loading_module._read_bounded_text(
+            file_fd,
+            max_bytes=8,
+            max_lines=2,
+            resource="resource",
+        )
+    finally:
+        loading_module.os.close(file_fd)
+
+    assert text == "x" * 8
+    assert truncated is True
+    assert read_sizes == [9]
 
 
 def test_rejects_invalid_utf8(tmp_path: Path) -> None:

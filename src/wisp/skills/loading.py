@@ -220,13 +220,10 @@ def _read_bounded_text(
     line_count = 0
     truncated = False
     with os.fdopen(os.dup(file_fd), "rb", buffering=0) as stream:
-        for line in stream:
-            if line_count >= max_lines:
-                truncated = True
-                break
+        while line_count < max_lines and byte_count < max_bytes:
             remaining = max_bytes - byte_count
-            if remaining <= 0:
-                truncated = True
+            line = stream.readline(remaining + 1)
+            if not line:
                 break
             if len(line) > remaining:
                 parts.append(line[:remaining])
@@ -235,6 +232,8 @@ def _read_bounded_text(
             parts.append(line)
             byte_count += len(line)
             line_count += 1
+        if not truncated and stream.read(1):
+            truncated = True
     raw = b"".join(parts)
     try:
         return raw.decode("utf-8"), truncated
