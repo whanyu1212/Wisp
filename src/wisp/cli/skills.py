@@ -10,7 +10,7 @@ import typer
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.trust import resolve_cli_trust
 from wisp.config import WispConfig
-from wisp.skills import SkillCatalog, discover_skills
+from wisp.skills import SkillCatalog, SkillDiagnostic, discover_skills
 
 
 def skills_command(
@@ -22,16 +22,48 @@ def skills_command(
     """List valid Agent Skills and isolated discovery diagnostics."""
 
     selected = (project or Path(".")).expanduser()
-    project_root = resolve_project_context_root(selected)
-    trust = resolve_cli_trust(project_root)
-    config = WispConfig.from_env(project_dir=project_root, trusted=trust.trusted)
+    resolution_diagnostics: tuple[SkillDiagnostic, ...] = ()
+    try:
+        project_root = resolve_project_context_root(selected)
+    except (OSError, RuntimeError) as exc:
+        project_root = None
+        message = str(exc) or type(exc).__name__
+        resolution_diagnostics = (
+            SkillDiagnostic(
+                code="root-unreadable",
+                severity="error",
+                message=f"cannot resolve project root: {message}",
+                source="project:wisp",
+                path=selected / ".wisp" / "skills",
+            ),
+            SkillDiagnostic(
+                code="root-unreadable",
+                severity="error",
+                message=f"cannot resolve project root: {message}",
+                source="project:agents",
+                path=selected / ".agents" / "skills",
+            ),
+        )
+
+    trust = resolve_cli_trust(project_root) if project_root is not None else None
+    trusted = trust.trusted if trust is not None else False
+    config = WispConfig.from_env(project_dir=project_root, trusted=trusted)
     catalog = discover_skills(
         home_dir=_home_dir(),
-        project_root=project_root if trust.trusted else None,
+        project_root=project_root if trusted else None,
         protected_paths=config.protected_paths,
     )
+    if resolution_diagnostics:
+        catalog = SkillCatalog(
+            entries=catalog.entries,
+            diagnostics=(*resolution_diagnostics, *catalog.diagnostics),
+        )
     _render_catalog(catalog)
-    if not trust.trusted:
+    if project_root is None:
+        typer.echo(
+            f"Project skills skipped because {_display_text(selected)} could not be resolved."
+        )
+    elif not trusted:
         typer.echo(f"Project skills skipped because {_display_text(project_root)} is not trusted.")
 
 

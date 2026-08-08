@@ -89,6 +89,29 @@ def test_skills_resolves_explicit_subdirectory_to_project_root(tmp_path: Path) -
     assert "project-skill [project:agents]" in result.stdout
 
 
+def test_skills_isolates_unresolvable_project_and_lists_user_catalog(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    _write_skill(home / ".wisp" / "skills", "user-skill", "User tasks.")
+    monkeypatch.setattr(skills_module, "_home_dir", lambda: home)
+    project = tmp_path / "project-loop"
+    project.symlink_to(project, target_is_directory=True)
+
+    result = CliRunner().invoke(
+        app,
+        ["skills", str(project)],
+        env=_env(home, trusted="1"),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "user-skill [user:wisp]" in result.stdout
+    assert result.stdout.count("root-unreadable [project:") == 2
+    assert "Project skills skipped" in result.stdout
+    assert "could not be resolved" in result.stdout
+
+
 def test_skills_reports_diagnostics_without_hiding_valid_entries(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
