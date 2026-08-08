@@ -255,7 +255,16 @@ class TextualTuiRenderer:
         self.app.record_prompt(prompt)
 
     def discard_live_prompt(self, prompt: str) -> None:
+        self._pop_prompt_widget(prompt)
         self._history.discard_live_message("user", prompt)
+
+    def _pop_prompt_widget(self, prompt: str) -> LineMessage | None:
+        for index in range(len(self._prompt_widgets) - 1, -1, -1):
+            candidate_prompt, widget = self._prompt_widgets[index]
+            if candidate_prompt == prompt:
+                del self._prompt_widgets[index]
+                return widget
+        return None
 
     def record_streamed_message_completed(self, event: MessageCompleted) -> None:
         """Record a streamed message that the shell suppresses from normal rendering."""
@@ -428,12 +437,7 @@ class TextualTuiRenderer:
 
     def skill_invoked(self, event: SkillInvoked) -> None:
         self._suspend_progress()
-        widget = None
-        for index, (prompt, candidate) in enumerate(self._prompt_widgets):
-            if prompt == event.invocation.original_content:
-                widget = candidate
-                del self._prompt_widgets[index]
-                break
+        widget = self._pop_prompt_widget(event.invocation.original_content)
         self.app.show_skill_invocation(event, widget=widget)
 
     def set_connect_api_key_hook(
