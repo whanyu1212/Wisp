@@ -59,6 +59,7 @@ class _RootScan:
 @dataclass(frozen=True, slots=True)
 class _OpenedRoot:
     fd: int | None
+    guards: tuple[int, ...] = ()
 
 
 class _RootLimitError(ValueError):
@@ -269,6 +270,8 @@ def _scan_root(root: _SkillRoot, *, context: ToolContext) -> _RootScan:
     finally:
         if root_fd is not None:
             os.close(root_fd)
+        for guard in opened_root.guards:
+            _close_windows_handle(guard)
 
 
 def _open_skill_root(root: _SkillRoot) -> tuple[_OpenedRoot | None, SkillDiagnostic | None]:
@@ -369,6 +372,9 @@ def _open_skill_root(root: _SkillRoot) -> tuple[_OpenedRoot | None, SkillDiagnos
 def _open_skill_root_by_path(
     root: _SkillRoot,
 ) -> tuple[_OpenedRoot | None, SkillDiagnostic | None]:
+    if os.name == "nt":
+        return _open_windows_skill_root(root)
+
     current_path = root.base
     try:
         base_stat = current_path.stat()
@@ -451,6 +457,80 @@ def _open_skill_root_by_path(
             )
         current_path = candidate
     return _OpenedRoot(None), None
+
+
+def _open_windows_skill_root(
+    root: _SkillRoot,
+) -> tuple[_OpenedRoot | None, SkillDiagnostic | None]:
+    guards: list[int] = []
+    paths = (root.base, *(root.base.joinpath(*root.components[:index]) for index in (1, 2)))
+    for index, candidate in enumerate(paths):
+        try:
+            guard = _open_windows_directory_guard(candidate)
+        except FileNotFoundError:
+            for opened in guards:
+                _close_windows_handle(opened)
+            return None, None
+        except OSError as exc:
+            for opened in guards:
+                _close_windows_handle(opened)
+            return (
+                None,
+                _diagnostic(
+                    "root-unreadable",
+                    "error",
+                    f"cannot open skill source root: {_os_error_message(exc)}",
+                    root.source,
+                    candidate,
+                ),
+            )
+        guards.append(guard)
+
+        try:
+            is_link = index > 0 and _is_link_like(candidate)
+            resolved = _resolved_windows_handle(guard, path=candidate)
+            expected = candidate.resolve(strict=False)
+            candidate_stat = candidate.stat(follow_symlinks=False)
+        except (OSError, RuntimeError) as exc:
+            for opened in guards:
+                _close_windows_handle(opened)
+            return (
+                None,
+                _diagnostic(
+                    "root-unreadable",
+                    "error",
+                    f"cannot inspect skill source root: {exc}",
+                    root.source,
+                    candidate,
+                ),
+            )
+        if is_link or resolved != expected:
+            for opened in guards:
+                _close_windows_handle(opened)
+            return (
+                None,
+                _diagnostic(
+                    "root-symlink",
+                    "error",
+                    "skill source root components must not be symlinks or junctions",
+                    root.source,
+                    candidate,
+                ),
+            )
+        if not stat.S_ISDIR(candidate_stat.st_mode):
+            for opened in guards:
+                _close_windows_handle(opened)
+            return (
+                None,
+                _diagnostic(
+                    "root-not-directory",
+                    "error",
+                    "skill source root component is not a directory",
+                    root.source,
+                    candidate,
+                ),
+            )
+    return _OpenedRoot(None, tuple(guards)), None
 
 
 def _bounded_root_names(root_fd: int | None, *, path: Path) -> tuple[tuple[str, bool, bool], ...]:
@@ -695,13 +775,60 @@ def _resolved_open_file(metadata_fd: int, *, path: Path) -> Path:
     if os.name != "nt":
         raise RuntimeError("stable opened-file resolution is unavailable on this platform")
 
-    # Path resolution after opening remains racy on Windows. Resolve the stable
-    # file handle instead so junction swaps cannot redirect the metadata read.
+    import importlib
+
+    msvcrt = importlib.import_module("msvcrt")
+    handle = msvcrt.get_osfhandle(metadata_fd)
+    return _resolved_windows_handle(handle, path=path)
+
+
+def _open_windows_directory_guard(path: Path) -> int:
     import importlib
 
     ctypes = importlib.import_module("ctypes")
-    msvcrt = importlib.import_module("msvcrt")
-    handle = msvcrt.get_osfhandle(metadata_fd)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    create_file.restype = ctypes.c_void_p
+    handle = create_file(
+        str(path),
+        0x80,  # FILE_READ_ATTRIBUTES
+        0x3,  # FILE_SHARE_READ | FILE_SHARE_WRITE; deliberately omit DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x02200000,  # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        error = ctypes.get_last_error()
+        raise OSError(error, os.strerror(error), path)
+    return int(handle)
+
+
+def _close_windows_handle(handle: int) -> None:
+    import importlib
+
+    ctypes = importlib.import_module("ctypes")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    close_handle(ctypes.c_void_p(handle))
+
+
+def _resolved_windows_handle(handle: int, *, path: Path) -> Path:
+    # Resolve the stable handle so junction swaps cannot redirect later path use.
+    import importlib
+
+    ctypes = importlib.import_module("ctypes")
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     get_final_path = kernel32.GetFinalPathNameByHandleW
     get_final_path.argtypes = [

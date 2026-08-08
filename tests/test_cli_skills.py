@@ -112,6 +112,26 @@ def test_skills_isolates_unresolvable_project_and_lists_user_catalog(
     assert "could not be resolved" in result.stdout
 
 
+def test_skills_isolates_project_user_expansion_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    _write_skill(home / ".wisp" / "skills", "user-skill", "User tasks.")
+    monkeypatch.setattr(skills_module, "_home_dir", lambda: home)
+
+    result = CliRunner().invoke(
+        app,
+        ["skills", "~wisp-user-that-does-not-exist/repo"],
+        env=_env(home, trusted="1"),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "user-skill [user:wisp]" in result.stdout
+    assert result.stdout.count("root-unreadable [project:") == 2
+    assert "could not be resolved" in result.stdout
+
+
 def test_skills_reports_diagnostics_without_hiding_valid_entries(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

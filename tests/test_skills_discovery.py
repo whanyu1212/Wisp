@@ -372,6 +372,51 @@ def test_path_fallback_discovers_skills_without_opening_directories(
     assert catalog.names() == ("windows-compatible",)
 
 
+def test_windows_fallback_holds_component_guards_while_enumerating(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    root_path = tmp_path / ".wisp" / "skills"
+    root_path.mkdir(parents=True)
+    root = discovery_module._SkillRoot("user:wisp", tmp_path, (".wisp", "skills"))
+    opened_paths: dict[int, Path] = {}
+    closed: list[int] = []
+
+    def open_guard(path: Path) -> int:
+        handle = len(opened_paths) + 1
+        opened_paths[handle] = path
+        return handle
+
+    def resolved_guard(handle: int, *, path: Path) -> Path:
+        assert opened_paths[handle] == path
+        return path.resolve(strict=False)
+
+    def enumerate_while_guarded(root_fd: int | None, *, path: Path):
+        assert root_fd is None
+        assert path == root_path
+        assert closed == []
+        return ()
+
+    monkeypatch.setattr(discovery_module, "_open_windows_directory_guard", open_guard)
+    monkeypatch.setattr(discovery_module, "_resolved_windows_handle", resolved_guard)
+    monkeypatch.setattr(discovery_module, "_close_windows_handle", closed.append)
+    monkeypatch.setattr(discovery_module, "_bounded_root_names", enumerate_while_guarded)
+    monkeypatch.setattr(
+        discovery_module,
+        "_open_skill_root",
+        discovery_module._open_windows_skill_root,
+    )
+
+    scan = discovery_module._scan_root(
+        root,
+        context=discovery_module.ToolContext(cwd=tmp_path, protected_paths=()),
+    )
+
+    assert scan.entries == ()
+    assert scan.diagnostics == ()
+    assert closed == [1, 2, 3]
+
+
 def test_rejects_path_fallback_without_stable_handle_validation(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

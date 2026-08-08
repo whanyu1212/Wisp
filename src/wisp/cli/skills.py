@@ -21,9 +21,10 @@ def skills_command(
 ) -> None:
     """List valid Agent Skills and isolated discovery diagnostics."""
 
-    selected = (project or Path(".")).expanduser()
+    selected = project or Path(".")
     resolution_diagnostics: tuple[SkillDiagnostic, ...] = ()
     try:
+        selected = selected.expanduser()
         project_root = resolve_project_context_root(selected)
     except (OSError, RuntimeError) as exc:
         project_root = None
