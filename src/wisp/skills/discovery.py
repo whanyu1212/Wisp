@@ -177,20 +177,9 @@ def _scan_root(root: _SkillRoot, *, context: ToolContext) -> _RootScan:
                 )
             )
 
-        try:
-            resolved_root = path.resolve(strict=False)
-        except OSError as exc:
-            return _RootScan(
-                diagnostics=(
-                    _diagnostic(
-                        "root-unreadable",
-                        "error",
-                        f"cannot resolve skill source root: {_os_error_message(exc)}",
-                        root.source,
-                        path,
-                    ),
-                )
-            )
+        # ``root.base`` is canonicalized before roots are constructed. Keep the
+        # containment boundary lexical so a later path swap cannot redefine it.
+        resolved_root = path
         entries: list[SkillEntry] = []
         diagnostics: list[SkillDiagnostic] = []
         frontmatter_bytes = 0
@@ -481,24 +470,6 @@ def _read_skill_entry(
             ),
         )
 
-    resolved_file = skill_file.resolve(strict=False)
-    try:
-        resolved_file.relative_to(resolved_root)
-    except ValueError:
-        return (
-            None,
-            0,
-            (
-                _diagnostic(
-                    "path-escape",
-                    "error",
-                    "skill metadata resolves outside its source root",
-                    root.source,
-                    skill_file,
-                ),
-            ),
-        )
-
     if root_fd is None:
         try:
             metadata_fd = os.open(skill_file, _FILE_FLAGS)
@@ -507,6 +478,15 @@ def _read_skill_entry(
         except OSError as exc:
             return _metadata_open_error(root.source, skill_file, exc)
         try:
+            resolved_file = _resolved_open_file(metadata_fd, path=skill_file)
+            escape = _path_escape_diagnostic(
+                resolved_file,
+                resolved_root=resolved_root,
+                source=root.source,
+                skill_file=skill_file,
+            )
+            if escape is not None:
+                return None, 0, (escape,)
             return _read_open_metadata(
                 metadata_fd,
                 source=root.source,
@@ -516,6 +496,16 @@ def _read_skill_entry(
             )
         finally:
             os.close(metadata_fd)
+
+    resolved_file = skill_file.resolve(strict=False)
+    escape = _path_escape_diagnostic(
+        resolved_file,
+        resolved_root=resolved_root,
+        source=root.source,
+        skill_file=skill_file,
+    )
+    if escape is not None:
+        return None, 0, (escape,)
 
     try:
         skill_fd = _open_relative(
@@ -638,6 +628,63 @@ def _metadata_open_error(
             ),
         ),
     )
+
+
+def _path_escape_diagnostic(
+    resolved_file: Path,
+    *,
+    resolved_root: Path,
+    source: SkillSource,
+    skill_file: Path,
+) -> SkillDiagnostic | None:
+    try:
+        resolved_file.relative_to(resolved_root)
+    except ValueError:
+        return _diagnostic(
+            "path-escape",
+            "error",
+            "skill metadata resolves outside its source root",
+            source,
+            skill_file,
+        )
+    return None
+
+
+def _resolved_open_file(metadata_fd: int, *, path: Path) -> Path:
+    if os.name != "nt":
+        return path.resolve(strict=False)
+
+    # Path resolution after opening remains racy on Windows. Resolve the stable
+    # file handle instead so junction swaps cannot redirect the metadata read.
+    import importlib
+
+    ctypes = importlib.import_module("ctypes")
+    msvcrt = importlib.import_module("msvcrt")
+    handle = msvcrt.get_osfhandle(metadata_fd)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+    ]
+    get_final_path.restype = ctypes.c_uint32
+    windows_handle = ctypes.c_void_p(handle)
+    size = get_final_path(windows_handle, None, 0, 0)
+    if size == 0:
+        error = ctypes.get_last_error()
+        raise OSError(error, os.strerror(error), path)
+    buffer = ctypes.create_unicode_buffer(size + 1)
+    if get_final_path(windows_handle, buffer, len(buffer), 0) == 0:
+        error = ctypes.get_last_error()
+        raise OSError(error, os.strerror(error), path)
+    resolved = buffer.value
+    if resolved.startswith("\\\\?\\UNC\\"):
+        resolved = "\\\\" + resolved[8:]
+    elif resolved.startswith("\\\\?\\"):
+        resolved = resolved[4:]
+    return Path(resolved)
 
 
 def _diagnostic(

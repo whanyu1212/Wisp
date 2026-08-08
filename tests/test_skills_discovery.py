@@ -348,6 +348,26 @@ def test_path_fallback_rejects_windows_junctions(
     assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["root-symlink"]
 
 
+def test_path_fallback_validates_open_file_handle_against_source_root(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    skill = _write_skill(tmp_path / ".wisp" / "skills", "swapped")
+    outside = _write_skill(tmp_path / "outside", "swapped")
+    monkeypatch.setattr(discovery_module, "_USE_DESCRIPTOR_TRAVERSAL", False)
+    monkeypatch.setattr(
+        discovery_module,
+        "_resolved_open_file",
+        lambda metadata_fd, *, path: outside / "SKILL.md",
+    )
+
+    catalog = _discover(tmp_path)
+
+    assert catalog.entries == ()
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["path-escape"]
+    assert catalog.diagnostics[0].path == skill / "SKILL.md"
+
+
 def test_catalog_stores_canonical_skill_root_through_symlinked_home_parent(
     tmp_path: Path,
 ) -> None:
