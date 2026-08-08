@@ -238,7 +238,7 @@ def _read_bounded_text(
     try:
         return raw.decode("utf-8"), truncated
     except UnicodeDecodeError as exc:
-        if truncated and exc.end == len(raw):
+        if truncated and exc.end == len(raw) and exc.reason == "unexpected end of data":
             return raw[: exc.start].decode("utf-8"), True
         raise ToolError(f"Skill resource is not valid UTF-8: {resource}") from exc
 

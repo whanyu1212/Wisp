@@ -174,6 +174,36 @@ def test_rejects_invalid_utf8(tmp_path: Path) -> None:
         )
 
 
+def test_rejects_invalid_utf8_at_byte_boundary(tmp_path: Path) -> None:
+    entry = _entry(tmp_path)
+    (entry.root / "invalid.dat").write_bytes(b"valid\xffmore")
+
+    with pytest.raises(ToolError, match="UTF-8"):
+        load_skill_resource(
+            entry,
+            "invalid.dat",
+            context=ToolContext(cwd=tmp_path, max_output_bytes=6),
+        )
+
+
+def test_tolerates_valid_utf8_split_by_byte_boundary(tmp_path: Path) -> None:
+    path = tmp_path / "split.txt"
+    path.write_bytes(b"valid\xe2\x82\xacmore")
+    file_fd = loading_module.os.open(path, loading_module.FILE_FLAGS)
+    try:
+        text, truncated = loading_module._read_bounded_text(
+            file_fd,
+            max_bytes=6,
+            max_lines=10,
+            resource="split.txt",
+        )
+    finally:
+        loading_module.os.close(file_fd)
+
+    assert text == "valid"
+    assert truncated is True
+
+
 def test_skill_tool_runs_loading_off_the_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
