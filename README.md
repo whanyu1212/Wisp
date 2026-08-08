@@ -380,8 +380,23 @@ automatically; execution still requires the normal command tool and approval pol
 `allowed-tools` metadata field is descriptive only and cannot grant tool access or approval.
 
 The active operation keeps one immutable catalog snapshot. First-time project trust refreshes that
-snapshot before the pending provider request begins. Explicit `/skill:<name>` invocation, skill
-installation, and hot reload remain unsupported.
+snapshot before the pending provider request begins. Invoke a cataloged skill explicitly from any
+CLI, JSON/RPC, SDK, or TUI prompt flow with:
+
+```text
+/skill:<name> [additional instructions]
+```
+
+The directive must begin at the first character; names are case-sensitive, and the optional request
+may span multiple lines. Wisp securely loads the bounded `SKILL.md` body, expands it into the
+provider-visible user message, and applies the same policy to initial prompts, steering, and
+follow-ups. Explicit invocation does not require exposing the `skill` tool and does not grant tool
+access or approval.
+
+Sessions retain the exact submitted directive, additional request, instruction-content SHA-256,
+truncation state, and provider-visible expansion as typed data. Replay uses that persisted expansion
+even if the source skill later changes or disappears; a new invocation reads the current resource
+and records a new hash. Skill installation, completion UI, and hot reload remain unsupported.
 
 ## Context & compaction
 

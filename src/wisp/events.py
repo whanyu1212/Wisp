@@ -19,8 +19,9 @@ from pydantic import (
 )
 
 from wisp.agent.mode import AgentMode
+from wisp.skills.models import SkillInvocationEvidence
 
-EVENT_SCHEMA_VERSION: Literal[27] = 27
+EVENT_SCHEMA_VERSION: Literal[28] = 28
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -39,6 +40,7 @@ RPC_SESSION_UNREVERT_SCHEMA_VERSION = 24
 PROCESS_METADATA_SCHEMA_VERSION = 25
 COMPACTION_POLICY_SCHEMA_VERSION = 26
 AGENT_MODE_SCHEMA_VERSION = 27
+SKILL_INVOCATION_SCHEMA_VERSION = 28
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -76,7 +78,7 @@ class WispEvent(BaseModel):
 
     type: str
     schema_version: Literal[
-        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27
+        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -374,6 +376,22 @@ class RpcMessageToolResultSnapshot(BaseModel):
     truncated: bool = False
 
 
+class RpcSkillInvocationSnapshot(BaseModel):
+    """Bounded explicit-skill evidence attached to an RPC transcript message."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    original_content: str
+    original_content_bytes: int = Field(ge=0)
+    original_content_truncated: bool = False
+    request: str
+    request_bytes: int = Field(ge=0)
+    request_truncated: bool = False
+    content_sha256: str
+    instructions_truncated: bool = False
+
+
 class RpcMessageSnapshot(BaseModel):
     """One bounded, frontend-oriented persisted message snapshot."""
 
@@ -398,6 +416,7 @@ class RpcMessageSnapshot(BaseModel):
     usage: TokenUsage | None = None
     cost: UsageCost | None = None
     tool_result: RpcMessageToolResultSnapshot | None = None
+    skill_invocation: RpcSkillInvocationSnapshot | None = None
 
     @model_validator(mode="after")
     def _validate_tool_result_role(self) -> Self:
@@ -912,6 +931,13 @@ class RpcMessagesReported(WispEvent):
                 "RPC message tool-result metadata requires schema_version "
                 f"{RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION} or newer"
             )
+        if self.schema_version < SKILL_INVOCATION_SCHEMA_VERSION and any(
+            message.skill_invocation is not None for message in self.messages
+        ):
+            raise ValueError(
+                "RPC message skill-invocation metadata requires schema_version "
+                f"{SKILL_INVOCATION_SCHEMA_VERSION} or newer"
+            )
         if self.next_before_entry_id is not None and not self.truncated:
             raise ValueError(
                 "RPC message reports cannot include next_before_entry_id unless truncated"
@@ -1220,6 +1246,7 @@ class QueueMessageInjected(WispEvent):
     type: Literal["queue.message.injected"] = "queue.message.injected"
     kind: QueueKind
     content: str
+    skill_invocation: SkillInvocationEvidence | None = None
 
     @model_validator(mode="after")
     def _validate_schema_version(self) -> Self:
@@ -1227,6 +1254,34 @@ class QueueMessageInjected(WispEvent):
             raise ValueError(
                 "queue message injection requires schema_version "
                 f"{QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION} or newer"
+            )
+        if (
+            self.skill_invocation is not None
+            and self.schema_version < SKILL_INVOCATION_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "queue skill-invocation metadata requires schema_version "
+                f"{SKILL_INVOCATION_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+
+class SkillInvoked(WispEvent):
+    """An explicit skill directive became one provider-visible user message."""
+
+    type: Literal["skill.invoked"] = "skill.invoked"
+    session_id: str
+    message_entry_id: str
+    invocation: SkillInvocationEvidence
+    provider_content: str
+    queue_kind: QueueKind | None = None
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < SKILL_INVOCATION_SCHEMA_VERSION:
+            raise ValueError(
+                "skill invocations require schema_version "
+                f"{SKILL_INVOCATION_SCHEMA_VERSION} or newer"
             )
         return self
 
@@ -1295,6 +1350,7 @@ type KnownWispEvent = Annotated[
     | QueueUpdated
     | QueueItemsRemoved
     | QueueMessageInjected
+    | SkillInvoked
     | ModelProviderAutoSwitched
     | ErrorEvent,
     Field(discriminator="type"),

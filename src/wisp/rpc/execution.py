@@ -201,8 +201,20 @@ class RpcCommandExecutor:
         if command_type == "get_commands":
             return self._dispatch_commands(command, running_command)
         if command_type in QUEUE_RPC_COMMAND_TYPES:
-            return self._dispatch_queue(command, running_command)
+            raise RuntimeError("Queue RPC commands require asynchronous dispatch")
         return self._dispatch_control(command, running_command)
+
+    async def dispatch_async(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        """Dispatch commands while allowing queue preparation to perform safe I/O."""
+
+        if rpc_command_type(command) in QUEUE_RPC_COMMAND_TYPES:
+            self.coordinator.running_command = running_command
+            return await self._dispatch_queue(command, running_command)
+        return self.dispatch(command, running_command)
 
     def _dispatch_prompt(self, command: dict[str, object]) -> _RpcDispatchResult:
         new_running_command, new_session = start_rpc_prompt_command(
@@ -402,12 +414,12 @@ class RpcCommandExecutor:
             )
         )
 
-    def _dispatch_queue(
+    async def _dispatch_queue(
         self,
         command: dict[str, object],
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
-        handle_rpc_queue_command(
+        await handle_rpc_queue_command(
             command,
             agent=self.agent,
             session=self.session_state.session,
@@ -2455,14 +2467,14 @@ def reject_rpc_command(
     )
 
 
-def handle_rpc_queue_command(
+async def handle_rpc_queue_command(
     command: dict[str, object],
     *,
     agent: CodingSession,
     session: JsonlSession | None,
     write_event: RpcEventWriter,
 ) -> None:
-    """Execute one synchronous queue command through the shared session facade."""
+    """Execute one ordered queue command through the shared session facade."""
 
     command_type, command_id, id_error = rpc_command_identity(command)
     write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
@@ -2489,7 +2501,11 @@ def handle_rpc_queue_command(
                     write_event=write_event,
                 )
                 return
-            state = agent.steer(content) if command_type == "steer" else agent.follow_up(content)
+            state = (
+                await agent.steer(content)
+                if command_type == "steer"
+                else await agent.follow_up(content)
+            )
         elif command_type == "set_queue_mode":
             kind = require_rpc_queue_kind(command, command_type=command_type)
             mode = require_rpc_queue_mode(command)
@@ -2501,8 +2517,12 @@ def handle_rpc_queue_command(
                 command_id=command_id,
                 operation="pop",
                 kind=kind,
-                steering=(popped.content,) if popped is not None and kind == "steering" else (),
-                follow_up=(popped.content,) if popped is not None and kind == "follow_up" else (),
+                steering=(popped.user_visible_content,)
+                if popped is not None and kind == "steering"
+                else (),
+                follow_up=(popped.user_visible_content,)
+                if popped is not None and kind == "follow_up"
+                else (),
             )
         elif command_type == "clear_queue":
             clear_kind = optional_rpc_queue_kind(command, command_type=command_type)
@@ -2511,8 +2531,8 @@ def handle_rpc_queue_command(
                 command_id=command_id,
                 operation="clear",
                 kind=clear_kind,
-                steering=tuple(message.content for message in cleared.steering),
-                follow_up=tuple(message.content for message in cleared.follow_up),
+                steering=tuple(message.user_visible_content for message in cleared.steering),
+                follow_up=tuple(message.user_visible_content for message in cleared.follow_up),
             )
         else:  # pragma: no cover - dispatch owns the closed command set
             raise AssertionError(f"Unsupported queue RPC command: {command_type}")

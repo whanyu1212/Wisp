@@ -797,8 +797,8 @@ def test_compaction_events_round_trip_on_current_schema_without_summary() -> Non
         usage=TokenUsage(input_tokens=3, output_tokens=2, total_tokens=5),
     )
 
-    assert started.schema_version == 27
-    assert completed.schema_version == 27
+    assert started.schema_version == 28
+    assert completed.schema_version == 28
     assert "summary" not in completed.model_dump(mode="json")
     assert wisp_event_from_json(started.model_dump_json()) == started
     assert wisp_event_from_json(completed.model_dump_json()) == completed
@@ -857,7 +857,7 @@ def test_compaction_events_require_schema_v8(version: int) -> None:
         source_entry_count=1,
     ).model_dump_json()
 
-    with pytest.raises(ValueError, match="require schema_version 8 through 27"):
+    with pytest.raises(ValueError, match="require schema_version 8 through 28"):
         wisp_event_from_json(payload)
 
 
@@ -1344,7 +1344,7 @@ def test_coding_session_rechecks_limit_after_preflight_steering(tmp_path: Path) 
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(consume)
             await summary_started.wait()
-            agent.steer("x" * 8_000)
+            await agent.steer("x" * 8_000)
             release_summary.set()
 
         assert session.read_context_messages() == history

@@ -532,7 +532,7 @@ class RpcHost:
                 defer_until_after_flush=after_flush.append,
             )
             try:
-                result = executor.dispatch(command, running_command)
+                result = await executor.dispatch_async(command, running_command)
                 if result.should_shutdown and self._on_shutdown_dispatched is not None:
                     self._on_shutdown_dispatched()
                 shutdown_abandoned = any(

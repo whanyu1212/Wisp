@@ -218,7 +218,7 @@ def test_executor_queue_state_is_idle_safe_and_mutations_fail_cleanly(tmp_path: 
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            state_result = executor.dispatch(
+            state_result = await executor.dispatch_async(
                 {"id": "state", "type": "get_queue_state"},
                 None,
             )
@@ -234,7 +234,9 @@ def test_executor_queue_state_is_idle_safe_and_mutations_fail_cleanly(tmp_path: 
                 {"id": "pop", "type": "pop_queue", "kind": "steering"},
                 {"id": "clear", "type": "clear_queue"},
             ]
-            results = [executor.dispatch(command, None) for command in mutation_commands]
+            results = [
+                await executor.dispatch_async(command, None) for command in mutation_commands
+            ]
             task_group.cancel_scope.cancel()
 
         assert state_result.running_command is None
@@ -2790,11 +2792,11 @@ def test_executor_queue_commands_delegate_and_report_removed_items(
             calls.append(("state", session))
             return QueueUpdated(steering=("one", "two"), follow_up=("later",))
 
-        def steer(content: str) -> QueueUpdated:
+        async def steer(content: str) -> QueueUpdated:
             calls.append(("steer", content))
             return QueueUpdated(steering=(content,))
 
-        def follow_up(content: str) -> QueueUpdated:
+        async def follow_up(content: str) -> QueueUpdated:
             calls.append(("follow_up", content))
             return QueueUpdated(follow_up=(content,))
 
@@ -2837,7 +2839,7 @@ def test_executor_queue_commands_delegate_and_report_removed_items(
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            results = [executor.dispatch(command, running) for command in commands]
+            results = [await executor.dispatch_async(command, running) for command in commands]
             task_group.cancel_scope.cancel()
 
         assert all(result.running_command is running for result in results)
@@ -2901,8 +2903,8 @@ def test_executor_rejects_invalid_raw_queue_fields(tmp_path: Path) -> None:
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
             for command in commands:
-                executor.dispatch(command, None)
-            executor.dispatch({"id": "state", "type": "get_queue_state"}, None)
+                await executor.dispatch_async(command, None)
+            await executor.dispatch_async({"id": "state", "type": "get_queue_state"}, None)
             task_group.cancel_scope.cancel()
 
         finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
@@ -2943,11 +2945,11 @@ def test_executor_reports_empty_pop_and_clear_as_success(
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
-            executor.dispatch(
+            await executor.dispatch_async(
                 {"id": "pop", "type": "pop_queue", "kind": "steering"},
                 running,
             )
-            executor.dispatch({"id": "clear", "type": "clear_queue"}, running)
+            await executor.dispatch_async({"id": "clear", "type": "clear_queue"}, running)
             task_group.cancel_scope.cancel()
 
         removed = [event for event in fixture.events if isinstance(event, QueueItemsRemoved)]
