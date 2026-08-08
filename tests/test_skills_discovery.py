@@ -506,7 +506,7 @@ def test_windows_fallback_holds_component_guards_while_enumerating(
 
     def resolved_guard(handle: int, *, path: Path) -> Path:
         assert opened_paths[handle] == path
-        return path.resolve(strict=False)
+        return path
 
     def enumerate_while_guarded(root_fd: int | None, *, path: Path):
         assert root_fd is None
@@ -515,6 +515,11 @@ def test_windows_fallback_holds_component_guards_while_enumerating(
         return ()
 
     monkeypatch.setattr(discovery_module, "_open_windows_directory_guard", open_guard)
+    monkeypatch.setattr(
+        discovery_module,
+        "_windows_handle_is_reparse_point",
+        lambda handle, *, path: False,
+    )
     monkeypatch.setattr(discovery_module, "_resolved_windows_handle", resolved_guard)
     monkeypatch.setattr(discovery_module, "_close_windows_handle", closed.append)
     monkeypatch.setattr(discovery_module, "_bounded_root_names", enumerate_while_guarded)
@@ -531,7 +536,47 @@ def test_windows_fallback_holds_component_guards_while_enumerating(
 
     assert scan.entries == ()
     assert scan.diagnostics == ()
-    assert closed == [1, 2, 3]
+    assert tuple(opened_paths.values()) == discovery_module._windows_skill_root_paths(root)
+    assert closed == list(opened_paths)
+
+
+def test_windows_fallback_rejects_swapped_base_ancestor(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    ancestor = tmp_path / "mutable"
+    base = ancestor / "home"
+    (base / ".wisp" / "skills").mkdir(parents=True)
+    root = discovery_module._SkillRoot("user:wisp", base, (".wisp", "skills"))
+    outside = tmp_path / "outside"
+    opened_paths: dict[int, Path] = {}
+    closed: list[int] = []
+
+    def open_guard(path: Path) -> int:
+        handle = len(opened_paths) + 1
+        opened_paths[handle] = path
+        return handle
+
+    def resolved_guard(handle: int, *, path: Path) -> Path:
+        assert opened_paths[handle] == path
+        return outside if path == ancestor else path
+
+    monkeypatch.setattr(discovery_module, "_open_windows_directory_guard", open_guard)
+    monkeypatch.setattr(
+        discovery_module,
+        "_windows_handle_is_reparse_point",
+        lambda handle, *, path: False,
+    )
+    monkeypatch.setattr(discovery_module, "_resolved_windows_handle", resolved_guard)
+    monkeypatch.setattr(discovery_module, "_close_windows_handle", closed.append)
+
+    opened, diagnostic = discovery_module._open_windows_skill_root(root)
+
+    assert opened is None
+    assert diagnostic is not None
+    assert diagnostic.code == "root-symlink"
+    assert diagnostic.path == ancestor
+    assert closed == list(opened_paths)
 
 
 def test_rejects_path_fallback_without_stable_handle_validation(

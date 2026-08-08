@@ -484,8 +484,7 @@ def _open_windows_skill_root(
     root: _SkillRoot,
 ) -> tuple[_OpenedRoot | None, SkillDiagnostic | None]:
     guards: list[int] = []
-    paths = (root.base, *(root.base.joinpath(*root.components[:index]) for index in (1, 2)))
-    for index, candidate in enumerate(paths):
+    for candidate in _windows_skill_root_paths(root):
         try:
             guard = _open_windows_directory_guard(candidate)
         except FileNotFoundError:
@@ -508,9 +507,8 @@ def _open_windows_skill_root(
         guards.append(guard)
 
         try:
-            is_link = index > 0 and _is_link_like(candidate)
+            is_link = _windows_handle_is_reparse_point(guard, path=candidate)
             resolved = _resolved_windows_handle(guard, path=candidate)
-            expected = candidate.resolve(strict=False)
             candidate_stat = candidate.stat(follow_symlinks=False)
         except (OSError, RuntimeError) as exc:
             for opened in guards:
@@ -525,7 +523,7 @@ def _open_windows_skill_root(
                     candidate,
                 ),
             )
-        if is_link or resolved != expected:
+        if is_link or resolved != candidate:
             for opened in guards:
                 _close_windows_handle(opened)
             return (
@@ -552,6 +550,15 @@ def _open_windows_skill_root(
                 ),
             )
     return _OpenedRoot(None, tuple(guards)), None
+
+
+def _windows_skill_root_paths(root: _SkillRoot) -> tuple[Path, ...]:
+    current = Path(root.base.anchor)
+    paths = [current]
+    for component in (*root.base.parts[1:], *root.components):
+        current /= component
+        paths.append(current)
+    return tuple(paths)
 
 
 def _bounded_root_names(root_fd: int | None, *, path: Path) -> tuple[tuple[str, bool, bool], ...]:
