@@ -23,6 +23,7 @@ _MISSING = object()
 _YAML_BOOL_TAG = "tag:yaml.org,2002:bool"
 _YAML_FLOAT_TAG = "tag:yaml.org,2002:float"
 _YAML_INT_TAG = "tag:yaml.org,2002:int"
+_YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
 _YAML_TIMESTAMP_TAG = "tag:yaml.org,2002:timestamp"
 _YAML_12_BOOL = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
 _YAML_12_FLOAT = re.compile(
@@ -121,7 +122,14 @@ _StrictSafeLoader.yaml_implicit_resolvers = {
     key: [
         (tag, resolver)
         for tag, resolver in resolvers
-        if tag not in {_YAML_BOOL_TAG, _YAML_FLOAT_TAG, _YAML_INT_TAG, _YAML_TIMESTAMP_TAG}
+        if tag
+        not in {
+            _YAML_BOOL_TAG,
+            _YAML_FLOAT_TAG,
+            _YAML_INT_TAG,
+            _YAML_MERGE_TAG,
+            _YAML_TIMESTAMP_TAG,
+        }
     ]
     for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }

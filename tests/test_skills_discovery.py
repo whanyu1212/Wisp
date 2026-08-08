@@ -75,6 +75,7 @@ def test_uses_yaml_12_scalar_rules_for_string_fields(tmp_path: Path) -> None:
         extra=(
             "compatibility: 2026-08-08\n"
             "metadata:\n"
+            "  <<: literal\n"
             "  legacy-bool: yes\n"
             "  on: off\n"
             "  leading-zero: 0123\n"
@@ -89,6 +90,7 @@ def test_uses_yaml_12_scalar_rules_for_string_fields(tmp_path: Path) -> None:
     assert entry.description == "1_2.3"
     assert entry.compatibility == "2026-08-08"
     assert entry.metadata == (
+        ("<<", "literal"),
         ("leading-zero", "0123"),
         ("legacy-bool", "yes"),
         ("on", "off"),
