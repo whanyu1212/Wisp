@@ -652,16 +652,6 @@ def _read_skill_entry(
         finally:
             os.close(metadata_fd)
 
-    resolved_file = skill_file.resolve(strict=False)
-    escape = _path_escape_diagnostic(
-        resolved_file,
-        resolved_root=resolved_root,
-        source=root.source,
-        skill_file=skill_file,
-    )
-    if escape is not None:
-        return None, 0, (escape,)
-
     try:
         skill_fd = _open_relative(
             directory_name,
@@ -688,6 +678,14 @@ def _read_skill_entry(
         )
 
     try:
+        identity_error = _skill_directory_identity_error(
+            skill_fd,
+            skill_root=skill_root,
+            source=root.source,
+            skill_file=skill_file,
+        )
+        if identity_error is not None:
+            return None, 0, (identity_error,)
         try:
             metadata_fd = _open_relative(
                 "SKILL.md",
@@ -701,13 +699,22 @@ def _read_skill_entry(
             return _metadata_open_error(root.source, skill_file, exc)
 
         try:
-            return _read_open_metadata(
+            entry, consumed, diagnostics = _read_open_metadata(
                 metadata_fd,
                 source=root.source,
-                resolved_skill_root=resolved_file.parent,
+                resolved_skill_root=skill_root,
                 directory_name=directory_name,
                 skill_file=skill_file,
             )
+            identity_error = _skill_directory_identity_error(
+                skill_fd,
+                skill_root=skill_root,
+                source=root.source,
+                skill_file=skill_file,
+            )
+            if identity_error is not None:
+                return None, consumed, (*diagnostics, identity_error)
+            return entry, consumed, diagnostics
         finally:
             os.close(metadata_fd)
     finally:
@@ -760,6 +767,30 @@ def _read_open_metadata(
             ),
         )
     return entry, consumed, diagnostics
+
+
+def _skill_directory_identity_error(
+    skill_fd: int,
+    *,
+    skill_root: Path,
+    source: SkillSource,
+    skill_file: Path,
+) -> SkillDiagnostic | None:
+    opened = os.fstat(skill_fd)
+    try:
+        current = skill_root.stat(follow_symlinks=False)
+    except OSError:
+        current = None
+    if current is not None and stat.S_ISDIR(current.st_mode):
+        if (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino):
+            return None
+    return _diagnostic(
+        "file-unreadable",
+        "error",
+        "skill directory changed while metadata was read",
+        source,
+        skill_file,
+    )
 
 
 def _metadata_open_error(

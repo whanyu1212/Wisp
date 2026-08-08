@@ -437,6 +437,29 @@ def test_descriptor_traversal_rejects_swapped_source_base_ancestor(
     assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["root-unreadable"]
 
 
+def test_descriptor_traversal_discards_entry_when_opened_skill_directory_is_replaced(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    source_root = tmp_path / ".wisp" / "skills"
+    skill_root = _write_skill(source_root, "swapped", description="original")
+    moved_root = source_root / "swapped-original"
+    original_read = discovery_module._read_open_metadata
+
+    def replace_after_read(*args: object, **kwargs: object):
+        result = original_read(*args, **kwargs)  # type: ignore[arg-type]
+        skill_root.rename(moved_root)
+        _write_skill(source_root, "swapped", description="replacement")
+        return result
+
+    monkeypatch.setattr(discovery_module, "_read_open_metadata", replace_after_read)
+
+    catalog = _discover(tmp_path)
+
+    assert catalog.entries == ()
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["file-unreadable"]
+
+
 def test_path_fallback_discovers_skills_without_opening_directories(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
