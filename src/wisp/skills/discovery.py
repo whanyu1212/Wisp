@@ -7,6 +7,7 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from wisp.skills.metadata import SkillMetadataError, read_skill_metadata
 from wisp.skills.models import (
@@ -891,7 +892,7 @@ def _open_windows_metadata_handle(path: Path) -> int:
     )
     if handle == ctypes.c_void_p(-1).value:
         error = ctypes.get_last_error()
-        raise OSError(error, os.strerror(error), path)
+        raise _windows_error(ctypes, error, path)
     return int(handle)
 
 
@@ -926,7 +927,7 @@ def _windows_handle_is_reparse_point(handle: int, *, path: Path) -> bool:
         ctypes.sizeof(info),
     ):
         error = ctypes.get_last_error()
-        raise OSError(error, os.strerror(error), path)
+        raise _windows_error(ctypes, error, path)
     return bool(info.file_attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
 
 
@@ -964,7 +965,7 @@ def _open_windows_directory_guard(path: Path) -> int:
     )
     if handle == ctypes.c_void_p(-1).value:
         error = ctypes.get_last_error()
-        raise OSError(error, os.strerror(error), path)
+        raise _windows_error(ctypes, error, path)
     return int(handle)
 
 
@@ -997,17 +998,23 @@ def _resolved_windows_handle(handle: int, *, path: Path) -> Path:
     size = get_final_path(windows_handle, None, 0, 0)
     if size == 0:
         error = ctypes.get_last_error()
-        raise OSError(error, os.strerror(error), path)
+        raise _windows_error(ctypes, error, path)
     buffer = ctypes.create_unicode_buffer(size + 1)
     if get_final_path(windows_handle, buffer, len(buffer), 0) == 0:
         error = ctypes.get_last_error()
-        raise OSError(error, os.strerror(error), path)
+        raise _windows_error(ctypes, error, path)
     resolved = buffer.value
     if resolved.startswith("\\\\?\\UNC\\"):
         resolved = "\\\\" + resolved[8:]
     elif resolved.startswith("\\\\?\\"):
         resolved = resolved[4:]
     return Path(resolved)
+
+
+def _windows_error(ctypes: Any, error: int, path: Path) -> OSError:
+    exc: OSError = ctypes.WinError(error)
+    exc.filename = str(path)
+    return exc
 
 
 def _diagnostic(

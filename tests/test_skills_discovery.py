@@ -660,6 +660,21 @@ def test_windows_metadata_open_closes_reparse_handle(
     assert closed == [42]
 
 
+def test_windows_error_preserves_translated_subclass_and_path(tmp_path: Path) -> None:
+    path = tmp_path / "missing"
+
+    class FakeCtypes:
+        @staticmethod
+        def WinError(error: int) -> OSError:
+            assert error == 3
+            return FileNotFoundError(errno.ENOENT, "path not found")
+
+    exc = discovery_module._windows_error(FakeCtypes(), 3, path)
+
+    assert isinstance(exc, FileNotFoundError)
+    assert exc.filename == str(path)
+
+
 def test_catalog_stores_canonical_skill_root_through_symlinked_home_parent(
     tmp_path: Path,
 ) -> None:
