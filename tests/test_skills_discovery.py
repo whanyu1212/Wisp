@@ -361,10 +361,33 @@ def test_path_fallback_discovers_skills_without_opening_directories(
 ) -> None:
     _write_skill(tmp_path / ".wisp" / "skills", "windows-compatible")
     monkeypatch.setattr(discovery_module, "_USE_DESCRIPTOR_TRAVERSAL", False)
+    monkeypatch.setattr(discovery_module, "_PATH_FALLBACK_SUPPORTED", True)
+    monkeypatch.setattr(
+        discovery_module,
+        "_resolved_open_file",
+        lambda metadata_fd, *, path: path.resolve(strict=False),
+    )
 
     catalog = _discover(tmp_path)
 
     assert catalog.names() == ("windows-compatible",)
+
+
+def test_rejects_path_fallback_without_stable_handle_validation(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    _write_skill(tmp_path / ".wisp" / "skills", "unsupported")
+    monkeypatch.setattr(discovery_module, "_USE_DESCRIPTOR_TRAVERSAL", False)
+    monkeypatch.setattr(discovery_module, "_PATH_FALLBACK_SUPPORTED", False)
+
+    catalog = _discover(tmp_path)
+
+    assert catalog.entries == ()
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == [
+        "root-unreadable",
+        "root-unreadable",
+    ]
 
 
 def test_path_fallback_rejects_intermediate_root_symlink(
@@ -377,6 +400,7 @@ def test_path_fallback_rejects_intermediate_root_symlink(
     _write_skill(outside / "skills", "escaped")
     (home / ".wisp").symlink_to(outside, target_is_directory=True)
     monkeypatch.setattr(discovery_module, "_USE_DESCRIPTOR_TRAVERSAL", False)
+    monkeypatch.setattr(discovery_module, "_PATH_FALLBACK_SUPPORTED", True)
 
     catalog = _discover(home)
 
@@ -391,6 +415,7 @@ def test_path_fallback_rejects_windows_junctions(
     home = tmp_path / "home"
     _write_skill(home / ".wisp" / "skills", "escaped")
     monkeypatch.setattr(discovery_module, "_USE_DESCRIPTOR_TRAVERSAL", False)
+    monkeypatch.setattr(discovery_module, "_PATH_FALLBACK_SUPPORTED", True)
     monkeypatch.setattr(
         discovery_module,
         "_is_link_like",
@@ -410,6 +435,7 @@ def test_path_fallback_validates_open_file_handle_against_source_root(
     skill = _write_skill(tmp_path / ".wisp" / "skills", "swapped")
     outside = _write_skill(tmp_path / "outside", "swapped")
     monkeypatch.setattr(discovery_module, "_USE_DESCRIPTOR_TRAVERSAL", False)
+    monkeypatch.setattr(discovery_module, "_PATH_FALLBACK_SUPPORTED", True)
     monkeypatch.setattr(
         discovery_module,
         "_resolved_open_file",

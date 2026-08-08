@@ -36,6 +36,7 @@ _USE_DESCRIPTOR_TRAVERSAL = (
     and _OPEN_SUPPORTS_DIR_FD
     and _SCANDIR_SUPPORTS_FD
 )
+_PATH_FALLBACK_SUPPORTED = os.name == "nt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +273,17 @@ def _scan_root(root: _SkillRoot, *, context: ToolContext) -> _RootScan:
 
 def _open_skill_root(root: _SkillRoot) -> tuple[_OpenedRoot | None, SkillDiagnostic | None]:
     if not _USE_DESCRIPTOR_TRAVERSAL:
+        if not _PATH_FALLBACK_SUPPORTED:
+            return (
+                None,
+                _diagnostic(
+                    "root-unreadable",
+                    "error",
+                    "secure skill source traversal is unavailable on this platform",
+                    root.source,
+                    root.path,
+                ),
+            )
         return _open_skill_root_by_path(root)
 
     try:
@@ -681,7 +693,7 @@ def _path_escape_diagnostic(
 
 def _resolved_open_file(metadata_fd: int, *, path: Path) -> Path:
     if os.name != "nt":
-        return path.resolve(strict=False)
+        raise RuntimeError("stable opened-file resolution is unavailable on this platform")
 
     # Path resolution after opening remains racy on Windows. Resolve the stable
     # file handle instead so junction swaps cannot redirect the metadata read.
