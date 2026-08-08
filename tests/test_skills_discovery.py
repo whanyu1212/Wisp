@@ -272,6 +272,25 @@ def test_project_roots_are_not_scanned_without_trust(
     assert scanned_sources == ["user:wisp", "user:agents"]
 
 
+def test_home_resolution_failure_does_not_hide_valid_project_skills(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_skill(project / ".wisp" / "skills", "valid")
+    home.symlink_to(home, target_is_directory=True)
+
+    catalog = _discover(home, project)
+
+    assert catalog.names() == ("valid",)
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == [
+        "root-unreadable",
+        "root-unreadable",
+    ]
+    assert [diagnostic.source for diagnostic in catalog.diagnostics] == [
+        "user:wisp",
+        "user:agents",
+    ]
+
+
 def test_rejects_symlinked_roots_directories_and_files(tmp_path: Path) -> None:
     home = tmp_path / "home"
     external = tmp_path / "external"

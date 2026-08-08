@@ -76,29 +76,35 @@ def discover_skills(
     constructed, much less inspected, until the caller has resolved project trust.
     """
 
-    home = home_dir.expanduser().resolve(strict=False)
     roots: list[_SkillRoot] = []
+    diagnostics: list[SkillDiagnostic] = []
+    project: Path | None = None
     if project_root is not None:
-        project = project_root.expanduser().resolve(strict=False)
-        roots.extend(
-            (
-                _SkillRoot("project:wisp", project, (".wisp", "skills")),
-                _SkillRoot("project:agents", project, (".agents", "skills")),
+        project_specs: tuple[tuple[SkillSource, tuple[str, str]], ...] = (
+            ("project:wisp", (".wisp", "skills")),
+            ("project:agents", (".agents", "skills")),
+        )
+        project, project_diagnostics = _resolve_source_base(project_root, project_specs)
+        diagnostics.extend(project_diagnostics)
+        if project is not None:
+            roots.extend(
+                _SkillRoot(source, project, components) for source, components in project_specs
             )
-        )
-    roots.extend(
-        (
-            _SkillRoot("user:wisp", home, (".wisp", "skills")),
-            _SkillRoot("user:agents", home, (".agents", "skills")),
-        )
+
+    home_specs: tuple[tuple[SkillSource, tuple[str, str]], ...] = (
+        ("user:wisp", (".wisp", "skills")),
+        ("user:agents", (".agents", "skills")),
     )
+    home, home_diagnostics = _resolve_source_base(home_dir, home_specs)
+    diagnostics.extend(home_diagnostics)
+    if home is not None:
+        roots.extend(_SkillRoot(source, home, components) for source, components in home_specs)
 
     context = ToolContext(
-        cwd=project_root or home,
+        cwd=project or home or home_dir,
         protected_paths=protected_paths,
     )
     selected: dict[str, SkillEntry] = {}
-    diagnostics: list[SkillDiagnostic] = []
     catalog_limit_reported = False
     for root in roots:
         scan = _scan_root(root, context=context)
@@ -138,6 +144,29 @@ def discover_skills(
         entries=tuple(selected[name] for name in sorted(selected)),
         diagnostics=tuple(diagnostics),
     )
+
+
+def _resolve_source_base(
+    base: Path,
+    specs: tuple[tuple[SkillSource, tuple[str, str]], ...],
+) -> tuple[Path | None, tuple[SkillDiagnostic, ...]]:
+    try:
+        return base.expanduser().resolve(strict=False), ()
+    except (OSError, RuntimeError) as exc:
+        message = str(exc) or type(exc).__name__
+        return (
+            None,
+            tuple(
+                _diagnostic(
+                    "root-unreadable",
+                    "error",
+                    f"cannot resolve skill source base: {message}",
+                    source,
+                    base.joinpath(*components),
+                )
+                for source, components in specs
+            ),
+        )
 
 
 def _scan_root(root: _SkillRoot, *, context: ToolContext) -> _RootScan:
