@@ -14,6 +14,8 @@ This log starts at schema v27. Earlier history is in the git log.
 - Added `wisp --version` to print the installed package version without starting the TUI.
 - Added strict, trust-aware Agent Skills metadata discovery from user and project locations, with a
   `wisp skills` command for inspecting the catalog and isolated diagnostics.
+- Added a bounded model-facing Agent Skills index and read-only `skill` tool for progressively
+  loading instructions and contained supporting resources without weakening tool policy.
 
 ## 0.1.0a2 — 2026-08-07
 

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from wisp.config import WispConfig
 from wisp.providers.base import Provider
 from wisp.providers.catalog import ModelRegistry, startup_effort
 from wisp.runtime.registry import ProviderRegistry
+from wisp.skills.models import SkillCatalog
 from wisp.tools.context import ToolContext
 
 
@@ -28,6 +29,7 @@ class CodingSessionConfiguration:
     trusted: bool
     context_reserve_tokens: int
     auto_compaction_enabled: bool
+    skill_catalog: SkillCatalog = field(default_factory=SkillCatalog)
 
 
 def resolve_coding_session_configuration(
@@ -36,6 +38,7 @@ def resolve_coding_session_configuration(
     providers: ProviderRegistry,
     models: ModelRegistry | None,
     trusted: bool,
+    skill_catalog: SkillCatalog | None = None,
     provider_name: str | None = None,
     model: str | None = None,
     has_model: bool = False,
@@ -71,6 +74,7 @@ def resolve_coding_session_configuration(
         effort=selected_effort,
         models=models,
         tool_context=ToolContext.from_config(config),
+        skill_catalog=skill_catalog or SkillCatalog(),
         trusted=trusted,
         context_reserve_tokens=config.context_reserve_tokens,
         auto_compaction_enabled=config.auto_compaction_enabled,

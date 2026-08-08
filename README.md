@@ -366,9 +366,22 @@ individually and reported without hiding valid entries. Symlinked, protected, ou
 oversized metadata is rejected. Project locations are not scanned until project trust is granted;
 user locations remain available in untrusted projects.
 
-This release slice discovers and validates metadata only. Skills are not yet injected into model
-context or invocable with `/skill:<name>`; progressive instruction loading and invocation are
-tracked separately.
+When the read-only `skill` tool is exposed, Wisp adds a separately bounded index of escaped skill
+names and descriptions to model context. The model can call `skill` with `name` to load the selected
+`SKILL.md` instructions, or add a forward-slash `resource` path to read a supporting file inside the
+same skill directory. Enable it with `--allow-read-tools`, `--allow-tool skill`, or `--all-tools`,
+following the same exposure rules as other tools. Print mode continues to expose no tools unless
+one of those options is selected.
+
+Instruction and resource reads are UTF-8, bounded, protected-path aware, and reject absolute paths,
+traversal, symlinks, junctions, non-regular files, and targets outside the selected skill. Absolute
+skill paths are not shown to the model. Bundled scripts are returned only as text and never execute
+automatically; execution still requires the normal command tool and approval policy. The optional
+`allowed-tools` metadata field is descriptive only and cannot grant tool access or approval.
+
+The active operation keeps one immutable catalog snapshot. First-time project trust refreshes that
+snapshot before the pending provider request begins. Explicit `/skill:<name>` invocation, skill
+installation, and hot reload remain unsupported.
 
 ## Context & compaction
 

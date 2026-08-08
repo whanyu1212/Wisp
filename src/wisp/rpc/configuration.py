@@ -14,6 +14,7 @@ from wisp.config import WispConfig
 from wisp.events import ProjectConfigApplied
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import ProviderRegistry
+from wisp.skills.lifecycle import discover_skill_catalog
 
 type RuntimeBuilder = Callable[[WispConfig], Awaitable[WispRuntime]]
 
@@ -84,15 +85,23 @@ class RpcProjectConfiguration:
         one logical session across stores.
         """
 
-        if self.startup_trusted or self.config_overrides is None:
+        if self.startup_trusted:
             return None
-        trusted_config = await anyio.to_thread.run_sync(
-            partial(
-                self.config_overrides.build,
-                trusted=True,
-                project_dir=self.project_context_root,
-            ),
-            abandon_on_cancel=True,
+        if self.config_overrides is None:
+            trusted_config = self.startup_config
+        else:
+            trusted_config = await anyio.to_thread.run_sync(
+                partial(
+                    self.config_overrides.build,
+                    trusted=True,
+                    project_dir=self.project_context_root,
+                ),
+                abandon_on_cancel=True,
+            )
+        skill_catalog = await discover_skill_catalog(
+            project_root=self.project_context_root,
+            trusted=True,
+            protected_paths=trusted_config.protected_paths,
         )
         overrides = self.configure_overrides
         effective_provider = overrides.effective_provider(trusted_config.provider)
@@ -103,6 +112,7 @@ class RpcProjectConfiguration:
                 providers=runtime.providers,
                 models=runtime.models,
                 trusted=True,
+                skill_catalog=skill_catalog,
                 provider_name=effective_provider,
                 model=effective_model,
                 has_model=overrides.has_model,
@@ -119,6 +129,7 @@ class RpcProjectConfiguration:
                     providers=staged_providers,
                     models=runtime.models,
                     trusted=True,
+                    skill_catalog=skill_catalog,
                     provider_name=effective_provider,
                     model=effective_model,
                     has_model=overrides.has_model,
