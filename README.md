@@ -393,10 +393,18 @@ provider-visible user message, and applies the same policy to initial prompts, s
 follow-ups. Explicit invocation does not require exposing the `skill` tool and does not grant tool
 access or approval.
 
+The TUI fetches the active immutable snapshot at startup. Type `/skill:` to see deterministic
+prefix completions for the available names, or run `/skills` to inspect the cached catalog and its
+discovery diagnostics without rescanning the filesystem. Both surfaces refresh after first-time
+project trust is applied and remain available while a prompt is running. Skill descriptions,
+diagnostics, paths, and requests are displayed as literal text rather than terminal markup.
+
 Sessions retain the exact submitted directive, additional request, instruction-content SHA-256,
 truncation state, and provider-visible expansion as typed data. Replay uses that persisted expansion
 even if the source skill later changes or disappears; a new invocation reads the current resource
-and records a new hash. Skill installation, completion UI, and hot reload remain unsupported.
+and records a new hash. Live and restored TUI transcripts show a compact invocation row from that
+typed metadata instead of exposing the provider-visible expansion. Skill installation, hot reload,
+bundled-script execution, fuzzy completion, and skill-management UI remain unsupported.
 
 ## Context & compaction
 

@@ -104,6 +104,7 @@ _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
     "cancel",
     "get_commands",
     "get_state",
+    "get_skills",
     "trust",
 }
 

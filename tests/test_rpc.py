@@ -33,8 +33,13 @@ from wisp.events import (
     RpcSessionTreeNode,
     RpcSessionTreeReported,
     RpcSessionTreeUnreverted,
+    RpcSkillCatalogEntry,
+    RpcSkillCatalogSnapshot,
+    RpcSkillDiagnostic,
+    RpcSkillsReported,
     RpcStateReported,
     RpcStateSnapshot,
+    SkillCatalogUpdated,
     ToolExecutionEnded,
     ToolResultReady,
     TrustRequested,
@@ -54,6 +59,7 @@ from wisp.rpc import (
     GetSessionsCommand,
     GetSessionStatsCommand,
     GetSessionTreeCommand,
+    GetSkillsCommand,
     GetStateCommand,
     JsonlSubprocessRpcTransport,
     NavigateSessionTreeCommand,
@@ -161,6 +167,44 @@ def test_get_commands_command_serializes_as_jsonl_and_parses() -> None:
         "type": "get_commands",
     }
     assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_get_skills_command_serializes_as_jsonl_and_parses() -> None:
+    command = GetSkillsCommand(id="skills-1")
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "skills-1",
+        "type": "get_skills",
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_skill_catalog_events_round_trip_over_json_transport() -> None:
+    catalog = RpcSkillCatalogSnapshot(
+        entries=(
+            RpcSkillCatalogEntry(
+                name="review",
+                description="Review [b]literal[/b] output",
+                source="user:wisp",
+            ),
+        ),
+        diagnostics=(
+            RpcSkillDiagnostic(
+                code="invalid-yaml",
+                severity="warning",
+                message="broken [literal] metadata",
+                source="project:wisp",
+                path=Path("/project/.agents/skills/bad/SKILL.md"),
+            ),
+        ),
+        project_trusted=True,
+    )
+    events = (
+        RpcSkillsReported(command_id="skills-1", catalog=catalog),
+        SkillCatalogUpdated(catalog=catalog),
+    )
+
+    assert tuple(wisp_event_from_json(event.model_dump_json()) for event in events) == events
 
 
 def test_get_messages_command_serializes_as_jsonl_and_parses() -> None:
@@ -1225,6 +1269,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         stats_id = await controller.get_session_stats()
         state_id = await controller.get_state()
         commands_id = await controller.get_commands()
+        skills_id = await controller.get_skills()
         messages_id = await controller.get_messages(
             session_id="session-1",
             limit=25,
@@ -1261,6 +1306,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             stats_id,
             state_id,
             commands_id,
+            skills_id,
             messages_id,
             sessions_id,
             new_session_id,
@@ -1287,6 +1333,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             "stats-id",
             "state-id",
             "commands-id",
+            "skills-id",
             "messages-id",
             "sessions-id",
             "new-session-id",
@@ -1314,6 +1361,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             GetSessionStatsCommand(id="stats-id"),
             GetStateCommand(id="state-id"),
             GetCommandsCommand(id="commands-id"),
+            GetSkillsCommand(id="skills-id"),
             GetMessagesCommand(
                 id="messages-id",
                 session_id="session-1",

@@ -3,7 +3,12 @@ from __future__ import annotations
 import anyio
 import pytest
 
-from wisp.events import RpcCommandArgument, RpcCommandDescriptor
+from wisp.events import (
+    RpcCommandArgument,
+    RpcCommandDescriptor,
+    RpcSkillCatalogEntry,
+    RpcSkillCatalogSnapshot,
+)
 from wisp.runtime.commands import CommandArgument, CommandCategory, CommandDescriptor
 from wisp.tui.commands import TuiCommandCatalog
 from wisp.tui.textual_app import TextualTui
@@ -162,3 +167,23 @@ def test_loaded_catalog_updates_inline_slash_suggestions() -> None:
     assert count == 1
     assert "/model" in prompt
     assert "[Choose] the model" in prompt
+
+
+def test_skill_suggestions_require_skill_prefix_and_use_literal_descriptions() -> None:
+    suggest = SlashSuggest()
+    suggest.set_skill_catalog(
+        RpcSkillCatalogSnapshot(
+            entries=(
+                RpcSkillCatalogEntry(
+                    name="review",
+                    description="Review [b]literal[/b] output",
+                    source="user:wisp",
+                ),
+            )
+        )
+    )
+
+    assert tuple(spec.command for spec in suggest.matches("/skill")) == ("/skills",)
+    matches = suggest.matches("/skill:r")
+    assert tuple(spec.command for spec in matches) == ("/skill:review",)
+    assert matches[0].description == "Review [b]literal[/b] output"

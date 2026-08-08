@@ -30,6 +30,7 @@ from wisp.rpc.commands import (
     GetSessionsCommand,
     GetSessionStatsCommand,
     GetSessionTreeCommand,
+    GetSkillsCommand,
     GetStateCommand,
     NavigateSessionTreeCommand,
     NewSessionCommand,
@@ -109,6 +110,13 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("commands")
         await self._transport.send(GetCommandsCommand(id=selected_id))
+        return selected_id
+
+    async def get_skills(self, *, command_id: str | None = None) -> str:
+        """Request the active immutable skill catalog snapshot."""
+
+        selected_id = command_id or self._command_id_factory("skills")
+        await self._transport.send(GetSkillsCommand(id=selected_id))
         return selected_id
 
     async def get_messages(

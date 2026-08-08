@@ -25,9 +25,11 @@ from wisp.events import (
     ProviderRetrying,
     RpcCommandFinished,
     RpcSessionSummary,
+    RpcSkillCatalogSnapshot,
     SessionCostSummary,
     SessionSaved,
     SessionStats,
+    SkillInvoked,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
@@ -39,11 +41,13 @@ from wisp.tool_presentation import tool_result_status
 from wisp.tui.commands import TuiCommandCatalog
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
+    HistoricalSkillInvocation,
     HistoricalToolCard,
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
     historical_tool_status,
 )
+from wisp.tui.skills import format_skill_invocation, skill_catalog_text, skill_invocation_text
 
 
 class TuiRendererKind(StrEnum):
@@ -129,6 +133,12 @@ class TuiRenderer(Protocol):
     def trust_request(self, event: TrustRequested) -> None: ...
 
     def command_catalog_updated(self, catalog: TuiCommandCatalog) -> None: ...
+
+    def skill_catalog_updated(self, catalog: RpcSkillCatalogSnapshot) -> None: ...
+
+    def skills_catalog(self, catalog: RpcSkillCatalogSnapshot) -> None: ...
+
+    def skill_invoked(self, event: SkillInvoked) -> None: ...
 
     def model_picker_request(
         self,
@@ -226,6 +236,18 @@ class LineTuiRenderer:
         for entry in entries:
             if isinstance(entry, HistoricalTranscriptMessage):
                 pending_text.append(entry)
+            elif isinstance(entry, HistoricalSkillInvocation):
+                flush_text()
+                self.console.print(
+                    format_skill_invocation(
+                        entry.name,
+                        entry.request,
+                        request_truncated=entry.request_truncated,
+                        instructions_truncated=entry.instructions_truncated,
+                    ),
+                    markup=False,
+                    highlight=False,
+                )
             else:
                 flush_text()
                 status = historical_tool_status(entry)
@@ -322,6 +344,15 @@ class LineTuiRenderer:
 
     def command_catalog_updated(self, catalog: TuiCommandCatalog) -> None:
         pass
+
+    def skill_catalog_updated(self, catalog: RpcSkillCatalogSnapshot) -> None:
+        pass
+
+    def skills_catalog(self, catalog: RpcSkillCatalogSnapshot) -> None:
+        self.console.print(Text(skill_catalog_text(catalog)))
+
+    def skill_invoked(self, event: SkillInvoked) -> None:
+        self.console.print(Text(skill_invocation_text(event), style="cyan"))
 
     def model_picker_request(
         self,
@@ -588,6 +619,19 @@ class FullscreenTuiRenderer:
         for entry in entries:
             if isinstance(entry, HistoricalTranscriptMessage):
                 pending_text.append(entry)
+            elif isinstance(entry, HistoricalSkillInvocation):
+                flush_text()
+                self._append(
+                    "skill",
+                    format_skill_invocation(
+                        entry.name,
+                        entry.request,
+                        request_truncated=entry.request_truncated,
+                        instructions_truncated=entry.instructions_truncated,
+                    ),
+                    style="cyan",
+                    preserve_scroll=False,
+                )
             else:
                 flush_text()
                 status = historical_tool_status(entry)
@@ -727,6 +771,28 @@ class FullscreenTuiRenderer:
 
     def command_catalog_updated(self, catalog: TuiCommandCatalog) -> None:
         pass
+
+    def skill_catalog_updated(self, catalog: RpcSkillCatalogSnapshot) -> None:
+        pass
+
+    def skills_catalog(self, catalog: RpcSkillCatalogSnapshot) -> None:
+        self._append("skills", skill_catalog_text(catalog), style="cyan")
+        self._refresh()
+
+    def skill_invoked(self, event: SkillInvoked) -> None:
+        content = skill_invocation_text(event)
+        for index in range(len(self.state.transcript) - 1, -1, -1):
+            entry = self.state.transcript[index]
+            if entry.role == "user" and entry.content == event.invocation.original_content:
+                self.state.transcript[index] = TuiTranscriptEntry(
+                    role="skill",
+                    content=content,
+                    style="cyan",
+                )
+                self._refresh()
+                return
+        self._append("skill", content, style="cyan")
+        self._refresh()
 
     def model_picker_request(
         self,

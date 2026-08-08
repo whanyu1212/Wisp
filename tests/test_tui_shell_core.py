@@ -2081,6 +2081,57 @@ def test_tui_shell_hydrates_rpc_command_catalog_before_accepting_input() -> None
     anyio.run(run)
 
 
+def test_tui_shell_hydrates_and_inspects_cached_skill_catalog() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.updated: list[RpcSkillCatalogSnapshot] = []
+            self.inspected: list[RpcSkillCatalogSnapshot] = []
+
+        def skill_catalog_updated(self, catalog: RpcSkillCatalogSnapshot) -> None:
+            self.updated.append(catalog)
+
+        def skills_catalog(self, catalog: RpcSkillCatalogSnapshot) -> None:
+            self.inspected.append(catalog)
+
+    async def run() -> None:
+        catalog = RpcSkillCatalogSnapshot(
+            entries=(
+                RpcSkillCatalogEntry(
+                    name="review",
+                    description="Review changes",
+                    source="user:wisp",
+                ),
+            )
+        )
+        controller = ScriptedController(
+            skills_events=[
+                [
+                    RpcSkillsReported(command_id="skills-1", catalog=catalog),
+                    RpcCommandFinished(
+                        command_id="skills-1",
+                        command_type="get_skills",
+                        ok=True,
+                    ),
+                ]
+            ]
+        )
+        renderer = RecordingRenderer()
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from(["/skills"]),
+        )
+
+        await shell.run()
+
+        assert controller.skills_requests == ["skills-1"]
+        assert renderer.updated == [catalog]
+        assert renderer.inspected == [catalog]
+
+    anyio.run(run)
+
+
 def test_tui_shell_command_discovery_failure_keeps_builtin_catalog() -> None:
     async def run() -> None:
         controller = ScriptedController(

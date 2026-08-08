@@ -23,11 +23,13 @@ from textual.widget import Widget
 from wisp.events import JsonObject
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.history import (
+    HistoricalSkillInvocation,
     HistoricalToolCard,
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
     historical_tool_status,
 )
+from wisp.tui.skills import format_skill_invocation
 from wisp.tui.tool_output import full_tool_output_for_display, render_tool_result
 from wisp.tui.transcript_window import TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, TranscriptWindow
 
@@ -464,6 +466,17 @@ class TextualHistoryController:
         if isinstance(entry, HistoricalTranscriptMessage):
             role = "user" if entry.role == "user" else "assistant"
             return self._surface.mount_historical_line(role, entry.content, before=before)
+        if isinstance(entry, HistoricalSkillInvocation):
+            return self._surface.mount_historical_line(
+                "user",
+                format_skill_invocation(
+                    entry.name,
+                    entry.request,
+                    request_truncated=entry.request_truncated,
+                    instructions_truncated=entry.instructions_truncated,
+                ),
+                before=before,
+            )
         return self._mount_tool_card(entry, before=before)
 
     def _mount_tool_card(
@@ -630,6 +643,12 @@ def _history_entry_matches_live(
 ) -> bool:
     if isinstance(entry, HistoricalToolCard):
         return live.kind == "tool" and entry.tool_call_id == live.tool_call_id
+    if isinstance(entry, HistoricalSkillInvocation):
+        if live.kind != "message" or live.role != "user" or live.content is None:
+            return False
+        if not entry.original_content_truncated:
+            return entry.original_content == live.content
+        return bool(entry.original_content) and live.content.startswith(entry.original_content)
     if live.kind != "message" or entry.role != live.role or live.content is None:
         return False
     if entry.content == live.content:

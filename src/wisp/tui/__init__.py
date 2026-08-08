@@ -3,6 +3,7 @@
 from wisp.tui.app import run_tui
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
+    HistoricalSkillInvocation,
     HistoricalToolCard,
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
@@ -29,6 +30,7 @@ from wisp.tui.state import TuiInteractionState, TuiStatus, TuiViewState
 __all__ = [
     "FullscreenTuiRenderer",
     "FullscreenTuiState",
+    "HistoricalSkillInvocation",
     "HistoricalToolCard",
     "HistoricalTranscriptEntry",
     "HistoricalTranscriptMessage",

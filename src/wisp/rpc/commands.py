@@ -68,6 +68,12 @@ class GetCommandsCommand(RpcCommandModel):
     type: Literal["get_commands"] = "get_commands"
 
 
+class GetSkillsCommand(RpcCommandModel):
+    """Return the active immutable skill catalog snapshot."""
+
+    type: Literal["get_skills"] = "get_skills"
+
+
 class GetMessagesCommand(RpcCommandModel):
     """Return a bounded persisted transcript page."""
 
@@ -239,6 +245,7 @@ type RpcCommand = Annotated[
     | GetSessionStatsCommand
     | GetStateCommand
     | GetCommandsCommand
+    | GetSkillsCommand
     | GetMessagesCommand
     | GetSessionsCommand
     | NewSessionCommand

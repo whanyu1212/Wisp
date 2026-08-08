@@ -16,10 +16,14 @@ from wisp.events import (
     ProviderRetrying,
     RpcMessageToolCallSnapshot,
     RpcMessageToolResultSnapshot,
+    RpcSkillInvocationSnapshot,
     SessionCostSummary,
+    SkillInvoked,
 )
+from wisp.skills.models import SkillInvocationEvidence
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
+    HistoricalSkillInvocation,
     HistoricalToolCard,
     HistoricalTranscriptMessage,
     history_entries_from_rpc_messages,
@@ -62,6 +66,7 @@ def _rpc_message(
     tool_calls: tuple[RpcMessageToolCallSnapshot, ...] = (),
     is_error: bool | None = None,
     tool_result: RpcMessageToolResultSnapshot | None = None,
+    skill_invocation: RpcSkillInvocationSnapshot | None = None,
 ) -> RpcMessageSnapshot:
     return RpcMessageSnapshot(
         entry_id=entry_id,
@@ -75,7 +80,66 @@ def _rpc_message(
         tool_calls=tool_calls,
         is_error=is_error,
         tool_result=tool_result,
+        skill_invocation=skill_invocation,
     )
+
+
+def test_history_uses_typed_skill_invocation_instead_of_expanded_content() -> None:
+    invocation = RpcSkillInvocationSnapshot(
+        name="review",
+        original_content="/skill:review focus on safety",
+        original_content_bytes=29,
+        request="focus on safety",
+        request_bytes=15,
+        content_sha256="a" * 64,
+        instructions_truncated=True,
+    )
+    entries = history_entries_from_rpc_messages(
+        (
+            _rpc_message(
+                "user",
+                "provider-visible expanded instructions",
+                entry_id="message-1",
+                skill_invocation=invocation,
+            ),
+        )
+    )
+
+    assert entries == (
+        HistoricalSkillInvocation(
+            name="review",
+            original_content="/skill:review focus on safety",
+            original_content_truncated=False,
+            request="focus on safety",
+            request_truncated=False,
+            instructions_truncated=True,
+        ),
+    )
+
+
+def test_fullscreen_renderer_replaces_live_skill_invocation_echo() -> None:
+    renderer = FullscreenTuiRenderer(_console()[0], clear_screen=False)
+    original = "/skill:review focus on safety"
+    renderer.prompt_submitted(original)
+
+    renderer.skill_invoked(
+        SkillInvoked(
+            session_id="session-1",
+            message_entry_id="message-1",
+            invocation=SkillInvocationEvidence(
+                name="review",
+                original_content=original,
+                request="focus on safety",
+                content_sha256="a" * 64,
+                instructions_truncated=False,
+            ),
+            provider_content="expanded instructions",
+        )
+    )
+
+    assert [(entry.role, entry.content) for entry in renderer.state.transcript] == [
+        ("skill", "skill /skill:review focus on safety")
+    ]
 
 
 def _context_budget(

@@ -20,7 +20,13 @@ from anyio.streams.memory import MemoryObjectSendStream
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.config import WispConfig
-from wisp.events import RpcCommandFinished, TrustRequested, TrustResolved, WispEvent
+from wisp.events import (
+    RpcCommandFinished,
+    SkillCatalogUpdated,
+    TrustRequested,
+    TrustResolved,
+    WispEvent,
+)
 from wisp.rpc.commands import ApprovalScope
 from wisp.rpc.configuration import RpcProjectConfiguration, _ConfigOverrides, _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
@@ -34,7 +40,12 @@ from wisp.rpc.coordinator import (
     _RpcRunningCommand,
     _RpcSessionState,
 )
-from wisp.rpc.execution import RpcCommandExecutor, rpc_command_type, rpc_session_state
+from wisp.rpc.execution import (
+    RpcCommandExecutor,
+    rpc_command_type,
+    rpc_session_state,
+    rpc_skill_catalog_snapshot,
+)
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSessionStore
@@ -453,6 +464,7 @@ class RpcHost:
             event = await project_configuration.apply_trusted_project(runtime=runtime, agent=agent)
             if event is not None:
                 publish_event(event)
+            publish_event(SkillCatalogUpdated(catalog=rpc_skill_catalog_snapshot(agent)))
 
         trust_gate = RpcTrustGate(
             project_context_root,

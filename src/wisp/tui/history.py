@@ -12,6 +12,7 @@ from wisp.events import (
     RpcMessageToolCallSnapshot,
     ToolPresentationStatus,
 )
+from wisp.tui.skills import format_skill_invocation
 
 TUI_HISTORY_MESSAGE_LIMIT = 500
 TUI_HISTORY_PAGE_LIMIT = 75
@@ -47,7 +48,21 @@ class HistoricalToolCard:
     call_missing: bool = field(default=False, compare=False)
 
 
-type HistoricalTranscriptEntry = HistoricalTranscriptMessage | HistoricalToolCard
+@dataclass(frozen=True)
+class HistoricalSkillInvocation:
+    """One persisted explicit invocation ready for compact rendering."""
+
+    name: str
+    original_content: str
+    original_content_truncated: bool
+    request: str
+    request_truncated: bool
+    instructions_truncated: bool
+
+
+type HistoricalTranscriptEntry = (
+    HistoricalTranscriptMessage | HistoricalSkillInvocation | HistoricalToolCard
+)
 
 
 def history_from_rpc_messages(
@@ -55,11 +70,23 @@ def history_from_rpc_messages(
 ) -> tuple[HistoricalTranscriptMessage, ...]:
     """Convert bounded RPC transcript messages into text-only TUI-visible history."""
 
-    return tuple(
-        entry
-        for entry in history_entries_from_rpc_messages(messages)
-        if isinstance(entry, HistoricalTranscriptMessage)
-    )
+    rendered: list[HistoricalTranscriptMessage] = []
+    for entry in history_entries_from_rpc_messages(messages):
+        if isinstance(entry, HistoricalTranscriptMessage):
+            rendered.append(entry)
+        elif isinstance(entry, HistoricalSkillInvocation):
+            rendered.append(
+                HistoricalTranscriptMessage(
+                    role="user",
+                    content=format_skill_invocation(
+                        entry.name,
+                        entry.request,
+                        request_truncated=entry.request_truncated,
+                        instructions_truncated=entry.instructions_truncated,
+                    ),
+                )
+            )
+    return tuple(rendered)
 
 
 def history_entries_from_rpc_messages(
@@ -76,9 +103,22 @@ def history_entries_from_rpc_messages(
     pending_tool_calls: dict[str, RpcMessageToolCallSnapshot] = {}
     for message in messages:
         if message.role == "user":
-            rendered.append(
-                HistoricalTranscriptMessage(role="user", content=_content_for_history(message))
-            )
+            invocation = message.skill_invocation
+            if invocation is not None:
+                rendered.append(
+                    HistoricalSkillInvocation(
+                        name=invocation.name,
+                        original_content=invocation.original_content,
+                        original_content_truncated=invocation.original_content_truncated,
+                        request=invocation.request,
+                        request_truncated=invocation.request_truncated,
+                        instructions_truncated=invocation.instructions_truncated,
+                    )
+                )
+            else:
+                rendered.append(
+                    HistoricalTranscriptMessage(role="user", content=_content_for_history(message))
+                )
         elif message.role == "assistant":
             if message.content or message.content_truncated:
                 rendered.append(

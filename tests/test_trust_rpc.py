@@ -179,8 +179,9 @@ def test_rpc_first_trust_refreshes_project_skills_before_provider_request(
     monkeypatch.setattr(rpc, "_build_runtime_for_config", build_runtime_for_config)
     monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
 
-    async def scenario() -> None:
-        with redirect_stdout(io.StringIO()):
+    async def scenario() -> list[dict[str, object]]:
+        output = io.StringIO()
+        with redirect_stdout(output):
             await rpc._run_rpc(
                 config,
                 allow_read_tools=True,
@@ -188,13 +189,21 @@ def test_rpc_first_trust_refreshes_project_skills_before_provider_request(
                 config_overrides=rpc._ConfigOverrides(provider="scripted", session_dir=session_dir),
                 project_context_root=project,
             )
+        return _jsonl_records(output.getvalue())
 
-    anyio.run(scenario)
+    records = anyio.run(scenario)
     system_content = "\n".join(
         message.content for message in provider.calls[0].messages if message.role == "system"
     )
     assert '"name":"project-demo"' in system_content
     assert str(skill_root) not in system_content
+    catalog_updated = next(
+        record for record in records if record["type"] == "skill.catalog.updated"
+    )
+    catalog = cast(dict[str, object], catalog_updated["catalog"])
+    entries = cast(list[dict[str, object]], catalog["entries"])
+    assert [entry["name"] for entry in entries] == ["project-demo"]
+    assert catalog["project_trusted"] is True
 
 
 @pytest.mark.parametrize(

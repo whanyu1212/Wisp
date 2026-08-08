@@ -38,6 +38,9 @@ from wisp.events import (
     RpcMessagesReported,
     RpcSessionSelected,
     RpcSessionsReported,
+    RpcSkillCatalogEntry,
+    RpcSkillCatalogSnapshot,
+    RpcSkillsReported,
     SessionSaved,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -140,6 +143,7 @@ class ScriptedController:
         compact_events: list[ScriptedBatch] | None = None,
         configure_events: list[ScriptedBatch] | None = None,
         commands_events: list[ScriptedBatch] | None = None,
+        skills_events: list[ScriptedBatch] | None = None,
         messages_events: list[ScriptedBatch] | None = None,
         sessions_events: list[ScriptedBatch] | None = None,
         select_session_events: list[ScriptedBatch] | None = None,
@@ -153,6 +157,7 @@ class ScriptedController:
         self.compact_events = deque(compact_events or [])
         self.configure_events = deque(configure_events or [])
         self.commands_events = deque(commands_events or [])
+        self.skills_events = deque(skills_events or [])
         self.messages_events = deque(messages_events or [])
         self.sessions_events = deque(sessions_events or [])
         self.select_session_events = deque(select_session_events or [])
@@ -169,6 +174,7 @@ class ScriptedController:
         self.auto_compaction_settings: list[bool | None] = []
         self.agent_modes: list[AgentMode | None] = []
         self.commands_requests: list[str] = []
+        self.skills_requests: list[str] = []
         self.messages_requests: list[tuple[str, str | None, int, str | None]] = []
         self.sessions_requests: list[tuple[str, int]] = []
         self.selected_sessions: list[tuple[str, str]] = []
@@ -222,6 +228,25 @@ class ScriptedController:
                 RpcCommandFinished(
                     command_id=selected_id,
                     command_type="get_commands",
+                    ok=True,
+                ),
+            ],
+        )
+        return selected_id
+
+    async def get_skills(self, *, command_id: str | None = None) -> str:
+        selected_id = command_id or f"skills-{len(self.skills_requests) + 1}"
+        self.skills_requests.append(selected_id)
+        await self._emit_scripted(
+            self.skills_events,
+            default=[
+                RpcSkillsReported(
+                    command_id=selected_id,
+                    catalog=RpcSkillCatalogSnapshot(),
+                ),
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="get_skills",
                     ok=True,
                 ),
             ],
@@ -445,6 +470,9 @@ __all__ = [
     "RpcCommandsReported",
     "RpcMessageSnapshot",
     "RpcMessagesReported",
+    "RpcSkillCatalogEntry",
+    "RpcSkillCatalogSnapshot",
+    "RpcSkillsReported",
     "ScriptedBatch",
     "ScriptedController",
     "SessionSaved",

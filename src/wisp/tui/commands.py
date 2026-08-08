@@ -22,6 +22,7 @@ class TuiSlashCommandName(StrEnum):
 
     help = "help"
     history = "history"
+    skills = "skills"
     quit = "quit"
     auth = "auth"
     connect = "connect"
