@@ -8,6 +8,7 @@ import pytest
 from pytest import MonkeyPatch
 
 import wisp.skills.discovery as discovery_module
+import wisp.skills.metadata as metadata_module
 from wisp.skills import discover_skills
 
 
@@ -105,10 +106,21 @@ def test_isolates_yaml_recursion_failures_without_hiding_valid_skills(tmp_path: 
     assert "nesting depth" in catalog.diagnostics[0].message
 
 
-def test_isolates_yaml_constructor_value_errors(tmp_path: Path) -> None:
+def test_isolates_yaml_constructor_value_errors(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
     root = tmp_path / ".wisp" / "skills"
     _write_skill(root, "valid")
-    _write_skill(root, "invalid-date", extra="future: 2022-02-31\n")
+    _write_skill(root, "invalid-scalar")
+    original_load = metadata_module.yaml.load
+
+    def load_with_constructor_failure(stream: str, *args: object, **kwargs: object) -> object:
+        if "name: invalid-scalar" in stream:
+            raise ValueError("invalid scalar")
+        return original_load(stream, *args, **kwargs)
+
+    monkeypatch.setattr(metadata_module.yaml, "load", load_with_constructor_failure)
 
     catalog = _discover(tmp_path)
 
@@ -155,7 +167,7 @@ def test_rejects_invalid_metadata(
     assert message in catalog.diagnostics[0].message
 
 
-@pytest.mark.parametrize("name", ["on", "off", "yes", "no"])
+@pytest.mark.parametrize("name", ["on", "off", "yes", "no", "2026-08-08"])
 def test_accepts_yaml_12_plain_scalar_skill_names(tmp_path: Path, name: str) -> None:
     _write_skill(tmp_path / ".wisp" / "skills", name)
 
