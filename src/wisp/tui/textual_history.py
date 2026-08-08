@@ -14,14 +14,13 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
 from textual.content import Content
 from textual.widget import Widget
 
 from wisp.events import JsonObject
-from wisp.skills.invocation import parse_skill_invocation
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.history import (
     HistoricalSkillInvocation,
@@ -123,6 +122,7 @@ class _LiveHistoryEntry:
     kind: Literal["message", "tool"]
     role: Literal["user", "assistant"] | None = None
     content: str | None = None
+    message_entry_id: str | None = None
     tool_call_id: str | None = None
     widget: Widget | None = None
 
@@ -185,6 +185,27 @@ class TextualHistoryController:
             if entry.kind == "message" and entry.role == role and entry.content == content:
                 del self._live_entries[index]
                 return
+
+    def record_live_skill_invocation(self, message_entry_id: str, original_content: str) -> None:
+        """Attach persisted identity to the newest matching live skill prompt."""
+
+        def attach_identity(entries: list[_LiveHistoryEntry]) -> None:
+            for index in range(len(entries) - 1, -1, -1):
+                entry = entries[index]
+                if (
+                    entry.kind == "message"
+                    and entry.role == "user"
+                    and entry.content == original_content
+                ):
+                    entries[index] = replace(entry, message_entry_id=message_entry_id)
+                    return
+
+        attach_identity(self._live_entries)
+        snapshot = self._latest_reload_live_entries
+        if snapshot is not None:
+            updated_snapshot = list(snapshot)
+            attach_identity(updated_snapshot)
+            self._latest_reload_live_entries = tuple(updated_snapshot)
 
     def record_live_tool_call(self, tool_call_id: str, *, widget: Widget | None = None) -> None:
         """Remember a pending live tool card as the durable history page would render it."""
@@ -647,16 +668,11 @@ def _history_entry_matches_live(
     if isinstance(entry, HistoricalSkillInvocation):
         if live.kind != "message" or live.role != "user" or live.content is None:
             return False
+        if live.message_entry_id is not None:
+            return entry.entry_id == live.message_entry_id
         if not entry.original_content_truncated:
             return entry.original_content == live.content
-        if entry.original_content:
-            return live.content.startswith(entry.original_content)
-        invocation = parse_skill_invocation(live.content)
-        return (
-            invocation is not None
-            and invocation.name == entry.name
-            and len(live.content.encode("utf-8")) == entry.original_content_bytes
-        )
+        return bool(entry.original_content) and live.content.startswith(entry.original_content)
     if live.kind != "message" or entry.role != live.role or live.content is None:
         return False
     if entry.content == live.content:

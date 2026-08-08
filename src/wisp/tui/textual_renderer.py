@@ -438,6 +438,10 @@ class TextualTuiRenderer:
     def skill_invoked(self, event: SkillInvoked) -> None:
         self._suspend_progress()
         widget = self._pop_prompt_widget(event.invocation.original_content)
+        self._history.record_live_skill_invocation(
+            event.message_entry_id,
+            event.invocation.original_content,
+        )
         self.app.show_skill_invocation(event, widget=widget)
 
     def set_connect_api_key_hook(
