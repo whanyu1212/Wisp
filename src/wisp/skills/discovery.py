@@ -81,17 +81,13 @@ def discover_skills(
     roots: list[_SkillRoot] = []
     diagnostics: list[SkillDiagnostic] = []
     project: Path | None = None
+    project_specs: tuple[tuple[SkillSource, tuple[str, str]], ...] = (
+        ("project:wisp", (".wisp", "skills")),
+        ("project:agents", (".agents", "skills")),
+    )
     if project_root is not None:
-        project_specs: tuple[tuple[SkillSource, tuple[str, str]], ...] = (
-            ("project:wisp", (".wisp", "skills")),
-            ("project:agents", (".agents", "skills")),
-        )
         project, project_diagnostics = _resolve_source_base(project_root, project_specs)
         diagnostics.extend(project_diagnostics)
-        if project is not None:
-            roots.extend(
-                _SkillRoot(source, project, components) for source, components in project_specs
-            )
 
     home_specs: tuple[tuple[SkillSource, tuple[str, str]], ...] = (
         ("user:wisp", (".wisp", "skills")),
@@ -99,6 +95,10 @@ def discover_skills(
     )
     home, home_diagnostics = _resolve_source_base(home_dir, home_specs)
     diagnostics.extend(home_diagnostics)
+    if project is not None and project != home:
+        roots.extend(
+            _SkillRoot(source, project, components) for source, components in project_specs
+        )
     if home is not None:
         roots.extend(_SkillRoot(source, home, components) for source, components in home_specs)
 

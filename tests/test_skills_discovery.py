@@ -268,6 +268,16 @@ def test_applies_documented_precedence_and_reports_shadowing(tmp_path: Path) -> 
     ]
 
 
+def test_deduplicates_project_root_that_matches_home(tmp_path: Path) -> None:
+    _write_skill(tmp_path / ".wisp" / "skills", "home-skill")
+
+    catalog = _discover(tmp_path, tmp_path)
+
+    assert catalog.names() == ("home-skill",)
+    assert catalog.entries[0].source == "user:wisp"
+    assert catalog.diagnostics == ()
+
+
 def test_catalog_entries_are_sorted_by_name(tmp_path: Path) -> None:
     root = tmp_path / ".wisp" / "skills"
     _write_skill(root, "zebra")
