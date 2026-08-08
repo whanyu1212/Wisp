@@ -21,6 +21,7 @@ from textual.content import Content
 from textual.widget import Widget
 
 from wisp.events import JsonObject
+from wisp.skills.invocation import parse_skill_invocation
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.history import (
     HistoricalSkillInvocation,
@@ -648,7 +649,14 @@ def _history_entry_matches_live(
             return False
         if not entry.original_content_truncated:
             return entry.original_content == live.content
-        return bool(entry.original_content) and live.content.startswith(entry.original_content)
+        if entry.original_content:
+            return live.content.startswith(entry.original_content)
+        invocation = parse_skill_invocation(live.content)
+        return (
+            invocation is not None
+            and invocation.name == entry.name
+            and len(live.content.encode("utf-8")) == entry.original_content_bytes
+        )
     if live.kind != "message" or entry.role != live.role or live.content is None:
         return False
     if entry.content == live.content:

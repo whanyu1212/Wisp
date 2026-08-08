@@ -109,6 +109,7 @@ def test_history_uses_typed_skill_invocation_instead_of_expanded_content() -> No
         HistoricalSkillInvocation(
             name="review",
             original_content="/skill:review focus on safety",
+            original_content_bytes=29,
             original_content_truncated=False,
             request="focus on safety",
             request_truncated=False,

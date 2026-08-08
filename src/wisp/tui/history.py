@@ -54,6 +54,7 @@ class HistoricalSkillInvocation:
 
     name: str
     original_content: str
+    original_content_bytes: int
     original_content_truncated: bool
     request: str
     request_truncated: bool
@@ -109,6 +110,7 @@ def history_entries_from_rpc_messages(
                     HistoricalSkillInvocation(
                         name=invocation.name,
                         original_content=invocation.original_content,
+                        original_content_bytes=invocation.original_content_bytes,
                         original_content_truncated=invocation.original_content_truncated,
                         request=invocation.request,
                         request_truncated=invocation.request_truncated,

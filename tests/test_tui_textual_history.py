@@ -8,7 +8,11 @@ from textual.content import Content
 from textual.widget import Widget
 
 from wisp.events import JsonObject
-from wisp.tui.history import HistoricalToolCard, HistoricalTranscriptMessage
+from wisp.tui.history import (
+    HistoricalSkillInvocation,
+    HistoricalToolCard,
+    HistoricalTranscriptMessage,
+)
 from wisp.tui.textual_history import TextualHistoryController
 from wisp.tui.transcript_window import TranscriptWindow
 
@@ -383,6 +387,29 @@ def test_history_controller_excludes_live_entries_from_a_latest_reload() -> None
     )
 
     assert surface.history_labels == ["assistant: previous"]
+
+
+def test_history_controller_matches_a_fully_clipped_live_skill_invocation() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    prompt = "/skill:review focus on safety"
+    controller.record_live_message("user", prompt)
+
+    controller.replace_latest_entries(
+        (
+            HistoricalSkillInvocation(
+                name="review",
+                original_content="",
+                original_content_bytes=len(prompt.encode("utf-8")),
+                original_content_truncated=True,
+                request="",
+                request_truncated=True,
+                instructions_truncated=False,
+            ),
+        )
+    )
+
+    assert surface.history_labels == []
 
 
 def test_history_controller_discards_a_failed_live_prompt() -> None:
