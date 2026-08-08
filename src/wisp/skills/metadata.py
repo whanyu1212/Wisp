@@ -23,7 +23,7 @@ _YAML_INT_TAG = "tag:yaml.org,2002:int"
 _YAML_TIMESTAMP_TAG = "tag:yaml.org,2002:timestamp"
 _YAML_12_BOOL = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
 _YAML_12_INT = re.compile(
-    r"^(?:[-+]?0b[0-1_]+|[-+]?0o[0-7_]+|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0x[0-9a-fA-F_]+)$"
+    r"^(?:[-+]?0b[0-1]+|[-+]?0o[0-7]+|[-+]?(?:0|[1-9][0-9]*)|[-+]?0x[0-9a-fA-F]+)$"
 )
 
 
@@ -77,7 +77,7 @@ class _StrictSafeLoader(yaml.SafeLoader):
 
 
 def _construct_yaml_12_int(loader: _StrictSafeLoader, node: yaml.nodes.ScalarNode) -> int:
-    value = loader.construct_scalar(node).replace("_", "")
+    value = loader.construct_scalar(node)
     sign = -1 if value.startswith("-") else 1
     value = value.removeprefix("-").removeprefix("+")
     if value.startswith("0b"):

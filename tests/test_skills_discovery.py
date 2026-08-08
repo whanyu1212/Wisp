@@ -70,17 +70,24 @@ def test_uses_yaml_12_scalar_rules_for_string_fields(tmp_path: Path) -> None:
     _write_skill(
         tmp_path / ".wisp" / "skills",
         "yaml-strings",
-        description="yes",
-        extra=("compatibility: 2026-08-08\nmetadata:\n  on: off\n  leading-zero: 0123\n"),
+        description="1_2",
+        extra=(
+            "compatibility: 2026-08-08\n"
+            "metadata:\n  legacy-bool: yes\n  on: off\n  leading-zero: 0123\n"
+        ),
     )
 
     catalog = _discover(tmp_path)
 
     entry = catalog.get("yaml-strings")
     assert entry is not None
-    assert entry.description == "yes"
+    assert entry.description == "1_2"
     assert entry.compatibility == "2026-08-08"
-    assert entry.metadata == (("leading-zero", "0123"), ("on", "off"))
+    assert entry.metadata == (
+        ("leading-zero", "0123"),
+        ("legacy-bool", "yes"),
+        ("on", "off"),
+    )
 
 
 def test_frontmatter_reader_does_not_read_ahead_into_skill_body(tmp_path: Path) -> None:
