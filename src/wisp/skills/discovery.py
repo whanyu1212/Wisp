@@ -290,7 +290,7 @@ def _open_skill_root(root: _SkillRoot) -> tuple[_OpenedRoot | None, SkillDiagnos
         return _open_skill_root_by_path(root)
 
     try:
-        current_fd = os.open(root.base, _DIRECTORY_FLAGS)
+        current_fd = _open_canonical_base(root.base)
     except FileNotFoundError:
         return None, None
     except OSError as exc:
@@ -367,6 +367,26 @@ def _open_skill_root(root: _SkillRoot) -> tuple[_OpenedRoot | None, SkillDiagnos
         current_fd = next_fd
         current_path = candidate
     return _OpenedRoot(current_fd), None
+
+
+def _open_canonical_base(base: Path) -> int:
+    current_path = Path(base.anchor)
+    current_fd = os.open(current_path, _DIRECTORY_FLAGS)
+    try:
+        for component in base.parts[1:]:
+            next_fd = _open_relative(
+                component,
+                _DIRECTORY_FLAGS,
+                directory_fd=current_fd,
+                directory_path=current_path,
+            )
+            os.close(current_fd)
+            current_fd = next_fd
+            current_path /= component
+    except BaseException:
+        os.close(current_fd)
+        raise
+    return current_fd
 
 
 def _open_skill_root_by_path(

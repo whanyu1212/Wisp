@@ -388,6 +388,48 @@ def test_rejects_intermediate_project_skill_root_symlink(tmp_path: Path) -> None
     assert catalog.diagnostics[0].path == project / ".wisp"
 
 
+def test_descriptor_traversal_rejects_swapped_source_base_ancestor(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    ancestor = tmp_path / "mutable"
+    home = ancestor / "home"
+    (home / ".wisp" / "skills" / "escaped").mkdir(parents=True)
+    external_ancestor = tmp_path / "external"
+    _write_skill(external_ancestor / "home" / ".wisp" / "skills", "escaped")
+    moved_ancestor = tmp_path / "mutable-original"
+    original_open = discovery_module.os.open
+    raced = False
+
+    def swap_ancestor_before_open(
+        path: str | Path,
+        flags: int,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal raced
+        opening_directly = dir_fd is None and Path(path) == home
+        opening_descriptor_relative = dir_fd is not None and path == ancestor.name
+        if not raced and (opening_directly or opening_descriptor_relative):
+            raced = True
+            ancestor.rename(moved_ancestor)
+            ancestor.symlink_to(external_ancestor, target_is_directory=True)
+            try:
+                return original_open(path, flags, dir_fd=dir_fd)
+            finally:
+                ancestor.unlink()
+                moved_ancestor.rename(ancestor)
+        return original_open(path, flags, dir_fd=dir_fd)
+
+    monkeypatch.setattr(discovery_module.os, "open", swap_ancestor_before_open)
+
+    catalog = _discover(home)
+
+    assert raced is True
+    assert catalog.entries == ()
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["root-unreadable"]
+
+
 def test_path_fallback_discovers_skills_without_opening_directories(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -627,7 +669,7 @@ def test_link_inspection_error_closes_root_and_does_not_hide_later_sources(
 
     def recording_open(path: str | Path, flags: int, *, dir_fd: int | None = None) -> int:
         fd = original_open(path, flags, dir_fd=dir_fd)
-        if Path(path) == tmp_path and dir_fd is None:
+        if path == tmp_path.name and dir_fd is not None:
             base_fds.append(fd)
         return fd
 
