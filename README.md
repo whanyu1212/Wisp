@@ -319,8 +319,8 @@ Caller-injected HTTP clients retain their caller-selected timeout policy.
 
 ## Project trust
 
-Project-local settings, context files (`AGENTS.md` / `CLAUDE.md`), and project extensions are
-loaded only after the project is trusted. Untrusted projects remain fully usable — Wisp simply
+Project-local settings, context files (`AGENTS.md` / `CLAUDE.md`), skills, and project extensions
+are loaded only after the project is trusted. Untrusted projects remain fully usable — Wisp simply
 ignores their local configuration and instructions.
 
 The first run in an untrusted directory asks `Do you trust the files in /path/to/project?`. Answer
@@ -342,6 +342,33 @@ Security notes:
   never persisted.
 - `WISP_TRUST_FILE` may relocate the global trust store, but only to an absolute path outside the
   repository. A relative value is rejected.
+
+## Agent Skills
+
+Wisp discovers metadata from directories that follow the
+[Agent Skills specification](https://agentskills.io/specification). Inspect the current catalog and
+isolated validation diagnostics with:
+
+```bash
+wisp skills [project-path]
+```
+
+| Precedence | Location |
+|---|---|
+| 1 (highest) | `<project>/.wisp/skills/<name>/SKILL.md` |
+| 2 | `<project>/.agents/skills/<name>/SKILL.md` |
+| 3 | `~/.wisp/skills/<name>/SKILL.md` |
+| 4 | `~/.agents/skills/<name>/SKILL.md` |
+
+Each `SKILL.md` must begin with bounded YAML frontmatter containing a specification-valid `name`
+and `description`; the declared name must match its parent directory. Invalid skills are skipped
+individually and reported without hiding valid entries. Symlinked, protected, out-of-root, and
+oversized metadata is rejected. Project locations are not scanned until project trust is granted;
+user locations remain available in untrusted projects.
+
+This release slice discovers and validates metadata only. Skills are not yet injected into model
+context or invocable with `/skill:<name>`; progressive instruction loading and invocation are
+tracked separately.
 
 ## Context & compaction
 
