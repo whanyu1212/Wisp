@@ -11,6 +11,10 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+_Nothing yet._
+
+## 0.1.0a3 — 2026-08-08
+
 - Added `wisp --version` to print the installed package version without starting the TUI.
 - Added strict, trust-aware Agent Skills metadata discovery from user and project locations, with a
   `wisp skills` command for inspecting the catalog and isolated diagnostics.
@@ -20,6 +24,8 @@ This log starts at schema v27. Earlier history is in the git log.
   follow-ups.
 - Added typed skill-catalog RPC snapshots, deterministic `/skill:` TUI completion, cached `/skills`
   inspection, trust-refresh updates, and compact live and historical invocation presentation.
+- Added an opt-in `wisp-code-review` example skill with user/project installation instructions and
+  a progressively loaded Wisp review checklist.
 
 ## 0.1.0a2 — 2026-08-07
 
