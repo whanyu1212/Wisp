@@ -51,7 +51,7 @@ Wisp is published on PyPI as `wisp-ai`, installs a `wisp` command, and requires 
 newer. The current release is an alpha, so request it explicitly:
 
 ```bash
-uv tool install "wisp-ai==0.1.0a2"
+uv tool install "wisp-ai==0.1.0a3"
 ```
 
 If `wisp` is not on your `PATH`, run `uv tool update-shell` once and restart your shell.
@@ -59,7 +59,7 @@ If `wisp` is not on your `PATH`, run `uv tool update-shell` once and restart you
 To run Wisp without installing it:
 
 ```bash
-uvx --from "wisp-ai==0.1.0a2" wisp
+uvx --from "wisp-ai==0.1.0a3" wisp
 ```
 
 Check the installed version with `wisp --version`.
@@ -365,6 +365,9 @@ and `description`; the declared name must match its parent directory. Invalid sk
 individually and reported without hiding valid entries. Symlinked, protected, out-of-root, and
 oversized metadata is rejected. Project locations are not scanned until project trust is granted;
 user locations remain available in untrusted projects.
+
+For a complete opt-in example, including installation instructions and a progressively loaded
+review checklist, see [`examples/skills/wisp-code-review`](examples/skills/wisp-code-review/).
 
 When the read-only `skill` tool is exposed, Wisp adds a separately bounded index of escaped skill
 names and descriptions to model context. The model can call `skill` with `name` to load the selected
