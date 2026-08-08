@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import yaml
 from yaml.tokens import AliasToken, AnchorToken, TagToken
@@ -18,6 +19,7 @@ _SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SUPPORTED_FIELDS = frozenset(
     {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
 )
+_MISSING = object()
 _YAML_BOOL_TAG = "tag:yaml.org,2002:bool"
 _YAML_FLOAT_TAG = "tag:yaml.org,2002:float"
 _YAML_INT_TAG = "tag:yaml.org,2002:int"
@@ -52,6 +54,21 @@ class SkillMetadataError(ValueError):
 class _StrictSafeLoader(yaml.SafeLoader):
     """Safe YAML loader that also rejects duplicate mapping keys."""
 
+    def __init__(self, stream: Any) -> None:
+        super().__init__(stream)
+        self._document_root: yaml.nodes.Node | None = None
+
+    def construct_document(self, node: yaml.nodes.Node) -> object:
+        self._document_root = node
+        try:
+            construct = cast(
+                Callable[[yaml.nodes.Node], object],
+                super().construct_document,
+            )
+            return construct(node)
+        finally:
+            self._document_root = None
+
     def construct_mapping(
         self,
         node: yaml.nodes.MappingNode,
@@ -76,7 +93,11 @@ class _StrictSafeLoader(yaml.SafeLoader):
                     f"duplicate key: {key!r}",
                     key_node.start_mark,
                 )
-            if key == "name" and isinstance(value_node, yaml.nodes.ScalarNode):
+            if (
+                node is self._document_root
+                and key == "name"
+                and isinstance(value_node, yaml.nodes.ScalarNode)
+            ):
                 mapping[key] = self.construct_scalar(value_node)
             else:
                 mapping[key] = self.construct_object(value_node, deep=deep)
@@ -246,7 +267,8 @@ def _parse_entry(
     if compatibility is not None and len(compatibility) > 500:
         raise SkillMetadataError("invalid-metadata", "compatibility exceeds 500 characters")
     allowed_tools = _optional_string(raw, "allowed-tools")
-    metadata = _metadata_items(raw.get("metadata"))
+    metadata_value = raw.get("metadata", _MISSING)
+    metadata = () if metadata_value is _MISSING else _metadata_items(metadata_value)
 
     diagnostics = tuple(
         SkillDiagnostic(
@@ -284,8 +306,8 @@ def _required_string(raw: dict[object, object], field: str, *, strip: bool = Tru
 
 
 def _optional_string(raw: dict[object, object], field: str) -> str | None:
-    value = raw.get(field)
-    if value is None:
+    value = raw.get(field, _MISSING)
+    if value is _MISSING:
         return None
     if type(value) is not str or not value.strip():
         raise SkillMetadataError(
@@ -296,8 +318,6 @@ def _optional_string(raw: dict[object, object], field: str) -> str | None:
 
 
 def _metadata_items(value: object) -> tuple[tuple[str, str], ...]:
-    if value is None:
-        return ()
     if not isinstance(value, dict):
         raise SkillMetadataError("invalid-metadata", "metadata must be a string mapping")
     items: list[tuple[str, str]] = []

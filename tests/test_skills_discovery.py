@@ -195,7 +195,16 @@ def test_isolates_yaml_constructor_value_errors(
         ("other", "name: demo\ndescription: test\n", "does not match"),
         ("demo", "name: demo\ndescription: 42\n", "description is required"),
         ("demo", "name: demo\ndescription: 1.5\n", "description is required"),
+        ("demo", "name: demo\ndescription: test\nlicense: null\n", "license must"),
+        ("demo", "name: demo\ndescription: test\ncompatibility: null\n", "compatibility must"),
+        ("demo", "name: demo\ndescription: test\nallowed-tools: null\n", "allowed-tools must"),
+        ("demo", "name: demo\ndescription: test\nmetadata: null\n", "metadata must"),
         ("demo", "name: demo\ndescription: test\nmetadata: []\n", "metadata must"),
+        (
+            "demo",
+            "name: demo\ndescription: test\nmetadata:\n  name: 123\n",
+            "metadata must map",
+        ),
         (
             "demo",
             "name: demo\ndescription: test\nmetadata:\n  count: 2\n",
