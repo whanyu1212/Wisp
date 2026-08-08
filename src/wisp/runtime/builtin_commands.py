@@ -56,6 +56,13 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=25,
         ),
         CommandDescriptor(
+            name="skills",
+            title="Agent Skills",
+            description="Show loaded skills and discovery diagnostics",
+            category=CommandCategory.general,
+            order=26,
+        ),
+        CommandDescriptor(
             name="plan",
             title="Plan mode",
             description="Switch to read-only planning mode",

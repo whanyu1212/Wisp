@@ -32,6 +32,7 @@ from wisp.events import (
     RpcSessionTreeNavigated,
     RpcSessionTreeReported,
     RpcSessionTreeUnreverted,
+    RpcSkillsReported,
     RpcStateReported,
     RpcStateSnapshot,
     WispEvent,
@@ -50,6 +51,7 @@ from wisp.runtime.commands import CommandArgument, CommandCategory, CommandDescr
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionTreeNavigation
+from wisp.skills.models import SkillCatalog, SkillDiagnostic, SkillEntry
 
 
 class _ApprovalResolver:
@@ -567,6 +569,7 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
             "compact",
             "context",
             "history",
+            "skills",
             "plan",
             "build",
             "model",
@@ -583,6 +586,54 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
         assert finished.command_id == "commands-1"
         assert finished.command_type == "get_commands"
         assert finished.ok is True
+
+    anyio.run(scenario)
+
+
+def test_executor_reports_active_skill_catalog_without_replacing_running_command(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        fixture.agent.skill_catalog = SkillCatalog(
+            entries=(
+                SkillEntry(
+                    name="review",
+                    description="Review [literal] output",
+                    source="user:wisp",
+                    root=tmp_path / "review",
+                ),
+            ),
+            diagnostics=(
+                SkillDiagnostic(
+                    code="invalid-yaml",
+                    severity="warning",
+                    message="broken [literal] metadata",
+                    source="project:wisp",
+                    path=tmp_path / "bad" / "SKILL.md",
+                ),
+            ),
+        )
+        running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+
+            result = executor.dispatch({"id": "skills-1", "type": "get_skills"}, running)
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is running
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            RpcSkillsReported,
+            RpcCommandFinished,
+        ]
+        report = fixture.events[1]
+        assert isinstance(report, RpcSkillsReported)
+        assert report.catalog.entries[0].name == "review"
+        assert report.catalog.entries[0].description == "Review [literal] output"
+        assert report.catalog.diagnostics[0].message == "broken [literal] metadata"
+        assert report.catalog.project_trusted is False
 
     anyio.run(scenario)
 

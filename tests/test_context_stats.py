@@ -238,7 +238,7 @@ def test_context_statistics_events_accept_schema_v9_and_current() -> None:
         ).schema_version
         == 9
     )
-    with pytest.raises(ValueError, match="require schema_version 9 through 28"):
+    with pytest.raises(ValueError, match="require schema_version 9 through 29"):
         wisp_event_from_json(estimated.model_copy(update={"schema_version": 8}).model_dump_json())
 
 

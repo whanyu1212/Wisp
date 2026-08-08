@@ -19,9 +19,14 @@ from pydantic import (
 )
 
 from wisp.agent.mode import AgentMode
-from wisp.skills.models import SkillInvocationEvidence
+from wisp.skills.models import (
+    SkillDiagnosticCode,
+    SkillDiagnosticSeverity,
+    SkillInvocationEvidence,
+    SkillSource,
+)
 
-EVENT_SCHEMA_VERSION: Literal[28] = 28
+EVENT_SCHEMA_VERSION: Literal[29] = 29
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -41,6 +46,7 @@ PROCESS_METADATA_SCHEMA_VERSION = 25
 COMPACTION_POLICY_SCHEMA_VERSION = 26
 AGENT_MODE_SCHEMA_VERSION = 27
 SKILL_INVOCATION_SCHEMA_VERSION = 28
+SKILL_CATALOG_SCHEMA_VERSION = 29
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -78,7 +84,31 @@ class WispEvent(BaseModel):
 
     type: str
     schema_version: Literal[
-        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -347,6 +377,38 @@ class RpcCommandDescriptor(BaseModel):
             if not (alias.startswith("/") or alias.startswith(":")):
                 raise ValueError("RPC command descriptor slash_aliases must be command tokens")
         return self
+
+
+class RpcSkillCatalogEntry(BaseModel):
+    """One model-free skill descriptor returned to RPC frontends."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    description: str
+    source: SkillSource
+
+
+class RpcSkillDiagnostic(BaseModel):
+    """One isolated skill discovery diagnostic returned to RPC frontends."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: SkillDiagnosticCode
+    severity: SkillDiagnosticSeverity
+    message: str
+    source: SkillSource
+    path: Path | None = None
+
+
+class RpcSkillCatalogSnapshot(BaseModel):
+    """Current immutable skill catalog and project-trust state."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    entries: tuple[RpcSkillCatalogEntry, ...] = ()
+    diagnostics: tuple[RpcSkillDiagnostic, ...] = ()
+    project_trusted: bool = False
 
 
 class RpcMessageToolCallSnapshot(BaseModel):
@@ -906,6 +968,38 @@ class RpcCommandsReported(WispEvent):
         return self
 
 
+class RpcSkillsReported(WispEvent):
+    """Immediate, non-persisted skill catalog snapshot returned over RPC."""
+
+    type: Literal["rpc.skills"] = "rpc.skills"
+    command_id: str
+    catalog: RpcSkillCatalogSnapshot
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < SKILL_CATALOG_SCHEMA_VERSION:
+            raise ValueError(
+                f"RPC skill reports require schema_version {SKILL_CATALOG_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+
+class SkillCatalogUpdated(WispEvent):
+    """A trust transition replaced the catalog available to future operations."""
+
+    type: Literal["skill.catalog.updated"] = "skill.catalog.updated"
+    catalog: RpcSkillCatalogSnapshot
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < SKILL_CATALOG_SCHEMA_VERSION:
+            raise ValueError(
+                "skill catalog updates require schema_version "
+                f"{SKILL_CATALOG_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+
 class RpcMessagesReported(WispEvent):
     """On-demand, bounded persisted transcript page returned over RPC."""
 
@@ -1338,6 +1432,8 @@ type KnownWispEvent = Annotated[
     | SessionStatsReported
     | RpcStateReported
     | RpcCommandsReported
+    | RpcSkillsReported
+    | SkillCatalogUpdated
     | RpcMessagesReported
     | RpcSessionsReported
     | RpcSessionSelected

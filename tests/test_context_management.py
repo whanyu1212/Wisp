@@ -398,8 +398,8 @@ def test_context_events_round_trip_on_current_schema() -> None:
         message="maximum context length exceeded",
     )
 
-    assert pressure.schema_version == 28
-    assert overflow.schema_version == 28
+    assert pressure.schema_version == 29
+    assert overflow.schema_version == 29
     assert wisp_event_from_json(pressure.model_dump_json()) == pressure
     assert wisp_event_from_json(overflow.model_dump_json()) == overflow
     assert (

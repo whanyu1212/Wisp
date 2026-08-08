@@ -1410,6 +1410,10 @@ def _rpc_message_snapshot(
     text_budget: _MessagePageTextBudget,
 ) -> RpcMessageSnapshot:
     message = entry.message
+    skill_invocation = _rpc_skill_invocation_snapshot(
+        message.skill_invocation,
+        text_budget=text_budget,
+    )
     content, content_original_bytes, content_truncated = _clip_text_with_budget(
         message.content,
         limit=MESSAGE_CONTENT_BYTE_LIMIT,
@@ -1440,10 +1444,7 @@ def _rpc_message_snapshot(
         usage=message.usage,
         cost=message.cost,
         tool_result=_rpc_tool_result_snapshot(entry.tool_result, text_budget=text_budget),
-        skill_invocation=_rpc_skill_invocation_snapshot(
-            message.skill_invocation,
-            text_budget=text_budget,
-        ),
+        skill_invocation=skill_invocation,
     )
 
 
@@ -1454,13 +1455,13 @@ def _rpc_skill_invocation_snapshot(
 ) -> RpcSkillInvocationSnapshot | None:
     if invocation is None:
         return None
-    original, original_bytes, original_truncated = _clip_text_with_budget(
-        invocation.original_content,
+    request, request_bytes, request_truncated = _clip_text_with_budget(
+        invocation.request,
         limit=MESSAGE_CONTENT_BYTE_LIMIT,
         text_budget=text_budget,
     )
-    request, request_bytes, request_truncated = _clip_text_with_budget(
-        invocation.request,
+    original, original_bytes, original_truncated = _clip_text_with_budget(
+        invocation.original_content,
         limit=MESSAGE_CONTENT_BYTE_LIMIT,
         text_budget=text_budget,
     )

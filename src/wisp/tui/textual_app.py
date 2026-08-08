@@ -28,7 +28,9 @@ from textual.widgets import HelpPanel, KeyPanel, Static, TextArea
 from wisp.config import WispConfig
 from wisp.events import (
     RpcSessionSummary,
+    RpcSkillCatalogSnapshot,
     SessionStats,
+    SkillInvoked,
     ToolApprovalRequested,
     TrustRequested,
 )
@@ -53,6 +55,7 @@ from wisp.tui.rendering import (
     TuiViewSnapshot,
     _markup_escape,
 )
+from wisp.tui.skills import skill_catalog_text, skill_invocation_text
 from wisp.tui.state import TuiCancelRequested, TuiQuitRequested
 from wisp.tui.stream_buffer import MarkdownStreamController
 from wisp.tui.textual_input import TextualInputController
@@ -398,6 +401,7 @@ class TextualTui(App[None]):
         self._help_viewport_state: TranscriptViewportState | None = None
         self._help_viewport_baseline: TranscriptViewportState | None = None
         self._command_catalog = DEFAULT_TUI_COMMAND_CATALOG
+        self._skill_catalog = RpcSkillCatalogSnapshot()
         self._agent_mode = "build"
         self._current_prompt = "wisp> "
         self._runner: Callable[[], Awaitable[None]] | None = None
@@ -537,6 +541,7 @@ class TextualTui(App[None]):
             defer_after_refresh=self._defer_overlay_restore,
         )
         self.set_command_catalog(self._command_catalog)
+        self.set_skill_catalog(self._skill_catalog)
         self._input.focus()  # keep the editor as the resting focus
         if self._runner is not None:
             self.run_worker(self._run_and_exit(), exclusive=True)
@@ -935,6 +940,35 @@ class TextualTui(App[None]):
             # menu is refreshed instead of being dismissed by the catalog swap.
             if self._input is not None and self._input.display:
                 self._suggest.show_for(self._input.text)
+
+    def set_skill_catalog(self, catalog: RpcSkillCatalogSnapshot) -> None:
+        """Apply the immutable skill snapshot to inline completion."""
+
+        self._skill_catalog = catalog
+        if self._suggest is not None:
+            self._suggest.set_skill_catalog(catalog)
+            if self._input is not None and self._input.display:
+                self._suggest.show_for(self._input.text)
+
+    def show_skill_catalog(self, catalog: RpcSkillCatalogSnapshot) -> None:
+        """Mount a literal-text catalog inspection block."""
+
+        self.write_message(skill_catalog_text(catalog), role="system")
+
+    def show_skill_invocation(
+        self,
+        event: SkillInvoked,
+        *,
+        widget: LineMessage | None = None,
+    ) -> None:
+        """Replace a raw live invocation echo with its typed compact label."""
+
+        text = skill_invocation_text(event)
+        if widget is not None:
+            widget.update(_markup_escape(text))
+            self.note_transcript_update(widget)
+            return
+        self.write_message(text, role="user")
 
     def prefill_command(self, prefix: str) -> None:
         """Put a command prefix in the editor, cursor at the end, without submitting.

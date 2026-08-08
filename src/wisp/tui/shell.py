@@ -34,8 +34,12 @@ from wisp.events import (
     RpcMessagesReported,
     RpcSessionSelected,
     RpcSessionsReported,
+    RpcSkillCatalogSnapshot,
+    RpcSkillsReported,
     SessionSaved,
     SessionStatsReported,
+    SkillCatalogUpdated,
+    SkillInvoked,
     ToolApprovalRequested,
     TrustRequested,
 )
@@ -112,6 +116,8 @@ class TuiController(Protocol):
     async def get_session_stats(self, *, command_id: str | None = None) -> str: ...
 
     async def get_commands(self, *, command_id: str | None = None) -> str: ...
+
+    async def get_skills(self, *, command_id: str | None = None) -> str: ...
 
     async def get_messages(
         self,
@@ -256,6 +262,7 @@ class TuiShell:
         self.current_mode: AgentMode = "build"
         self.current_model = model
         self.command_catalog = DEFAULT_TUI_COMMAND_CATALOG
+        self.skill_catalog = RpcSkillCatalogSnapshot()
         self.models = ModelRegistry(effective_catalog())
         # Mirrors wisp.providers.catalog.startup_effort's filtering on the RPC
         # side (see CodingSession construction in cli/rpc.py and cli/__init__.py):
@@ -335,6 +342,9 @@ class TuiShell:
                     task_group.cancel_scope.cancel()
                     return
                 if await self._hydrate_command_catalog(receive):
+                    task_group.cancel_scope.cancel()
+                    return
+                if await self._hydrate_skill_catalog(receive):
                     task_group.cancel_scope.cancel()
                     return
                 await self._request_session_stats()
@@ -523,6 +533,47 @@ class TuiShell:
         if callable(update_catalog):
             cast(Callable[[TuiCommandCatalog], None], update_catalog)(self.command_catalog)
 
+    async def _hydrate_skill_catalog(
+        self,
+        receive: anyio.abc.ObjectReceiveStream[_TuiSignal],
+    ) -> bool:
+        """Load the immutable skill catalog before accepting interactive input."""
+
+        try:
+            command_id = await self.controller.get_skills()
+        except Exception as exc:  # noqa: BLE001 - discovery is optional TUI startup polish
+            self.renderer.notice(f"Skill discovery unavailable: {exc}")
+            self._publish_skill_catalog()
+            return False
+
+        report: RpcSkillsReported | None = None
+        while True:
+            signal = await receive.receive()
+            if isinstance(signal, _RpcEvent):
+                event = signal.event
+                if isinstance(event, RpcSkillsReported) and event.command_id == command_id:
+                    report = event
+                    continue
+                if isinstance(event, RpcCommandFinished) and event.command_id == command_id:
+                    if event.ok and report is not None:
+                        self.skill_catalog = report.catalog
+                        self._publish_skill_catalog()
+                    else:
+                        reason = event.error or "skill catalog completed without a result"
+                        self.renderer.notice(f"Skill discovery unavailable: {reason}")
+                        self._publish_skill_catalog()
+                    return False
+                if await self._handle_rpc_event(event):
+                    return True
+                continue
+            if isinstance(signal, _RpcEventsClosed):
+                return self._handle_rpc_closed(signal, pending_command_id=command_id)
+            if await self._handle_signal(signal):
+                return True
+
+    def _publish_skill_catalog(self) -> None:
+        self._call_renderer_optional("skill_catalog_updated", self.skill_catalog)
+
     def _render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
         render_history = getattr(self.renderer, "render_history", None)
         if not callable(render_history):
@@ -686,6 +737,12 @@ class TuiShell:
                 self.renderer.command_error("Usage: /history")
                 return False
             self.renderer.prompt_history_request()
+            return False
+        if command.name is TuiSlashCommandName.skills:
+            if command.args:
+                self.renderer.command_error("Usage: /skills")
+                return False
+            self._call_renderer_optional("skills_catalog", self.skill_catalog)
             return False
         if self.state.current_command_id is not None:
             operation = self._active_operation()
@@ -1554,6 +1611,15 @@ class TuiShell:
                 f"{f', model {event.model}' if event.model else ''}."
             )
             self._sync_view()
+            return False
+
+        if isinstance(event, SkillCatalogUpdated):
+            self.skill_catalog = event.catalog
+            self._publish_skill_catalog()
+            return False
+
+        if isinstance(event, SkillInvoked):
+            self._call_renderer_optional("skill_invoked", event)
             return False
 
         if isinstance(event, ModelProviderAutoSwitched):

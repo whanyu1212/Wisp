@@ -16,6 +16,10 @@ This log starts at schema v27. Earlier history is in the git log.
   `wisp skills` command for inspecting the catalog and isolated diagnostics.
 - Added a bounded model-facing Agent Skills index and read-only `skill` tool for progressively
   loading instructions and contained supporting resources without weakening tool policy.
+- Added explicit `/skill:<name>` invocation with typed replay evidence for prompts, steering, and
+  follow-ups.
+- Added typed skill-catalog RPC snapshots, deterministic `/skill:` TUI completion, cached `/skills`
+  inspection, trust-refresh updates, and compact live and historical invocation presentation.
 
 ## 0.1.0a2 — 2026-08-07
 
@@ -37,13 +41,26 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
   protected paths, and explicit unsafe-tool approvals.
 - Publishes provider-neutral lifecycle events at schema v27.
 
-## Schema v27 — current
+## Schema v29 — current
+
+Adds `rpc.skills` and `skill.catalog.updated` events carrying typed skill descriptors, isolated
+discovery diagnostics, and project-trust state. RPC clients can issue `get_skills` for the active
+immutable catalog; TUI clients should replace their cached snapshot when `skill.catalog.updated`
+arrives.
+
+## Schema v28
+
+Adds `skill.invoked` and typed skill-invocation evidence to queue updates and persisted RPC message
+snapshots. Consumers can present the original directive and request without parsing the bounded
+provider-visible expansion.
+
+## Schema v27
 
 Adds `mode` (`"plan" | "build"`, default `"build"`) to `CodingSessionState`, so RPC `get_state`
 reports the active agent mode. The field is stripped for consumers reading at an older schema
 version.
 
-Events at schema v5 through v27 remain readable.
+Events at schema v5 through v29 remain readable.
 
 ---
 

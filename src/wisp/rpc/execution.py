@@ -42,6 +42,10 @@ from wisp.events import (
     RpcSessionTreeNode,
     RpcSessionTreeReported,
     RpcSessionTreeUnreverted,
+    RpcSkillCatalogEntry,
+    RpcSkillCatalogSnapshot,
+    RpcSkillDiagnostic,
+    RpcSkillsReported,
     RpcStateReported,
     RpcStateSnapshot,
     SessionStatsReported,
@@ -200,6 +204,8 @@ class RpcCommandExecutor:
             return self._dispatch_state(command, running_command)
         if command_type == "get_commands":
             return self._dispatch_commands(command, running_command)
+        if command_type == "get_skills":
+            return self._dispatch_skills(command, running_command)
         if command_type in QUEUE_RPC_COMMAND_TYPES:
             raise RuntimeError("Queue RPC commands require asynchronous dispatch")
         return self._dispatch_control(command, running_command)
@@ -451,6 +457,18 @@ class RpcCommandExecutor:
         handle_rpc_commands_command(
             command,
             runtime=self.runtime,
+            write_event=self.write_event,
+        )
+        return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_skills(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        handle_rpc_skills_command(
+            command,
+            agent=self.agent,
             write_event=self.write_event,
         )
         return _RpcDispatchResult(running_command=running_command)
@@ -2639,6 +2657,56 @@ def handle_rpc_commands_command(
 
     write_event(RpcCommandsReported(command_id=command_id, commands=commands))
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def handle_rpc_skills_command(
+    command: dict[str, object],
+    *,
+    agent: CodingSession,
+    write_event: RpcEventWriter,
+) -> None:
+    """Return the active immutable skill catalog without performing discovery."""
+
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return
+
+    write_event(RpcSkillsReported(command_id=command_id, catalog=rpc_skill_catalog_snapshot(agent)))
+    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def rpc_skill_catalog_snapshot(agent: CodingSession) -> RpcSkillCatalogSnapshot:
+    """Project one session's current catalog into its bounded RPC shape."""
+
+    catalog = agent.skill_catalog
+    return RpcSkillCatalogSnapshot(
+        entries=tuple(
+            RpcSkillCatalogEntry(
+                name=entry.name,
+                description=entry.description,
+                source=entry.source,
+            )
+            for entry in catalog.entries
+        ),
+        diagnostics=tuple(
+            RpcSkillDiagnostic(
+                code=diagnostic.code,
+                severity=diagnostic.severity,
+                message=diagnostic.message,
+                source=diagnostic.source,
+                path=diagnostic.path,
+            )
+            for diagnostic in catalog.diagnostics
+        ),
+        project_trusted=agent.trusted,
+    )
 
 
 def _rpc_command_descriptor(descriptor: CommandDescriptor) -> RpcCommandDescriptor:

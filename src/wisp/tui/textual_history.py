@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
 from textual.content import Content
@@ -23,11 +23,13 @@ from textual.widget import Widget
 from wisp.events import JsonObject
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.history import (
+    HistoricalSkillInvocation,
     HistoricalToolCard,
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
     historical_tool_status,
 )
+from wisp.tui.skills import format_skill_invocation
 from wisp.tui.tool_output import full_tool_output_for_display, render_tool_result
 from wisp.tui.transcript_window import TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, TranscriptWindow
 
@@ -120,6 +122,7 @@ class _LiveHistoryEntry:
     kind: Literal["message", "tool"]
     role: Literal["user", "assistant"] | None = None
     content: str | None = None
+    message_entry_id: str | None = None
     tool_call_id: str | None = None
     widget: Widget | None = None
 
@@ -182,6 +185,29 @@ class TextualHistoryController:
             if entry.kind == "message" and entry.role == role and entry.content == content:
                 del self._live_entries[index]
                 return
+
+    def record_live_skill_invocation(self, message_entry_id: str, original_content: str) -> None:
+        """Attach persisted identity to the newest matching live skill prompt."""
+
+        matched_entry = None
+        updated_entry = None
+        for index in range(len(self._live_entries) - 1, -1, -1):
+            entry = self._live_entries[index]
+            if (
+                entry.kind == "message"
+                and entry.role == "user"
+                and entry.content == original_content
+            ):
+                matched_entry = entry
+                updated_entry = replace(entry, message_entry_id=message_entry_id)
+                self._live_entries[index] = updated_entry
+                break
+
+        snapshot = self._latest_reload_live_entries
+        if snapshot is not None and matched_entry is not None and updated_entry is not None:
+            self._latest_reload_live_entries = tuple(
+                updated_entry if entry is matched_entry else entry for entry in snapshot
+            )
 
     def record_live_tool_call(self, tool_call_id: str, *, widget: Widget | None = None) -> None:
         """Remember a pending live tool card as the durable history page would render it."""
@@ -464,6 +490,17 @@ class TextualHistoryController:
         if isinstance(entry, HistoricalTranscriptMessage):
             role = "user" if entry.role == "user" else "assistant"
             return self._surface.mount_historical_line(role, entry.content, before=before)
+        if isinstance(entry, HistoricalSkillInvocation):
+            return self._surface.mount_historical_line(
+                "user",
+                format_skill_invocation(
+                    entry.name,
+                    entry.request,
+                    request_truncated=entry.request_truncated,
+                    instructions_truncated=entry.instructions_truncated,
+                ),
+                before=before,
+            )
         return self._mount_tool_card(entry, before=before)
 
     def _mount_tool_card(
@@ -630,6 +667,14 @@ def _history_entry_matches_live(
 ) -> bool:
     if isinstance(entry, HistoricalToolCard):
         return live.kind == "tool" and entry.tool_call_id == live.tool_call_id
+    if isinstance(entry, HistoricalSkillInvocation):
+        if live.kind != "message" or live.role != "user" or live.content is None:
+            return False
+        if live.message_entry_id is not None:
+            return entry.entry_id == live.message_entry_id
+        if not entry.original_content_truncated:
+            return entry.original_content == live.content
+        return bool(entry.original_content) and live.content.startswith(entry.original_content)
     if live.kind != "message" or entry.role != live.role or live.content is None:
         return False
     if entry.content == live.content:

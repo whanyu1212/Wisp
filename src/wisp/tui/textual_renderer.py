@@ -26,7 +26,9 @@ from wisp.events import (
     ProviderRetrying,
     RpcCommandFinished,
     RpcSessionSummary,
+    RpcSkillCatalogSnapshot,
     SessionStats,
+    SkillInvoked,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
@@ -50,6 +52,7 @@ from wisp.tui.tool_output import full_tool_output_for_display, render_tool_resul
 
 if TYPE_CHECKING:
     from wisp.tui.textual_app import TextualTui
+    from wisp.tui.widgets import LineMessage
 
 _RETRY_REASON_LABELS = {
     "network": "network error",
@@ -86,6 +89,7 @@ class TextualTuiRenderer:
         # tool approval that arrived mid-line), so the shell reconciles against
         # it via consume_submitted_input_mode().
         self._submitted_input_mode: str | None = None
+        self._prompt_widgets: list[tuple[str, LineMessage | None]] = []
         app.set_submit_hook(self._capture_submitted_input_mode)
         # call_id → request event timestamp, so a tool card can show the true
         # wall-clock duration (result.timestamp − request.timestamp) when it
@@ -243,13 +247,24 @@ class TextualTuiRenderer:
         # Echo a compact line for large pastes (marker kept) while the model still
         # received the full expanded text via controller.prompt(prompt).
         widget = self.app.write_user(self.app.compact_echo_for(prompt))
+        self._prompt_widgets.append((prompt, widget))
+        del self._prompt_widgets[:-100]
         self._history.record_live_message("user", prompt, widget=widget)
 
     def prompt_accepted(self, prompt: str) -> None:
         self.app.record_prompt(prompt)
 
     def discard_live_prompt(self, prompt: str) -> None:
+        self._pop_prompt_widget(prompt)
         self._history.discard_live_message("user", prompt)
+
+    def _pop_prompt_widget(self, prompt: str) -> LineMessage | None:
+        for index in range(len(self._prompt_widgets) - 1, -1, -1):
+            candidate_prompt, widget = self._prompt_widgets[index]
+            if candidate_prompt == prompt:
+                del self._prompt_widgets[index]
+                return widget
+        return None
 
     def record_streamed_message_completed(self, event: MessageCompleted) -> None:
         """Record a streamed message that the shell suppresses from normal rendering."""
@@ -412,6 +427,22 @@ class TextualTuiRenderer:
 
     def command_catalog_updated(self, catalog: TuiCommandCatalog) -> None:
         self.app.set_command_catalog(catalog)
+
+    def skill_catalog_updated(self, catalog: RpcSkillCatalogSnapshot) -> None:
+        self.app.set_skill_catalog(catalog)
+
+    def skills_catalog(self, catalog: RpcSkillCatalogSnapshot) -> None:
+        self._suspend_progress()
+        self.app.show_skill_catalog(catalog)
+
+    def skill_invoked(self, event: SkillInvoked) -> None:
+        self._suspend_progress()
+        widget = self._pop_prompt_widget(event.invocation.original_content)
+        self._history.record_live_skill_invocation(
+            event.message_entry_id,
+            event.invocation.original_content,
+        )
+        self.app.show_skill_invocation(event, widget=widget)
 
     def set_connect_api_key_hook(
         self,

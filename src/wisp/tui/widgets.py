@@ -40,7 +40,12 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
-from wisp.events import RpcSessionSummary, ToolApprovalRequested, TrustRequested
+from wisp.events import (
+    RpcSessionSummary,
+    RpcSkillCatalogSnapshot,
+    ToolApprovalRequested,
+    TrustRequested,
+)
 from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tui.commands import (
     MODEL_COMMAND_CLEAR_EFFORT_TOKEN,
@@ -2061,6 +2066,7 @@ class SlashSuggest(OptionList):
     def __init__(self, id: str | None = None) -> None:  # noqa: A002 - Textual's param name
         super().__init__(id=id)
         self._specs = SLASH_COMMAND_SPECS
+        self._skill_specs: tuple[SlashCommandSpec, ...] = ()
         # spelling → spec, so the highlighted option's id maps back to its command.
         self._by_command: dict[str, SlashCommandSpec] = {spec.command: spec for spec in self._specs}
         self._visible_specs: tuple[SlashCommandSpec, ...] = ()
@@ -2068,8 +2074,25 @@ class SlashSuggest(OptionList):
 
     def set_catalog(self, catalog: TuiCommandCatalog) -> None:
         self._specs = catalog.specs
-        self._by_command = {spec.command: spec for spec in self._specs}
+        self._rebuild_command_index()
         self.hide()
+
+    def set_skill_catalog(self, catalog: RpcSkillCatalogSnapshot) -> None:
+        """Apply deterministic skill rows used only after the `/skill:` prefix."""
+
+        self._skill_specs = tuple(
+            SlashCommandSpec(
+                command=f"/skill:{entry.name}",
+                description=" ".join(entry.description.split()),
+                takes_args=True,
+            )
+            for entry in catalog.entries
+        )
+        self._rebuild_command_index()
+        self.hide()
+
+    def _rebuild_command_index(self) -> None:
+        self._by_command = {spec.command: spec for spec in (*self._specs, *self._skill_specs)}
 
     def on_resize(self, event: events.Resize) -> None:
         # Same `on_resize`-driven pattern as StatusBar (widgets.py, below).
@@ -2093,7 +2116,8 @@ class SlashSuggest(OptionList):
     def matches(self, query: str) -> tuple[SlashCommandSpec, ...]:
         """Specs whose command starts with `query` (prefix match on the spelling)."""
 
-        return tuple(spec for spec in self._specs if spec.command.startswith(query))
+        specs = self._skill_specs if query.startswith("/skill:") else self._specs
+        return tuple(spec for spec in specs if spec.command.startswith(query))
 
     def show_for(self, value: str) -> int:
         """Filter and display the menu for the current input value.
@@ -2120,8 +2144,10 @@ class SlashSuggest(OptionList):
         self.add_options(
             [
                 Option(
-                    _truncate_to_cell_width(
-                        f"{spec.command:<{name_width}}  {spec.description}", content_width
+                    Content(
+                        _truncate_to_cell_width(
+                            f"{spec.command:<{name_width}}  {spec.description}", content_width
+                        )
                     ),
                     id=spec.command,
                 )

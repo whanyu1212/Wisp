@@ -22,8 +22,10 @@ from wisp.events import (
     MessageStarted,
     ProviderRetrying,
     RpcCommandStarted,
+    SkillInvoked,
     TurnStarted,
 )
+from wisp.skills.models import SkillInvocationEvidence
 from wisp.trust_flow import TrustDecision
 from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.compact_echo import MAX_PENDING_ECHOES as _MAX_PENDING_ECHOES
@@ -1352,6 +1354,38 @@ def _render_events_to_transcript(events: list[object]) -> str:
             return "\n".join(_transcript_texts(app_instance))
 
     return anyio.run(scenario)
+
+
+def test_textual_renderer_matches_skill_invocation_to_retried_prompt() -> None:
+    async def scenario() -> list[str]:
+        app_instance, renderer = create_textual_tui()
+        assert isinstance(renderer, TextualTuiRenderer)
+        original = "/skill:review focus on safety"
+        async with app_instance.run_test() as pilot:
+            renderer.prompt_submitted(original)
+            renderer.discard_live_prompt(original)
+            renderer.prompt_submitted(original)
+            renderer.skill_invoked(
+                SkillInvoked(
+                    session_id="session-1",
+                    message_entry_id="message-1",
+                    invocation=SkillInvocationEvidence(
+                        name="review",
+                        original_content=original,
+                        request="focus on safety",
+                        content_sha256="a" * 64,
+                        instructions_truncated=False,
+                    ),
+                    provider_content="expanded instructions",
+                )
+            )
+            await pilot.pause()
+            return _transcript_texts(app_instance)
+
+    assert anyio.run(scenario) == [
+        "/skill:review focus on safety",
+        "skill /skill:review focus on safety",
+    ]
 
 
 def test_textual_renderer_dispatches_events_by_type() -> None:
