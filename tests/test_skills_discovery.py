@@ -639,6 +639,47 @@ def test_path_fallback_rejects_metadata_reparse_swap(
     assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["entry-symlink"]
 
 
+def test_path_fallback_rejects_skill_directory_reparse_swap(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    skill_root = _write_skill(tmp_path / ".wisp" / "skills", "swapped")
+    monkeypatch.setattr(discovery_module, "_USE_DESCRIPTOR_TRAVERSAL", False)
+    monkeypatch.setattr(discovery_module, "_PATH_FALLBACK_SUPPORTED", True)
+
+    def reject_reparse_point(path: Path) -> int:
+        raise OSError(errno.ELOOP, "skill directory is a reparse point", path)
+
+    monkeypatch.setattr(discovery_module, "_open_path_skill_guard", reject_reparse_point)
+
+    catalog = _discover(tmp_path)
+
+    assert catalog.entries == ()
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["entry-symlink"]
+    assert catalog.diagnostics[0].path == skill_root
+
+
+def test_windows_skill_directory_guard_closes_reparse_handle(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    skill_root = tmp_path / "skill"
+    closed: list[int] = []
+    monkeypatch.setattr(discovery_module, "_open_windows_directory_guard", lambda path: 42)
+    monkeypatch.setattr(
+        discovery_module,
+        "_windows_handle_is_reparse_point",
+        lambda handle, *, path: True,
+    )
+    monkeypatch.setattr(discovery_module, "_close_windows_handle", closed.append)
+
+    with pytest.raises(OSError) as exc_info:
+        discovery_module._open_windows_skill_directory_guard(skill_root)
+
+    assert exc_info.value.errno == errno.ELOOP
+    assert closed == [42]
+
+
 def test_windows_metadata_open_closes_reparse_handle(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

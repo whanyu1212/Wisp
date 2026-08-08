@@ -614,44 +614,69 @@ def _read_skill_entry(
 
     if root_fd is None:
         try:
-            metadata_fd = _open_path_metadata(skill_file)
+            skill_guard = _open_path_skill_guard(skill_root)
         except FileNotFoundError:
             return None, 0, ()
         except OSError as exc:
-            return _metadata_open_error(root.source, skill_file, exc)
-        try:
-            resolved_file = _resolved_open_file(metadata_fd, path=skill_file)
-            escape = _path_escape_diagnostic(
-                resolved_file,
-                resolved_root=resolved_root,
-                source=root.source,
-                skill_file=skill_file,
+            path_directory_code: SkillDiagnosticCode = (
+                "entry-symlink" if exc.errno == errno.ELOOP else "file-unreadable"
             )
-            if escape is not None:
-                return None, 0, (escape,)
-            if is_protected_path(resolved_file, context):
-                return (
-                    None,
-                    0,
-                    (
-                        _diagnostic(
-                            "protected-path",
-                            "error",
-                            "opened skill metadata target is protected",
-                            root.source,
-                            skill_file,
-                        ),
+            return (
+                None,
+                0,
+                (
+                    _diagnostic(
+                        path_directory_code,
+                        "error",
+                        f"cannot open skill directory: {_os_error_message(exc)}",
+                        root.source,
+                        skill_root,
                     ),
-                )
-            return _read_open_metadata(
-                metadata_fd,
-                source=root.source,
-                resolved_skill_root=resolved_file.parent,
-                directory_name=directory_name,
-                skill_file=skill_file,
+                ),
             )
+        try:
+            try:
+                metadata_fd = _open_path_metadata(skill_file)
+            except FileNotFoundError:
+                return None, 0, ()
+            except OSError as exc:
+                return _metadata_open_error(root.source, skill_file, exc)
+            try:
+                resolved_file = _resolved_open_file(metadata_fd, path=skill_file)
+                escape = _path_escape_diagnostic(
+                    resolved_file,
+                    resolved_root=resolved_root,
+                    source=root.source,
+                    skill_file=skill_file,
+                )
+                if escape is not None:
+                    return None, 0, (escape,)
+                if is_protected_path(resolved_file, context):
+                    return (
+                        None,
+                        0,
+                        (
+                            _diagnostic(
+                                "protected-path",
+                                "error",
+                                "opened skill metadata target is protected",
+                                root.source,
+                                skill_file,
+                            ),
+                        ),
+                    )
+                return _read_open_metadata(
+                    metadata_fd,
+                    source=root.source,
+                    resolved_skill_root=resolved_file.parent,
+                    directory_name=directory_name,
+                    skill_file=skill_file,
+                )
+            finally:
+                os.close(metadata_fd)
         finally:
-            os.close(metadata_fd)
+            if skill_guard is not None:
+                _close_windows_handle(skill_guard)
 
     try:
         skill_fd = _open_relative(
@@ -852,6 +877,25 @@ def _open_path_metadata(path: Path) -> int:
     if os.name == "nt":
         return _open_windows_metadata(path)
     return os.open(path, _FILE_FLAGS)
+
+
+def _open_path_skill_guard(path: Path) -> int | None:
+    if os.name != "nt":
+        return None
+    return _open_windows_skill_directory_guard(path)
+
+
+def _open_windows_skill_directory_guard(path: Path) -> int:
+    handle = _open_windows_directory_guard(path)
+    try:
+        if _windows_handle_is_reparse_point(handle, path=path):
+            raise OSError(errno.ELOOP, "skill directory is a reparse point", path)
+        if _resolved_windows_handle(handle, path=path) != path.resolve(strict=False):
+            raise OSError(errno.ELOOP, "skill directory changed while opening", path)
+    except BaseException:
+        _close_windows_handle(handle)
+        raise
+    return handle
 
 
 def _open_windows_metadata(path: Path) -> int:
