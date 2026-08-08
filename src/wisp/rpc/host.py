@@ -38,6 +38,7 @@ from wisp.rpc.execution import RpcCommandExecutor, rpc_command_type, rpc_session
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.skills.lifecycle import discover_skill_catalog
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.base import Tool, ToolSafety
 from wisp.tools.selection import select_session, select_tools, tool_approval_policy
@@ -413,11 +414,17 @@ class RpcHost:
             runtime_builder=selected_runtime_builder,
             configure_overrides=configure_overrides,
         )
+        skill_catalog = await discover_skill_catalog(
+            project_root=project_context_root,
+            trusted=options.startup_trusted,
+            protected_paths=config.protected_paths,
+        )
         initial_configuration = resolve_coding_session_configuration(
             config,
             providers=runtime.providers,
             models=runtime.models,
             trusted=options.startup_trusted,
+            skill_catalog=skill_catalog,
         )
         agent = CodingSession.from_configuration(
             initial_configuration,

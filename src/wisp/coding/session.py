@@ -75,6 +75,9 @@ from wisp.sessions.entries import (
 )
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import SessionReplay, replay_session_entries
+from wisp.skills.models import SkillCatalog
+from wisp.skills.prompt import build_skill_index
+from wisp.skills.tool import SkillTool
 from wisp.tool_presentation import tool_result_status
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.context import ToolContext
@@ -152,6 +155,7 @@ class CodingSession:
         project_context_root: Path | None = None,
         max_tool_iterations: int | None = None,
         trusted: bool = False,
+        skill_catalog: SkillCatalog | None = None,
         context_reserve_tokens: int = 16_384,
         auto_compaction_enabled: bool = True,
         mode: AgentMode = DEFAULT_AGENT_MODE,
@@ -191,6 +195,7 @@ class CodingSession:
                 effort=effort,
                 models=models,
                 tool_context=tool_context or ToolContext.default(),
+                skill_catalog=skill_catalog or SkillCatalog(),
                 trusted=trusted,
                 context_reserve_tokens=context_reserve_tokens,
                 auto_compaction_enabled=auto_compaction_enabled,
@@ -232,6 +237,7 @@ class CodingSession:
             project_context_root=project_context_root,
             max_tool_iterations=max_tool_iterations,
             trusted=configuration.trusted,
+            skill_catalog=configuration.skill_catalog,
             context_reserve_tokens=configuration.context_reserve_tokens,
             auto_compaction_enabled=configuration.auto_compaction_enabled,
         )
@@ -246,6 +252,7 @@ class CodingSession:
             effort=self.effort,
             models=self.models,
             tool_context=self.tool_context,
+            skill_catalog=self.skill_catalog,
             trusted=self.trusted,
             context_reserve_tokens=self.context_reserve_tokens,
             auto_compaction_enabled=self.auto_compaction_enabled,
@@ -375,6 +382,7 @@ class CodingSession:
         self.models = configuration.models
         self._cost_estimator = CostEstimator(configuration.models)
         self.tool_context = configuration.tool_context
+        self.skill_catalog = configuration.skill_catalog
         self.trusted = configuration.trusted
         self.context_reserve_tokens = configuration.context_reserve_tokens
         self.auto_compaction_enabled = configuration.auto_compaction_enabled
@@ -435,10 +443,11 @@ class CodingSession:
         async def emit(event: WispEvent) -> WispEvent:
             return await self._emit(event, session=session, operation_id=operation_id)
 
-        effective_tools = self._effective_tools()
-        prompt_messages = self._prompt_messages(effective_tools)
+        operation_registry = self._operation_tool_registry()
+        effective_tools = self._effective_tools(operation_registry)
+        prompt_messages = self._prompt_messages(effective_tools, registry=operation_registry)
         executor = ConfiguredToolExecutor(
-            registry=self.tool_registry,
+            registry=operation_registry,
             context=self.tool_context,
             policy=self._effective_tool_policy(effective_tools),
             approval_policy=self.tool_approval_policy,
@@ -1325,15 +1334,16 @@ class CodingSession:
         except UnknownToolError:
             return True
 
-    def _effective_tools(self) -> tuple[ToolSpec, ...]:
+    def _effective_tools(self, registry: ToolRegistry | None = None) -> tuple[ToolSpec, ...]:
         """Return the startup-authorized tools available in the current mode."""
 
-        if self.mode == "build" or self.tool_registry is None:
+        effective_registry = registry if registry is not None else self.tool_registry
+        if self.mode == "build" or effective_registry is None:
             return self.tools if self.mode == "build" else ()
         build_names = {tool.name for tool in self.tools}
         return tuple(
             ToolSpec.from_tool(tool)
-            for tool in self.tool_registry.all()
+            for tool in effective_registry.all()
             if tool.name in build_names and tool.safety == "read" and self.tool_policy.allows(tool)
         )
 
@@ -1342,20 +1352,40 @@ class CodingSession:
             return self.tool_policy
         return ToolPolicy.allow_tool_names({tool.name for tool in tools})
 
-    def _prompt_messages(self, tools: Sequence[ToolSpec] | None = None) -> tuple[Message, ...]:
+    def _prompt_messages(
+        self,
+        tools: Sequence[ToolSpec] | None = None,
+        *,
+        registry: ToolRegistry | None = None,
+    ) -> tuple[Message, ...]:
         effective_tools = tuple(tools) if tools is not None else self._effective_tools()
+        effective_registry = registry if registry is not None else self.tool_registry
+        effective_names = {tool.name for tool in effective_tools}
+        skill_index = (
+            build_skill_index(self.skill_catalog)
+            if effective_registry is not None
+            and any(
+                type(tool) is SkillTool and tool.name in effective_names
+                for tool in effective_registry.all()
+            )
+            else ""
+        )
         if self.prompt_messages is not None:
-            messages = self.prompt_messages
+            messages = (
+                (*self.prompt_messages, Message(role="system", content=skill_index))
+                if skill_index
+                else self.prompt_messages
+            )
             if self.mode == "plan":
                 return (*messages, Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT))
             return messages
-        return build_prompt_messages(
+        messages = build_prompt_messages(
             cwd=self.tool_context.cwd,
             tools=effective_tools,
-            tool_prompt_metadata=self.tool_registry.prompt_metadata(
+            tool_prompt_metadata=effective_registry.prompt_metadata(
                 tool.name for tool in effective_tools
             )
-            if self.tool_registry is not None
+            if effective_registry is not None
             else (),
             mode=self.mode,
             max_context_chars=self.project_context_max_chars,
@@ -1364,6 +1394,26 @@ class CodingSession:
             trusted_context_root=self.project_context_root
             or resolve_project_context_root(self.tool_context.cwd),
         )
+        if not skill_index:
+            return messages
+        skill_message = Message(role="system", content=skill_index)
+        if self.mode == "plan":
+            return (*messages[:-1], skill_message, messages[-1])
+        return (*messages, skill_message)
+
+    def _operation_tool_registry(self) -> ToolRegistry | None:
+        """Bind the selected skill tool to this operation's immutable catalog snapshot."""
+
+        if self.tool_registry is None:
+            return None
+        registry = ToolRegistry()
+        for tool in self.tool_registry.all():
+            operation_tool = SkillTool(self.skill_catalog) if type(tool) is SkillTool else tool
+            registry.register(
+                operation_tool,
+                prompt=self.tool_registry.prompt_metadata_for(tool.name),
+            )
+        return registry
 
     def _conversation_history(self, history: Sequence[Message]) -> tuple[Message, ...]:
         """Retain raw tool metadata while replacing stale system prompts."""

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from wisp.skills import filesystem as skill_filesystem
 from wisp.skills.metadata import SkillMetadataError, read_skill_metadata
 from wisp.skills.models import (
     SkillCatalog,
@@ -25,6 +26,19 @@ MAX_FRONTMATTER_BYTES = 16 * 1024
 MAX_ROOT_ENTRIES = 256
 MAX_ROOT_FRONTMATTER_BYTES = 256 * 1024
 MAX_CATALOG_SKILLS = 256
+
+# Keep local aliases so discovery's platform-fallback tests can replace one primitive
+# without affecting progressive resource loading, which shares the implementations.
+_close_windows_handle = skill_filesystem.close_windows_handle
+_is_link_like = skill_filesystem.is_link_like
+_shared_open_path_file = skill_filesystem.open_path_file
+_open_relative = skill_filesystem.open_relative
+_open_windows_directory_guard = skill_filesystem.open_windows_directory_guard
+_open_windows_metadata_handle = skill_filesystem.open_windows_file_handle
+_resolved_open_file = skill_filesystem.resolved_open_file
+_resolved_windows_handle = skill_filesystem.resolved_windows_handle
+_windows_handle_is_reparse_point = skill_filesystem.windows_handle_is_reparse_point
+_windows_handle_to_fd = skill_filesystem.windows_handle_to_fd
 
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -869,21 +883,8 @@ def _path_escape_diagnostic(
     return None
 
 
-def _resolved_open_file(metadata_fd: int, *, path: Path) -> Path:
-    if os.name != "nt":
-        raise RuntimeError("stable opened-file resolution is unavailable on this platform")
-
-    import importlib
-
-    msvcrt = importlib.import_module("msvcrt")
-    handle = msvcrt.get_osfhandle(metadata_fd)
-    return _resolved_windows_handle(handle, path=path)
-
-
 def _open_path_metadata(path: Path) -> int:
-    if os.name == "nt":
-        return _open_windows_metadata(path)
-    return os.open(path, _FILE_FLAGS)
+    return _shared_open_path_file(path)
 
 
 def _open_path_skill_guard(path: Path) -> int | None:
@@ -916,156 +917,8 @@ def _open_windows_metadata(path: Path) -> int:
         raise
 
 
-def _open_windows_metadata_handle(path: Path) -> int:
-    import importlib
-
-    ctypes = importlib.import_module("ctypes")
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    create_file = kernel32.CreateFileW
-    create_file.argtypes = [
-        ctypes.c_wchar_p,
-        ctypes.c_uint32,
-        ctypes.c_uint32,
-        ctypes.c_void_p,
-        ctypes.c_uint32,
-        ctypes.c_uint32,
-        ctypes.c_void_p,
-    ]
-    create_file.restype = ctypes.c_void_p
-    handle = create_file(
-        str(path),
-        0x80000000,  # GENERIC_READ
-        0x3,  # FILE_SHARE_READ | FILE_SHARE_WRITE; deliberately omit DELETE
-        None,
-        3,  # OPEN_EXISTING
-        0x02200000,  # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
-        None,
-    )
-    if handle == ctypes.c_void_p(-1).value:
-        error = ctypes.get_last_error()
-        raise _windows_error(ctypes, error, path)
-    return int(handle)
-
-
-def _windows_handle_is_reparse_point(handle: int, *, path: Path) -> bool:
-    import importlib
-
-    ctypes = importlib.import_module("ctypes")
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    file_attribute_tag_info = type(
-        "FileAttributeTagInfo",
-        (ctypes.Structure,),
-        {
-            "_fields_": [
-                ("file_attributes", ctypes.c_uint32),
-                ("reparse_tag", ctypes.c_uint32),
-            ]
-        },
-    )
-    info = file_attribute_tag_info()
-    get_file_information = kernel32.GetFileInformationByHandleEx
-    get_file_information.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        ctypes.c_uint32,
-    ]
-    get_file_information.restype = ctypes.c_int
-    if not get_file_information(
-        ctypes.c_void_p(handle),
-        9,  # FileAttributeTagInfo
-        ctypes.byref(info),
-        ctypes.sizeof(info),
-    ):
-        error = ctypes.get_last_error()
-        raise _windows_error(ctypes, error, path)
-    return bool(info.file_attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
-
-
-def _windows_handle_to_fd(handle: int) -> int:
-    import importlib
-
-    msvcrt = importlib.import_module("msvcrt")
-    return int(msvcrt.open_osfhandle(handle, os.O_RDONLY))
-
-
-def _open_windows_directory_guard(path: Path) -> int:
-    import importlib
-
-    ctypes = importlib.import_module("ctypes")
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    create_file = kernel32.CreateFileW
-    create_file.argtypes = [
-        ctypes.c_wchar_p,
-        ctypes.c_uint32,
-        ctypes.c_uint32,
-        ctypes.c_void_p,
-        ctypes.c_uint32,
-        ctypes.c_uint32,
-        ctypes.c_void_p,
-    ]
-    create_file.restype = ctypes.c_void_p
-    handle = create_file(
-        str(path),
-        0x80,  # FILE_READ_ATTRIBUTES
-        0x3,  # FILE_SHARE_READ | FILE_SHARE_WRITE; deliberately omit DELETE
-        None,
-        3,  # OPEN_EXISTING
-        0x02200000,  # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
-        None,
-    )
-    if handle == ctypes.c_void_p(-1).value:
-        error = ctypes.get_last_error()
-        raise _windows_error(ctypes, error, path)
-    return int(handle)
-
-
-def _close_windows_handle(handle: int) -> None:
-    import importlib
-
-    ctypes = importlib.import_module("ctypes")
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = [ctypes.c_void_p]
-    close_handle.restype = ctypes.c_int
-    close_handle(ctypes.c_void_p(handle))
-
-
-def _resolved_windows_handle(handle: int, *, path: Path) -> Path:
-    # Resolve the stable handle so junction swaps cannot redirect later path use.
-    import importlib
-
-    ctypes = importlib.import_module("ctypes")
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    get_final_path = kernel32.GetFinalPathNameByHandleW
-    get_final_path.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_wchar_p,
-        ctypes.c_uint32,
-        ctypes.c_uint32,
-    ]
-    get_final_path.restype = ctypes.c_uint32
-    windows_handle = ctypes.c_void_p(handle)
-    size = get_final_path(windows_handle, None, 0, 0)
-    if size == 0:
-        error = ctypes.get_last_error()
-        raise _windows_error(ctypes, error, path)
-    buffer = ctypes.create_unicode_buffer(size + 1)
-    if get_final_path(windows_handle, buffer, len(buffer), 0) == 0:
-        error = ctypes.get_last_error()
-        raise _windows_error(ctypes, error, path)
-    resolved = buffer.value
-    if resolved.startswith("\\\\?\\UNC\\"):
-        resolved = "\\\\" + resolved[8:]
-    elif resolved.startswith("\\\\?\\"):
-        resolved = resolved[4:]
-    return Path(resolved)
-
-
 def _windows_error(ctypes: Any, error: int, path: Path) -> OSError:
-    exc: OSError = ctypes.WinError(error)
-    exc.filename = str(path)
-    return exc
+    return skill_filesystem.windows_error(ctypes, error, path)
 
 
 def _diagnostic(
@@ -1086,19 +939,3 @@ def _diagnostic(
 
 def _os_error_message(exc: OSError) -> str:
     return exc.strerror or type(exc).__name__
-
-
-def _is_link_like(path: Path) -> bool:
-    return path.is_symlink() or path.is_junction()
-
-
-def _open_relative(
-    name: str,
-    flags: int,
-    *,
-    directory_fd: int | None,
-    directory_path: Path,
-) -> int:
-    if directory_fd is not None and _OPEN_SUPPORTS_DIR_FD:
-        return os.open(name, flags, dir_fd=directory_fd)
-    return os.open(directory_path / name, flags)

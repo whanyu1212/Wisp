@@ -12,6 +12,7 @@ from wisp.providers.openai_codex import OpenAICodexProvider
 from wisp.retry import RetryPolicy
 from wisp.runtime.api import ExtensionAPI
 from wisp.runtime.builtin_commands import builtin_command_descriptors
+from wisp.skills.tool import SkillTool
 from wisp.tools.base import ToolPromptMetadata
 from wisp.tools.builtin import builtin_tools
 from wisp.tools.process_manager import ProcessSupervisor
@@ -64,5 +65,6 @@ def activate(
     api.register_provider(GoogleProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
     for tool in builtin_tools(process_supervisor=process_supervisor):
         api.register_tool(tool, prompt=_BUILTIN_TOOL_PROMPTS.get(tool.name))
+    api.register_tool(SkillTool())
     for command in builtin_command_descriptors():
         api.register_command(command)

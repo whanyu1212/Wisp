@@ -13,6 +13,7 @@ from tests.cli_support import *
 from tests.cli_support import _test_model_registry
 from wisp.providers.events import ProviderResponseCompleted, ProviderResponseStarted
 from wisp.providers.fake import ScriptedProvider
+from wisp.skills.tool import SkillTool
 
 
 def test_rpc_prompt_in_undecided_project_emits_trust_request(tmp_path: Path) -> None:
@@ -125,6 +126,75 @@ def test_rpc_first_trust_applies_project_context_without_setting_changes(
         message.content for message in provider.calls[0].messages if message.role == "system"
     )
     assert "trusted instruction" in system_content
+
+
+def test_rpc_first_trust_refreshes_project_skills_before_provider_request(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from wisp.cli import rpc
+    from wisp.config import WispConfig
+
+    project = tmp_path / "project"
+    skill_root = project / ".wisp" / "skills" / "project-demo"
+    skill_root.mkdir(parents=True)
+    (skill_root / "SKILL.md").write_text(
+        "---\nname: project-demo\ndescription: Trusted project workflow\n---\nUse it.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("WISP_PROVIDER", "scripted")
+    monkeypatch.setenv("WISP_MODEL", "")
+    monkeypatch.setenv("WISP_TRUST", "1")
+    session_dir = project / "sessions"
+    config = WispConfig.from_env(
+        provider="scripted",
+        session_dir=session_dir,
+        project_dir=project,
+        trusted=False,
+    )
+    provider = ScriptedProvider(
+        [[ProviderResponseStarted(model="scripted"), ProviderResponseCompleted(content="done")]]
+    )
+    providers = ProviderRegistry()
+    providers.register(provider)
+    tools = ToolRegistry()
+    tools.register(SkillTool())
+    events = EventBus()
+    runtime = WispRuntime(
+        providers=providers,
+        tools=tools,
+        events=events,
+        api=ExtensionAPI(providers=providers, tools=tools, events=events),
+        models=_test_model_registry(),
+    )
+
+    async def build_runtime_for_config(_config: WispConfig) -> WispRuntime:
+        return runtime
+
+    async def fake_read_rpc_stdin(send: Any, _stop_reader: Any) -> None:
+        async with send:
+            await send.send(rpc._RpcInputCommand({"id": "p1", "type": "prompt", "prompt": "hi"}))
+            await send.send(rpc._RpcInputClosed())
+
+    monkeypatch.setattr(rpc, "_build_runtime_for_config", build_runtime_for_config)
+    monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
+
+    async def scenario() -> None:
+        with redirect_stdout(io.StringIO()):
+            await rpc._run_rpc(
+                config,
+                allow_read_tools=True,
+                startup_trusted=False,
+                config_overrides=rpc._ConfigOverrides(provider="scripted", session_dir=session_dir),
+                project_context_root=project,
+            )
+
+    anyio.run(scenario)
+    system_content = "\n".join(
+        message.content for message in provider.calls[0].messages if message.role == "system"
+    )
+    assert '"name":"project-demo"' in system_content
+    assert str(skill_root) not in system_content
 
 
 @pytest.mark.parametrize(

@@ -26,6 +26,7 @@ from wisp.providers.base import ProviderError
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore, SessionError
+from wisp.skills.lifecycle import discover_skill_catalog
 from wisp.tools.approval import ToolApprovalDecision as ToolApprovalDecision
 from wisp.tools.result import ToolError
 from wisp.tui.rendering import TuiRendererKind
@@ -608,11 +609,17 @@ async def _run_print_with_runtime(
     sessions = JsonlSessionStore(config.session_dir)
     session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
     history = session.read_context_messages() if session is not None else ()
+    skill_catalog = await discover_skill_catalog(
+        project_root=project_context_root,
+        trusted=trusted,
+        protected_paths=config.protected_paths,
+    )
     initial_configuration = resolve_coding_session_configuration(
         config,
         providers=runtime.providers,
         models=runtime.models,
         trusted=trusted,
+        skill_catalog=skill_catalog,
     )
     agent = CodingSession.from_configuration(
         initial_configuration,
