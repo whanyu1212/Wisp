@@ -118,7 +118,7 @@ def read_skill_metadata(
 def _read_frontmatter(metadata_fd: int, *, max_frontmatter_bytes: int) -> tuple[str, int]:
     consumed = 0
     lines: list[bytes] = []
-    with os.fdopen(os.dup(metadata_fd), "rb") as stream:
+    with os.fdopen(os.dup(metadata_fd), "rb", buffering=0) as stream:
         opening = stream.readline(max_frontmatter_bytes + 1)
         consumed += len(opening)
         if opening not in {b"---\n", b"---\r\n"}:

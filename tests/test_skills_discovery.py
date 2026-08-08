@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,29 @@ def test_discovers_valid_metadata_without_reading_the_body(tmp_path: Path) -> No
     assert entry.metadata == (("author", "example"), ("version", "1"))
     assert entry.allowed_tools == "Bash(pdftotext:*) Read"
     assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["unsupported-field"]
+
+
+def test_frontmatter_reader_does_not_read_ahead_into_skill_body(tmp_path: Path) -> None:
+    skill = _write_skill(
+        tmp_path / ".wisp" / "skills",
+        "demo",
+        body=b"x" * 16_384,
+    )
+    skill_file = skill / "SKILL.md"
+    metadata_fd = os.open(skill_file, os.O_RDONLY)
+    try:
+        _, consumed, _ = metadata_module.read_skill_metadata(
+            metadata_fd,
+            source="user:wisp",
+            skill_root=skill,
+            directory_name="demo",
+            skill_file=skill_file,
+            max_frontmatter_bytes=16 * 1024,
+        )
+
+        assert os.lseek(metadata_fd, 0, os.SEEK_CUR) == consumed
+    finally:
+        os.close(metadata_fd)
 
 
 @pytest.mark.parametrize(
