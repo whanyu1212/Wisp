@@ -19,9 +19,16 @@ _SUPPORTED_FIELDS = frozenset(
     {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
 )
 _YAML_BOOL_TAG = "tag:yaml.org,2002:bool"
+_YAML_FLOAT_TAG = "tag:yaml.org,2002:float"
 _YAML_INT_TAG = "tag:yaml.org,2002:int"
 _YAML_TIMESTAMP_TAG = "tag:yaml.org,2002:timestamp"
 _YAML_12_BOOL = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
+_YAML_12_FLOAT = re.compile(
+    r"^(?:"
+    r"[-+]?(?:(?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?|[0-9]+[eE][-+]?[0-9]+)"
+    r"|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)"
+    r")$"
+)
 _YAML_12_INT = re.compile(
     r"^(?:[-+]?0b[0-1]+|[-+]?0o[0-7]+|[-+]?(?:0|[1-9][0-9]*)|[-+]?0x[0-9a-fA-F]+)$"
 )
@@ -93,7 +100,7 @@ _StrictSafeLoader.yaml_implicit_resolvers = {
     key: [
         (tag, resolver)
         for tag, resolver in resolvers
-        if tag not in {_YAML_BOOL_TAG, _YAML_INT_TAG, _YAML_TIMESTAMP_TAG}
+        if tag not in {_YAML_BOOL_TAG, _YAML_FLOAT_TAG, _YAML_INT_TAG, _YAML_TIMESTAMP_TAG}
     ]
     for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
@@ -104,6 +111,10 @@ for _first_character in "tTfF":
 for _first_character in "-+0123456789":
     _StrictSafeLoader.yaml_implicit_resolvers.setdefault(_first_character, []).append(
         (_YAML_INT_TAG, _YAML_12_INT)
+    )
+for _first_character in "-+0123456789.":
+    _StrictSafeLoader.yaml_implicit_resolvers.setdefault(_first_character, []).append(
+        (_YAML_FLOAT_TAG, _YAML_12_FLOAT)
     )
 _StrictSafeLoader.add_constructor(_YAML_INT_TAG, _construct_yaml_12_int)
 

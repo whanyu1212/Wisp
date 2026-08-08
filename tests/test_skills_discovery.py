@@ -70,10 +70,14 @@ def test_uses_yaml_12_scalar_rules_for_string_fields(tmp_path: Path) -> None:
     _write_skill(
         tmp_path / ".wisp" / "skills",
         "yaml-strings",
-        description="1_2",
+        description="1_2.3",
         extra=(
             "compatibility: 2026-08-08\n"
-            "metadata:\n  legacy-bool: yes\n  on: off\n  leading-zero: 0123\n"
+            "metadata:\n"
+            "  legacy-bool: yes\n"
+            "  on: off\n"
+            "  leading-zero: 0123\n"
+            "  underscore-int: 1_2\n"
         ),
     )
 
@@ -81,12 +85,13 @@ def test_uses_yaml_12_scalar_rules_for_string_fields(tmp_path: Path) -> None:
 
     entry = catalog.get("yaml-strings")
     assert entry is not None
-    assert entry.description == "1_2"
+    assert entry.description == "1_2.3"
     assert entry.compatibility == "2026-08-08"
     assert entry.metadata == (
         ("leading-zero", "0123"),
         ("legacy-bool", "yes"),
         ("on", "off"),
+        ("underscore-int", "1_2"),
     )
 
 
@@ -188,6 +193,7 @@ def test_isolates_yaml_constructor_value_errors(
         ("demo", 'name: " demo "\ndescription: test\n', "name must be"),
         ("other", "name: demo\ndescription: test\n", "does not match"),
         ("demo", "name: demo\ndescription: 42\n", "description is required"),
+        ("demo", "name: demo\ndescription: 1.5\n", "description is required"),
         ("demo", "name: demo\ndescription: test\nmetadata: []\n", "metadata must"),
         (
             "demo",
