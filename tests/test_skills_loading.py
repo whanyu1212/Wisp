@@ -173,6 +173,35 @@ def test_resource_reader_bounds_each_read(
     assert read_sizes == [9]
 
 
+def test_path_fallback_closes_resource_when_handle_resolution_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = _entry(tmp_path)
+    resource = entry.root / "resource.txt"
+    resource.write_text("content", encoding="utf-8")
+    opened: list[int] = []
+    original_open = loading_module.open_path_file
+
+    def recording_open(path: Path) -> int:
+        file_fd = original_open(path)
+        opened.append(file_fd)
+        return file_fd
+
+    def fail_resolution(file_fd: int, *, path: Path) -> Path:
+        raise OSError("resolution failed")
+
+    monkeypatch.setattr(loading_module, "open_path_file", recording_open)
+    monkeypatch.setattr(loading_module, "resolved_open_file", fail_resolution)
+
+    with pytest.raises(OSError, match="resolution failed"):
+        loading_module._open_resource_by_path(entry.root, "resource.txt")
+
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        loading_module.os.fstat(opened[0])
+
+
 def test_rejects_invalid_utf8(tmp_path: Path) -> None:
     entry = _entry(tmp_path)
     (entry.root / "binary.dat").write_bytes(b"valid\n\xffbad")

@@ -157,6 +157,7 @@ def _open_canonical_directory(path: Path) -> int:
 
 def _open_resource_by_path(root: Path, resource: str) -> tuple[int, Path, tuple[int, ...]]:
     guards: list[int] = []
+    file_fd: int | None = None
     current = root
     try:
         for component in PurePosixPath(resource).parts[:-1]:
@@ -174,10 +175,11 @@ def _open_resource_by_path(root: Path, resource: str) -> tuple[int, Path, tuple[
         try:
             resolved.relative_to(root)
         except ValueError:
-            os.close(file_fd)
             raise ToolError(f"Skill resource resolves outside its root: {resource}") from None
         return file_fd, resolved, tuple(guards)
     except BaseException:
+        if file_fd is not None:
+            os.close(file_fd)
         for guard in guards:
             close_windows_handle(guard)
         raise
