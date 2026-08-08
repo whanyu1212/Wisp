@@ -613,7 +613,7 @@ def _read_skill_entry(
 
     if root_fd is None:
         try:
-            metadata_fd = os.open(skill_file, _FILE_FLAGS)
+            metadata_fd = _open_path_metadata(skill_file)
         except FileNotFoundError:
             return None, 0, ()
         except OSError as exc:
@@ -814,6 +814,96 @@ def _resolved_open_file(metadata_fd: int, *, path: Path) -> Path:
     msvcrt = importlib.import_module("msvcrt")
     handle = msvcrt.get_osfhandle(metadata_fd)
     return _resolved_windows_handle(handle, path=path)
+
+
+def _open_path_metadata(path: Path) -> int:
+    if os.name == "nt":
+        return _open_windows_metadata(path)
+    return os.open(path, _FILE_FLAGS)
+
+
+def _open_windows_metadata(path: Path) -> int:
+    handle = _open_windows_metadata_handle(path)
+    try:
+        if _windows_handle_is_reparse_point(handle, path=path):
+            raise OSError(errno.ELOOP, "skill metadata is a reparse point", path)
+        return _windows_handle_to_fd(handle)
+    except BaseException:
+        _close_windows_handle(handle)
+        raise
+
+
+def _open_windows_metadata_handle(path: Path) -> int:
+    import importlib
+
+    ctypes = importlib.import_module("ctypes")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    create_file.restype = ctypes.c_void_p
+    handle = create_file(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x3,  # FILE_SHARE_READ | FILE_SHARE_WRITE; deliberately omit DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x02200000,  # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        error = ctypes.get_last_error()
+        raise OSError(error, os.strerror(error), path)
+    return int(handle)
+
+
+def _windows_handle_is_reparse_point(handle: int, *, path: Path) -> bool:
+    import importlib
+
+    ctypes = importlib.import_module("ctypes")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    file_attribute_tag_info = type(
+        "FileAttributeTagInfo",
+        (ctypes.Structure,),
+        {
+            "_fields_": [
+                ("file_attributes", ctypes.c_uint32),
+                ("reparse_tag", ctypes.c_uint32),
+            ]
+        },
+    )
+    info = file_attribute_tag_info()
+    get_file_information = kernel32.GetFileInformationByHandleEx
+    get_file_information.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    ]
+    get_file_information.restype = ctypes.c_int
+    if not get_file_information(
+        ctypes.c_void_p(handle),
+        9,  # FileAttributeTagInfo
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        error = ctypes.get_last_error()
+        raise OSError(error, os.strerror(error), path)
+    return bool(info.file_attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def _windows_handle_to_fd(handle: int) -> int:
+    import importlib
+
+    msvcrt = importlib.import_module("msvcrt")
+    return int(msvcrt.open_osfhandle(handle, os.O_RDONLY))
 
 
 def _open_windows_directory_guard(path: Path) -> int:
