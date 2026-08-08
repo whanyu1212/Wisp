@@ -279,11 +279,11 @@ def test_coding_session_persists_follow_up_at_injection_boundary(tmp_path: Path)
         queued = False
         persisted_at_injection = False
 
-        def queue_once(event: WispEvent) -> None:
+        async def queue_once(event: WispEvent) -> None:
             nonlocal queued
             if event.type == "agent.started" and not queued:
                 queued = True
-                update = agent.follow_up("continue")
+                update = await agent.follow_up("continue")
                 assert update.follow_up == ("continue",)
 
         def observe_first_completion(event: WispEvent) -> None:
@@ -306,6 +306,8 @@ def test_coding_session_persists_follow_up_at_injection_boundary(tmp_path: Path)
         event_bus.on("queue.message.injected", observe_injection)
         events = [event async for event in agent.run("initial", session=session)]
         assert persisted_at_injection
+        with pytest.raises(RuntimeError, match="no active agent run"):
+            await agent.follow_up("too late")
         return events, session.read_context_messages(), agent
 
     events, messages, agent = anyio.run(run_agent)
@@ -324,8 +326,6 @@ def test_coding_session_persists_follow_up_at_injection_boundary(tmp_path: Path)
     assert injected.content == "continue"
     assert any(isinstance(event, QueueUpdated) and event.follow_up == () for event in events)
     assert messages[-2].created_at == injected.timestamp
-    with pytest.raises(RuntimeError, match="no active agent run"):
-        agent.follow_up("too late")
 
 
 def test_coding_session_accepts_and_persists_steering_from_agent_start(tmp_path: Path) -> None:
@@ -347,13 +347,15 @@ def test_coding_session_accepts_and_persists_steering_from_agent_start(tmp_path:
         event_bus = EventBus()
         agent = CodingSession(provider=provider, sessions=store, events=event_bus)
 
-        def queue_at_start(event: WispEvent) -> None:
+        async def queue_at_start(event: WispEvent) -> None:
             assert event.type == "agent.started"
-            update = agent.steer("change direction")
+            update = await agent.steer("change direction")
             assert update.steering == ("change direction",)
 
         event_bus.on("agent.started", queue_at_start)
         events = [event async for event in agent.run("initial", session=session)]
+        with pytest.raises(RuntimeError, match="no active agent run"):
+            await agent.steer("too late")
         return events, session.read_context_messages(), agent
 
     events, messages, agent = anyio.run(run_agent)
@@ -372,8 +374,6 @@ def test_coding_session_accepts_and_persists_steering_from_agent_start(tmp_path:
         and event.content == "change direction"
         for event in events
     )
-    with pytest.raises(RuntimeError, match="no active agent run"):
-        agent.steer("too late")
 
 
 def test_coding_session_queue_state_is_safe_while_idle(tmp_path: Path) -> None:
@@ -483,14 +483,14 @@ def test_coding_session_queue_facade_delegates_to_active_harness(tmp_path: Path)
         event_bus = EventBus()
         agent = CodingSession(provider=provider, sessions=store, events=event_bus)
 
-        def exercise_queue_facade(event: WispEvent) -> None:
+        async def exercise_queue_facade(event: WispEvent) -> None:
             if event.type != "agent.started":
                 return
             assert agent.queue_state().steering == ()
             assert agent.set_queue_mode("steering", "all").steering_mode == "all"
             assert agent.set_queue_mode("follow_up", "all").follow_up_mode == "all"
-            assert agent.steer("steer one").steering == ("steer one",)
-            assert agent.follow_up("follow one").follow_up == ("follow one",)
+            assert (await agent.steer("steer one")).steering == ("steer one",)
+            assert (await agent.follow_up("follow one")).follow_up == ("follow one",)
             snapshot = agent.state_snapshot()
             assert snapshot.steering_mode == "all"
             assert snapshot.follow_up_mode == "all"
@@ -502,7 +502,7 @@ def test_coding_session_queue_facade_delegates_to_active_harness(tmp_path: Path)
             assert popped is not None
             assert popped.content == "steer one"
             assert pop_state.steering == ()
-            assert agent.steer("steer two").steering == ("steer two",)
+            assert (await agent.steer("steer two")).steering == ("steer two",)
             cleared_follow_up, follow_up_state = agent.clear_queue("follow_up")
             assert [message.content for message in cleared_follow_up.follow_up] == ["follow one"]
             assert follow_up_state.follow_up == ()
@@ -583,16 +583,16 @@ def test_coding_session_retains_unconsumed_queues_for_same_session_retry(
         agent = CodingSession(provider=provider, sessions=store, events=event_bus)
         queued = False
 
-        def queue_once(event: WispEvent) -> None:
+        async def queue_once(event: WispEvent) -> None:
             nonlocal queued
             if not queued:
                 queued = True
                 agent.set_queue_mode("steering", "all")
                 agent.set_queue_mode("follow_up", "all")
-                agent.steer("retained steering one")
-                agent.steer("retained steering two")
-                agent.follow_up("retained follow-up one")
-                agent.follow_up("retained follow-up two")
+                await agent.steer("retained steering one")
+                await agent.steer("retained steering two")
+                await agent.follow_up("retained follow-up one")
+                await agent.follow_up("retained follow-up two")
 
         event_bus.on("agent.started", queue_once)
         with pytest.raises(RuntimeError, match="provider failed"):

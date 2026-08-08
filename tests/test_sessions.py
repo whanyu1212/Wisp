@@ -206,7 +206,7 @@ def test_session_names_are_normalized_cleared_and_latest_wins(tmp_path: Path) ->
     assert session.read_name() is None
     entries = session.read_entries()
     info_entries = [entry for entry in entries if isinstance(entry, SessionInfoSessionEntry)]
-    assert [entry.schema_version for entry in info_entries] == [5, 5, 5]
+    assert [entry.schema_version for entry in info_entries] == [6, 6, 6]
     assert [entry.name for entry in info_entries] == [
         "alpha beta",
         "alpha beta",
@@ -1270,7 +1270,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
         "event",
         "compaction",
     ]
-    assert [record["schema_version"] for record in records] == [5, 5, 5, 5, 5]
+    assert [record["schema_version"] for record in records] == [6, 6, 6, 6, 6]
     assert [record["parent_id"] for record in records] == [
         None,
         records[0]["id"],
@@ -1279,7 +1279,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
         records[3]["id"],
     ]
     assert records[3]["event"]["schema_version"] == 1
-    assert records[3]["event"]["payload"]["schema_version"] == 27
+    assert records[3]["event"]["payload"]["schema_version"] == 28
     assert isinstance(session.read_entries()[0], MessageSessionEntry)
     assert isinstance(session.read_entries()[3], EventSessionEntry)
     assert isinstance(session.read_entries()[4], CompactionSessionEntry)
@@ -1379,7 +1379,7 @@ def test_session_upgrades_v1_entries_to_a_parent_chain_without_rewriting(tmp_pat
 
     entries = JsonlSessionStore(tmp_path).load(path).read_entries()
 
-    assert [entry.schema_version for entry in entries] == [5, 5]
+    assert [entry.schema_version for entry in entries] == [6, 6]
     assert [entry.parent_id for entry in entries if isinstance(entry, MessageSessionEntry)] == [
         None,
         "first",
@@ -1441,7 +1441,7 @@ def test_session_upgrades_v3_entries_but_rejects_v4_tool_result_field(
     loaded = JsonlSessionStore(tmp_path).load(legacy_path).read_entries()[0]
 
     assert isinstance(loaded, MessageSessionEntry)
-    assert loaded.schema_version == 5
+    assert loaded.schema_version == 6
     assert loaded.tool_result is None
 
     malformed_path = tmp_path / "v3-tool-result.jsonl"
@@ -1482,7 +1482,7 @@ def test_session_upgrades_v4_active_leaf_as_system_transition(tmp_path: Path) ->
     loaded = JsonlSessionStore(tmp_path).load(path).read_entries()[-1]
 
     assert isinstance(loaded, ActiveLeafSessionEntry)
-    assert loaded.schema_version == 5
+    assert loaded.schema_version == 6
     assert loaded.reason == "system"
     assert loaded.selected_entry_id is None
     assert loaded.source_transition_id is None
@@ -1780,7 +1780,7 @@ def test_session_rejects_malformed_event_only_on_typed_access(tmp_path: Path) ->
     ("schema_version", "error_type", "match"),
     [
         ("1", MalformedSessionEntryError, "must be an integer"),
-        (6, UnsupportedSessionEntryVersionError, "schema_version 6"),
+        (7, UnsupportedSessionEntryVersionError, "schema_version 7"),
     ],
 )
 def test_session_distinguishes_malformed_and_future_entry_versions(

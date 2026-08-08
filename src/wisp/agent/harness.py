@@ -270,6 +270,7 @@ class AgentHarness:
                 QueueMessageInjected(
                     kind="steering",
                     content=message.content,
+                    skill_invocation=message.skill_invocation,
                     timestamp=message.created_at,
                 )
             )
@@ -279,8 +280,8 @@ class AgentHarness:
     def queue_updated_event(self) -> QueueUpdated:
         """Return current queue state as a portable versioned event."""
         return QueueUpdated(
-            steering=tuple(message.content for message in self._steering_queue),
-            follow_up=tuple(message.content for message in self._follow_up_queue),
+            steering=tuple(message.user_visible_content for message in self._steering_queue),
+            follow_up=tuple(message.user_visible_content for message in self._follow_up_queue),
             steering_mode=self._config.steering_mode,
             follow_up_mode=self._config.follow_up_mode,
         )
@@ -483,6 +484,7 @@ class AgentHarness:
                         yield QueueMessageInjected(
                             kind="steering",
                             content=message.content,
+                            skill_invocation=message.skill_invocation,
                             timestamp=message.created_at,
                         )
                     yield self.queue_updated_event()
@@ -519,6 +521,7 @@ class AgentHarness:
                     yield QueueMessageInjected(
                         kind="follow_up",
                         content=message.content,
+                        skill_invocation=message.skill_invocation,
                         timestamp=message.created_at,
                     )
                 yield self.queue_updated_event()

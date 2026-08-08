@@ -25,6 +25,7 @@ from wisp.events import (
     RpcMessageSnapshot,
     RpcMessageToolCallSnapshot,
     RpcMessageToolResultSnapshot,
+    RpcSkillInvocationSnapshot,
     ToolCallSnapshot,
     WispEvent,
 )
@@ -69,6 +70,7 @@ from wisp.sessions.replay import (
     replay_session_entries,
     resolve_session_tree,
 )
+from wisp.skills.models import SkillInvocationEvidence
 
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
@@ -1438,6 +1440,40 @@ def _rpc_message_snapshot(
         usage=message.usage,
         cost=message.cost,
         tool_result=_rpc_tool_result_snapshot(entry.tool_result, text_budget=text_budget),
+        skill_invocation=_rpc_skill_invocation_snapshot(
+            message.skill_invocation,
+            text_budget=text_budget,
+        ),
+    )
+
+
+def _rpc_skill_invocation_snapshot(
+    invocation: SkillInvocationEvidence | None,
+    *,
+    text_budget: _MessagePageTextBudget,
+) -> RpcSkillInvocationSnapshot | None:
+    if invocation is None:
+        return None
+    original, original_bytes, original_truncated = _clip_text_with_budget(
+        invocation.original_content,
+        limit=MESSAGE_CONTENT_BYTE_LIMIT,
+        text_budget=text_budget,
+    )
+    request, request_bytes, request_truncated = _clip_text_with_budget(
+        invocation.request,
+        limit=MESSAGE_CONTENT_BYTE_LIMIT,
+        text_budget=text_budget,
+    )
+    return RpcSkillInvocationSnapshot(
+        name=invocation.name,
+        original_content=original,
+        original_content_bytes=original_bytes,
+        original_content_truncated=original_truncated,
+        request=request,
+        request_bytes=request_bytes,
+        request_truncated=request_truncated,
+        content_sha256=invocation.content_sha256,
+        instructions_truncated=invocation.instructions_truncated,
     )
 
 
@@ -1812,12 +1848,23 @@ def _summary_entry_metadata_from_json(
             raise MalformedSessionEntryError(
                 f"V{version} session entry contains v5 transition field(s) {fields}{location}"
             )
+    message_payload = raw.get("message")
+    if version <= 5 and isinstance(message_payload, dict) and "skill_invocation" in message_payload:
+        raise MalformedSessionEntryError(
+            f"V{version} message session entries cannot include skill_invocation{location}"
+        )
     if version == 1:
         return _v1_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
     if version == 2:
         return _v2_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
     if version in {3, 4}:
         return _v3_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
+    if version == 5:
+        if raw.get("kind") == "active_leaf" and "reason" not in raw:
+            raise MalformedSessionEntryError(
+                f"V5 active-leaf session entries require reason{location}"
+            )
+        return _v5_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
     if version != SESSION_ENTRY_SCHEMA_VERSION:
         raise UnsupportedSessionEntryVersionError(
             f"Unsupported session entry schema_version {version}{location}; "

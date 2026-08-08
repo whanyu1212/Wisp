@@ -16,6 +16,11 @@ def test_parse_tui_slash_command_returns_none_for_prompt() -> None:
     assert parse_tui_slash_command("") is None
 
 
+@pytest.mark.parametrize("text", ["/skill:demo", "/skill:demo review this"])
+def test_parse_tui_slash_command_passes_skill_directives_to_core(text: str) -> None:
+    assert parse_tui_slash_command(text) is None
+
+
 @pytest.mark.parametrize(
     "text",
     [

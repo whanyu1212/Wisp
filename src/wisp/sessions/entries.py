@@ -35,7 +35,8 @@ from wisp.sessions.errors import (
     UnsupportedSessionEntryVersionError,
 )
 
-SESSION_ENTRY_SCHEMA_VERSION: Literal[5] = 5
+SESSION_ENTRY_SCHEMA_VERSION: Literal[6] = 6
+SKILL_INVOCATION_SESSION_SCHEMA_VERSION = 6
 PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION: Literal[1] = 1
 _MIN_SUPPORTED_EVENT_SCHEMA_VERSION = 5
 MAX_SESSION_NAME_BYTES = 256
@@ -47,7 +48,7 @@ class SessionEntryBase(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    schema_version: Literal[5] = SESSION_ENTRY_SCHEMA_VERSION
+    schema_version: Literal[6] = SESSION_ENTRY_SCHEMA_VERSION
     id: str = Field(default_factory=lambda: uuid4().hex, min_length=1)
     session_id: str = Field(min_length=1)
     operation_id: str | None = None
@@ -254,6 +255,15 @@ def session_entry_from_dict(
                 raise MalformedSessionEntryError(
                     f"V{version} session entry contains v5 transition field(s) {fields}{location}"
                 )
+        message_payload = raw.get("message")
+        if (
+            version <= 5
+            and isinstance(message_payload, dict)
+            and "skill_invocation" in message_payload
+        ):
+            raise MalformedSessionEntryError(
+                f"V{version} message session entries cannot include skill_invocation{location}"
+            )
         if version == 1:
             normalized = _upgrade_v1_entry(
                 raw,
@@ -286,6 +296,16 @@ def session_entry_from_dict(
                 parent_id=legacy_parent_id,
             )
             normalized["schema_version"] = SESSION_ENTRY_SCHEMA_VERSION
+        elif version == 5:
+            if raw.get("kind") == "active_leaf" and "reason" not in raw:
+                raise MalformedSessionEntryError(
+                    f"V5 active-leaf session entries require reason{location}"
+                )
+            normalized = _normalize_v2_structural_fields(
+                raw,
+                parent_id=legacy_parent_id,
+            )
+            normalized["schema_version"] = SESSION_ENTRY_SCHEMA_VERSION
         elif version != SESSION_ENTRY_SCHEMA_VERSION:
             raise UnsupportedSessionEntryVersionError(
                 f"Unsupported session entry schema_version {version}{location}; "
@@ -298,7 +318,7 @@ def session_entry_from_dict(
             )
             if normalized.get("kind") == "active_leaf" and "reason" not in normalized:
                 raise MalformedSessionEntryError(
-                    f"V5 active-leaf session entries require reason{location}"
+                    f"V6 active-leaf session entries require reason{location}"
                 )
     _require_persisted_base_fields(normalized, location=location)
     _require_supported_event_envelope(normalized, location=location)

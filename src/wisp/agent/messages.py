@@ -29,6 +29,7 @@ from wisp.events import (
     UsageCost,
     utc_now,
 )
+from wisp.skills.models import SkillInvocationEvidence
 
 if TYPE_CHECKING:
     from wisp.sessions.entries import SessionEntry as PersistedSessionEntry
@@ -53,7 +54,16 @@ class Message(BaseModel):
     is_error: bool | None = None
     usage: TokenUsage | None = None
     cost: UsageCost | None = None
+    skill_invocation: SkillInvocationEvidence | None = None
     created_at: datetime = Field(default_factory=utc_now)
+
+    @property
+    def user_visible_content(self) -> str:
+        """Return submitted text rather than any provider-only expansion."""
+
+        if self.skill_invocation is not None:
+            return self.skill_invocation.original_content
+        return self.content
 
 
 class CompactionRecord(BaseModel):

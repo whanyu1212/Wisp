@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from pydantic import BaseModel, ConfigDict, Field
+
 type SkillSource = Literal["project:wisp", "project:agents", "user:wisp", "user:agents"]
 type SkillDiagnosticSeverity = Literal["warning", "error"]
 type SkillDiagnosticCode = Literal[
@@ -25,6 +27,18 @@ type SkillDiagnosticCode = Literal[
     "shadowed",
     "unsupported-field",
 ]
+
+
+class SkillInvocationEvidence(BaseModel):
+    """Typed evidence retained with one explicitly expanded user message."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    name: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=64)
+    original_content: str
+    request: str
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    instructions_truncated: bool = False
 
 
 @dataclass(frozen=True, slots=True)

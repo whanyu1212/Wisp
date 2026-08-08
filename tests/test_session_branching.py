@@ -273,7 +273,7 @@ def test_clone_upgrades_legacy_source_only_in_new_file(tmp_path: Path) -> None:
     cloned = anyio.run(clone)
 
     assert source_path.read_bytes() == original
-    assert [entry.schema_version for entry in cloned.read_entries()] == [5, 5]
+    assert [entry.schema_version for entry in cloned.read_entries()] == [6, 6]
     assert [entry.id for entry in cloned.read_entries()] == ["legacy-user", "legacy-answer"]
     assert all(entry.session_id == cloned.session_id for entry in cloned.read_entries())
 

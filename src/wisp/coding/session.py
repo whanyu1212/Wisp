@@ -56,6 +56,7 @@ from wisp.events import (
     QueueUpdated,
     SessionSaved,
     SessionStats,
+    SkillInvoked,
     ToolApprovalResolved,
     ToolExecutionEnded,
     ToolPresentationStatus,
@@ -75,6 +76,7 @@ from wisp.sessions.entries import (
 )
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import SessionReplay, replay_session_entries
+from wisp.skills.invocation import expand_skill_invocation
 from wisp.skills.models import SkillCatalog
 from wisp.skills.prompt import build_skill_index
 from wisp.skills.tool import SkillTool
@@ -280,15 +282,23 @@ class CodingSession:
         self._last_session_id = None
         self._retained_queues.clear()
 
-    def follow_up(self, content: str) -> QueueUpdated:
+    async def follow_up(self, content: str) -> QueueUpdated:
         """Queue user text for the active run's next completed-turn boundary."""
 
-        return self._active_queue_harness().follow_up(content)
+        harness = self._active_queue_harness()
+        message = await self._prepare_user_message(content)
+        if harness is not self._active_queue_harness():
+            raise RuntimeError("CodingSession active agent run changed")
+        return harness.follow_up_message(message)
 
-    def steer(self, content: str) -> QueueUpdated:
+    async def steer(self, content: str) -> QueueUpdated:
         """Queue user text after the active run's current assistant/tool batch."""
 
-        return self._active_queue_harness().steer(content)
+        harness = self._active_queue_harness()
+        message = await self._prepare_user_message(content)
+        if harness is not self._active_queue_harness():
+            raise RuntimeError("CodingSession active agent run changed")
+        return harness.steer_message(message)
 
     def queue_state(self, session: JsonlSession | None = None) -> QueueUpdated:
         """Return the current or retained queue state without requiring an active run."""
@@ -362,13 +372,21 @@ class CodingSession:
             raise RuntimeError("CodingSession has no active agent run")
         return harness
 
+    async def _prepare_user_message(self, content: str) -> Message:
+        expanded, evidence = await expand_skill_invocation(
+            content,
+            catalog=self.skill_catalog,
+            context=self.tool_context,
+        )
+        return Message(role="user", content=expanded, skill_invocation=evidence)
+
     @staticmethod
     def _queue_updated_from_snapshot(queued: _RetainedQueueState | None) -> QueueUpdated:
         if queued is None:
             return QueueUpdated()
         return QueueUpdated(
-            steering=tuple(message.content for message in queued.messages.steering),
-            follow_up=tuple(message.content for message in queued.messages.follow_up),
+            steering=tuple(message.user_visible_content for message in queued.messages.steering),
+            follow_up=tuple(message.user_visible_content for message in queued.messages.follow_up),
             steering_mode=queued.steering_mode,
             follow_up_mode=queued.follow_up_mode,
         )
@@ -429,6 +447,7 @@ class CodingSession:
         history: Sequence[Message] = (),
         operation_id: str | None = None,
     ) -> AsyncGenerator[WispEvent, None]:
+        user_message = await self._prepare_user_message(prompt)
         session = session or self.sessions.create()
         self._active_session_id = session.session_id
         self._last_session_id = session.session_id
@@ -506,11 +525,19 @@ class CodingSession:
         for prompt_message in prompt_messages:
             await session.append_message(prompt_message, operation_id=operation_id)
 
-        user_message = Message(role="user", content=prompt)
         user_entry = await session.append_message(user_message, operation_id=operation_id)
         # Add the persisted prompt before checking the threshold so provider limits
         # apply to the complete next request, not only the resumed history.
         harness.append_message(user_message)
+        if user_message.skill_invocation is not None:
+            yield await emit(
+                SkillInvoked(
+                    session_id=session.session_id,
+                    message_entry_id=user_entry.id,
+                    invocation=user_message.skill_invocation,
+                    provider_content=user_message.content,
+                )
+            )
         auto_compaction_status = _AutoCompactionStatus()
         # A preflight compaction can only update a request that is actually
         # resuming persisted history. It is reserved for cataloged provider
@@ -565,15 +592,26 @@ class CodingSession:
                 for queue_event in harness.drain_steering():
                     if isinstance(queue_event, QueueMessageInjected):
                         steering_injected = True
-                        self._queue_message(
+                        queue_entry_id = self._queue_message(
                             session,
                             Message(
                                 role="user",
                                 content=queue_event.content,
+                                skill_invocation=queue_event.skill_invocation,
                                 created_at=queue_event.timestamp,
                             ),
                             operation_id=operation_id,
                         )
+                        if queue_event.skill_invocation is not None:
+                            yield await emit(
+                                SkillInvoked(
+                                    session_id=session.session_id,
+                                    message_entry_id=queue_entry_id,
+                                    invocation=queue_event.skill_invocation,
+                                    provider_content=queue_event.content,
+                                    queue_kind=queue_event.kind,
+                                )
+                            )
                     yield await emit(queue_event)
                 if steering_injected:
                     steering_compacted = False
@@ -658,15 +696,26 @@ class CodingSession:
                         tool_presentation_statuses[event.call_id] = "denied"
                     completion_entry_id: str | None = None
                     if isinstance(event, QueueMessageInjected):
-                        self._queue_message(
+                        queue_entry_id = self._queue_message(
                             session,
                             Message(
                                 role="user",
                                 content=event.content,
+                                skill_invocation=event.skill_invocation,
                                 created_at=event.timestamp,
                             ),
                             operation_id=operation_id,
                         )
+                        if event.skill_invocation is not None:
+                            yield await emit(
+                                SkillInvoked(
+                                    session_id=session.session_id,
+                                    message_entry_id=queue_entry_id,
+                                    invocation=event.skill_invocation,
+                                    provider_content=event.content,
+                                    queue_kind=event.kind,
+                                )
+                            )
                     if isinstance(event, MessageCompleted | ToolExecutionEnded):
                         tool_status = (
                             tool_presentation_statuses.pop(event.call_id, None)
