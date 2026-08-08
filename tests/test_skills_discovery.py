@@ -157,7 +157,6 @@ def test_isolates_yaml_constructor_value_errors(
     [
         ("demo", "description: missing name\n", "name is required"),
         ("demo", "name: demo\n", "description is required"),
-        ("demo", "name: true\ndescription: test\n", "name is required"),
         ("Demo", "name: Demo\ndescription: test\n", "name must be"),
         ("-demo", "name: -demo\ndescription: test\n", "name must be"),
         ("demo-", "name: demo-\ndescription: test\n", "name must be"),
@@ -191,8 +190,8 @@ def test_rejects_invalid_metadata(
     assert message in catalog.diagnostics[0].message
 
 
-@pytest.mark.parametrize("name", ["on", "off", "yes", "no", "2026-08-08"])
-def test_accepts_yaml_12_plain_scalar_skill_names(tmp_path: Path, name: str) -> None:
+@pytest.mark.parametrize("name", ["on", "off", "yes", "no", "true", "2026-08-08", "0123"])
+def test_preserves_plain_scalar_skill_names(tmp_path: Path, name: str) -> None:
     _write_skill(tmp_path / ".wisp" / "skills", name)
 
     catalog = _discover(tmp_path)

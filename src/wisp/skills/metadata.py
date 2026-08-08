@@ -18,9 +18,6 @@ _SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SUPPORTED_FIELDS = frozenset(
     {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
 )
-_YAML_BOOL_TAG = "tag:yaml.org,2002:bool"
-_YAML_TIMESTAMP_TAG = "tag:yaml.org,2002:timestamp"
-_YAML_12_BOOL = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
 
 
 class SkillMetadataError(ValueError):
@@ -65,25 +62,11 @@ class _StrictSafeLoader(yaml.SafeLoader):
                     f"duplicate key: {key!r}",
                     key_node.start_mark,
                 )
-            mapping[key] = self.construct_object(value_node, deep=deep)
+            if key == "name" and isinstance(value_node, yaml.nodes.ScalarNode):
+                mapping[key] = self.construct_scalar(value_node)
+            else:
+                mapping[key] = self.construct_object(value_node, deep=deep)
         return mapping
-
-
-# PyYAML defaults to YAML 1.1, where valid skill names such as ``on`` and
-# ``2026-08-08`` become typed values. Keep real true/false values typed while
-# treating legacy booleans and timestamps as ordinary YAML 1.2 strings.
-_StrictSafeLoader.yaml_implicit_resolvers = {
-    key: [
-        (tag, resolver)
-        for tag, resolver in resolvers
-        if tag not in {_YAML_BOOL_TAG, _YAML_TIMESTAMP_TAG}
-    ]
-    for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
-}
-for _first_character in "tTfF":
-    _StrictSafeLoader.yaml_implicit_resolvers.setdefault(_first_character, []).append(
-        (_YAML_BOOL_TAG, _YAML_12_BOOL)
-    )
 
 
 def read_skill_metadata(
