@@ -18,6 +18,13 @@ _SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SUPPORTED_FIELDS = frozenset(
     {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
 )
+_YAML_BOOL_TAG = "tag:yaml.org,2002:bool"
+_YAML_INT_TAG = "tag:yaml.org,2002:int"
+_YAML_TIMESTAMP_TAG = "tag:yaml.org,2002:timestamp"
+_YAML_12_BOOL = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
+_YAML_12_INT = re.compile(
+    r"^(?:[-+]?0b[0-1_]+|[-+]?0o[0-7_]+|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0x[0-9a-fA-F_]+)$"
+)
 
 
 class SkillMetadataError(ValueError):
@@ -67,6 +74,38 @@ class _StrictSafeLoader(yaml.SafeLoader):
             else:
                 mapping[key] = self.construct_object(value_node, deep=deep)
         return mapping
+
+
+def _construct_yaml_12_int(loader: _StrictSafeLoader, node: yaml.nodes.ScalarNode) -> int:
+    value = loader.construct_scalar(node).replace("_", "")
+    sign = -1 if value.startswith("-") else 1
+    value = value.removeprefix("-").removeprefix("+")
+    if value.startswith("0b"):
+        return sign * int(value[2:], 2)
+    if value.startswith("0o"):
+        return sign * int(value[2:], 8)
+    if value.startswith("0x"):
+        return sign * int(value[2:], 16)
+    return sign * int(value, 10)
+
+
+_StrictSafeLoader.yaml_implicit_resolvers = {
+    key: [
+        (tag, resolver)
+        for tag, resolver in resolvers
+        if tag not in {_YAML_BOOL_TAG, _YAML_INT_TAG, _YAML_TIMESTAMP_TAG}
+    ]
+    for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+for _first_character in "tTfF":
+    _StrictSafeLoader.yaml_implicit_resolvers.setdefault(_first_character, []).append(
+        (_YAML_BOOL_TAG, _YAML_12_BOOL)
+    )
+for _first_character in "-+0123456789":
+    _StrictSafeLoader.yaml_implicit_resolvers.setdefault(_first_character, []).append(
+        (_YAML_INT_TAG, _YAML_12_INT)
+    )
+_StrictSafeLoader.add_constructor(_YAML_INT_TAG, _construct_yaml_12_int)
 
 
 def read_skill_metadata(

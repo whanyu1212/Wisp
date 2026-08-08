@@ -608,6 +608,20 @@ def _read_skill_entry(
             )
             if escape is not None:
                 return None, 0, (escape,)
+            if is_protected_path(resolved_file, context):
+                return (
+                    None,
+                    0,
+                    (
+                        _diagnostic(
+                            "protected-path",
+                            "error",
+                            "opened skill metadata target is protected",
+                            root.source,
+                            skill_file,
+                        ),
+                    ),
+                )
             return _read_open_metadata(
                 metadata_fd,
                 source=root.source,

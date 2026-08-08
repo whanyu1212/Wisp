@@ -66,6 +66,23 @@ def test_discovers_valid_metadata_without_reading_the_body(tmp_path: Path) -> No
     assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["unsupported-field"]
 
 
+def test_uses_yaml_12_scalar_rules_for_string_fields(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path / ".wisp" / "skills",
+        "yaml-strings",
+        description="yes",
+        extra=("compatibility: 2026-08-08\nmetadata:\n  on: off\n  leading-zero: 0123\n"),
+    )
+
+    catalog = _discover(tmp_path)
+
+    entry = catalog.get("yaml-strings")
+    assert entry is not None
+    assert entry.description == "yes"
+    assert entry.compatibility == "2026-08-08"
+    assert entry.metadata == (("leading-zero", "0123"), ("on", "off"))
+
+
 def test_frontmatter_reader_does_not_read_ahead_into_skill_body(tmp_path: Path) -> None:
     skill = _write_skill(
         tmp_path / ".wisp" / "skills",
@@ -501,6 +518,27 @@ def test_path_fallback_validates_open_file_handle_against_source_root(
     assert catalog.entries == ()
     assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["path-escape"]
     assert catalog.diagnostics[0].path == skill / "SKILL.md"
+
+
+def test_path_fallback_rechecks_protection_for_open_file_handle(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    _write_skill(tmp_path / ".wisp" / "skills", "swapped")
+    protected = tmp_path / ".wisp" / "skills" / "protected.md"
+    protected.write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(discovery_module, "_USE_DESCRIPTOR_TRAVERSAL", False)
+    monkeypatch.setattr(discovery_module, "_PATH_FALLBACK_SUPPORTED", True)
+    monkeypatch.setattr(
+        discovery_module,
+        "_resolved_open_file",
+        lambda metadata_fd, *, path: protected,
+    )
+
+    catalog = _discover(tmp_path, None, "protected.md")
+
+    assert catalog.entries == ()
+    assert [diagnostic.code for diagnostic in catalog.diagnostics] == ["protected-path"]
 
 
 def test_catalog_stores_canonical_skill_root_through_symlinked_home_parent(
