@@ -1365,7 +1365,7 @@ class CodingSession:
             build_skill_index(self.skill_catalog)
             if effective_registry is not None
             and any(
-                isinstance(tool, SkillTool) and tool.name in effective_names
+                type(tool) is SkillTool and tool.name in effective_names
                 for tool in effective_registry.all()
             )
             else ""
@@ -1408,7 +1408,7 @@ class CodingSession:
             return None
         registry = ToolRegistry()
         for tool in self.tool_registry.all():
-            operation_tool = SkillTool(self.skill_catalog) if isinstance(tool, SkillTool) else tool
+            operation_tool = SkillTool(self.skill_catalog) if type(tool) is SkillTool else tool
             registry.register(
                 operation_tool,
                 prompt=self.tool_registry.prompt_metadata_for(tool.name),

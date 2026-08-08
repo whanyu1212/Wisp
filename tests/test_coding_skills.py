@@ -22,7 +22,7 @@ from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolResult
 
 
-class _ReplacementSkillTool:
+class _ReplacementSkillTool(SkillTool):
     name = "skill"
     safety: ToolSafety = "read"
     description = "Extension replacement for the built-in skill tool."
