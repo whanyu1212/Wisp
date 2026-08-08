@@ -438,6 +438,33 @@ def test_history_controller_keeps_a_different_fully_clipped_skill_invocation() -
     assert surface.history_labels == ["user: skill /skill:review [request truncated]"]
 
 
+def test_history_controller_preserves_an_identical_pre_request_snapshot_entry() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    prompt = "/skill:review focus on safety"
+    controller.record_live_message("user", prompt)
+    controller.record_live_skill_invocation("message-1", prompt)
+    controller.capture_latest_reload_live_entries()
+    controller.record_live_message("user", prompt)
+    controller.record_live_skill_invocation("message-2", prompt)
+
+    controller.replace_latest_entries(
+        (
+            HistoricalSkillInvocation(
+                entry_id="message-1",
+                name="review",
+                original_content="",
+                original_content_truncated=True,
+                request="",
+                request_truncated=True,
+                instructions_truncated=False,
+            ),
+        )
+    )
+
+    assert surface.history_labels == []
+
+
 def test_history_controller_discards_a_failed_live_prompt() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)

@@ -189,23 +189,25 @@ class TextualHistoryController:
     def record_live_skill_invocation(self, message_entry_id: str, original_content: str) -> None:
         """Attach persisted identity to the newest matching live skill prompt."""
 
-        def attach_identity(entries: list[_LiveHistoryEntry]) -> None:
-            for index in range(len(entries) - 1, -1, -1):
-                entry = entries[index]
-                if (
-                    entry.kind == "message"
-                    and entry.role == "user"
-                    and entry.content == original_content
-                ):
-                    entries[index] = replace(entry, message_entry_id=message_entry_id)
-                    return
+        matched_entry = None
+        updated_entry = None
+        for index in range(len(self._live_entries) - 1, -1, -1):
+            entry = self._live_entries[index]
+            if (
+                entry.kind == "message"
+                and entry.role == "user"
+                and entry.content == original_content
+            ):
+                matched_entry = entry
+                updated_entry = replace(entry, message_entry_id=message_entry_id)
+                self._live_entries[index] = updated_entry
+                break
 
-        attach_identity(self._live_entries)
         snapshot = self._latest_reload_live_entries
-        if snapshot is not None:
-            updated_snapshot = list(snapshot)
-            attach_identity(updated_snapshot)
-            self._latest_reload_live_entries = tuple(updated_snapshot)
+        if snapshot is not None and matched_entry is not None and updated_entry is not None:
+            self._latest_reload_live_entries = tuple(
+                updated_entry if entry is matched_entry else entry for entry in snapshot
+            )
 
     def record_live_tool_call(self, tool_call_id: str, *, widget: Widget | None = None) -> None:
         """Remember a pending live tool card as the durable history page would render it."""
