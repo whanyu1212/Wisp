@@ -97,7 +97,9 @@ def _normalize_resource(resource: str | None) -> str:
     if (
         selected.startswith("/")
         or selected.endswith("/")
-        or any(component in {"", ".", ".."} for component in selected.split("/"))
+        or any(
+            component in {"", ".", ".."} or ":" in component for component in selected.split("/")
+        )
     ):
         raise ToolError("skill.resource must stay within the selected skill")
     path = PurePosixPath(selected)

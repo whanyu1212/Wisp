@@ -55,7 +55,18 @@ def test_loads_nested_relative_resource(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "resource",
-    ["", "/etc/passwd", "../secret", "refs/../secret", "refs/./secret", "a//b", "a\\b"],
+    [
+        "",
+        "/etc/passwd",
+        "../secret",
+        "refs/../secret",
+        "refs/./secret",
+        "a//b",
+        "a\\b",
+        ".env::$DATA",
+        "SKILL.md::$DATA",
+        "references/file.txt:stream",
+    ],
 )
 def test_rejects_invalid_resource_paths(tmp_path: Path, resource: str) -> None:
     with pytest.raises(ToolError, match="skill|Skill"):
