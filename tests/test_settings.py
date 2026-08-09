@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -597,6 +599,33 @@ def test_persist_user_effort_writes_a_new_file(tmp_path: Path) -> None:
 
     path = user_settings_path(home_dir=tmp_path)
     assert json.loads(path.read_text(encoding="utf-8")) == {"effort": "high"}
+
+
+def test_persist_user_settings_uses_private_permissions_and_preserves_mcp_env(
+    tmp_path: Path,
+) -> None:
+    _write_settings(
+        tmp_path,
+        mcp_servers={
+            "server": {
+                "command": "server",
+                "env": {"TOKEN": "super-secret"},
+            }
+        },
+    )
+    path = user_settings_path(home_dir=tmp_path)
+    path.chmod(0o600)
+    path.parent.chmod(0o755)
+    previous_umask = os.umask(0o022)
+    try:
+        persist_user_effort("high", home_dir=tmp_path)
+    finally:
+        os.umask(previous_umask)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["mcp_servers"]["server"]["env"]["TOKEN"] == "super-secret"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
 def test_persist_user_effort_round_trips_through_resolve_settings(tmp_path: Path) -> None:

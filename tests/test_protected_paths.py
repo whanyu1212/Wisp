@@ -18,7 +18,7 @@ from wisp.tools.result import ToolError
 
 pytestmark = pytest.mark.process
 
-PROTECTED = (".env", "*.key", "credentials.json", ".wisp/auth.json")
+PROTECTED = (".env", "*.key", "credentials.json", ".wisp/auth.json", ".wisp/settings.json")
 
 
 def _context(cwd: Path, **kwargs: object) -> ToolContext:
@@ -37,6 +37,7 @@ def _context(cwd: Path, **kwargs: object) -> ToolContext:
         "sub/api.key",
         "config/credentials.json",
         ".wisp/auth.json",
+        ".wisp/settings.json",
     ],
 )
 def test_protected_patterns_match(tmp_path: Path, relative: str) -> None:
@@ -188,7 +189,20 @@ def test_protected_path_suffix_matches_outside_cwd() -> None:
     )
 
     assert is_protected_path(Path("/home/user/.wisp/auth.json"), context) is True
+    assert is_protected_path(Path("/home/user/.wisp/settings.json"), context) is True
     assert is_protected_path(Path("/tmp/elsewhere/.env"), context) is True
+
+
+def test_default_context_blocks_settings_file_with_mcp_secrets(tmp_path: Path) -> None:
+    settings_dir = tmp_path / ".wisp"
+    settings_dir.mkdir()
+    (settings_dir / "settings.json").write_text(
+        '{"mcp_servers":{"server":{"command":"server","env":{"TOKEN":"secret"}}}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ToolError, match="protected path"):
+        run_tool(ReadTool(), {"path": ".wisp/settings.json"}, ToolContext(cwd=tmp_path))
 
 
 def test_default_tool_context_is_secure_by_default(tmp_path: Path) -> None:

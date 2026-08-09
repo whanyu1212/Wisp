@@ -23,6 +23,7 @@ project config should never make Wisp unusable.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -94,6 +95,7 @@ DEFAULT_PROTECTED_PATHS: tuple[str, ...] = (
     ".netrc",
     ".pgpass",
     ".wisp/auth.json",
+    ".wisp/settings.json",
 )
 
 
@@ -379,9 +381,19 @@ def _persist_user_settings(
             data[key] = value
 
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.parent.chmod(0o700)
         tmp_path = path.with_name(f".{path.name}.tmp")
-        tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp_path, flags, 0o600)
+        try:
+            os.chmod(tmp_path, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+                fd = -1
+                tmp_file.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        finally:
+            if fd >= 0:
+                os.close(fd)
         tmp_path.replace(path)
     except OSError as exc:
         _warn(f"could not write settings file {path}: {exc}")
