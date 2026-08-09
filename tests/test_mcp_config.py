@@ -117,6 +117,31 @@ def test_wisp_config_sorts_and_rejects_duplicate_server_names() -> None:
         WispConfig(mcp_servers=(alpha, alpha))
 
 
+def test_duplicate_server_error_hides_nested_environment_values() -> None:
+    secret = "super-secret"
+
+    with pytest.raises(ValidationError) as captured:
+        WispConfig.model_validate(
+            {
+                "mcp_servers": [
+                    {
+                        "name": "duplicate",
+                        "command": "first",
+                        "env": {"TOKEN": secret},
+                    },
+                    {
+                        "name": "duplicate",
+                        "command": "second",
+                        "env": {"TOKEN": secret},
+                    },
+                ]
+            }
+        )
+
+    assert secret not in captured.value.json()
+    assert all(error.get("input") == "<redacted>" for error in captured.value.errors())
+
+
 def test_wisp_config_limits_server_count() -> None:
     servers = tuple(
         McpServerConfig(name=f"server-{index}", command="command") for index in range(17)

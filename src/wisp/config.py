@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
 from wisp.retry import RetryPolicy
 from wisp.settings import DEFAULT_PROTECTED_PATHS, ResolvedSettings, resolve_settings
+from wisp.validation import redact_validation_error_inputs
 
 DEFAULT_PROVIDER = "openai-codex"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
@@ -37,6 +47,21 @@ class WispConfig(BaseModel):
     mcp_servers: tuple[McpServerConfig, ...] = Field(
         default=(), max_length=MAX_MCP_SERVERS, repr=False
     )
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _redact_mcp_validation_inputs(
+        cls,
+        value: Any,
+        handler: ModelWrapValidatorHandler[Self],
+    ) -> Self:
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            redacted = redact_validation_error_inputs(exc, field="mcp_servers")
+            if redacted is exc:
+                raise
+            raise redacted from None
 
     @field_validator("mcp_servers")
     @classmethod

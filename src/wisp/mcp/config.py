@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Annotated, Any, Self, cast
+from typing import Annotated, Any, Self
 
 from pydantic import (
     BaseModel,
@@ -16,9 +16,9 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from pydantic_core import InitErrorDetails
 
 from wisp.tool_types import ToolSafety
+from wisp.validation import redact_validation_error_inputs
 
 MAX_MCP_SERVERS = 16
 MAX_MCP_ARGS = 64
@@ -67,11 +67,7 @@ class McpServerConfig(BaseModel):
         try:
             return handler(value)
         except ValidationError as exc:
-            errors = exc.errors(include_url=False)
-            for error in errors:
-                error["input"] = "<redacted>"
-            redacted = cast(list[InitErrorDetails], errors)
-            raise ValidationError.from_exception_data(cls.__name__, redacted) from None
+            raise redact_validation_error_inputs(exc) from None
 
     @field_validator("env", "tool_safety", mode="before")
     @classmethod

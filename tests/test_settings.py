@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
 from pytest import CaptureFixture, MonkeyPatch
 
 from wisp.config import WispConfig
 from wisp.settings import (
     DEFAULT_PROTECTED_PATHS,
+    WispSettings,
     persist_user_effort,
     persist_user_model_selection,
     resolve_settings,
@@ -335,6 +338,23 @@ def test_invalid_user_mcp_warning_does_not_expose_environment_secret(
     assert settings.mcp_servers is None
     assert "ignoring invalid settings" in warning
     assert secret not in warning
+
+
+def test_mcp_server_count_error_hides_nested_environment_values() -> None:
+    secret = "super-secret"
+    servers = {
+        f"server-{index}": {
+            "command": "command",
+            "env": {"TOKEN": secret},
+        }
+        for index in range(17)
+    }
+
+    with pytest.raises(ValidationError) as captured:
+        WispSettings.model_validate({"mcp_servers": servers})
+
+    assert secret not in captured.value.json()
+    assert all(error.get("input") == "<redacted>" for error in captured.value.errors())
 
 
 # --- Precedence through WispConfig.from_env (CLI > env > file > default) ---
