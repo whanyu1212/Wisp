@@ -7,6 +7,7 @@ from pytest import MonkeyPatch
 
 from wisp import config as config_module
 from wisp.config import WispConfig, default_auth_path, default_session_dir
+from wisp.mcp.config import McpServerConfig
 from wisp.settings import persist_user_model_selection
 
 
@@ -86,6 +87,26 @@ def test_explicit_config_values_override_env(tmp_path: Path, monkeypatch: Monkey
     assert config.model == "fake-model"
     assert config.effort == "high"
     assert config.auth_path == tmp_path / "auth.json"
+
+
+def test_explicit_mcp_servers_override_user_settings(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    settings_dir = home / ".wisp"
+    settings_dir.mkdir(parents=True)
+    (settings_dir / "settings.json").write_text(
+        '{"mcp_servers":{"saved":{"command":"saved-command"}}}',
+        encoding="utf-8",
+    )
+    explicit = McpServerConfig(name="explicit", command="explicit-command")
+
+    saved_config = WispConfig.from_env(session_dir=tmp_path)
+    config = WispConfig.from_env(session_dir=tmp_path, mcp_servers=(explicit,))
+
+    assert [server.name for server in saved_config.mcp_servers] == ["saved"]
+    assert config.mcp_servers == (explicit,)
 
 
 def test_config_reads_effort_from_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:

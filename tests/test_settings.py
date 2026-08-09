@@ -273,6 +273,70 @@ def test_invalid_project_user_only_fields_do_not_discard_project_settings(
     assert capsys.readouterr().err == ""
 
 
+def test_mcp_servers_are_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(
+        home,
+        mcp_servers={"user-server": {"command": "user-command"}},
+    )
+    _write_settings(
+        project,
+        mcp_servers={"project-server": {"command": "project-command"}},
+    )
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.mcp_servers is not None
+    assert [server.name for server in settings.mcp_servers] == ["user-server"]
+
+
+def test_invalid_project_mcp_settings_do_not_discard_other_project_settings(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _write_settings(
+        project,
+        provider="project-provider",
+        mcp_servers={"INVALID": {"command": 42}},
+    )
+
+    settings = resolve_settings(
+        project_dir=project,
+        home_dir=tmp_path / "home",
+        trust_project=True,
+    )
+
+    assert settings.provider == "project-provider"
+    assert settings.mcp_servers is None
+    assert capsys.readouterr().err == ""
+
+
+def test_invalid_user_mcp_warning_does_not_expose_environment_secret(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    secret = "super-secret\x00"
+    _write_settings(
+        home,
+        mcp_servers={
+            "server": {
+                "command": "command",
+                "env": {"TOKEN": secret},
+            }
+        },
+    )
+
+    settings = resolve_settings(project_dir=tmp_path / "project", home_dir=home)
+    warning = capsys.readouterr().err
+
+    assert settings.mcp_servers is None
+    assert "ignoring invalid settings" in warning
+    assert secret not in warning
+
+
 # --- Precedence through WispConfig.from_env (CLI > env > file > default) ---
 #
 # The project settings layer only applies to a TRUSTED project, so tests that need

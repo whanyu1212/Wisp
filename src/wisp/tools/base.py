@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Protocol
 
+from wisp.tool_types import ToolSafety as ToolSafety
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolResult
 
 ToolArguments = Mapping[str, object]
 ToolInputSchema = Mapping[str, object]
-ToolSafety = Literal["read", "mutating", "command"]
 
 
 @dataclass(frozen=True, slots=True)

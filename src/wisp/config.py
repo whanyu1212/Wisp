@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
 from wisp.retry import RetryPolicy
 from wisp.settings import DEFAULT_PROTECTED_PATHS, ResolvedSettings, resolve_settings
 
@@ -21,7 +22,7 @@ _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
 class WispConfig(BaseModel):
     """Runtime configuration for Wisp."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     provider: str = DEFAULT_PROVIDER
     model: str | None = None
@@ -33,6 +34,19 @@ class WispConfig(BaseModel):
     context_reserve_tokens: int = Field(default=DEFAULT_CONTEXT_RESERVE_TOKENS, ge=0)
     auto_compaction_enabled: bool = DEFAULT_AUTO_COMPACTION_ENABLED
     update_check_enabled: bool = DEFAULT_UPDATE_CHECK_ENABLED
+    mcp_servers: tuple[McpServerConfig, ...] = Field(
+        default=(), max_length=MAX_MCP_SERVERS, repr=False
+    )
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _validate_mcp_servers(
+        cls, value: tuple[McpServerConfig, ...]
+    ) -> tuple[McpServerConfig, ...]:
+        names = [server.name for server in value]
+        if len(names) != len(set(names)):
+            raise ValueError("MCP server names must be unique")
+        return tuple(sorted(value, key=lambda server: server.name))
 
     @model_validator(mode="after")
     def _always_protect_auth_path(self) -> WispConfig:
@@ -64,6 +78,7 @@ class WispConfig(BaseModel):
         context_reserve_tokens: int | None = None,
         auto_compaction_enabled: bool | None = None,
         update_check_enabled: bool | None = None,
+        mcp_servers: tuple[McpServerConfig, ...] | None = None,
         project_dir: Path | None = None,
         trusted: bool = False,
     ) -> WispConfig:
@@ -92,6 +107,10 @@ class WispConfig(BaseModel):
         provider/model defaults are coupled: a higher-precedence provider override
         without a model drops the saved user model and effort rather than sending
         them to another provider.
+
+        ``mcp_servers`` is likewise user-only because it defines commands that Wisp
+        may later execute. There is deliberately no environment-variable layer for
+        this structured setting.
         """
 
         settings = resolve_settings(project_dir=project_dir, trust_project=trusted)
@@ -167,6 +186,7 @@ class WispConfig(BaseModel):
                     name="WISP_UPDATE_CHECK",
                 )
             ),
+            mcp_servers=mcp_servers if mcp_servers is not None else settings.mcp_servers or (),
         )
 
 

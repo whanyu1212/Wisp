@@ -26,9 +26,11 @@ import json
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
 from wisp.retry import RetrySettings
 
 GLOBAL_SETTINGS_PATH = Path("~/.wisp/settings.json")
@@ -42,6 +44,7 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "context_reserve_tokens",
         "auto_compaction_enabled",
         "update_check_enabled",
+        "mcp_servers",
     }
 )
 
@@ -92,7 +95,7 @@ class WispSettings(BaseModel):
     builds (``extra="ignore"``).
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", hide_input_in_errors=True)
 
     provider: str | None = None
     model: str | None = None
@@ -104,6 +107,34 @@ class WispSettings(BaseModel):
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
     update_check_enabled: bool | None = None
+    mcp_servers: tuple[McpServerConfig, ...] | None = Field(
+        default=None, max_length=MAX_MCP_SERVERS, repr=False
+    )
+
+    @field_validator("mcp_servers", mode="before")
+    @classmethod
+    def _parse_mcp_servers(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            raise ValueError("mcp_servers must be a JSON object")
+        servers: list[dict[str, object]] = []
+        for name, raw_server in value.items():
+            if not isinstance(raw_server, Mapping):
+                raise ValueError("each MCP server must be a JSON object")
+            server = dict(raw_server)
+            server["name"] = name
+            servers.append(server)
+        return servers
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _sort_mcp_servers(
+        cls, value: tuple[McpServerConfig, ...] | None
+    ) -> tuple[McpServerConfig, ...] | None:
+        if value is None:
+            return None
+        return tuple(sorted(value, key=lambda server: server.name))
 
 
 class ResolvedSettings(BaseModel):
@@ -115,7 +146,7 @@ class ResolvedSettings(BaseModel):
     win.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     provider: str | None = None
     model: str | None = None
@@ -127,6 +158,7 @@ class ResolvedSettings(BaseModel):
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
     update_check_enabled: bool | None = None
+    mcp_servers: tuple[McpServerConfig, ...] | None = Field(default=None, repr=False)
     # Provenance used only while applying higher-precedence provider overrides.
     # Excluded from serialization because these are resolver details, not settings.
     user_provider: str | None = Field(default=None, exclude=True)
@@ -199,6 +231,8 @@ def resolve_settings(
     # per-request cost/latency (a higher reasoning tier means more tokens), so a
     # project must not be able to force an expensive tier on every prompt just by
     # being trusted for read/write access.
+    # MCP server definitions are user-only because they name commands that Wisp may
+    # later execute; project trust never grants authority to configure executables.
     return ResolvedSettings(
         provider=project_provider or user_provider,
         model=project_model or user_model,
@@ -210,6 +244,7 @@ def resolve_settings(
         context_reserve_tokens=user_settings.context_reserve_tokens,
         auto_compaction_enabled=user_settings.auto_compaction_enabled,
         update_check_enabled=user_settings.update_check_enabled,
+        mcp_servers=user_settings.mcp_servers,
         user_provider=user_provider,
         model_from_user=project_model is None and user_model is not None,
     )
