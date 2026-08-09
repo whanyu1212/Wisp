@@ -535,6 +535,27 @@ def test_from_config_backstops_auth_protection_after_model_copy(tmp_path: Path) 
         run_tool(ReadTool(), {"path": "codex-auth.json"}, context)
 
 
+def test_from_config_backstops_settings_protection_after_model_copy(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    from wisp.config import WispConfig
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    settings_dir = tmp_path / ".wisp"
+    settings_dir.mkdir()
+    (settings_dir / "settings.json").write_text(
+        '{"mcp_servers":{"server":{"command":"server","env":{"TOKEN":"secret"}}}}',
+        encoding="utf-8",
+    )
+    config = WispConfig().model_copy(update={"protected_paths": ()})
+
+    context = ToolContext.from_config(config, cwd=tmp_path)
+
+    with pytest.raises(ToolError, match="protected path"):
+        run_tool(ReadTool(), {"path": ".wisp/settings.json"}, context)
+
+
 def test_project_settings_cannot_disable_secret_guard(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from wisp.settings import DEFAULT_PROTECTED_PATHS
+from wisp.settings import DEFAULT_PROTECTED_PATHS, user_settings_path
 
 if TYPE_CHECKING:
     from wisp.config import WispConfig
@@ -39,17 +39,21 @@ class ToolContext:
         globs come from the resolved config so file tools deny reads of secrets
         (``.env`` and friends) unless the policy is relaxed.
 
-        The active credential file (``config.auth_path``) is guaranteed to be in
-        the returned context's ``protected_paths``. ``WispConfig`` already enforces
-        this on construction; re-asserting it here is a defensive backstop so the
-        credential stays protected even for a config produced by a path that
-        skipped validation (e.g. ``model_copy``).
+        The active credential and user settings files are guaranteed to be in the
+        returned context's ``protected_paths``. ``WispConfig`` already enforces this
+        on construction; re-asserting it here is a defensive backstop so the secrets
+        stay protected even for a config produced by a path that skipped validation
+        (e.g. ``model_copy``).
         """
 
         protected_paths = config.protected_paths
-        auth_pattern = config.auth_path.expanduser().resolve(strict=False).as_posix()
-        if auth_pattern not in protected_paths:
-            protected_paths = (*protected_paths, auth_pattern)
+        required = (
+            config.auth_path.expanduser().resolve(strict=False).as_posix(),
+            user_settings_path().resolve(strict=False).as_posix(),
+        )
+        missing = tuple(pattern for pattern in required if pattern not in protected_paths)
+        if missing:
+            protected_paths = (*protected_paths, *missing)
 
         return cls(
             cwd=cwd if cwd is not None else Path.cwd(),
