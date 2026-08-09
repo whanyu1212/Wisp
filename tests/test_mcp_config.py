@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from wisp.config import WispConfig
+from wisp.mcp import config as mcp_config_module
 from wisp.mcp.config import McpServerConfig
 
 
@@ -98,6 +99,24 @@ def test_mcp_server_config_rejects_overlapping_environment_sources() -> None:
             env={"TOKEN": "literal"},
             env_from=("TOKEN",),
         )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"env": {"Path": "first", "PATH": "second"}},
+        {"env_from": ["Path", "PATH"]},
+        {"env": {"Path": "literal"}, "env_from": ["PATH"]},
+    ],
+)
+def test_windows_environment_names_are_case_insensitive(
+    values: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mcp_config_module, "_ENVIRONMENT_NAMES_CASE_INSENSITIVE", True)
+
+    with pytest.raises(ValidationError):
+        McpServerConfig(name="server", command="command", **values)
 
 
 def test_mcp_validation_error_hides_environment_value() -> None:

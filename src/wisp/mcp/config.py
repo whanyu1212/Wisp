@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from typing import Annotated, Any, Self
 
@@ -25,6 +26,7 @@ MAX_MCP_SERVERS = 16
 MAX_MCP_ARGS = 64
 MAX_MCP_ENV_VARS = 64
 MAX_MCP_TOOL_OVERRIDES = 256
+_ENVIRONMENT_NAMES_CASE_INSENSITIVE = os.name == "nt"
 
 ServerName = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]{0,31}$")]
 Command = Annotated[str, StringConstraints(min_length=1, max_length=4096)]
@@ -123,7 +125,7 @@ class McpServerConfig(BaseModel):
     def _validate_env(
         cls, values: tuple[tuple[str, SecretStr], ...]
     ) -> tuple[tuple[str, SecretStr], ...]:
-        names = [name for name, _ in values]
+        names = [_environment_name_key(name) for name, _ in values]
         if len(names) != len(set(names)):
             raise ValueError("environment variable names must be unique")
         if any("\x00" in value.get_secret_value() for _, value in values):
@@ -133,7 +135,8 @@ class McpServerConfig(BaseModel):
     @field_validator("env_from")
     @classmethod
     def _validate_env_from(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        if len(values) != len(set(values)):
+        normalized = [_environment_name_key(value) for value in values]
+        if len(normalized) != len(set(normalized)):
             raise ValueError("env_from names must be unique")
         return tuple(sorted(values))
 
@@ -151,7 +154,15 @@ class McpServerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_environment_sources(self) -> McpServerConfig:
-        overlap = {name for name, _ in self.env}.intersection(self.env_from)
+        literal_names = {_environment_name_key(name) for name, _ in self.env}
+        inherited_names = {_environment_name_key(name) for name in self.env_from}
+        overlap = literal_names.intersection(inherited_names)
         if overlap:
             raise ValueError("env and env_from must not contain the same variable")
         return self
+
+
+def _environment_name_key(name: str) -> str:
+    if _ENVIRONMENT_NAMES_CASE_INSENSITIVE:
+        return name.casefold()
+    return name
