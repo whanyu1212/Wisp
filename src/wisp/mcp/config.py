@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Annotated, Any
+from typing import Annotated, Any, Self, cast
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ModelWrapValidatorHandler,
     SecretStr,
     StringConstraints,
+    ValidationError,
     field_validator,
     model_validator,
 )
+from pydantic_core import InitErrorDetails
 
 from wisp.tool_types import ToolSafety
 
@@ -53,6 +56,22 @@ class McpServerConfig(BaseModel):
     tool_safety: tuple[tuple[ToolName, ToolSafety], ...] = Field(
         default=(), max_length=MAX_MCP_TOOL_OVERRIDES
     )
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _redact_validation_inputs(
+        cls,
+        value: Any,
+        handler: ModelWrapValidatorHandler[Self],
+    ) -> Self:
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            errors = exc.errors(include_url=False)
+            for error in errors:
+                error["input"] = "<redacted>"
+            redacted = cast(list[InitErrorDetails], errors)
+            raise ValidationError.from_exception_data(cls.__name__, redacted) from None
 
     @field_validator("env", "tool_safety", mode="before")
     @classmethod

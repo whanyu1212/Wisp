@@ -88,6 +88,22 @@ def test_mcp_validation_error_hides_environment_value() -> None:
         )
 
     assert secret not in str(captured.value)
+    assert secret not in captured.value.json()
+    assert all(error.get("input") == "<redacted>" for error in captured.value.errors())
+
+
+def test_mcp_length_validation_error_hides_environment_value() -> None:
+    secret = "s" * 16_385
+
+    with pytest.raises(ValidationError) as captured:
+        McpServerConfig(
+            name="server",
+            command="command",
+            env={"TOKEN": secret},
+        )
+
+    assert secret not in captured.value.json()
+    assert all(error.get("input") == "<redacted>" for error in captured.value.errors())
 
 
 def test_wisp_config_sorts_and_rejects_duplicate_server_names() -> None:
