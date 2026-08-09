@@ -64,9 +64,9 @@ uvx --from "wisp-ai==0.1.0a3" wisp
 
 Check the installed version with `wisp --version`.
 
-Installed builds check PyPI once per day after TUI startup. When a newer applicable release is
-available, Wisp prints a non-blocking update command; it never installs updates automatically. Set
-`WISP_UPDATE_CHECK=0` to disable the check.
+Installed builds check PyPI at most once every six hours after TUI startup. When a newer applicable
+release is available, Wisp prints a non-blocking update command; it never installs updates
+automatically. Set `WISP_UPDATE_CHECK=0` to disable the check.
 
 ## Quickstart
 
@@ -268,7 +268,7 @@ CLI flag > environment variable > project ./.wisp/settings.json > user ~/.wisp/s
 | `WISP_RETRY_MAX_DELAY_SECONDS` | Maximum retry delay; defaults to `30` |
 | `WISP_CONTEXT_RESERVE_TOKENS` | Minimum tokens reserved outside estimated input context; defaults to `16384` |
 | `WISP_AUTO_COMPACTION` | Automatic threshold compaction and overflow recovery; defaults to `true` |
-| `WISP_UPDATE_CHECK` | Daily non-blocking PyPI update notice; defaults to `true` |
+| `WISP_UPDATE_CHECK` | Six-hour non-blocking PyPI update notice; defaults to `true` |
 | `OPENAI_API_KEY` · `ANTHROPIC_API_KEY` · `GOOGLE_API_KEY` · `GEMINI_API_KEY` | Required only for the matching provider |
 
 ### Settings files
