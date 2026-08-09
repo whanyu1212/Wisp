@@ -23,7 +23,7 @@ from wisp import __version__
 
 PYPI_URL = "https://pypi.org/pypi/wisp-ai/json"
 UPDATE_COMMAND_TEMPLATE = 'uv tool install --force "wisp-ai=={version}"'
-CACHE_TTL_SECONDS = 24 * 60 * 60
+CACHE_TTL_SECONDS = 6 * 60 * 60
 HTTP_TIMEOUT_SECONDS = 2.0
 
 _DISTRIBUTION_NAME = "wisp-ai"

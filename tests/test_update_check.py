@@ -9,7 +9,6 @@ import httpx
 import pytest
 
 from wisp.update_check import (
-    CACHE_TTL_SECONDS,
     PYPI_URL,
     UpdateAvailable,
     check_for_update,
@@ -160,7 +159,7 @@ def test_fresh_cache_avoids_network(tmp_path: Path) -> None:
     cache_path.write_text(
         json.dumps(
             {
-                "checked_at": 9_999.0,
+                "checked_at": 10_000.0 - (6 * 60 * 60) + 1,
                 "python_version": "3.12.0",
                 "releases": ["1.0.0", "1.3.0"],
             }
@@ -219,7 +218,7 @@ def test_stale_cache_is_refreshed(tmp_path: Path) -> None:
     cache_path.write_text(
         json.dumps(
             {
-                "checked_at": 10_000.0 - CACHE_TTL_SECONDS,
+                "checked_at": 10_000.0 - (6 * 60 * 60),
                 "python_version": "3.12.0",
                 "releases": ["1.1.0"],
             }

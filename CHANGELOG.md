@@ -11,7 +11,8 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
-_Nothing yet._
+- Reduced the installed-build PyPI update cache from 24 hours to six hours so new releases are
+  announced sooner without checking on every TUI launch.
 
 ## 0.1.0a3 — 2026-08-08
 
