@@ -371,6 +371,29 @@ def test_invalid_user_mcp_warning_does_not_expose_environment_secret(
     assert secret not in warning
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission contract")
+def test_user_mcp_settings_permissions_are_hardened_before_loading(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write_settings(
+        home,
+        mcp_servers={
+            "server": {
+                "command": "server",
+                "env": {"TOKEN": "super-secret"},
+            }
+        },
+    )
+    path = user_settings_path(home_dir=home)
+    path.chmod(0o644)
+    path.parent.chmod(0o755)
+
+    settings = resolve_settings(project_dir=tmp_path / "project", home_dir=home)
+
+    assert settings.mcp_servers is not None
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
 def test_mcp_server_count_error_hides_nested_environment_values() -> None:
     secret = "super-secret"
     servers = {
@@ -473,7 +496,7 @@ def test_from_env_defaults_protected_paths(tmp_path: Path, monkeypatch: MonkeyPa
 
     config = WispConfig.from_env()
 
-    # The built-in defaults are present; the active auth file is always appended.
+    # The built-in defaults are present; active Wisp secret files are always appended.
     assert set(DEFAULT_PROTECTED_PATHS).issubset(config.protected_paths)
     assert any(config.auth_path.name in pattern for pattern in config.protected_paths)
 
@@ -482,8 +505,8 @@ def test_from_env_user_settings_can_disable_protected_paths(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     # The USER (global) settings file may disable the general guard; Wisp still
-    # protects its own active credential file. Point HOME at an explicit temp dir so
-    # the user-settings write is self-evidently isolated from the real home.
+    # protects its own active credential and settings files. Point HOME at an explicit
+    # temp dir so the user-settings write is isolated from the real home.
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
@@ -494,7 +517,8 @@ def test_from_env_user_settings_can_disable_protected_paths(
     config = WispConfig.from_env()
 
     auth_pattern = config.auth_path.resolve().as_posix()
-    assert config.protected_paths == (auth_pattern,)
+    settings_pattern = user_settings_path(home_dir=home).resolve().as_posix()
+    assert config.protected_paths == (auth_pattern, settings_pattern)
 
 
 def test_from_env_project_settings_cannot_disable_protected_paths(
@@ -601,6 +625,7 @@ def test_persist_user_effort_writes_a_new_file(tmp_path: Path) -> None:
     assert json.loads(path.read_text(encoding="utf-8")) == {"effort": "high"}
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission contract")
 def test_persist_user_settings_uses_private_permissions_and_preserves_mcp_env(
     tmp_path: Path,
 ) -> None:

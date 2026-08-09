@@ -236,7 +236,7 @@ def resolve_settings(
     project = project_dir if project_dir is not None else Path.cwd()
 
     user_file = (home / ".wisp" / PROJECT_SETTINGS_FILENAME).expanduser()
-    user_settings = _load_settings_file(user_file)
+    user_settings = _load_settings_file(user_file, secure_permissions=True)
 
     # An untrusted project contributes nothing: skip its settings file entirely so a
     # cloned repo cannot inject provider/model/session_dir/auth_path. This is
@@ -403,6 +403,7 @@ def _load_settings_file(
     path: Path,
     *,
     ignored_fields: frozenset[str] = frozenset(),
+    secure_permissions: bool = False,
 ) -> WispSettings:
     """Load one settings file, returning empty settings on any problem.
 
@@ -410,6 +411,16 @@ def _load_settings_file(
     but cannot be parsed or validated is a user error worth surfacing, so we warn on
     stderr and continue with empty settings rather than aborting startup.
     """
+
+    if secure_permissions and os.name == "posix":
+        try:
+            path.chmod(0o600)
+            path.parent.chmod(0o700)
+        except FileNotFoundError:
+            return WispSettings()
+        except OSError as exc:
+            _warn(f"could not secure settings file {path}: {exc}")
+            return WispSettings()
 
     try:
         raw = path.read_text(encoding="utf-8")

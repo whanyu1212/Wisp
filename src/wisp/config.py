@@ -18,7 +18,12 @@ from pydantic import (
 
 from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
 from wisp.retry import RetryPolicy
-from wisp.settings import DEFAULT_PROTECTED_PATHS, ResolvedSettings, resolve_settings
+from wisp.settings import (
+    DEFAULT_PROTECTED_PATHS,
+    ResolvedSettings,
+    resolve_settings,
+    user_settings_path,
+)
 from wisp.validation import redact_validation_error_inputs
 
 DEFAULT_PROVIDER = "openai-codex"
@@ -74,20 +79,23 @@ class WispConfig(BaseModel):
         return tuple(sorted(value, key=lambda server: server.name))
 
     @model_validator(mode="after")
-    def _always_protect_auth_path(self) -> WispConfig:
-        """Ensure the active credential file is always in ``protected_paths``.
+    def _always_protect_sensitive_paths(self) -> WispConfig:
+        """Ensure Wisp's credential and user settings files are always protected.
 
         Enforced as a model invariant — on *every* construction path, not just
         ``from_env`` — so embedding/SDK code that builds ``WispConfig`` directly
         (e.g. ``WispConfig(auth_path=Path("codex-auth.json"))``) still protects the
-        credential file that ``ToolContext.from_config`` will honor. The auth file
-        is protected even when ``protected_paths`` is otherwise empty, since it is
-        Wisp's own secret.
+        sensitive files that ``ToolContext.from_config`` will honor. These files are
+        protected even when ``protected_paths`` is otherwise empty.
         """
 
-        auth_pattern = self.auth_path.expanduser().resolve(strict=False).as_posix()
-        if auth_pattern not in self.protected_paths:
-            object.__setattr__(self, "protected_paths", (*self.protected_paths, auth_pattern))
+        required = (
+            self.auth_path.expanduser().resolve(strict=False).as_posix(),
+            user_settings_path().resolve(strict=False).as_posix(),
+        )
+        missing = tuple(pattern for pattern in required if pattern not in self.protected_paths)
+        if missing:
+            object.__setattr__(self, "protected_paths", (*self.protected_paths, *missing))
         return self
 
     @classmethod
@@ -254,9 +262,9 @@ def _resolve_protected_paths(settings: ResolvedSettings) -> tuple[str, ...]:
     list to disable the guard entirely. When the key is absent (``None``), the
     built-in default list applies.
 
-    The active credential file is appended separately by
-    :meth:`WispConfig._always_protect_auth_path`, so it stays protected regardless
-    of this value (including an empty list).
+    Wisp's active credential and user settings files are appended separately by
+    :meth:`WispConfig._always_protect_sensitive_paths`, so they stay protected
+    regardless of this value (including an empty list).
     """
 
     if settings.protected_paths is not None:
