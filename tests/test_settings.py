@@ -294,6 +294,35 @@ def test_mcp_servers_are_user_only_even_for_trusted_projects(tmp_path: Path) -> 
     assert [server.name for server in settings.mcp_servers] == ["user-server"]
 
 
+def test_mcp_settings_json_round_trip_uses_name_keyed_servers() -> None:
+    settings = WispSettings.model_validate(
+        {
+            "mcp_servers": {
+                "github": {
+                    "command": "server",
+                    "tool_safety": {"read-file": "read"},
+                }
+            }
+        }
+    )
+
+    serialized = settings.model_dump_json()
+    data = json.loads(serialized)
+
+    assert data["mcp_servers"] == {
+        "github": {
+            "command": "server",
+            "args": [],
+            "env": {},
+            "env_from": [],
+            "tool_safety": {"read-file": "read"},
+        }
+    }
+    assert WispSettings.model_validate_json(serialized) == settings
+    schema = WispSettings.model_json_schema()
+    assert schema["properties"]["mcp_servers"]["anyOf"][0]["type"] == "object"
+
+
 def test_invalid_project_mcp_settings_do_not_discard_other_project_settings(
     tmp_path: Path,
     capsys: CaptureFixture[str],

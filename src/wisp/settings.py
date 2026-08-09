@@ -34,6 +34,7 @@ from pydantic import (
     Field,
     ModelWrapValidatorHandler,
     ValidationError,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -135,7 +136,11 @@ class WispSettings(BaseModel):
                 raise
             raise redacted from None
 
-    @field_validator("mcp_servers", mode="before")
+    @field_validator(
+        "mcp_servers",
+        mode="before",
+        json_schema_input_type=dict[str, dict[str, Any]] | None,
+    )
     @classmethod
     def _parse_mcp_servers(cls, value: Any) -> Any:
         if value is None:
@@ -150,6 +155,15 @@ class WispSettings(BaseModel):
             server["name"] = name
             servers.append(server)
         return servers
+
+    @field_serializer("mcp_servers", when_used="json")
+    def _serialize_mcp_servers(
+        self,
+        value: tuple[McpServerConfig, ...] | None,
+    ) -> dict[str, dict[str, Any]] | None:
+        if value is None:
+            return None
+        return {server.name: server.model_dump(mode="json", exclude={"name"}) for server in value}
 
     @field_validator("mcp_servers")
     @classmethod

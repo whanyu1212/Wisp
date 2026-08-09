@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -43,6 +45,27 @@ def test_mcp_server_config_is_frozen_and_hides_literal_environment() -> None:
     assert "super-secret" not in repr(server)
     assert "super-secret" not in repr(WispConfig(mcp_servers=(server,)))
     assert "super-secret" not in server.model_dump_json()
+
+
+def test_mcp_server_config_json_round_trip_uses_mapping_shapes() -> None:
+    server = McpServerConfig(
+        name="github",
+        command="server",
+        tool_safety={"write-file": "mutating", "read-file": "read"},
+    )
+
+    serialized = server.model_dump_json()
+    data = json.loads(serialized)
+
+    assert data["env"] == {}
+    assert data["tool_safety"] == {"read-file": "read", "write-file": "mutating"}
+    assert McpServerConfig.model_validate_json(serialized) == server
+    schema = McpServerConfig.model_json_schema()
+    assert schema["properties"]["env"]["type"] == "object"
+    assert schema["properties"]["tool_safety"]["type"] == "object"
+
+    config = WispConfig(mcp_servers=(server,))
+    assert WispConfig.model_validate_json(config.model_dump_json()) == config
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,7 @@ from pydantic import (
     SecretStr,
     StringConstraints,
     ValidationError,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -69,14 +70,37 @@ class McpServerConfig(BaseModel):
         except ValidationError as exc:
             raise redact_validation_error_inputs(exc) from None
 
-    @field_validator("env", "tool_safety", mode="before")
+    @field_validator("env", mode="before", json_schema_input_type=dict[str, str])
     @classmethod
-    def _mapping_to_items(cls, value: Any) -> Any:
+    def _env_mapping_to_items(cls, value: Any) -> Any:
         if isinstance(value, Mapping):
             return tuple(value.items())
         if isinstance(value, tuple):
             return value
         raise ValueError("value must be a JSON object")
+
+    @field_serializer("env", when_used="json")
+    def _serialize_env(self, values: tuple[tuple[str, SecretStr], ...]) -> dict[str, SecretStr]:
+        return dict(values)
+
+    @field_validator(
+        "tool_safety",
+        mode="before",
+        json_schema_input_type=dict[str, ToolSafety],
+    )
+    @classmethod
+    def _tool_safety_mapping_to_items(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return tuple(value.items())
+        if isinstance(value, tuple):
+            return value
+        raise ValueError("value must be a JSON object")
+
+    @field_serializer("tool_safety", when_used="json")
+    def _serialize_tool_safety(
+        self, values: tuple[tuple[str, ToolSafety], ...]
+    ) -> dict[str, ToolSafety]:
+        return dict(values)
 
     @field_validator("command")
     @classmethod
