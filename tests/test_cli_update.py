@@ -28,7 +28,7 @@ def test_update_check_reports_available_release_without_installing(
 
     assert result.exit_code == 0
     assert "Wisp 1.2.0 is available (current 1.0.0)." in result.stdout
-    assert 'uv tool install --force "wisp-ai==1.2.0"' in result.stdout
+    assert "Update with: wisp update" in result.stdout
 
 
 def test_update_reports_current_release(monkeypatch: MonkeyPatch) -> None:

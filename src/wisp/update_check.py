@@ -24,7 +24,8 @@ from packaging.version import InvalidVersion, Version
 from wisp import __version__
 
 PYPI_URL = "https://pypi.org/pypi/wisp-ai/json"
-UPDATE_COMMAND_TEMPLATE = 'uv tool install --force "wisp-ai=={version}"'
+PYPI_INDEX_URL = "https://pypi.org/simple"
+UPDATE_COMMAND_TEMPLATE = "wisp update"
 CACHE_TTL_SECONDS = 6 * 60 * 60
 HTTP_TIMEOUT_SECONDS = 2.0
 
@@ -185,7 +186,17 @@ async def install_update(
     if latest <= current:
         raise UpdateInstallError("The requested Wisp version is not newer than this installation.")
     await (install_verifier or _require_uv_tool_install)()
-    command = ("uv", "tool", "install", "--force", f"wisp-ai=={latest}")
+    command = (
+        "uv",
+        "tool",
+        "install",
+        "--force",
+        "--no-config",
+        "--no-sources",
+        "--default-index",
+        PYPI_INDEX_URL,
+        f"wisp-ai=={latest}",
+    )
     # Once uv starts replacing the active tool environment, interruption risks
     # leaving the installation incomplete. Checks and verification remain cancellable.
     with anyio.CancelScope(shield=True):
@@ -194,7 +205,12 @@ async def install_update(
 
 async def _require_uv_tool_install() -> None:
     try:
-        result = await anyio.run_process(("uv", "tool", "dir"), check=False)
+        result = await anyio.run_process(
+            ("uv", "tool", "dir", "--no-config"),
+            check=False,
+            cwd=_safe_update_cwd(),
+            env=_update_environment(),
+        )
     except FileNotFoundError:
         raise UpdateInstallError("uv is not installed or is not available on PATH.") from None
     except OSError:
@@ -223,7 +239,12 @@ async def _require_uv_tool_install() -> None:
 
 async def _run_update_command(command: tuple[str, ...]) -> None:
     try:
-        result = await anyio.run_process(command, check=False)
+        result = await anyio.run_process(
+            command,
+            check=False,
+            cwd=_safe_update_cwd(),
+            env=_update_environment(),
+        )
     except FileNotFoundError:
         raise UpdateInstallError("uv is not installed or is not available on PATH.") from None
     except OSError:
@@ -235,6 +256,21 @@ async def _run_update_command(command: tuple[str, ...]) -> None:
         detail = detail.splitlines()[-1][:500]
         raise UpdateInstallError(f"uv failed to update Wisp (exit {result.returncode}): {detail}")
     raise UpdateInstallError(f"uv failed to update Wisp (exit {result.returncode}).")
+
+
+def _safe_update_cwd() -> Path:
+    return Path.home().expanduser().resolve(strict=False)
+
+
+def _update_environment() -> dict[str, str]:
+    # Keep custom persistent tool locations, but prevent project/shell-scoped uv
+    # resolver settings from adding indexes, local links, sources, or constraints.
+    retained_uv_names = {"UV_TOOL_BIN_DIR", "UV_TOOL_DIR"}
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith("UV_") or name in retained_uv_names
+    }
 
 
 def is_local_install(

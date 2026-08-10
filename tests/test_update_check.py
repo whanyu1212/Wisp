@@ -76,7 +76,7 @@ def test_update_check_uses_pep_440_ordering_and_ignores_yanked_only_releases(
     assert result == UpdateAvailable(
         current_version="1.0.0",
         latest_version="1.10.0",
-        update_command='uv tool install --force "wisp-ai==1.10.0"',
+        update_command="wisp update",
     )
     cache_path = tmp_path / ".wisp" / "update-check.json"
     assert cache_path.is_file()
@@ -423,7 +423,19 @@ def test_install_update_uses_exact_argv_without_a_shell() -> None:
 
     anyio.run(run)
 
-    assert commands == [("uv", "tool", "install", "--force", "wisp-ai==1.2.0")]
+    assert commands == [
+        (
+            "uv",
+            "tool",
+            "install",
+            "--force",
+            "--no-config",
+            "--no-sources",
+            "--default-index",
+            "https://pypi.org/simple",
+            "wisp-ai==1.2.0",
+        )
+    ]
 
 
 def test_install_update_rejects_invalid_or_non_newer_versions() -> None:
@@ -477,9 +489,13 @@ def test_install_update_verifies_the_active_uv_tool_environment(
         command: tuple[str, ...],
         *,
         check: bool,
+        cwd: Path,
+        env: dict[str, str],
     ) -> CompletedProcess[bytes]:
-        assert command == ("uv", "tool", "dir")
+        assert command == ("uv", "tool", "dir", "--no-config")
         assert check is False
+        assert cwd == Path.home().resolve()
+        assert env == update_check_module._update_environment()
         return CompletedProcess(command, 0, stdout=b"/tools\n", stderr=b"")
 
     async def runner(command: tuple[str, ...]) -> None:
@@ -498,7 +514,23 @@ def test_install_update_verifies_the_active_uv_tool_environment(
 
     anyio.run(run)
 
-    assert commands == ([("uv", "tool", "install", "--force", "wisp-ai==1.1.0")] if allowed else [])
+    assert commands == (
+        [
+            (
+                "uv",
+                "tool",
+                "install",
+                "--force",
+                "--no-config",
+                "--no-sources",
+                "--default-index",
+                "https://pypi.org/simple",
+                "wisp-ai==1.1.0",
+            )
+        ]
+        if allowed
+        else []
+    )
 
 
 def test_install_update_shields_environment_replacement_from_cancellation() -> None:
@@ -533,3 +565,56 @@ def test_install_update_shields_environment_replacement_from_cancellation() -> N
         assert completed.is_set()
 
     anyio.run(run)
+
+
+def test_install_update_isolates_uv_from_project_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "untrusted-project"
+    project.mkdir()
+    (project / "uv.toml").write_text(
+        '[[index]]\nurl = "https://attacker.invalid/simple"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("UV_INDEX", "https://attacker.invalid/simple")
+    monkeypatch.setenv("UV_FIND_LINKS", str(project))
+    monkeypatch.setenv("UV_TOOL_DIR", str(tmp_path / "tools"))
+    monkeypatch.setenv("WISP_UPDATE_TEST", "retained")
+    calls: list[tuple[tuple[str, ...], Path, dict[str, str]]] = []
+
+    async def verify_install() -> None:
+        pass
+
+    async def run_process(
+        command: tuple[str, ...],
+        *,
+        check: bool,
+        cwd: Path,
+        env: dict[str, str],
+    ) -> CompletedProcess[bytes]:
+        assert check is False
+        calls.append((command, cwd, env))
+        return CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(update_check_module.anyio, "run_process", run_process)
+
+    async def run() -> None:
+        await install_update(
+            UpdateAvailable("1.0.0", "1.1.0", "ignored"),
+            install_verifier=verify_install,
+        )
+
+    anyio.run(run)
+
+    assert len(calls) == 1
+    command, cwd, environment = calls[0]
+    assert "--no-config" in command
+    assert "--no-sources" in command
+    assert command[command.index("--default-index") + 1] == "https://pypi.org/simple"
+    assert cwd == Path.home().resolve()
+    assert environment["UV_TOOL_DIR"] == str(tmp_path / "tools")
+    assert environment["WISP_UPDATE_TEST"] == "retained"
+    assert "UV_INDEX" not in environment
+    assert "UV_FIND_LINKS" not in environment
