@@ -48,6 +48,7 @@ def measure[T](
     try:
         result = operation()
         for _ in range(iterations - 1):
+            del result
             result = operation()
         cpu_ns = time.process_time_ns() - started_cpu
         wall_ns = time.perf_counter_ns() - started_wall
@@ -75,6 +76,7 @@ async def measure_async[T](
     try:
         result = await operation()
         for _ in range(iterations - 1):
+            del result
             result = await operation()
         cpu_ns = time.process_time_ns() - started_cpu
         wall_ns = time.perf_counter_ns() - started_wall
