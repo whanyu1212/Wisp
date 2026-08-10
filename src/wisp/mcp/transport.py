@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from typing import TextIO
 
@@ -37,6 +37,7 @@ async def bounded_stdio_client(
     *,
     errlog: TextIO,
     max_frame_bytes: int = MAX_MCP_FRAME_BYTES,
+    on_disconnect: Callable[[], None] | None = None,
 ) -> AsyncGenerator[TransportStreams, None]:
     """Connect over official SDK streams while bounding frames before parsing."""
 
@@ -85,6 +86,8 @@ async def bounded_stdio_client(
         except (anyio.BrokenResourceError, anyio.ClosedResourceError, ConnectionError, OSError):
             pass
         finally:
+            if on_disconnect is not None:
+                on_disconnect()
             await _drain_stdout(process)
 
     async def stdin_writer() -> None:

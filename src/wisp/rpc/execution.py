@@ -2729,7 +2729,7 @@ def handle_rpc_mcp_status_command(
             status: Literal["connected", "disconnected", "unavailable"]
             if diagnostic is not None:
                 status = "unavailable"
-            elif registered_tools:
+            elif mcp_runtime.is_connected(name):
                 status = "connected"
             else:
                 status = "disconnected"

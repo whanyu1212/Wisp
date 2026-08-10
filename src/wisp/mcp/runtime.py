@@ -104,6 +104,7 @@ class McpRuntime:
         self._registered_tool_names: dict[str, tuple[str, ...]] = {
             server.name: () for server in servers
         }
+        self._disconnected_server_names: set[str] = set()
 
     @classmethod
     async def start(
@@ -144,6 +145,13 @@ class McpRuntime:
         """Return tool names registered by this runtime for one configured server."""
 
         return self._registered_tool_names.get(server_name, ())
+
+    def is_connected(self, server_name: str) -> bool:
+        """Return whether one registered server's stdio transport remains live."""
+
+        return bool(self.tool_names_for(server_name)) and (
+            server_name not in self._disconnected_server_names
+        )
 
     async def aclose(self) -> None:
         """Close all MCP clients safely; repeated and concurrent calls share cleanup."""
@@ -218,7 +226,13 @@ class McpRuntime:
                 async with asyncio.timeout(MCP_STARTUP_TIMEOUT_SECONDS):
                     client = await stack.enter_async_context(
                         Client(
-                            bounded_stdio_client(parameters, errlog=errlog),
+                            bounded_stdio_client(
+                                parameters,
+                                errlog=errlog,
+                                on_disconnect=lambda: self._disconnected_server_names.add(
+                                    server.name
+                                ),
+                            ),
                             cache=None,
                         )
                     )
