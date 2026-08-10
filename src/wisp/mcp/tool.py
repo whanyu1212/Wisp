@@ -25,6 +25,7 @@ _MAX_DESCRIPTION_BYTES = 4_096
 _MAX_DESCRIPTION_LINES = 40
 _PROVIDER_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 _UNSUPPORTED_TOOL_CONTENT = "MCP tool returned unsupported non-text content"
+_NORMALIZED_NAME_MARKER = "_"
 
 
 class McpToolDefinitionError(ValueError):
@@ -64,6 +65,8 @@ class McpTool:
             if not isinstance(block, TextContent):
                 raise ToolError(_UNSUPPORTED_TOOL_CONTENT)
             text_parts.append(block.text)
+        if not text_parts and result.structured_content is not None:
+            raise ToolError(_UNSUPPORTED_TOOL_CONTENT)
 
         bounded = truncate_text(
             "\n".join(text_parts),
@@ -114,14 +117,17 @@ def mcp_tool_name(server_name: str, remote_name: str) -> str:
     if (
         len(candidate) <= _MAX_PROVIDER_TOOL_NAME_CHARS
         and _PROVIDER_TOOL_NAME.fullmatch(candidate) is not None
+        and not remote_name.startswith(_NORMALIZED_NAME_MARKER)
     ):
         return candidate
 
     readable = re.sub(r"[^A-Za-z0-9_-]+", "_", remote_name).strip("_-") or "tool"
     digest = hashlib.sha256(remote_name.encode("utf-8")).hexdigest()[:10]
     suffix = f"__{digest}"
-    readable_chars = _MAX_PROVIDER_TOOL_NAME_CHARS - len(prefix) - len(suffix)
-    return f"{prefix}{readable[:readable_chars]}{suffix}"
+    readable_chars = (
+        _MAX_PROVIDER_TOOL_NAME_CHARS - len(prefix) - len(_NORMALIZED_NAME_MARKER) - len(suffix)
+    )
+    return f"{prefix}{_NORMALIZED_NAME_MARKER}{readable[:readable_chars]}{suffix}"
 
 
 def _copy_input_schema(

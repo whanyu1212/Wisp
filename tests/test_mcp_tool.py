@@ -170,6 +170,13 @@ def test_tool_name_hashes_invalid_and_oversized_names_deterministically() -> Non
     assert _provider_safe(oversized)
 
 
+def test_normalized_tool_name_cannot_overlap_direct_name_namespace() -> None:
+    normalized = mcp_tool_name("docs", "foo.")
+    direct_lookalike = normalized.removeprefix("mcp__docs__")
+
+    assert mcp_tool_name("docs", direct_lookalike) != normalized
+
+
 def test_tool_names_are_namespaced_by_server() -> None:
     assert mcp_tool_name("github", "search") != mcp_tool_name("gitlab", "search")
 
@@ -289,6 +296,21 @@ def test_empty_remote_error_uses_generic_message() -> None:
 
     with pytest.raises(ToolError, match="MCP tool reported an error"):
         anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
+
+
+def test_structured_only_result_is_rejected() -> None:
+    adapted = adapt_mcp_tool(
+        server=_server(),
+        tool=_definition(),
+        client=ScriptedMcpClient(
+            CallToolResult(content=[], structuredContent={"secret": "structured-result"})
+        ),
+    )
+
+    with pytest.raises(ToolError, match="unsupported non-text content") as captured:
+        anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
+
+    assert "structured-result" not in str(captured.value)
 
 
 def test_unsupported_content_does_not_expose_payload() -> None:
