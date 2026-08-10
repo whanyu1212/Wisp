@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import platform
 import sys
-import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from benchmarks.support import Measurement, environment, measure
 from wisp.tools.process_manager import (
     DEFAULT_MAX_RETAINED_BYTES,
     DEFAULT_MAX_RETAINED_LINES,
@@ -18,21 +17,34 @@ from wisp.tools.process_manager import (
 )
 
 _MEBIBYTE = 1024 * 1024
+DEFAULT_WORKLOADS = (
+    "ascii_lines",
+    "unicode",
+    "short_lines",
+    "long_line",
+    "mixed_newlines",
+    "invalid_utf8",
+)
 
 
 @dataclass(frozen=True)
 class BenchmarkConfig:
     sample_sizes: tuple[int, ...] = (_MEBIBYTE, 2 * _MEBIBYTE)
+    workloads: tuple[str, ...] = DEFAULT_WORKLOADS
     chunk_bytes: int = 8_192
     max_retained_bytes: int = DEFAULT_MAX_RETAINED_BYTES
     max_retained_lines: int = DEFAULT_MAX_RETAINED_LINES
+    iterations: int = 1
+    track_memory: bool = False
 
 
 @dataclass(frozen=True)
 class BenchmarkSample:
+    workload: str
     input_bytes: int
     chunk_count: int
-    elapsed_ms: float
+    measurement: Measurement
+    max_chunk_ms: float
     throughput_bytes_per_second: float
     retained_bytes: int
     dropped_bytes: int
@@ -60,43 +72,82 @@ def run_benchmark(config: BenchmarkConfig | None = None) -> BenchmarkReport:
     if config.max_retained_bytes < 0 or config.max_retained_lines < 0:
         raise ValueError("retained output limits must be non-negative")
 
-    samples = tuple(_run_sample(size, config) for size in config.sample_sizes)
+    if not config.workloads or any(
+        workload not in DEFAULT_WORKLOADS for workload in config.workloads
+    ):
+        raise ValueError(f"workloads must be selected from {DEFAULT_WORKLOADS}")
+    if config.iterations < 1:
+        raise ValueError("iterations must be positive")
+    samples = tuple(
+        _run_sample(size, workload, config)
+        for workload in config.workloads
+        for size in config.sample_sizes
+    )
     return BenchmarkReport(
         config=config,
-        environment={
-            "platform": platform.platform(),
-            "python": platform.python_version(),
-        },
+        environment=environment(),
         samples=samples,
     )
 
 
-def _run_sample(input_bytes: int, config: BenchmarkConfig) -> BenchmarkSample:
-    pending = _PendingText(config.max_retained_bytes, config.max_retained_lines)
-    chunk = b"x" * (config.chunk_bytes - 1) + b"\n"
-    remaining = input_bytes
-    chunk_count = 0
-    started = time.perf_counter_ns()
-    while remaining:
-        payload = chunk[:remaining]
-        pending.append_bytes(payload)
-        remaining -= len(payload)
-        chunk_count += 1
-    pending.append_bytes(b"", final=True)
-    _text, dropped_bytes, retained_bytes, _source_byte_lengths = pending.drain()
-    elapsed_seconds = (time.perf_counter_ns() - started) / 1_000_000_000
+def _run_sample(input_bytes: int, workload: str, config: BenchmarkConfig) -> BenchmarkSample:
+    source = _workload_bytes(workload, input_bytes)
+    observed_max_chunk_ns = 0
+
+    def consume() -> tuple[int, int, int]:
+        import time
+
+        nonlocal observed_max_chunk_ns
+        pending = _PendingText(config.max_retained_bytes, config.max_retained_lines)
+        chunk_count = 0
+        for offset in range(0, len(source), config.chunk_bytes):
+            payload = source[offset : offset + config.chunk_bytes]
+            started = time.perf_counter_ns()
+            pending.append_bytes(payload)
+            observed_max_chunk_ns = max(
+                observed_max_chunk_ns,
+                time.perf_counter_ns() - started,
+            )
+            chunk_count += 1
+        pending.append_bytes(b"", final=True)
+        _text, dropped_bytes, retained_bytes, _source_byte_lengths = pending.drain()
+        return chunk_count, dropped_bytes, retained_bytes
+
+    result, measurement = measure(
+        consume,
+        iterations=config.iterations,
+        track_memory=config.track_memory,
+    )
+    chunk_count, dropped_bytes, retained_bytes = result
     if dropped_bytes + retained_bytes != input_bytes:
         raise RuntimeError("process-output benchmark lost source-byte accounting")
+    elapsed_seconds = measurement.wall_ms_per_iteration / 1_000
     return BenchmarkSample(
+        workload=workload,
         input_bytes=input_bytes,
         chunk_count=chunk_count,
-        elapsed_ms=elapsed_seconds * 1_000,
+        measurement=measurement,
+        max_chunk_ms=observed_max_chunk_ns / 1_000_000,
         throughput_bytes_per_second=input_bytes / elapsed_seconds
         if elapsed_seconds
         else float("inf"),
         retained_bytes=retained_bytes,
         dropped_bytes=dropped_bytes,
     )
+
+
+def _workload_bytes(workload: str, size: int) -> bytes:
+    patterns = {
+        "ascii_lines": b"x" * 127 + b"\n",
+        "unicode": "lambda λ emoji 🙂\n".encode(),
+        "short_lines": b"x\n",
+        "long_line": b"x",
+        "mixed_newlines": b"alpha\r\nbeta\rgamma\n",
+        "invalid_utf8": b"\xff\xfevalid\n",
+    }
+    pattern = patterns[workload]
+    repetitions, remainder = divmod(size, len(pattern))
+    return pattern * repetitions + pattern[:remainder]
 
 
 def _parse_sizes(value: str) -> tuple[int, ...]:
@@ -118,6 +169,13 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
         help="comma-separated input sizes in bytes",
     )
     parser.add_argument("--chunk-bytes", type=int, default=BenchmarkConfig.chunk_bytes)
+    parser.add_argument(
+        "--workloads",
+        default=",".join(BenchmarkConfig.workloads),
+        help="comma-separated workload names",
+    )
+    parser.add_argument("--iterations", type=int, default=BenchmarkConfig.iterations)
+    parser.add_argument("--track-memory", action="store_true")
     parser.add_argument("--output", type=Path)
     return parser.parse_args(arguments)
 
@@ -125,7 +183,13 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
 def main(arguments: Sequence[str] | None = None) -> None:
     parsed = _parse_args(arguments)
     report = run_benchmark(
-        BenchmarkConfig(sample_sizes=parsed.sizes, chunk_bytes=parsed.chunk_bytes)
+        BenchmarkConfig(
+            sample_sizes=parsed.sizes,
+            workloads=tuple(parsed.workloads.split(",")),
+            chunk_bytes=parsed.chunk_bytes,
+            iterations=parsed.iterations,
+            track_memory=parsed.track_memory,
+        )
     )
     print(report.to_json())
     if parsed.output is not None:
