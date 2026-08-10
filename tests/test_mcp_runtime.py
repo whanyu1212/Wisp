@@ -440,6 +440,12 @@ def test_sdk_reports_zero_tool_server_as_disconnected(
     monkeypatch.setattr(
         mcp_runtime_module, "bounded_stdio_client", lambda *_args, **_kwargs: object()
     )
+    original_names = ToolRegistry.names
+
+    def names_with_extension_tool(registry: ToolRegistry) -> tuple[str, ...]:
+        return (*original_names(registry), "mcp__fixture__extension_tool")
+
+    monkeypatch.setattr(ToolRegistry, "names", names_with_extension_tool)
     server = _fixture_server(tmp_path)
     config = WispConfig(provider="fake", session_dir=tmp_path, mcp_servers=(server,))
 

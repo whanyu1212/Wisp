@@ -2722,12 +2722,9 @@ def handle_rpc_mcp_status_command(
     servers: tuple[RpcMcpServerSnapshot, ...] = ()
     if mcp_runtime is not None:
         diagnostics = {item.server_name: item for item in mcp_runtime.diagnostics}
-        tool_names = runtime.tools.names()
         snapshots: list[RpcMcpServerSnapshot] = []
         for name in mcp_runtime.server_names:
-            registered_tools = tuple(
-                tool_name for tool_name in tool_names if tool_name.startswith(f"mcp__{name}__")
-            )
+            registered_tools = mcp_runtime.tool_names_for(name)
             diagnostic = diagnostics.get(name)
             status: Literal["connected", "disconnected", "unavailable"]
             if diagnostic is not None:
