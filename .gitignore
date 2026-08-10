@@ -41,6 +41,7 @@ __pycache__/
 .venv/
 build/
 dist/
+/profiles/
 
 # Local code index
 .codegraph/
