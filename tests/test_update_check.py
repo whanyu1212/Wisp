@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from subprocess import CompletedProcess
 from typing import Any
 
 import anyio
 import httpx
 import pytest
 
+from wisp import update_check as update_check_module
 from wisp.update_check import (
     PYPI_URL,
     UpdateAvailable,
+    UpdateCheckError,
+    UpdateInstallError,
+    UpdateStatus,
     check_for_update,
+    get_update_status,
+    install_update,
     is_local_install,
 )
 
@@ -330,3 +337,165 @@ def test_malformed_response_returns_no_result(tmp_path: Path, payload: Any) -> N
 )
 def test_local_install_detection_from_direct_url(direct_url: str | None, expected: bool) -> None:
     assert is_local_install(direct_url_reader=lambda: direct_url) is expected
+
+
+def test_explicit_status_bypasses_fresh_cache(tmp_path: Path) -> None:
+    cache_path = tmp_path / ".wisp" / "update-check.json"
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "checked_at": 9_999.0,
+                "python_version": "3.12.0",
+                "releases": ["1.1.0"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_pypi_response({"1.4.0": _available("1.4.0")}),
+            request=request,
+        )
+
+    async def run() -> UpdateStatus:
+        return await get_update_status(
+            current_version="1.0.0",
+            home_dir=tmp_path,
+            now=10_000.0,
+            python_version="3.12.0",
+            local_install_detector=lambda: False,
+            transport=httpx.MockTransport(handler),
+        )
+
+    status = anyio.run(run)
+
+    assert status == UpdateStatus(current_version="1.0.0", latest_version="1.4.0")
+    assert status.available is not None
+    assert status.available.latest_version == "1.4.0"
+
+
+def test_explicit_status_reports_network_and_local_install_errors(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    async def offline() -> None:
+        with pytest.raises(UpdateCheckError, match="Could not check PyPI"):
+            await get_update_status(
+                home_dir=tmp_path,
+                local_install_detector=lambda: False,
+                transport=httpx.MockTransport(handler),
+            )
+
+    async def local() -> None:
+        with pytest.raises(UpdateCheckError, match="installed from a local source"):
+            await get_update_status(
+                home_dir=tmp_path,
+                local_install_detector=lambda: True,
+                transport=httpx.MockTransport(handler),
+            )
+
+    anyio.run(offline)
+    anyio.run(local)
+
+
+def test_install_update_uses_exact_argv_without_a_shell() -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def verify_install() -> None:
+        pass
+
+    async def runner(command: tuple[str, ...]) -> None:
+        commands.append(command)
+
+    async def run() -> None:
+        await install_update(
+            UpdateAvailable(
+                current_version="1.0.0",
+                latest_version="1.2.0",
+                update_command="ignored display value",
+            ),
+            runner=runner,
+            install_verifier=verify_install,
+        )
+
+    anyio.run(run)
+
+    assert commands == [("uv", "tool", "install", "--force", "wisp-ai==1.2.0")]
+
+
+def test_install_update_rejects_invalid_or_non_newer_versions() -> None:
+    async def run(update: UpdateAvailable) -> None:
+        with pytest.raises(UpdateInstallError):
+            await install_update(update)
+
+    anyio.run(
+        run,
+        UpdateAvailable("1.0.0", "not-a-version; command", "ignored"),
+    )
+    anyio.run(
+        run,
+        UpdateAvailable("1.0.0", "1.0.0", "ignored"),
+    )
+
+
+def test_install_update_rejects_unmanaged_install_before_running_command() -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def reject_install() -> None:
+        raise UpdateInstallError("not managed by uv")
+
+    async def runner(command: tuple[str, ...]) -> None:
+        commands.append(command)
+
+    async def run() -> None:
+        with pytest.raises(UpdateInstallError, match="not managed by uv"):
+            await install_update(
+                UpdateAvailable("1.0.0", "1.1.0", "ignored"),
+                runner=runner,
+                install_verifier=reject_install,
+            )
+
+    anyio.run(run)
+
+    assert commands == []
+
+
+@pytest.mark.parametrize(
+    ("environment", "allowed"), [("/tools/wisp-ai", True), ("/tools/other", False)]
+)
+def test_install_update_verifies_the_active_uv_tool_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    environment: str,
+    allowed: bool,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def run_process(
+        command: tuple[str, ...],
+        *,
+        check: bool,
+    ) -> CompletedProcess[bytes]:
+        assert command == ("uv", "tool", "dir")
+        assert check is False
+        return CompletedProcess(command, 0, stdout=b"/tools\n", stderr=b"")
+
+    async def runner(command: tuple[str, ...]) -> None:
+        commands.append(command)
+
+    monkeypatch.setattr(update_check_module.anyio, "run_process", run_process)
+    monkeypatch.setattr(update_check_module.sys, "prefix", environment)
+
+    async def run() -> None:
+        update = UpdateAvailable("1.0.0", "1.1.0", "ignored")
+        if allowed:
+            await install_update(update, runner=runner)
+        else:
+            with pytest.raises(UpdateInstallError, match="persistent uv tool installation"):
+                await install_update(update, runner=runner)
+
+    anyio.run(run)
+
+    assert commands == ([("uv", "tool", "install", "--force", "wisp-ai==1.1.0")] if allowed else [])

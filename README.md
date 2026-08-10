@@ -66,7 +66,10 @@ Check the installed version with `wisp --version`.
 
 Installed builds check PyPI at most once every six hours after TUI startup. When a newer applicable
 release is available, Wisp prints a non-blocking update command; it never installs updates
-automatically. Set `WISP_UPDATE_CHECK=0` to disable the check.
+automatically. Run `wisp update --check` to bypass the cache and check immediately, or `wisp update`
+to check and confirm installation. Set `WISP_UPDATE_CHECK=0` to disable automatic checks; explicit
+checks still run. Automatic installation is available only when Wisp is running from a persistent
+`uv tool` installation; `uvx`, local-source, and other package-manager installs are never replaced.
 
 ## Quickstart
 
@@ -248,6 +251,11 @@ servers, 64 discovery pages and 64 tools per server, 256 MCP tools overall, 1 Mi
 server, 4 MiB overall, and 2 MiB per protocol frame before parsing. Connection and discovery have a
 10-second per-server deadline. A server's catalog is registered atomically, so invalid definitions,
 duplicate names, collisions, or limit violations expose none of that server's tools.
+
+The 16-server ceiling is intentional: every stdio server is a separate local process, so startup
+time and memory use grow with the number and implementation of the configured servers. Wisp may
+revisit this limit when it can avoid eagerly starting every local server, rather than raising it
+without a lifecycle or lazy-start solution.
 
 Current MCP support covers stdio tool discovery and bounded text results. Resources, prompts,
 dynamic `tools/list_changed` updates, HTTP/SSE transports, OAuth, and interactive authentication are
@@ -536,6 +544,7 @@ approve once, allow that tool for the session, YOLO all mutating/command tools f
 /plan                       switch to read-only planning mode
 /build                      switch to normal build mode
 /history                    search prompts submitted in this TUI run
+/update [check|install]     check immediately or explicitly install an update
 /quit, /exit
 ```
 

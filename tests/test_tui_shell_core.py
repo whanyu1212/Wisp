@@ -45,8 +45,8 @@ from wisp.tui.history import (
     HistoricalTranscriptEntry,
     HistoricalTranscriptMessage,
 )
-from wisp.tui.state import TuiCancelRequested, TuiViewState
-from wisp.update_check import UpdateAvailable
+from wisp.tui.state import TuiCancelRequested, TuiViewState, _InputCancelled
+from wisp.update_check import UpdateAvailable, UpdateStatus
 
 
 def _context_budget(
@@ -120,6 +120,64 @@ def test_tui_shell_history_dispatches_renderer_request_and_rejects_arguments() -
 
         assert renderer.history_requests == 2
         assert renderer.errors == ["Usage: /history"]
+
+    anyio.run(run)
+
+
+def test_tui_update_runs_in_background_without_blocking_shell_signals() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.history_requests = 0
+            self.notices: list[str] = []
+            self.errors: list[str] = []
+
+        def prompt_history_request(self) -> None:
+            self.history_requests += 1
+
+        def notice(self, message: str) -> None:
+            self.notices.append(message)
+
+        def command_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    async def run() -> None:
+        started = anyio.Event()
+        release = anyio.Event()
+
+        async def check() -> UpdateStatus:
+            started.set()
+            await release.wait()
+            return UpdateStatus("1.0.0", "1.1.0")
+
+        renderer = RecordingRenderer()
+        shell = TuiShell(
+            ScriptedController(),
+            renderer=renderer,
+            manual_update_checker=check,
+        )
+        async with anyio.create_task_group() as task_group:
+            shell._task_group = task_group
+            await shell._handle_input_line(_InputLine("/update", _InputMode.idle))
+            await started.wait()
+
+            await shell._handle_input_line(_InputLine("/history", _InputMode.idle))
+            await shell._handle_input_line(_InputLine("do work", _InputMode.idle))
+
+            assert renderer.history_requests == 1
+            assert renderer.errors == [
+                "Cannot submit prompts while a Wisp update operation is in progress."
+            ]
+            assert shell._update_cancel_scope is not None
+            await shell._handle_input_cancelled(_InputCancelled(_InputMode.idle))
+            while shell._update_cancel_scope is not None:
+                await anyio.sleep(0)
+            task_group.cancel_scope.cancel()
+
+        assert renderer.notices == [
+            "Checking PyPI for Wisp updates...",
+            "Wisp update cancelled.",
+        ]
 
     anyio.run(run)
 

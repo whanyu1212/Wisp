@@ -1,13 +1,14 @@
-"""Best-effort, cached checks for newer Wisp releases on PyPI."""
+"""Cached release checks and explicit Wisp updates through PyPI."""
 
 from __future__ import annotations
 
 import json
 import os
 import platform
+import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -17,6 +18,7 @@ from urllib.parse import urlsplit
 import anyio
 import httpx
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from wisp import __version__
@@ -29,6 +31,9 @@ HTTP_TIMEOUT_SECONDS = 2.0
 _DISTRIBUTION_NAME = "wisp-ai"
 _CACHE_FILENAME = "update-check.json"
 
+type UpdateCommandRunner = Callable[[tuple[str, ...]], Awaitable[None]]
+type UpdateInstallVerifier = Callable[[], Awaitable[None]]
+
 
 @dataclass(frozen=True, slots=True)
 class UpdateAvailable:
@@ -37,6 +42,34 @@ class UpdateAvailable:
     current_version: str
     latest_version: str
     update_command: str
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateStatus:
+    """The installed and latest compatible Wisp releases."""
+
+    current_version: str
+    latest_version: str
+
+    @property
+    def available(self) -> UpdateAvailable | None:
+        installed = Version(self.current_version)
+        latest = Version(self.latest_version)
+        if latest <= installed:
+            return None
+        return UpdateAvailable(
+            current_version=str(installed),
+            latest_version=str(latest),
+            update_command=UPDATE_COMMAND_TEMPLATE.format(version=latest),
+        )
+
+
+class UpdateCheckError(RuntimeError):
+    """An explicit update check could not produce a trustworthy result."""
+
+
+class UpdateInstallError(RuntimeError):
+    """A requested Wisp update could not be installed."""
 
 
 async def check_for_update(
@@ -59,23 +92,54 @@ async def check_for_update(
         return None
 
     try:
+        status = await get_update_status(
+            current_version=current_version,
+            home_dir=home_dir,
+            now=now,
+            python_version=python_version,
+            local_install_detector=local_install_detector,
+            transport=transport,
+            use_cache=True,
+        )
+        return status.available
+    except Exception:
+        return None
+
+
+async def get_update_status(
+    *,
+    current_version: str = __version__,
+    home_dir: Path | None = None,
+    now: float | None = None,
+    python_version: str | None = None,
+    local_install_detector: Callable[[], bool] | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+    use_cache: bool = False,
+) -> UpdateStatus:
+    """Return explicit release status, bypassing the six-hour cache by default."""
+
+    try:
         detector = local_install_detector or is_local_install
         if await anyio.to_thread.run_sync(detector):
-            return None
+            raise UpdateCheckError(
+                "Wisp is installed from a local source; update it through that source instead."
+            )
 
         installed = Version(current_version)
         interpreter = Version(python_version or platform.python_version())
         checked_at = time.time() if now is None else now
         cache_path = _cache_path(home_dir=home_dir)
-        try:
-            releases = await anyio.to_thread.run_sync(
-                _read_cache,
-                cache_path,
-                checked_at,
-                interpreter,
-            )
-        except Exception:
-            releases = None
+        releases: tuple[str, ...] | None = None
+        if use_cache:
+            try:
+                releases = await anyio.to_thread.run_sync(
+                    _read_cache,
+                    cache_path,
+                    checked_at,
+                    interpreter,
+                )
+            except Exception:
+                releases = None
         if releases is None:
             releases = await _fetch_releases(
                 transport=transport,
@@ -93,15 +157,81 @@ async def check_for_update(
                 pass
 
         latest = _latest_compatible_version(installed, releases)
-        if latest is None or latest <= installed:
-            return None
-        return UpdateAvailable(
+        if latest is None:
+            raise UpdateCheckError("PyPI returned no compatible Wisp releases.")
+        return UpdateStatus(
             current_version=str(installed),
             latest_version=str(latest),
-            update_command=UPDATE_COMMAND_TEMPLATE.format(version=latest),
         )
-    except Exception:
-        return None
+    except UpdateCheckError:
+        raise
+    except Exception as exc:
+        raise UpdateCheckError("Could not check PyPI for Wisp updates.") from exc
+
+
+async def install_update(
+    update: UpdateAvailable,
+    *,
+    runner: UpdateCommandRunner | None = None,
+    install_verifier: UpdateInstallVerifier | None = None,
+) -> None:
+    """Install one exact newer release through Wisp's supported uv-tool path."""
+
+    try:
+        current = Version(update.current_version)
+        latest = Version(update.latest_version)
+    except InvalidVersion as exc:
+        raise UpdateInstallError("The requested Wisp update version is invalid.") from exc
+    if latest <= current:
+        raise UpdateInstallError("The requested Wisp version is not newer than this installation.")
+    await (install_verifier or _require_uv_tool_install)()
+    command = ("uv", "tool", "install", "--force", f"wisp-ai=={latest}")
+    await (runner or _run_update_command)(command)
+
+
+async def _require_uv_tool_install() -> None:
+    try:
+        result = await anyio.run_process(("uv", "tool", "dir"), check=False)
+    except FileNotFoundError:
+        raise UpdateInstallError("uv is not installed or is not available on PATH.") from None
+    except OSError:
+        raise UpdateInstallError("Could not verify this Wisp installation with uv.") from None
+    if result.returncode != 0:
+        raise UpdateInstallError("Could not verify this Wisp installation with uv.")
+    raw_tools_dir = result.stdout.decode(errors="replace").strip()
+    if not raw_tools_dir:
+        raise UpdateInstallError("uv returned an invalid tools directory.")
+    tools_dir = Path(raw_tools_dir).expanduser().resolve(strict=False)
+    environment = Path(sys.prefix).resolve(strict=False)
+    try:
+        relative_environment = environment.relative_to(tools_dir)
+    except ValueError:
+        relative_environment = None
+    if (
+        relative_environment is None
+        or len(relative_environment.parts) != 1
+        or canonicalize_name(relative_environment.name) != canonicalize_name(_DISTRIBUTION_NAME)
+    ):
+        raise UpdateInstallError(
+            "Automatic updates require a persistent uv tool installation; "
+            "update this installation with its package manager instead."
+        )
+
+
+async def _run_update_command(command: tuple[str, ...]) -> None:
+    try:
+        result = await anyio.run_process(command, check=False)
+    except FileNotFoundError:
+        raise UpdateInstallError("uv is not installed or is not available on PATH.") from None
+    except OSError:
+        raise UpdateInstallError("Could not start uv to update Wisp.") from None
+    if result.returncode == 0:
+        return
+    detail = result.stderr.decode(errors="replace").strip()
+    if detail:
+        detail = detail.splitlines()[-1][:500]
+        raise UpdateInstallError(f"uv failed to update Wisp (exit {result.returncode}): {detail}")
+    raise UpdateInstallError(f"uv failed to update Wisp (exit {result.returncode}).")
 
 
 def is_local_install(

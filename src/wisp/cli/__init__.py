@@ -37,6 +37,7 @@ from . import rpc as _cli_rpc
 from . import skills as _cli_skills
 from . import tools as _cli_tools
 from . import trust as _cli_trust
+from . import update as _cli_update
 from .types import OutputMode, _JsonOutputModeError, _RenderedPrintError
 
 # Compatibility aliases for callers/tests that import private helpers from wisp.cli.
@@ -123,6 +124,7 @@ app = typer.Typer(
 app.add_typer(auth_app, name="auth")
 app.add_typer(_cli_trust.trust_app, name="trust")
 app.command("skills")(_cli_skills.skills_command)
+app.command("update")(_cli_update.update_command)
 
 
 @app.callback()
