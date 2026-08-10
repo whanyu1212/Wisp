@@ -172,7 +172,7 @@ def _copy_input_schema(
         raise _definition_error(server_name, remote_name)
     try:
         validator_for(copied).check_schema(copied)
-    except SchemaError:
+    except (SchemaError, TypeError):
         raise _definition_error(server_name, remote_name) from None
     return copied
 

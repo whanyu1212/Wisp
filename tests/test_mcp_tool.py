@@ -219,6 +219,7 @@ def test_schema_is_deeply_copied_and_defaults_to_object() -> None:
         {"type": "object", "secret-schema-value": {1, 2}},
         {"type": "object", "description": "\ud800"},
         {"type": "object", "required": "query"},
+        {"type": "object", "$schema": {}},
         {"type": "object", "description": "x" * 65_536},
     ],
 )
