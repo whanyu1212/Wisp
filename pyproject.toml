@@ -34,6 +34,8 @@ dependencies = [
     "anyio>=4.14.1",
     "google-genai>=2.12.0",
     "httpx>=0.28.1",
+    "jsonschema>=4.26",
+    "mcp>=2,<3",
     "openai>=2.44.0",
     "packaging>=26.0",
     "prompt-toolkit>=3.0.52",
@@ -66,6 +68,7 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.20",
+    "types-jsonschema>=4.26",
     "types-pyyaml>=6.0.12",
 ]
 
