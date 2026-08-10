@@ -205,7 +205,6 @@ class McpRuntime:
                     client = await stack.enter_async_context(
                         Client(
                             bounded_stdio_client(parameters, errlog=errlog),
-                            read_timeout_seconds=MCP_STARTUP_TIMEOUT_SECONDS,
                             cache=None,
                         )
                     )

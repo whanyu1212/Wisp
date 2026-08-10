@@ -90,6 +90,11 @@ async def build_runtime(
             if mcp_runtime is not None
             else ()
         ),
+        unavailable_tool_prefixes=(
+            tuple(f"mcp__{diagnostic.server_name}__" for diagnostic in mcp_runtime.diagnostics)
+            if mcp_runtime is not None
+            else ()
+        ),
     )
 
 

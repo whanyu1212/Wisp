@@ -103,6 +103,7 @@ class WispRuntime:
     )
     mcp_runtime: McpRuntime | None = field(default=None, repr=False)
     startup_events: tuple[WispEvent, ...] = ()
+    unavailable_tool_prefixes: tuple[str, ...] = ()
     _configured_providers: dict[str, Provider] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:

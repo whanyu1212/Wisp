@@ -446,6 +446,7 @@ class RpcHost:
                 all_tools=options.all_tools,
                 allow_read_tools=options.allow_read_tools,
                 allowed_tools=options.allowed_tools,
+                ignored_unknown_prefixes=runtime.unavailable_tool_prefixes,
             ),
             tool_approval_policy=approval_policy,
             max_tool_iterations=options.max_tool_iterations,

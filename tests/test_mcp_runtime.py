@@ -141,6 +141,7 @@ class _RecordingClient:
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         self.enter_task: asyncio.Task[Any] | None = None
         self.exit_task: asyncio.Task[Any] | None = None
+        self.read_timeout_seconds = _kwargs.get("read_timeout_seconds")
         self.__class__.instances.append(self)
 
     async def __aenter__(self) -> _RecordingClient:
@@ -185,6 +186,7 @@ def test_client_context_closes_in_its_owner_task_from_cross_task_shutdown(
 
     client = _RecordingClient.instances[0]
     assert client.enter_task is client.exit_task
+    assert client.read_timeout_seconds is None
     assert "mcp__fixture__search" in tools.names()
 
 
@@ -370,7 +372,10 @@ def test_sdk_receives_nonfatal_startup_diagnostic(tmp_path: Path) -> None:
     async def scenario() -> ErrorEvent:
         controller = await InProcessWisp.start(
             config,
-            options=InProcessOptions(startup_trusted=True),
+            options=InProcessOptions(
+                startup_trusted=True,
+                allowed_tools=("mcp__broken__search",),
+            ),
         )
         try:
             event = await anext(controller.events())
@@ -400,6 +405,7 @@ def test_print_mode_renders_startup_diagnostic_without_failing(
                 "hello",
                 config,
                 runtime,
+                allowed_tools=("mcp__broken__search",),
                 trusted=True,
             )
         finally:

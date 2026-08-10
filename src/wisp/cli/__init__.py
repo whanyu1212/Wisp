@@ -630,6 +630,7 @@ async def _run_print_with_runtime(
             all_tools=all_tools,
             allow_read_tools=allow_read_tools,
             allowed_tools=allowed_tools,
+            ignored_unknown_prefixes=runtime.unavailable_tool_prefixes,
         ),
         tool_approval_policy=_print_mode_tool_approval_policy(approve_unsafe_tools),
         max_tool_iterations=max_tool_iterations,

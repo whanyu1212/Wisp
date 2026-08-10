@@ -40,17 +40,20 @@ def select_tools(
     all_tools: bool = False,
     allow_read_tools: bool = False,
     allowed_tools: tuple[str, ...] = (),
+    ignored_unknown_prefixes: tuple[str, ...] = (),
 ) -> ToolRegistry:
     """Filter registered tools without weakening their approval requirements.
 
     A tool is exposed when all tools are selected, it is explicitly named, or it
-    is read-only and ``allow_read_tools`` is set.  Named unknown tools fail before
-    a run begins.  Exposing a mutating or command tool never auto-approves it.
+    is read-only and ``allow_read_tools`` is set. Named unknown tools fail before
+    a run begins unless their prefix belongs to an isolated startup failure.
+    Exposing a mutating or command tool never auto-approves it.
     """
 
     allowed_names = set(allowed_tools)
     for name in allowed_names:
-        tools.get(name)
+        if not name.startswith(ignored_unknown_prefixes):
+            tools.get(name)
 
     filtered = ToolRegistry()
     for tool in tools.all():
