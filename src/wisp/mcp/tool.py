@@ -169,6 +169,9 @@ def _copy_input_schema(
     schema_type = copied.get("type")
     if schema_type is None:
         copied["type"] = "object"
+        normalized = json.dumps(copied, ensure_ascii=False, separators=(",", ":"))
+        if len(normalized.encode("utf-8")) > _MAX_SCHEMA_BYTES:
+            raise _definition_error(server_name, remote_name)
     elif schema_type != "object":
         raise _definition_error(server_name, remote_name)
     try:

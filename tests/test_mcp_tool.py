@@ -221,6 +221,7 @@ def test_schema_is_deeply_copied_and_defaults_to_object() -> None:
         {"type": "object", "required": "query"},
         {"type": "object", "$schema": {}},
         {"type": "object", "$schema": "https://invalid.example/schema"},
+        {"description": "x" * 65_518},
         {"type": "object", "description": "x" * 65_536},
     ],
 )
