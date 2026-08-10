@@ -419,14 +419,14 @@ class RpcMcpServerSnapshot(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str = Field(min_length=1)
-    status: Literal["connected", "unavailable"]
+    status: Literal["connected", "disconnected", "unavailable"]
     tool_names: tuple[str, ...] = ()
     error: str | None = None
 
     @model_validator(mode="after")
     def _validate_status(self) -> Self:
-        if self.status == "connected" and self.error is not None:
-            raise ValueError("connected MCP servers cannot include an error")
+        if self.status != "unavailable" and self.error is not None:
+            raise ValueError("available MCP server states cannot include an error")
         if self.status == "unavailable" and self.error is None:
             raise ValueError("unavailable MCP servers require an error")
         return self

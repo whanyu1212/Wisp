@@ -65,7 +65,13 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
   protected paths, and explicit unsafe-tool approvals.
 - Publishes provider-neutral lifecycle events at schema v27.
 
-## Schema v29 — current
+## Schema v30 — current
+
+Adds the `rpc.mcp` event carrying configured server connection status, registered tool names, and
+sanitized startup failures. RPC clients can issue `get_mcp_status`; consumers that exhaustively
+match event types must handle or ignore `rpc.mcp`.
+
+## Schema v29
 
 Adds `rpc.skills` and `skill.catalog.updated` events carrying typed skill descriptors, isolated
 discovery diagnostics, and project-trust state. RPC clients can issue `get_skills` for the active
@@ -84,7 +90,7 @@ Adds `mode` (`"plan" | "build"`, default `"build"`) to `CodingSessionState`, so 
 reports the active agent mode. The field is stripped for consumers reading at an older schema
 version.
 
-Events at schema v5 through v29 remain readable.
+Events at schema v5 through v30 remain readable.
 
 ---
 

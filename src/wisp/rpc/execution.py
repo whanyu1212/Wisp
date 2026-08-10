@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 from uuid import uuid4
 
 import anyio
@@ -2723,17 +2723,28 @@ def handle_rpc_mcp_status_command(
     if mcp_runtime is not None:
         diagnostics = {item.server_name: item for item in mcp_runtime.diagnostics}
         tool_names = runtime.tools.names()
-        servers = tuple(
-            RpcMcpServerSnapshot(
-                name=name,
-                status="unavailable" if name in diagnostics else "connected",
-                tool_names=tuple(
-                    tool_name for tool_name in tool_names if tool_name.startswith(f"mcp__{name}__")
-                ),
-                error=diagnostics[name].message if name in diagnostics else None,
+        snapshots: list[RpcMcpServerSnapshot] = []
+        for name in mcp_runtime.server_names:
+            registered_tools = tuple(
+                tool_name for tool_name in tool_names if tool_name.startswith(f"mcp__{name}__")
             )
-            for name in mcp_runtime.server_names
-        )
+            diagnostic = diagnostics.get(name)
+            status: Literal["connected", "disconnected", "unavailable"]
+            if diagnostic is not None:
+                status = "unavailable"
+            elif registered_tools:
+                status = "connected"
+            else:
+                status = "disconnected"
+            snapshots.append(
+                RpcMcpServerSnapshot(
+                    name=name,
+                    status=status,
+                    tool_names=registered_tools,
+                    error=diagnostic.message if diagnostic is not None else None,
+                )
+            )
+        servers = tuple(snapshots)
 
     write_event(
         RpcMcpStatusReported(command_id=command_id, status=RpcMcpStatusSnapshot(servers=servers))

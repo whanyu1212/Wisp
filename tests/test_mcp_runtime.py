@@ -26,6 +26,7 @@ from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 from wisp.sdk import InProcessWisp
 from wisp.tui.launch import TuiOptions, _preflight_tui_options
+from wisp.tui.mcp import mcp_status_text
 
 
 def _fixture_server(
@@ -425,6 +426,48 @@ def test_sdk_reports_connected_mcp_server_and_registered_tools(tmp_path: Path) -
         "mcp__fixture__runtime_environment",
     )
     assert status.error is None
+
+
+def test_sdk_reports_zero_tool_server_as_disconnected(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class EmptyCatalogClient(_RecordingClient):
+        definitions = ()
+
+    EmptyCatalogClient.instances.clear()
+    monkeypatch.setattr(mcp_runtime_module, "Client", EmptyCatalogClient)
+    monkeypatch.setattr(
+        mcp_runtime_module, "bounded_stdio_client", lambda *_args, **_kwargs: object()
+    )
+    server = _fixture_server(tmp_path)
+    config = WispConfig(provider="fake", session_dir=tmp_path, mcp_servers=(server,))
+
+    async def scenario() -> RpcMcpStatusReported:
+        controller = await InProcessWisp.start(
+            config,
+            options=InProcessOptions(startup_trusted=True),
+        )
+        try:
+            await controller.get_mcp_status(command_id="mcp-1")
+            report: RpcMcpStatusReported | None = None
+            async for event in controller.events():
+                if isinstance(event, RpcMcpStatusReported):
+                    report = event
+                if isinstance(event, RpcCommandFinished) and event.command_id == "mcp-1":
+                    assert report is not None
+                    return report
+            raise AssertionError("MCP status command did not finish")
+        finally:
+            await controller.aclose()
+
+    report = anyio.run(scenario)
+
+    assert report.status.servers[0].status == "disconnected"
+    assert report.status.servers[0].tool_names == ()
+    assert report.status.servers[0].error is None
+    assert "fixture: disconnected (no tools discovered)" in mcp_status_text(report.status)
+    assert EmptyCatalogClient.instances[0].exit_task is not None
 
 
 def test_print_mode_renders_startup_diagnostic_without_failing(
