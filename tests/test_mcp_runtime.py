@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -352,41 +351,6 @@ def test_shutdown_failure_is_generic_and_redacted(
     assert str(error) == "Failed to close MCP runtime"
     assert secret not in str(error)
     assert error.__cause__ is None
-
-
-def test_sdk_client_logs_are_suppressed_and_logger_state_is_restored(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    secret = "server-controlled-log-secret"
-    logger = logging.getLogger("mcp.client.session")
-
-    class LoggingClient(_RecordingClient):
-        async def list_tools(self, *, cursor: str | None = None) -> ListToolsResult:
-            logger.warning(secret)
-            return await super().list_tools(cursor=cursor)
-
-    LoggingClient.instances.clear()
-    monkeypatch.setattr(mcp_runtime_module, "Client", LoggingClient)
-    monkeypatch.setattr(mcp_runtime_module, "stdio_client", lambda *_args, **_kwargs: object())
-    caplog.set_level(logging.WARNING)
-    api, _tools = _api()
-
-    async def scenario() -> None:
-        runtime = await McpRuntime.start(
-            (_fixture_server(tmp_path),),
-            api=api,
-            existing_tool_names=(),
-        )
-        assert secret not in caplog.text
-        await runtime.aclose()
-
-    anyio.run(scenario)
-    logger.warning("logger-restored")
-
-    assert secret not in caplog.text
-    assert "logger-restored" in caplog.text
 
 
 def test_sdk_receives_nonfatal_startup_diagnostic(tmp_path: Path) -> None:

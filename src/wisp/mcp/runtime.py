@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
 from typing import Literal, cast
 
 import anyio
@@ -27,11 +25,6 @@ MAX_MCP_TOOLS_PER_SERVER = 64
 MAX_MCP_TOOL_DEFINITION_BYTES_PER_SERVER = 1_048_576
 MAX_MCP_TOOLS = 256
 MAX_MCP_TOOL_DEFINITION_BYTES = 4_194_304
-
-_MCP_CLIENT_LOGGER = logging.getLogger("mcp.client")
-_mcp_log_lock = Lock()
-_mcp_log_silence_users = 0
-_mcp_log_saved_state: tuple[tuple[logging.Handler, ...], bool] | None = None
 
 type McpDiagnosticCode = Literal[
     "missing-environment",
@@ -107,7 +100,6 @@ class McpRuntime:
         self._start_error: BaseException | None = None
         self._close_error: BaseException | None = None
         self._diagnostics: tuple[McpStartupDiagnostic, ...] = ()
-        self._logs_silenced = False
 
     @classmethod
     async def start(
@@ -120,7 +112,6 @@ class McpRuntime:
         """Connect configured servers and register every accepted catalog."""
 
         runtime = cls(servers, api, existing_tool_names)
-        runtime._silence_client_logs()
         runtime._owner_task = asyncio.create_task(runtime._run_owner())
         try:
             await runtime._started.wait()
@@ -128,10 +119,8 @@ class McpRuntime:
             runtime._owner_task.cancel()
             with anyio.CancelScope(shield=True), suppress(asyncio.CancelledError):
                 await runtime._owner_task
-            runtime._restore_client_logs()
             raise
         if runtime._start_error is not None:
-            runtime._restore_client_logs()
             raise RuntimeError("Failed to initialize MCP runtime") from None
         return runtime
 
@@ -155,44 +144,12 @@ class McpRuntime:
             raise
 
     async def _close(self) -> None:
-        try:
-            self._close_requested.set()
-            owner_task = self._owner_task
-            if owner_task is not None:
-                await owner_task
-            if self._close_error is not None:
-                raise RuntimeError("Failed to close MCP runtime") from None
-        finally:
-            self._restore_client_logs()
-
-    def _silence_client_logs(self) -> None:
-        global _mcp_log_saved_state, _mcp_log_silence_users
-
-        with _mcp_log_lock:
-            if _mcp_log_silence_users == 0:
-                _mcp_log_saved_state = (
-                    tuple(_MCP_CLIENT_LOGGER.handlers),
-                    _MCP_CLIENT_LOGGER.propagate,
-                )
-                _MCP_CLIENT_LOGGER.handlers = [logging.NullHandler()]
-                _MCP_CLIENT_LOGGER.propagate = False
-            _mcp_log_silence_users += 1
-            self._logs_silenced = True
-
-    def _restore_client_logs(self) -> None:
-        global _mcp_log_saved_state, _mcp_log_silence_users
-
-        with _mcp_log_lock:
-            if not self._logs_silenced:
-                return
-            self._logs_silenced = False
-            _mcp_log_silence_users -= 1
-            if _mcp_log_silence_users == 0:
-                assert _mcp_log_saved_state is not None
-                handlers, propagate = _mcp_log_saved_state
-                _MCP_CLIENT_LOGGER.handlers = list(handlers)
-                _MCP_CLIENT_LOGGER.propagate = propagate
-                _mcp_log_saved_state = None
+        self._close_requested.set()
+        owner_task = self._owner_task
+        if owner_task is not None:
+            await owner_task
+        if self._close_error is not None:
+            raise RuntimeError("Failed to close MCP runtime") from None
 
     async def _run_owner(self) -> None:
         connected: list[_ConnectedServer] = []
