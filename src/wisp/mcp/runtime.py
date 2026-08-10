@@ -11,11 +11,12 @@ from typing import Literal, cast
 
 import anyio
 from mcp.client import Client
-from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.stdio import StdioServerParameters
 from mcp.types import Tool as McpToolDefinition
 
 from wisp.mcp.config import McpServerConfig
 from wisp.mcp.tool import adapt_mcp_tool
+from wisp.mcp.transport import bounded_stdio_client
 from wisp.runtime.api import ExtensionAPI
 from wisp.tools.base import Tool
 
@@ -203,7 +204,7 @@ class McpRuntime:
                 async with asyncio.timeout(MCP_STARTUP_TIMEOUT_SECONDS):
                     client = await stack.enter_async_context(
                         Client(
-                            stdio_client(parameters, errlog=errlog),
+                            bounded_stdio_client(parameters, errlog=errlog),
                             read_timeout_seconds=MCP_STARTUP_TIMEOUT_SECONDS,
                             cache=None,
                         )

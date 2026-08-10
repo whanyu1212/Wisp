@@ -245,9 +245,9 @@ the remote tool name exactly.
 Startup is failure-isolated: an unavailable or malformed server produces a sanitized error event
 while healthy servers and built-in tools remain available. Wisp accepts at most 16 configured
 servers, 64 discovery pages and 64 tools per server, 256 MCP tools overall, 1 MiB of definitions per
-server, and 4 MiB overall. Connection and discovery have a 10-second per-server deadline. A server's
-catalog is registered atomically, so invalid definitions, duplicate names, collisions, or limit
-violations expose none of that server's tools.
+server, 4 MiB overall, and 2 MiB per protocol frame before parsing. Connection and discovery have a
+10-second per-server deadline. A server's catalog is registered atomically, so invalid definitions,
+duplicate names, collisions, or limit violations expose none of that server's tools.
 
 Current MCP support covers stdio tool discovery and bounded text results. Resources, prompts,
 dynamic `tools/list_changed` updates, HTTP/SSE transports, OAuth, and interactive authentication are

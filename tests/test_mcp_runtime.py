@@ -168,7 +168,9 @@ def test_client_context_closes_in_its_owner_task_from_cross_task_shutdown(
 ) -> None:
     _RecordingClient.instances.clear()
     monkeypatch.setattr(mcp_runtime_module, "Client", _RecordingClient)
-    monkeypatch.setattr(mcp_runtime_module, "stdio_client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        mcp_runtime_module, "bounded_stdio_client", lambda *_args, **_kwargs: object()
+    )
     api, tools = _api()
 
     async def scenario() -> None:
@@ -195,7 +197,9 @@ def test_one_invalid_definition_rejects_the_whole_server_catalog(
 
     InvalidCatalogClient.instances.clear()
     monkeypatch.setattr(mcp_runtime_module, "Client", InvalidCatalogClient)
-    monkeypatch.setattr(mcp_runtime_module, "stdio_client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        mcp_runtime_module, "bounded_stdio_client", lambda *_args, **_kwargs: object()
+    )
     api, tools = _api()
 
     async def scenario() -> tuple[str, ...]:
@@ -221,7 +225,9 @@ def test_catalog_collision_rejects_the_whole_server(
 ) -> None:
     _RecordingClient.instances.clear()
     monkeypatch.setattr(mcp_runtime_module, "Client", _RecordingClient)
-    monkeypatch.setattr(mcp_runtime_module, "stdio_client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        mcp_runtime_module, "bounded_stdio_client", lambda *_args, **_kwargs: object()
+    )
     api, tools = _api()
 
     async def scenario() -> tuple[str, ...]:
@@ -247,7 +253,9 @@ def test_aggregate_limit_rejects_later_server_atomically(
 ) -> None:
     _RecordingClient.instances.clear()
     monkeypatch.setattr(mcp_runtime_module, "Client", _RecordingClient)
-    monkeypatch.setattr(mcp_runtime_module, "stdio_client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        mcp_runtime_module, "bounded_stdio_client", lambda *_args, **_kwargs: object()
+    )
     monkeypatch.setattr(mcp_runtime_module, "MAX_MCP_TOOLS", 1)
     api, tools = _api()
 
@@ -292,7 +300,7 @@ def test_timed_out_server_is_isolated_from_concurrent_healthy_server(
     monkeypatch.setattr(mcp_runtime_module, "Client", SelectiveClient)
     monkeypatch.setattr(
         mcp_runtime_module,
-        "stdio_client",
+        "bounded_stdio_client",
         lambda parameters, **_kwargs: parameters,
     )
     monkeypatch.setattr(mcp_runtime_module, "MCP_STARTUP_TIMEOUT_SECONDS", 0.01)
@@ -333,7 +341,9 @@ def test_shutdown_failure_is_generic_and_redacted(
 
     FailingExitClient.instances.clear()
     monkeypatch.setattr(mcp_runtime_module, "Client", FailingExitClient)
-    monkeypatch.setattr(mcp_runtime_module, "stdio_client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        mcp_runtime_module, "bounded_stdio_client", lambda *_args, **_kwargs: object()
+    )
     api, _tools = _api()
 
     async def scenario() -> RuntimeError:

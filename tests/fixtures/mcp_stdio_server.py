@@ -38,4 +38,15 @@ if __name__ == "__main__":
     atexit.register(_record_close)
     sys.stderr.write(os.environ.get("WISP_MCP_TEST_STDERR", "stdio fixture started"))
     sys.stderr.flush()
-    server.run()
+    mode = sys.argv[1] if len(sys.argv) > 1 else "server"
+    if mode == "invalid-frame":
+        sys.stdout.write(
+            json.dumps({"credential": os.environ.get("WISP_MCP_TEST_FRAME_SECRET")}) + "\n"
+        )
+        sys.stdout.flush()
+    elif mode == "oversized-frame":
+        frame_bytes = int(os.environ["WISP_MCP_TEST_FRAME_BYTES"])
+        sys.stdout.buffer.write(b"x" * frame_bytes)
+        sys.stdout.buffer.flush()
+    else:
+        server.run()

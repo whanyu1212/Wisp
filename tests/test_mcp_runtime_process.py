@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from wisp.mcp.config import McpServerConfig
+from wisp.mcp.transport import MAX_MCP_FRAME_BYTES
 from wisp.runtime.extensions import build_runtime
 from wisp.tools.context import ToolContext
 
@@ -23,12 +25,13 @@ def _fixture_server(
     name: str = "fixture",
     env: dict[str, str] | None = None,
     env_from: tuple[str, ...] = (),
+    fixture_args: tuple[str, ...] = (),
 ) -> McpServerConfig:
     fixture = Path(__file__).parent / "fixtures" / "mcp_stdio_server.py"
     return McpServerConfig(
         name=name,
         command=sys.executable,
-        args=("-u", str(fixture)),
+        args=("-u", str(fixture), *fixture_args),
         env={
             "WISP_MCP_TEST_CLOSED_FILE": str(tmp_path / f"{name}-closed"),
             **(env or {}),
@@ -109,3 +112,56 @@ def test_unavailable_server_is_isolated_and_diagnostic_is_redacted(tmp_path: Pat
         "MCP server broken is unavailable: the server could not be started or initialized",
     )
     assert secret not in "\n".join(messages)
+
+
+def test_invalid_protocol_frame_is_rejected_without_logging_payload(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    secret = "credential-from-server-stdout"
+    caplog.set_level(logging.DEBUG)
+    server = _fixture_server(
+        tmp_path,
+        env={"WISP_MCP_TEST_FRAME_SECRET": secret},
+        fixture_args=("invalid-frame",),
+    )
+
+    async def scenario() -> tuple[str, ...]:
+        runtime = await build_runtime(mcp_servers=(server,))
+        try:
+            return tuple(event.message for event in runtime.startup_events)
+        finally:
+            await runtime.aclose()
+
+    messages = anyio.run(scenario)
+    captured = capfd.readouterr()
+
+    assert messages == (
+        "MCP server fixture is unavailable: the server could not be started or initialized",
+    )
+    assert secret not in caplog.text
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert secret not in "\n".join(messages)
+
+
+def test_oversized_protocol_frame_is_rejected_before_sdk_parsing(tmp_path: Path) -> None:
+    server = _fixture_server(
+        tmp_path,
+        env={"WISP_MCP_TEST_FRAME_BYTES": str(MAX_MCP_FRAME_BYTES + 65_536)},
+        fixture_args=("oversized-frame",),
+    )
+
+    async def scenario() -> tuple[str, ...]:
+        runtime = await build_runtime(mcp_servers=(server,))
+        try:
+            return tuple(event.message for event in runtime.startup_events)
+        finally:
+            await runtime.aclose()
+
+    messages = anyio.run(scenario)
+
+    assert messages == (
+        "MCP server fixture is unavailable: the server could not be started or initialized",
+    )
