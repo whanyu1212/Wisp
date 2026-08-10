@@ -34,6 +34,7 @@ _CACHE_FILENAME = "update-check.json"
 
 type UpdateCommandRunner = Callable[[tuple[str, ...]], Awaitable[None]]
 type UpdateInstallVerifier = Callable[[], Awaitable[None]]
+type UpdateInstallStartedCallback = Callable[[], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +176,7 @@ async def install_update(
     *,
     runner: UpdateCommandRunner | None = None,
     install_verifier: UpdateInstallVerifier | None = None,
+    on_install_started: UpdateInstallStartedCallback | None = None,
 ) -> None:
     """Install one exact newer release through Wisp's supported uv-tool path."""
 
@@ -199,6 +201,8 @@ async def install_update(
     )
     # Once uv starts replacing the active tool environment, interruption risks
     # leaving the installation incomplete. Checks and verification remain cancellable.
+    if on_install_started is not None:
+        on_install_started()
     with anyio.CancelScope(shield=True):
         await (runner or _run_update_command)(command)
 

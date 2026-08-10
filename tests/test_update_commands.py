@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import cast
 
 import anyio
@@ -28,7 +29,13 @@ def test_tui_update_check_then_explicit_install() -> None:
     async def check() -> UpdateStatus:
         return UpdateStatus("1.0.0", "1.2.0")
 
-    async def install(update: UpdateAvailable) -> None:
+    async def install(
+        update: UpdateAvailable,
+        *,
+        on_install_started: Callable[[], None] | None = None,
+    ) -> None:
+        if on_install_started is not None:
+            on_install_started()
         installed.append(update)
 
     commands = UpdateCommands(

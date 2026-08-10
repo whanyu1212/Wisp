@@ -537,11 +537,16 @@ def test_install_update_shields_environment_replacement_from_cancellation() -> N
     started = anyio.Event()
     release = anyio.Event()
     completed = anyio.Event()
+    phases: list[str] = []
 
     async def verify_install() -> None:
-        pass
+        phases.append("verified")
+
+    def install_started() -> None:
+        phases.append("installing")
 
     async def runner(command: tuple[str, ...]) -> None:
+        assert phases == ["verified", "installing"]
         started.set()
         await release.wait()
         completed.set()
@@ -551,6 +556,7 @@ def test_install_update_shields_environment_replacement_from_cancellation() -> N
             UpdateAvailable("1.0.0", "1.1.0", "ignored"),
             runner=runner,
             install_verifier=verify_install,
+            on_install_started=install_started,
         )
 
     async def run() -> None:

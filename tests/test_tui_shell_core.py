@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from tempfile import TemporaryDirectory
@@ -198,7 +199,13 @@ def test_tui_update_installation_finishes_safely_after_cancel_request() -> None:
         async def check() -> UpdateStatus:
             return UpdateStatus("1.0.0", "1.1.0")
 
-        async def install(update: UpdateAvailable) -> None:
+        async def install(
+            update: UpdateAvailable,
+            *,
+            on_install_started: Callable[[], None] | None = None,
+        ) -> None:
+            if on_install_started is not None:
+                on_install_started()
             install_started.set()
             await release_install.wait()
 
@@ -227,6 +234,58 @@ def test_tui_update_installation_finishes_safely_after_cancel_request() -> None:
             "Checking PyPI for Wisp updates...",
             "Wisp update installation is in progress; waiting for it to finish safely.",
             "Updated Wisp to 1.1.0. Restart Wisp to use the new version.",
+        ]
+
+    anyio.run(run)
+
+
+def test_tui_update_provenance_verification_remains_cancellable() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.notices: list[str] = []
+
+        def notice(self, message: str) -> None:
+            self.notices.append(message)
+
+    async def run() -> None:
+        verification_started = anyio.Event()
+        release_verification = anyio.Event()
+
+        async def check() -> UpdateStatus:
+            return UpdateStatus("1.0.0", "1.1.0")
+
+        async def install(
+            update: UpdateAvailable,
+            *,
+            on_install_started: Callable[[], None] | None = None,
+        ) -> None:
+            verification_started.set()
+            await release_verification.wait()
+            if on_install_started is not None:
+                on_install_started()
+
+        renderer = RecordingRenderer()
+        shell = TuiShell(
+            ScriptedController(),
+            renderer=renderer,
+            manual_update_checker=check,
+            update_installer=install,
+        )
+        async with anyio.create_task_group() as task_group:
+            shell._task_group = task_group
+            await shell._handle_input_line(_InputLine("/update install", _InputMode.idle))
+            await verification_started.wait()
+
+            assert shell._updates.installing is False
+            await shell._handle_input_cancelled(_InputCancelled(_InputMode.idle))
+            while shell._update_cancel_scope is not None:
+                await anyio.sleep(0)
+            task_group.cancel_scope.cancel()
+
+        assert renderer.notices == [
+            "Checking PyPI for Wisp updates...",
+            "Wisp update cancelled.",
         ]
 
     anyio.run(run)
