@@ -28,7 +28,9 @@ class BenchmarkConfig:
 @dataclass(frozen=True)
 class BenchmarkSample:
     workload: Workload
+    configured_size: int
     line_count: int
+    longest_line_chars: int
     input_bytes: int
     guarded: bool
     retained_rows: int
@@ -60,10 +62,10 @@ def run_benchmark(config: BenchmarkConfig | None = None) -> BenchmarkReport:
 
 def _run_sample(
     workload: Workload,
-    line_count: int,
+    configured_size: int,
     config: BenchmarkConfig,
 ) -> BenchmarkSample:
-    before, after = _documents(workload, line_count)
+    before, after = _documents(workload, configured_size)
     presentation, generation = measure(
         lambda: build_write_diff_presentation(
             before,
@@ -74,7 +76,9 @@ def _run_sample(
     )
     return BenchmarkSample(
         workload=workload,
-        line_count=line_count,
+        configured_size=configured_size,
+        line_count=len(before.splitlines()),
+        longest_line_chars=max((len(line) for line in before.splitlines()), default=0),
         input_bytes=len(before.encode()) + len(after.encode()),
         guarded=presentation is None,
         retained_rows=len(presentation.rows) if presentation is not None else 0,

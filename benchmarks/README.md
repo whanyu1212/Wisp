@@ -99,6 +99,9 @@ uv run python -m benchmarks.diff_generation --line-counts 1000,3500,10000 --trac
 
 Inputs refused by the production event-loop safety guard are reported with `guarded: true` and no
 retained rows. This keeps the guard cost visible without misrepresenting it as diff computation.
+For ordinary workloads, `configured_size` selects the line count; for `long_line`, it selects the
+line's character length. Every sample separately reports its actual `line_count` and
+`longest_line_chars`.
 
 ## CPU Profiles
 

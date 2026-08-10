@@ -19,6 +19,10 @@ def test_diff_generation_benchmark_uses_bounded_structured_presentations() -> No
     assert all(sample.additions > 0 for sample in report.samples)
     assert all(sample.deletions > 0 for sample in report.samples)
     assert all(sample.generation.wall_ms >= 0 for sample in report.samples)
+    long_line = next(sample for sample in report.samples if sample.workload == "long_line")
+    assert long_line.configured_size == 20
+    assert long_line.line_count == 1
+    assert long_line.longest_line_chars == 20
     assert '"retained_rows"' in report.to_json()
 
 

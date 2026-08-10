@@ -92,29 +92,33 @@ def run_benchmark(config: BenchmarkConfig | None = None) -> BenchmarkReport:
 
 def _run_sample(input_bytes: int, workload: str, config: BenchmarkConfig) -> BenchmarkSample:
     source = _workload_bytes(workload, input_bytes)
+    observed_max_chunk_ns = 0
 
-    def consume() -> tuple[int, int, int, float]:
+    def consume() -> tuple[int, int, int]:
         import time
 
+        nonlocal observed_max_chunk_ns
         pending = _PendingText(config.max_retained_bytes, config.max_retained_lines)
         chunk_count = 0
-        max_chunk_ns = 0
         for offset in range(0, len(source), config.chunk_bytes):
             payload = source[offset : offset + config.chunk_bytes]
             started = time.perf_counter_ns()
             pending.append_bytes(payload)
-            max_chunk_ns = max(max_chunk_ns, time.perf_counter_ns() - started)
+            observed_max_chunk_ns = max(
+                observed_max_chunk_ns,
+                time.perf_counter_ns() - started,
+            )
             chunk_count += 1
         pending.append_bytes(b"", final=True)
         _text, dropped_bytes, retained_bytes, _source_byte_lengths = pending.drain()
-        return chunk_count, dropped_bytes, retained_bytes, max_chunk_ns / 1_000_000
+        return chunk_count, dropped_bytes, retained_bytes
 
     result, measurement = measure(
         consume,
         iterations=config.iterations,
         track_memory=config.track_memory,
     )
-    chunk_count, dropped_bytes, retained_bytes, max_chunk_ms = result
+    chunk_count, dropped_bytes, retained_bytes = result
     if dropped_bytes + retained_bytes != input_bytes:
         raise RuntimeError("process-output benchmark lost source-byte accounting")
     elapsed_seconds = measurement.wall_ms_per_iteration / 1_000
@@ -123,7 +127,7 @@ def _run_sample(input_bytes: int, workload: str, config: BenchmarkConfig) -> Ben
         input_bytes=input_bytes,
         chunk_count=chunk_count,
         measurement=measurement,
-        max_chunk_ms=max_chunk_ms,
+        max_chunk_ms=observed_max_chunk_ns / 1_000_000,
         throughput_bytes_per_second=input_bytes / elapsed_seconds
         if elapsed_seconds
         else float("inf"),
