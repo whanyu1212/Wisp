@@ -11,6 +11,9 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+- Added typed MCP status RPC snapshots and a TUI `/mcp` command that reports configured servers,
+  registered tools, and sanitized startup failures without reconnecting servers.
+
 ## 0.1.0b1 — 2026-08-10
 
 - Reduced the installed-build PyPI update cache from 24 hours to six hours so new releases are

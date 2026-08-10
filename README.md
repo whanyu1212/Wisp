@@ -252,6 +252,9 @@ server, 4 MiB overall, and 2 MiB per protocol frame before parsing. Connection a
 10-second per-server deadline. A server's catalog is registered atomically, so invalid definitions,
 duplicate names, collisions, or limit violations expose none of that server's tools.
 
+Run `/mcp` in the TUI to inspect configured server status, registered tool names, and sanitized
+startup failures. The command reads the current runtime snapshot and does not reconnect servers.
+
 The 16-server ceiling is intentional: every stdio server is a separate local process, so startup
 time and memory use grow with the number and implementation of the configured servers. Wisp may
 revisit this limit when it can avoid eagerly starting every local server, rather than raising it
@@ -545,6 +548,8 @@ approve once, allow that tool for the session, YOLO all mutating/command tools f
 /build                      switch to normal build mode
 /history                    search prompts submitted in this TUI run
 /update [check|install]     check immediately or explicitly install an update
+/skills                     inspect loaded skills and discovery diagnostics
+/mcp                        show configured MCP servers and registered tools
 /quit, /exit
 ```
 

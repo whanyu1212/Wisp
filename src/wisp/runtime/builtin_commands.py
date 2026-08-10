@@ -77,6 +77,13 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=27,
         ),
         CommandDescriptor(
+            name="mcp",
+            title="MCP servers",
+            description="Show MCP server and tool status",
+            category=CommandCategory.configuration,
+            order=28,
+        ),
+        CommandDescriptor(
             name="plan",
             title="Plan mode",
             description="Switch to read-only planning mode",

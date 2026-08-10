@@ -74,6 +74,12 @@ class GetSkillsCommand(RpcCommandModel):
     type: Literal["get_skills"] = "get_skills"
 
 
+class GetMcpStatusCommand(RpcCommandModel):
+    """Return sanitized MCP server and registered-tool status."""
+
+    type: Literal["get_mcp_status"] = "get_mcp_status"
+
+
 class GetMessagesCommand(RpcCommandModel):
     """Return a bounded persisted transcript page."""
 
@@ -246,6 +252,7 @@ type RpcCommand = Annotated[
     | GetStateCommand
     | GetCommandsCommand
     | GetSkillsCommand
+    | GetMcpStatusCommand
     | GetMessagesCommand
     | GetSessionsCommand
     | NewSessionCommand

@@ -131,6 +131,12 @@ class McpRuntime:
 
         return self._diagnostics
 
+    @property
+    def server_names(self) -> tuple[str, ...]:
+        """Return configured server names without exposing launch configuration."""
+
+        return tuple(server.name for server in self._servers)
+
     async def aclose(self) -> None:
         """Close all MCP clients safely; repeated and concurrent calls share cleanup."""
 

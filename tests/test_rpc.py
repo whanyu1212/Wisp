@@ -19,6 +19,9 @@ from wisp.events import (
     RpcCommandFinished,
     RpcCommandsReported,
     RpcCommandStarted,
+    RpcMcpServerSnapshot,
+    RpcMcpStatusReported,
+    RpcMcpStatusSnapshot,
     RpcMessageSnapshot,
     RpcMessagesReported,
     RpcMessageToolCallSnapshot,
@@ -54,6 +57,7 @@ from wisp.rpc import (
     FollowUpCommand,
     ForkSessionCommand,
     GetCommandsCommand,
+    GetMcpStatusCommand,
     GetMessagesCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
@@ -177,6 +181,35 @@ def test_get_skills_command_serializes_as_jsonl_and_parses() -> None:
         "type": "get_skills",
     }
     assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_get_mcp_status_command_serializes_as_jsonl_and_parses() -> None:
+    command = GetMcpStatusCommand(id="mcp-1")
+
+    assert json.loads(command.to_json_line()) == {
+        "id": "mcp-1",
+        "type": "get_mcp_status",
+    }
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_mcp_status_event_round_trips_over_json_transport() -> None:
+    event = RpcMcpStatusReported(
+        command_id="mcp-1",
+        status=RpcMcpStatusSnapshot(
+            servers=(
+                RpcMcpServerSnapshot(
+                    name="docs",
+                    status="connected",
+                    tool_names=("mcp__docs__search",),
+                ),
+            )
+        ),
+    )
+
+    assert wisp_event_from_json(event.model_dump_json()) == event
+    with pytest.raises(ValueError, match="require schema_version 30"):
+        wisp_event_from_json(event.model_copy(update={"schema_version": 29}).model_dump_json())
 
 
 def test_skill_catalog_events_round_trip_over_json_transport() -> None:
@@ -1270,6 +1303,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         state_id = await controller.get_state()
         commands_id = await controller.get_commands()
         skills_id = await controller.get_skills()
+        mcp_id = await controller.get_mcp_status()
         messages_id = await controller.get_messages(
             session_id="session-1",
             limit=25,
@@ -1307,6 +1341,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             state_id,
             commands_id,
             skills_id,
+            mcp_id,
             messages_id,
             sessions_id,
             new_session_id,
@@ -1334,6 +1369,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             "state-id",
             "commands-id",
             "skills-id",
+            "mcp-id",
             "messages-id",
             "sessions-id",
             "new-session-id",
@@ -1362,6 +1398,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             GetStateCommand(id="state-id"),
             GetCommandsCommand(id="commands-id"),
             GetSkillsCommand(id="skills-id"),
+            GetMcpStatusCommand(id="mcp-id"),
             GetMessagesCommand(
                 id="messages-id",
                 session_id="session-1",

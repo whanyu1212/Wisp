@@ -16,7 +16,7 @@ from pytest import MonkeyPatch
 import wisp.mcp.runtime as mcp_runtime_module
 from wisp import cli as cli_module
 from wisp.config import WispConfig
-from wisp.events import ErrorEvent
+from wisp.events import ErrorEvent, RpcCommandFinished, RpcMcpStatusReported
 from wisp.mcp.config import McpServerConfig
 from wisp.mcp.runtime import McpRuntime, _discover_tools
 from wisp.rpc.host import InProcessOptions
@@ -389,6 +389,42 @@ def test_sdk_receives_nonfatal_startup_diagnostic(tmp_path: Path) -> None:
     assert event.message == (
         "MCP server broken is unavailable: the server could not be started or initialized"
     )
+
+
+def test_sdk_reports_connected_mcp_server_and_registered_tools(tmp_path: Path) -> None:
+    server = _fixture_server(tmp_path)
+    config = WispConfig(provider="fake", session_dir=tmp_path, mcp_servers=(server,))
+
+    async def scenario() -> RpcMcpStatusReported:
+        controller = await InProcessWisp.start(
+            config,
+            options=InProcessOptions(startup_trusted=True),
+        )
+        try:
+            await controller.get_mcp_status(command_id="mcp-1")
+            report: RpcMcpStatusReported | None = None
+            async for event in controller.events():
+                if isinstance(event, RpcMcpStatusReported):
+                    report = event
+                if isinstance(event, RpcCommandFinished) and event.command_id == "mcp-1":
+                    assert event.ok is True
+                    assert report is not None
+                    return report
+            raise AssertionError("MCP status command did not finish")
+        finally:
+            await controller.aclose()
+
+    report = anyio.run(scenario)
+
+    assert len(report.status.servers) == 1
+    status = report.status.servers[0]
+    assert status.name == "fixture"
+    assert status.status == "connected"
+    assert status.tool_names == (
+        "mcp__fixture__echo",
+        "mcp__fixture__runtime_environment",
+    )
+    assert status.error is None
 
 
 def test_print_mode_renders_startup_diagnostic_without_failing(

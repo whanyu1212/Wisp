@@ -31,6 +31,9 @@ from wisp.events import (
     RpcCommandFinished,
     RpcCommandsReported,
     RpcCommandStarted,
+    RpcMcpServerSnapshot,
+    RpcMcpStatusReported,
+    RpcMcpStatusSnapshot,
     RpcMessagesReported,
     RpcSessionCloned,
     RpcSessionForked,
@@ -206,6 +209,8 @@ class RpcCommandExecutor:
             return self._dispatch_commands(command, running_command)
         if command_type == "get_skills":
             return self._dispatch_skills(command, running_command)
+        if command_type == "get_mcp_status":
+            return self._dispatch_mcp_status(command, running_command)
         if command_type in QUEUE_RPC_COMMAND_TYPES:
             raise RuntimeError("Queue RPC commands require asynchronous dispatch")
         return self._dispatch_control(command, running_command)
@@ -469,6 +474,18 @@ class RpcCommandExecutor:
         handle_rpc_skills_command(
             command,
             agent=self.agent,
+            write_event=self.write_event,
+        )
+        return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_mcp_status(
+        self,
+        command: dict[str, object],
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        handle_rpc_mcp_status_command(
+            command,
+            runtime=self.runtime,
             write_event=self.write_event,
         )
         return _RpcDispatchResult(running_command=running_command)
@@ -2679,6 +2696,48 @@ def handle_rpc_skills_command(
         return
 
     write_event(RpcSkillsReported(command_id=command_id, catalog=rpc_skill_catalog_snapshot(agent)))
+    write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
+
+
+def handle_rpc_mcp_status_command(
+    command: dict[str, object],
+    *,
+    runtime: WispRuntime,
+    write_event: RpcEventWriter,
+) -> None:
+    """Return sanitized startup status without reconnecting MCP servers."""
+
+    command_type, command_id, id_error = rpc_command_identity(command)
+    write_event(RpcCommandStarted(command_id=command_id, command_type=command_type))
+    if id_error is not None:
+        write_rpc_command_error(
+            command_id=command_id,
+            command_type=command_type,
+            message=id_error,
+            write_event=write_event,
+        )
+        return
+
+    mcp_runtime = runtime.mcp_runtime
+    servers: tuple[RpcMcpServerSnapshot, ...] = ()
+    if mcp_runtime is not None:
+        diagnostics = {item.server_name: item for item in mcp_runtime.diagnostics}
+        tool_names = runtime.tools.names()
+        servers = tuple(
+            RpcMcpServerSnapshot(
+                name=name,
+                status="unavailable" if name in diagnostics else "connected",
+                tool_names=tuple(
+                    tool_name for tool_name in tool_names if tool_name.startswith(f"mcp__{name}__")
+                ),
+                error=diagnostics[name].message if name in diagnostics else None,
+            )
+            for name in mcp_runtime.server_names
+        )
+
+    write_event(
+        RpcMcpStatusReported(command_id=command_id, status=RpcMcpStatusSnapshot(servers=servers))
+    )
     write_event(RpcCommandFinished(command_id=command_id, command_type=command_type, ok=True))
 
 

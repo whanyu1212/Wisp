@@ -119,6 +119,16 @@ def test_history_command_parses_and_is_available_in_slash_menu() -> None:
     assert spec.takes_args is False
 
 
+def test_mcp_command_parses_and_is_available_in_slash_menu() -> None:
+    command = parse_tui_slash_command("/mcp")
+    spec = next(spec for spec in SLASH_COMMAND_SPECS if spec.command == "/mcp")
+
+    assert command is not None
+    assert command.name is TuiSlashCommandName.mcp
+    assert command.args == ()
+    assert spec.takes_args is False
+
+
 def test_slash_command_specs_project_shared_builtin_descriptors() -> None:
     descriptors = builtin_command_descriptors()
 

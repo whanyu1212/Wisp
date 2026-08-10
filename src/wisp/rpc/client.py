@@ -25,6 +25,7 @@ from wisp.rpc.commands import (
     FollowUpCommand,
     ForkSessionCommand,
     GetCommandsCommand,
+    GetMcpStatusCommand,
     GetMessagesCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
@@ -117,6 +118,13 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("skills")
         await self._transport.send(GetSkillsCommand(id=selected_id))
+        return selected_id
+
+    async def get_mcp_status(self, *, command_id: str | None = None) -> str:
+        """Request sanitized MCP server and registered-tool status."""
+
+        selected_id = command_id or self._command_id_factory("mcp")
+        await self._transport.send(GetMcpStatusCommand(id=selected_id))
         return selected_id
 
     async def get_messages(
