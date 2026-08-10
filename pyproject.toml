@@ -1,6 +1,6 @@
 [project]
 name = "wisp-ai"
-version = "0.1.0a3"
+version = "0.1.0b1"
 description = "Terminal-first coding agent with typed CLI, TUI, RPC, and SDK interfaces"
 readme = "README.md"
 license = "MIT"
@@ -18,7 +18,7 @@ keywords = [
     "tui",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",

@@ -29,7 +29,7 @@
   <a href="https://github.com/whanyu1212/Wisp/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License" /></a>
 </p>
 
-> **Alpha status:** Wisp is under active development. Interfaces may change while the runtime and
+> **Beta status:** Wisp is under active development. Interfaces may change while the runtime and
 > TUI stabilize.
 
 ## What is Wisp?
@@ -48,10 +48,10 @@ and persistence boundaries around local coding-agent work.
 ## Install
 
 Wisp is published on PyPI as `wisp-ai`, installs a `wisp` command, and requires Python 3.12 or
-newer. The current release is an alpha, so request it explicitly:
+newer. The current release is a beta, so request it explicitly:
 
 ```bash
-uv tool install "wisp-ai==0.1.0a3"
+uv tool install "wisp-ai==0.1.0b1"
 ```
 
 If `wisp` is not on your `PATH`, run `uv tool update-shell` once and restart your shell.
@@ -59,7 +59,7 @@ If `wisp` is not on your `PATH`, run `uv tool update-shell` once and restart you
 To run Wisp without installing it:
 
 ```bash
-uvx --from "wisp-ai==0.1.0a3" wisp
+uvx --from "wisp-ai==0.1.0b1" wisp
 ```
 
 Check the installed version with `wisp --version`.
