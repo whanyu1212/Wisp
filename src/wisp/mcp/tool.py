@@ -142,9 +142,10 @@ def _copy_input_schema(
             ensure_ascii=False,
             separators=(",", ":"),
         )
+        encoded = serialized.encode("utf-8")
     except (RecursionError, TypeError, ValueError):
         raise _definition_error(server_name, remote_name) from None
-    if len(serialized.encode("utf-8")) > _MAX_SCHEMA_BYTES:
+    if len(encoded) > _MAX_SCHEMA_BYTES:
         raise _definition_error(server_name, remote_name)
     copied = json.loads(serialized)
     if not isinstance(copied, dict):
