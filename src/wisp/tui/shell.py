@@ -98,7 +98,8 @@ from wisp.tui.state import (
     _TuiSignal,
     _view_status_for_status,
 )
-from wisp.update_check import UpdateAvailable
+from wisp.tui.update_commands import UpdateCommands, UpdateInstaller, UpdateStatusChecker
+from wisp.update_check import UpdateAvailable, get_update_status, install_update
 
 
 class TuiController(Protocol):
@@ -247,6 +248,8 @@ class TuiShell:
         auth_path: Path | None = None,
         settings_home_dir: Path | None = None,
         update_checker: UpdateChecker | None = None,
+        manual_update_checker: UpdateStatusChecker = get_update_status,
+        update_installer: UpdateInstaller = install_update,
         quit_press_window: float = 1.5,
     ) -> None:
         self.controller = controller
@@ -310,8 +313,14 @@ class TuiShell:
         # production resolves the real home directory.
         self._settings_home_dir = settings_home_dir
         self._update_checker = update_checker
+        self._updates = UpdateCommands(
+            self.renderer,
+            checker=manual_update_checker,
+            installer=update_installer,
+        )
         self._task_group: anyio.abc.TaskGroup | None = None
         self._connect_cancel_scope: anyio.CancelScope | None = None
+        self._update_cancel_scope: anyio.CancelScope | None = None
         # Credential commands read auth_store lazily (it is rebound on a trusted-
         # project rebuild) and the default provider from live shell state.
         self._auth = AuthCommands(
@@ -666,6 +675,12 @@ class TuiShell:
             return False
         if command is not None:
             return await self._handle_slash_command(command)
+        if self._update_cancel_scope is not None:
+            if has_content:
+                self.renderer.command_error(
+                    "Cannot submit prompts while a Wisp update operation is in progress."
+                )
+            return False
         if self._connect_cancel_scope is not None:
             if has_content:
                 self.renderer.command_error(
@@ -744,6 +759,14 @@ class TuiShell:
                 return False
             self._call_renderer_optional("skills_catalog", self.skill_catalog)
             return False
+        if self._update_cancel_scope is not None:
+            if command.name is TuiSlashCommandName.update:
+                self._start_update(command.args)
+            else:
+                self.renderer.command_error(
+                    "Cannot run this slash command while a Wisp update operation is in progress."
+                )
+            return False
         if self.state.current_command_id is not None:
             operation = self._active_operation()
             self.renderer.command_error(f"Cannot run slash commands while {operation} is running.")
@@ -752,6 +775,9 @@ class TuiShell:
             self.renderer.command_error(
                 f"Cannot run slash commands while {self._session_operation_name()}."
             )
+            return False
+        if command.name is TuiSlashCommandName.update:
+            self._start_update(command.args)
             return False
         if command.name in {TuiSlashCommandName.plan, TuiSlashCommandName.build}:
             if command.args:
@@ -1038,6 +1064,7 @@ class TuiShell:
             return False
         self.state.exit_requested = True
         self._cancel_connect("Provider connection cancelled: input closed.")
+        self._cancel_update("Wisp update cancelled: input closed.")
         if self.state.pending_trust is not None:
             # Resolve pending trust as untrusted (safe) so the RPC side unblocks.
             return await self._answer_pending_trust(
@@ -1103,6 +1130,8 @@ class TuiShell:
             return await self._cancel_current(message)
         if self._cancel_connect("Provider connection cancelled."):
             return False
+        if self._cancel_update("Wisp update cancelled."):
+            return False
         return False
 
     async def _handle_input_interrupted(self, signal: _InputInterrupted) -> bool:
@@ -1132,6 +1161,8 @@ class TuiShell:
             return await self._cancel_current(message)
         if self._cancel_connect("Provider connection cancelled."):
             return False
+        if self._cancel_update("Wisp update cancelled."):
+            return False
         self.renderer.input_cleared()
         return False
 
@@ -1142,6 +1173,7 @@ class TuiShell:
         self._disarm_quit()
         self.state.exit_requested = True
         self._cancel_connect("Provider connection cancelled: quit requested.")
+        self._cancel_update("Wisp update cancelled: quit requested.")
         self._clear_queued_prompts()
         self._update_view(queued_follow_ups=0)
         if self.state.pending_trust is not None:
@@ -1177,6 +1209,51 @@ class TuiShell:
         cancel_scope = anyio.CancelScope()
         self._connect_cancel_scope = cancel_scope
         task_group.start_soon(self._run_connect, args, cancel_scope)
+
+    def _start_update(self, args: tuple[str, ...]) -> None:
+        if args not in {(), ("check",), ("install",)}:
+            self.renderer.command_error("Usage: /update [check|install]")
+            return
+        if self._update_cancel_scope is not None:
+            self.renderer.command_error("A Wisp update operation is already in progress.")
+            return
+        if self._connect_cancel_scope is not None:
+            self.renderer.command_error(
+                "Cannot update Wisp while a provider connection is in progress."
+            )
+            return
+        task_group = self._task_group
+        if task_group is None:
+            raise RuntimeError("updates require an active TUI task group")
+        cancel_scope = anyio.CancelScope()
+        self._update_cancel_scope = cancel_scope
+        self.renderer.notice("Checking PyPI for Wisp updates...")
+        task_group.start_soon(self._run_update, args, cancel_scope)
+
+    async def _run_update(
+        self,
+        args: tuple[str, ...],
+        cancel_scope: anyio.CancelScope,
+    ) -> None:
+        try:
+            with cancel_scope:
+                await self._updates.run(args)
+        finally:
+            if self._update_cancel_scope is cancel_scope:
+                self._update_cancel_scope = None
+
+    def _cancel_update(self, message: str) -> bool:
+        cancel_scope = self._update_cancel_scope
+        if cancel_scope is None:
+            return False
+        if self._updates.installing:
+            self.renderer.notice(
+                "Wisp update installation is in progress; waiting for it to finish safely."
+            )
+            return True
+        cancel_scope.cancel()
+        self.renderer.notice(message)
+        return True
 
     async def _run_connect(
         self,

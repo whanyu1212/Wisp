@@ -1092,6 +1092,7 @@ def test_rpc_mode_reports_commands_before_prompt(tmp_path: Path) -> None:
         "compact",
         "context",
         "history",
+        "update",
         "skills",
         "plan",
         "build",

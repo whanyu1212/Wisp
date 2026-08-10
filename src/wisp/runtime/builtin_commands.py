@@ -56,25 +56,39 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=25,
         ),
         CommandDescriptor(
+            name="update",
+            title="Update",
+            description="Check for or install a Wisp update",
+            category=CommandCategory.general,
+            arguments=(
+                CommandArgument(
+                    name="action",
+                    description="Optional 'check' or 'install' action",
+                ),
+            ),
+            accepts_arguments=True,
+            order=26,
+        ),
+        CommandDescriptor(
             name="skills",
             title="Agent Skills",
             description="Show loaded skills and discovery diagnostics",
             category=CommandCategory.general,
-            order=26,
+            order=27,
         ),
         CommandDescriptor(
             name="plan",
             title="Plan mode",
             description="Switch to read-only planning mode",
             category=CommandCategory.configuration,
-            order=27,
+            order=28,
         ),
         CommandDescriptor(
             name="build",
             title="Build mode",
             description="Switch to normal build mode",
             category=CommandCategory.configuration,
-            order=28,
+            order=29,
         ),
         CommandDescriptor(
             name="model",
