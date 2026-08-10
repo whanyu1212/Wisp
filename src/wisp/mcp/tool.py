@@ -68,12 +68,13 @@ class McpTool:
             if not isinstance(block, TextContent):
                 raise ToolError(_UNSUPPORTED_TOOL_CONTENT)
             text_parts.append(block.text)
-        if not text_parts and result.structured_content is not None:
+        text = "\n".join(text_parts)
+        if result.structured_content is not None and not text.strip():
             raise ToolError(_UNSUPPORTED_TOOL_CONTENT)
 
         try:
             bounded = truncate_text(
-                "\n".join(text_parts),
+                text,
                 max_bytes=max(0, context.max_output_bytes),
                 max_lines=max(0, context.max_output_lines),
             )
@@ -171,7 +172,14 @@ def _copy_input_schema(
     elif schema_type != "object":
         raise _definition_error(server_name, remote_name)
     try:
-        validator_for(copied).check_schema(copied)
+        if "$schema" in copied:
+            # jsonschema supports None to disable fallback, but types-jsonschema omits it.
+            validator = validator_for(copied, default=None)  # type: ignore[arg-type]
+        else:
+            validator = validator_for(copied)
+        if validator is None:
+            raise _definition_error(server_name, remote_name)
+        validator.check_schema(copied)
     except (SchemaError, TypeError):
         raise _definition_error(server_name, remote_name) from None
     return copied

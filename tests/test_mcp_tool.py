@@ -220,6 +220,7 @@ def test_schema_is_deeply_copied_and_defaults_to_object() -> None:
         {"type": "object", "description": "\ud800"},
         {"type": "object", "required": "query"},
         {"type": "object", "$schema": {}},
+        {"type": "object", "$schema": "https://invalid.example/schema"},
         {"type": "object", "description": "x" * 65_536},
     ],
 )
@@ -320,6 +321,24 @@ def test_structured_only_result_is_rejected() -> None:
         tool=_definition(),
         client=ScriptedMcpClient(
             CallToolResult(content=[], structuredContent={"secret": "structured-result"})
+        ),
+    )
+
+    with pytest.raises(ToolError, match="unsupported non-text content") as captured:
+        anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
+
+    assert "structured-result" not in str(captured.value)
+
+
+def test_structured_result_with_empty_compatibility_text_is_rejected() -> None:
+    adapted = adapt_mcp_tool(
+        server=_server(),
+        tool=_definition(),
+        client=ScriptedMcpClient(
+            CallToolResult(
+                content=[TextContent(text="")],
+                structuredContent={"secret": "structured-result"},
+            )
         ),
     )
 
