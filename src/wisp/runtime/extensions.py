@@ -17,7 +17,10 @@ import anyio
 
 from wisp.auth.storage import JsonAuthStore
 from wisp.config import default_auth_path
+from wisp.events import ErrorEvent
 from wisp.extensions import builtin
+from wisp.mcp.config import McpServerConfig
+from wisp.mcp.runtime import McpRuntime
 from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.retry import RetryPolicy
 from wisp.runtime.api import ExtensionAPI, WispRuntime
@@ -33,6 +36,7 @@ async def build_runtime(
     *,
     auth_path: Path | None = None,
     retry_policy: RetryPolicy | None = None,
+    mcp_servers: tuple[McpServerConfig, ...] = (),
 ) -> WispRuntime:
     """Create runtime state and activate built-in extensions."""
 
@@ -51,15 +55,7 @@ async def build_runtime(
     models = ModelRegistry(
         await anyio.to_thread.run_sync(effective_catalog, abandon_on_cancel=True)
     )
-    runtime = WispRuntime(
-        providers=providers,
-        tools=tools,
-        commands=commands,
-        events=events,
-        api=api,
-        models=models,
-        process_supervisor=process_supervisor,
-    )
+    mcp_runtime: McpRuntime | None = None
     try:
         await activate_builtin_extensions(
             api,
@@ -67,11 +63,34 @@ async def build_runtime(
             retry_policy=retry_policy,
             process_supervisor=process_supervisor,
         )
+        if mcp_servers:
+            mcp_runtime = await McpRuntime.start(
+                mcp_servers,
+                api=api,
+                existing_tool_names=tools.names(),
+            )
     except BaseException:
-        await process_supervisor.aclose()
+        try:
+            if mcp_runtime is not None:
+                await mcp_runtime.aclose()
+        finally:
+            await process_supervisor.aclose()
         raise
-    runtime.capture_provider_configuration()
-    return runtime
+    return WispRuntime(
+        providers=providers,
+        tools=tools,
+        commands=commands,
+        events=events,
+        api=api,
+        models=models,
+        process_supervisor=process_supervisor,
+        mcp_runtime=mcp_runtime,
+        startup_events=(
+            tuple(ErrorEvent(message=diagnostic.message) for diagnostic in mcp_runtime.diagnostics)
+            if mcp_runtime is not None
+            else ()
+        ),
+    )
 
 
 async def activate_builtin_extensions(

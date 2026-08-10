@@ -210,6 +210,49 @@ Wisp adds that guidance only when the tool is actually exposed for the current r
 and bounds it, and keeps it separate from the provider-facing tool schema. The metadata is
 descriptive — it cannot alter tool policy, sandboxing, protected paths, or approval requirements.
 
+### MCP tools
+
+Wisp can connect to user-configured [Model Context Protocol](https://modelcontextprotocol.io/)
+servers over stdio. Add servers only to the user settings file at `~/.wisp/settings.json`:
+
+```json
+{
+  "mcp_servers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {"READ_ONLY": "1"},
+      "env_from": ["GITHUB_TOKEN"],
+      "tool_safety": {"search_repositories": "read"}
+    }
+  }
+}
+```
+
+`env` contains literal user-owned values. `env_from` forwards only the named variables from Wisp's
+process environment; if one is missing, that server is skipped. Server processes otherwise receive
+only the MCP SDK's small safe environment baseline, run from the user's home directory rather than
+the active project, and have stderr suppressed. Commands, arguments, environment values, stderr,
+and transport errors are never included in MCP startup diagnostics.
+
+Discovered tools are named `mcp__<server>__<tool>`, with deterministic normalization and hashing
+when needed. They follow the same exposure flags as built-ins: use `--allow-tool <name>` or
+`--all-tools`, while `--allow-read-tools` also includes MCP tools explicitly assigned `read` safety.
+Remote tools default to `command` safety and require approval; server-provided annotations cannot
+weaken this policy. `tool_safety` is the only way to assign `read` or `mutating` safety and matches
+the remote tool name exactly.
+
+Startup is failure-isolated: an unavailable or malformed server produces a sanitized error event
+while healthy servers and built-in tools remain available. Wisp accepts at most 16 configured
+servers, 64 discovery pages and 64 tools per server, 256 MCP tools overall, 1 MiB of definitions per
+server, and 4 MiB overall. Connection and discovery have a 10-second per-server deadline. A server's
+catalog is registered atomically, so invalid definitions, duplicate names, collisions, or limit
+violations expose none of that server's tools.
+
+Current MCP support covers stdio tool discovery and bounded text results. Resources, prompts,
+dynamic `tools/list_changed` updates, HTTP/SSE transports, OAuth, and interactive authentication are
+not yet supported.
+
 ## Sessions
 
 Wisp persists each run as a JSONL session and can continue an existing one:
@@ -290,9 +333,9 @@ project may add `./.wisp/settings.json`, applied only after you trust the projec
 ```
 
 Some fields are **user-only** and a project file can never set them: `protected_paths`, `retry`,
-`effort`, `context_reserve_tokens`, `auto_compaction_enabled`, and `update_check_enabled`. A
-repository cannot increase your API spending, prolong waits, trigger network update checks, or
-weaken the secret guard.
+`effort`, `context_reserve_tokens`, `auto_compaction_enabled`, `update_check_enabled`, and
+`mcp_servers`. A repository cannot increase your API spending, prolong waits, trigger network update
+checks, launch an MCP command, receive forwarded credentials, or weaken the secret guard.
 
 After a successful TUI `/model` or `/provider` change, Wisp atomically records the active provider,
 model, and effort as user defaults, reused next launch unless a higher-precedence source overrides

@@ -638,10 +638,17 @@ async def _run_print_with_runtime(
 
     events = agent.run(prompt, session=session, history=history)
     if mode is OutputMode.json:
+        for event in runtime.startup_events:
+            _write_json_event(event)
         await _render_json_events(events)
         return
 
     event_console = Console(stderr=True, soft_wrap=True)
+    for event in runtime.startup_events:
+        if isinstance(event, ErrorEvent):
+            event_console.print(f"error: {event.message}", markup=False)
+        else:
+            _render_print_event(event, event_console)
     wrote_tokens = False
     stdout_line_terminated = False
     streamed_text_for_message = False
