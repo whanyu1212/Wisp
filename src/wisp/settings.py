@@ -23,13 +23,26 @@ project config should never make Wisp unusable.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    ValidationError,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
+from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
 from wisp.retry import RetrySettings
+from wisp.validation import redact_validation_error_inputs
 
 GLOBAL_SETTINGS_PATH = Path("~/.wisp/settings.json")
 PROJECT_SETTINGS_DIRNAME = ".wisp"
@@ -42,6 +55,7 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "context_reserve_tokens",
         "auto_compaction_enabled",
         "update_check_enabled",
+        "mcp_servers",
     }
 )
 
@@ -81,6 +95,7 @@ DEFAULT_PROTECTED_PATHS: tuple[str, ...] = (
     ".netrc",
     ".pgpass",
     ".wisp/auth.json",
+    ".wisp/settings.json",
 )
 
 
@@ -92,7 +107,7 @@ class WispSettings(BaseModel):
     builds (``extra="ignore"``).
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", hide_input_in_errors=True)
 
     provider: str | None = None
     model: str | None = None
@@ -104,6 +119,62 @@ class WispSettings(BaseModel):
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
     update_check_enabled: bool | None = None
+    mcp_servers: tuple[McpServerConfig, ...] | None = Field(
+        default=None, max_length=MAX_MCP_SERVERS, repr=False
+    )
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _redact_mcp_validation_inputs(
+        cls,
+        value: Any,
+        handler: ModelWrapValidatorHandler[Self],
+    ) -> Self:
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            redacted = redact_validation_error_inputs(exc, field="mcp_servers")
+            if redacted is exc:
+                raise
+            raise redacted from None
+
+    @field_validator(
+        "mcp_servers",
+        mode="before",
+        json_schema_input_type=dict[str, dict[str, Any]] | None,
+    )
+    @classmethod
+    def _parse_mcp_servers(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            raise ValueError("mcp_servers must be a JSON object")
+        servers: list[dict[str, object]] = []
+        for name, raw_server in value.items():
+            if not isinstance(raw_server, Mapping):
+                raise ValueError("each MCP server must be a JSON object")
+            server = dict(raw_server)
+            server["name"] = name
+            servers.append(server)
+        return servers
+
+    @field_serializer("mcp_servers", when_used="json")
+    def _serialize_mcp_servers(
+        self,
+        value: tuple[McpServerConfig, ...] | None,
+    ) -> dict[str, dict[str, Any]] | None:
+        if value is None:
+            return None
+        return {server.name: server.model_dump(mode="json", exclude={"name"}) for server in value}
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _sort_mcp_servers(
+        cls, value: tuple[McpServerConfig, ...] | None
+    ) -> tuple[McpServerConfig, ...] | None:
+        if value is None:
+            return None
+        return tuple(sorted(value, key=lambda server: server.name))
 
 
 class ResolvedSettings(BaseModel):
@@ -115,7 +186,7 @@ class ResolvedSettings(BaseModel):
     win.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     provider: str | None = None
     model: str | None = None
@@ -127,6 +198,7 @@ class ResolvedSettings(BaseModel):
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
     update_check_enabled: bool | None = None
+    mcp_servers: tuple[McpServerConfig, ...] | None = Field(default=None, repr=False)
     # Provenance used only while applying higher-precedence provider overrides.
     # Excluded from serialization because these are resolver details, not settings.
     user_provider: str | None = Field(default=None, exclude=True)
@@ -164,7 +236,7 @@ def resolve_settings(
     project = project_dir if project_dir is not None else Path.cwd()
 
     user_file = (home / ".wisp" / PROJECT_SETTINGS_FILENAME).expanduser()
-    user_settings = _load_settings_file(user_file)
+    user_settings = _load_settings_file(user_file, secure_permissions=True)
 
     # An untrusted project contributes nothing: skip its settings file entirely so a
     # cloned repo cannot inject provider/model/session_dir/auth_path. This is
@@ -199,6 +271,8 @@ def resolve_settings(
     # per-request cost/latency (a higher reasoning tier means more tokens), so a
     # project must not be able to force an expensive tier on every prompt just by
     # being trusted for read/write access.
+    # MCP server definitions are user-only because they name commands that Wisp may
+    # later execute; project trust never grants authority to configure executables.
     return ResolvedSettings(
         provider=project_provider or user_provider,
         model=project_model or user_model,
@@ -210,6 +284,7 @@ def resolve_settings(
         context_reserve_tokens=user_settings.context_reserve_tokens,
         auto_compaction_enabled=user_settings.auto_compaction_enabled,
         update_check_enabled=user_settings.update_check_enabled,
+        mcp_servers=user_settings.mcp_servers,
         user_provider=user_provider,
         model_from_user=project_model is None and user_model is not None,
     )
@@ -306,9 +381,19 @@ def _persist_user_settings(
             data[key] = value
 
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.parent.chmod(0o700)
         tmp_path = path.with_name(f".{path.name}.tmp")
-        tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp_path, flags, 0o600)
+        try:
+            os.chmod(tmp_path, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+                fd = -1
+                tmp_file.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        finally:
+            if fd >= 0:
+                os.close(fd)
         tmp_path.replace(path)
     except OSError as exc:
         _warn(f"could not write settings file {path}: {exc}")
@@ -318,6 +403,7 @@ def _load_settings_file(
     path: Path,
     *,
     ignored_fields: frozenset[str] = frozenset(),
+    secure_permissions: bool = False,
 ) -> WispSettings:
     """Load one settings file, returning empty settings on any problem.
 
@@ -325,6 +411,16 @@ def _load_settings_file(
     but cannot be parsed or validated is a user error worth surfacing, so we warn on
     stderr and continue with empty settings rather than aborting startup.
     """
+
+    if secure_permissions and os.name == "posix":
+        try:
+            path.chmod(0o600)
+            path.parent.chmod(0o700)
+        except FileNotFoundError:
+            return WispSettings()
+        except OSError as exc:
+            _warn(f"could not secure settings file {path}: {exc}")
+            return WispSettings()
 
     try:
         raw = path.read_text(encoding="utf-8")

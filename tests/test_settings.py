@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
 from pytest import CaptureFixture, MonkeyPatch
 
 from wisp.config import WispConfig
 from wisp.settings import (
     DEFAULT_PROTECTED_PATHS,
+    WispSettings,
     persist_user_effort,
     persist_user_model_selection,
     resolve_settings,
@@ -273,6 +278,139 @@ def test_invalid_project_user_only_fields_do_not_discard_project_settings(
     assert capsys.readouterr().err == ""
 
 
+def test_mcp_servers_are_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(
+        home,
+        mcp_servers={"user-server": {"command": "user-command"}},
+    )
+    _write_settings(
+        project,
+        mcp_servers={"project-server": {"command": "project-command"}},
+    )
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.mcp_servers is not None
+    assert [server.name for server in settings.mcp_servers] == ["user-server"]
+
+
+def test_mcp_settings_json_round_trip_uses_name_keyed_servers() -> None:
+    settings = WispSettings.model_validate(
+        {
+            "mcp_servers": {
+                "github": {
+                    "command": "server",
+                    "tool_safety": {"read-file": "read"},
+                }
+            }
+        }
+    )
+
+    serialized = settings.model_dump_json()
+    data = json.loads(serialized)
+
+    assert data["mcp_servers"] == {
+        "github": {
+            "command": "server",
+            "args": [],
+            "env": {},
+            "env_from": [],
+            "tool_safety": {"read-file": "read"},
+        }
+    }
+    assert WispSettings.model_validate_json(serialized) == settings
+    schema = WispSettings.model_json_schema()
+    assert schema["properties"]["mcp_servers"]["anyOf"][0]["type"] == "object"
+
+
+def test_invalid_project_mcp_settings_do_not_discard_other_project_settings(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _write_settings(
+        project,
+        provider="project-provider",
+        mcp_servers={"INVALID": {"command": 42}},
+    )
+
+    settings = resolve_settings(
+        project_dir=project,
+        home_dir=tmp_path / "home",
+        trust_project=True,
+    )
+
+    assert settings.provider == "project-provider"
+    assert settings.mcp_servers is None
+    assert capsys.readouterr().err == ""
+
+
+def test_invalid_user_mcp_warning_does_not_expose_environment_secret(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    secret = "super-secret\x00"
+    _write_settings(
+        home,
+        mcp_servers={
+            "server": {
+                "command": "command",
+                "env": {"TOKEN": secret},
+            }
+        },
+    )
+
+    settings = resolve_settings(project_dir=tmp_path / "project", home_dir=home)
+    warning = capsys.readouterr().err
+
+    assert settings.mcp_servers is None
+    assert "ignoring invalid settings" in warning
+    assert secret not in warning
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission contract")
+def test_user_mcp_settings_permissions_are_hardened_before_loading(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write_settings(
+        home,
+        mcp_servers={
+            "server": {
+                "command": "server",
+                "env": {"TOKEN": "super-secret"},
+            }
+        },
+    )
+    path = user_settings_path(home_dir=home)
+    path.chmod(0o644)
+    path.parent.chmod(0o755)
+
+    settings = resolve_settings(project_dir=tmp_path / "project", home_dir=home)
+
+    assert settings.mcp_servers is not None
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+def test_mcp_server_count_error_hides_nested_environment_values() -> None:
+    secret = "super-secret"
+    servers = {
+        f"server-{index}": {
+            "command": "command",
+            "env": {"TOKEN": secret},
+        }
+        for index in range(17)
+    }
+
+    with pytest.raises(ValidationError) as captured:
+        WispSettings.model_validate({"mcp_servers": servers})
+
+    assert secret not in captured.value.json()
+    assert all(error.get("input") == "<redacted>" for error in captured.value.errors())
+
+
 # --- Precedence through WispConfig.from_env (CLI > env > file > default) ---
 #
 # The project settings layer only applies to a TRUSTED project, so tests that need
@@ -358,7 +496,7 @@ def test_from_env_defaults_protected_paths(tmp_path: Path, monkeypatch: MonkeyPa
 
     config = WispConfig.from_env()
 
-    # The built-in defaults are present; the active auth file is always appended.
+    # The built-in defaults are present; active Wisp secret files are always appended.
     assert set(DEFAULT_PROTECTED_PATHS).issubset(config.protected_paths)
     assert any(config.auth_path.name in pattern for pattern in config.protected_paths)
 
@@ -367,8 +505,8 @@ def test_from_env_user_settings_can_disable_protected_paths(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     # The USER (global) settings file may disable the general guard; Wisp still
-    # protects its own active credential file. Point HOME at an explicit temp dir so
-    # the user-settings write is self-evidently isolated from the real home.
+    # protects its own active credential and settings files. Point HOME at an explicit
+    # temp dir so the user-settings write is isolated from the real home.
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
@@ -379,7 +517,8 @@ def test_from_env_user_settings_can_disable_protected_paths(
     config = WispConfig.from_env()
 
     auth_pattern = config.auth_path.resolve().as_posix()
-    assert config.protected_paths == (auth_pattern,)
+    settings_pattern = user_settings_path(home_dir=home).resolve().as_posix()
+    assert config.protected_paths == (auth_pattern, settings_pattern)
 
 
 def test_from_env_project_settings_cannot_disable_protected_paths(
@@ -484,6 +623,34 @@ def test_persist_user_effort_writes_a_new_file(tmp_path: Path) -> None:
 
     path = user_settings_path(home_dir=tmp_path)
     assert json.loads(path.read_text(encoding="utf-8")) == {"effort": "high"}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission contract")
+def test_persist_user_settings_uses_private_permissions_and_preserves_mcp_env(
+    tmp_path: Path,
+) -> None:
+    _write_settings(
+        tmp_path,
+        mcp_servers={
+            "server": {
+                "command": "server",
+                "env": {"TOKEN": "super-secret"},
+            }
+        },
+    )
+    path = user_settings_path(home_dir=tmp_path)
+    path.chmod(0o600)
+    path.parent.chmod(0o755)
+    previous_umask = os.umask(0o022)
+    try:
+        persist_user_effort("high", home_dir=tmp_path)
+    finally:
+        os.umask(previous_umask)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["mcp_servers"]["server"]["env"]["TOKEN"] == "super-secret"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
 def test_persist_user_effort_round_trips_through_resolve_settings(tmp_path: Path) -> None:
