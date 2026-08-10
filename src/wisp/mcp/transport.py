@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from typing import TextIO
 
@@ -37,6 +37,7 @@ async def bounded_stdio_client(
     *,
     errlog: TextIO,
     max_frame_bytes: int = MAX_MCP_FRAME_BYTES,
+    on_disconnect: Callable[[], None] | None = None,
 ) -> AsyncGenerator[TransportStreams, None]:
     """Connect over official SDK streams while bounding frames before parsing."""
 
@@ -50,6 +51,15 @@ async def bounded_stdio_client(
     read_send, read_receive = anyio.create_memory_object_stream[SessionMessage | Exception](0)
     write_send, write_receive = anyio.create_memory_object_stream[SessionMessage](0)
     writer_done = anyio.Event()
+    disconnect_reported = False
+
+    def report_disconnect() -> None:
+        nonlocal disconnect_reported
+        if disconnect_reported:
+            return
+        disconnect_reported = True
+        if on_disconnect is not None:
+            on_disconnect()
 
     async def stdout_reader() -> None:
         assert process.stdout is not None
@@ -85,6 +95,7 @@ async def bounded_stdio_client(
         except (anyio.BrokenResourceError, anyio.ClosedResourceError, ConnectionError, OSError):
             pass
         finally:
+            report_disconnect()
             await _drain_stdout(process)
 
     async def stdin_writer() -> None:
@@ -99,6 +110,7 @@ async def bounded_stdio_client(
                     )
                     await process.stdin.send(data)
         except (anyio.BrokenResourceError, anyio.ClosedResourceError, OSError):
+            report_disconnect()
             await read_send.aclose()
         finally:
             writer_done.set()

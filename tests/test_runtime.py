@@ -248,6 +248,7 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
             "history",
             "update",
             "skills",
+            "mcp",
             "plan",
             "build",
             "model",

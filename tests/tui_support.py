@@ -34,6 +34,8 @@ from wisp.events import (
     RpcCommandDescriptor,
     RpcCommandFinished,
     RpcCommandsReported,
+    RpcMcpStatusReported,
+    RpcMcpStatusSnapshot,
     RpcMessageSnapshot,
     RpcMessagesReported,
     RpcSessionSelected,
@@ -144,6 +146,7 @@ class ScriptedController:
         configure_events: list[ScriptedBatch] | None = None,
         commands_events: list[ScriptedBatch] | None = None,
         skills_events: list[ScriptedBatch] | None = None,
+        mcp_events: list[ScriptedBatch] | None = None,
         messages_events: list[ScriptedBatch] | None = None,
         sessions_events: list[ScriptedBatch] | None = None,
         select_session_events: list[ScriptedBatch] | None = None,
@@ -158,6 +161,7 @@ class ScriptedController:
         self.configure_events = deque(configure_events or [])
         self.commands_events = deque(commands_events or [])
         self.skills_events = deque(skills_events or [])
+        self.mcp_events = deque(mcp_events or [])
         self.messages_events = deque(messages_events or [])
         self.sessions_events = deque(sessions_events or [])
         self.select_session_events = deque(select_session_events or [])
@@ -175,6 +179,7 @@ class ScriptedController:
         self.agent_modes: list[AgentMode | None] = []
         self.commands_requests: list[str] = []
         self.skills_requests: list[str] = []
+        self.mcp_requests: list[str] = []
         self.messages_requests: list[tuple[str, str | None, int, str | None]] = []
         self.sessions_requests: list[tuple[str, int]] = []
         self.selected_sessions: list[tuple[str, str]] = []
@@ -247,6 +252,25 @@ class ScriptedController:
                 RpcCommandFinished(
                     command_id=selected_id,
                     command_type="get_skills",
+                    ok=True,
+                ),
+            ],
+        )
+        return selected_id
+
+    async def get_mcp_status(self, *, command_id: str | None = None) -> str:
+        selected_id = command_id or f"mcp-{len(self.mcp_requests) + 1}"
+        self.mcp_requests.append(selected_id)
+        await self._emit_scripted(
+            self.mcp_events,
+            default=[
+                RpcMcpStatusReported(
+                    command_id=selected_id,
+                    status=RpcMcpStatusSnapshot(),
+                ),
+                RpcCommandFinished(
+                    command_id=selected_id,
+                    command_type="get_mcp_status",
                     ok=True,
                 ),
             ],

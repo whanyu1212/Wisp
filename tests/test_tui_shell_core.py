@@ -2299,6 +2299,24 @@ def test_tui_shell_hydrates_and_inspects_cached_skill_catalog() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_requests_and_renders_mcp_status() -> None:
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = LineTuiRenderer(_console()[0])
+        shell = TuiShell(
+            controller,
+            renderer=renderer,
+            prompt_reader=await _reader_from(["/mcp"]),
+        )
+
+        await shell.run()
+
+        assert controller.mcp_requests == ["mcp-1"]
+        assert "No MCP servers configured." in renderer.console.file.getvalue()
+
+    anyio.run(run)
+
+
 def test_tui_shell_command_discovery_failure_keeps_builtin_catalog() -> None:
     async def run() -> None:
         controller = ScriptedController(

@@ -26,7 +26,7 @@ from wisp.skills.models import (
     SkillSource,
 )
 
-EVENT_SCHEMA_VERSION: Literal[29] = 29
+EVENT_SCHEMA_VERSION: Literal[30] = 30
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -47,6 +47,7 @@ COMPACTION_POLICY_SCHEMA_VERSION = 26
 AGENT_MODE_SCHEMA_VERSION = 27
 SKILL_INVOCATION_SCHEMA_VERSION = 28
 SKILL_CATALOG_SCHEMA_VERSION = 29
+MCP_STATUS_SCHEMA_VERSION = 30
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -109,6 +110,7 @@ class WispEvent(BaseModel):
         27,
         28,
         29,
+        30,
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -409,6 +411,33 @@ class RpcSkillCatalogSnapshot(BaseModel):
     entries: tuple[RpcSkillCatalogEntry, ...] = ()
     diagnostics: tuple[RpcSkillDiagnostic, ...] = ()
     project_trusted: bool = False
+
+
+class RpcMcpServerSnapshot(BaseModel):
+    """Sanitized status for one configured MCP server."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    status: Literal["connected", "disconnected", "unavailable"]
+    tool_names: tuple[str, ...] = ()
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_status(self) -> Self:
+        if self.status != "unavailable" and self.error is not None:
+            raise ValueError("available MCP server states cannot include an error")
+        if self.status == "unavailable" and self.error is None:
+            raise ValueError("unavailable MCP servers require an error")
+        return self
+
+
+class RpcMcpStatusSnapshot(BaseModel):
+    """Current sanitized MCP server and registered-tool status."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    servers: tuple[RpcMcpServerSnapshot, ...] = ()
 
 
 class RpcMessageToolCallSnapshot(BaseModel):
@@ -984,6 +1013,23 @@ class RpcSkillsReported(WispEvent):
         return self
 
 
+class RpcMcpStatusReported(WispEvent):
+    """Immediate, non-persisted MCP runtime status returned over RPC."""
+
+    type: Literal["rpc.mcp"] = "rpc.mcp"
+    command_id: str
+    status: RpcMcpStatusSnapshot
+
+    @model_validator(mode="after")
+    def _validate_schema_version(self) -> Self:
+        if self.schema_version < MCP_STATUS_SCHEMA_VERSION:
+            raise ValueError(
+                "RPC MCP status reports require schema_version "
+                f"{MCP_STATUS_SCHEMA_VERSION} or newer"
+            )
+        return self
+
+
 class SkillCatalogUpdated(WispEvent):
     """A trust transition replaced the catalog available to future operations."""
 
@@ -1433,6 +1479,7 @@ type KnownWispEvent = Annotated[
     | RpcStateReported
     | RpcCommandsReported
     | RpcSkillsReported
+    | RpcMcpStatusReported
     | SkillCatalogUpdated
     | RpcMessagesReported
     | RpcSessionsReported
@@ -1548,6 +1595,10 @@ def _require_current_schema(data: JsonObject) -> None:
         raise ValueError(
             "RPC command report events require schema_version "
             f"{RPC_COMMANDS_SCHEMA_VERSION} or newer"
+        )
+    if data.get("type") == "rpc.mcp" and version < MCP_STATUS_SCHEMA_VERSION:
+        raise ValueError(
+            f"RPC MCP status events require schema_version {MCP_STATUS_SCHEMA_VERSION} or newer"
         )
     if data.get("type") == "rpc.messages" and version < RPC_MESSAGES_SCHEMA_VERSION:
         raise ValueError(

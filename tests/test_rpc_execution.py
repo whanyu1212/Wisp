@@ -23,6 +23,7 @@ from wisp.events import (
     RpcCommandFinished,
     RpcCommandsReported,
     RpcCommandStarted,
+    RpcMcpStatusReported,
     RpcMessagesReported,
     RpcSessionCloned,
     RpcSessionForked,
@@ -571,6 +572,7 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
             "history",
             "update",
             "skills",
+            "mcp",
             "plan",
             "build",
             "model",
@@ -635,6 +637,32 @@ def test_executor_reports_active_skill_catalog_without_replacing_running_command
         assert report.catalog.entries[0].description == "Review [literal] output"
         assert report.catalog.diagnostics[0].message == "broken [literal] metadata"
         assert report.catalog.project_trusted is False
+
+    anyio.run(scenario)
+
+
+def test_executor_reports_empty_mcp_status_without_replacing_running_command(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+
+            result = executor.dispatch({"id": "mcp-1", "type": "get_mcp_status"}, running)
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is running
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            RpcMcpStatusReported,
+            RpcCommandFinished,
+        ]
+        report = fixture.events[1]
+        assert isinstance(report, RpcMcpStatusReported)
+        assert report.status.servers == ()
 
     anyio.run(scenario)
 

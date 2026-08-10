@@ -24,6 +24,7 @@ class TuiSlashCommandName(StrEnum):
     history = "history"
     update = "update"
     skills = "skills"
+    mcp = "mcp"
     quit = "quit"
     auth = "auth"
     connect = "connect"

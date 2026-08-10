@@ -101,6 +101,10 @@ class McpRuntime:
         self._start_error: BaseException | None = None
         self._close_error: BaseException | None = None
         self._diagnostics: tuple[McpStartupDiagnostic, ...] = ()
+        self._registered_tool_names: dict[str, tuple[str, ...]] = {
+            server.name: () for server in servers
+        }
+        self._disconnected_server_names: set[str] = set()
 
     @classmethod
     async def start(
@@ -130,6 +134,24 @@ class McpRuntime:
         """Return sanitized startup diagnostics in server-name order."""
 
         return self._diagnostics
+
+    @property
+    def server_names(self) -> tuple[str, ...]:
+        """Return configured server names without exposing launch configuration."""
+
+        return tuple(server.name for server in self._servers)
+
+    def tool_names_for(self, server_name: str) -> tuple[str, ...]:
+        """Return tool names registered by this runtime for one configured server."""
+
+        return self._registered_tool_names.get(server_name, ())
+
+    def is_connected(self, server_name: str) -> bool:
+        """Return whether one registered server's stdio transport remains live."""
+
+        return bool(self.tool_names_for(server_name)) and (
+            server_name not in self._disconnected_server_names
+        )
 
     async def aclose(self) -> None:
         """Close all MCP clients safely; repeated and concurrent calls share cleanup."""
@@ -204,7 +226,13 @@ class McpRuntime:
                 async with asyncio.timeout(MCP_STARTUP_TIMEOUT_SECONDS):
                     client = await stack.enter_async_context(
                         Client(
-                            bounded_stdio_client(parameters, errlog=errlog),
+                            bounded_stdio_client(
+                                parameters,
+                                errlog=errlog,
+                                on_disconnect=lambda: self._disconnected_server_names.add(
+                                    server.name
+                                ),
+                            ),
                             cache=None,
                         )
                     )
@@ -279,6 +307,7 @@ class McpRuntime:
                 continue
             for tool in tools:
                 self._api.register_tool(cast(Tool, tool), replace=False)
+            self._registered_tool_names[result.server.name] = tuple(names)
             registered_names.update(names)
             registered_tools += len(tools)
             registered_definition_bytes += result.definition_bytes

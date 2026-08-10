@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +17,10 @@ from pytest import MonkeyPatch
 import wisp.mcp.runtime as mcp_runtime_module
 from wisp import cli as cli_module
 from wisp.config import WispConfig
-from wisp.events import ErrorEvent
+from wisp.events import ErrorEvent, KnownWispEvent, RpcCommandFinished, RpcMcpStatusReported
 from wisp.mcp.config import McpServerConfig
 from wisp.mcp.runtime import McpRuntime, _discover_tools
+from wisp.rpc import RpcController
 from wisp.rpc.host import InProcessOptions
 from wisp.runtime.api import ExtensionAPI
 from wisp.runtime.event_bus import EventBus
@@ -26,6 +28,7 @@ from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 from wisp.sdk import InProcessWisp
 from wisp.tui.launch import TuiOptions, _preflight_tui_options
+from wisp.tui.mcp import mcp_status_text
 
 
 def _fixture_server(
@@ -389,6 +392,155 @@ def test_sdk_receives_nonfatal_startup_diagnostic(tmp_path: Path) -> None:
     assert event.message == (
         "MCP server broken is unavailable: the server could not be started or initialized"
     )
+
+
+def test_sdk_reports_connected_mcp_server_and_registered_tools(tmp_path: Path) -> None:
+    server = _fixture_server(tmp_path)
+    config = WispConfig(provider="fake", session_dir=tmp_path, mcp_servers=(server,))
+
+    async def scenario() -> RpcMcpStatusReported:
+        controller = await InProcessWisp.start(
+            config,
+            options=InProcessOptions(startup_trusted=True),
+        )
+        try:
+            await controller.get_mcp_status(command_id="mcp-1")
+            report: RpcMcpStatusReported | None = None
+            async for event in controller.events():
+                if isinstance(event, RpcMcpStatusReported):
+                    report = event
+                if isinstance(event, RpcCommandFinished) and event.command_id == "mcp-1":
+                    assert event.ok is True
+                    assert report is not None
+                    return report
+            raise AssertionError("MCP status command did not finish")
+        finally:
+            await controller.aclose()
+
+    report = anyio.run(scenario)
+
+    assert len(report.status.servers) == 1
+    status = report.status.servers[0]
+    assert status.name == "fixture"
+    assert status.status == "connected"
+    assert status.tool_names == (
+        "mcp__fixture__echo",
+        "mcp__fixture__runtime_environment",
+    )
+    assert status.error is None
+
+
+def test_sdk_reports_zero_tool_server_as_disconnected(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class EmptyCatalogClient(_RecordingClient):
+        definitions = ()
+
+    EmptyCatalogClient.instances.clear()
+    monkeypatch.setattr(mcp_runtime_module, "Client", EmptyCatalogClient)
+    monkeypatch.setattr(
+        mcp_runtime_module, "bounded_stdio_client", lambda *_args, **_kwargs: object()
+    )
+    original_names = ToolRegistry.names
+
+    def names_with_extension_tool(registry: ToolRegistry) -> tuple[str, ...]:
+        return (*original_names(registry), "mcp__fixture__extension_tool")
+
+    monkeypatch.setattr(ToolRegistry, "names", names_with_extension_tool)
+    server = _fixture_server(tmp_path)
+    config = WispConfig(provider="fake", session_dir=tmp_path, mcp_servers=(server,))
+
+    async def scenario() -> RpcMcpStatusReported:
+        controller = await InProcessWisp.start(
+            config,
+            options=InProcessOptions(startup_trusted=True),
+        )
+        try:
+            await controller.get_mcp_status(command_id="mcp-1")
+            report: RpcMcpStatusReported | None = None
+            async for event in controller.events():
+                if isinstance(event, RpcMcpStatusReported):
+                    report = event
+                if isinstance(event, RpcCommandFinished) and event.command_id == "mcp-1":
+                    assert report is not None
+                    return report
+            raise AssertionError("MCP status command did not finish")
+        finally:
+            await controller.aclose()
+
+    report = anyio.run(scenario)
+
+    assert report.status.servers[0].status == "disconnected"
+    assert report.status.servers[0].tool_names == ()
+    assert report.status.servers[0].error is None
+    assert "fixture: disconnected (no tools discovered)" in mcp_status_text(report.status)
+    assert EmptyCatalogClient.instances[0].exit_task is not None
+
+
+def test_sdk_downgrades_mcp_status_after_transport_disconnect(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DisconnectingClient(_RecordingClient):
+        disconnect: Callable[[], None]
+
+        def __init__(self, transport: object, **kwargs: object) -> None:
+            super().__init__(transport, **kwargs)
+            assert callable(transport)
+            self.disconnect = transport
+
+    DisconnectingClient.instances.clear()
+    monkeypatch.setattr(mcp_runtime_module, "Client", DisconnectingClient)
+
+    def transport(
+        *_args: object,
+        on_disconnect: Callable[[], None],
+        **_kwargs: object,
+    ) -> Callable[[], None]:
+        return on_disconnect
+
+    monkeypatch.setattr(mcp_runtime_module, "bounded_stdio_client", transport)
+    server = _fixture_server(tmp_path)
+    config = WispConfig(provider="fake", session_dir=tmp_path, mcp_servers=(server,))
+
+    async def next_report(
+        controller: RpcController,
+        events: AsyncIterator[KnownWispEvent],
+        command_id: str,
+    ) -> RpcMcpStatusReported:
+        await controller.get_mcp_status(command_id=command_id)
+        report: RpcMcpStatusReported | None = None
+        async for event in events:
+            if isinstance(event, RpcMcpStatusReported) and event.command_id == command_id:
+                report = event
+            if isinstance(event, RpcCommandFinished) and event.command_id == command_id:
+                assert report is not None
+                return report
+        raise AssertionError("MCP status command did not finish")
+
+    async def scenario() -> tuple[RpcMcpStatusReported, RpcMcpStatusReported]:
+        controller = await InProcessWisp.start(
+            config,
+            options=InProcessOptions(startup_trusted=True),
+        )
+        try:
+            events = controller.events()
+            connected = await next_report(controller, events, "mcp-connected")
+            DisconnectingClient.instances[0].disconnect()
+            disconnected = await next_report(controller, events, "mcp-disconnected")
+            return connected, disconnected
+        finally:
+            await controller.aclose()
+
+    connected, disconnected = anyio.run(scenario)
+
+    assert connected.status.servers[0].status == "connected"
+    assert disconnected.status.servers[0].status == "disconnected"
+    assert disconnected.status.servers[0].tool_names == connected.status.servers[0].tool_names
+    rendered = mcp_status_text(disconnected.status)
+    assert "fixture: disconnected (1 registered tool)" in rendered
+    assert "mcp__fixture__search" in rendered
 
 
 def test_print_mode_renders_startup_diagnostic_without_failing(

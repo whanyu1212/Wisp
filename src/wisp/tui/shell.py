@@ -31,6 +31,7 @@ from wisp.events import (
     ProviderRetrying,
     RpcCommandFinished,
     RpcCommandsReported,
+    RpcMcpStatusReported,
     RpcMessagesReported,
     RpcSessionSelected,
     RpcSessionsReported,
@@ -72,6 +73,7 @@ from wisp.tui.history import (
 )
 from wisp.tui.launch import _stdin_is_interactive
 from wisp.tui.live import LiveFullscreenInputInterrupted
+from wisp.tui.mcp import mcp_status_text
 from wisp.tui.rendering import (
     TuiRenderer,
     TuiRendererKind,
@@ -119,6 +121,8 @@ class TuiController(Protocol):
     async def get_commands(self, *, command_id: str | None = None) -> str: ...
 
     async def get_skills(self, *, command_id: str | None = None) -> str: ...
+
+    async def get_mcp_status(self, *, command_id: str | None = None) -> str: ...
 
     async def get_messages(
         self,
@@ -758,6 +762,15 @@ class TuiShell:
                 self.renderer.command_error("Usage: /skills")
                 return False
             self._call_renderer_optional("skills_catalog", self.skill_catalog)
+            return False
+        if command.name is TuiSlashCommandName.mcp:
+            if command.args:
+                self.renderer.command_error("Usage: /mcp")
+                return False
+            try:
+                await self.controller.get_mcp_status()
+            except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
+                self.renderer.send_failed("MCP status", exc)
             return False
         if self._update_cancel_scope is not None:
             if command.name is TuiSlashCommandName.update:
@@ -1585,6 +1598,9 @@ class TuiShell:
             if is_context_status:
                 self.pending_context_status_received = True
                 self.renderer.context_status(event.stats)
+            return False
+        if isinstance(event, RpcMcpStatusReported):
+            self.renderer.notice(mcp_status_text(event.status))
             return False
         context_updated = self.view.update_context_from_event(event)
         if context_updated:
