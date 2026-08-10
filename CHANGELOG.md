@@ -11,8 +11,22 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+## 0.1.0b1 — 2026-08-10
+
 - Reduced the installed-build PyPI update cache from 24 hours to six hours so new releases are
   announced sooner without checking on every TUI launch.
+- Added immediate manual update checks through `wisp update --check` and `/update`, with confirmed
+  installation for persistent `uv tool` environments through `wisp update` or `/update install`.
+- Isolated self-updates from project-controlled uv configuration and indexes, kept provenance checks
+  cancellable, and shielded active environment replacement from interruption.
+- Added bounded, user-only configuration for multiple MCP stdio servers, including explicit
+  arguments, environment forwarding, and exact per-tool safety overrides.
+- Added MCP tool adaptation through the official SDK with deterministic namespacing, bounded schemas
+  and text results, and command safety by default through Wisp's existing approval policy.
+- Added concurrent MCP startup, paginated tool discovery, atomic catalog registration, sanitized
+  failure diagnostics, and runtime-owned connection cleanup across CLI, RPC, SDK, and TUI modes.
+- Added pre-parse MCP frame limits and aggregate server, tool, definition, and discovery limits so
+  malformed or oversized servers fail independently without exposing payloads or credentials.
 
 ## 0.1.0a3 — 2026-08-08
 
