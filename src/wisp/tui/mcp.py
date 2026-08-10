@@ -23,7 +23,13 @@ def mcp_status_text(status: RpcMcpStatusSnapshot) -> str:
             lines.append(f"{server.name}: unavailable - {server.error}")
             continue
         if server.status == "disconnected":
-            lines.append(f"{server.name}: disconnected (no tools discovered)")
+            if not server.tool_names:
+                lines.append(f"{server.name}: disconnected (no tools discovered)")
+                continue
+            count = len(server.tool_names)
+            noun = "tool" if count == 1 else "tools"
+            lines.append(f"{server.name}: disconnected ({count} registered {noun})")
+            lines.extend(f"  {name}" for name in server.tool_names)
             continue
         count = len(server.tool_names)
         noun = "tool" if count == 1 else "tools"

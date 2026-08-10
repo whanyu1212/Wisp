@@ -538,6 +538,9 @@ def test_sdk_downgrades_mcp_status_after_transport_disconnect(
     assert connected.status.servers[0].status == "connected"
     assert disconnected.status.servers[0].status == "disconnected"
     assert disconnected.status.servers[0].tool_names == connected.status.servers[0].tool_names
+    rendered = mcp_status_text(disconnected.status)
+    assert "fixture: disconnected (1 registered tool)" in rendered
+    assert "mcp__fixture__search" in rendered
 
 
 def test_print_mode_renders_startup_diagnostic_without_failing(
