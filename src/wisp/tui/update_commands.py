@@ -31,6 +31,13 @@ class UpdateCommands:
         self._renderer = renderer
         self._checker = checker
         self._installer = installer
+        self._installing = False
+
+    @property
+    def installing(self) -> bool:
+        """Return whether the non-cancellable installation phase has begun."""
+
+        return self._installing
 
     async def run(self, args: tuple[str, ...]) -> None:
         if args not in {(), ("check",), ("install",)}:
@@ -55,10 +62,13 @@ class UpdateCommands:
             return
 
         try:
+            self._installing = True
             await self._installer(update)
         except UpdateInstallError as exc:
             self._renderer.command_error(f"Update failed: {exc}")
             return
+        finally:
+            self._installing = False
         self._renderer.notice(
             f"Updated Wisp to {update.latest_version}. Restart Wisp to use the new version."
         )

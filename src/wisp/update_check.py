@@ -186,7 +186,10 @@ async def install_update(
         raise UpdateInstallError("The requested Wisp version is not newer than this installation.")
     await (install_verifier or _require_uv_tool_install)()
     command = ("uv", "tool", "install", "--force", f"wisp-ai=={latest}")
-    await (runner or _run_update_command)(command)
+    # Once uv starts replacing the active tool environment, interruption risks
+    # leaving the installation incomplete. Checks and verification remain cancellable.
+    with anyio.CancelScope(shield=True):
+        await (runner or _run_update_command)(command)
 
 
 async def _require_uv_tool_install() -> None:

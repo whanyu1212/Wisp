@@ -182,6 +182,56 @@ def test_tui_update_runs_in_background_without_blocking_shell_signals() -> None:
     anyio.run(run)
 
 
+def test_tui_update_installation_finishes_safely_after_cancel_request() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.notices: list[str] = []
+
+        def notice(self, message: str) -> None:
+            self.notices.append(message)
+
+    async def run() -> None:
+        install_started = anyio.Event()
+        release_install = anyio.Event()
+
+        async def check() -> UpdateStatus:
+            return UpdateStatus("1.0.0", "1.1.0")
+
+        async def install(update: UpdateAvailable) -> None:
+            install_started.set()
+            await release_install.wait()
+
+        renderer = RecordingRenderer()
+        shell = TuiShell(
+            ScriptedController(),
+            renderer=renderer,
+            manual_update_checker=check,
+            update_installer=install,
+        )
+        async with anyio.create_task_group() as task_group:
+            shell._task_group = task_group
+            await shell._handle_input_line(_InputLine("/update install", _InputMode.idle))
+            await install_started.wait()
+
+            await shell._handle_input_cancelled(_InputCancelled(_InputMode.idle))
+
+            assert shell._update_cancel_scope is not None
+            assert shell._updates.installing is True
+            release_install.set()
+            while shell._update_cancel_scope is not None:
+                await anyio.sleep(0)
+            task_group.cancel_scope.cancel()
+
+        assert renderer.notices == [
+            "Checking PyPI for Wisp updates...",
+            "Wisp update installation is in progress; waiting for it to finish safely.",
+            "Updated Wisp to 1.1.0. Restart Wisp to use the new version.",
+        ]
+
+    anyio.run(run)
+
+
 def test_tui_shell_switches_agent_mode_after_successful_configure() -> None:
     async def run() -> None:
         controller = ScriptedController()

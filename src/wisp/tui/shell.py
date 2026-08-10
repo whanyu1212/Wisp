@@ -1246,6 +1246,11 @@ class TuiShell:
         cancel_scope = self._update_cancel_scope
         if cancel_scope is None:
             return False
+        if self._updates.installing:
+            self.renderer.notice(
+                "Wisp update installation is in progress; waiting for it to finish safely."
+            )
+            return True
         cancel_scope.cancel()
         self.renderer.notice(message)
         return True

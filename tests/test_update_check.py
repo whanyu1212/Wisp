@@ -499,3 +499,37 @@ def test_install_update_verifies_the_active_uv_tool_environment(
     anyio.run(run)
 
     assert commands == ([("uv", "tool", "install", "--force", "wisp-ai==1.1.0")] if allowed else [])
+
+
+def test_install_update_shields_environment_replacement_from_cancellation() -> None:
+    started = anyio.Event()
+    release = anyio.Event()
+    completed = anyio.Event()
+
+    async def verify_install() -> None:
+        pass
+
+    async def runner(command: tuple[str, ...]) -> None:
+        started.set()
+        await release.wait()
+        completed.set()
+
+    async def run_install() -> None:
+        await install_update(
+            UpdateAvailable("1.0.0", "1.1.0", "ignored"),
+            runner=runner,
+            install_verifier=verify_install,
+        )
+
+    async def run() -> None:
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(run_install)
+            await started.wait()
+            task_group.cancel_scope.cancel()
+            with anyio.CancelScope(shield=True):
+                release.set()
+                await completed.wait()
+
+        assert completed.is_set()
+
+    anyio.run(run)
