@@ -27,6 +27,7 @@ _MAX_DESCRIPTION_BYTES = 4_096
 _MAX_DESCRIPTION_LINES = 40
 _PROVIDER_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 _UNSUPPORTED_TOOL_CONTENT = "MCP tool returned unsupported non-text content"
+_INVALID_TEXT_CONTENT = "MCP tool returned invalid text content"
 _NORMALIZED_NAME_MARKER = "_"
 
 
@@ -70,11 +71,14 @@ class McpTool:
         if not text_parts and result.structured_content is not None:
             raise ToolError(_UNSUPPORTED_TOOL_CONTENT)
 
-        bounded = truncate_text(
-            "\n".join(text_parts),
-            max_bytes=max(0, context.max_output_bytes),
-            max_lines=max(0, context.max_output_lines),
-        )
+        try:
+            bounded = truncate_text(
+                "\n".join(text_parts),
+                max_bytes=max(0, context.max_output_bytes),
+                max_lines=max(0, context.max_output_lines),
+            )
+        except UnicodeEncodeError:
+            raise ToolError(_INVALID_TEXT_CONTENT) from None
         if result.is_error:
             raise ToolError(bounded.text or "MCP tool reported an error")
         return ToolResult(text=bounded.text, truncated=bounded.truncated)

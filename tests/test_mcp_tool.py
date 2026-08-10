@@ -328,6 +328,19 @@ def test_structured_only_result_is_rejected() -> None:
     assert "structured-result" not in str(captured.value)
 
 
+def test_non_utf8_text_result_is_rejected() -> None:
+    adapted = adapt_mcp_tool(
+        server=_server(),
+        tool=_definition(),
+        client=ScriptedMcpClient(CallToolResult(content=[TextContent(text="\ud800")])),
+    )
+
+    with pytest.raises(ToolError, match="invalid text content") as captured:
+        anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
+
+    assert "\ud800" not in str(captured.value)
+
+
 def test_unsupported_content_does_not_expose_payload() -> None:
     adapted = adapt_mcp_tool(
         server=_server(),
