@@ -9,6 +9,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from jsonschema.exceptions import SchemaError
+from jsonschema.validators import validator_for
 from mcp.types import CallToolResult, TextContent
 from mcp.types import Tool as McpToolDefinition
 
@@ -88,12 +90,21 @@ def adapt_mcp_tool(
 
     if not tool.name:
         raise _definition_error(server.name, "unnamed")
+    try:
+        tool.name.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _definition_error(server.name, "invalid-name") from None
     input_schema = _copy_input_schema(server.name, tool.name, tool.input_schema)
     description_source = tool.description or tool.title
     if not description_source:
         description_source = f"MCP tool {tool.name}"
+    raw_description = f"MCP server {server.name}: {description_source}"
+    try:
+        raw_description.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _definition_error(server.name, tool.name) from None
     description = truncate_text(
-        f"MCP server {server.name}: {description_source}",
+        raw_description,
         max_bytes=_MAX_DESCRIPTION_BYTES,
         max_lines=_MAX_DESCRIPTION_LINES,
     ).text
@@ -155,6 +166,10 @@ def _copy_input_schema(
         copied["type"] = "object"
     elif schema_type != "object":
         raise _definition_error(server_name, remote_name)
+    try:
+        validator_for(copied).check_schema(copied)
+    except SchemaError:
+        raise _definition_error(server_name, remote_name) from None
     return copied
 
 

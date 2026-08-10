@@ -1374,6 +1374,18 @@ wheels = [
 ]
 
 [[package]]
+name = "types-jsonschema"
+version = "4.26.0.20260518"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "referencing" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/dd/46/73b6a5d61a61015c4248030a8cb07e5bdddb4041430fae9e585a68692578/types_jsonschema-4.26.0.20260518.tar.gz", hash = "sha256:e1dd53dc97a64f5eccdd6fa9839666e09bb500a8ebba2db6fdaf1789faea81a6", size = 16638, upload-time = "2026-05-18T06:06:44.106Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/d5/134f8a147dcecda10db7f60cfc6af0578a25a5c53c87b3907a64385e0184/types_jsonschema-4.26.0.20260518-py3-none-any.whl", hash = "sha256:30b30a518c7fe335df85c919fcbcc631b69c03d4a4b5b632fa916bea03065307", size = 16072, upload-time = "2026-05-18T06:06:43.264Z" },
+]
+
+[[package]]
 name = "types-pyyaml"
 version = "6.0.12.20260724"
 source = { registry = "https://pypi.org/simple" }
@@ -1529,6 +1541,7 @@ dependencies = [
     { name = "anyio" },
     { name = "google-genai" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "mcp" },
     { name = "openai" },
     { name = "packaging" },
@@ -1546,6 +1559,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
+    { name = "types-jsonschema" },
     { name = "types-pyyaml" },
 ]
 
@@ -1555,6 +1569,7 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.14.1" },
     { name = "google-genai", specifier = ">=2.12.0" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "jsonschema", specifier = ">=4.26" },
     { name = "mcp", specifier = ">=2,<3" },
     { name = "openai", specifier = ">=2.44.0" },
     { name = "packaging", specifier = ">=26.0" },
@@ -1572,5 +1587,6 @@ dev = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "ruff", specifier = ">=0.15.20" },
+    { name = "types-jsonschema", specifier = ">=4.26" },
     { name = "types-pyyaml", specifier = ">=6.0.12" },
 ]

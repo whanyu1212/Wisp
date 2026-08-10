@@ -154,6 +154,19 @@ def test_description_fallback_and_bound() -> None:
     assert bounded.description.endswith("[truncated]")
 
 
+def test_non_utf8_name_and_description_are_rejected() -> None:
+    for definition in (
+        _definition(name="\ud800"),
+        _definition(description="\ud800"),
+    ):
+        with pytest.raises(McpToolDefinitionError):
+            adapt_mcp_tool(
+                server=_server(),
+                tool=definition,
+                client=ScriptedMcpClient(),
+            )
+
+
 def test_tool_name_is_readable_when_already_provider_safe() -> None:
     assert mcp_tool_name("github", "get_issue") == "mcp__github__get_issue"
 
@@ -205,6 +218,7 @@ def test_schema_is_deeply_copied_and_defaults_to_object() -> None:
         {"type": "object", "default": float("nan")},
         {"type": "object", "secret-schema-value": {1, 2}},
         {"type": "object", "description": "\ud800"},
+        {"type": "object", "required": "query"},
         {"type": "object", "description": "x" * 65_536},
     ],
 )
