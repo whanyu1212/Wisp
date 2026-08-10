@@ -9,6 +9,7 @@ from pathlib import Path
 
 from wisp.config import WispConfig
 from wisp.runtime.extensions import build_runtime
+from wisp.runtime.registry import UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tui.rendering import TuiRendererKind
 
@@ -68,7 +69,12 @@ async def _preflight_tui_options(options: TuiOptions) -> None:
     try:
         runtime.providers.get(options.config.provider)
         for tool_name in set(options.allowed_tools):
-            runtime.tools.get(tool_name)
+            try:
+                runtime.tools.get(tool_name)
+            except UnknownToolError:
+                prefixes = tuple(f"mcp__{server.name}__" for server in options.config.mcp_servers)
+                if not tool_name.startswith(prefixes):
+                    raise
         sessions = JsonlSessionStore(options.config.session_dir)
         if options.resume is not None:
             sessions.load(options.resume)

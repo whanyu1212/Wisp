@@ -93,6 +93,11 @@ async def _build_runtime_for_config(config: WispConfig) -> WispRuntime:
     # factory with an older, narrower callable. Do not conceal TypeErrors raised
     # inside a compatible factory.
     for kwargs in (
+        {
+            "auth_path": config.auth_path,
+            "retry_policy": config.retry_policy,
+            "mcp_servers": config.mcp_servers,
+        },
         {"auth_path": config.auth_path, "retry_policy": config.retry_policy},
         {"auth_path": config.auth_path},
         {},

@@ -120,7 +120,10 @@ class RpcProjectConfiguration:
                 has_effort=overrides.has_effort,
             )
         else:
-            trusted_runtime = await self.runtime_builder(trusted_config)
+            # This temporary runtime exists only to refresh provider adapters. The
+            # live runtime already owns the configured MCP processes.
+            provider_config = trusted_config.model_copy(update={"mcp_servers": ()})
+            trusted_runtime = await self.runtime_builder(provider_config)
             try:
                 staged_providers = ProviderRegistry()
                 staged_providers.replace_all(runtime.providers_for_configuration(trusted_runtime))

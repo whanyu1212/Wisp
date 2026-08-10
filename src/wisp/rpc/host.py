@@ -446,6 +446,7 @@ class RpcHost:
                 all_tools=options.all_tools,
                 allow_read_tools=options.allow_read_tools,
                 allowed_tools=options.allowed_tools,
+                ignored_unknown_prefixes=runtime.unavailable_tool_prefixes,
             ),
             tool_approval_policy=approval_policy,
             max_tool_iterations=options.max_tool_iterations,
@@ -502,6 +503,8 @@ class RpcHost:
             on_shutdown_dispatched=on_shutdown_dispatched,
             on_shutdown_abandoned=on_shutdown_abandoned,
         )
+        for event in runtime.startup_events:
+            write_event(event)
         return host
 
     async def run_with_streams(
@@ -658,6 +661,11 @@ async def build_runtime_for_config(config: WispConfig) -> WispRuntime:
     """Build a runtime from configuration while retaining factory compatibility."""
 
     for kwargs in (
+        {
+            "auth_path": config.auth_path,
+            "retry_policy": config.retry_policy,
+            "mcp_servers": config.mcp_servers,
+        },
         {"auth_path": config.auth_path, "retry_policy": config.retry_policy},
         {"auth_path": config.auth_path},
         {},

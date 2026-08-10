@@ -9,6 +9,7 @@ import pytest
 
 from wisp.coding import CodingSession
 from wisp.config import WispConfig
+from wisp.mcp.config import McpServerConfig
 from wisp.rpc.configuration import RpcProjectConfiguration, _ConfigOverrides
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
@@ -18,6 +19,61 @@ from wisp.sessions.jsonl import JsonlSessionStore
 
 async def _runtime_for(config: WispConfig) -> WispRuntime:
     return await build_runtime(auth_path=config.auth_path, retry_policy=config.retry_policy)
+
+
+def test_trusted_project_provider_refresh_does_not_restart_mcp_servers(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    (project / ".wisp").mkdir(parents=True)
+    (project / ".wisp" / "settings.json").write_text(
+        json.dumps({"model": "trusted-model"}),
+        encoding="utf-8",
+    )
+    user_settings = Path.home() / ".wisp" / "settings.json"
+    user_settings.parent.mkdir(parents=True, exist_ok=True)
+    user_settings.write_text(
+        json.dumps(
+            {
+                "provider": "fake",
+                "mcp_servers": {"docs": {"command": "configured-server"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    session_dir = tmp_path / "sessions"
+    startup = WispConfig.from_env(
+        provider="fake",
+        session_dir=session_dir,
+        project_dir=project,
+        trusted=False,
+    )
+    built_configs: list[WispConfig] = []
+
+    async def recording_builder(config: WispConfig) -> WispRuntime:
+        built_configs.append(config)
+        return await _runtime_for(config)
+
+    async def scenario() -> None:
+        runtime = await _runtime_for(startup)
+        agent = CodingSession(
+            provider=runtime.providers.get("fake"),
+            sessions=JsonlSessionStore(session_dir),
+        )
+        transition = RpcProjectConfiguration(
+            startup_config=startup,
+            startup_trusted=False,
+            config_overrides=_ConfigOverrides(provider="fake", session_dir=session_dir),
+            project_context_root=project,
+            runtime_builder=recording_builder,
+        )
+
+        await transition.apply_trusted_project(runtime=runtime, agent=agent)
+        await runtime.aclose()
+
+    anyio.run(scenario)
+
+    assert startup.mcp_servers == (McpServerConfig(name="docs", command="configured-server"),)
+    assert len(built_configs) == 1
+    assert built_configs[0].mcp_servers == ()
 
 
 def test_no_settings_trust_transition_updates_session_without_rebuilding(

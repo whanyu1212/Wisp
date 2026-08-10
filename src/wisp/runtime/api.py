@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
+from wisp.events import WispEvent
 from wisp.providers.base import Provider
 from wisp.providers.catalog import ModelRegistry
 from wisp.runtime.commands import CommandDescriptor, CommandRegistry
@@ -11,6 +13,9 @@ from wisp.runtime.event_bus import EventBus, EventHandler
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 from wisp.tools.base import Tool, ToolPromptMetadata
 from wisp.tools.process_manager import ProcessSupervisor
+
+if TYPE_CHECKING:
+    from wisp.mcp.runtime import McpRuntime
 
 
 class ExtensionAPI:
@@ -96,6 +101,9 @@ class WispRuntime:
         default_factory=ProcessSupervisor,
         repr=False,
     )
+    mcp_runtime: McpRuntime | None = field(default=None, repr=False)
+    startup_events: tuple[WispEvent, ...] = ()
+    unavailable_tool_prefixes: tuple[str, ...] = ()
     _configured_providers: dict[str, Provider] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -158,6 +166,10 @@ class WispRuntime:
         self._configured_providers.update(candidate._configured_providers)
 
     async def aclose(self) -> None:
-        """Release runtime-owned resources, including every managed process."""
+        """Release runtime-owned MCP connections and managed processes."""
 
-        await self.process_supervisor.aclose()
+        try:
+            if self.mcp_runtime is not None:
+                await self.mcp_runtime.aclose()
+        finally:
+            await self.process_supervisor.aclose()

@@ -123,6 +123,19 @@ def test_tool_selection_preserves_metadata_only_for_selected_tools() -> None:
     assert filtered.prompt_metadata(("read", "bash")) == (read_prompt,)
 
 
+def test_tool_selection_ignores_unknown_names_from_failed_startup_extension() -> None:
+    registry = ToolRegistry()
+    registry.register(ReadTool())
+
+    filtered = select_tools(
+        registry,
+        allowed_tools=("mcp__broken__search",),
+        ignored_unknown_prefixes=("mcp__broken__",),
+    )
+
+    assert filtered.names() == ()
+
+
 def test_tool_registry_raises_for_unknown_tool() -> None:
     registry = ToolRegistry()
 
