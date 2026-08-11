@@ -11,6 +11,7 @@ import anyio
 
 from wisp.skills.loading import load_skill_resource
 from wisp.skills.models import SkillCatalog, SkillInvocationEvidence
+from wisp.skills.prompt import format_skill_content
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError
 
@@ -70,11 +71,16 @@ async def expand_skill_invocation(
         instructions_truncated=resource.truncated,
     )
     request = invocation.request or "Apply these skill instructions to the current task."
+    skill_content = format_skill_content(
+        name=invocation.name,
+        resource=resource.resource,
+        content=resource.text,
+    )
     expanded = (
         f"{_EXPANSION_HEADER}\n"
         f"Skill: {invocation.name}\n"
         f"Content-SHA256: {content_sha256}\n\n"
-        f"[SKILL INSTRUCTIONS]\n{resource.text}\n\n"
+        f"{skill_content}\n\n"
         f"[USER REQUEST]\n{request}"
     )
     return expanded, evidence

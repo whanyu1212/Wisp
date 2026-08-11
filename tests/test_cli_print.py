@@ -311,11 +311,13 @@ def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
     assert [record["message"]["role"] for record in records] == [
         "system",
         "system",
+        "system",
         "user",
         "assistant",
     ]
     assert "You are Wisp" in records[0]["message"]["content"]
     assert "allowed tools: none exposed to the model" in records[1]["message"]["content"]
+    assert records[2]["message"]["content"].startswith("[WISP INSTRUCTION BOUNDARY]")
 
 
 def test_print_mode_outputs_completion_only_response(
@@ -437,8 +439,10 @@ def test_print_mode_continue_appends_to_latest_session(tmp_path: Path) -> None:
     assert [record["message"]["role"] for record in records] == [
         "system",
         "system",
+        "system",
         "user",
         "assistant",
+        "system",
         "system",
         "system",
         "user",

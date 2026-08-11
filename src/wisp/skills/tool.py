@@ -8,6 +8,7 @@ import anyio
 
 from wisp.skills.loading import load_skill_resource
 from wisp.skills.models import SkillCatalog
+from wisp.skills.prompt import format_skill_content
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
@@ -55,7 +56,11 @@ class SkillTool:
             abandon_on_cancel=True,
         )
         return ToolResult(
-            text=resource.text,
+            text=format_skill_content(
+                name=name,
+                resource=resource.resource,
+                content=resource.text,
+            ),
             data={"skill": name, "resource": resource.resource},
             truncated=resource.truncated,
         )

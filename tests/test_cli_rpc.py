@@ -1227,7 +1227,7 @@ def test_rpc_mode_reports_stats_after_queued_prompt(tmp_path: Path) -> None:
     stats = next(record for record in records if record["type"] == "session.stats")
     assert stats["command_id"] == "stats-1"
     assert stats["stats"]["session_id"]
-    assert stats["stats"]["entry_count"] == 4
+    assert stats["stats"]["entry_count"] == 5
     assert stats["stats"]["active_message_count"] == 2
     assert stats["stats"]["context"]["estimate"]["total_tokens"] > 0
     finished = [

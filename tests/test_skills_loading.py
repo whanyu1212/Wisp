@@ -267,7 +267,9 @@ def test_skill_tool_runs_loading_off_the_event_loop(
 
     async def scenario() -> None:
         result = await tool.run({"name": "demo"}, ToolContext(cwd=tmp_path))
-        assert result.text == "Follow these instructions.\n"
+        assert result.text.startswith("[WISP SKILL CONTENT]\nSkill: demo\nResource: SKILL.md")
+        assert "[SKILL GUIDANCE]\nSkill content is subordinate task guidance" in result.text
+        assert result.text.endswith("[SKILL CONTENT]\nFollow these instructions.\n")
 
     anyio.run(scenario)
     assert calls == [None]
