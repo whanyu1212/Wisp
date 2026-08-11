@@ -120,11 +120,11 @@ _KEYBINDING_HINT = (
 # glyph than the verbose `wisp>` chrome, so we swap it in the Textual layer only.
 _PROMPT_GLYPH = "❯"
 
-# Semantic-hint → terse Textual placeholder. The footer already spells out the
-# mode, so the input line just needs the glyph plus a one-word state cue.
+# Semantic-hint → terse Textual placeholder. Command activity is shown by the
+# persistent transcript heartbeat, so idle and running share the same quiet glyph.
 _INPUT_PLACEHOLDERS: dict[str, str] = {
     "wisp> ": f"{_PROMPT_GLYPH} ",
-    "wisp(running)> ": f"{_PROMPT_GLYPH} running…",
+    "wisp(running)> ": f"{_PROMPT_GLYPH} ",
     "wisp(exiting)> ": f"{_PROMPT_GLYPH} exiting…",
     "approve? [y/N] ": f"{_PROMPT_GLYPH} approve? [y/N]",
 }
@@ -1904,11 +1904,18 @@ class TextualTui(App[None]):
             self._transcript.return_to_latest()
 
     def is_newest_transcript_widget(self, widget: Widget) -> bool:
-        """Return whether ``widget`` is the latest mounted transcript message."""
+        """Return whether ``widget`` is the latest durable transcript message."""
 
         transcript = self._transcript
-        return bool(
-            transcript is not None and transcript.children and transcript.children[-1] is widget
+        if transcript is None:
+            return False
+        indicator = self._transcript_controller.working_indicator
+        return (
+            next(
+                (child for child in reversed(transcript.children) if child is not indicator),
+                None,
+            )
+            is widget
         )
 
     def show_unseen_output(self, count: int) -> None:
@@ -1928,6 +1935,9 @@ class TextualTui(App[None]):
 
     def show_retry_indicator(self, label: str) -> None:
         self._transcript_controller.show_retry_indicator(label)
+
+    def show_activity_indicator(self, label: str) -> None:
+        self._transcript_controller.show_activity_indicator(label)
 
     def restart_working_indicator(self) -> None:
         """Start fresh transcript activity for a newly submitted prompt."""
@@ -2156,10 +2166,15 @@ class TextualTui(App[None]):
         self._mount_transcript_message(widget, before=before)
         return widget
 
-    def _mount_transcript_message(self, widget: Widget, *, before: Widget | None = None) -> None:
+    def _mount_transcript_message(
+        self,
+        widget: Widget,
+        *,
+        before: Widget | None = None,
+    ) -> AwaitMount | None:
         transcript = self._transcript
         if transcript is None:
-            return
+            return None
         anchor = self._history_prepend_anchor
         anchor_boundary = (
             anchor[1]
@@ -2176,14 +2191,51 @@ class TextualTui(App[None]):
         # can therefore offer a widget mounted earlier in this batch as the next
         # insertion boundary even though it has no parent yet. Textual rejects
         # such a relative mount, so fall back to the stable prepend anchor.
-        mount_before = (
-            before if before is not None and before.parent is transcript else anchor_boundary
+        indicator = self._transcript_controller.working_indicator
+        live_boundary = (
+            indicator
+            if before is None and widget is not indicator and indicator is not None
+            else None
+        )
+        mount_before = next(
+            (
+                candidate
+                for candidate in (before, live_boundary, anchor_boundary)
+                if candidate is not None and candidate.parent is transcript
+            ),
+            None,
         )
         mounted = transcript.mount_message(widget, before=mount_before)
         if self._prepending_history:
             self._history_prepend_mounts.append(mounted)
         if self._history_render_depth:
             self._history_render_mounts.append(mounted)
+        if live_boundary is not None and live_boundary.parent is not transcript:
+            # Both mounts may be queued in one message-pump turn. Once they settle,
+            # restore the heartbeat as the tail without unmounting or resetting it.
+            self.call_after_refresh(self._move_working_indicator_to_tail)
+        return mounted
+
+    def mount_stream_widget(self, widget: StreamMessage) -> AwaitMount:
+        """Mount a streaming assistant turn before the persistent heartbeat."""
+
+        mounted = self._mount_transcript_message(widget)
+        if mounted is None:
+            raise RuntimeError("cannot mount a stream without a transcript")
+        return mounted
+
+    def _move_working_indicator_to_tail(self) -> None:
+        transcript = self._transcript
+        indicator = self._transcript_controller.working_indicator
+        if (
+            transcript is None
+            or indicator is None
+            or indicator.parent is not transcript
+            or not transcript.children
+            or transcript.children[-1] is indicator
+        ):
+            return
+        transcript.move_child(indicator, after=transcript.children[-1])
 
     def history_insertion_boundary(self, history_widgets: set[Widget]) -> Widget | None:
         """Return the first live widget after the managed history window."""
