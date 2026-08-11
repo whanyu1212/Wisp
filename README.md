@@ -617,11 +617,17 @@ policy, so secrets are never offered.
 | `Enter` | Submit |
 | `Shift+Enter` / `Ctrl+J` | Insert newline (`Ctrl+J` in the live fullscreen renderer) |
 | `Shift+Tab` | Toggle plan/build mode |
+| `Ctrl+T` | Switch between the light and dark themes (remembered across runs) |
 | `Ctrl+G` | Toggle contextual help for the focused Textual surface |
 | `Ctrl+R` | Search prompt history for this TUI run |
 | `Escape` | Dismiss nearest menu or overlay, then cancel an active prompt |
 | `Ctrl+C` | Copy selection; otherwise press twice within 1.5s to quit |
 | `Ctrl+D` | Delete right; EOF only from an empty editor |
+
+`Ctrl+T` switches between Wisp's dark and light palettes. The choice is written to
+`~/.wisp/tui.json` and restored on the next run. It is presentation state owned by the TUI client,
+so it is kept out of `settings.json` and never reaches the agent subprocess; an unreadable or
+unrecognized value falls back to the dark theme rather than failing to start.
 
 In the Textual TUI, `Ctrl+G` and `/help` open the same native contextual guide. It follows focus
 across the editor, tool cards, pickers, context reports, and safety decisions; its key reference is

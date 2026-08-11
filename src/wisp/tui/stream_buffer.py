@@ -46,7 +46,22 @@ class MarkdownStreamController:
     permanently partial response.
     """
 
-    _DRAIN_INTERVAL_SECONDS = 1 / 30
+    # Paced to leave headroom for the cost of the write it schedules, rather than
+    # to a nominal frame rate. Appending one fragment to a mounted StreamMessage
+    # and following the tail measured ~28 ms into an empty transcript and ~50 ms
+    # once a few hundred messages were mounted (headless, so treat the absolute
+    # numbers as indicative and the ratio as the point). A 1/30 s interval sits
+    # below even the best of those, so a drain was always ready the instant the
+    # previous one finished and frames landed whenever rendering happened to
+    # complete — an irregular beat, which reads as jitter even though throughput
+    # is fine. At 1/15 s the budget clears the measured cost in a long session,
+    # so writes settle into a steady cadence.
+    #
+    # This bounds *repaints*, never throughput: fragments accumulate in
+    # `turn.pending` between drains and a burst still cuts the wait short via
+    # `_DRAIN_IMMEDIATE_BYTES`, so a fast provider renders the same text in the
+    # same wall-clock time with fewer, more even repaints.
+    _DRAIN_INTERVAL_SECONDS = 1 / 15
     _DRAIN_IMMEDIATE_BYTES = 4 * 1024
 
     def __init__(self, app: TextualTui) -> None:

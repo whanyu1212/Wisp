@@ -61,7 +61,8 @@ from wisp.tui.stream_buffer import MarkdownStreamController
 from wisp.tui.textual_input import TextualInputController
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.textual_transcript import TextualTranscriptController
-from wisp.tui.theme import WISP_THEMES, role_styles
+from wisp.tui.theme import WISP_THEME_NAMES, WISP_THEMES, role_styles
+from wisp.tui.theme_preference import load_theme_preference, save_theme_preference
 from wisp.tui.widgets import (
     DecisionPanel,
     JumpToLatest,
@@ -387,6 +388,7 @@ class TextualTui(App[None]):
         Binding("tab", "menu_complete", "Complete suggestion", priority=True, show=False),
         Binding("ctrl+r", "open_prompt_history", "History", priority=True),
         Binding("shift+tab", "toggle_agent_mode", "Plan/build", priority=True, show=False),
+        Binding("ctrl+t", "toggle_theme", "Light/dark", priority=True, show=False),
         Binding("ctrl+c", "interrupt", "Quit", priority=True),
         Binding("ctrl+d", "eof", "EOF", priority=True),
         Binding("escape", "cancel", "Cancel", priority=False, show=False),
@@ -536,7 +538,11 @@ class TextualTui(App[None]):
         self.title = "wisp"
         for theme in WISP_THEMES:
             self.register_theme(theme)
-        self.theme = WISP_THEMES[0].name
+        # A persisted choice only selects among Wisp's own themes: Textual also
+        # registers ~20 built-ins, and silently adopting one of those from a
+        # stale or hand-edited file would leave the transcript's role colors
+        # (resolved from the active theme) unrecognizable.
+        self.theme = load_theme_preference(valid_themes=WISP_THEME_NAMES) or WISP_THEMES[0].name
         self._role_styles = role_styles(self.current_theme)
         self._transcript = self.query_one("#transcript", Transcript)
         self._jump_to_latest = self.query_one("#jump-latest", JumpToLatest)
@@ -1384,6 +1390,28 @@ class TextualTui(App[None]):
 
         command = "/build" if self._agent_mode == "plan" else "/plan"
         self._input_controller.submit_line(command, clear_editor=False)
+
+    def action_toggle_theme(self) -> None:
+        """Switch between Wisp's light and dark palettes and remember the choice.
+
+        Presentation-only, so this stays client-side: it never reaches the RPC
+        subprocess or the agent settings model. Already-mounted transcript lines
+        keep the styles they were written with (see ``theme.role_styles``), so a
+        switch re-colors the chrome and everything written afterwards.
+        """
+
+        names = [theme.name for theme in WISP_THEMES]
+        try:
+            next_name = names[(names.index(self.theme) + 1) % len(names)]
+        except ValueError:
+            # An unrecognized active theme (only reachable if something outside
+            # Wisp set it) resolves to the default rather than failing.
+            next_name = names[0]
+        self.theme = next_name
+        # A failed write is surfaced rather than swallowed: the theme still
+        # changed for this session, but the user should know it will not stick.
+        suffix = "" if save_theme_preference(next_name) else " (could not save)"
+        self.write_notice(f"Theme: {next_name}{suffix}")
 
     def action_open_prompt_history(self) -> None:
         picker = self._prompt_history_picker
