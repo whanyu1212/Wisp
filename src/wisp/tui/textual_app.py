@@ -113,9 +113,13 @@ _WORDMARK = """\
 █   █  ███  ████  █   """
 # Cells occupied by the widest wordmark row, used to size the centered block.
 _WORDMARK_WIDTH = 22
-# The narrow fallback: five rows of lettering cannot fit a short terminal, so a
-# single-row badge keeps an identity present instead of dropping it entirely.
-_WORDMARK_COMPACT = "W  I  S  P"
+# The fallback for viewports too short or too narrow for the drawn mark. Plain
+# lowercase rather than letterspaced caps: this substitution is triggered partly
+# BY narrowness, and letterspacing would pad the very axis that ran out. It also
+# matches how the name is written everywhere else in the UI — the window title
+# and the `wisp>` prompt — so the small form reads as the product name rather
+# than as a shrunken logo.
+_WORDMARK_COMPACT = "wisp"
 _EMPTY_TRANSCRIPT_TAGLINE = "A coding agent that stays in sync"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 _MARKDOWN_VISIBLE_MARKERS = frozenset("`*_[]<>#|~-+\\&@")
@@ -206,9 +210,15 @@ class TextualTui(App[None]):
         text-align: center;
     }
 
+    /* `height: auto` on the text rows, not a fixed `1`: on a viewport narrower
+       than the block these lines have to wrap. Pinned to one row they truncated
+       mid-word instead ("A coding agent", "Type a prompt or /"), which reads as
+       a rendering fault rather than a deliberately compact layout. Wrapping
+       costs rows, so the panel's height thresholds are what keep the total
+       bounded — see TranscriptEmptyState. */
     #transcript-empty-tagline {
         max-width: 100%;
-        height: 1;
+        height: auto;
         margin-top: 1;
         color: $text;
         text-align: center;
@@ -216,7 +226,7 @@ class TextualTui(App[None]):
 
     #transcript-empty-hint {
         max-width: 100%;
-        height: 1;
+        height: auto;
         margin-top: 1;
         color: $text-muted;
         text-align: center;
@@ -224,7 +234,7 @@ class TextualTui(App[None]):
 
     #transcript-empty-actions {
         max-width: 100%;
-        height: 1;
+        height: auto;
         margin-top: 1;
         color: $text-muted;
         text-style: dim;

@@ -1610,11 +1610,21 @@ class TranscriptEmptyState(Vertical):
 
     The panel sheds rows as the viewport shortens rather than overflowing: first
     the quick actions, then the tagline and hint, and finally the tall wordmark
-    is exchanged for a one-row badge.
+    is exchanged for a one-row badge. That exchange also happens when the
+    viewport is merely too *narrow* for the drawn mark, which wraps rather than
+    clips and would otherwise arrive at twice its expected height.
+
+    The shared block width itself is also re-derived on every resize rather than
+    fixed once at construction. `_MIN_BLOCK_WIDTH` is a comfortable width for the
+    text lines, not a floor Textual will honor on a narrower terminal — pinning
+    every child to it regardless of the real viewport clipped the tagline and
+    hint mid-word instead of letting them wrap or shrink with the panel.
     """
 
-    # Falls back to a width that suits the text lines when the wordmark is
-    # narrower than they are, so a future shorter mark cannot squeeze them.
+    # A comfortable width for the text lines, used only when the viewport can
+    # actually provide it. On a narrower terminal the available width governs
+    # instead, so children track the real space rather than clipping against a
+    # value the panel can no longer honor.
     _MIN_BLOCK_WIDTH = 40
 
     # Thresholds are measured against THIS PANEL's height, not the terminal's.
@@ -1652,13 +1662,18 @@ class TranscriptEmptyState(Vertical):
         self._tagline = tagline
         self._hint = hint
         self._wordmark_label: Static | None = None
-        self._block_width = max(
-            self._MIN_BLOCK_WIDTH,
-            *(len(line) for line in wordmark.splitlines() or [""]),
+        # Cells the drawn mark needs before Textual starts wrapping its rows.
+        # Derived from the art itself so the fit check cannot drift from it.
+        self._wordmark_width = max(
+            (len(line) for line in wordmark.splitlines()),
+            default=0,
         )
+        # Populated by compose(); every direct child gets the same width so
+        # Textual's block-centering keeps them aligned with one another.
+        self._centered_children: list[Widget] = []
 
     def _centered(self, widget: Widget) -> Widget:
-        widget.styles.width = self._block_width
+        self._centered_children.append(widget)
         return widget
 
     def compose(self) -> ComposeResult:
@@ -1676,12 +1691,29 @@ class TranscriptEmptyState(Vertical):
 
     def on_resize(self, event: events.Resize) -> None:
         height = self.size.height
+        width = self.size.width
         self.set_class(height < self._FULL_HEIGHT, "-compact")
         self.set_class(height < self._TAGLINE_HEIGHT, "-minimal")
+
+        # Both axes matter, and for different reasons. Too short and the drawn
+        # mark cannot fit its own five rows. Too narrow and Textual wraps each
+        # row instead of clipping it, which shears the letterforms *and* doubles
+        # the rendered height — invalidating the five-row assumption the height
+        # thresholds above are derived from.
+        drawn_mark_fits = height >= self._TALL_WORDMARK_HEIGHT and width >= self._wordmark_width
         label = self._wordmark_label
         if label is not None:
-            tall = height >= self._TALL_WORDMARK_HEIGHT
-            label.update(self._wordmark if tall else self._compact_wordmark)
+            label.update(self._wordmark if drawn_mark_fits else self._compact_wordmark)
+
+        # Whichever mark is showing is this panel's widest child, so it sets the
+        # comfortable width; `_MIN_BLOCK_WIDTH` only raises that when there is
+        # room to spare. Clamped to the real viewport so a narrow terminal
+        # shrinks the whole block, rather than Textual clipping the tagline and
+        # hint mid-word against a width the panel cannot actually honor.
+        mark_width = self._wordmark_width if drawn_mark_fits else len(self._compact_wordmark)
+        block_width = min(width, max(mark_width, self._MIN_BLOCK_WIDTH))
+        for child in self._centered_children:
+            child.styles.width = block_width
 
 
 class OperationIndicator(Vertical):

@@ -42,6 +42,7 @@ from wisp.tui.history import (
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.state import TuiCancelRequested, TuiQuitRequested
 from wisp.tui.textual_app import (
+    _EMPTY_TRANSCRIPT_TAGLINE,
     TextualTui,
     TextualTuiRenderer,
     create_textual_tui,
@@ -6241,6 +6242,51 @@ def test_textual_startup_empty_state_never_overflows_its_viewport(height: int) -
     assert not overflows
     # Either the full drawn mark or the single-row badge — never a partial one.
     assert wordmark_rows in {1, 5}
+
+
+@pytest.mark.parametrize("width", [90, 40, 30, 26, 24, 20, 16, 12])
+def test_textual_startup_wordmark_never_wraps_in_a_narrow_viewport(width: int) -> None:
+    # The drawn mark needs its full cell width. Textual wraps the rows rather
+    # than clipping them when the viewport is narrower, which both shears the
+    # letterforms and doubles the rendered height — invalidating the five-row
+    # assumption the height breakpoints are derived from. Sweeping only height
+    # (as the test above does) cannot surface this.
+    async def scenario() -> int:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(width, 30)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
+            return wordmark.region.height
+
+    # A wrapped five-row mark renders taller than five rows; the badge is one.
+    assert anyio.run(scenario) in {1, 5}
+
+
+@pytest.mark.parametrize("width", [90, 40, 30, 24, 20, 16])
+def test_textual_startup_text_wraps_instead_of_truncating_when_narrow(width: int) -> None:
+    # The children share one explicit width so Textual's block-centering keeps
+    # them aligned. That width used to be fixed at construction, so on a viewport
+    # narrower than the block the tagline and hint were clipped mid-word rather
+    # than wrapping. Both the shared width and the rows' `height: auto` are
+    # needed: clamping alone still truncates while the rows are pinned to one.
+    async def scenario() -> tuple[int, int, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(width, 30)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            tagline = app_instance.query_one("#transcript-empty-tagline", Label)
+            return transcript.size.width, tagline.region.width, tagline.region.height
+
+    transcript_width, tagline_width, tagline_rows = anyio.run(scenario)
+
+    # Never wider than the space available, and never clipped to a single row
+    # when the text cannot fit one.
+    assert tagline_width <= transcript_width
+    expected_rows = -(-len(_EMPTY_TRANSCRIPT_TAGLINE) // max(1, tagline_width))
+    assert tagline_rows >= min(expected_rows, 1)
+    assert tagline_rows * tagline_width >= len(_EMPTY_TRANSCRIPT_TAGLINE)
 
 
 def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
