@@ -306,6 +306,7 @@ def test_history_entries_from_rpc_messages_handles_orphan_and_missing_tool_resul
             is_error=True,
             exit_code=2,
             truncated=True,
+            call_missing=True,
         ),
         HistoricalToolCard(
             card_id="history:missing:missing",

@@ -167,7 +167,10 @@ def _historical_tool_card(
         output=output,
         is_error=bool(message.is_error),
         tool_call_id=message.tool_call_id,
-        call_missing=tool_call is None and message.tool_call_id is not None,
+        # A result can lack call metadata even when legacy persistence omitted the
+        # call ID. Pairability still depends on tool_call_id elsewhere, but display
+        # availability does not: never fabricate built-in defaults from `{}`.
+        call_missing=tool_call is None,
         status=status,
         exit_code=tool_result.exit_code if tool_result is not None else None,
         output_has_exit_status=(

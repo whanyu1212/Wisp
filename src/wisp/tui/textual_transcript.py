@@ -207,6 +207,7 @@ class TextualTranscriptController:
         *,
         historical_card_id: str | None = None,
         historical: bool = False,
+        arguments_available: bool = True,
         before: Widget | None = None,
     ) -> ToolCard | None:
         """Mount and register one evolving tool card when a transcript is available."""
@@ -215,7 +216,7 @@ class TextualTranscriptController:
             return None
         if not historical:
             self.hide_working_indicator()
-        card = ToolCard(name, arguments)
+        card = ToolCard(name, arguments, arguments_available=arguments_available)
         self._tool_cards[call_id] = card
         if historical_card_id is not None:
             self._historical_tool_cards[historical_card_id] = card

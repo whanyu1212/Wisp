@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass
 
 from rich.cells import cell_len, set_cell_size
@@ -76,6 +75,7 @@ from wisp.tui.rendering import (
     _truncate_to_cell_width,
     format_tui_footer_text,
 )
+from wisp.tui.tool_call import format_tool_call_arguments
 
 _TOOL_OUTPUT_PREVIEW_LINES = 8
 _TOOL_OUTPUT_PREVIEW_BYTES = 2_000
@@ -587,26 +587,6 @@ def _preview_tool_output(
         hidden.append(f"{hidden_lines} more {unit}")
     hidden.append(f"{hidden_bytes} bytes hidden")
     return f"{preview}\n... {', '.join(hidden)}"
-
-
-def _summarize_arguments(arguments: object, *, limit: int = 48) -> str:
-    """Render a tool call's arguments as a terse `k=v, k=v` summary.
-
-    Values are stringified and clipped so a card stays one line; a long single
-    value (a pasted blob, a big path) is truncated with an ellipsis rather than
-    wrapping the card. Non-mapping arguments fall back to their repr.
-    """
-
-    if not isinstance(arguments, Mapping):
-        text = str(arguments)
-        return text if len(text) <= limit else f"{text[: limit - 1]}…"
-    parts: list[str] = []
-    for key, value in arguments.items():
-        text = str(value)
-        if len(text) > limit:
-            text = f"{text[: limit - 1]}…"
-        parts.append(f"{key}={text}")
-    return ", ".join(parts)
 
 
 class DecisionPanel(Vertical):
@@ -2273,13 +2253,21 @@ class ToolCard(Static):
         Binding("escape", "leave", "Back to input", show=False),
     ]
 
-    def __init__(self, name: str, arguments: object) -> None:
+    def __init__(
+        self,
+        name: str,
+        arguments: object,
+        *,
+        arguments_available: bool = True,
+    ) -> None:
         super().__init__("")
         # Not `_name`: Textual's DOMNode uses `self._name` to back the widget
         # `name` property (typed str | None), so a distinct field avoids
         # shadowing it and keeps this a plain str.
         self._tool_name = name
-        self._summary = _summarize_arguments(arguments)
+        self._call_arguments = (
+            format_tool_call_arguments(name, arguments) if arguments_available else Content("")
+        )
         # A plain str is untrusted output escaped at repaint; a Content is an
         # already-styled renderable (e.g. a colored diff) whose text is literal,
         # so it is composed directly without markup escaping.
@@ -2320,7 +2308,7 @@ class ToolCard(Static):
         """Enrich a historical result when its paged-in call arrives later."""
 
         self._tool_name = name
-        self._summary = _summarize_arguments(arguments)
+        self._call_arguments = format_tool_call_arguments(name, arguments)
         self._repaint()
 
     def on_unmount(self) -> None:
@@ -2349,8 +2337,8 @@ class ToolCard(Static):
     ) -> None:
         """Transition the card to a new status, swapping glyph, color, and detail.
 
-        ``detail`` overrides the argument summary (used to show a denial reason or
-        bounded result preview). A plain ``str`` is untrusted output escaped at
+        ``detail`` adds a denial reason or bounded result preview below the persistent
+        call header. A plain ``str`` is untrusted output escaped at
         repaint; a Textual ``Content`` is a pre-styled renderable (e.g. a colored
         diff) composed directly. ``elapsed`` is the true wall-clock duration (from
         the request/result event timestamps); passing it freezes the live counter
@@ -2444,20 +2432,21 @@ class ToolCard(Static):
 
     def _repaint(self, *, layout: bool = True) -> None:
         # Build the whole card as Content, appending every untrusted value
-        # (name, summary, detail) as LITERAL styled text. Nothing untrusted is
+        # (name, call arguments, detail) as LITERAL styled text. Nothing untrusted is
         # ever routed through a markup parser, so no escaping is needed and no
         # content — however it is truncated or whatever brackets it contains —
         # can inject or break a style span. Trusted chrome (glyph, `·`, indent)
         # is plain literal too; styles are applied out-of-band.
         content = Content(f"{self._glyph} ") + Content.styled(self._tool_name, "b")
-        if not _has_detail(self._detail) and self._summary:
-            content += Content("  ") + Content.styled(self._summary, "dim")
+        if self._call_arguments.plain:
+            content += Content("  ") + self._call_arguments
         if self._elapsed is not None:
             content += Content.styled(f" · {_format_duration(self._elapsed)}", "dim")
-        # A ▸/▾ affordance signals the card can be expanded and its current state,
-        # shown only when there is genuinely more to reveal than the collapsed detail.
+        # Label the affordance so a reader does not have to infer what a bare
+        # triangle means. Enter is the primary binding; Space remains supported.
         if self._can_expand():
-            content += Content.styled(" ▾" if self._expanded else " ▸", "dim")
+            label = " ▾ less (Enter)" if self._expanded else " ▸ more (Enter)"
+            content += Content.styled(label, "dim")
 
         if isinstance(self._detail, DiffPresentation):
             # Structured edit/write cards retain diff rows for both states; unlike

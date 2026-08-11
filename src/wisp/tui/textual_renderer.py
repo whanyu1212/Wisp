@@ -48,7 +48,7 @@ from wisp.tui.rendering import (
     _truncate_to_cell_width,
 )
 from wisp.tui.textual_history import TextualHistoryController
-from wisp.tui.tool_output import full_tool_output_for_display, render_tool_result
+from wisp.tui.tool_output import full_tool_result_for_display, render_tool_result
 
 if TYPE_CHECKING:
     from wisp.tui.textual_app import TextualTui
@@ -606,10 +606,12 @@ class TextualTuiRenderer:
                 # the collapsed detail; the card only offers expansion when this adds
                 # something. `truncated` flags that even the full output was capped by
                 # the tool itself.
-                full_output=full_tool_output_for_display(
+                full_output=full_tool_result_for_display(
+                    event.name,
                     event.output,
                     event.exit_code,
                     output_has_exit_status=event.output_has_exit_status,
+                    summary=event.summary if status == "done" else None,
                 ),
                 truncated=event.truncated,
             )

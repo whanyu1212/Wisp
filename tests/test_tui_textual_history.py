@@ -121,9 +121,10 @@ class _HistorySurface:
         *,
         historical_card_id: str | None = None,
         historical: bool = False,
+        arguments_available: bool = True,
         before: Widget | None = None,
     ) -> Widget:
-        del historical
+        del historical, arguments_available
         widget = self._mount(f"tool: {name}", before=before)
         widget.name = name
         widget.arguments = arguments
@@ -305,6 +306,30 @@ def test_history_controller_pairs_boundary_tool_cards_and_resets_on_session_repl
     assert len(cards) == 1
     assert cards[0].arguments == {"command": "printf done"}
     assert cards[0].status == "cancelled"
+
+
+def test_history_controller_replays_grep_summary_with_match_evidence() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    output = "a.py:1:TODO\nb.py:2:TODO\n"
+
+    controller.replace_entries(
+        (
+            HistoricalToolCard(
+                card_id="history:grep",
+                name="grep",
+                arguments={"pattern": "TODO", "path": "src"},
+                output=output,
+                is_error=False,
+                summary="grep: 2 matches",
+            ),
+        ),
+        session_label="Search",
+    )
+
+    card = next(widget for widget in surface.widgets if widget.name == "grep")
+    assert card.arguments == {"pattern": "TODO", "path": "src"}
+    assert card.detail == "grep: 2 matches\na.py:1:TODO\nb.py:2:TODO"
 
 
 def test_history_controller_finishes_a_render_batch_when_mounting_fails() -> None:
