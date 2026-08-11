@@ -57,6 +57,72 @@ def test_save_preserves_unrelated_keys(tmp_path: Path) -> None:
     assert payload == {"unrelated": "kept", "theme": "wisp-light"}
 
 
+def test_unreadable_file_is_left_alone_rather_than_overwritten(tmp_path: Path) -> None:
+    # A read failure leaves the real contents unknown. Writing anyway would
+    # replace unrelated preferences with just the theme — silently losing data
+    # while nominally "succeeding". Refusing to save is the safe outcome.
+    path = theme_preference_path(home_dir=tmp_path)
+    path.parent.mkdir(parents=True)
+    original = json.dumps({"unrelated": "kept", "theme": "wisp"})
+    path.write_text(original, encoding="utf-8")
+
+    def _explode(*args: object, **kwargs: object) -> str:
+        raise PermissionError("read denied")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "read_text", _explode)
+        assert not save_theme_preference("wisp-light", home_dir=tmp_path)
+
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_failed_write_leaves_the_previous_document_intact(tmp_path: Path) -> None:
+    # A direct truncating write would empty the file before failing, losing the
+    # previous theme and every unrelated key. Staging through a temp file and
+    # renaming means the destination is never observed half-written.
+    path = theme_preference_path(home_dir=tmp_path)
+    path.parent.mkdir(parents=True)
+    original = json.dumps({"unrelated": "kept", "theme": "wisp"}) + "\n"
+    path.write_text(original, encoding="utf-8")
+
+    def _explode(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("wisp.tui.theme_preference.os.replace", _explode)
+        assert not save_theme_preference("wisp-light", home_dir=tmp_path)
+
+    assert path.read_text(encoding="utf-8") == original
+    assert load_theme_preference(home_dir=tmp_path) == "wisp"
+
+
+def test_failed_write_does_not_leave_temp_files_behind(tmp_path: Path) -> None:
+    path = theme_preference_path(home_dir=tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"theme": "wisp"}), encoding="utf-8")
+
+    def _explode(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("wisp.tui.theme_preference.os.replace", _explode)
+        assert not save_theme_preference("wisp-light", home_dir=tmp_path)
+
+    assert [entry.name for entry in path.parent.iterdir()] == [path.name]
+
+
+def test_unparseable_file_is_replaced_rather_than_preserved(tmp_path: Path) -> None:
+    # Distinct from an unreadable file: content that parsed to nothing carries
+    # no preferences worth keeping, so overwriting it repairs rather than loses.
+    path = theme_preference_path(home_dir=tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("{ not json", encoding="utf-8")
+
+    assert save_theme_preference("wisp-light", home_dir=tmp_path)
+
+    assert load_theme_preference(home_dir=tmp_path) == "wisp-light"
+
+
 @pytest.mark.parametrize(
     "contents",
     ["not json at all", '"a bare string"', "[]", "{}", '{"theme": ""}', '{"theme": 42}'],
