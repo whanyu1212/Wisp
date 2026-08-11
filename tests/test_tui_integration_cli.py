@@ -2769,8 +2769,8 @@ def test_textual_transcript_uses_theme_colors() -> None:
 
 
 def test_textual_tool_card_carries_role_class_for_lifecycle_styling() -> None:
-    # A ToolCard's rail and surface live in its `message--<role>` CSS class, not
-    # in text spans — so assert the class rather than a span color.
+    # A ToolCard's rail lives in its `message--<role>` CSS class; glyph color is
+    # a separate Content span. Assert the class here rather than a span color.
     cards = _cards_for_events([ToolCallRequested(call_id="c1", name="bash", arguments={})])
     assert cards == [("message--tool", "tool")]
 
@@ -3314,8 +3314,8 @@ def test_textual_turn_rails_distinguish_conversation_roles_without_color() -> No
 
 
 @pytest.mark.parametrize("theme", ["wisp", "wisp-light"])
-def test_textual_transcript_surfaces_follow_authorship_and_tool_state(theme: str) -> None:
-    async def scenario() -> tuple[dict[str, str], dict[str, str], int]:
+def test_textual_transcript_keeps_tool_cards_minimal_and_semantic(theme: str) -> None:
+    async def scenario() -> tuple[dict[str, tuple[str, int, float, str, set[str]]], str]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             app_instance.theme = theme
@@ -3336,53 +3336,93 @@ def test_textual_transcript_surfaces_follow_authorship_and_tool_state(theme: str
             )
             await pilot.pause()
 
+            states: dict[str, tuple[str, int, float, str, set[str]]] = {}
+            for card in _all_tool_cards(app_instance):
+                role = _transcript_role_class(card)
+                assert role is not None
+                content = card.render()
+                glyph_styles = {
+                    str(span.style) for span in content.spans if span.start <= 0 < span.end
+                }
+                name_styles = {
+                    str(span.style) for span in content.spans if span.start <= 2 < span.end
+                }
+                assert name_styles == {"b"}
+                assert all("dim" not in str(span.style).split() for span in content.spans)
+                states[role] = (
+                    card.styles.background.hex.lower(),
+                    card.styles.padding.right,
+                    card.styles.color.a,
+                    card._glyph,
+                    glyph_styles,
+                )
             transcript = app_instance.query_one("#transcript", Transcript)
-            backgrounds = {
-                role: child.styles.background.hex.lower()
-                for child in transcript.children
-                if (role := _transcript_role_class(child)) is not None
-            }
-            variables = {
-                name: value.lower()
-                for name, value in app_instance.get_css_variables().items()
-                if name in {"panel", "surface", "success-muted", "error-muted", "warning-muted"}
-            }
-            assistant = next(
-                child for child in transcript.children if child.has_class("message--assistant")
-            )
-            return backgrounds, variables, assistant.styles.background.a
+            user = next(child for child in transcript.children if child.has_class("message--user"))
+            return states, user.styles.background.hex.lower()
 
-    backgrounds, variables, assistant_alpha = anyio.run(scenario)
-    assert backgrounds == {
-        "message--user": variables["panel"],
-        "message--assistant": "#00000000",
-        "message--tool": variables["surface"],
-        "message--approved": variables["success-muted"],
-        "message--error": variables["error-muted"],
-        "message--denied": variables["warning-muted"],
+    states, user_background = anyio.run(scenario)
+    assert user_background != "#00000000"
+    expected_glyphs = {
+        "message--tool": ("⋯", "$text-accent"),
+        "message--approved": ("✓", "$text-success"),
+        "message--error": ("✗", "$text-error"),
+        "message--denied": ("⊘", "$text-warning"),
     }
-    assert assistant_alpha == 0
+    assert set(states) == set(expected_glyphs)
+    for role, (glyph, glyph_style) in expected_glyphs.items():
+        background, padding_right, text_alpha, rendered_glyph, glyph_styles = states[role]
+        assert background == "#00000000"
+        assert padding_right == 0
+        assert text_alpha == pytest.approx(0.6)
+        assert rendered_glyph == glyph
+        assert glyph_styles == {glyph_style}
 
 
-def test_textual_focused_tool_card_preserves_lifecycle_surface() -> None:
-    async def scenario() -> tuple[str, str, str]:
+@pytest.mark.parametrize("theme", ["wisp", "wisp-light"])
+def test_textual_standalone_error_retains_its_surface(theme: str) -> None:
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            app_instance.theme = theme
+            renderer.event(ErrorEvent(message="boom"))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            (error,) = transcript.children
+            return error.styles.background.hex.lower(), app_instance.get_css_variables()[
+                "error-muted"
+            ].lower()
+
+    background, expected = anyio.run(scenario)
+    assert background == expected
+
+
+def test_textual_focused_tool_card_uses_only_a_left_outline() -> None:
+    async def scenario() -> tuple[str, tuple[str, str, str, str], str, bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={}))
             await pilot.pause()
             card = _first_tool_card(app_instance)
-            before = card.styles.background.hex.lower()
             card.focus()
             await pilot.pause()
+            outlines = (
+                card.styles.outline_top[0],
+                card.styles.outline_right[0],
+                card.styles.outline_bottom[0],
+                card.styles.outline_left[0],
+            )
             return (
-                before,
                 card.styles.background.hex.lower(),
+                outlines,
                 card.styles.outline_left[1].hex.lower(),
+                card.has_class("message--tool"),
             )
 
-    before, after, outline = anyio.run(scenario)
-    assert after == before
-    assert outline == "#3fb8b8"
+    background, outlines, outline_color, keeps_role = anyio.run(scenario)
+    assert background == "#00000000"
+    assert outlines == ("", "", "", "heavy")
+    assert outline_color == "#3fb8b8"
+    assert keeps_role
 
 
 def test_textual_denied_and_error_tool_cards_render_distinct_glyphs() -> None:

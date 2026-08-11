@@ -23,6 +23,7 @@ _GENERIC_LIMIT = 160
 _GENERIC_MAX_ITEMS = 8
 _BUILTIN_LIMIT = 200
 _NUMBER_LIMIT = 24
+_TOOL_MUTED_STYLE = "$text-muted"
 
 
 def format_tool_call_arguments(name: str, arguments: object) -> Content:
@@ -30,14 +31,14 @@ def format_tool_call_arguments(name: str, arguments: object) -> Content:
 
     if not isinstance(arguments, Mapping):
         text = _clip(_one_line(_safe_text(arguments)), _VALUE_LIMIT)
-        return Content.styled(text, "dim")
+        return Content.styled(text, _TOOL_MUTED_STYLE)
     formatter = _FORMATTERS.get(name)
     if formatter is None:
         return _format_generic(arguments)
     rendered = formatter(arguments)
     if len(rendered.plain) <= _BUILTIN_LIMIT:
         return rendered
-    return Content.styled(_clip(rendered.plain, _BUILTIN_LIMIT), "dim")
+    return Content.styled(_clip(rendered.plain, _BUILTIN_LIMIT), _TOOL_MUTED_STYLE)
 
 
 def _format_read(arguments: Mapping[object, object]) -> Content:
@@ -47,44 +48,52 @@ def _format_read(arguments: Mapping[object, object]) -> Content:
     if offset is not None or limit is not None:
         start = offset or 1
         end = start + limit - 1 if limit is not None else ""
-        content += Content.styled(f":{start}-{end}", "dim")
+        content += Content.styled(f":{start}-{end}", _TOOL_MUTED_STYLE)
     return content
 
 
 def _format_grep(arguments: Mapping[object, object]) -> Content:
     pattern = _value(arguments.get("pattern"), default="")
-    content = Content.styled("/", "dim") + Content(pattern) + Content.styled("/ in ", "dim")
+    content = (
+        Content.styled("/", _TOOL_MUTED_STYLE)
+        + Content(pattern)
+        + Content.styled("/ in ", _TOOL_MUTED_STYLE)
+    )
     content += _path_content(arguments.get("path"), default=".")
     glob = _optional_value(arguments.get("glob"))
     if glob:
-        content += Content.styled(" (", "dim") + Content(glob) + Content.styled(")", "dim")
+        content += (
+            Content.styled(" (", _TOOL_MUTED_STYLE)
+            + Content(glob)
+            + Content.styled(")", _TOOL_MUTED_STYLE)
+        )
     if arguments.get("ignore_case") is True:
-        content += Content.styled(" · ignore case", "dim")
+        content += Content.styled(" · ignore case", _TOOL_MUTED_STYLE)
     if arguments.get("literal") is True:
-        content += Content.styled(" · literal", "dim")
+        content += Content.styled(" · literal", _TOOL_MUTED_STYLE)
     context = _nonnegative_int(arguments.get("context"))
     if context:
-        content += Content.styled(f" · context {context}", "dim")
+        content += Content.styled(f" · context {context}", _TOOL_MUTED_STYLE)
     max_results = _positive_int(arguments.get("max_results"))
     if max_results is not None:
-        content += Content.styled(f" · limit {max_results}", "dim")
+        content += Content.styled(f" · limit {max_results}", _TOOL_MUTED_STYLE)
     return content
 
 
 def _format_find(arguments: Mapping[object, object]) -> Content:
     pattern = _value(arguments.get("pattern"), default="*")
-    content = Content(pattern) + Content.styled(" in ", "dim")
+    content = Content(pattern) + Content.styled(" in ", _TOOL_MUTED_STYLE)
     content += _path_content(arguments.get("path"), default=".")
     max_results = _positive_int(arguments.get("max_results"))
     if max_results is not None:
-        content += Content.styled(f" · limit {max_results}", "dim")
+        content += Content.styled(f" · limit {max_results}", _TOOL_MUTED_STYLE)
     return content
 
 
 def _format_ls(arguments: Mapping[object, object]) -> Content:
     content = _path_content(arguments.get("path"), default=".")
     if arguments.get("all") is True:
-        content += Content.styled(" · hidden", "dim")
+        content += Content.styled(" · hidden", _TOOL_MUTED_STYLE)
     return content
 
 
@@ -92,29 +101,29 @@ def _format_bash(arguments: Mapping[object, object]) -> Content:
     raw_operation = arguments.get("operation")
     operation = raw_operation if isinstance(raw_operation, str) else "run"
     if operation in {"poll", "cancel"}:
-        content = Content.styled(f"{operation} ", "dim")
+        content = Content.styled(f"{operation} ", _TOOL_MUTED_STYLE)
         content += Content(_value(arguments.get("process_id"), default="<process>"))
         if operation == "poll":
             wait = _nonnegative_number_text(arguments.get("wait_seconds"))
             if wait is not None:
-                content += Content.styled(f" · wait {wait}s", "dim")
+                content += Content.styled(f" · wait {wait}s", _TOOL_MUTED_STYLE)
         return content
 
     content = Content("")
     if operation == "start":
-        content += Content.styled("start ", "dim")
+        content += Content.styled("start ", _TOOL_MUTED_STYLE)
     content += Content(_value(arguments.get("command"), default=""))
     if operation == "start":
         lifetime = _positive_number_text(arguments.get("lifetime_seconds"))
         if lifetime is not None:
-            content += Content.styled(f" · lifetime {lifetime}s", "dim")
+            content += Content.styled(f" · lifetime {lifetime}s", _TOOL_MUTED_STYLE)
         yield_seconds = _nonnegative_number_text(arguments.get("yield_seconds"))
         if yield_seconds is not None:
-            content += Content.styled(f" · yield {yield_seconds}s", "dim")
+            content += Content.styled(f" · yield {yield_seconds}s", _TOOL_MUTED_STYLE)
     else:
         timeout = _positive_int(arguments.get("timeout"))
         if timeout is not None:
-            content += Content.styled(f" · timeout {timeout}s", "dim")
+            content += Content.styled(f" · timeout {timeout}s", _TOOL_MUTED_STYLE)
     return content
 
 
@@ -124,7 +133,7 @@ def _format_edit(arguments: Mapping[object, object]) -> Content:
     if isinstance(edits, Sequence) and not isinstance(edits, str | bytes):
         count = len(edits)
         noun = "edit" if count == 1 else "edits"
-        content += Content.styled(f" · {count} {noun}", "dim")
+        content += Content.styled(f" · {count} {noun}", _TOOL_MUTED_STYLE)
     return content
 
 
@@ -141,7 +150,7 @@ def _format_generic(arguments: Mapping[object, object]) -> Content:
         key_text = _clip(_one_line(_safe_text(key)), _VALUE_LIMIT)
         value_text = _clip(_one_line(_safe_text(value)), _VALUE_LIMIT)
         parts.append(f"{key_text}={value_text}")
-    return Content.styled(_clip(", ".join(parts), _GENERIC_LIMIT), "dim")
+    return Content.styled(_clip(", ".join(parts), _GENERIC_LIMIT), _TOOL_MUTED_STYLE)
 
 
 def _path_content(value: object, *, default: str = "") -> Content:
