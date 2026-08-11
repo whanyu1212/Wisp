@@ -4808,7 +4808,16 @@ def test_textual_streaming_reconciles_deferred_output_after_returning_to_tail() 
             )
             assert stream._markdown.source == "visible"
             transcript.return_to_latest()
+            # Two distinct waits, in this order. The pause delivers the
+            # FollowChanged message, whose handler is what re-queues the
+            # deferred fragments; only then is there streaming work to wait on.
+            # Waiting on idle first would return immediately, because nothing is
+            # queued until that handler runs. The idle wait then replaces a
+            # fixed pump count, so this test does not silently depend on
+            # StreamBuffer's drain interval, which is a pacing choice rather
+            # than part of the behavior under test.
             await pilot.pause()
+            await app_instance.wait_for_stream_idle()
             await pilot.pause()
             return stream._markdown.source, transcript.is_following
 
