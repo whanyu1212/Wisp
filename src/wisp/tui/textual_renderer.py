@@ -34,6 +34,7 @@ from wisp.events import (
     ToolCallRequested,
     ToolResultReady,
     TrustRequested,
+    TrustResolved,
     TurnStarted,
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
@@ -562,6 +563,9 @@ class TextualTuiRenderer:
             self._tool_arguments[event.call_id] = event.arguments
             card = self.app.mount_tool_call(event.call_id, event.name, event.arguments)
             self._history.record_live_tool_call(event.call_id, widget=card)
+        elif isinstance(event, TrustResolved):
+            if self._progress_active:
+                self.app.show_working_indicator()
         elif isinstance(event, ToolApprovalResolved):
             if self._progress_active:
                 self.app.show_working_indicator()

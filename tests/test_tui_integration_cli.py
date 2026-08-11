@@ -27,6 +27,7 @@ from wisp.events import (
     RpcMessageSnapshot,
     RpcMessagesReported,
     SkillInvoked,
+    TrustResolved,
     TurnStarted,
     wisp_event_from_json,
 )
@@ -3942,6 +3943,33 @@ def test_textual_retry_progress_does_not_replay_or_survive_terminal_states() -> 
     assert not remaining
     assert timer_stopped
     assert "Retrying" not in rendered
+
+
+def test_textual_trust_resolution_restores_working_activity() -> None:
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.trust_request(
+                TrustRequested(request_id="trust-1", project_path=Path("/tmp/project"))
+            )
+            await pilot.pause()
+            waiting = _working_activity(app_instance)
+
+            renderer.event(
+                TrustResolved(
+                    request_id="trust-1",
+                    project_path=Path("/tmp/project"),
+                    trusted=True,
+                )
+            )
+            await pilot.pause()
+            return waiting, _working_activity(app_instance)
+
+    waiting, resolved = anyio.run(scenario)
+    assert "Waiting for trust" in waiting
+    assert "Working" in resolved
+    assert "Waiting for trust" not in resolved
 
 
 def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure() -> None:
