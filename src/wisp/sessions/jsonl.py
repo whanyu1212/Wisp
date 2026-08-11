@@ -436,7 +436,15 @@ class JsonlSessionStore:
         if not selected.is_absolute():
             direct_candidates.append(self.root / selected)
         for candidate in direct_candidates:
-            if candidate.is_file():
+            try:
+                info = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise SessionError(f"Could not inspect session file: {candidate}") from exc
+            if stat.S_ISLNK(info.st_mode):
+                raise SessionError(f"Session file is not a regular file: {candidate}")
+            if stat.S_ISREG(info.st_mode):
                 return candidate.resolve(strict=False)
 
         ref_text = str(reference)
@@ -454,7 +462,8 @@ class JsonlSessionStore:
     def _session_files(self) -> tuple[Path, ...]:
         if not self.root.exists():
             return ()
-        return tuple(sorted(self.root.glob("*.jsonl"), key=lambda path: path.name))
+        files = (path for path in self.root.glob("*.jsonl") if _prepare_session_file(path))
+        return tuple(sorted(files, key=lambda path: path.name))
 
 
 class JsonlSession:
@@ -648,7 +657,7 @@ class JsonlSession:
             )
 
     def read_entries(self) -> tuple[SessionEntry, ...]:
-        """Read all persisted entries from the session file."""
+        """Read all committed entries, repairing an incomplete final record first."""
 
         return tuple(_read_entries(self.path))
 
@@ -656,11 +665,12 @@ class JsonlSession:
         """Read an append-ordered snapshot through the validated entry index."""
 
         with self._file_state.lock:
-            if self._validate_session_file() is None:
-                raise SessionNotFoundError(f"Session file does not exist: {self.path}")
-            self._refresh_entry_index()
-            assert self._entry_index is not None
-            return tuple(self._entry_index.values())
+            with self._interprocess_lock():
+                if self._validate_session_file() is None:
+                    raise SessionNotFoundError(f"Session file does not exist: {self.path}")
+                self._refresh_entry_index()
+                assert self._entry_index is not None
+                return tuple(self._entry_index.values())
 
     def read_messages(self) -> tuple[Message, ...]:
         """Read all persisted messages from the session file."""
@@ -701,21 +711,22 @@ class JsonlSession:
 
         _validate_message_page_limit(limit)
         with self._file_state.lock:
-            if self._validate_session_file() is None:
-                raise SessionNotFoundError(f"Session file does not exist: {self.path}")
-            self._refresh_entry_index()
-            if self._message_page_index is None:
-                assert self._entry_index is not None
-                self._message_page_index = _message_page_index_from_entries(
-                    self._entry_index.values()
+            with self._interprocess_lock():
+                if self._validate_session_file() is None:
+                    raise SessionNotFoundError(f"Session file does not exist: {self.path}")
+                self._refresh_entry_index()
+                if self._message_page_index is None:
+                    assert self._entry_index is not None
+                    self._message_page_index = _message_page_index_from_entries(
+                        self._entry_index.values()
+                    )
+                return _message_page_from_index(
+                    self._message_page_index,
+                    session_id=self.session_id,
+                    path=self.path,
+                    limit=limit,
+                    before_entry_id=before_entry_id,
                 )
-            return _message_page_from_index(
-                self._message_page_index,
-                session_id=self.session_id,
-                path=self.path,
-                limit=limit,
-                before_entry_id=before_entry_id,
-            )
 
     def read_tree_page(
         self,
@@ -826,7 +837,7 @@ class JsonlSession:
                     session_file.write(line)
                     session_file.write("\n")
 
-            persisted = tuple(_read_entries(temp_path))
+            persisted = tuple(_read_entries_unlocked(temp_path))
             if persisted != entries:
                 raise SessionError(f"Projected session validation failed: {temp_path}")
             # A hard link publishes the already complete inode without replacing
@@ -856,21 +867,48 @@ class JsonlSession:
         self._entry_index_signature = _session_file_signature(final_info)
 
     def _append_line(self, line: str) -> None:
+        """Append and sync one newline-committed record, rolling back on failure."""
+
         _ensure_private_directory(self.path.parent)
+        data = f"{line}\n".encode()
+        existed = self._validate_session_file() is not None
         flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         fd = os.open(self.path, flags, PRIVATE_FILE_MODE)
         try:
+            info = os.fstat(fd)
+        except Exception:
+            os.close(fd)
+            raise
+        signature = (info.st_dev, info.st_ino)
+        original_size = info.st_size
+        try:
+            if not stat.S_ISREG(info.st_mode):
+                raise SessionError(f"Session file is not a regular file: {self.path}")
             if os.name == "posix":
                 os.fchmod(fd, PRIVATE_FILE_MODE)
-            with os.fdopen(fd, "a", encoding="utf-8") as session_file:
-                fd = -1
-                session_file.write(line)
-                session_file.write("\n")
-        finally:
-            if fd != -1:
+            _write_all(fd, data)
+            _sync_file(fd)
+            if not existed:
+                _sync_directory(self.path.parent)
+        except Exception as append_error:
+            try:
+                os.ftruncate(fd, original_size)
+                _sync_file(fd)
+            except OSError as rollback_error:
+                raise SessionError(
+                    "Session append failed and rollback could not be synchronized for "
+                    f"{self.path}: append error: {append_error}"
+                ) from rollback_error
+            finally:
                 os.close(fd)
+            if not existed and original_size == 0:
+                _unlink_if_same_file(self.path, signature)
+                _sync_directory(self.path.parent)
+            raise
+        else:
+            os.close(fd)
 
     def _append_entry_once(self, entry: SessionEntry) -> SessionEntry:
         with self._file_state.lock:
@@ -1104,6 +1142,7 @@ class JsonlSession:
         raise SessionError(f"Session entry id conflicts with persisted data: {entry.id}")
 
     def _refresh_entry_index(self) -> None:
+        self._recover_incomplete_tail_locked()
         info = self._validate_session_file()
         if info is None:
             self._entry_index = {}
@@ -1134,7 +1173,7 @@ class JsonlSession:
 
     def _load_entry_index(self) -> dict[str, SessionEntry]:
         entries: dict[str, SessionEntry] = {}
-        for entry in _read_entries(self.path):
+        for entry in _read_entries_unlocked(self.path):
             if entry.id in entries:
                 raise SessionError(f"Duplicate session entry id: {entry.id}")
             entries[entry.id] = entry
@@ -1165,7 +1204,10 @@ class JsonlSession:
             with self._interprocess_lock():
                 if not self.path.is_file():
                     return False
-                entries = self.read_entries()
+                self._recover_incomplete_tail_locked()
+                if not self.path.is_file():
+                    return False
+                entries = tuple(_read_entries_unlocked(self.path))
                 suffix = entries[count:]
                 if not suffix or any(entry.operation_id != operation_id for entry in suffix):
                     return False
@@ -1209,51 +1251,25 @@ class JsonlSession:
                 )
                 return True
 
+    def _recover_incomplete_tail_locked(self) -> None:
+        if _recover_incomplete_tail(self.path):
+            self._file_state.generation += 1
+            self._invalidate_entry_index()
+
     @contextmanager
     def _interprocess_lock(self) -> Iterator[None]:
-        """Serialize session mutations across cooperating Wisp processes."""
+        """Serialize session access across cooperating Wisp processes."""
 
-        _ensure_private_directory(self.path.parent)
-        lock_path = self.path.with_suffix(f"{self.path.suffix}.lock")
-        flags = os.O_CREAT | os.O_RDWR
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(lock_path, flags, PRIVATE_FILE_MODE)
-        unlock: Callable[[], object] | None = None
-        try:
-            if os.name == "posix":
-                os.fchmod(fd, PRIVATE_FILE_MODE)
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                raise SessionError(f"Session lock is not a regular file: {lock_path}")
-            if os.name == "posix":
-                import fcntl
-
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                unlock = partial(fcntl.flock, fd, fcntl.LOCK_UN)
-            elif os.name == "nt":
-                import msvcrt
-
-                if info.st_size == 0:
-                    os.write(fd, b"\0")
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
-                unlock = partial(
-                    msvcrt.locking,  # type: ignore[attr-defined]
-                    fd,
-                    msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
-                    1,
-                )
+        with _interprocess_lock(self.path):
             yield
-        finally:
-            if unlock is not None:
-                unlock()
-            os.close(fd)
 
     def _truncate_entries(self, count: int) -> None:
         if not self.path.is_file():
             return
-        entries = self.read_entries()[:count]
+        self._recover_incomplete_tail_locked()
+        if not self.path.is_file():
+            return
+        entries = tuple(_read_entries_unlocked(self.path))[:count]
         if not entries:
             self.path.unlink(missing_ok=True)
             return
@@ -1276,6 +1292,134 @@ class JsonlSession:
         finally:
             if fd != -1:
                 os.close(fd)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written == 0:
+            raise OSError("Session write made no progress")
+        view = view[written:]
+
+
+def _sync_file(fd: int) -> None:
+    os.fsync(fd)
+
+
+def _sync_directory(path: Path) -> None:
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _interprocess_lock(path: Path) -> Iterator[None]:
+    """Serialize access to one session across cooperating Wisp processes."""
+
+    _ensure_private_directory(path.parent)
+    lock_path = path.with_suffix(f"{path.suffix}.lock")
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(lock_path, flags, PRIVATE_FILE_MODE)
+    unlock: Callable[[], object] | None = None
+    try:
+        if os.name == "posix":
+            os.fchmod(fd, PRIVATE_FILE_MODE)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise SessionError(f"Session lock is not a regular file: {lock_path}")
+        if os.name == "posix":
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            unlock = partial(fcntl.flock, fd, fcntl.LOCK_UN)
+        elif os.name == "nt":
+            import msvcrt
+
+            if info.st_size == 0:
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
+            unlock = partial(
+                msvcrt.locking,  # type: ignore[attr-defined]
+                fd,
+                msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
+                1,
+            )
+        yield
+    finally:
+        if unlock is not None:
+            unlock()
+        os.close(fd)
+
+
+def _recover_incomplete_tail(path: Path) -> bool:
+    """Discard bytes after the final newline; return whether the file changed."""
+
+    flags = os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise SessionError(f"Session file is not a regular file: {path}") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise SessionError(f"Session file is not a regular file: {path}")
+        if info.st_size == 0:
+            committed_size = 0
+            signature = (info.st_dev, info.st_ino)
+        else:
+            os.lseek(fd, -1, os.SEEK_END)
+            if os.read(fd, 1) == b"\n":
+                return False
+
+            position = info.st_size
+            committed_size = 0
+            while position:
+                chunk_size = min(position, 64 * 1024)
+                position -= chunk_size
+                os.lseek(fd, position, os.SEEK_SET)
+                chunk = os.read(fd, chunk_size)
+                newline = chunk.rfind(b"\n")
+                if newline != -1:
+                    committed_size = position + newline + 1
+                    break
+            os.ftruncate(fd, committed_size)
+            _sync_file(fd)
+            signature = (info.st_dev, info.st_ino)
+    finally:
+        os.close(fd)
+
+    if committed_size == 0:
+        _unlink_if_same_file(path, signature)
+        _sync_directory(path.parent)
+    return True
+
+
+def _prepare_session_file(path: Path) -> bool:
+    state = _session_file_state(path)
+    with state.lock:
+        with _interprocess_lock(path):
+            changed = _recover_incomplete_tail(path)
+            if changed:
+                state.generation += 1
+            try:
+                return path.stat().st_size > 0
+            except FileNotFoundError:
+                return False
 
 
 def _ensure_private_directory(path: Path) -> None:
@@ -1755,6 +1899,15 @@ _SESSION_TREE_ENTRY_KINDS = frozenset({"message", "event", "compaction"})
 
 
 def _read_session_summary_metadata(path: Path) -> _SessionSummaryMetadata:
+    state = _session_file_state(path)
+    with state.lock:
+        with _interprocess_lock(path):
+            if _recover_incomplete_tail(path):
+                state.generation += 1
+            return _read_session_summary_metadata_unlocked(path)
+
+
+def _read_session_summary_metadata_unlocked(path: Path) -> _SessionSummaryMetadata:
     if not path.is_file():
         raise SessionNotFoundError(f"Session file does not exist: {path}")
 
@@ -2190,6 +2343,15 @@ def _resolve_summary_entry(
 
 
 def _read_entries(path: Path, *, limit: int | None = None) -> list[SessionEntry]:
+    state = _session_file_state(path)
+    with state.lock:
+        with _interprocess_lock(path):
+            if _recover_incomplete_tail(path):
+                state.generation += 1
+            return _read_entries_unlocked(path, limit=limit)
+
+
+def _read_entries_unlocked(path: Path, *, limit: int | None = None) -> list[SessionEntry]:
     if not path.is_file():
         raise SessionNotFoundError(f"Session file does not exist: {path}")
 

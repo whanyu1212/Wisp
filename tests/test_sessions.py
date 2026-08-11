@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -427,7 +429,7 @@ def test_session_message_pages_reuse_validated_entry_index(
 
     anyio.run(write)
     reader = store.load(session.session_id)
-    original_read_entries = jsonl_module._read_entries
+    original_read_entries = jsonl_module._read_entries_unlocked
     read_count = 0
 
     def count_reads(path: Path, *, limit: int | None = None) -> list[SessionEntry]:
@@ -435,7 +437,7 @@ def test_session_message_pages_reuse_validated_entry_index(
         read_count += 1
         return original_read_entries(path, limit=limit)
 
-    monkeypatch.setattr(jsonl_module, "_read_entries", count_reads)
+    monkeypatch.setattr(jsonl_module, "_read_entries_unlocked", count_reads)
 
     newest = reader.read_message_page(limit=2)
     older = reader.read_message_page(limit=2, before_entry_id=newest.next_before_entry_id)
@@ -492,7 +494,7 @@ def test_session_message_page_cache_reloads_after_external_append(
 
     first = anyio.run(write)
     reader = store.load(session.session_id)
-    original_read_entries = jsonl_module._read_entries
+    original_read_entries = jsonl_module._read_entries_unlocked
     read_count = 0
 
     def count_reads(path: Path, *, limit: int | None = None) -> list[SessionEntry]:
@@ -500,7 +502,7 @@ def test_session_message_page_cache_reloads_after_external_append(
         read_count += 1
         return original_read_entries(path, limit=limit)
 
-    monkeypatch.setattr(jsonl_module, "_read_entries", count_reads)
+    monkeypatch.setattr(jsonl_module, "_read_entries_unlocked", count_reads)
 
     assert [message.content for message in reader.read_message_page().messages] == ["first"]
     external = MessageSessionEntry(
@@ -1926,12 +1928,52 @@ def test_session_rejects_v2_tree_metadata_claimed_by_v1_entry(tmp_path: Path) ->
         JsonlSessionStore(tmp_path).load(path)
 
 
-def test_session_wraps_invalid_json_as_malformed_entry(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "incomplete_tail",
+    [
+        b'{"kind":"message"',
+        b'{"valid":"json"}',
+        b"\xf0\x9f\x99",
+    ],
+    ids=["partial-json", "valid-json-without-newline", "partial-utf8"],
+)
+def test_session_recovers_unterminated_final_bytes(
+    tmp_path: Path,
+    incomplete_tail: bytes,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    committed = MessageSessionEntry(
+        id="committed",
+        session_id=session.session_id,
+        message=Message(role="user", content="safe"),
+    )
+    committed_bytes = f"{session_entry_to_json(committed)}\n".encode()
+    session.path.write_bytes(committed_bytes + incomplete_tail)
+
+    assert session.read_entries() == (committed,)
+    assert session.path.read_bytes() == committed_bytes
+
+
+def test_session_removes_file_with_only_uncommitted_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "incomplete-only.jsonl"
+    path.write_bytes(b'{"valid":"json"}')
+    store = JsonlSessionStore(tmp_path)
+
+    assert store.summaries() == ()
+    assert not path.exists()
+    with pytest.raises(SessionNotFoundError):
+        store.load(path)
+
+
+def test_session_preserves_committed_malformed_final_record(tmp_path: Path) -> None:
     path = tmp_path / "invalid.jsonl"
-    path.write_text('{"kind":"message"\n', encoding="utf-8")
+    malformed = b'{"kind":"message"\n'
+    path.write_bytes(malformed)
 
     with pytest.raises(MalformedSessionEntryError, match="Malformed session entry JSON"):
         JsonlSessionStore(tmp_path).load(path)
+
+    assert path.read_bytes() == malformed
 
 
 def test_session_rejects_unknown_supported_version_event_on_typed_access(
@@ -2370,6 +2412,169 @@ def test_append_entry_reloads_identity_after_uncertain_write_failure(
     assert session.read_entries() == (entry,)
 
 
+def test_write_all_retries_short_writes(monkeypatch: MonkeyPatch) -> None:
+    written = bytearray()
+
+    def short_write(_fd: int, data: bytes | memoryview) -> int:
+        chunk = bytes(data[:2])
+        written.extend(chunk)
+        return len(chunk)
+
+    monkeypatch.setattr(os, "write", short_write)
+
+    jsonl_module._write_all(123, b"abcdef")  # noqa: SLF001
+
+    assert written == b"abcdef"
+
+
+def test_write_all_rejects_zero_progress(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(os, "write", lambda _fd, _data: 0)
+
+    with pytest.raises(OSError, match="made no progress"):
+        jsonl_module._write_all(123, b"record")  # noqa: SLF001
+
+
+def test_failed_first_append_removes_empty_crash_artifact(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    monkeypatch.setattr(os, "write", lambda _fd, _data: 0)
+
+    with pytest.raises(OSError, match="made no progress"):
+        session._append_line('{"incomplete":true}')  # noqa: SLF001
+
+    assert not session.path.exists()
+
+
+def test_append_failure_rolls_back_partial_record(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    committed = MessageSessionEntry(
+        id="committed",
+        session_id=session.session_id,
+        message=Message(role="user", content="safe"),
+    )
+    session.path.write_bytes(f"{session_entry_to_json(committed)}\n".encode())
+    original = session.path.read_bytes()
+    real_write = os.write
+    write_calls = 0
+
+    def fail_after_short_write(fd: int, data: bytes | memoryview) -> int:
+        nonlocal write_calls
+        write_calls += 1
+        if write_calls == 1:
+            return real_write(fd, data[:7])
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(os, "write", fail_after_short_write)
+
+    with pytest.raises(OSError, match="disk full"):
+        session._append_line('{"incomplete":true}')  # noqa: SLF001
+
+    assert session.path.read_bytes() == original
+    assert session.read_entries() == (committed,)
+
+
+def test_append_sync_failure_rolls_back_complete_record(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    committed = MessageSessionEntry(
+        id="committed",
+        session_id=session.session_id,
+        message=Message(role="user", content="safe"),
+    )
+    session.path.write_bytes(f"{session_entry_to_json(committed)}\n".encode())
+    original = session.path.read_bytes()
+    real_sync = jsonl_module._sync_file  # noqa: SLF001
+    sync_calls = 0
+
+    def fail_first_sync(fd: int) -> None:
+        nonlocal sync_calls
+        sync_calls += 1
+        if sync_calls == 1:
+            raise OSError(errno.EIO, "sync failed")
+        real_sync(fd)
+
+    monkeypatch.setattr(jsonl_module, "_sync_file", fail_first_sync)
+
+    with pytest.raises(OSError, match="sync failed"):
+        session._append_line('{"complete":true}')  # noqa: SLF001
+
+    assert sync_calls == 2
+    assert session.path.read_bytes() == original
+
+
+def test_append_reports_uncertain_outcome_when_rollback_fails(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    committed = MessageSessionEntry(
+        id="committed",
+        session_id=session.session_id,
+        message=Message(role="user", content="safe"),
+    )
+    session.path.write_bytes(f"{session_entry_to_json(committed)}\n".encode())
+    real_write = os.write
+    write_calls = 0
+
+    def fail_after_short_write(fd: int, data: bytes | memoryview) -> int:
+        nonlocal write_calls
+        write_calls += 1
+        if write_calls == 1:
+            return real_write(fd, data[:7])
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(os, "write", fail_after_short_write)
+    real_ftruncate = os.ftruncate
+
+    def fail_ftruncate(_fd: int, _size: int) -> None:
+        raise OSError(errno.EIO, "rollback failed")
+
+    with monkeypatch.context() as rollback_failure:
+        rollback_failure.setattr(os, "ftruncate", fail_ftruncate)
+        with pytest.raises(SessionError, match="rollback could not be synchronized"):
+            session._append_line('{"incomplete":true}')  # noqa: SLF001
+
+    monkeypatch.setattr(os, "ftruncate", real_ftruncate)
+    # The next cooperating read removes the uncommitted suffix.
+    assert session.read_entries() == (committed,)
+    assert session.path.read_bytes().endswith(b"\n")
+
+
+def test_successful_append_syncs_file_and_new_parent_entry(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    file_syncs: list[int] = []
+    directory_syncs: list[Path] = []
+    real_file_sync = jsonl_module._sync_file  # noqa: SLF001
+    real_directory_sync = jsonl_module._sync_directory  # noqa: SLF001
+
+    def track_file_sync(fd: int) -> None:
+        file_syncs.append(fd)
+        real_file_sync(fd)
+
+    def track_directory_sync(path: Path) -> None:
+        directory_syncs.append(path)
+        real_directory_sync(path)
+
+    monkeypatch.setattr(jsonl_module, "_sync_file", track_file_sync)
+    monkeypatch.setattr(jsonl_module, "_sync_directory", track_directory_sync)
+
+    session._append_line('{"first":true}')  # noqa: SLF001
+    session._append_line('{"second":true}')  # noqa: SLF001
+
+    assert len(file_syncs) == 2
+    assert directory_syncs == [tmp_path]
+
+
 def test_append_entry_rejects_conflicting_identity(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
     first_message = Message(role="assistant", content="first")
@@ -2439,6 +2644,42 @@ def test_truncate_invalidates_append_identity_index(tmp_path: Path) -> None:
     )
 
 
+def test_session_recovery_uses_process_local_and_sidecar_locks(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    committed = MessageSessionEntry(
+        id="committed",
+        session_id=session.session_id,
+        message=Message(role="user", content="safe"),
+    )
+    session.path.write_bytes(f"{session_entry_to_json(committed)}\n{{".encode())
+    real_interprocess_lock = jsonl_module._interprocess_lock  # noqa: SLF001
+    real_recover = jsonl_module._recover_incomplete_tail  # noqa: SLF001
+    sidecar_lock_held = False
+
+    @contextmanager
+    def tracked_interprocess_lock(path: Path) -> Iterator[None]:
+        nonlocal sidecar_lock_held
+        with real_interprocess_lock(path):
+            sidecar_lock_held = True
+            try:
+                yield
+            finally:
+                sidecar_lock_held = False
+
+    def checked_recover(path: Path) -> bool:
+        assert session._file_state.lock.locked()  # noqa: SLF001
+        assert sidecar_lock_held
+        return real_recover(path)
+
+    monkeypatch.setattr(jsonl_module, "_interprocess_lock", tracked_interprocess_lock)
+    monkeypatch.setattr(jsonl_module, "_recover_incomplete_tail", checked_recover)
+
+    assert session.read_entries() == (committed,)
+
+
 def test_session_store_creates_private_directories_and_files(tmp_path: Path) -> None:
     root = tmp_path / "missing" / "sessions"
     session = JsonlSessionStore(root).create()
@@ -2484,6 +2725,37 @@ def test_session_store_rejects_symlink_session_directory(tmp_path: Path) -> None
 
     with pytest.raises(SessionError, match="not a directory"):
         anyio.run(write)
+
+
+def test_recovery_rejects_symlink_session_file(tmp_path: Path) -> None:
+    if not hasattr(os, "symlink") or not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("no-follow symlink opens are not supported")
+    root = tmp_path / "sessions"
+    root.mkdir()
+    target = tmp_path / "target.jsonl"
+    target.write_bytes(b'{"valid":"json"}')
+    original = target.read_bytes()
+    (root / "linked.jsonl").symlink_to(target)
+
+    with pytest.raises(SessionError, match="not a regular file"):
+        JsonlSessionStore(root).summaries()
+
+    assert target.read_bytes() == original
+
+
+def test_direct_load_rejects_symlink_session_file(tmp_path: Path) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are not supported")
+    target = tmp_path / "target.jsonl"
+    target.write_bytes(b'{"valid":"json"}')
+    original = target.read_bytes()
+    link = tmp_path / "linked.jsonl"
+    link.symlink_to(target)
+
+    with pytest.raises(SessionError, match="not a regular file"):
+        JsonlSessionStore(tmp_path).load(link)
+
+    assert target.read_bytes() == original
 
 
 def test_append_entry_rejects_symlink_session_file(tmp_path: Path) -> None:
@@ -2549,11 +2821,11 @@ def test_limited_session_read_stops_after_requested_entry(
     monkeypatch: MonkeyPatch,
 ) -> None:
     path = tmp_path / "session.jsonl"
-    path.touch()
     first_line = MessageSessionEntry(
         session_id="session-id",
         message=Message(role="user", content="hello"),
     ).model_dump_json()
+    path.write_text(f"{first_line}\n", encoding="utf-8")
 
     class TrackingFile:
         next_calls = 0

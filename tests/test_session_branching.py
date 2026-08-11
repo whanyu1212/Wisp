@@ -363,14 +363,14 @@ def test_failed_destination_validation_removes_new_file(
     leaf_id = anyio.run(seed)
     target = JsonlSession(session_id="target-session", path=tmp_path / "target.jsonl")
     monkeypatch.setattr(store, "create", lambda: target)
-    read_entries = jsonl_module._read_entries  # noqa: SLF001
+    read_entries = jsonl_module._read_entries_unlocked  # noqa: SLF001
 
     def fail_target_read(path: Path, *, limit: int | None = None) -> list[SessionEntry]:
         if path != source.path:
             raise SessionError("simulated validation failure")
         return read_entries(path, limit=limit)
 
-    monkeypatch.setattr(jsonl_module, "_read_entries", fail_target_read)
+    monkeypatch.setattr(jsonl_module, "_read_entries_unlocked", fail_target_read)
 
     async def clone() -> None:
         with pytest.raises(SessionError, match="simulated validation failure"):
@@ -453,8 +453,8 @@ def test_clone_blocks_destination_append_until_cache_initialization(
 
     async def append_during_publication() -> None:
         assert await anyio.to_thread.run_sync(published.wait, 5)
-        reopened = store.load(target.path)
         append_started.set()
+        reopened = store.load(target.path)
         await reopened.append_message(Message(role="assistant", content="concurrent"))
         append_finished.set()
 

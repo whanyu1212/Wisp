@@ -289,6 +289,15 @@ Session files contain provider-facing `message` entries plus selected structured
 events. Continuation replays only the selected path's messages and compactions, so audit events
 never become model-visible history.
 
+Wisp treats a JSONL record as committed only when it is newline-terminated. A successful append
+also synchronizes the session file before returning. Appends are serialized across cooperating Wisp
+processes and rolled back to the previous committed size if writing or synchronization fails. On the
+next read, Wisp discards any unterminated final bytes left by an interrupted writer—even if those
+bytes happen to form valid JSON—while preserving all newline-terminated records. A malformed
+newline-terminated record remains a session error rather than being silently removed. Newly created
+session files and recovery deletions also synchronize the parent directory on supported POSIX
+systems.
+
 Records form a parent-linked tree, and an append-only active-leaf record selects the root-to-leaf
 path used by continuation — abandoned or cancelled work stays in the audit log without entering
 model context. Legacy unversioned and v1 linear session files remain readable and are never
