@@ -2683,9 +2683,13 @@ def test_session_recovery_uses_process_local_and_sidecar_locks(
     sidecar_lock_held = False
 
     @contextmanager
-    def tracked_interprocess_lock(path: Path) -> Iterator[None]:
+    def tracked_interprocess_lock(
+        path: Path,
+        *,
+        prepare_parent: bool = True,
+    ) -> Iterator[None]:
         nonlocal sidecar_lock_held
-        with real_interprocess_lock(path):
+        with real_interprocess_lock(path, prepare_parent=prepare_parent):
             sidecar_lock_held = True
             try:
                 yield
@@ -2750,6 +2754,25 @@ def test_session_store_rejects_symlink_session_directory(tmp_path: Path) -> None
         anyio.run(write)
 
 
+def test_session_read_preserves_existing_parent_permissions(tmp_path: Path) -> None:
+    if os.name != "posix":
+        pytest.skip("POSIX permissions are required")
+    root = tmp_path / "shared-sessions"
+    root.mkdir(mode=0o755)
+    root.chmod(0o755)
+    entry = MessageSessionEntry(
+        id="entry-1",
+        session_id="session-id",
+        message=Message(role="user", content="hello"),
+    )
+    path = root / "session.jsonl"
+    path.write_text(f"{session_entry_to_json(entry)}\n", encoding="utf-8")
+
+    assert JsonlSessionStore(root).load(path).read_entries() == (entry,)
+
+    assert stat.S_IMODE(root.stat().st_mode) == 0o755
+
+
 def test_recovery_rejects_symlink_session_file_without_no_follow(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -2766,6 +2789,31 @@ def test_recovery_rejects_symlink_session_file_without_no_follow(
 
     with pytest.raises(SessionError, match="not a regular file"):
         JsonlSessionStore(root).summaries()
+
+    assert target.read_bytes() == original
+
+
+def test_recovery_rejects_symlink_sidecar_lock_without_no_follow(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are not supported")
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    entry = MessageSessionEntry(
+        id="entry-1",
+        session_id="session-id",
+        message=Message(role="user", content="hello"),
+    )
+    path = tmp_path / "session.jsonl"
+    path.write_text(f"{session_entry_to_json(entry)}\n", encoding="utf-8")
+    target = tmp_path / "lock-target"
+    target.write_bytes(b"")
+    original = target.read_bytes()
+    path.with_suffix(".jsonl.lock").symlink_to(target)
+
+    with pytest.raises(SessionError, match="lock is not a regular file"):
+        JsonlSessionStore(tmp_path).summaries()
 
     assert target.read_bytes() == original
 

@@ -665,7 +665,7 @@ class JsonlSession:
         """Read an append-ordered snapshot through the validated entry index."""
 
         with self._file_state.lock:
-            with self._interprocess_lock():
+            with self._interprocess_lock(prepare_parent=False):
                 if self._validate_session_file() is None:
                     raise SessionNotFoundError(f"Session file does not exist: {self.path}")
                 self._refresh_entry_index()
@@ -711,7 +711,7 @@ class JsonlSession:
 
         _validate_message_page_limit(limit)
         with self._file_state.lock:
-            with self._interprocess_lock():
+            with self._interprocess_lock(prepare_parent=False):
                 if self._validate_session_file() is None:
                     raise SessionNotFoundError(f"Session file does not exist: {self.path}")
                 self._refresh_entry_index()
@@ -783,7 +783,7 @@ class JsonlSession:
         """Read one coherent tree snapshot and reject stale branch requests."""
 
         with self._file_state.lock:
-            with self._interprocess_lock():
+            with self._interprocess_lock(prepare_parent=False):
                 self._refresh_entry_index()
                 assert self._entry_index is not None
                 entries = tuple(self._entry_index.values())
@@ -1257,10 +1257,10 @@ class JsonlSession:
             self._invalidate_entry_index()
 
     @contextmanager
-    def _interprocess_lock(self) -> Iterator[None]:
+    def _interprocess_lock(self, *, prepare_parent: bool = True) -> Iterator[None]:
         """Serialize session access across cooperating Wisp processes."""
 
-        with _interprocess_lock(self.path):
+        with _interprocess_lock(self.path, prepare_parent=prepare_parent):
             yield
 
     def _truncate_entries(self, count: int) -> None:
@@ -1331,23 +1331,48 @@ def _sync_directory(path: Path) -> None:
 
 
 @contextmanager
-def _interprocess_lock(path: Path) -> Iterator[None]:
+def _interprocess_lock(path: Path, *, prepare_parent: bool = True) -> Iterator[None]:
     """Serialize access to one session across cooperating Wisp processes."""
 
-    _ensure_private_directory(path.parent)
+    if prepare_parent:
+        _ensure_private_directory(path.parent)
     lock_path = path.with_suffix(f"{path.suffix}.lock")
+    try:
+        path_info = lock_path.lstat()
+    except FileNotFoundError:
+        path_info = None
+    except OSError as exc:
+        raise SessionError(f"Could not inspect session lock: {lock_path}") from exc
+    if path_info is not None and (
+        stat.S_ISLNK(path_info.st_mode) or not stat.S_ISREG(path_info.st_mode)
+    ):
+        raise SessionError(f"Session lock is not a regular file: {lock_path}")
+
     flags = os.O_CREAT | os.O_RDWR
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     fd = os.open(lock_path, flags, PRIVATE_FILE_MODE)
     unlock: Callable[[], object] | None = None
     try:
+        info = os.fstat(fd)
+        try:
+            current_info = lock_path.lstat()
+        except OSError as exc:
+            raise SessionError(
+                f"Could not inspect session lock after opening: {lock_path}"
+            ) from exc
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or not stat.S_ISREG(current_info.st_mode)
+            or (info.st_dev, info.st_ino) != (current_info.st_dev, current_info.st_ino)
+            or (
+                path_info is not None
+                and (info.st_dev, info.st_ino) != (path_info.st_dev, path_info.st_ino)
+            )
+        ):
+            raise SessionError(f"Session lock changed while being opened: {lock_path}")
         if os.name == "posix":
             os.fchmod(fd, PRIVATE_FILE_MODE)
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise SessionError(f"Session lock is not a regular file: {lock_path}")
-        if os.name == "posix":
             import fcntl
 
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -1441,7 +1466,7 @@ def _recover_incomplete_tail(path: Path) -> bool:
 def _prepare_session_file(path: Path) -> bool:
     state = _session_file_state(path)
     with state.lock:
-        with _interprocess_lock(path):
+        with _interprocess_lock(path, prepare_parent=False):
             changed = _recover_incomplete_tail(path)
             if changed:
                 state.generation += 1
@@ -1930,7 +1955,7 @@ _SESSION_TREE_ENTRY_KINDS = frozenset({"message", "event", "compaction"})
 def _read_session_summary_metadata(path: Path) -> _SessionSummaryMetadata:
     state = _session_file_state(path)
     with state.lock:
-        with _interprocess_lock(path):
+        with _interprocess_lock(path, prepare_parent=False):
             if _recover_incomplete_tail(path):
                 state.generation += 1
             return _read_session_summary_metadata_unlocked(path)
@@ -2374,7 +2399,7 @@ def _resolve_summary_entry(
 def _read_entries(path: Path, *, limit: int | None = None) -> list[SessionEntry]:
     state = _session_file_state(path)
     with state.lock:
-        with _interprocess_lock(path):
+        with _interprocess_lock(path, prepare_parent=False):
             if _recover_incomplete_tail(path):
                 state.generation += 1
             return _read_entries_unlocked(path, limit=limit)
