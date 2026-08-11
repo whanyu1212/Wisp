@@ -219,6 +219,13 @@ class RpcCoordinator:
                 return False
             if isinstance(event, _RpcInputCommand):
                 command = event.command
+                duplicate_id = self._duplicate_outstanding_id(command)
+                if duplicate_id is not None:
+                    reject(
+                        self._duplicate_rejection_command(command),
+                        f"RPC command id is already outstanding: {duplicate_id}",
+                    )
+                    continue
                 if command_type(command) not in _ACTIVE_COMMAND_BYPASS_COMMANDS:
                     reject(command, "RPC command rejected because shutdown is pending")
                     continue
@@ -282,6 +289,13 @@ class RpcCoordinator:
             return False
 
         command = cast(_RpcInputCommand, event).command
+        duplicate_id = self._duplicate_outstanding_id(command)
+        if duplicate_id is not None:
+            reject(
+                self._duplicate_rejection_command(command),
+                f"RPC command id is already outstanding: {duplicate_id}",
+            )
+            return False
         selected_type = command_type(command)
         running = self.running_command
         prompt_queue_not_ready = (
@@ -425,6 +439,13 @@ class RpcCoordinator:
                 return False
             if isinstance(event, _RpcInputCommand):
                 command = event.command
+                duplicate_id = self._duplicate_outstanding_id(command)
+                if duplicate_id is not None:
+                    await reject(
+                        self._duplicate_rejection_command(command),
+                        f"RPC command id is already outstanding: {duplicate_id}",
+                    )
+                    continue
                 if command_type(command) not in _ACTIVE_COMMAND_BYPASS_COMMANDS:
                     await reject(command, "RPC command rejected because shutdown is pending")
                     continue
@@ -493,6 +514,13 @@ class RpcCoordinator:
             return False
 
         command = cast(_RpcInputCommand, event).command
+        duplicate_id = self._duplicate_outstanding_id(command)
+        if duplicate_id is not None:
+            await reject(
+                self._duplicate_rejection_command(command),
+                f"RPC command id is already outstanding: {duplicate_id}",
+            )
+            return False
         selected_type = command_type(command)
         running = self.running_command
         if running is None and selected_type == "shutdown":
@@ -541,6 +569,28 @@ class RpcCoordinator:
         elif result.selected_session is not None:
             self.session_state.session = result.selected_session
         return result.should_shutdown
+
+    def _duplicate_outstanding_id(self, command: dict[str, object]) -> str | None:
+        command_id = command.get("id")
+        if not isinstance(command_id, str) or not command_id:
+            return None
+        if self.running_command is not None and self.running_command.command_id == command_id:
+            return command_id
+        if any(
+            queued.get("id") == command_id
+            for queue in (self.pending_prompt_queue_commands, self.queued_commands)
+            for queued in queue
+        ):
+            return command_id
+        return None
+
+    @staticmethod
+    def _duplicate_rejection_command(command: dict[str, object]) -> dict[str, object]:
+        """Return a rejection command whose lifecycle cannot reuse the conflicting id."""
+
+        rejected = dict(command)
+        rejected.pop("id", None)
+        return rejected
 
     def _reset_session_state(self) -> None:
         self.session_state.session = None

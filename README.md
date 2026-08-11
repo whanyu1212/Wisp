@@ -139,6 +139,12 @@ and interfaces consume typed `WispEvent` values. The TUI is an RPC client, not a
 JSON mode writes every event as one JSON object per line. RPC mode and the in-process SDK expose the
 same command, event, session, trust, and approval contracts used by the built-in interfaces.
 
+RPC command IDs must be unique while a command is running or queued. A duplicate is rejected before
+dispatch under a fresh server-generated ID, with the conflicting requested ID named in the error;
+this keeps every outstanding ID correlated with exactly one terminal `rpc.command.finished` event.
+An ID may be reused after its earlier completion has been processed. Ordinary command exceptions
+produce a failed terminal event and leave the long-running host available for later commands.
+
 ## Providers & auth
 
 | Provider | Credentials |

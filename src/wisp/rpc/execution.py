@@ -14,7 +14,6 @@ import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
-from wisp.agent.execution import ToolResultProcessingError
 from wisp.agent.messages import Message
 from wisp.agent.mode import AgentMode, is_agent_mode
 from wisp.coding import CodingSession
@@ -54,12 +53,12 @@ from wisp.events import (
     SessionStatsReported,
     WispEvent,
 )
-from wisp.providers.base import Provider, ProviderError
+from wisp.providers.base import Provider
 from wisp.providers.catalog import AmbiguousModelError, UnknownModelError
 from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES, ApprovalScope
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.commands import CommandDescriptor
-from wisp.runtime.registry import UnknownProviderError, UnknownToolError
+from wisp.runtime.registry import UnknownProviderError
 from wisp.sessions.entries import MessageSessionEntry, SessionEntry, SessionInfoSessionEntry
 from wisp.sessions.errors import SessionNavigationCancelledError
 from wisp.sessions.jsonl import (
@@ -2219,88 +2218,82 @@ async def run_rpc_prompt_command(
                 continue
             yield event
 
-    try:
-        with cancel_scope:
-            try:
-                agent.trusted = await trust_gate.resolve()
-                await render_events(
-                    track_run_start(
-                        agent.run(
-                            prompt,
-                            session=session,
-                            history=committed_history,
-                            operation_id=command_id,
-                        )
+    with cancel_scope:
+        try:
+            agent.trusted = await trust_gate.resolve()
+            await render_events(
+                track_run_start(
+                    agent.run(
+                        prompt,
+                        session=session,
+                        history=committed_history,
+                        operation_id=command_id,
                     )
                 )
-            except RpcOutputAlreadyReportedError as exc:
-                error = str(exc)
-            except (
-                ProviderError,
-                SessionError,
-                ToolResultProcessingError,
-                UnknownProviderError,
-                UnknownToolError,
-                OSError,
-            ) as exc:
-                error = str(exc)
-            except anyio.get_cancelled_exc_class():
-                error = f"RPC command cancelled: {command_id}"
-    finally:
-        cancelled = error is not None and error.startswith("RPC command cancelled:")
-        if cancelled:
-            crossed_completion_boundary = await _run_abandonable_session_read(
-                rpc_has_durable_completion,
-                session,
+            )
+        except RpcOutputAlreadyReportedError as exc:
+            error = str(exc)
+        except anyio.get_cancelled_exc_class():
+            error = f"RPC command cancelled: {command_id}"
+        except Exception as exc:  # noqa: BLE001 - command failures must not stop RPC
+            error = str(exc)
+
+    # Process-level BaseException values deliberately skip this terminal lifecycle and
+    # continue unwinding the host. Ordinary failures always reach the coordinator below.
+    cancelled = error is not None and error.startswith("RPC command cancelled:")
+    if cancelled:
+        crossed_completion_boundary = await _run_abandonable_session_read(
+            rpc_has_durable_completion,
+            session,
+            run_entry_start,
+            command_id,
+        )
+        if not crossed_completion_boundary and run_start_captured:
+            rolled_back = await session.restore_active_leaf_for_operation(
                 run_entry_start,
-                command_id,
+                run_active_leaf_id,
+                operation_id=command_id,
             )
-            if not crossed_completion_boundary and run_start_captured:
-                rolled_back = await session.restore_active_leaf_for_operation(
-                    run_entry_start,
-                    run_active_leaf_id,
-                    operation_id=command_id,
-                )
-                if not rolled_back and session.path.is_file():
-                    entries = await _run_abandonable_session_read(session.read_entries)
-                    if any(entry.operation_id == command_id for entry in entries[run_entry_start:]):
-                        error = (
-                            f"RPC command cancelled: {command_id}; prompt entries were retained "
-                            "because another writer appended to the session"
-                        )
-        try:
-            entry_count, updated_history = await _run_abandonable_session_read(
-                updated_rpc_session_state,
-                session,
-                committed_history,
-                entry_start,
+            if not rolled_back and session.path.is_file():
+                entries = await _run_abandonable_session_read(session.read_entries)
+                if any(entry.operation_id == command_id for entry in entries[run_entry_start:]):
+                    error = (
+                        f"RPC command cancelled: {command_id}; prompt entries were retained "
+                        "because another writer appended to the session"
+                    )
+    try:
+        entry_count, updated_history = await _run_abandonable_session_read(
+            updated_rpc_session_state,
+            session,
+            committed_history,
+            entry_start,
+        )
+    except Exception as exc:  # noqa: BLE001 - preserve a usable RPC coordinator
+        entry_count = entry_start
+        updated_history = committed_history
+        if error is None:
+            error = str(exc)
+    async with send:
+        if cancelled:
+            assert error is not None
+            write_event(ErrorEvent(message=error))
+        write_event(
+            RpcCommandFinished(
+                command_id=command_id,
+                command_type=command_type,
+                ok=error is None,
+                error=error,
             )
-        except Exception as exc:  # noqa: BLE001 - preserve a usable RPC coordinator
-            entry_count = entry_start
-            updated_history = committed_history
-            if error is None:
-                error = str(exc)
-        async with send:
-            if cancelled:
-                assert error is not None
-                write_event(ErrorEvent(message=error))
-            write_event(
-                RpcCommandFinished(
-                    command_id=command_id,
-                    command_type=command_type,
-                    ok=error is None,
-                    error=error,
-                )
+        )
+        await send.send(
+            command_completed_factory(
+                command_id=command_id,
+                command_type="prompt",
+                ok=error is None,
+                history=updated_history,
+                entry_count=entry_count,
             )
-            await send.send(
-                command_completed_factory(
-                    command_id=command_id,
-                    command_type="prompt",
-                    ok=error is None,
-                    history=updated_history,
-                    entry_count=entry_count,
-                )
-            )
+        )
 
 
 async def run_rpc_compact_command(

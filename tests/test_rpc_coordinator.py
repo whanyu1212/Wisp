@@ -696,6 +696,109 @@ def test_coordinator_does_not_retarget_queue_commands_when_prompt_fails_before_r
     anyio.run(scenario)
 
 
+def test_coordinator_rejects_duplicate_running_and_allows_reuse_after_completion() -> None:
+    async def scenario() -> None:
+        receiver = _Receiver(
+            [
+                _RpcInputCommand({"id": "same", "type": "prompt"}),
+                _RpcInputCommand({"id": "same", "type": "prompt"}),
+                _RpcCommandCompleted("same", "prompt", True, (), 1),
+                _RpcInputCommand({"id": "same", "type": "prompt"}),
+                _RpcCommandCompleted("same", "prompt", True, (), 2),
+                _RpcInputClosed(),
+            ]
+        )
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        dispatched: list[str] = []
+        rejected: list[tuple[dict[str, object], str]] = []
+
+        def dispatch(
+            command: dict[str, object],
+            _running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            command_id = str(command["id"])
+            dispatched.append(command_id)
+            return _RpcDispatchResult(_RpcRunningCommand(command_id, "prompt", anyio.CancelScope()))
+
+        await coordinator.run(
+            receiver,
+            dispatch=dispatch,
+            reject=lambda command, message: rejected.append((command, message)),
+            command_type=_command_type,
+        )
+
+        assert dispatched == ["same", "same"]
+        assert rejected == [({"type": "prompt"}, "RPC command id is already outstanding: same")]
+        assert coordinator.session_state.entry_count == 2
+
+    anyio.run(scenario)
+
+
+def test_coordinator_rejects_duplicate_ids_in_both_queues() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        coordinator.running_command = _RpcRunningCommand("active", "prompt", anyio.CancelScope())
+        coordinator.pending_prompt_queue_commands.append(
+            {"id": "pending", "type": "steer", "content": "redirect"}
+        )
+        coordinator.queued_commands.append({"id": "queued", "type": "prompt", "prompt": "later"})
+        rejected: list[tuple[dict[str, object], str]] = []
+
+        for command_id in ("pending", "queued"):
+            coordinator.handle_event(
+                _RpcInputCommand({"id": command_id, "type": "prompt", "prompt": "duplicate"}),
+                dispatch=lambda _command, running: _RpcDispatchResult(running),
+                reject=lambda command, message: rejected.append((command, message)),
+                command_type=_command_type,
+            )
+
+        assert rejected == [
+            (
+                {"type": "prompt", "prompt": "duplicate"},
+                "RPC command id is already outstanding: pending",
+            ),
+            (
+                {"type": "prompt", "prompt": "duplicate"},
+                "RPC command id is already outstanding: queued",
+            ),
+        ]
+        assert [command["id"] for command in coordinator.pending_prompt_queue_commands] == [
+            "pending"
+        ]
+        assert [command["id"] for command in coordinator.queued_commands] == ["queued"]
+
+    anyio.run(scenario)
+
+
+def test_coordinator_rejects_duplicate_running_id_async() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        running = _RpcRunningCommand("same", "prompt", anyio.CancelScope())
+        coordinator.running_command = running
+        rejected: list[tuple[dict[str, object], str]] = []
+
+        async def dispatch(
+            _command: dict[str, object],
+            _running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            raise AssertionError("duplicate command must not be dispatched")
+
+        async def reject(command: dict[str, object], message: str) -> None:
+            rejected.append((command, message))
+
+        await coordinator.handle_event_async(
+            _RpcInputCommand({"id": "same", "type": "get_state"}),
+            dispatch=dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+
+        assert coordinator.running_command is running
+        assert rejected == [({"type": "get_state"}, "RPC command id is already outstanding: same")]
+
+    anyio.run(scenario)
+
+
 def test_coordinator_rejects_commands_beyond_its_queue_bound() -> None:
     async def scenario() -> None:
         receiver = _Receiver(
