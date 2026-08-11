@@ -257,15 +257,14 @@ class RpcCommandExecutor:
 
     def _dispatch_init(self, command: dict[str, object]) -> _RpcDispatchResult:
         try:
-            instructions, tool_context, target = _project_init_request(self.agent)
+            instructions, target = _project_init_request(self.agent)
         except ValueError as exc:
             self.reject(command, str(exc))
             return _RpcDispatchResult(
                 running_command=None,
                 selected_session=self.session_state.session,
             )
-        receipt = tool_context.create_only_write_receipt
-        assert receipt is not None
+        receipt = CreateOnlyWriteReceipt()
         completion = _ProjectInitCompletion(
             target,
             conflicting_paths=(target.with_name("AGENTS.MD"),),
@@ -281,7 +280,12 @@ class RpcCommandExecutor:
             trust_gate=self.trust_gate,
             write_event=self.write_event,
             render_events=self.render_events,
-            tool_context=tool_context,
+            tool_context_factory=partial(
+                _project_init_tool_context,
+                self.agent,
+                target,
+                receipt,
+            ),
             operation_instructions=instructions,
             operation_tool_names=_PROJECT_INIT_TOOL_NAMES,
             event_observer=completion.observe,
@@ -605,7 +609,7 @@ def rpc_session_state(session: JsonlSession | None) -> _RpcSessionState:
     )
 
 
-def _project_init_request(agent: CodingSession) -> tuple[str, ToolContext, Path]:
+def _project_init_request(agent: CodingSession) -> tuple[str, Path]:
     if agent.mode != "build":
         raise ValueError("Project initialization requires build mode. Run /build first.")
 
@@ -626,7 +630,6 @@ def _project_init_request(agent: CodingSession) -> tuple[str, ToolContext, Path]
         raise ValueError("Project initialization requires the write tool.")
 
     target = project_root / "AGENTS.md"
-    receipt = CreateOnlyWriteReceipt()
     encoded_target = json.dumps(str(target), ensure_ascii=False)
     prompt = f"""Initialize this repository for future coding agents.
 
@@ -646,18 +649,22 @@ Avoid generic advice and do not invent commands. Modify no other file. Immediate
 check that neither AGENTS.md nor AGENTS.MD exists at the project root. If either exists, stop
 without changing it. Create the target with the write tool using overwrite=false so the operation
 remains create-only if the filesystem changes during your inspection."""
-    return (
-        prompt,
-        replace(
-            agent.tool_context,
-            cwd=project_root,
-            allowed_write_paths=(target,),
-            conflicting_write_paths=(target.with_name("AGENTS.MD"),),
-            require_create_only_writes=True,
-            require_non_empty_writes=True,
-            create_only_write_receipt=receipt,
-        ),
-        target,
+    return prompt, target
+
+
+def _project_init_tool_context(
+    agent: CodingSession,
+    target: Path,
+    receipt: CreateOnlyWriteReceipt,
+) -> ToolContext:
+    return replace(
+        agent.tool_context,
+        cwd=target.parent,
+        allowed_write_paths=(target,),
+        conflicting_write_paths=(target.with_name("AGENTS.MD"),),
+        require_create_only_writes=True,
+        require_non_empty_writes=True,
+        create_only_write_receipt=receipt,
     )
 
 
@@ -734,6 +741,7 @@ def start_rpc_prompt_command(
     write_event: RpcEventWriter,
     render_events: RpcEventRenderer,
     tool_context: ToolContext | None = None,
+    tool_context_factory: Callable[[], ToolContext] | None = None,
     operation_instructions: str | None = None,
     operation_tool_names: frozenset[str] | None = None,
     event_observer: Callable[[WispEvent], None] | None = None,
@@ -780,6 +788,7 @@ def start_rpc_prompt_command(
         render_events,
         command_completed_factory,
         tool_context,
+        tool_context_factory,
         operation_instructions,
         operation_tool_names,
         event_observer,
@@ -2372,6 +2381,7 @@ async def run_rpc_prompt_command(
     render_events: RpcEventRenderer,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
     tool_context: ToolContext | None = None,
+    tool_context_factory: Callable[[], ToolContext] | None = None,
     operation_instructions: str | None = None,
     operation_tool_names: frozenset[str] | None = None,
     event_observer: Callable[[WispEvent], None] | None = None,
@@ -2404,6 +2414,9 @@ async def run_rpc_prompt_command(
     with cancel_scope:
         try:
             agent.trusted = await trust_gate.resolve()
+            operation_context = (
+                tool_context_factory() if tool_context_factory is not None else tool_context
+            )
             agent_events = (
                 agent.run(
                     prompt,
@@ -2413,13 +2426,13 @@ async def run_rpc_prompt_command(
                     operation_instructions=operation_instructions,
                     operation_tool_names=operation_tool_names,
                 )
-                if tool_context is None
+                if operation_context is None
                 else agent.run(
                     prompt,
                     session=session,
                     history=committed_history,
                     operation_id=command_id,
-                    tool_context=tool_context,
+                    tool_context=operation_context,
                     operation_instructions=operation_instructions,
                     operation_tool_names=operation_tool_names,
                 )

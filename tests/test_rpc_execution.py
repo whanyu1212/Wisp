@@ -244,7 +244,23 @@ def test_init_dispatches_repository_specific_create_only_prompt(
         fixture = await build_rpc_executor_fixture(tmp_path / "sessions")
         _enable_project_init(fixture, project)
         fixture.agent.project_context_root = None
-        fixture.agent.tool_context = ToolContext(cwd=subdirectory)
+        fixture.agent.tool_context = ToolContext(
+            cwd=subdirectory,
+            protected_paths=("stale-secret",),
+        )
+
+        class UpdatingTrustResolver:
+            async def resolve(self) -> bool:
+                fixture.agent.tool_context = ToolContext(
+                    cwd=subdirectory,
+                    protected_paths=("trusted-secret",),
+                )
+                return True
+
+            def resolve_request(self, **_kwargs: object) -> bool:
+                return False
+
+        fixture.trust_gate = UpdatingTrustResolver()  # type: ignore[assignment]
         prompts: list[str] = []
         instructions: list[str] = []
         operation_contexts: list[ToolContext] = []
@@ -311,6 +327,7 @@ def test_init_dispatches_repository_specific_create_only_prompt(
         assert completed.ok is True
         assert prompts == ["/init"]
         assert [context.cwd for context in operation_contexts] == [project]
+        assert [context.protected_paths for context in operation_contexts] == [("trusted-secret",)]
         assert len(instructions) == 1
         assert json.dumps(str(project / "AGENTS.md"), ensure_ascii=False) in instructions[0]
         assert "overwrite=false" in instructions[0]
