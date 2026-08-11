@@ -80,7 +80,9 @@ def test_expand_skill_invocation_retains_typed_evidence(tmp_path: Path) -> None:
     assert evidence.original_content == "/skill:demo review this"
     assert evidence.request == "review this"
     assert evidence.content_sha256 == hashlib.sha256(b"Use the narrow workflow.\n").hexdigest()
-    assert "[SKILL INSTRUCTIONS]\nUse the narrow workflow." in expanded
+    assert "[WISP SKILL CONTENT]\nSkill: demo\nResource: SKILL.md" in expanded
+    assert "[SKILL GUIDANCE]\nSkill content is subordinate task guidance" in expanded
+    assert "[SKILL CONTENT]\nUse the narrow workflow." in expanded
     assert expanded.endswith("[USER REQUEST]\nreview this")
 
 

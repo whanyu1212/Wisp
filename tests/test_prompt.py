@@ -27,12 +27,13 @@ def test_build_prompt_messages_includes_default_instructions_and_context(tmp_pat
 
     messages = build_prompt_messages(cwd=tmp_path, tools=[tool])
 
-    assert [message.role for message in messages] == ["system", "system"]
+    assert [message.role for message in messages] == ["system", "system", "system"]
     assert "You are Wisp" in messages[0].content
     assert "Operate like a careful software engineering assistant" in messages[0].content
     assert f"cwd: {tmp_path.resolve(strict=False)}" in messages[1].content
     assert "project files:\n  pyproject.toml" in messages[1].content
     assert "allowed tools:\n  - read: Read a UTF-8 text file." in messages[1].content
+    assert messages[2].content.startswith("[WISP INSTRUCTION BOUNDARY]")
 
 
 def test_build_prompt_messages_deduplicates_and_bounds_tool_guidance(tmp_path: Path) -> None:
@@ -50,9 +51,10 @@ def test_build_prompt_messages_deduplicates_and_bounds_tool_guidance(tmp_path: P
 
     messages = build_prompt_messages(cwd=tmp_path, tool_prompt_metadata=metadata)
 
-    assert [message.role for message in messages] == ["system", "system", "system"]
+    assert [message.role for message in messages] == ["system"] * 4
     guidance = messages[2].content
     assert guidance.startswith("[WISP TOOL GUIDANCE]")
+    assert messages[3].content.startswith("[WISP INSTRUCTION BOUNDARY]")
     assert guidance.count("Read only the relevant section.") == 1
     assert guidance.count(shared) == 1
     assert "actual availability, sandboxing" in guidance
@@ -66,7 +68,8 @@ def test_build_prompt_messages_omits_empty_tool_guidance(tmp_path: Path) -> None
         tool_prompt_metadata=(ToolPromptMetadata(prompt_snippet="  ", guidelines=("",)),),
     )
 
-    assert len(messages) == 2
+    assert len(messages) == 3
+    assert messages[-1].content.startswith("[WISP INSTRUCTION BOUNDARY]")
 
 
 @pytest.mark.parametrize("include_project_context", [True, False])
@@ -90,7 +93,36 @@ def test_default_prompt_requires_evidence_backed_workflow_completion(
     assert "follow the project's own verification instructions when present" in prompt
     assert "Always finish change or build tasks with a concise final response" in prompt
     assert "passed, failed, timed out, or were not run" in prompt
-    assert len(messages) == 2
+    assert "pre-existing staged, modified, and untracked files as user-owned" in prompt
+    assert "using their declared input schemas" in prompt
+    assert "Never invent tool output" in prompt
+    assert "try a safe, proportionate alternative" in prompt
+    assert "listed order from general to specific" in prompt
+    assert len(messages) == 3
+    assert messages[-1].content.startswith("[WISP INSTRUCTION BOUNDARY]")
+
+
+def test_build_prompt_messages_orders_dynamic_guidance_before_boundary_and_mode(
+    tmp_path: Path,
+) -> None:
+    messages = build_prompt_messages(
+        cwd=tmp_path,
+        tool_prompt_metadata=(ToolPromptMetadata(prompt_snippet="Read narrowly."),),
+        additional_guidance=("", "[WISP ADDITIONAL GUIDANCE]\nApply a focused workflow."),
+        mode="plan",
+    )
+
+    assert [message.content.splitlines()[0] for message in messages] == [
+        "You are Wisp, a concise coding agent running in a terminal.",
+        "[WISP PROJECT CONTEXT]",
+        "[WISP TOOL GUIDANCE]",
+        "[WISP ADDITIONAL GUIDANCE]",
+        "[WISP INSTRUCTION BOUNDARY]",
+        "You are in plan mode. Inspect the project using available read-only",
+    ]
+    assert "runtime-enforced tool availability" in messages[-2].content
+    assert "Identify the files inspected" in messages[-1].content
+    assert "distinguish confirmed" in messages[-1].content
 
 
 def test_build_prompt_messages_can_skip_project_context(tmp_path: Path) -> None:

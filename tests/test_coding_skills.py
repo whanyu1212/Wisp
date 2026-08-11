@@ -134,9 +134,11 @@ def test_operation_bound_skill_tool_loads_from_same_catalog(tmp_path: Path) -> N
     events = anyio.run(scenario)
 
     result = next(event for event in events if isinstance(event, ToolExecutionEnded))
-    assert result.output == "Use the narrow workflow.\n"
+    assert result.output.startswith("[WISP SKILL CONTENT]\nSkill: demo\nResource: SKILL.md")
+    assert "[SKILL GUIDANCE]\nSkill content is subordinate task guidance" in result.output
+    assert result.output.endswith("[SKILL CONTENT]\nUse the narrow workflow.\n")
     assert result.is_error is False
-    assert provider.calls[1].tool_results[0].output == "Use the narrow workflow.\n"
+    assert provider.calls[1].tool_results[0].output == result.output
 
 
 def test_extension_replacement_named_skill_is_not_overwritten(tmp_path: Path) -> None:
