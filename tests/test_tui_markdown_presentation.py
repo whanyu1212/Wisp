@@ -9,7 +9,7 @@ import pytest
 from textual.content import Content
 from textual.style import Style
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Label, Static
 from textual.widgets.markdown import MarkdownFence
 
 from wisp.tui.textual_app import TextualTui
@@ -78,7 +78,7 @@ def test_assistant_markdown_uses_semantic_theme_styles(theme: str) -> None:
                     "quote_border": quote.styles.border_left,
                     "bullet_color": bullet.styles.color.hex.lower(),
                     "rule_border": rule.styles.border_bottom,
-                    "fence_background": fence.styles.background.hex.lower(),
+                    "fence_background_alpha": fence.styles.background.a,
                     "fence_border": fence.styles.border_left,
                     "fence_overflow": fence.styles.overflow_x,
                     "fence_scrollbar": fence.styles.scrollbar_size_horizontal,
@@ -116,11 +116,41 @@ def test_assistant_markdown_uses_semantic_theme_styles(theme: str) -> None:
     assert styles["quote_border"][1].hex.lower() == variables["secondary"]
     assert styles["bullet_color"] == variables["accent"]
     assert styles["rule_border"][1].hex.lower() == variables["secondary"]
-    assert styles["fence_background"] == variables["panel"]
-    assert styles["fence_border"][0] == "outer"
-    assert styles["fence_border"][1].hex.lower() == variables["secondary"]
+    # A fence carries no surface and no rail of its own: the turn already owns a
+    # role-encoding `border-left`, so a second rail inside it would overload that
+    # channel and render as two disagreeing bars. Indentation plus the fence's
+    # monospace, syntax-colored content is the whole separation. Blockquotes keep
+    # their rail — see the CSS comment and the non-color-cue test below.
+    assert styles["fence_background_alpha"] == 0
+    assert not styles["fence_border"][0]
     assert styles["fence_overflow"] == "scroll"
     assert styles["fence_scrollbar"] == 0
+
+
+def test_assistant_fence_indent_matches_blockquote_text_start() -> None:
+    # A fence and a blockquote in the same turn should start their content at
+    # the same column, so the turn does not read as two unrelated indentation
+    # systems. The quote spends one of its two cells on its rail; the fence has
+    # no rail, so its whole indent lives on its Label.
+    async def scenario() -> tuple[int, int]:
+        app = TextualTui()
+        async with app.run_test(size=(80, 30)) as pilot:
+            stream = StreamMessage()
+            await app.query_one("#transcript", Transcript).mount(stream)
+            await stream.replace_markdown("```python\nx = 1\n```\n\n> quoted\n")
+            await pilot.pause()
+
+            fence = stream._markdown.query_one(MarkdownFence)
+            label = fence.query_one(Label)
+            quote = _widget_named(stream._markdown, "MarkdownBlockQuote")
+            quote_rail_width = 1 if quote.styles.border_left[0] else 0
+            return (
+                fence.styles.padding.left + label.styles.padding.left,
+                quote_rail_width + quote.styles.padding.left,
+            )
+
+    fence_indent, quote_indent = anyio.run(scenario)
+    assert fence_indent == quote_indent == 2
 
 
 def test_wisp_themes_define_all_markdown_heading_hooks() -> None:
@@ -322,7 +352,13 @@ def test_assistant_markdown_keeps_non_color_cues(monkeypatch: pytest.MonkeyPatch
     assert heading_style.bold and heading_style.underline
     assert link_style.underline
     assert bullet == "• "
-    assert quote_rail == fence_rail == "outer"
+    # A blockquote's rail is its ONLY non-color cue: strip color and muted text
+    # is indistinguishable from ordinary prose, so the rail must stay.
+    assert quote_rail == "outer"
+    # A fence needs no rail to survive without color — its content is monospace,
+    # syntax-structured and non-wrapping, and it is indented. Dropping the rail
+    # keeps it from competing with the turn's own role rail.
+    assert not fence_rail
     assert source == _DOCUMENT
 
 

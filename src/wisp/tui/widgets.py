@@ -2688,17 +2688,33 @@ class StreamMessage(Widget):
         background: $panel;
     }
 
+    /* Fences and blockquotes carry no surface and no rail of their own. Each
+       assistant turn already owns a `border-left` that encodes its ROLE
+       (.message--assistant and friends in textual_app.py); a second rail a few
+       cells inside it puts an unrelated meaning on the same visual channel and
+       renders as two disagreeing bars, the inner one broken across the block's
+       lines. A panel background instead gives prose content the weight of an
+       interactive surface, since `$panel` is what the composer and indicators
+       use.
+
+       Indentation alone is sufficient here in a way it would not be on the web:
+       fenced content is already monospaced, syntax-colored and non-wrapping, so
+       it separates from surrounding prose without added chrome. */
     StreamMessage MarkdownFence:dark,
     StreamMessage MarkdownFence:light {
         color: $text;
-        background: $panel;
-        border-left: outer $secondary;
-        padding: 0 1;
+        background: transparent;
+        border-left: none;
+        padding: 0;
         margin: 1 0;
     }
 
+    /* The fence's whole indent lives here rather than being split across the
+       fence and its Label, so it can be read against MarkdownBlockQuote's
+       matching value below: both block constructs indent by 2 and therefore
+       line up in a turn that contains both. */
     StreamMessage MarkdownFence > Label {
-        padding: 0 1;
+        padding: 0 0 0 2;
     }
 
     StreamMessage MarkdownFence:ansi {
@@ -2713,6 +2729,13 @@ class StreamMessage(Widget):
         padding: 1 0;
     }
 
+    /* A blockquote deliberately KEEPS its rail, unlike the fence above. Its
+       only other cue is `$text-muted`, which is purely chromatic — strip color
+       and a quote becomes an ordinary paragraph. A fence has monospace
+       alignment and syntax coloring to fall back on; a quote has nothing. The
+       rail is therefore load-bearing here in a way it is not for fences, and
+       quotes are rare enough in assistant output that the double-rail overlap
+       stays uncommon. See `test_assistant_markdown_keeps_non_color_cues`. */
     StreamMessage MarkdownBlockQuote:dark,
     StreamMessage MarkdownBlockQuote:light {
         color: $text-muted;
