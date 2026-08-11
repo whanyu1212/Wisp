@@ -587,6 +587,7 @@ approve once, allow that tool for the session, YOLO all mutating/command tools f
 
 ```text
 /help                       show help
+/init                       inspect the project and create a root AGENTS.md
 /auth [provider]            show credential status
 /connect [provider]          connect a provider or open the provider panel
 /disconnect [provider]       remove stored credentials (`/logout` alias)
@@ -604,6 +605,11 @@ approve once, allow that tool for the session, YOLO all mutating/command tools f
 /mcp                        show configured MCP servers and registered tools
 /quit, /exit
 ```
+
+`/init` asks the active model to inspect repository documentation, manifests, CI configuration,
+and source layout before creating project-specific guidance. It only works in build mode, uses the
+normal project-trust and write-approval flow, and refuses to replace an existing `AGENTS.md` or
+`AGENTS.MD`. The final write is create-only, so a file that appears during inspection is preserved.
 
 Type `/` to filter commands inline. Type `@` to reference a project file — an inline picker filters
 as you type, matching loosely so `@tuiapp` finds `src/wisp/tui/textual_app.py`. Only the path is

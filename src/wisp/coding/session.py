@@ -372,11 +372,16 @@ class CodingSession:
             raise RuntimeError("CodingSession has no active agent run")
         return harness
 
-    async def _prepare_user_message(self, content: str) -> Message:
+    async def _prepare_user_message(
+        self,
+        content: str,
+        *,
+        context: ToolContext | None = None,
+    ) -> Message:
         expanded, evidence = await expand_skill_invocation(
             content,
             catalog=self.skill_catalog,
-            context=self.tool_context,
+            context=context or self.tool_context,
         )
         return Message(role="user", content=expanded, skill_invocation=evidence)
 
@@ -412,6 +417,9 @@ class CodingSession:
         session: JsonlSession | None = None,
         history: Sequence[Message] = (),
         operation_id: str | None = None,
+        tool_context: ToolContext | None = None,
+        operation_instructions: str | None = None,
+        operation_tool_names: frozenset[str] | None = None,
     ) -> AsyncIterator[WispEvent]:
         async with self._operation_lock:
             self._operation_active = True
@@ -420,6 +428,9 @@ class CodingSession:
                 session=session,
                 history=history,
                 operation_id=operation_id,
+                tool_context=tool_context,
+                operation_instructions=operation_instructions,
+                operation_tool_names=operation_tool_names,
             )
             try:
                 async for event in events:
@@ -446,8 +457,12 @@ class CodingSession:
         session: JsonlSession | None = None,
         history: Sequence[Message] = (),
         operation_id: str | None = None,
+        tool_context: ToolContext | None = None,
+        operation_instructions: str | None = None,
+        operation_tool_names: frozenset[str] | None = None,
     ) -> AsyncGenerator[WispEvent, None]:
-        user_message = await self._prepare_user_message(prompt)
+        operation_context = tool_context or self.tool_context
+        user_message = await self._prepare_user_message(prompt, context=operation_context)
         session = session or self.sessions.create()
         self._active_session_id = session.session_id
         self._last_session_id = session.session_id
@@ -464,11 +479,44 @@ class CodingSession:
 
         operation_registry = self._operation_tool_registry()
         effective_tools = self._effective_tools(operation_registry)
-        prompt_messages = self._prompt_messages(effective_tools, registry=operation_registry)
+        operation_policy: ToolPolicy | None = None
+        if operation_tool_names is not None:
+            effective_tools = tuple(
+                tool for tool in effective_tools if tool.name in operation_tool_names
+            )
+            allowed_names = {tool.name for tool in effective_tools}
+            if operation_registry is not None:
+                policy_allowed_names: set[str] = set()
+                for name in allowed_names:
+                    try:
+                        operation_tool = operation_registry.get(name)
+                    except UnknownToolError:
+                        continue
+                    if self.tool_policy.allows(operation_tool):
+                        policy_allowed_names.add(name)
+                allowed_names = policy_allowed_names
+                effective_tools = tuple(
+                    tool for tool in effective_tools if tool.name in allowed_names
+                )
+            operation_policy = ToolPolicy.allow_tool_names(allowed_names)
+        prompt_messages = self._prompt_messages(
+            effective_tools,
+            registry=operation_registry,
+            context=operation_context,
+        )
+        if operation_instructions:
+            prompt_messages = (
+                *prompt_messages,
+                Message(role="system", content=operation_instructions),
+            )
         executor = ConfiguredToolExecutor(
             registry=operation_registry,
-            context=self.tool_context,
-            policy=self._effective_tool_policy(effective_tools),
+            context=operation_context,
+            policy=(
+                operation_policy
+                if operation_policy is not None
+                else self._effective_tool_policy(effective_tools)
+            ),
             approval_policy=self.tool_approval_policy,
         )
         harness = AgentHarness(
@@ -1406,8 +1454,10 @@ class CodingSession:
         tools: Sequence[ToolSpec] | None = None,
         *,
         registry: ToolRegistry | None = None,
+        context: ToolContext | None = None,
     ) -> tuple[Message, ...]:
         effective_tools = tuple(tools) if tools is not None else self._effective_tools()
+        operation_context = context or self.tool_context
         effective_registry = registry if registry is not None else self.tool_registry
         effective_names = {tool.name for tool in effective_tools}
         skill_index = (
@@ -1429,7 +1479,7 @@ class CodingSession:
                 return (*messages, Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT))
             return messages
         return build_prompt_messages(
-            cwd=self.tool_context.cwd,
+            cwd=operation_context.cwd,
             tools=effective_tools,
             tool_prompt_metadata=effective_registry.prompt_metadata(
                 tool.name for tool in effective_tools
@@ -1440,9 +1490,9 @@ class CodingSession:
             mode=self.mode,
             max_context_chars=self.project_context_max_chars,
             include_project_context=self.trusted,
-            protected_paths=self.tool_context.protected_paths,
+            protected_paths=operation_context.protected_paths,
             trusted_context_root=self.project_context_root
-            or resolve_project_context_root(self.tool_context.cwd),
+            or resolve_project_context_root(operation_context.cwd),
         )
 
     def _operation_tool_registry(self) -> ToolRegistry | None:

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from pathlib import Path
+from uuid import uuid4
 
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
-from wisp.tools.common import _optional_int, _required_string, _truncate_text
+from wisp.tools.common import _optional_bool, _optional_int, _required_string, _truncate_text
 from wisp.tools.context import ToolContext
 from wisp.tools.paths import display_tool_path, resolve_tool_path
 from wisp.tools.result import ToolError, ToolResult
@@ -17,6 +19,20 @@ from wisp.tools.result import ToolError, ToolResult
 # drop the snapshot and let the write fall back to its plain summary. Matched to the
 # renderer's per-hunk character ceiling so the two bounds agree.
 _WRITE_SNAPSHOT_MAX_CHARS = 1_000_000
+
+
+class CreateOnlyWriteReceipt:
+    """Operation-local identity of a successfully published create-only write."""
+
+    __slots__ = ("file_id", "path")
+
+    def __init__(self) -> None:
+        self.path: Path | None = None
+        self.file_id: tuple[int, int] | None = None
+
+    def record(self, path: Path, file_id: tuple[int, int]) -> None:
+        self.path = path
+        self.file_id = file_id
 
 
 class ReadTool:
@@ -81,25 +97,43 @@ class WriteTool:
 
     name = "write"
     safety: ToolSafety = "mutating"
-    description = "Create or overwrite a UTF-8 text file, creating parent directories."
+    description = (
+        "Create or overwrite a UTF-8 text file, creating parent directories. "
+        "Set overwrite=false to fail if the target already exists."
+    )
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
             "path": {"type": "string"},
             "content": {"type": "string"},
+            "overwrite": {"type": "boolean", "default": True},
         },
         "required": ["path", "content"],
     }
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
-        path = resolve_tool_path(_required_string(arguments, "path"), context)
+        selected_path = _required_string(arguments, "path")
         content = _required_string(arguments, "content", allow_empty=True)
+        overwrite = _optional_bool(arguments, "overwrite", default=True)
+        if context.require_create_only_writes and overwrite:
+            raise ToolError("This operation requires write calls with overwrite=false")
+        if context.require_non_empty_writes and not content:
+            raise ToolError("This operation requires non-empty write content")
+        path = resolve_tool_path(
+            selected_path,
+            context,
+            follow_leaf_symlink=overwrite,
+        )
+        if context.allowed_write_paths is not None and path not in {
+            allowed.resolve(strict=False) for allowed in context.allowed_write_paths
+        }:
+            raise ToolError(f"Write path is not allowed for this operation: {selected_path}")
 
         # Distinguish a create from an overwrite *before* the write, so the renderer
         # can tell "brand-new file" (show its content as a pure-addition diff) from
         # "overwrote an existing file whose prior text we couldn't capture" (fall back
         # to the plain summary — never imply a create by rendering pure additions).
-        created = not path.exists()
+        created = not path.exists() if overwrite else True
         # Snapshot the prior contents *before* the write clobbers them, so the TUI can
         # render a before/after diff. This is the only moment the "before" exists: the
         # open("w") below destroys it and the tool args carry only the new content. The
@@ -107,11 +141,25 @@ class WriteTool:
         # file; ``created`` is what separates those, since only a real create should
         # still render (as additions). Bounding here (not renderer-side) keeps the
         # snapshot off the RPC wire when it would be too large to diff anyway.
-        before_text = _snapshot_before_write(path)
+        before_text = _snapshot_before_write(path) if overwrite else None
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8", newline="") as file:
-            file.write(content)
+        for conflict in context.conflicting_write_paths:
+            candidate = conflict if conflict.is_absolute() else context.cwd / conflict
+            try:
+                candidate.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ToolError(f"Could not inspect conflicting write path: {conflict}") from exc
+            raise ToolError(f"Conflicting write path already exists: {conflict}")
+        if overwrite:
+            with path.open("w", encoding="utf-8", newline="") as file:
+                file.write(content)
+        else:
+            file_id = _write_create_only(path, content, selected_path=selected_path)
+            if context.create_only_write_receipt is not None:
+                context.create_only_write_receipt.record(path, file_id)
         byte_count = len(content.encode("utf-8"))
         data: dict[str, object] = {
             "path": display_tool_path(path, context),
@@ -124,6 +172,66 @@ class WriteTool:
             text=f"Wrote {byte_count} bytes to {display_tool_path(path, context)}",
             data=data,
         )
+
+
+def _write_create_only(
+    path: Path,
+    content: str,
+    *,
+    selected_path: str,
+) -> tuple[int, int]:
+    """Publish complete content without exposing an empty or partial target."""
+
+    descriptor, temporary = _open_write_temporary(path.parent, selected_path=selected_path)
+    published = False
+    file_id: tuple[int, int] | None = None
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as file:
+            descriptor = -1
+            file.write(content)
+            info = os.fstat(file.fileno())
+            file_id = (info.st_dev, info.st_ino)
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise ToolError(f"File already exists: {selected_path}") from exc
+        except OSError as exc:
+            raise ToolError(f"Could not create file: {selected_path}: {exc}") from exc
+        published = True
+    except ToolError:
+        raise
+    except OSError as exc:
+        raise ToolError(f"Could not create file: {selected_path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as exc:
+            if not published:
+                raise ToolError(
+                    f"Could not clean up failed create-only write {temporary}: {exc}"
+                ) from exc
+            raise ToolError(
+                "Create-only file was published but temporary-link cleanup failed; "
+                f"destination: {path}; temporary: {temporary}: {exc}"
+            ) from exc
+    if file_id is None:
+        raise ToolError(f"Could not record created file identity: {selected_path}")
+    return file_id
+
+
+def _open_write_temporary(directory: Path, *, selected_path: str) -> tuple[int, Path]:
+    for _attempt in range(10):
+        temporary = directory / f".wisp-write-{uuid4().hex}"
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise ToolError(f"Could not create file: {selected_path}: {exc}") from exc
+        return descriptor, temporary
+    raise ToolError(f"Could not allocate temporary file for create-only write: {selected_path}")
 
 
 class EditTool:

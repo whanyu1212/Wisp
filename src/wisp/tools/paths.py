@@ -9,8 +9,18 @@ from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError
 
 
-def resolve_tool_path(path: str | None, context: ToolContext, *, default: str = ".") -> Path:
+def resolve_tool_path(
+    path: str | None,
+    context: ToolContext,
+    *,
+    default: str = ".",
+    follow_leaf_symlink: bool = True,
+) -> Path:
     """Resolve a tool path relative to the context working directory.
+
+    Set ``follow_leaf_symlink=False`` for exclusive creation: parent directories
+    are still resolved, but the final path component remains lexical so opening it
+    with create-only semantics cannot follow a symlink introduced by a race.
 
     By default, tools are sandboxed to ``context.cwd``. Absolute paths and
     ``~`` are accepted only when they resolve back inside that directory.
@@ -36,7 +46,9 @@ def resolve_tool_path(path: str | None, context: ToolContext, *, default: str = 
     # resolved target, so a link *to* a secret is caught as well.
     if is_protected_path(candidate, context):
         raise ToolError(f"Access to protected path denied: {selected}")
-    return resolved
+    if follow_leaf_symlink:
+        return resolved
+    return candidate.parent.resolve(strict=False) / candidate.name
 
 
 def is_protected_path(path: Path, context: ToolContext) -> bool:

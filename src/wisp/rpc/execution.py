@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import stat
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -16,11 +18,13 @@ from anyio.streams.memory import MemoryObjectSendStream
 
 from wisp.agent.messages import Message
 from wisp.agent.mode import AgentMode, is_agent_mode
+from wisp.agent.prompt import resolve_project_context_root
 from wisp.coding import CodingSession
 from wisp.events import (
     AgentStarted,
     CodingSessionState,
     ErrorEvent,
+    MessageCompleted,
     ModelProviderAutoSwitched,
     QueueItemsRemoved,
     QueueKind,
@@ -51,6 +55,7 @@ from wisp.events import (
     RpcStateReported,
     RpcStateSnapshot,
     SessionStatsReported,
+    ToolExecutionEnded,
     WispEvent,
 )
 from wisp.providers.base import Provider
@@ -75,6 +80,8 @@ from wisp.sessions.jsonl import (
     SessionTreePage,
 )
 from wisp.sessions.replay import replay_session_entries, resolve_session_tree
+from wisp.tools.context import ToolContext
+from wisp.tools.file_ops import CreateOnlyWriteReceipt
 
 from .configuration import _RpcConfigureOverrides
 from .coordinator import (
@@ -96,6 +103,7 @@ type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
 
 DEFAULT_RPC_SESSION_CATALOG_LIMIT = 50
 MAX_RPC_SESSION_CATALOG_LIMIT = 200
+_PROJECT_INIT_TOOL_NAMES = frozenset({"read", "grep", "find", "ls", "write"})
 
 
 async def _run_abandonable_session_read[T](func: Callable[..., T], *args: object) -> T:
@@ -178,6 +186,8 @@ class RpcCommandExecutor:
         command_type = rpc_command_type(command)
         if command_type == "prompt":
             return self._dispatch_prompt(command)
+        if command_type == "init":
+            return self._dispatch_init(command)
         if command_type == "compact":
             return self._dispatch_compact(command)
         if command_type == "get_session_stats":
@@ -237,6 +247,49 @@ class RpcCommandExecutor:
             trust_gate=self.trust_gate,
             write_event=self.write_event,
             render_events=self.render_events,
+            running_command_factory=self.running_command_factory,
+            command_completed_factory=self.command_completed_factory,
+        )
+        return _RpcDispatchResult(
+            running_command=new_running_command,
+            selected_session=new_session,
+        )
+
+    def _dispatch_init(self, command: dict[str, object]) -> _RpcDispatchResult:
+        try:
+            instructions, target = _project_init_request(self.agent)
+        except ValueError as exc:
+            self.reject(command, str(exc))
+            return _RpcDispatchResult(
+                running_command=None,
+                selected_session=self.session_state.session,
+            )
+        receipt = CreateOnlyWriteReceipt()
+        completion = _ProjectInitCompletion(
+            target,
+            conflicting_paths=(target.with_name("AGENTS.MD"),),
+            receipt=receipt,
+        )
+        new_running_command, new_session = start_rpc_prompt_command(
+            {**command, "prompt": "/init"},
+            agent=self.agent,
+            sessions=self.sessions,
+            session_state=self.session_state,
+            task_group=self.task_group,
+            send=self.send,
+            trust_gate=self.trust_gate,
+            write_event=self.write_event,
+            render_events=self.render_events,
+            tool_context_factory=partial(
+                _project_init_tool_context,
+                self.agent,
+                target,
+                receipt,
+            ),
+            operation_instructions=instructions,
+            operation_tool_names=_PROJECT_INIT_TOOL_NAMES,
+            event_observer=completion.observe,
+            completion_error=completion.error,
             running_command_factory=self.running_command_factory,
             command_completed_factory=self.command_completed_factory,
         )
@@ -556,6 +609,126 @@ def rpc_session_state(session: JsonlSession | None) -> _RpcSessionState:
     )
 
 
+def _project_init_request(agent: CodingSession) -> tuple[str, Path]:
+    if agent.mode != "build":
+        raise ValueError("Project initialization requires build mode. Run /build first.")
+
+    project_root = (
+        agent.project_context_root or resolve_project_context_root(agent.tool_context.cwd)
+    ).resolve(strict=False)
+    for filename in ("AGENTS.md", "AGENTS.MD"):
+        candidate = project_root / filename
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError(f"Could not inspect project guidance path: {candidate}") from exc
+        raise ValueError(f"Project guidance already exists: {candidate}")
+
+    if "write" not in {tool.name for tool in agent.tools}:
+        raise ValueError("Project initialization requires the write tool.")
+
+    target = project_root / "AGENTS.md"
+    encoded_target = json.dumps(str(target), ensure_ascii=False)
+    prompt = f"""Initialize this repository for future coding agents.
+
+Inspect the repository using read-only tools before writing anything. Base the guidance on verified
+README files, manifests, lockfiles, CI configuration, source layout, and existing contributor
+instructions. Do not run project code or copy secrets.
+
+Create concise, repository-specific guidance at the exact absolute path
+{encoded_target}. Include:
+- a short project overview and mission;
+- verified setup, build, format, lint, type-check, and test commands;
+- the important architecture and module boundaries;
+- repository-specific development conventions and safety rules;
+- a practical definition of done.
+
+Avoid generic advice and do not invent commands. Modify no other file. Immediately before writing,
+check that neither AGENTS.md nor AGENTS.MD exists at the project root. If either exists, stop
+without changing it. Create the target with the write tool using overwrite=false so the operation
+remains create-only if the filesystem changes during your inspection."""
+    return prompt, target
+
+
+def _project_init_tool_context(
+    agent: CodingSession,
+    target: Path,
+    receipt: CreateOnlyWriteReceipt,
+) -> ToolContext:
+    return replace(
+        agent.tool_context,
+        cwd=target.parent,
+        allowed_write_paths=(target,),
+        conflicting_write_paths=(target.with_name("AGENTS.MD"),),
+        require_create_only_writes=True,
+        require_non_empty_writes=True,
+        create_only_write_receipt=receipt,
+    )
+
+
+@dataclass(slots=True)
+class _ProjectInitCompletion:
+    target: Path
+    conflicting_paths: tuple[Path, ...]
+    receipt: CreateOnlyWriteReceipt
+    matching_call_ids: set[str] = field(default_factory=set)
+    created_file_id: tuple[int, int] | None = None
+
+    def observe(self, event: WispEvent) -> None:
+        if isinstance(event, MessageCompleted):
+            for call in event.tool_calls:
+                # The operation policy and ToolContext permit a successful write only
+                # to ``target`` with create-only semantics, regardless of path spelling.
+                if (
+                    call.name == "write"
+                    and call.parse_error is None
+                    and call.arguments.get("overwrite") is False
+                ):
+                    self.matching_call_ids.add(call.call_id)
+            return
+        if (
+            isinstance(event, ToolExecutionEnded)
+            and event.call_id in self.matching_call_ids
+            and event.name == "write"
+            and not event.is_error
+            and event.created
+        ):
+            if self.receipt.path == self.target:
+                self.created_file_id = self.receipt.file_id
+
+    def error(self) -> str | None:
+        if self.created_file_id is None:
+            return (
+                "Project initialization completed without a successful create-only write to "
+                f"{self.target}"
+            )
+        try:
+            info = self.target.lstat()
+        except FileNotFoundError:
+            return f"Project initialization completed without creating {self.target}"
+        except OSError as exc:
+            return f"Could not inspect generated project guidance: {exc}"
+        if not stat.S_ISREG(info.st_mode):
+            return f"Project initialization did not create a regular file: {self.target}"
+        if (info.st_dev, info.st_ino) != self.created_file_id:
+            return f"Generated project guidance was replaced before completion: {self.target}"
+        if info.st_size == 0:
+            return f"Project initialization created an empty file: {self.target}"
+        for conflict in self.conflicting_paths:
+            try:
+                conflict_info = conflict.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                return f"Could not inspect generated project guidance: {exc}"
+            if (conflict_info.st_dev, conflict_info.st_ino) == self.created_file_id:
+                continue
+            return f"Conflicting project guidance appeared during initialization: {conflict}"
+        return None
+
+
 def start_rpc_prompt_command(
     command: dict[str, object],
     *,
@@ -567,6 +740,12 @@ def start_rpc_prompt_command(
     trust_gate: RpcTrustResolver,
     write_event: RpcEventWriter,
     render_events: RpcEventRenderer,
+    tool_context: ToolContext | None = None,
+    tool_context_factory: Callable[[], ToolContext] | None = None,
+    operation_instructions: str | None = None,
+    operation_tool_names: frozenset[str] | None = None,
+    event_observer: Callable[[WispEvent], None] | None = None,
+    completion_error: Callable[[], str | None] | None = None,
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> tuple[_RpcRunningCommand | None, JsonlSession | None]:
@@ -608,11 +787,17 @@ def start_rpc_prompt_command(
         write_event,
         render_events,
         command_completed_factory,
+        tool_context,
+        tool_context_factory,
+        operation_instructions,
+        operation_tool_names,
+        event_observer,
+        completion_error,
     )
     return (
         running_command_factory(
             command_id=command_id,
-            command_type="prompt",
+            command_type=command_type,
             cancel_scope=cancel_scope,
         ),
         selected_session,
@@ -2195,6 +2380,12 @@ async def run_rpc_prompt_command(
     write_event: RpcEventWriter,
     render_events: RpcEventRenderer,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+    tool_context: ToolContext | None = None,
+    tool_context_factory: Callable[[], ToolContext] | None = None,
+    operation_instructions: str | None = None,
+    operation_tool_names: frozenset[str] | None = None,
+    event_observer: Callable[[WispEvent], None] | None = None,
+    completion_error: Callable[[], str | None] | None = None,
 ) -> None:
     error: str | None = None
     run_entry_start = entry_start
@@ -2204,6 +2395,8 @@ async def run_rpc_prompt_command(
     async def track_run_start(events: AsyncIterator[WispEvent]) -> AsyncIterator[WispEvent]:
         nonlocal run_active_leaf_id, run_entry_start, run_start_captured
         async for event in events:
+            if event_observer is not None:
+                event_observer(event)
             if isinstance(event, AgentStarted):
                 run_entry_start, run_active_leaf_id = await anyio.to_thread.run_sync(
                     rpc_session_run_start,
@@ -2221,16 +2414,32 @@ async def run_rpc_prompt_command(
     with cancel_scope:
         try:
             agent.trusted = await trust_gate.resolve()
-            await render_events(
-                track_run_start(
-                    agent.run(
-                        prompt,
-                        session=session,
-                        history=committed_history,
-                        operation_id=command_id,
-                    )
+            operation_context = (
+                tool_context_factory() if tool_context_factory is not None else tool_context
+            )
+            agent_events = (
+                agent.run(
+                    prompt,
+                    session=session,
+                    history=committed_history,
+                    operation_id=command_id,
+                    operation_instructions=operation_instructions,
+                    operation_tool_names=operation_tool_names,
+                )
+                if operation_context is None
+                else agent.run(
+                    prompt,
+                    session=session,
+                    history=committed_history,
+                    operation_id=command_id,
+                    tool_context=operation_context,
+                    operation_instructions=operation_instructions,
+                    operation_tool_names=operation_tool_names,
                 )
             )
+            await render_events(track_run_start(agent_events))
+            if completion_error is not None:
+                error = await anyio.to_thread.run_sync(completion_error)
         except RpcOutputAlreadyReportedError as exc:
             error = str(exc)
         except anyio.get_cancelled_exc_class():
@@ -2288,7 +2497,7 @@ async def run_rpc_prompt_command(
         await send.send(
             command_completed_factory(
                 command_id=command_id,
-                command_type="prompt",
+                command_type=command_type,
                 ok=error is None,
                 history=updated_history,
                 entry_count=entry_count,

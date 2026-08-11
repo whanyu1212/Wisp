@@ -44,7 +44,7 @@ class TuiInteractionState:
 
     status: TuiStatus = TuiStatus.idle
     current_command_id: str | None = None
-    current_command_type: Literal["prompt", "compact"] | None = None
+    current_command_type: Literal["prompt", "init", "compact"] | None = None
     shutdown_command_id: str | None = None
     pending_approval: ToolApprovalRequested | None = None
     pending_trust: TrustRequested | None = None

@@ -16,6 +16,7 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
+from wisp.tools import file_ops as file_ops_module
 from wisp.tools import process as process_tools_module
 from wisp.tools import process_manager as process_manager_module
 from wisp.tools import search as search_tools_module
@@ -160,6 +161,196 @@ def test_write_tool_creates_parent_directories_and_overwrites(tmp_path: Path) ->
     assert first.data["bytes"] == 5
     assert second.data["bytes"] == 6
     assert (tmp_path / "nested/file.txt").read_text(encoding="utf-8") == "second"
+
+
+def test_write_tool_create_only_creates_new_file(tmp_path: Path) -> None:
+    receipt = file_ops_module.CreateOnlyWriteReceipt()
+    context = ToolContext(cwd=tmp_path, create_only_write_receipt=receipt)
+
+    result = run_tool(
+        WriteTool(),
+        {"path": "nested/new.txt", "content": "new\n", "overwrite": False},
+        context,
+    )
+
+    assert result.data["created"] is True
+    assert "before_text" not in result.data
+    path = tmp_path / "nested/new.txt"
+    assert path.read_text(encoding="utf-8") == "new\n"
+    info = path.lstat()
+    assert receipt.path == path
+    assert receipt.file_id == (info.st_dev, info.st_ino)
+
+
+def test_write_tool_honors_operation_write_path_restriction(tmp_path: Path) -> None:
+    allowed = tmp_path / "AGENTS.md"
+    context = ToolContext(
+        cwd=tmp_path,
+        allowed_write_paths=(allowed,),
+        require_create_only_writes=True,
+        require_non_empty_writes=True,
+    )
+
+    run_tool(
+        WriteTool(),
+        {"path": "AGENTS.md", "content": "allowed\n", "overwrite": False},
+        context,
+    )
+    with pytest.raises(ToolError, match="Write path is not allowed for this operation"):
+        run_tool(
+            WriteTool(),
+            {"path": "other.txt", "content": "blocked\n", "overwrite": False},
+            context,
+        )
+    with pytest.raises(ToolError, match="requires write calls with overwrite=false"):
+        run_tool(
+            WriteTool(),
+            {"path": "AGENTS.md", "content": "overwrite\n"},
+            context,
+        )
+    with pytest.raises(ToolError, match="requires non-empty write content"):
+        run_tool(
+            WriteTool(),
+            {"path": "AGENTS.md", "content": "", "overwrite": False},
+            context,
+        )
+
+    assert allowed.read_text(encoding="utf-8") == "allowed\n"
+    assert not (tmp_path / "other.txt").exists()
+
+
+def test_write_tool_refuses_operation_conflicting_path(tmp_path: Path) -> None:
+    target = tmp_path / "AGENTS.md"
+    conflict = tmp_path / "other-guidance.md"
+    conflict.write_text("existing\n", encoding="utf-8")
+    context = ToolContext(
+        cwd=tmp_path,
+        allowed_write_paths=(target,),
+        conflicting_write_paths=(conflict,),
+        require_create_only_writes=True,
+    )
+
+    with pytest.raises(ToolError, match="Conflicting write path already exists"):
+        run_tool(
+            WriteTool(),
+            {"path": "AGENTS.md", "content": "generated\n", "overwrite": False},
+            context,
+        )
+
+    assert not target.exists()
+    assert conflict.read_text(encoding="utf-8") == "existing\n"
+
+
+def test_write_tool_failed_create_only_content_write_leaves_no_partial_target(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    context = ToolContext(cwd=tmp_path)
+    real_fdopen = file_ops_module.os.fdopen
+
+    class FailingWriter:
+        def __init__(self, descriptor: int, *args: object, **kwargs: object) -> None:
+            self.file = real_fdopen(descriptor, *args, **kwargs)
+
+        def __enter__(self) -> FailingWriter:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.file.close()
+
+        def write(self, _content: str) -> int:
+            raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(file_ops_module.os, "fdopen", FailingWriter)
+
+    with pytest.raises(ToolError, match="Could not create file: target.txt"):
+        run_tool(
+            WriteTool(),
+            {"path": "target.txt", "content": "partial\n", "overwrite": False},
+            context,
+        )
+
+    assert not (tmp_path / "target.txt").exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_tool_failed_create_only_publish_leaves_no_partial_target(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    context = ToolContext(cwd=tmp_path)
+
+    def fail_link(_source: object, _target: object) -> None:
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(file_ops_module.os, "link", fail_link)
+
+    with pytest.raises(ToolError, match="Could not create file: target.txt"):
+        run_tool(
+            WriteTool(),
+            {"path": "target.txt", "content": "partial\n", "overwrite": False},
+            context,
+        )
+
+    assert not (tmp_path / "target.txt").exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_tool_reports_temporary_cleanup_failure_after_publish(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    context = ToolContext(cwd=tmp_path)
+    real_unlink = Path.unlink
+
+    def fail_temporary_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path.name.startswith(".wisp-write-"):
+            raise PermissionError(errno.EACCES, "permission denied")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_temporary_unlink)
+
+    with pytest.raises(ToolError, match="temporary-link cleanup failed"):
+        run_tool(
+            WriteTool(),
+            {"path": "target.txt", "content": "complete\n", "overwrite": False},
+            context,
+        )
+
+    assert (tmp_path / "target.txt").read_text(encoding="utf-8") == "complete\n"
+    assert len(tuple(tmp_path.glob(".wisp-write-*"))) == 1
+
+
+def test_write_tool_create_only_preserves_existing_file(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    path = tmp_path / "existing.txt"
+    path.write_text("original\n", encoding="utf-8")
+
+    with pytest.raises(ToolError, match="File already exists: existing.txt"):
+        run_tool(
+            WriteTool(),
+            {"path": "existing.txt", "content": "replacement\n", "overwrite": False},
+            context,
+        )
+
+    assert path.read_text(encoding="utf-8") == "original\n"
+
+
+def test_write_tool_create_only_refuses_dangling_symlink(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    target = tmp_path / "target.txt"
+    link = tmp_path / "new.txt"
+    link.symlink_to(target)
+
+    with pytest.raises(ToolError, match="File already exists: new.txt"):
+        run_tool(
+            WriteTool(),
+            {"path": "new.txt", "content": "content\n", "overwrite": False},
+            context,
+        )
+
+    assert link.is_symlink()
+    assert not target.exists()
 
 
 def test_write_tool_preserves_exact_newline_bytes(tmp_path: Path) -> None:

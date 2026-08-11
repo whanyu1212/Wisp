@@ -21,6 +21,7 @@ class TuiSlashCommandName(StrEnum):
     """Built-in TUI slash commands."""
 
     help = "help"
+    init = "init"
     history = "history"
     update = "update"
     skills = "skills"

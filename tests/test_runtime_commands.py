@@ -163,6 +163,8 @@ def test_command_registry_raises_for_unknown_command() -> None:
 def test_builtin_command_descriptors_capture_supported_arguments() -> None:
     descriptors = {descriptor.name: descriptor for descriptor in builtin_command_descriptors()}
 
+    assert descriptors["init"].accepts_arguments is False
+    assert descriptors["init"].category is CommandCategory.general
     assert tuple(argument.name for argument in descriptors["model"].arguments) == (
         "model",
         "effort",

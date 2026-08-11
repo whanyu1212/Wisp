@@ -1108,6 +1108,36 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
     assert records[-1]["error"] is None
 
 
+def test_rpc_mode_init_refuses_existing_project_guidance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    guidance = project / "AGENTS.md"
+    guidance.write_text("Keep me.\n", encoding="utf-8")
+    monkeypatch.chdir(project)
+
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path / "sessions")],
+        input='{"id":"init-1","type":"init"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == [
+        "rpc.command.started",
+        "error",
+        "rpc.command.finished",
+    ]
+    assert records[1]["message"] == f"Project guidance already exists: {guidance}"
+    assert records[2]["command_type"] == "init"
+    assert records[2]["ok"] is False
+    assert guidance.read_text(encoding="utf-8") == "Keep me.\n"
+
+
 def test_rpc_mode_reports_commands_before_prompt(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
@@ -1128,6 +1158,7 @@ def test_rpc_mode_reports_commands_before_prompt(tmp_path: Path) -> None:
     assert report["command_id"] == "commands-1"
     assert [command["name"] for command in report["commands"]] == [
         "help",
+        "init",
         "compact",
         "context",
         "history",
@@ -1145,7 +1176,7 @@ def test_rpc_mode_reports_commands_before_prompt(tmp_path: Path) -> None:
         "disconnect",
         "quit",
     ]
-    compact = report["commands"][1]
+    compact = report["commands"][2]
     assert compact["slash_command"] == "/compact"
     assert compact["category"] == "session"
     assert compact["arguments"] == [

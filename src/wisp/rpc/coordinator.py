@@ -14,6 +14,9 @@ from wisp.events import WispEvent
 from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES
 from wisp.sessions.jsonl import JsonlSession
 
+_PROMPT_RUN_COMMAND_TYPES = frozenset({"prompt", "init"})
+
+
 type _SequentialRpcCommandType = Literal[
     "prompt",
     "compact",
@@ -281,7 +284,7 @@ class RpcCoordinator:
             running = self.running_command
             if (
                 running is not None
-                and running.command_type == "prompt"
+                and running.command_type in _PROMPT_RUN_COMMAND_TYPES
                 and ready.command_id == running.command_id
             ):
                 self._prompt_queue_ready = True
@@ -300,7 +303,7 @@ class RpcCoordinator:
         running = self.running_command
         prompt_queue_not_ready = (
             running is not None
-            and running.command_type == "prompt"
+            and running.command_type in _PROMPT_RUN_COMMAND_TYPES
             and selected_type in QUEUE_RPC_COMMAND_TYPES
             and not self._prompt_queue_ready
         )
@@ -314,7 +317,7 @@ class RpcCoordinator:
         new_session_waits_for_ordered_operation = (
             selected_type == "new_session"
             and running is not None
-            and running.command_type not in {"prompt", "compact"}
+            and running.command_type not in {*_PROMPT_RUN_COMMAND_TYPES, "compact"}
         )
         if running is not None and (
             not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_operation
@@ -506,7 +509,7 @@ class RpcCoordinator:
             running = self.running_command
             if (
                 running is not None
-                and running.command_type == "prompt"
+                and running.command_type in _PROMPT_RUN_COMMAND_TYPES
                 and ready.command_id == running.command_id
             ):
                 self._prompt_queue_ready = True
@@ -528,7 +531,7 @@ class RpcCoordinator:
             return False
         prompt_queue_not_ready = (
             running is not None
-            and running.command_type == "prompt"
+            and running.command_type in _PROMPT_RUN_COMMAND_TYPES
             and selected_type in QUEUE_RPC_COMMAND_TYPES
             and not self._prompt_queue_ready
         )
@@ -542,7 +545,7 @@ class RpcCoordinator:
         new_session_waits_for_ordered_operation = (
             selected_type == "new_session"
             and running is not None
-            and running.command_type not in {"prompt", "compact"}
+            and running.command_type not in {*_PROMPT_RUN_COMMAND_TYPES, "compact"}
         )
         if running is not None and (
             not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_operation

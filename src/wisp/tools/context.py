@@ -10,6 +10,7 @@ from wisp.settings import DEFAULT_PROTECTED_PATHS, user_settings_path
 
 if TYPE_CHECKING:
     from wisp.config import WispConfig
+    from wisp.tools.file_ops import CreateOnlyWriteReceipt
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,13 @@ class ToolContext:
     max_output_bytes: int = 50_000
     max_output_lines: int = 2_000
     allow_outside_cwd: bool = False
+    # ``None`` permits the normal project-root sandbox. Operations with a narrower
+    # write contract can name the only exact paths that the write tool may mutate.
+    allowed_write_paths: tuple[Path, ...] | None = None
+    conflicting_write_paths: tuple[Path, ...] = ()
+    require_create_only_writes: bool = False
+    require_non_empty_writes: bool = False
+    create_only_write_receipt: CreateOnlyWriteReceipt | None = None
     # Secure by default: every construction path (including a bare
     # ``ToolContext(cwd=...)`` from embedding/SDK code) protects secrets unless a
     # caller explicitly passes ``protected_paths=()`` to opt out.

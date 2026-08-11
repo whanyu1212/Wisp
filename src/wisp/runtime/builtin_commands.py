@@ -17,6 +17,13 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=10,
         ),
         CommandDescriptor(
+            name="init",
+            title="Initialize project",
+            description="Inspect the project and create AGENTS.md",
+            category=CommandCategory.general,
+            order=15,
+        ),
+        CommandDescriptor(
             name="compact",
             title="Compact",
             description="Compact the session context",

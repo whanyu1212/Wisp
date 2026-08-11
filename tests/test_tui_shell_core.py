@@ -291,6 +291,45 @@ def test_tui_update_provenance_verification_remains_cancellable() -> None:
     anyio.run(run)
 
 
+def test_tui_shell_starts_project_initialization_and_rejects_arguments() -> None:
+    class RecordingRenderer(LineTuiRenderer):
+        def __init__(self) -> None:
+            super().__init__(_console()[0])
+            self.submitted: list[str] = []
+            self.errors: list[str] = []
+
+        def prompt_submitted(self, prompt: str) -> None:
+            self.submitted.append(prompt)
+
+        def command_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    async def run() -> None:
+        controller = ScriptedController()
+        renderer = RecordingRenderer()
+        shell = TuiShell(controller, renderer=renderer)
+
+        await shell._handle_input_line(_InputLine("/init extra", _InputMode.idle))
+        assert renderer.errors == ["Usage: /init"]
+        assert controller.init_requests == []
+
+        await shell._handle_input_line(_InputLine("/init", _InputMode.idle))
+
+        assert renderer.submitted == ["/init"]
+        assert controller.init_requests == ["init-1"]
+        assert shell.state.current_command_id == "init-1"
+        assert shell.state.current_command_type == "init"
+
+        await shell._handle_rpc_event(
+            RpcCommandFinished(command_id="init-1", command_type="init", ok=True)
+        )
+
+        assert shell.state.current_command_id is None
+        assert shell.state.current_command_type is None
+
+    anyio.run(run)
+
+
 def test_tui_shell_switches_agent_mode_after_successful_configure() -> None:
     async def run() -> None:
         controller = ScriptedController()
