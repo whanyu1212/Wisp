@@ -1493,6 +1493,33 @@ def _render_events_to_transcript(events: list[object]) -> str:
     return anyio.run(scenario)
 
 
+def test_textual_skill_invocation_keeps_active_working_indicator() -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        original = "/skill:review focus on safety"
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.prompt_submitted(original)
+            renderer.skill_invoked(
+                SkillInvoked(
+                    session_id="session-1",
+                    message_entry_id="message-1",
+                    invocation=SkillInvocationEvidence(
+                        name="review",
+                        original_content=original,
+                        request="focus on safety",
+                        content_sha256="a" * 64,
+                        instructions_truncated=False,
+                    ),
+                    provider_content="expanded instructions",
+                )
+            )
+            await pilot.pause()
+            return _working_activity(app_instance)
+
+    assert "Working" in anyio.run(scenario)
+
+
 def test_textual_renderer_matches_skill_invocation_to_retried_prompt() -> None:
     async def scenario() -> list[str]:
         app_instance, renderer = create_textual_tui()

@@ -440,7 +440,6 @@ class TextualTuiRenderer:
         self.app.show_skill_catalog(catalog)
 
     def skill_invoked(self, event: SkillInvoked) -> None:
-        self._suspend_progress()
         widget = self._pop_prompt_widget(event.invocation.original_content)
         self._history.record_live_skill_invocation(
             event.message_entry_id,
