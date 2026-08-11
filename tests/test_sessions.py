@@ -2773,6 +2773,40 @@ def test_session_read_preserves_existing_parent_permissions(tmp_path: Path) -> N
     assert stat.S_IMODE(root.stat().st_mode) == 0o755
 
 
+def test_complete_session_reads_do_not_require_write_access(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    root = tmp_path / "sessions"
+    root.mkdir()
+    entry = MessageSessionEntry(
+        id="entry-1",
+        session_id="session-id",
+        message=Message(role="user", content="hello"),
+    )
+    path = root / "session.jsonl"
+    path.write_text(f"{session_entry_to_json(entry)}\n", encoding="utf-8")
+    real_open = os.open
+
+    def reject_session_write_open(
+        target: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if os.fsdecode(target) == os.fsdecode(path) and flags & os.O_RDWR:
+            raise PermissionError("session is read-only")
+        return real_open(target, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", reject_session_write_open)
+    store = JsonlSessionStore(root)
+
+    assert store.load(path).read_entries() == (entry,)
+    assert store.latest().read_entries() == (entry,)
+    assert store.summaries()[0].session_id == entry.session_id
+
+
 def test_recovery_rejects_symlink_session_file_without_no_follow(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

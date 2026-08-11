@@ -1409,7 +1409,24 @@ def _recover_incomplete_tail(path: Path) -> bool:
     if stat.S_ISLNK(path_info.st_mode) or not stat.S_ISREG(path_info.st_mode):
         raise SessionError(f"Session file is not a regular file: {path}")
 
-    flags = os.O_RDWR
+    expected_signature = (path_info.st_dev, path_info.st_ino)
+
+    def validated_info(fd: int) -> os.stat_result:
+        info = os.fstat(fd)
+        try:
+            current_info = path.lstat()
+        except OSError as exc:
+            raise SessionError(f"Could not inspect session file after opening: {path}") from exc
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or not stat.S_ISREG(current_info.st_mode)
+            or (info.st_dev, info.st_ino) != expected_signature
+            or (current_info.st_dev, current_info.st_ino) != expected_signature
+        ):
+            raise SessionError(f"Session file changed while being opened: {path}")
+        return info
+
+    flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
@@ -1419,27 +1436,31 @@ def _recover_incomplete_tail(path: Path) -> bool:
     except OSError as exc:
         raise SessionError(f"Session file is not a regular file: {path}") from exc
     try:
-        info = os.fstat(fd)
-        try:
-            current_info = path.lstat()
-        except OSError as exc:
-            raise SessionError(f"Could not inspect session file after opening: {path}") from exc
-        expected_signature = (path_info.st_dev, path_info.st_ino)
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or not stat.S_ISREG(current_info.st_mode)
-            or (info.st_dev, info.st_ino) != expected_signature
-            or (current_info.st_dev, current_info.st_ino) != expected_signature
-        ):
-            raise SessionError(f"Session file changed while being opened: {path}")
+        info = validated_info(fd)
+        if info.st_size:
+            os.lseek(fd, -1, os.SEEK_END)
+            if _read_exact(fd, 1) == b"\n":
+                return False
+    finally:
+        os.close(fd)
+
+    flags = os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise SessionError(f"Could not recover incomplete session file: {path}") from exc
+    try:
+        info = validated_info(fd)
         if info.st_size == 0:
             committed_size = 0
-            signature = (info.st_dev, info.st_ino)
         else:
             os.lseek(fd, -1, os.SEEK_END)
             if _read_exact(fd, 1) == b"\n":
                 return False
-
             position = info.st_size
             committed_size = 0
             while position:
@@ -1453,7 +1474,7 @@ def _recover_incomplete_tail(path: Path) -> bool:
                     break
             os.ftruncate(fd, committed_size)
             _sync_file(fd)
-            signature = (info.st_dev, info.st_ino)
+        signature = (info.st_dev, info.st_ino)
     finally:
         os.close(fd)
 
