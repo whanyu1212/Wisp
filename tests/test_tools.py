@@ -176,6 +176,36 @@ def test_write_tool_create_only_creates_new_file(tmp_path: Path) -> None:
     assert (tmp_path / "nested/new.txt").read_text(encoding="utf-8") == "new\n"
 
 
+def test_write_tool_honors_operation_write_path_restriction(tmp_path: Path) -> None:
+    allowed = tmp_path / "AGENTS.md"
+    context = ToolContext(
+        cwd=tmp_path,
+        allowed_write_paths=(allowed,),
+        require_create_only_writes=True,
+    )
+
+    run_tool(
+        WriteTool(),
+        {"path": "AGENTS.md", "content": "allowed\n", "overwrite": False},
+        context,
+    )
+    with pytest.raises(ToolError, match="Write path is not allowed for this operation"):
+        run_tool(
+            WriteTool(),
+            {"path": "other.txt", "content": "blocked\n", "overwrite": False},
+            context,
+        )
+    with pytest.raises(ToolError, match="requires write calls with overwrite=false"):
+        run_tool(
+            WriteTool(),
+            {"path": "AGENTS.md", "content": "overwrite\n"},
+            context,
+        )
+
+    assert allowed.read_text(encoding="utf-8") == "allowed\n"
+    assert not (tmp_path / "other.txt").exists()
+
+
 def test_write_tool_create_only_preserves_existing_file(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     path = tmp_path / "existing.txt"

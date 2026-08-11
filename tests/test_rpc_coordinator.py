@@ -421,6 +421,54 @@ def test_coordinator_async_buffers_init_queue_until_ready() -> None:
     anyio.run(scenario)
 
 
+def test_coordinator_dispatches_new_session_while_init_is_running() -> None:
+    async def scenario() -> None:
+        sync_coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        sync_coordinator.running_command = _RpcRunningCommand("init", "init", anyio.CancelScope())
+        sync_dispatched: list[str] = []
+
+        def sync_dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            sync_dispatched.append(str(command["id"]))
+            return _RpcDispatchResult(running)
+
+        sync_coordinator.handle_event(
+            _RpcInputCommand({"id": "new-sync", "type": "new_session"}),
+            dispatch=sync_dispatch,
+            reject=lambda _command, _message: None,
+            command_type=_command_type,
+        )
+        assert sync_dispatched == ["new-sync"]
+        assert not sync_coordinator.queued_commands
+
+        async_coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        async_coordinator.running_command = _RpcRunningCommand("init", "init", anyio.CancelScope())
+        async_dispatched: list[str] = []
+
+        async def async_dispatch(
+            command: dict[str, object],
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            async_dispatched.append(str(command["id"]))
+            return _RpcDispatchResult(running)
+
+        async def reject(_command: dict[str, object], _message: str) -> None:
+            raise AssertionError("command unexpectedly rejected")
+
+        await async_coordinator.handle_event_async(
+            _RpcInputCommand({"id": "new-async", "type": "new_session"}),
+            dispatch=async_dispatch,
+            reject=reject,
+            command_type=_command_type,
+        )
+        assert async_dispatched == ["new-async"]
+        assert not async_coordinator.queued_commands
+
+    anyio.run(scenario)
+
+
 def test_coordinator_state_bypasses_active_prompt_without_draining_pending_queue() -> None:
     async def scenario() -> None:
         coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))

@@ -259,7 +259,12 @@ def test_init_dispatches_repository_specific_create_only_prompt(
             operation_instructions = kwargs.get("operation_instructions")
             assert isinstance(operation_instructions, str)
             instructions.append(operation_instructions)
+            assert kwargs.get("operation_tool_names") == frozenset(
+                {"read", "grep", "find", "ls", "write"}
+            )
             target = context.cwd / "AGENTS.md"
+            assert context.allowed_write_paths == (target,)
+            assert context.require_create_only_writes is True
             target.write_text("# Agent guidance\n", encoding="utf-8")
             call = ToolCallSnapshot(
                 call_id="write-1",

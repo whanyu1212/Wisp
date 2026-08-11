@@ -99,11 +99,17 @@ class WriteTool:
         selected_path = _required_string(arguments, "path")
         content = _required_string(arguments, "content", allow_empty=True)
         overwrite = _optional_bool(arguments, "overwrite", default=True)
+        if context.require_create_only_writes and overwrite:
+            raise ToolError("This operation requires write calls with overwrite=false")
         path = resolve_tool_path(
             selected_path,
             context,
             follow_leaf_symlink=overwrite,
         )
+        if context.allowed_write_paths is not None and path not in {
+            allowed.resolve(strict=False) for allowed in context.allowed_write_paths
+        }:
+            raise ToolError(f"Write path is not allowed for this operation: {selected_path}")
 
         # Distinguish a create from an overwrite *before* the write, so the renderer
         # can tell "brand-new file" (show its content as a pure-addition diff) from

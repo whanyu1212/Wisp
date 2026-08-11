@@ -727,13 +727,62 @@ def test_coding_session_operation_tool_context_overrides_tool_root(tmp_path: Pat
     )
 
     async def run_agent() -> None:
-        events = agent.run("inspect", tool_context=ToolContext(cwd=project_root))
+        events = agent.run(
+            "inspect",
+            tool_context=ToolContext(cwd=project_root),
+            operation_tool_names=frozenset({"cwd"}),
+        )
         _ = [event async for event in events]
 
     anyio.run(run_agent)
 
     assert provider.calls[1][0] == (ToolCallResult(call_id="call-1", output=str(project_root)),)
     assert agent.tool_context.cwd == launch_directory
+
+
+def test_coding_session_operation_tool_names_block_other_registry_tools(tmp_path: Path) -> None:
+    class HiddenTool:
+        name = "hidden"
+        safety = "read"
+        description = "A tool excluded from this operation."
+        input_schema: ToolInputSchema = {"type": "object", "properties": {}}
+
+        async def run(
+            self,
+            arguments: ToolArguments,
+            context: ToolContext,
+        ) -> ToolResult:
+            return ToolResult(text="unexpected")
+
+    tool_call = ToolCall(call_id="call-1", name="hidden", arguments={})
+    provider = ToolLoopProvider([[tool_call], ["done"]])
+    registry = ToolRegistry()
+    registry.register(HiddenTool())
+    agent = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+
+    async def run_agent() -> None:
+        _ = [
+            event
+            async for event in agent.run(
+                "inspect",
+                operation_tool_names=frozenset(),
+            )
+        ]
+
+    anyio.run(run_agent)
+
+    assert provider.calls[1][0] == (
+        ToolCallResult(
+            call_id="call-1",
+            output="Tool hidden is blocked by policy",
+            is_error=True,
+        ),
+    )
 
 
 def test_coding_session_keeps_operation_instructions_out_of_user_prompt(

@@ -20,6 +20,10 @@ class ToolContext:
     max_output_bytes: int = 50_000
     max_output_lines: int = 2_000
     allow_outside_cwd: bool = False
+    # ``None`` permits the normal project-root sandbox. Operations with a narrower
+    # write contract can name the only exact paths that the write tool may mutate.
+    allowed_write_paths: tuple[Path, ...] | None = None
+    require_create_only_writes: bool = False
     # Secure by default: every construction path (including a bare
     # ``ToolContext(cwd=...)`` from embedding/SDK code) protects secrets unless a
     # caller explicitly passes ``protected_paths=()`` to opt out.

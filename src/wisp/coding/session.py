@@ -419,6 +419,7 @@ class CodingSession:
         operation_id: str | None = None,
         tool_context: ToolContext | None = None,
         operation_instructions: str | None = None,
+        operation_tool_names: frozenset[str] | None = None,
     ) -> AsyncIterator[WispEvent]:
         async with self._operation_lock:
             self._operation_active = True
@@ -429,6 +430,7 @@ class CodingSession:
                 operation_id=operation_id,
                 tool_context=tool_context,
                 operation_instructions=operation_instructions,
+                operation_tool_names=operation_tool_names,
             )
             try:
                 async for event in events:
@@ -457,6 +459,7 @@ class CodingSession:
         operation_id: str | None = None,
         tool_context: ToolContext | None = None,
         operation_instructions: str | None = None,
+        operation_tool_names: frozenset[str] | None = None,
     ) -> AsyncGenerator[WispEvent, None]:
         operation_context = tool_context or self.tool_context
         user_message = await self._prepare_user_message(prompt, context=operation_context)
@@ -476,6 +479,26 @@ class CodingSession:
 
         operation_registry = self._operation_tool_registry()
         effective_tools = self._effective_tools(operation_registry)
+        operation_policy: ToolPolicy | None = None
+        if operation_tool_names is not None:
+            effective_tools = tuple(
+                tool for tool in effective_tools if tool.name in operation_tool_names
+            )
+            allowed_names = {tool.name for tool in effective_tools}
+            if operation_registry is not None:
+                policy_allowed_names: set[str] = set()
+                for name in allowed_names:
+                    try:
+                        operation_tool = operation_registry.get(name)
+                    except UnknownToolError:
+                        continue
+                    if self.tool_policy.allows(operation_tool):
+                        policy_allowed_names.add(name)
+                allowed_names = policy_allowed_names
+                effective_tools = tuple(
+                    tool for tool in effective_tools if tool.name in allowed_names
+                )
+            operation_policy = ToolPolicy.allow_tool_names(allowed_names)
         prompt_messages = self._prompt_messages(
             effective_tools,
             registry=operation_registry,
@@ -489,7 +512,11 @@ class CodingSession:
         executor = ConfiguredToolExecutor(
             registry=operation_registry,
             context=operation_context,
-            policy=self._effective_tool_policy(effective_tools),
+            policy=(
+                operation_policy
+                if operation_policy is not None
+                else self._effective_tool_policy(effective_tools)
+            ),
             approval_policy=self.tool_approval_policy,
         )
         harness = AgentHarness(

@@ -102,6 +102,7 @@ type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
 
 DEFAULT_RPC_SESSION_CATALOG_LIMIT = 50
 MAX_RPC_SESSION_CATALOG_LIMIT = 200
+_PROJECT_INIT_TOOL_NAMES = frozenset({"read", "grep", "find", "ls", "write"})
 
 
 async def _run_abandonable_session_read[T](func: Callable[..., T], *args: object) -> T:
@@ -275,6 +276,7 @@ class RpcCommandExecutor:
             render_events=self.render_events,
             tool_context=tool_context,
             operation_instructions=instructions,
+            operation_tool_names=_PROJECT_INIT_TOOL_NAMES,
             event_observer=completion.observe,
             completion_error=completion.error,
             running_command_factory=self.running_command_factory,
@@ -636,7 +638,16 @@ Avoid generic advice and do not invent commands. Modify no other file. Immediate
 check that neither AGENTS.md nor AGENTS.MD exists at the project root. If either exists, stop
 without changing it. Create the target with the write tool using overwrite=false so the operation
 remains create-only if the filesystem changes during your inspection."""
-    return prompt, replace(agent.tool_context, cwd=project_root), target
+    return (
+        prompt,
+        replace(
+            agent.tool_context,
+            cwd=project_root,
+            allowed_write_paths=(target,),
+            require_create_only_writes=True,
+        ),
+        target,
+    )
 
 
 @dataclass(slots=True)
@@ -697,6 +708,7 @@ def start_rpc_prompt_command(
     render_events: RpcEventRenderer,
     tool_context: ToolContext | None = None,
     operation_instructions: str | None = None,
+    operation_tool_names: frozenset[str] | None = None,
     event_observer: Callable[[WispEvent], None] | None = None,
     completion_error: Callable[[], str | None] | None = None,
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
@@ -742,6 +754,7 @@ def start_rpc_prompt_command(
         command_completed_factory,
         tool_context,
         operation_instructions,
+        operation_tool_names,
         event_observer,
         completion_error,
     )
@@ -2333,6 +2346,7 @@ async def run_rpc_prompt_command(
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
     tool_context: ToolContext | None = None,
     operation_instructions: str | None = None,
+    operation_tool_names: frozenset[str] | None = None,
     event_observer: Callable[[WispEvent], None] | None = None,
     completion_error: Callable[[], str | None] | None = None,
 ) -> None:
@@ -2370,6 +2384,7 @@ async def run_rpc_prompt_command(
                     history=committed_history,
                     operation_id=command_id,
                     operation_instructions=operation_instructions,
+                    operation_tool_names=operation_tool_names,
                 )
                 if tool_context is None
                 else agent.run(
@@ -2379,6 +2394,7 @@ async def run_rpc_prompt_command(
                     operation_id=command_id,
                     tool_context=tool_context,
                     operation_instructions=operation_instructions,
+                    operation_tool_names=operation_tool_names,
                 )
             )
             await render_events(track_run_start(agent_events))
