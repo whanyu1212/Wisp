@@ -441,9 +441,10 @@ review checklist, see [`examples/skills/wisp-code-review`](examples/skills/wisp-
 When the read-only `skill` tool is exposed, Wisp adds a separately bounded index of escaped skill
 names and descriptions to model context. The model can call `skill` with `name` to load the selected
 `SKILL.md` instructions, or add a forward-slash `resource` path to read a supporting file inside the
-same skill directory. Enable it with `--allow-read-tools`, `--allow-tool skill`, or `--all-tools`,
-following the same exposure rules as other tools. Print mode continues to expose no tools unless
-one of those options is selected.
+same skill directory. Loaded content is delimited and labeled as subordinate task guidance; it
+cannot override Wisp's core policy, the user's request, or runtime controls. Enable the tool with
+`--allow-read-tools`, `--allow-tool skill`, or `--all-tools`, following the same exposure rules as
+other tools. Print mode continues to expose no tools unless one of those options is selected.
 
 Instruction and resource reads are UTF-8, bounded, protected-path aware, and reject absolute paths,
 traversal, symlinks, junctions, non-regular files, and targets outside the selected skill. Absolute
@@ -480,15 +481,18 @@ bundled-script execution, fuzzy completion, and skill-management UI remain unsup
 
 ## Context & compaction
 
-Each turn sends a default coding-agent system prompt plus a bounded project-context message before
-the user prompt: working directory, git branch and capped status summary, detected root files,
-tools exposed to the model, and trusted project instructions.
+Each turn sends an ordered system-instruction stack before the user prompt: Wisp's core coding
+policy, bounded project context, guidance for exposed tools and skills when present, an instruction
+boundary, and the active mode policy. The boundary makes project, tool, and skill content
+subordinate to Wisp's core policy, the user's request, and runtime-enforced permissions.
 
-Context files load from the trusted context root down to the working directory, parent instructions
-first. In each directory Wisp uses the first Pi-compatible match: `AGENTS.md`, `AGENTS.MD`,
-`CLAUDE.md`, `CLAUDE.MD`. Symlinked, protected, or out-of-scope files are skipped. Project
-instructions are bounded separately from the tool list, so a large instruction file cannot hide the
-available tools.
+Project context includes the working directory, Git branch and capped status summary, detected root
+files, exposed tools, and trusted project instructions. Context files load from the trusted context
+root down to the working directory, parent instructions first. Nearer files may refine earlier
+project guidance but cannot override higher-priority instructions. In each directory Wisp uses the
+first Pi-compatible match: `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`. Symlinked,
+protected, or out-of-scope files are skipped. Project instructions are bounded separately from the
+tool list, so a large instruction file cannot hide the available tools.
 
 Project context is trust-gated — in untrusted projects Wisp reads no local instruction files or
 settings. This is stricter than Pi, and keeps project guidance inside the same boundary as project

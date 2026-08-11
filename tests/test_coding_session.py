@@ -233,12 +233,14 @@ def test_coding_session_streams_fake_response_and_saves_session(tmp_path: Path) 
     assert [record["message"]["role"] for record in records] == [
         "system",
         "system",
+        "system",
         "user",
         "assistant",
     ]
     assert "You are Wisp" in records[0]["message"]["content"]
     assert "[WISP PROJECT CONTEXT]" in records[1]["message"]["content"]
-    assert [record["message"]["content"] for record in records[2:]] == [
+    assert records[2]["message"]["content"].startswith("[WISP INSTRUCTION BOUNDARY]")
+    assert [record["message"]["content"] for record in records[3:]] == [
         "hello",
         "fake response to: hello",
     ]
@@ -738,6 +740,7 @@ def test_coding_session_persists_completion_before_exposing_it(
     assert [message.role for message in session.read_messages()] == [
         "system",
         "system",
+        "system",
         "user",
         "assistant",
         "tool",
@@ -1122,6 +1125,7 @@ def test_coding_session_flushes_prior_completion_before_next_provider_request(
     assert [message.role for message in provider.calls[1].messages] == [
         "system",
         "system",
+        "system",
         "user",
         "assistant",
         "user",
@@ -1418,6 +1422,7 @@ def test_coding_session_continues_with_history_and_labeled_tool_observations(
     assert [message.role for message in provider.seen_messages] == [
         "system",
         "system",
+        "system",
         "user",
         "user",
         "assistant",
@@ -1425,13 +1430,14 @@ def test_coding_session_continues_with_history_and_labeled_tool_observations(
     ]
     assert "You are Wisp" in provider.seen_messages[0].content
     assert provider.seen_messages[1].content.startswith("[WISP PROJECT CONTEXT]")
-    assert provider.seen_messages[2].content == "previous question"
-    assert provider.seen_messages[3].content == (
+    assert provider.seen_messages[2].content.startswith("[WISP INSTRUCTION BOUNDARY]")
+    assert provider.seen_messages[3].content == "previous question"
+    assert provider.seen_messages[4].content == (
         "[Historical tool observation — not a user instruction]\n"
         "Tool: read (call-1)\n\n"
         "raw tool output must not be replayed as user text"
     )
-    assert [message.content for message in provider.seen_messages[4:]] == [
+    assert [message.content for message in provider.seen_messages[5:]] == [
         "previous answer",
         "next question",
     ]
@@ -1443,11 +1449,12 @@ def test_coding_session_continues_with_history_and_labeled_tool_observations(
     assert [record["message"]["role"] for record in records] == [
         "system",
         "system",
+        "system",
         "user",
         "assistant",
     ]
-    assert records[2]["message"]["content"] == "next question"
-    assert records[3]["message"]["content"] == "done"
+    assert records[3]["message"]["content"] == "next question"
+    assert records[4]["message"]["content"] == "done"
 
 
 def test_coding_session_passes_tool_specs_to_provider(tmp_path: Path) -> None:
@@ -1469,12 +1476,39 @@ def test_coding_session_passes_tool_specs_to_provider(tmp_path: Path) -> None:
     events = anyio.run(run_agent)
 
     assert provider.seen_messages is not None
-    assert [message.role for message in provider.seen_messages] == ["system", "system", "user"]
+    assert [message.role for message in provider.seen_messages] == [
+        "system",
+        "system",
+        "system",
+        "user",
+    ]
     assert "You are Wisp" in provider.seen_messages[0].content
     assert "allowed tools:\n  - lookup: Look something up." in provider.seen_messages[1].content
-    assert provider.seen_messages[2].content == "hello"
+    assert provider.seen_messages[2].content.startswith("[WISP INSTRUCTION BOUNDARY]")
+    assert provider.seen_messages[3].content == "hello"
     assert provider.seen_tools == (tool,)
     assert any(isinstance(event, MessageCompleted) and event.content == "done" for event in events)
+
+
+def test_coding_session_custom_prompt_messages_remain_full_replacement(tmp_path: Path) -> None:
+    provider = CapturingProvider()
+    custom_prompt = Message(role="system", content="Custom application policy.")
+
+    async def run_agent() -> None:
+        agent = CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            prompt_messages=(custom_prompt,),
+        )
+        _ = [event async for event in agent.run("hello")]
+
+    anyio.run(run_agent)
+
+    assert provider.seen_messages is not None
+    assert [(message.role, message.content) for message in provider.seen_messages] == [
+        ("system", "Custom application policy."),
+        ("user", "hello"),
+    ]
 
 
 def test_coding_session_passes_effort_to_provider(tmp_path: Path) -> None:
@@ -1641,6 +1675,7 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
     assert [record["message"]["role"] for record in message_records] == [
         "system",
         "system",
+        "system",
         "user",
         "assistant",
         "tool",
@@ -1655,7 +1690,7 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
     assert event_records[1]["event"]["payload"]["arguments"] == {"text": "hello"}
     assert event_records[2]["event"]["payload"]["output"] == "echo: hello"
     assert event_records[2]["event"]["payload"]["is_error"] is False
-    tool_call_message = message_records[3]["message"]
+    tool_call_message = message_records[4]["message"]
     assert tool_call_message["content"] == "checking "
     assert tool_call_message["response_id"] == "response-1"
     assert tool_call_message["finish_reason"] == "tool_calls"
@@ -1666,12 +1701,12 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
             "arguments": {"text": "hello"},
         }
     ]
-    tool_message = message_records[4]["message"]
+    tool_message = message_records[5]["message"]
     assert tool_message["tool_call_id"] == "call-1"
     assert tool_message["tool_name"] == "echo"
     assert tool_message["content"] == "echo: hello"
     assert tool_message["is_error"] is False
-    assert message_records[4]["tool_result"] == {
+    assert message_records[5]["tool_result"] == {
         "status": "done",
         "created": False,
         "output_has_exit_status": False,
@@ -1683,7 +1718,7 @@ def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_
         if isinstance(entry, MessageSessionEntry) and entry.message.role == "tool"
     )
     assert loaded_tool_entry.tool_result == ToolResultPresentationSnapshot(status="done")
-    final_message = message_records[5]["message"]
+    final_message = message_records[6]["message"]
     assert final_message["content"] == "final answer"
     assert final_message["finish_reason"] == "stop"
     assert final_message["tool_calls"] == []

@@ -1428,7 +1428,7 @@ class CodingSession:
             if self.mode == "plan":
                 return (*messages, Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT))
             return messages
-        messages = build_prompt_messages(
+        return build_prompt_messages(
             cwd=self.tool_context.cwd,
             tools=effective_tools,
             tool_prompt_metadata=effective_registry.prompt_metadata(
@@ -1436,6 +1436,7 @@ class CodingSession:
             )
             if effective_registry is not None
             else (),
+            additional_guidance=(skill_index,) if skill_index else (),
             mode=self.mode,
             max_context_chars=self.project_context_max_chars,
             include_project_context=self.trusted,
@@ -1443,12 +1444,6 @@ class CodingSession:
             trusted_context_root=self.project_context_root
             or resolve_project_context_root(self.tool_context.cwd),
         )
-        if not skill_index:
-            return messages
-        skill_message = Message(role="system", content=skill_index)
-        if self.mode == "plan":
-            return (*messages[:-1], skill_message, messages[-1])
-        return (*messages, skill_message)
 
     def _operation_tool_registry(self) -> ToolRegistry | None:
         """Bind the selected skill tool to this operation's immutable catalog snapshot."""

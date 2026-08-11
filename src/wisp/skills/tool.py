@@ -8,9 +8,11 @@ import anyio
 
 from wisp.skills.loading import load_skill_resource
 from wisp.skills.models import SkillCatalog
+from wisp.skills.prompt import format_skill_content
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.truncation import TruncatedText, truncate_text
 
 
 class SkillTool:
@@ -54,11 +56,31 @@ class SkillTool:
             ),
             abandon_on_cancel=True,
         )
-        return ToolResult(
-            text=resource.text,
-            data={"skill": name, "resource": resource.resource},
-            truncated=resource.truncated,
+        bounded = _bound_skill_content(
+            format_skill_content(
+                name=name,
+                resource=resource.resource,
+                content=resource.text,
+            ),
+            context=context,
         )
+        return ToolResult(
+            text=bounded.text,
+            data={"skill": name, "resource": resource.resource},
+            truncated=resource.truncated or bounded.truncated,
+        )
+
+
+def _bound_skill_content(text: str, *, context: ToolContext) -> TruncatedText:
+    max_bytes = max(0, context.max_output_bytes)
+    max_lines = max(0, context.max_output_lines)
+    if max_lines == 0:
+        return TruncatedText(text="", truncated=bool(text))
+
+    bounded = truncate_text(text, max_bytes=max_bytes, max_lines=max_lines)
+    if len(bounded.text.splitlines()) <= max_lines:
+        return bounded
+    return truncate_text(text, max_bytes=max_bytes, max_lines=max_lines - 1)
 
 
 __all__ = ["SkillTool"]
