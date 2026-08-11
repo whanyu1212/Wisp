@@ -659,10 +659,11 @@ class _ProjectInitCompletion:
     def observe(self, event: WispEvent) -> None:
         if isinstance(event, MessageCompleted):
             for call in event.tool_calls:
+                # The operation policy and ToolContext permit a successful write only
+                # to ``target`` with create-only semantics, regardless of path spelling.
                 if (
                     call.name == "write"
                     and call.parse_error is None
-                    and call.arguments.get("path") == str(self.target)
                     and call.arguments.get("overwrite") is False
                 ):
                     self.matching_call_ids.add(call.call_id)

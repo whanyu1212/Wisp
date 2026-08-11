@@ -270,7 +270,7 @@ def test_init_dispatches_repository_specific_create_only_prompt(
                 call_id="write-1",
                 name="write",
                 arguments={
-                    "path": str(target),
+                    "path": "./AGENTS.md",
                     "content": "# Agent guidance\n",
                     "overwrite": False,
                 },
