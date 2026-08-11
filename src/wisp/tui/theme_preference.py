@@ -6,13 +6,16 @@ and never crosses the subprocess boundary (see ``tui/launch.py``). It is stored
 beside the other user-local client state in ``~/.wisp/`` rather than in the
 agent's settings file, which project directories can influence.
 
-Reading is forgiving and writing is conservative. A malformed or unreadable file
-is ignored on load rather than fatal, matching how settings files are treated: an
-unusable preference falls back to the default theme instead of preventing the TUI
-from starting. Saving, by contrast, would rather not persist at all than damage
-what is already on disk — it refuses to overwrite a document it could not read
-back, and stages writes through a temporary file so a failure cannot leave a
-truncated one behind.
+Reading is forgiving and writing is conservative. Any unusable file — missing,
+permission-denied, not valid UTF-8, not valid JSON, or valid JSON of the wrong
+shape — falls back to the default theme on load rather than raising, matching how
+settings files are treated. This matters more than it looks: loading happens
+during ``on_mount``, so an escaping exception here does not degrade the theme, it
+stops the TUI from starting.
+
+Saving, by contrast, would rather not persist at all than damage what is already
+on disk. It refuses to overwrite a document it could not read back, and stages
+writes through a temporary file so a failure cannot leave a truncated one behind.
 """
 
 from __future__ import annotations
@@ -28,11 +31,38 @@ _PREFERENCE_FILENAME = "tui.json"
 _THEME_KEY = "theme"
 
 
+class _Unreadable(Exception):
+    """The file exists but its contents could not be recovered."""
+
+
 def theme_preference_path(*, home_dir: Path | None = None) -> Path:
     """Return the user-local file holding TUI presentation preferences."""
 
     home = Path.home() if home_dir is None else home_dir
     return home.expanduser() / ".wisp" / _PREFERENCE_FILENAME
+
+
+def _read_document(path: Path) -> str | None:
+    """Return the file's text, ``None`` when absent, or raise :class:`_Unreadable`.
+
+    Reading can fail at two layers, and only one of them is an ``OSError``:
+    the filesystem may refuse the read, or the bytes may not be valid UTF-8
+    (``UnicodeDecodeError`` subclasses ``ValueError``). A partially written or
+    corrupted file produces the latter, so handling only ``OSError`` left a
+    decode error escaping to the caller — and since loading happens during
+    ``on_mount``, that stopped the TUI from starting at all.
+
+    The three outcomes stay distinct because callers need them to be: absent
+    means "no preference yet", unreadable means "do not overwrite what you
+    cannot see", and text means "parse it".
+    """
+
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as error:
+        raise _Unreadable(str(error)) from error
 
 
 def load_theme_preference(
@@ -47,9 +77,13 @@ def load_theme_preference(
     Textual cannot resolve.
     """
 
+    # Absent and unreadable are the same answer here — no usable preference —
+    # unlike `save`, where the two call for opposite behavior.
     try:
-        raw = theme_preference_path(home_dir=home_dir).read_text(encoding="utf-8")
-    except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+        raw = _read_document(theme_preference_path(home_dir=home_dir))
+    except _Unreadable:
+        return None
+    if raw is None:
         return None
 
     try:
@@ -81,13 +115,11 @@ def save_theme_preference(theme: str, *, home_dir: Path | None = None) -> bool:
     path = theme_preference_path(home_dir=home_dir)
     payload: dict[str, object] = {}
     try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        # The only failure that genuinely means "no document yet". Every other
-        # read error leaves the file's real contents unknown, and overwriting
-        # then would silently drop unrelated preferences.
-        raw = None
-    except OSError:
+        # An absent file genuinely means "no document yet". Anything unreadable
+        # leaves the real contents unknown, and overwriting then would silently
+        # drop unrelated preferences.
+        raw = _read_document(path)
+    except _Unreadable:
         return False
 
     if raw is not None:

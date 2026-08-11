@@ -137,6 +137,66 @@ def test_malformed_preference_falls_back_instead_of_raising(tmp_path: Path, cont
     assert load_theme_preference(home_dir=tmp_path) is None
 
 
+def test_unreadable_file_loads_as_unset_rather_than_raising(tmp_path: Path) -> None:
+    # Load is forgiving where save is conservative: startup must never fail
+    # because the preference file could not be read.
+    path = theme_preference_path(home_dir=tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"theme": "wisp-light"}), encoding="utf-8")
+
+    def _explode(*args: object, **kwargs: object) -> str:
+        raise PermissionError("read denied")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "read_text", _explode)
+        assert load_theme_preference(home_dir=tmp_path) is None
+
+
+def test_invalid_utf8_loads_as_unset_rather_than_crashing_startup(tmp_path: Path) -> None:
+    # Reading fails at two layers and only one is an OSError: UnicodeDecodeError
+    # subclasses ValueError. A partial or corrupted write produces exactly this,
+    # and because loading runs during on_mount an escaping exception would stop
+    # the TUI from starting rather than merely losing the theme.
+    path = theme_preference_path(home_dir=tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'{"theme": "\xff\xfe not utf-8"}')
+
+    assert load_theme_preference(home_dir=tmp_path) is None
+
+
+def test_invalid_utf8_is_not_overwritten_by_a_save(tmp_path: Path) -> None:
+    # Undecodable bytes are unreadable, not empty: the real contents are unknown,
+    # so saving must refuse rather than replace whatever was there.
+    path = theme_preference_path(home_dir=tmp_path)
+    path.parent.mkdir(parents=True)
+    original = b'{"theme": "\xff\xfe not utf-8"}'
+    path.write_bytes(original)
+
+    assert not save_theme_preference("wisp-light", home_dir=tmp_path)
+
+    assert path.read_bytes() == original
+
+
+def test_startup_survives_an_undecodable_preference_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The end-to-end form of the same guarantee, through a real app mount.
+    from wisp.tui.textual_app import TextualTui
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    path = theme_preference_path(home_dir=tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\xff\xfe\x00garbage")
+
+    async def scenario() -> str:
+        app = TextualTui()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            return str(app.theme)
+
+    assert anyio.run(scenario) == WISP_THEMES[0].name
+
+
 def test_unknown_theme_is_rejected_when_valid_names_are_supplied(tmp_path: Path) -> None:
     # Textual registers ~20 built-in themes alongside Wisp's own. Adopting one
     # would leave transcript role colors and diff variables unresolvable.
