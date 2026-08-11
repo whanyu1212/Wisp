@@ -14,6 +14,7 @@ Stage 2 replaces the append-only ``RichLog`` transcript with a
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -2599,6 +2600,32 @@ class StatusBar(Static):
         self.update(format_tui_footer_text(self._snapshot, width=width if width > 0 else None))
 
 
+class _StreamMarkdown(Markdown):
+    """Markdown child whose mount-time empty update has definitely completed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._ready = asyncio.Event()
+
+    # Textual's runtime Markdown handler is async although its inherited type is sync.
+    async def _on_mount(self, event: events.Mount) -> None:  # type: ignore[override]
+        # Textual 8.2.8 dispatches named handlers for every class in the widget MRO.
+        # Prevent that default traversal because we must signal readiness *after*
+        # Markdown's mount-time update("") and Widget's mount setup both finish.
+        # Calling super() without this guard would run Markdown._on_mount twice.
+        event.prevent_default()
+        try:
+            await super()._on_mount(event)
+            Widget._on_mount(self, event)
+        finally:
+            self._ready.set()
+
+    async def wait_until_ready(self) -> None:
+        """Wait until Textual can no longer overwrite content during mounting."""
+
+        await self._ready.wait()
+
+
 class StreamMessage(Widget):
     """One assistant turn rendered through Textual's public Markdown API."""
 
@@ -2606,7 +2633,8 @@ class StreamMessage(Widget):
     StreamMessage {
         height: auto;
     }
-    StreamMessage > Markdown {
+    StreamMessage > Markdown,
+    StreamMessage > .stream-fallback {
         height: auto;
         margin: 0;
     }
@@ -2617,17 +2645,34 @@ class StreamMessage(Widget):
         self.add_class("message", "message--assistant")
         # Match settled assistant turns: role styling remains, but conversation
         # cards intentionally have no visible role title.
-        self._markdown = Markdown()
+        self._markdown = _StreamMarkdown()
+        # Keep the literal fallback mounted but hidden. If Markdown's authoritative
+        # replacement fails, switching already-mounted children is synchronous and
+        # preserves this StreamMessage's history identity.
+        self._fallback = Static(Content(), classes="stream-fallback")
+        self._fallback.display = False
 
     def compose(self) -> ComposeResult:
         yield self._markdown
+        yield self._fallback
 
     async def append_markdown(self, fragment: str) -> None:
-        """Append one provider fragment after Textual has applied its layout update."""
+        """Append one provider fragment after Markdown mount initialization."""
 
+        await self._markdown.wait_until_ready()
         await self._markdown.append(fragment)
 
     async def replace_markdown(self, content: str) -> None:
-        """Replace the document from the authoritative completed message."""
+        """Render authoritative content, falling back to literal text on failure."""
 
-        await self._markdown.update(content)
+        await self._markdown.wait_until_ready()
+        try:
+            await self._markdown.update(content)
+        except Exception as error:
+            # MessageCompleted is suppressed after streaming starts, making this
+            # authoritative source the only live copy. Preserve it as literal text
+            # rather than allowing a parser/layout failure to leave a blank turn.
+            self.log.error(f"Markdown finalization failed; using literal fallback: {error}")
+            self._fallback.update(Content(content))
+            self._markdown.display = False
+            self._fallback.display = True
