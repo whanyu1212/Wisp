@@ -218,10 +218,10 @@ class TextualTui(App[None]):
         align: right middle;
     }
 
-    /* Minimalist messages: left rails distinguish conversation roles without
-       visible role labels; user turns use a heavier rail so authorship remains
-       legible without color. No top border or fill. Colors come only from theme
-       vars present in both themes. */
+    /* Left rails and lifecycle glyphs keep conversation roles legible without
+       color. Subtle surfaces distinguish authored input and tool state while
+       assistant prose stays open on the transcript background. Colors come only
+       from theme vars present in both themes. */
     .message {
         height: auto;
         margin: 1 0 0 0;
@@ -232,14 +232,19 @@ class TextualTui(App[None]):
 
     .message--user {
         border-left: heavy $primary;
+        background: $panel;
+        padding-right: 1;
     }
 
     .message--assistant {
         border-left: outer $success;
+        background: transparent;
     }
 
     .message--tool {
         border-left: outer $accent;
+        background: $surface;
+        padding-right: 1;
     }
 
     .message--notice {
@@ -248,11 +253,20 @@ class TextualTui(App[None]):
 
     .message--approved {
         border-left: outer $success;
+        background: $success-muted;
+        padding-right: 1;
     }
 
-    .message--denied,
+    .message--denied {
+        border-left: outer $warning;
+        background: $warning-muted;
+        padding-right: 1;
+    }
+
     .message--error {
         border-left: outer $error;
+        background: $error-muted;
+        padding-right: 1;
     }
 
     .message--dim,
@@ -262,10 +276,10 @@ class TextualTui(App[None]):
         color: $text-muted;
     }
 
-    /* A focused tool card (reached by Tab) is the expand/collapse target; a subtle
-       fill marks it without competing with the role-colored left rule. */
+    /* A focused tool card (reached by Tab) is the expand/collapse target. An
+       outline preserves its lifecycle surface instead of replacing that state. */
     ToolCard:focus {
-        background: $boost;
+        outline: outer $accent;
     }
 
     /* One bordered panel frames the editor and its status line as a single

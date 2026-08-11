@@ -49,6 +49,7 @@ from wisp.events import ManagedProcessState
 from wisp.tool_presentation import tool_result_failed
 from wisp.tui.diff_presentation import (
     DIFF_ADD_STYLE,
+    DIFF_CONTEXT_STYLE,
     DIFF_DEL_STYLE,
     DIFF_EXPANDED_BYTES,
     DIFF_EXPANDED_ROWS,
@@ -69,6 +70,7 @@ from wisp.tui.widgets import (
 # Preserve the established private names for direct legacy renderer tests while
 # sharing the actual style values with the structured ToolCard painter.
 _DIFF_ADD_STYLE = DIFF_ADD_STYLE
+_DIFF_CONTEXT_STYLE = DIFF_CONTEXT_STYLE
 _DIFF_DEL_STYLE = DIFF_DEL_STYLE
 _DIFF_META_STYLE = DIFF_META_STYLE
 _DIFF_INTRA_HIGHLIGHT_MODIFIER = DIFF_INTRA_HIGHLIGHT_MODIFIER
@@ -1388,7 +1390,7 @@ def _content_from_diff_lines(
 def _styled_line_with_intra_highlights(
     line: str, ranges: Sequence[tuple[int, int]], base_style: str
 ) -> Content:
-    """A diff line's ``Content``, with ``ranges`` bold on top of ``base_style``.
+    """A diff line's ``Content``, with ``ranges`` reversed on top of ``base_style``.
 
     ``ranges`` are offsets into the line's *content* (after the leading
     ``+``/``-`` marker) as computed by :func:`_intra_line_highlight_map` —
@@ -1398,7 +1400,7 @@ def _styled_line_with_intra_highlights(
     the clip point contributes nothing, and one straddling it is truncated.
 
     Builds the line as several concatenated ``Content.styled`` segments — an
-    unhighlighted segment, a bold-modified highlighted segment, repeating —
+    unhighlighted segment, a reverse-emphasized highlighted segment, repeating —
     rather than one call for the whole line, so each segment gets its own
     independent style span (verified: concatenating ``Content.styled`` calls
     produces correctly offset, independent spans). A line with no highlight
@@ -1469,7 +1471,7 @@ def _diff_line_style(line: str) -> str:
     """Theme style for a unified-diff line, chosen by its leading marker.
 
     ``@@`` range markers are metadata; ``+``/``-`` are additions/deletions;
-    everything else is unchanged context (no style, so it reads as body text).
+    everything else is muted unchanged context.
     """
 
     if line.startswith("@@"):
@@ -1478,4 +1480,4 @@ def _diff_line_style(line: str) -> str:
         return _DIFF_ADD_STYLE
     if line.startswith("-"):
         return _DIFF_DEL_STYLE
-    return ""
+    return _DIFF_CONTEXT_STYLE

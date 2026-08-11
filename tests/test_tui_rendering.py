@@ -1054,6 +1054,15 @@ def test_tui_notice_role_uses_a_distinct_color_from_tool() -> None:
         assert theme.accent in styles["tool"]
 
 
+def test_denied_role_uses_warning_instead_of_execution_error_color() -> None:
+    from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT, role_styles
+
+    for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
+        styles = role_styles(theme)
+        assert theme.warning in styles["denied"]
+        assert theme.error not in styles["denied"]
+
+
 def test_denied_and_error_tool_cards_have_distinct_glyph_and_label() -> None:
     # Issue #76: a user-denied tool call and a genuine execution error
     # previously shared the same glyph ("✗"), the same "denied" CSS role

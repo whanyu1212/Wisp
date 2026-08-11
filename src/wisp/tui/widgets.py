@@ -18,7 +18,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 
-from rich.cells import cell_len, set_cell_size
+from rich.cells import cell_len
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -61,6 +61,7 @@ from wisp.tui.decision_content import (
 )
 from wisp.tui.diff_presentation import (
     DIFF_ADD_STYLE,
+    DIFF_CONTEXT_STYLE,
     DIFF_DEL_STYLE,
     DIFF_INTRA_HIGHLIGHT_MODIFIER,
     DIFF_META_STYLE,
@@ -315,13 +316,17 @@ def _render_diff_presentation(
     """Paint one structured diff with a fixed gutter and no ambiguous wrapping."""
 
     inner_width = max(1, width - 2)  # ToolCard indents details by two cells.
-    counts = f"+{presentation.additions} -{presentation.deletions}"
-    path_width = max(1, inner_width - cell_len(counts) - 4)
+    additions = f"+{presentation.additions}"
+    deletions = f"-{presentation.deletions}"
+    counts_width = cell_len(additions) + 1 + cell_len(deletions)
+    path_width = max(1, inner_width - counts_width - 4)
     path = _truncate_to_cell_width(presentation.file_label, path_width)
     header = (
         Content.styled(f"{presentation.file_marker} {path}", "b")
         + Content("  ")
-        + Content.styled(counts, DIFF_META_STYLE)
+        + Content.styled(additions, DIFF_ADD_STYLE)
+        + Content(" ")
+        + Content.styled(deletions, DIFF_DEL_STYLE)
     )
     content = Content("  ") + header
     for visible_row in presentation.visible_rows(expanded=expanded):
@@ -339,17 +344,12 @@ def _render_diff_visible_row(
     width: int,
     show_line_numbers: bool,
 ) -> Content:
-    """Render one selected row, filling changed backgrounds through the gutter."""
+    """Render one selected row without adding presentation-only trailing cells."""
 
     row = visible_row.row
-    if row.kind is DiffRowKind.omission:
+    if row.kind in {DiffRowKind.omission, DiffRowKind.hunk}:
         return Content("  ") + Content.styled(
-            _pad_to_cell_width(_truncate_to_cell_width(row.text, width), width),
-            DIFF_META_STYLE,
-        )
-    if row.kind is DiffRowKind.hunk:
-        return Content("  ") + Content.styled(
-            _pad_to_cell_width(_truncate_to_cell_width(row.text, width), width),
+            _truncate_to_cell_width(row.text, width),
             DIFF_META_STYLE,
         )
 
@@ -367,13 +367,8 @@ def _render_diff_visible_row(
     source_width = max(1, width - cell_len(gutter))
     source, emphasis_ranges = _crop_diff_row_source(row, width=source_width)
     style = _diff_row_style(row)
-    return (
-        Content.styled("  " + gutter, style)
-        + _styled_diff_source(source, emphasis_ranges, style)
-        + Content.styled(
-            _pad_to_cell_width("", max(0, source_width - cell_len(source))),
-            style,
-        )
+    return Content.styled("  " + gutter, style) + _styled_diff_source(
+        source, emphasis_ranges, style
     )
 
 
@@ -417,7 +412,9 @@ def _diff_row_style(row: DiffRow) -> str:
         return DIFF_ADD_STYLE
     if row.kind is DiffRowKind.deletion:
         return DIFF_DEL_STYLE
-    return ""
+    if row.kind is DiffRowKind.context:
+        return DIFF_CONTEXT_STYLE
+    return DIFF_META_STYLE
 
 
 def _crop_diff_source(
@@ -546,12 +543,6 @@ def _styled_diff_source(
             Content.styled(source[cursor:], base_style) if base_style else Content(source[cursor:])
         )
     return content
-
-
-def _pad_to_cell_width(text: str, width: int) -> str:
-    """Pad literal text to exactly ``width`` terminal cells without wrapping."""
-
-    return set_cell_size(text, width) if width > 0 else ""
 
 
 def _preview_tool_output(
@@ -2195,9 +2186,9 @@ class ToolCard(Static):
     approval resolution (only for safety-gated tools), and a result. Rather than
     mint a separate line per event, one ``ToolCard`` is mounted on the request and
     then *mutated in place* as the later events arrive. The card carries its status
-    in a leading glyph plus the role CSS class (which colors the left rule), so the
-    whole lifecycle reads as one card transitioning pending → running → done/error
-    instead of three stacked cards the reader has to reconcile. Resolved cards add
+    in a leading glyph plus the role CSS class (which styles its rail and surface),
+    so the whole lifecycle reads as one card transitioning pending → running →
+    done/error instead of three stacked cards the reader has to reconcile. Resolved cards add
     a bounded multiline output preview below their compact status row.
 
     Parallel calls each own a stable card regardless of finish order, because the
@@ -2213,8 +2204,8 @@ class ToolCard(Static):
     tool. Escape returns focus to the prompt or active safety decision.
     """
 
-    # status → (leading glyph, role class). The role class drives the left-rule
-    # color via the shared `.message--{role}` CSS in TextualTui.
+    # status → (leading glyph, role class). The role class drives the rail and
+    # lifecycle surface via the shared `.message--{role}` CSS in TextualTui.
     #
     # denied and error previously shared both the "✗" glyph AND the "denied"
     # role class, making a user-denied tool call visually identical to a
@@ -2345,7 +2336,7 @@ class ToolCard(Static):
         at the honest value and stops the per-card timer. ``full_output`` is the
         tool's full (tool-bounded) output, retained so the reader can expand past the
         collapsed detail; ``truncated`` says the tool itself capped that output. The
-        role CSS class is swapped rather than added so the left-rule color reflects
+        role CSS class is swapped rather than added so the rail and surface reflect
         only the current state.
         """
 

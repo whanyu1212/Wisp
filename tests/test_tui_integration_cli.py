@@ -1673,12 +1673,10 @@ def test_textual_tool_card_edit_renders_colored_diff() -> None:
     assert "M src/foo.py  +1 -1" in text
     assert "- │ return 1" in text  # deletion gutter + literal source
     assert "+ │ return 2" in text  # addition gutter + literal source
-    # Diff spans carry the theme *variables* ($success/$error), not baked hex —
-    # Textual resolves them per active theme at paint time, so a theme switch
-    # recolors the diff. Asserting the variable names proves it's theme-linked,
-    # not hardcoded, which is the whole point of using $success/$error.
-    assert "$success" in styles  # additions
-    assert "$error" in styles  # deletions
+    # Diff spans carry semantic theme variables, not baked hex. Textual resolves
+    # them per active theme at paint time, so a theme switch recolors the diff.
+    assert "$text-success" in styles  # additions
+    assert "$text-error" in styles  # deletions
 
 
 @pytest.mark.parametrize("size", [(28, 20), (80, 24), (120, 40)])
@@ -2005,8 +2003,8 @@ def test_textual_tool_card_write_renders_colored_diff() -> None:
     assert "M src/foo.py  +1 -1" in text
     assert "- │ line a" in text  # deletion line (prior content)
     assert "+ │ line b" in text  # addition line (new content)
-    assert "$success" in styles  # additions
-    assert "$error" in styles  # deletions
+    assert "$text-success" in styles  # additions
+    assert "$text-error" in styles  # deletions
 
 
 def test_textual_tool_card_write_create_renders_pure_addition() -> None:
@@ -2770,9 +2768,9 @@ def test_textual_transcript_uses_theme_colors() -> None:
     assert anyio.run(scenario) == ("#5cc9a7", "#d06a7c")
 
 
-def test_textual_tool_card_carries_role_class_for_left_rule_color() -> None:
-    # A ToolCard's color lives in its `message--<role>` CSS class (which drives the
-    # left-rule color), not in a text span — so assert the class, not a span color.
+def test_textual_tool_card_carries_role_class_for_lifecycle_styling() -> None:
+    # A ToolCard's rail and surface live in its `message--<role>` CSS class, not
+    # in text spans — so assert the class rather than a span color.
     cards = _cards_for_events([ToolCallRequested(call_id="c1", name="bash", arguments={})])
     assert cards == [("message--tool", "tool")]
 
@@ -3313,6 +3311,78 @@ def test_textual_turn_rails_distinguish_conversation_roles_without_color() -> No
         ("message--assistant", "outer"),
         ("message--tool", "outer"),
     ]
+
+
+@pytest.mark.parametrize("theme", ["wisp", "wisp-light"])
+def test_textual_transcript_surfaces_follow_authorship_and_tool_state(theme: str) -> None:
+    async def scenario() -> tuple[dict[str, str], dict[str, str], int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            app_instance.theme = theme
+            renderer.prompt_submitted("hello")
+            renderer.event(completed_message(content="hi"))
+            renderer.event(ToolCallRequested(call_id="pending", name="read", arguments={}))
+            renderer.event(ToolCallRequested(call_id="done", name="read", arguments={}))
+            renderer.event(
+                ToolResultReady(call_id="done", name="read", output="ok", is_error=False)
+            )
+            renderer.event(ToolCallRequested(call_id="error", name="read", arguments={}))
+            renderer.event(
+                ToolResultReady(call_id="error", name="read", output="boom", is_error=True)
+            )
+            renderer.event(ToolCallRequested(call_id="denied", name="write", arguments={}))
+            renderer.event(
+                ToolApprovalResolved(call_id="denied", name="write", approved=False, reason="no")
+            )
+            await pilot.pause()
+
+            transcript = app_instance.query_one("#transcript", Transcript)
+            backgrounds = {
+                role: child.styles.background.hex.lower()
+                for child in transcript.children
+                if (role := _transcript_role_class(child)) is not None
+            }
+            variables = {
+                name: value.lower()
+                for name, value in app_instance.get_css_variables().items()
+                if name in {"panel", "surface", "success-muted", "error-muted", "warning-muted"}
+            }
+            assistant = next(
+                child for child in transcript.children if child.has_class("message--assistant")
+            )
+            return backgrounds, variables, assistant.styles.background.a
+
+    backgrounds, variables, assistant_alpha = anyio.run(scenario)
+    assert backgrounds == {
+        "message--user": variables["panel"],
+        "message--assistant": "#00000000",
+        "message--tool": variables["surface"],
+        "message--approved": variables["success-muted"],
+        "message--error": variables["error-muted"],
+        "message--denied": variables["warning-muted"],
+    }
+    assert assistant_alpha == 0
+
+
+def test_textual_focused_tool_card_preserves_lifecycle_surface() -> None:
+    async def scenario() -> tuple[str, str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={}))
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            before = card.styles.background.hex.lower()
+            card.focus()
+            await pilot.pause()
+            return (
+                before,
+                card.styles.background.hex.lower(),
+                card.styles.outline_left[1].hex.lower(),
+            )
+
+    before, after, outline = anyio.run(scenario)
+    assert after == before
+    assert outline == "#3fb8b8"
 
 
 def test_textual_denied_and_error_tool_cards_render_distinct_glyphs() -> None:

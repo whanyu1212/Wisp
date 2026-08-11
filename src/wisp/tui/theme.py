@@ -78,7 +78,7 @@ _ROLE_COLOR_ATTR: dict[str, str] = {
     "assistant": "success",
     "tool": "accent",
     "approved": "success",
-    "denied": "error",
+    "denied": "warning",
 }
 _BOLD_ROLES = frozenset({"user", "assistant"})
 _MUTED_ROLES = frozenset({"dim", "session"})
