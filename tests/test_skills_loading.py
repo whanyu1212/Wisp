@@ -275,6 +275,53 @@ def test_skill_tool_runs_loading_off_the_event_loop(
     assert calls == [None]
 
 
+@pytest.mark.parametrize(
+    ("context", "expected_max_bytes", "expected_max_lines"),
+    [
+        (ToolContext(cwd=Path("."), max_output_bytes=96, max_output_lines=2_000), 96, 2_000),
+        (ToolContext(cwd=Path("."), max_output_bytes=50_000, max_output_lines=4), 50_000, 4),
+    ],
+)
+def test_skill_tool_bounds_final_framed_output(
+    tmp_path: Path,
+    context: ToolContext,
+    expected_max_bytes: int,
+    expected_max_lines: int,
+) -> None:
+    entry = _entry(tmp_path)
+    tool = SkillTool(SkillCatalog(entries=(entry,)))
+    bounded_context = ToolContext(
+        cwd=tmp_path,
+        max_output_bytes=context.max_output_bytes,
+        max_output_lines=context.max_output_lines,
+    )
+
+    async def scenario() -> None:
+        result = await tool.run({"name": "demo"}, bounded_context)
+
+        assert len(result.text.encode("utf-8")) <= expected_max_bytes
+        assert len(result.text.splitlines()) <= expected_max_lines
+        assert result.text.endswith("[truncated]")
+        assert result.truncated is True
+
+    anyio.run(scenario)
+
+
+def test_skill_tool_honors_zero_line_budget(tmp_path: Path) -> None:
+    tool = SkillTool(SkillCatalog(entries=(_entry(tmp_path),)))
+
+    async def scenario() -> None:
+        result = await tool.run(
+            {"name": "demo"},
+            ToolContext(cwd=tmp_path, max_output_lines=0),
+        )
+
+        assert result.text == ""
+        assert result.truncated is True
+
+    anyio.run(scenario)
+
+
 def test_skill_tool_rejects_unknown_name_without_paths(tmp_path: Path) -> None:
     tool = SkillTool()
 
