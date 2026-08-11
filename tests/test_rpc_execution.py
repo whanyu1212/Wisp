@@ -19,6 +19,7 @@ from wisp.coding.session import _RetainedQueueState
 from wisp.config import WispConfig
 from wisp.events import (
     ErrorEvent,
+    MessageCompleted,
     QueueItemsRemoved,
     QueueUpdated,
     RpcCommandFinished,
@@ -37,6 +38,8 @@ from wisp.events import (
     RpcSkillsReported,
     RpcStateReported,
     RpcStateSnapshot,
+    ToolCallSnapshot,
+    ToolExecutionEnded,
     WispEvent,
 )
 from wisp.providers.base import ToolSpec
@@ -242,6 +245,7 @@ def test_init_dispatches_repository_specific_create_only_prompt(
         fixture.agent.project_context_root = None
         fixture.agent.tool_context = ToolContext(cwd=subdirectory)
         prompts: list[str] = []
+        instructions: list[str] = []
         operation_contexts: list[ToolContext] = []
 
         async def capture_run(
@@ -252,9 +256,33 @@ def test_init_dispatches_repository_specific_create_only_prompt(
             context = kwargs.get("tool_context")
             assert isinstance(context, ToolContext)
             operation_contexts.append(context)
-            (context.cwd / "AGENTS.md").write_text("# Agent guidance\n", encoding="utf-8")
-            if False:
-                yield ErrorEvent(message="unreachable")
+            operation_instructions = kwargs.get("operation_instructions")
+            assert isinstance(operation_instructions, str)
+            instructions.append(operation_instructions)
+            target = context.cwd / "AGENTS.md"
+            target.write_text("# Agent guidance\n", encoding="utf-8")
+            call = ToolCallSnapshot(
+                call_id="write-1",
+                name="write",
+                arguments={
+                    "path": str(target),
+                    "content": "# Agent guidance\n",
+                    "overwrite": False,
+                },
+            )
+            yield MessageCompleted(
+                turn=1,
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=(call,),
+            )
+            yield ToolExecutionEnded(
+                call_id=call.call_id,
+                name="write",
+                output="Wrote 17 bytes to AGENTS.md",
+                is_error=False,
+                created=True,
+            )
 
         monkeypatch.setattr(fixture.agent, "run", capture_run)
         send, receive = anyio.create_memory_object_stream(10)
@@ -269,11 +297,12 @@ def test_init_dispatches_repository_specific_create_only_prompt(
         assert isinstance(completed, _RpcCommandCompleted)
         assert completed.command_id == "init-1"
         assert completed.ok is True
-        assert len(prompts) == 1
+        assert prompts == ["/init"]
         assert [context.cwd for context in operation_contexts] == [project]
-        assert json.dumps(str(project / "AGENTS.md"), ensure_ascii=False) in prompts[0]
-        assert "overwrite=false" in prompts[0]
-        assert "Modify no other file" in prompts[0]
+        assert len(instructions) == 1
+        assert json.dumps(str(project / "AGENTS.md"), ensure_ascii=False) in instructions[0]
+        assert "overwrite=false" in instructions[0]
+        assert "Modify no other file" in instructions[0]
 
     anyio.run(scenario)
 
@@ -311,7 +340,47 @@ def test_init_fails_when_agent_does_not_create_guidance(
         assert completed.ok is False
         finished = next(event for event in fixture.events if isinstance(event, RpcCommandFinished))
         assert finished.error == (
-            f"Project initialization completed without creating {project / 'AGENTS.md'}"
+            "Project initialization completed without a successful create-only write to "
+            f"{project / 'AGENTS.md'}"
+        )
+
+    anyio.run(scenario)
+
+
+def test_init_does_not_accept_a_concurrently_created_file(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        fixture = await build_rpc_executor_fixture(tmp_path / "sessions")
+        _enable_project_init(fixture, project)
+
+        async def raced_run(
+            _prompt: str,
+            **_kwargs: object,
+        ) -> AsyncIterator[WispEvent]:
+            (project / "AGENTS.md").write_text("Created elsewhere.\n", encoding="utf-8")
+            if False:
+                yield ErrorEvent(message="unreachable")
+
+        monkeypatch.setattr(fixture.agent, "run", raced_run)
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            fixture.executor(task_group=task_group, send=send).dispatch(
+                {"id": "init-1", "type": "init"},
+                None,
+            )
+            completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert isinstance(completed, _RpcCommandCompleted)
+        assert completed.ok is False
+        finished = next(event for event in fixture.events if isinstance(event, RpcCommandFinished))
+        assert finished.error == (
+            "Project initialization completed without a successful create-only write to "
+            f"{project / 'AGENTS.md'}"
         )
 
     anyio.run(scenario)

@@ -418,6 +418,7 @@ class CodingSession:
         history: Sequence[Message] = (),
         operation_id: str | None = None,
         tool_context: ToolContext | None = None,
+        operation_instructions: str | None = None,
     ) -> AsyncIterator[WispEvent]:
         async with self._operation_lock:
             self._operation_active = True
@@ -427,6 +428,7 @@ class CodingSession:
                 history=history,
                 operation_id=operation_id,
                 tool_context=tool_context,
+                operation_instructions=operation_instructions,
             )
             try:
                 async for event in events:
@@ -454,6 +456,7 @@ class CodingSession:
         history: Sequence[Message] = (),
         operation_id: str | None = None,
         tool_context: ToolContext | None = None,
+        operation_instructions: str | None = None,
     ) -> AsyncGenerator[WispEvent, None]:
         operation_context = tool_context or self.tool_context
         user_message = await self._prepare_user_message(prompt, context=operation_context)
@@ -478,6 +481,11 @@ class CodingSession:
             registry=operation_registry,
             context=operation_context,
         )
+        if operation_instructions:
+            prompt_messages = (
+                *prompt_messages,
+                Message(role="system", content=operation_instructions),
+            )
         executor = ConfiguredToolExecutor(
             registry=operation_registry,
             context=operation_context,

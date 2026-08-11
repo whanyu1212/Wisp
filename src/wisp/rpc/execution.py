@@ -6,7 +6,7 @@ import json
 import stat
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -24,6 +24,7 @@ from wisp.events import (
     AgentStarted,
     CodingSessionState,
     ErrorEvent,
+    MessageCompleted,
     ModelProviderAutoSwitched,
     QueueItemsRemoved,
     QueueKind,
@@ -54,6 +55,7 @@ from wisp.events import (
     RpcStateReported,
     RpcStateSnapshot,
     SessionStatsReported,
+    ToolExecutionEnded,
     WispEvent,
 )
 from wisp.providers.base import Provider
@@ -253,15 +255,16 @@ class RpcCommandExecutor:
 
     def _dispatch_init(self, command: dict[str, object]) -> _RpcDispatchResult:
         try:
-            prompt, tool_context, target = _project_init_request(self.agent)
+            instructions, tool_context, target = _project_init_request(self.agent)
         except ValueError as exc:
             self.reject(command, str(exc))
             return _RpcDispatchResult(
                 running_command=None,
                 selected_session=self.session_state.session,
             )
+        completion = _ProjectInitCompletion(target)
         new_running_command, new_session = start_rpc_prompt_command(
-            {**command, "prompt": prompt},
+            {**command, "prompt": "/init"},
             agent=self.agent,
             sessions=self.sessions,
             session_state=self.session_state,
@@ -271,7 +274,9 @@ class RpcCommandExecutor:
             write_event=self.write_event,
             render_events=self.render_events,
             tool_context=tool_context,
-            completion_error=partial(_project_init_completion_error, target),
+            operation_instructions=instructions,
+            event_observer=completion.observe,
+            completion_error=completion.error,
             running_command_factory=self.running_command_factory,
             command_completed_factory=self.command_completed_factory,
         )
@@ -634,18 +639,49 @@ remains create-only if the filesystem changes during your inspection."""
     return prompt, replace(agent.tool_context, cwd=project_root), target
 
 
-def _project_init_completion_error(target: Path) -> str | None:
-    try:
-        info = target.lstat()
-    except FileNotFoundError:
-        return f"Project initialization completed without creating {target}"
-    except OSError as exc:
-        return f"Could not inspect generated project guidance: {exc}"
-    if not stat.S_ISREG(info.st_mode):
-        return f"Project initialization did not create a regular file: {target}"
-    if info.st_size == 0:
-        return f"Project initialization created an empty file: {target}"
-    return None
+@dataclass(slots=True)
+class _ProjectInitCompletion:
+    target: Path
+    matching_call_ids: set[str] = field(default_factory=set)
+    created: bool = False
+
+    def observe(self, event: WispEvent) -> None:
+        if isinstance(event, MessageCompleted):
+            for call in event.tool_calls:
+                if (
+                    call.name == "write"
+                    and call.parse_error is None
+                    and call.arguments.get("path") == str(self.target)
+                    and call.arguments.get("overwrite") is False
+                ):
+                    self.matching_call_ids.add(call.call_id)
+            return
+        if (
+            isinstance(event, ToolExecutionEnded)
+            and event.call_id in self.matching_call_ids
+            and event.name == "write"
+            and not event.is_error
+            and event.created
+        ):
+            self.created = True
+
+    def error(self) -> str | None:
+        if not self.created:
+            return (
+                "Project initialization completed without a successful create-only write to "
+                f"{self.target}"
+            )
+        try:
+            info = self.target.lstat()
+        except FileNotFoundError:
+            return f"Project initialization completed without creating {self.target}"
+        except OSError as exc:
+            return f"Could not inspect generated project guidance: {exc}"
+        if not stat.S_ISREG(info.st_mode):
+            return f"Project initialization did not create a regular file: {self.target}"
+        if info.st_size == 0:
+            return f"Project initialization created an empty file: {self.target}"
+        return None
 
 
 def start_rpc_prompt_command(
@@ -660,6 +696,8 @@ def start_rpc_prompt_command(
     write_event: RpcEventWriter,
     render_events: RpcEventRenderer,
     tool_context: ToolContext | None = None,
+    operation_instructions: str | None = None,
+    event_observer: Callable[[WispEvent], None] | None = None,
     completion_error: Callable[[], str | None] | None = None,
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
@@ -703,6 +741,8 @@ def start_rpc_prompt_command(
         render_events,
         command_completed_factory,
         tool_context,
+        operation_instructions,
+        event_observer,
         completion_error,
     )
     return (
@@ -2292,6 +2332,8 @@ async def run_rpc_prompt_command(
     render_events: RpcEventRenderer,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
     tool_context: ToolContext | None = None,
+    operation_instructions: str | None = None,
+    event_observer: Callable[[WispEvent], None] | None = None,
     completion_error: Callable[[], str | None] | None = None,
 ) -> None:
     error: str | None = None
@@ -2302,6 +2344,8 @@ async def run_rpc_prompt_command(
     async def track_run_start(events: AsyncIterator[WispEvent]) -> AsyncIterator[WispEvent]:
         nonlocal run_active_leaf_id, run_entry_start, run_start_captured
         async for event in events:
+            if event_observer is not None:
+                event_observer(event)
             if isinstance(event, AgentStarted):
                 run_entry_start, run_active_leaf_id = await anyio.to_thread.run_sync(
                     rpc_session_run_start,
@@ -2325,6 +2369,7 @@ async def run_rpc_prompt_command(
                     session=session,
                     history=committed_history,
                     operation_id=command_id,
+                    operation_instructions=operation_instructions,
                 )
                 if tool_context is None
                 else agent.run(
@@ -2333,6 +2378,7 @@ async def run_rpc_prompt_command(
                     history=committed_history,
                     operation_id=command_id,
                     tool_context=tool_context,
+                    operation_instructions=operation_instructions,
                 )
             )
             await render_events(track_run_start(agent_events))

@@ -736,6 +736,37 @@ def test_coding_session_operation_tool_context_overrides_tool_root(tmp_path: Pat
     assert agent.tool_context.cwd == launch_directory
 
 
+def test_coding_session_keeps_operation_instructions_out_of_user_prompt(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider(
+        [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
+    )
+    sessions = JsonlSessionStore(tmp_path / "sessions")
+    session = sessions.create()
+    agent = CodingSession(provider=provider, sessions=sessions)
+
+    async def run_agent() -> None:
+        _ = [
+            event
+            async for event in agent.run(
+                "/init",
+                session=session,
+                operation_instructions="Inspect and initialize the repository.",
+            )
+        ]
+
+    anyio.run(run_agent)
+
+    provider_messages = provider.calls[0].messages
+    assert [(message.role, message.content) for message in provider_messages[-2:]] == [
+        ("system", "Inspect and initialize the repository."),
+        ("user", "/init"),
+    ]
+    persisted = session.read_context_messages()
+    assert [message.content for message in persisted if message.role == "user"] == ["/init"]
+
+
 def test_coding_session_persists_completion_before_exposing_it(
     tmp_path: Path,
 ) -> None:
