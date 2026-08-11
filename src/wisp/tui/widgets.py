@@ -22,7 +22,7 @@ from rich.cells import cell_len
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Center, Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
 from textual.timer import Timer
@@ -1598,11 +1598,35 @@ class SessionPicker(Vertical):
 class TranscriptEmptyState(Vertical):
     """Centered welcome panel shown only while the transcript has no output.
 
-    A native ``Label`` inside a fixed-width ``Center`` provides a compact
-    badge above the tagline, prompt hint, and quick-action reminder without
-    consuming a permanent header row. Every direct child has the same explicit width because
-    Textual centers these siblings as a block rather than independently.
+    Drawn lettering sits above the tagline, prompt hint and quick-action
+    reminder, without consuming a permanent header row. Every direct child is
+    given the same explicit width because Textual centers these siblings as a
+    block rather than independently — the width therefore has to fit the widest
+    of them, and the drawn wordmark is wider than any of the text lines.
+
+    Deliberately carries no provider/model/project line: the footer already
+    reports all three on the same screen, so repeating them here would be pure
+    duplication rather than orientation.
+
+    The panel sheds rows as the viewport shortens rather than overflowing: first
+    the quick actions, then the tagline and hint, and finally the tall wordmark
+    is exchanged for a one-row badge.
     """
+
+    # Falls back to a width that suits the text lines when the wordmark is
+    # narrower than they are, so a future shorter mark cannot squeeze them.
+    _MIN_BLOCK_WIDTH = 40
+
+    # Thresholds are measured against THIS PANEL's height, not the terminal's.
+    # The composer, status bar and hint row sit outside the transcript, so the
+    # panel receives roughly sixteen rows fewer than the window has.
+    #
+    # Everything shown needs 5 wordmark rows + 3 single rows + 3 margins = 11.
+    # Below that the quick actions go, then the tagline and hint; under 6 the
+    # tall wordmark no longer fits its own footprint and yields to the badge.
+    _FULL_HEIGHT = 11
+    _TAGLINE_HEIGHT = 8
+    _TALL_WORDMARK_HEIGHT = 6
 
     DEFAULT_CSS = """
     TranscriptEmptyState.-compact #transcript-empty-actions {
@@ -1615,24 +1639,31 @@ class TranscriptEmptyState(Vertical):
     }
     """
 
-    def __init__(self, wordmark: str, tagline: str, hint: str) -> None:
+    def __init__(
+        self,
+        wordmark: str,
+        compact_wordmark: str,
+        tagline: str,
+        hint: str,
+    ) -> None:
         super().__init__(id="transcript-empty")
         self._wordmark = wordmark
+        self._compact_wordmark = compact_wordmark
         self._tagline = tagline
         self._hint = hint
+        self._wordmark_label: Static | None = None
+        self._block_width = max(
+            self._MIN_BLOCK_WIDTH,
+            *(len(line) for line in wordmark.splitlines() or [""]),
+        )
 
-    @staticmethod
-    def _centered(widget: Widget) -> Widget:
-        widget.styles.width = 40
+    def _centered(self, widget: Widget) -> Widget:
+        widget.styles.width = self._block_width
         return widget
 
     def compose(self) -> ComposeResult:
-        yield self._centered(
-            Center(
-                Label(self._wordmark, id="transcript-empty-wordmark", markup=False),
-                id="transcript-empty-wordmark-frame",
-            )
-        )
+        self._wordmark_label = Static(self._wordmark, id="transcript-empty-wordmark", markup=False)
+        yield self._centered(self._wordmark_label)
         yield self._centered(Label(self._tagline, id="transcript-empty-tagline", markup=False))
         yield self._centered(Label(self._hint, id="transcript-empty-hint", markup=False))
         yield self._centered(
@@ -1644,8 +1675,13 @@ class TranscriptEmptyState(Vertical):
         )
 
     def on_resize(self, event: events.Resize) -> None:
-        self.set_class(self.size.height < 9, "-compact")
-        self.set_class(self.size.height < 6, "-minimal")
+        height = self.size.height
+        self.set_class(height < self._FULL_HEIGHT, "-compact")
+        self.set_class(height < self._TAGLINE_HEIGHT, "-minimal")
+        label = self._wordmark_label
+        if label is not None:
+            tall = height >= self._TALL_WORDMARK_HEIGHT
+            label.update(self._wordmark if tall else self._compact_wordmark)
 
 
 class OperationIndicator(Vertical):
@@ -1807,6 +1843,7 @@ class Transcript(VerticalScroll):
         self,
         *args: object,
         empty_wordmark: str | None = None,
+        empty_compact_wordmark: str = "",
         empty_tagline: str = "",
         empty_hint: str = "",
         **kwargs: object,
@@ -1818,6 +1855,7 @@ class Transcript(VerticalScroll):
         self._follow = True
         self._follow_generation = 0
         self._empty_wordmark = empty_wordmark
+        self._empty_compact_wordmark = empty_compact_wordmark
         self._empty_tagline = empty_tagline
         self._empty_hint = empty_hint
         self._empty_state: TranscriptEmptyState | None = None
@@ -1830,6 +1868,7 @@ class Transcript(VerticalScroll):
         if self._empty_wordmark is not None:
             self._empty_state = TranscriptEmptyState(
                 self._empty_wordmark,
+                self._empty_compact_wordmark,
                 self._empty_tagline,
                 self._empty_hint,
             )

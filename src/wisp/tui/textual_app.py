@@ -91,10 +91,31 @@ _ROLE_FALLBACK: dict[str, str] = {
     "denied": "red",
 }
 
-# The Wisp wordmark, shown while the transcript is empty. Wide-spaced uppercase
-# lettering gives the compact badge more presence without relying on terminal-
-# dependent ASCII art or unsupported font scaling.
-_WORDMARK = "W  I  S  P"
+# The Wisp wordmark, shown while the transcript is empty. Drawn from U+2588 FULL
+# BLOCK rather than box-drawing or ASCII art: a single, near-universally
+# available glyph whose cell is fully painted, so the letterforms hold their
+# shape in any monospace font without depending on how a terminal renders
+# partial blocks or line-drawing joins.
+#
+# Letters were laid out as per-glyph grids and joined column-wise; typing the
+# rows by hand produces subtly misaligned stems that stop reading as letters.
+# The rendered result is committed rather than generated at import time — there
+# is no runtime need to re-derive a constant.
+#
+# Every row is padded to the full width. `text-align: center` centers each line
+# independently, so ragged rows drift relative to one another and the letterforms
+# shear apart — the block has to be a true rectangle to hold its shape.
+_WORDMARK = """\
+█   █  ███  ████  ████
+█   █   █   █     █  █
+█ █ █   █   ████  ████
+██ ██   █      █  █   
+█   █  ███  ████  █   """
+# Cells occupied by the widest wordmark row, used to size the centered block.
+_WORDMARK_WIDTH = 22
+# The narrow fallback: five rows of lettering cannot fit a short terminal, so a
+# single-row badge keeps an identity present instead of dropping it entirely.
+_WORDMARK_COMPACT = "W  I  S  P"
 _EMPTY_TRANSCRIPT_TAGLINE = "A coding agent that stays in sync"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
 _MARKDOWN_VISIBLE_MARKERS = frozenset("`*_[]<>#|~-+\\&@")
@@ -162,26 +183,26 @@ class TextualTui(App[None]):
         scrollbar-color-active: $accent;
     }
 
+    /* No `min-height`: a floor here would keep `size.height` pinned above the
+       real viewport on a short terminal, so the panel's own resize breakpoints
+       could never observe the smaller sizes they exist to handle — and the
+       oversized panel would overflow the transcript and clip the wordmark
+       mid-glyph instead of switching to the compact badge. */
     #transcript-empty {
         width: 1fr;
         height: 1fr;
-        min-height: 9;
         align: center middle;
     }
 
-    #transcript-empty-wordmark-frame {
-        max-width: 100%;
-        height: 3;
-    }
-
+    /* No border and no fixed size: the drawn letterforms are the mark, and a
+       frame around them would read as chrome competing with the lettering.
+       `height: auto` lets the tall wordmark and the one-row compact fallback
+       share this rule. */
     #transcript-empty-wordmark {
-        width: 16;
-        height: 3;
-        padding: 0 2;
-        border: heavy $accent;
+        max-width: 100%;
+        height: auto;
         background: transparent;
         color: $accent;
-        text-style: bold;
         text-align: center;
     }
 
@@ -489,6 +510,7 @@ class TextualTui(App[None]):
             # height: 1fr and float the input into the middle of the screen.
             yield Transcript(
                 empty_wordmark=_WORDMARK,
+                empty_compact_wordmark=_WORDMARK_COMPACT,
                 empty_tagline=_EMPTY_TRANSCRIPT_TAGLINE,
                 empty_hint=_EMPTY_TRANSCRIPT_HINT,
                 id="transcript",

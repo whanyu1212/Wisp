@@ -6141,7 +6141,9 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
             await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
             empty = app_instance.query_one("#transcript-empty", TranscriptEmptyState)
-            wordmark = app_instance.query_one("#transcript-empty-wordmark", Label)
+            # Static, not Label: the wordmark is multi-line drawn lettering and
+            # is swapped for a one-row badge on short terminals.
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
             tagline = app_instance.query_one("#transcript-empty-tagline", Label)
             hint = app_instance.query_one("#transcript-empty-hint", Label)
             actions = app_instance.query_one("#transcript-empty-actions", Static)
@@ -6161,9 +6163,10 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
             assert isinstance(tagline_content, Content)
             assert isinstance(hint_content, Content)
             assert isinstance(actions_content, Content)
-            assert wordmark.region.width == 16
-            assert wordmark.region.height == 3
-            assert wordmark.styles.border_top[0] == "heavy"
+            # Drawn letterforms are the mark: no frame, and every row the same
+            # width so `text-align: center` cannot shear them apart.
+            assert wordmark.region.height == 5
+            assert not wordmark.styles.border_top[0]
             assert wordmark.styles.background.a == 0
             content = (
                 wordmark_content.plain,
@@ -6180,7 +6183,11 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
 
     content, centers, initial_children, final_children = anyio.run(scenario)
     wordmark, tagline, hint, actions = content
-    assert wordmark == "W  I  S  P"
+    wordmark_rows = wordmark.splitlines()
+    assert len(wordmark_rows) == 5
+    # A true rectangle. Ragged rows centre independently and the glyphs shear.
+    assert len({len(row) for row in wordmark_rows}) == 1
+    assert set("".join(wordmark_rows)) == {"█", " "}
     assert tagline == "A coding agent that stays in sync"
     assert hint == "Type a prompt or / for commands."
     assert actions == "/ commands  ·  /resume session"
@@ -6190,14 +6197,15 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
 
 
 def test_textual_startup_empty_state_wordmark_centers_match_hint() -> None:
-    # Regression: the badge is narrower than the hint, so its fixed-width
-    # Center wrapper must keep their true centers aligned.
+    # Regression: Textual centers these siblings as a block, not independently,
+    # so every child is given the same explicit width. That width has to fit the
+    # drawn wordmark, which is wider than any of the text lines.
     async def scenario() -> tuple[int, int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(90, 20)) as pilot:
             renderer.startup()
             await pilot.pause()
-            wordmark = app_instance.query_one("#transcript-empty-wordmark", Label)
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
             hint = app_instance.query_one("#transcript-empty-hint", Label)
             wordmark_center = wordmark.region.x + wordmark.region.width // 2
             hint_center = hint.region.x + hint.region.width // 2
@@ -6205,6 +6213,34 @@ def test_textual_startup_empty_state_wordmark_centers_match_hint() -> None:
 
     wordmark_center, hint_center = anyio.run(scenario)
     assert wordmark_center == hint_center
+
+
+@pytest.mark.parametrize("height", [24, 18, 16, 14, 12, 10, 8, 6])
+def test_textual_startup_empty_state_never_overflows_its_viewport(height: int) -> None:
+    # Regression: the panel used to carry `min-height`, which pinned its
+    # reported height above the real viewport on a short terminal. Its resize
+    # breakpoints could therefore never observe the small sizes they exist to
+    # handle, and the oversized panel overflowed the transcript — clipping the
+    # wordmark mid-glyph instead of falling back to the one-row badge.
+    async def scenario() -> tuple[bool, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(90, height)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
+            # Measured against the TRANSCRIPT, not the panel: a floored panel
+            # reports bounds larger than the viewport it sits in, so comparing
+            # the mark against its own parent would compare it to the same
+            # inflated number and never see the overflow.
+            overflows = wordmark.region.bottom > transcript.region.bottom
+            return overflows, wordmark.region.height
+
+    overflows, wordmark_rows = anyio.run(scenario)
+
+    assert not overflows
+    # Either the full drawn mark or the single-row badge — never a partial one.
+    assert wordmark_rows in {1, 5}
 
 
 def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
