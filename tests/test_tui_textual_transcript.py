@@ -15,7 +15,7 @@ from wisp.tui.textual_transcript import (
     TUI_SETTLED_LIVE_WIDGET_LIMIT,
     TextualTranscriptController,
 )
-from wisp.tui.widgets import LineMessage, ToolCard, WorkingIndicator
+from wisp.tui.widgets import LineMessage, StreamMessage, ToolCard, WorkingIndicator
 
 pytestmark = pytest.mark.tui
 
@@ -87,7 +87,8 @@ def test_history_mount_falls_back_from_a_detached_insertion_boundary() -> None:
         app = TextualTui()
         async with app.run_test() as pilot:
             current = app.mount_historical_line("assistant", "current")
-            assert current is not None
+            # Plain one-line history avoids hundreds of nested Markdown documents.
+            assert isinstance(current, LineMessage)
             await pilot.pause()
 
             app.begin_history_prepend()
@@ -118,9 +119,9 @@ def test_history_marker_falls_back_to_the_attached_transcript_head() -> None:
             transcript = app._transcript
             assert transcript is not None
             lines = [
-                child.render().plain
+                child._markdown.source if isinstance(child, StreamMessage) else child.render().plain
                 for child in transcript.children
-                if isinstance(child, LineMessage)
+                if isinstance(child, LineMessage | StreamMessage)
             ]
             assert lines == ["resumed session: Restored", "current"]
 

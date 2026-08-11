@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import suppress
+from datetime import UTC, datetime
 
 import pytest
 from pytest import MonkeyPatch
@@ -22,14 +23,21 @@ from wisp.events import (
     MessageStarted,
     ProviderRetrying,
     RpcCommandStarted,
+    RpcMessageSnapshot,
+    RpcMessagesReported,
     SkillInvoked,
     TurnStarted,
+    wisp_event_from_json,
 )
 from wisp.skills.models import SkillInvocationEvidence
 from wisp.trust_flow import TrustDecision
 from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.compact_echo import MAX_PENDING_ECHOES as _MAX_PENDING_ECHOES
-from wisp.tui.history import HistoricalToolCard, HistoricalTranscriptMessage
+from wisp.tui.history import (
+    HistoricalToolCard,
+    HistoricalTranscriptMessage,
+    history_entries_from_rpc_messages,
+)
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.state import TuiCancelRequested, TuiQuitRequested
 from wisp.tui.textual_app import (
@@ -946,23 +954,91 @@ def test_textual_tui_preserves_brackets_in_streamed_output() -> None:
     assert "[/close]" in rendered
 
 
-def test_textual_tui_renderer_renders_hydrated_history_in_order_and_escapes() -> None:
-    async def scenario() -> list[str]:
+def test_textual_tui_renderer_renders_hydrated_history_in_order_and_markdown() -> None:
+    restored_markdown = "# Restored answer\n\n- first\n- second\n\n```python\nprint('ok')\n```"
+
+    async def scenario() -> tuple[list[str], list[str], int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.render_history(
                 (
                     HistoricalTranscriptMessage(role="user", content="old [red]prompt[/red]"),
-                    HistoricalTranscriptMessage(role="assistant", content="old answer"),
+                    HistoricalTranscriptMessage(role="assistant", content=restored_markdown),
                 )
             )
             await pilot.pause()
-            return _transcript_texts(app_instance)
+            transcript = app_instance.query_one("#transcript", Transcript)
+            assistants = [
+                child for child in transcript.children if isinstance(child, StreamMessage)
+            ]
+            block_names = [
+                type(widget).__name__
+                for assistant in assistants
+                for widget in assistant._markdown.walk_children()
+            ]
+            return _transcript_texts(app_instance), block_names, len(assistants)
 
-    assert anyio.run(scenario) == [
-        "old [red]prompt[/red]",
-        "old answer",
-    ]
+    rendered, block_names, assistant_count = anyio.run(scenario)
+    assert rendered == ["old [red]prompt[/red]", restored_markdown]
+    assert assistant_count == 1
+    assert {"MarkdownH1", "MarkdownBullet", "MarkdownFence"} <= set(block_names)
+
+
+def test_textual_tui_renders_resumed_markdown_after_rpc_json_round_trip() -> None:
+    restored_markdown = "### Transported answer\n\n1. first\n2. second"
+    report = RpcMessagesReported(
+        command_id="messages-1",
+        session_id="session-1",
+        messages=(
+            RpcMessageSnapshot(
+                entry_id="entry-1",
+                created_at=datetime(2026, 8, 1, tzinfo=UTC),
+                role="assistant",
+                content=restored_markdown,
+                content_original_bytes=len(restored_markdown.encode()),
+            ),
+        ),
+    )
+    restored = wisp_event_from_json(report.model_dump_json())
+    assert isinstance(restored, RpcMessagesReported)
+
+    async def scenario() -> tuple[str, list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.replace_history_entries(
+                history_entries_from_rpc_messages(restored.messages),
+                session_label="Restored session",
+            )
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            assistant = next(
+                child for child in transcript.children if isinstance(child, StreamMessage)
+            )
+            return assistant._markdown.source, [
+                type(widget).__name__ for widget in assistant._markdown.walk_children()
+            ]
+
+    source, block_names = anyio.run(scenario)
+    assert source == restored_markdown
+    assert {"MarkdownH3", "MarkdownOrderedList"} <= set(block_names)
+
+
+def test_textual_completed_message_without_deltas_renders_markdown() -> None:
+    async def scenario() -> tuple[str, list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.event(completed_message(content="## Settled answer\n\n`inline`"))
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            (assistant,) = transcript.children
+            assert isinstance(assistant, StreamMessage)
+            return assistant._markdown.source, [
+                type(widget).__name__ for widget in assistant._markdown.walk_children()
+            ]
+
+    source, block_names = anyio.run(scenario)
+    assert source == "## Settled answer\n\n`inline`"
+    assert "MarkdownH2" in block_names
 
 
 def test_textual_tui_renderer_renders_historical_tool_cards() -> None:
@@ -4379,7 +4455,8 @@ def test_textual_history_page_prepend_preserves_viewport_and_session_marker() ->
             anchor = next(
                 child
                 for child in transcript.children
-                if isinstance(child, LineMessage) and "current 8" in child.render().plain
+                if (isinstance(child, LineMessage) and "current 8" in child.render().plain)
+                or (isinstance(child, StreamMessage) and "current 8" in child._markdown.source)
             )
             anchor_y_before = anchor.region.y
             scroll_y_before = transcript.scroll_y
@@ -4510,20 +4587,26 @@ def test_textual_history_window_shifts_without_evicting_live_output() -> None:
             await pilot.pause()
             await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
-            initial_count = sum(isinstance(child, LineMessage) for child in transcript.children)
+            initial_count = sum(
+                isinstance(child, LineMessage | StreamMessage) for child in transcript.children
+            )
 
             # Normal wheel/PageUp edge navigation still shifts retained entries
             # after the durable page cursor has been exhausted.
             transcript.scroll_home(animate=False)
             await pilot.pause()
             await pilot.pause()
-            older_count = sum(isinstance(child, LineMessage) for child in transcript.children)
+            older_count = sum(
+                isinstance(child, LineMessage | StreamMessage) for child in transcript.children
+            )
             older_texts = _transcript_texts(app_instance)
 
             app_instance.action_scroll_transcript_end()
             await pilot.pause()
             await pilot.pause()
-            newest_count = sum(isinstance(child, LineMessage) for child in transcript.children)
+            newest_count = sum(
+                isinstance(child, LineMessage | StreamMessage) for child in transcript.children
+            )
             return (
                 _transcript_texts(app_instance),
                 older_texts,
