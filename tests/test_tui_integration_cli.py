@@ -27,6 +27,7 @@ from wisp.events import (
     RpcMessageSnapshot,
     RpcMessagesReported,
     SkillInvoked,
+    TrustResolved,
     TurnStarted,
     wisp_event_from_json,
 )
@@ -1490,6 +1491,33 @@ def _render_events_to_transcript(events: list[object]) -> str:
             return "\n".join(_transcript_texts(app_instance))
 
     return anyio.run(scenario)
+
+
+def test_textual_skill_invocation_keeps_active_working_indicator() -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        original = "/skill:review focus on safety"
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.prompt_submitted(original)
+            renderer.skill_invoked(
+                SkillInvoked(
+                    session_id="session-1",
+                    message_entry_id="message-1",
+                    invocation=SkillInvocationEvidence(
+                        name="review",
+                        original_content=original,
+                        request="focus on safety",
+                        content_sha256="a" * 64,
+                        instructions_truncated=False,
+                    ),
+                    provider_content="expanded instructions",
+                )
+            )
+            await pilot.pause()
+            return _working_activity(app_instance)
+
+    assert "Working" in anyio.run(scenario)
 
 
 def test_textual_renderer_matches_skill_invocation_to_retried_prompt() -> None:
@@ -3749,7 +3777,7 @@ def test_textual_threshold_compaction_failure_is_a_notice() -> None:
     ]
 
 
-def test_textual_overflow_compaction_restarts_progress_for_retry() -> None:
+def test_textual_overflow_compaction_keeps_progress_for_retry() -> None:
     async def scenario() -> tuple[list[str], bool, bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
@@ -3775,17 +3803,17 @@ def test_textual_overflow_compaction_restarts_progress_for_retry() -> None:
                 )
             )
             await pilot.pause()
-            stopped = app_instance._transcript_controller.working_indicator is None
+            remained = app_instance._transcript_controller.working_indicator is not None
             renderer.event(TurnStarted(turn=2))
             await pilot.pause()
-            restarted = app_instance._transcript_controller.working_indicator is not None
-            return _transcript_texts(app_instance), started and stopped, restarted
+            continued = app_instance._transcript_controller.working_indicator is not None
+            return _transcript_texts(app_instance), started and remained, continued
 
-    texts, stopped_after_compaction, restarted_for_retry = anyio.run(scenario)
+    texts, remained_after_compaction, continued_for_retry = anyio.run(scenario)
     assert "Context overflow detected; compacting before one retry..." in texts
     assert "Compacted 5 context entries; retrying request..." in texts
-    assert stopped_after_compaction
-    assert restarted_for_retry
+    assert remained_after_compaction
+    assert continued_for_retry
 
 
 def test_textual_status_activity_animates_spinner_and_counts_elapsed() -> None:
@@ -3897,8 +3925,8 @@ def test_textual_retry_progress_recovers_and_ignores_post_start_retry() -> None:
     assert "Retrying" not in recovered
     assert "response" in transcript
     assert "Retrying" not in transcript
-    assert timer_stopped
-    assert not active
+    assert not timer_stopped
+    assert active
 
 
 def test_textual_retry_progress_resumes_for_a_later_tool_turn() -> None:
@@ -3944,8 +3972,52 @@ def test_textual_retry_progress_does_not_replay_or_survive_terminal_states() -> 
     assert "Retrying" not in rendered
 
 
+def test_textual_trust_resolution_restores_working_activity() -> None:
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.trust_request(
+                TrustRequested(request_id="trust-1", project_path=Path("/tmp/project"))
+            )
+            await pilot.pause()
+            waiting = _working_activity(app_instance)
+
+            renderer.event(
+                TrustResolved(
+                    request_id="trust-1",
+                    project_path=Path("/tmp/project"),
+                    trusted=True,
+                )
+            )
+            await pilot.pause()
+            return waiting, _working_activity(app_instance)
+
+    waiting, resolved = anyio.run(scenario)
+    assert "Waiting for trust" in waiting
+    assert "Working" in resolved
+    assert "Waiting for trust" not in resolved
+
+
+def test_textual_skills_catalog_keeps_active_working_indicator() -> None:
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            await pilot.pause()
+            before = _working_activity(app_instance)
+
+            renderer.skills_catalog(RpcSkillCatalogSnapshot())
+            await pilot.pause()
+            return before, _working_activity(app_instance)
+
+    before, after = anyio.run(scenario)
+    assert "Working" in before
+    assert "Working" in after
+
+
 def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure() -> None:
-    async def approval_scenario() -> tuple[bool, bool]:
+    async def approval_scenario() -> tuple[bool, bool, str]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()
@@ -3962,6 +4034,7 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
             return (
                 app_instance._transcript_controller.working_indicator is not None,
                 app_instance.query_one("#decision-panel").display,
+                _working_activity(app_instance),
             )
 
     async def cancellation_scenario() -> tuple[bool, bool]:
@@ -3987,11 +4060,12 @@ def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure(
             remaining = app_instance._transcript_controller.working_indicator is not None
             return remaining, not remaining
 
-    approval_row, approval_visible = anyio.run(approval_scenario)
+    approval_row, approval_visible, approval_activity = anyio.run(approval_scenario)
     cancellation_row, cancellation_timer_stopped = anyio.run(cancellation_scenario)
     failure_row, failure_timer_stopped = anyio.run(failure_scenario)
-    assert not approval_row
+    assert approval_row
     assert approval_visible
+    assert "Waiting for approval" in approval_activity
     assert not cancellation_row
     assert cancellation_timer_stopped
     assert not failure_row
@@ -4324,8 +4398,8 @@ def test_textual_footer_stays_below_input_without_stealing_focus() -> None:
     assert focus_ok
 
 
-def test_textual_working_status_disappears_on_first_stream_output() -> None:
-    async def scenario() -> tuple[str, str, list[str]]:
+def test_textual_working_status_persists_at_tail_during_stream_output() -> None:
+    async def scenario() -> tuple[str, str, list[str], bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.running()
@@ -4333,13 +4407,40 @@ def test_textual_working_status_disappears_on_first_stream_output() -> None:
             before = _working_activity(app_instance)
             renderer.token_delta("hello")
             await pilot.pause()
-            after = _working_activity(app_instance)
-            return before, after, _transcript_texts(app_instance)
+            indicator = app_instance._transcript_controller.working_indicator
+            transcript = app_instance.query_one("#transcript", Transcript)
+            return (
+                before,
+                _working_activity(app_instance),
+                _transcript_texts(app_instance),
+                indicator is not None and transcript.children[-1] is indicator,
+            )
 
-    before, after, transcript = anyio.run(scenario)
+    before, after, transcript, indicator_is_tail = anyio.run(scenario)
     assert "Working" in before
-    assert "Working" not in after
+    assert "Working" in after
     assert any("hello" in text for text in transcript)
+    assert indicator_is_tail
+
+
+def test_textual_working_status_persists_after_tool_card_mount() -> None:
+    async def scenario() -> tuple[bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            renderer.event(ToolCallRequested(call_id="c1", name="read", arguments={}))
+            await pilot.pause()
+            indicator = app_instance._transcript_controller.working_indicator
+            transcript = app_instance.query_one("#transcript", Transcript)
+            remained_at_tail = indicator is not None and transcript.children[-1] is indicator
+
+            renderer.event(AgentCompleted(session_id="s1", turns=1, outcome="completed"))
+            await pilot.pause()
+            return remained_at_tail, app_instance._transcript_controller.working_indicator is None
+
+    remained_at_tail, removed_on_completion = anyio.run(scenario)
+    assert remained_at_tail
+    assert removed_on_completion
 
 
 def _fill_transcript(renderer: TextualTuiRenderer, count: int) -> None:
@@ -6342,8 +6443,8 @@ def test_textual_keybinding_hint_lists_only_real_bindings() -> None:
 
 def test_textual_input_placeholder_uses_the_prompt_glyph() -> None:
     # The underline-only input leads with a `❯` glyph, not the verbose `wisp>`
-    # chrome. The shared semantic hint (wisp> / wisp(running)>) is mapped to a terse
-    # glyph placeholder in the Textual layer, so a mode change swaps the cue.
+    # chrome. The shared semantic hint (wisp> / wisp(running)>) maps to the same
+    # quiet glyph because command activity remains visible in the transcript.
     async def scenario() -> tuple[str, str]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
@@ -6356,7 +6457,7 @@ def test_textual_input_placeholder_uses_the_prompt_glyph() -> None:
 
     idle_placeholder, running_placeholder = anyio.run(scenario)
     assert idle_placeholder == "❯ "
-    assert running_placeholder == "❯ running…"
+    assert running_placeholder == "❯ "
 
 
 def test_textual_composer_frames_input_and_status_as_one_panel() -> None:

@@ -86,14 +86,13 @@ class MarkdownStreamController:
     def append(self, delta: str) -> None:
         if not delta:
             return
-        self._app.hide_working_indicator()
         turn = self._turn
         transcript = self._app.transcript
         if turn is None:
             if transcript is None:
                 return
             widget = StreamMessage()
-            mounted = transcript.mount_message(widget)
+            mounted = self._app.mount_stream_widget(widget)
             turn = _StreamTurn(widget=widget, mounted=mounted)
             if transcript.is_following:
                 turn.follow_generation = transcript.follow_generation
@@ -112,7 +111,6 @@ class MarkdownStreamController:
     def flush(self, completed_content: str | None = None) -> None:
         """Finish the active turn and reconcile it with completed provider content."""
 
-        self._app.hide_working_indicator()
         turn = self._turn
         self._turn = None
         if turn is not None:

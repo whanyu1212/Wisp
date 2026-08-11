@@ -169,14 +169,19 @@ class TextualTranscriptController:
     def show_retry_indicator(self, label: str) -> None:
         """Show or refresh the transcript's provider-retry indicator."""
 
+        self.show_activity_indicator(label, show_elapsed=False)
+
+    def show_activity_indicator(self, label: str, *, show_elapsed: bool = True) -> None:
+        """Show or relabel command activity without resetting its elapsed time."""
+
         if not self._surface.transcript_available():
             return
         indicator = self._working_indicator
         if indicator is not None:
-            indicator.show_retry(label)
+            indicator.show_activity(label, show_elapsed=show_elapsed)
             return
         indicator = WorkingIndicator()
-        indicator.show_retry(label)
+        indicator.show_activity(label, show_elapsed=show_elapsed)
         self._mount_working_indicator(indicator)
 
     def restart_working_indicator(self) -> None:
@@ -214,8 +219,6 @@ class TextualTranscriptController:
 
         if not self._surface.transcript_available():
             return None
-        if not historical:
-            self.hide_working_indicator()
         card = ToolCard(name, arguments, arguments_available=arguments_available)
         self._tool_cards[call_id] = card
         if historical_card_id is not None:

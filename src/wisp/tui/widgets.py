@@ -2522,12 +2522,12 @@ class ToolCard(Static):
 
 
 class WorkingIndicator(Static):
-    """Transient heartbeat shown in the *transcript*, not the footer.
+    """Command-scoped heartbeat shown in the *transcript*, not the footer.
 
-    Opencode-style: right after the user's prompt, a dim row
-    ``⠋ Working… · 3s`` (or ``Retrying openai · 1/3 …``) that ticks alive
-    and auto-removes when token streaming or a ToolCard mounts. Keeps the
-    footer stable (cwd / session / model) — quiet over noisy.
+    A dim ``⠋ Working… · 3s`` row remains at the live transcript tail while
+    assistant output and tool cards appear ahead of it. It may be relabeled for
+    retries, approvals, trust, or compaction, and is removed only when the command
+    settles. The footer stays stable (cwd / session / model) — quiet over noisy.
     """
 
     _FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -2568,11 +2568,13 @@ class WorkingIndicator(Static):
         self._show_elapsed = True
         self._repaint()
 
-    def show_retry(self, label: str) -> None:
+    def show_activity(self, label: str, *, show_elapsed: bool = True) -> None:
+        """Relabel this command heartbeat without resetting its elapsed time."""
+
         if self._timer is None:
             self._start_timer()
         self._label = label
-        self._show_elapsed = False
+        self._show_elapsed = show_elapsed
         self._repaint()
 
     def _start_timer(self) -> None:

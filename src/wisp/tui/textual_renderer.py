@@ -34,6 +34,7 @@ from wisp.events import (
     ToolCallRequested,
     ToolResultReady,
     TrustRequested,
+    TrustResolved,
     TurnStarted,
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
@@ -123,8 +124,6 @@ class TextualTuiRenderer:
         self._visible_cwd = snapshot.cwd
         self.app.set_input_hint(snapshot.input_hint)
         self.app.set_status(snapshot)
-        if snapshot.input_mode != "running":
-            self.app.hide_working_indicator()
         if snapshot.input_mode not in {"running", "approval", "trust"}:
             self._finish_progress()
         if snapshot.input_mode not in {"approval", "trust"}:
@@ -160,6 +159,12 @@ class TextualTuiRenderer:
 
     def _suspend_progress(self) -> None:
         self.app.hide_working_indicator()
+
+    def _show_activity(self, label: str) -> None:
+        """Relabel an active command heartbeat without creating one for idle UI work."""
+
+        if self._progress_active:
+            self.app.show_activity_indicator(label)
 
     def _turn_started(self, turn: int) -> None:
         if not self._progress_active:
@@ -401,9 +406,8 @@ class TextualTuiRenderer:
         self.app.write_notice("cancelled")
 
     def token_delta(self, delta: str) -> None:
-        # Stream live into the assistant Markdown widget. The app bridges this
-        # synchronous renderer surface to Textual's awaited public Markdown API.
-        self._suspend_progress()
+        # Stream live into the assistant Markdown widget. The command-scoped
+        # heartbeat remains mounted at the transcript tail until the command ends.
         self.app.append_stream(delta)
 
     def end_token_stream_with_content(self, completed_content: str) -> None:
@@ -415,14 +419,15 @@ class TextualTuiRenderer:
         self.app.flush_stream()
 
     def approval_request(self, event: ToolApprovalRequested) -> None:
-        self._suspend_progress()
+        self._show_activity("Waiting for approval…")
         self.app.show_approval(event, cwd=self._visible_cwd)
 
     def approval_all_confirmation(self, event: ToolApprovalRequested) -> None:
+        self._show_activity("Waiting for approval…")
         self.app.show_approval_all_confirmation(event)
 
     def trust_request(self, event: TrustRequested) -> None:
-        self._suspend_progress()
+        self._show_activity("Waiting for trust…")
         self.app.show_trust(event)
 
     def command_catalog_updated(self, catalog: TuiCommandCatalog) -> None:
@@ -432,11 +437,9 @@ class TextualTuiRenderer:
         self.app.set_skill_catalog(catalog)
 
     def skills_catalog(self, catalog: RpcSkillCatalogSnapshot) -> None:
-        self._suspend_progress()
         self.app.show_skill_catalog(catalog)
 
     def skill_invoked(self, event: SkillInvoked) -> None:
-        self._suspend_progress()
         widget = self._pop_prompt_widget(event.invocation.original_content)
         self._history.record_live_skill_invocation(
             event.message_entry_id,
@@ -530,11 +533,10 @@ class TextualTuiRenderer:
             self._provider_retrying(event)
         elif isinstance(event, CompactionStarted):
             self.app.write_notice(_compaction_started_text(event))
-            if event.reason in {"threshold", "overflow"}:
-                self.app.show_working_indicator()
+            self._show_activity("Compacting…")
         elif isinstance(event, CompactionCompleted):
-            if event.reason in {"threshold", "overflow"}:
-                self._suspend_progress()
+            if self._progress_active:
+                self.app.show_working_indicator()
             overflow_retry_failed = event.reason == "overflow" and not event.will_retry
             if (event.outcome == "failed" and event.reason in {"manual", "overflow"}) or (
                 event.outcome == "completed" and overflow_retry_failed
@@ -547,7 +549,6 @@ class TextualTuiRenderer:
         elif isinstance(event, MessageStarted):
             self._message_started(event.turn)
         elif isinstance(event, MessageCompleted):
-            self._suspend_progress()
             if event.content:
                 widget = self.app.write_assistant(event.content)
                 self._history.record_live_message("assistant", event.content, widget=widget)
@@ -556,12 +557,16 @@ class TextualTuiRenderer:
             # the request time so the card can show its true duration on resolve,
             # and retain the arguments so the result renderer can build tool-aware
             # detail (they don't travel on the result event).
-            self._suspend_progress()
             self._tool_started[event.call_id] = event.timestamp
             self._tool_arguments[event.call_id] = event.arguments
             card = self.app.mount_tool_call(event.call_id, event.name, event.arguments)
             self._history.record_live_tool_call(event.call_id, widget=card)
+        elif isinstance(event, TrustResolved):
+            if self._progress_active:
+                self.app.show_working_indicator()
         elif isinstance(event, ToolApprovalResolved):
+            if self._progress_active:
+                self.app.show_working_indicator()
             # Only a denial changes the card here: an approval leaves it pending
             # until the result lands (the tool still has to run). A denial short-
             # circuits to an error result, but flip the card to "denied" now so the

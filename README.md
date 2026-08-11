@@ -570,9 +570,11 @@ reached an interface, because side effects and partial responses cannot be safel
 wisp
 ```
 
-A fullscreen Textual TUI built on the same RPC controller other integrations use. The footer shows
-the working directory/session, status, queued follow-ups, provider/model, context use, and
-cumulative cost.
+A fullscreen Textual TUI built on the same RPC controller other integrations use. While a command
+is active, a spinning `Working…` row stays at the live transcript tail as assistant output and tool
+cards appear, and changes labels for retries, approvals, trust, or compaction. The footer shows the
+working directory/session, status, queued follow-ups, provider/model, context use, and cumulative
+cost.
 
 - `ctx 12k/128k` is a current provider observation; `ctx ~12k/128k` is an estimate.
 - `cost $0.042` is complete accounting; `cost ≥$0.042` includes unpriced requests. Estimates are
