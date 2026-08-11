@@ -2786,6 +2786,7 @@ def test_complete_session_reads_do_not_require_write_access(
     )
     path = root / "session.jsonl"
     path.write_text(f"{session_entry_to_json(entry)}\n", encoding="utf-8")
+    lock_path = path.with_suffix(f"{path.suffix}.lock")
     real_open = os.open
 
     def reject_session_write_open(
@@ -2796,7 +2797,9 @@ def test_complete_session_reads_do_not_require_write_access(
         dir_fd: int | None = None,
     ) -> int:
         if os.fsdecode(target) == os.fsdecode(path) and flags & os.O_RDWR:
-            raise PermissionError("session is read-only")
+            raise PermissionError(errno.EACCES, "session is read-only")
+        if os.fsdecode(target) == os.fsdecode(lock_path) and flags & os.O_CREAT:
+            raise PermissionError(errno.EACCES, "session directory is read-only")
         return real_open(target, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(os, "open", reject_session_write_open)
@@ -2805,6 +2808,7 @@ def test_complete_session_reads_do_not_require_write_access(
     assert store.load(path).read_entries() == (entry,)
     assert store.latest().read_entries() == (entry,)
     assert store.summaries()[0].session_id == entry.session_id
+    assert not lock_path.exists()
 
 
 def test_recovery_rejects_symlink_session_file_without_no_follow(
