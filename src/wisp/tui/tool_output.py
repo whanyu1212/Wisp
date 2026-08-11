@@ -23,7 +23,7 @@ signal stays bounded and serialization-safe across the RPC transport.
 Return types and the untrusted-content rule:
 
 * The error/generic renderers return a bounded plain ``str``. The widget renders
-  it as literal, un-styled text (``Content.styled(..., "dim")``), so it is never
+  it as literal text inheriting the card's semantic muted color, so it is never
   parsed as markup — bracket characters in tool output stay literal.
 * Edit/write card rendering returns a structured ``DiffPresentation`` whose rows
   retain literal source text and precomputed intra-line ranges. ``ToolCard`` applies

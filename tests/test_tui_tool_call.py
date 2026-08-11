@@ -161,3 +161,15 @@ def test_non_mapping_arguments_degrade_to_a_bounded_literal() -> None:
     assert len(rendered.plain) == 64
     assert rendered.plain.startswith("[red]")
     assert all("red" not in str(span.style).lower() for span in rendered.spans)
+
+
+def test_tool_arguments_use_semantic_muted_style_without_terminal_dim() -> None:
+    rendered = [
+        format_tool_call_arguments("grep", {"pattern": "TODO", "path": "src"}),
+        format_tool_call_arguments("bash", {"command": "pytest", "timeout": 30}),
+        format_tool_call_arguments("extension", {"query": "value"}),
+    ]
+
+    styles = {str(span.style) for content in rendered for span in content.spans}
+    assert "$text-muted" in styles
+    assert all("dim" not in style.split() for style in styles)

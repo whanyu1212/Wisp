@@ -219,9 +219,9 @@ class TextualTui(App[None]):
     }
 
     /* Left rails and lifecycle glyphs keep conversation roles legible without
-       color. Subtle surfaces distinguish authored input and tool state while
-       assistant prose stays open on the transcript background. Colors come only
-       from theme vars present in both themes. */
+       color. Authored input keeps a subtle surface; assistant prose and tool rows
+       stay open on the transcript background. Colors come only from theme vars
+       present in both themes. */
     .message {
         height: auto;
         margin: 1 0 0 0;
@@ -276,10 +276,23 @@ class TextualTui(App[None]):
         color: $text-muted;
     }
 
-    /* A focused tool card (reached by Tab) is the expand/collapse target. An
-       outline preserves its lifecycle surface instead of replacing that state. */
+    /* Tool text recedes behind assistant prose; the semantic rail and glyph carry
+       lifecycle state. Keyboard focus adds only a stronger left cue, not a box. */
+    ToolCard {
+        color: $text-muted;
+    }
+
+    ToolCard.message--tool,
+    ToolCard.message--approved,
+    ToolCard.message--denied,
+    ToolCard.message--error {
+        background: transparent;
+        padding-right: 0;
+    }
+
     ToolCard:focus {
-        outline: outer $accent;
+        outline: none;
+        outline-left: heavy $accent;
     }
 
     /* One bordered panel frames the editor and its status line as a single

@@ -2186,10 +2186,10 @@ class ToolCard(Static):
     approval resolution (only for safety-gated tools), and a result. Rather than
     mint a separate line per event, one ``ToolCard`` is mounted on the request and
     then *mutated in place* as the later events arrive. The card carries its status
-    in a leading glyph plus the role CSS class (which styles its rail and surface),
+    in a semantically colored glyph plus the role CSS class (which styles its rail),
     so the whole lifecycle reads as one card transitioning pending → running →
-    done/error instead of three stacked cards the reader has to reconcile. Resolved cards add
-    a bounded multiline output preview below their compact status row.
+    done/error instead of three stacked cards the reader has to reconcile. Resolved
+    cards add a bounded multiline output preview below their compact status row.
 
     Parallel calls each own a stable card regardless of finish order, because the
     registry (in ``TextualTui``) routes every event to the card for its call_id.
@@ -2204,8 +2204,8 @@ class ToolCard(Static):
     tool. Escape returns focus to the prompt or active safety decision.
     """
 
-    # status → (leading glyph, role class). The role class drives the rail and
-    # lifecycle surface via the shared `.message--{role}` CSS in TextualTui.
+    # status → (leading glyph, role class). The role class drives the rail via the
+    # shared `.message--{role}` CSS in TextualTui; glyph color is applied separately.
     #
     # denied and error previously shared both the "✗" glyph AND the "denied"
     # role class, making a user-denied tool call visually identical to a
@@ -2221,6 +2221,12 @@ class ToolCard(Static):
         "error": ("✗", "error"),
         "cancelled": ("⊘", "denied"),
         "done": ("✓", "approved"),
+    }
+    _GLYPH_STYLES: dict[str, str] = {
+        "tool": "$text-accent",
+        "approved": "$text-success",
+        "denied": "$text-warning",
+        "error": "$text-error",
     }
 
     # Border-title override for statuses whose role class (above) is shared
@@ -2336,8 +2342,8 @@ class ToolCard(Static):
         at the honest value and stops the per-card timer. ``full_output`` is the
         tool's full (tool-bounded) output, retained so the reader can expand past the
         collapsed detail; ``truncated`` says the tool itself capped that output. The
-        role CSS class is swapped rather than added so the rail and surface reflect
-        only the current state.
+        role CSS class is swapped rather than added so the rail reflects only the
+        current state.
         """
 
         glyph, role = self._STATUS.get(status, self._STATUS["pending"])
@@ -2426,18 +2432,23 @@ class ToolCard(Static):
         # (name, call arguments, detail) as LITERAL styled text. Nothing untrusted is
         # ever routed through a markup parser, so no escaping is needed and no
         # content — however it is truncated or whatever brackets it contains —
-        # can inject or break a style span. Trusted chrome (glyph, `·`, indent)
-        # is plain literal too; styles are applied out-of-band.
-        content = Content(f"{self._glyph} ") + Content.styled(self._tool_name, "b")
+        # can inject or break a style span. Trusted chrome is literal too; only the
+        # lifecycle glyph gets semantic color, applied out-of-band.
+        glyph_style = self._GLYPH_STYLES.get(self._role, "$text-accent")
+        content = (
+            Content.styled(self._glyph, glyph_style)
+            + Content(" ")
+            + Content.styled(self._tool_name, "b")
+        )
         if self._call_arguments.plain:
             content += Content("  ") + self._call_arguments
         if self._elapsed is not None:
-            content += Content.styled(f" · {_format_duration(self._elapsed)}", "dim")
+            content += Content(f" · {_format_duration(self._elapsed)}")
         # Label the affordance so a reader does not have to infer what a bare
         # triangle means. Enter is the primary binding; Space remains supported.
         if self._can_expand():
             label = " ▾ less (Enter)" if self._expanded else " ▸ more (Enter)"
-            content += Content.styled(label, "dim")
+            content += Content(label)
 
         if isinstance(self._detail, DiffPresentation):
             # Structured edit/write cards retain diff rows for both states; unlike
@@ -2464,18 +2475,16 @@ class ToolCard(Static):
             # story. Say so honestly regardless of expand state: a capped output that
             # fits the preview budget (so there's nothing extra to expand) would
             # otherwise present as complete, which is exactly the case this marks.
-            content += Content("\n") + Content.styled(
-                "  ⋯ output truncated at the tool's limit", "dim"
-            )
+            content += Content("\n  ⋯ output truncated at the tool's limit")
 
         self.update(content, layout=layout)
 
     @staticmethod
     def _indent_str(text: str) -> Content:
-        """Indent untrusted output two spaces and style it dim, as literal text."""
+        """Indent untrusted output as literal text that inherits the card color."""
 
         indented = "\n".join(f"  {line}" for line in text.split("\n"))
-        return Content.styled(indented, "dim")
+        return Content(indented)
 
 
 class WorkingIndicator(Static):
