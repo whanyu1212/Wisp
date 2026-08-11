@@ -155,7 +155,7 @@ class TextualTui(App[None]):
     #transcript {
         height: 1fr;
         border: none;
-        padding: 0 1;
+        padding: 0 1 1 1;
         scrollbar-size-vertical: 1;
         scrollbar-color: $secondary;
         scrollbar-color-hover: $primary;
