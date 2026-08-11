@@ -72,6 +72,7 @@ from wisp.tui.widgets import (
     SessionPicker,
     SlashSuggest,
     StatusBar,
+    StreamMessage,
     ToolCard,
     Transcript,
 )
@@ -95,6 +96,7 @@ _ROLE_FALLBACK: dict[str, str] = {
 _WORDMARK = "W  I  S  P"
 _EMPTY_TRANSCRIPT_TAGLINE = "A coding agent that stays in sync"
 _EMPTY_TRANSCRIPT_HINT = "Type a prompt or / for commands."
+_MARKDOWN_VISIBLE_MARKERS = frozenset("`*_[]<>#|~-+\\&@")
 _SESSION_OPERATION_LABELS: dict[OverlayOperation, str] = {
     OverlayOperation.session_catalog: "Loading sessions…",
     OverlayOperation.session_switch: "Switching session…",
@@ -2070,15 +2072,25 @@ class TextualTui(App[None]):
         self._history_marker = widget
 
     def write_user(self, message: str) -> LineMessage | None:
-        return self.write_message(message, role="user")
+        return self._mount_line("user", _markup_escape(message))
 
-    def write_assistant(self, message: str) -> LineMessage | None:
-        return self.write_message(message, role="assistant")
+    def write_assistant(self, message: str) -> StreamMessage | None:
+        """Mount a settled assistant turn through the same Markdown path as streaming."""
 
-    def write_message(self, message: str, *, role: str) -> LineMessage | None:
-        # Message content is untrusted and escaped at the rendering boundary.
-        # The role remains attached to the widget for styling and reconciliation,
-        # but conversation cards intentionally show no textual role prefix.
+        if self._transcript is None:
+            return None
+        widget = StreamMessage(message)
+        self._mount_transcript_message(widget)
+        self._transcript_controller.settle_widget(widget, durable_entry_count=1)
+        self.note_transcript_update(widget)
+        self._follow_tail_after_refresh()
+        return widget
+
+    def write_message(self, message: str, *, role: str) -> Widget | None:
+        # Assistant content is Markdown whether it streamed live or arrived as one
+        # completed event. Other roles remain literal and escaped at the boundary.
+        if role == "assistant":
+            return self.write_assistant(message)
         return self._mount_line(role, _markup_escape(message))
 
     def _mount_line(self, role: str, markup: str) -> LineMessage | None:
@@ -2103,12 +2115,16 @@ class TextualTui(App[None]):
         message: str,
         *,
         before: Widget | None = None,
-    ) -> LineMessage | None:
-        """Mount one retained history line without treating it as new output."""
+    ) -> Widget | None:
+        """Mount one retained history message without treating it as new output."""
 
         if self._transcript is None:
             return None
-        widget = LineMessage(_markup_escape(message), role=role)
+        widget: Widget = (
+            StreamMessage(message)
+            if role == "assistant" and _historical_message_needs_markdown(message)
+            else LineMessage(_markup_escape(message), role=role)
+        )
         self._mount_transcript_message(widget, before=before)
         return widget
 
@@ -2405,6 +2421,26 @@ class TextualTui(App[None]):
         """Surface live-controller updates through the history-prepend guard."""
 
         self.note_transcript_update(widget)
+
+
+def _historical_message_needs_markdown(message: str) -> bool:
+    """Return whether Markdown can visibly differ from one literal transcript line.
+
+    Plain one-line history stays lightweight: a retained window can contain hundreds
+    of messages, and mounting a nested Markdown document for every literal sentence
+    makes history paging prohibitively slow. Any multiline content or Markdown
+    construct still uses the same Markdown widget as a live assistant turn.
+    """
+
+    if "\n" in message or "\r" in message or "\t" in message:
+        return True
+    if message.startswith("    ") or any(marker in message for marker in _MARKDOWN_VISIBLE_MARKERS):
+        return True
+    lowered = message.lower()
+    if "http://" in lowered or "https://" in lowered or "www." in lowered:
+        return True
+    first, separator, _rest = message.lstrip().partition(" ")
+    return bool(separator and first.rstrip(".)").isdigit())
 
 
 def _file_index_context(

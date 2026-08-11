@@ -2763,8 +2763,9 @@ class StreamMessage(Widget):
     }
     """
 
-    def __init__(self) -> None:
+    def __init__(self, initial_markdown: str | None = None) -> None:
         super().__init__()
+        self._initial_markdown = initial_markdown
         self.add_class("message", "message--assistant")
         # Match settled assistant turns: role styling remains, but conversation
         # cards intentionally have no visible role title.
@@ -2778,6 +2779,14 @@ class StreamMessage(Widget):
     def compose(self) -> ComposeResult:
         yield self._markdown
         yield self._fallback
+
+    async def on_mount(self) -> None:
+        """Render settled content after the Markdown child finishes mounting."""
+
+        initial_markdown = self._initial_markdown
+        self._initial_markdown = None
+        if initial_markdown is not None:
+            await self.replace_markdown(initial_markdown)
 
     async def append_markdown(self, fragment: str) -> None:
         """Append one provider fragment after Markdown mount initialization."""
