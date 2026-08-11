@@ -49,11 +49,12 @@ from wisp.events import ManagedProcessState
 from wisp.tool_presentation import tool_result_failed
 from wisp.tui.diff_presentation import (
     DIFF_ADD_STYLE,
+    DIFF_ADD_TOKEN_STYLE,
     DIFF_CONTEXT_STYLE,
     DIFF_DEL_STYLE,
+    DIFF_DEL_TOKEN_STYLE,
     DIFF_EXPANDED_BYTES,
     DIFF_EXPANDED_ROWS,
-    DIFF_INTRA_HIGHLIGHT_MODIFIER,
     DIFF_META_STYLE,
     DiffOperation,
     DiffPresentation,
@@ -70,10 +71,11 @@ from wisp.tui.widgets import (
 # Preserve the established private names for direct legacy renderer tests while
 # sharing the actual style values with the structured ToolCard painter.
 _DIFF_ADD_STYLE = DIFF_ADD_STYLE
+_DIFF_ADD_TOKEN_STYLE = DIFF_ADD_TOKEN_STYLE
 _DIFF_CONTEXT_STYLE = DIFF_CONTEXT_STYLE
 _DIFF_DEL_STYLE = DIFF_DEL_STYLE
+_DIFF_DEL_TOKEN_STYLE = DIFF_DEL_TOKEN_STYLE
 _DIFF_META_STYLE = DIFF_META_STYLE
-_DIFF_INTRA_HIGHLIGHT_MODIFIER = DIFF_INTRA_HIGHLIGHT_MODIFIER
 
 # A colored diff is bounded like the other previews so one giant edit can't flood
 # the transcript; the tail metadata stays honest about what was hidden.
@@ -1377,7 +1379,9 @@ def _content_from_diff_lines(
             content += Content("\n")
         ranges = (intra_line_ranges or {}).get(offset)
         if ranges:
-            content += _styled_line_with_intra_highlights(line, ranges, _diff_line_style(line))
+            content += _styled_line_with_intra_highlights(
+                line, ranges, _diff_line_style(line), _diff_line_token_style(line)
+            )
         else:
             content += Content.styled(line, _diff_line_style(line))
 
@@ -1388,9 +1392,9 @@ def _content_from_diff_lines(
 
 
 def _styled_line_with_intra_highlights(
-    line: str, ranges: Sequence[tuple[int, int]], base_style: str
+    line: str, ranges: Sequence[tuple[int, int]], base_style: str, token_style: str
 ) -> Content:
-    """A diff line's ``Content``, with ``ranges`` reversed on top of ``base_style``.
+    """A diff line's ``Content``, with ``ranges`` tinted by ``token_style``.
 
     ``ranges`` are offsets into the line's *content* (after the leading
     ``+``/``-`` marker) as computed by :func:`_intra_line_highlight_map` —
@@ -1399,17 +1403,16 @@ def _styled_line_with_intra_highlights(
     the line's actual (possibly shorter) length here; a range entirely past
     the clip point contributes nothing, and one straddling it is truncated.
 
-    Builds the line as several concatenated ``Content.styled`` segments — an
-    unhighlighted segment, a reverse-emphasized highlighted segment, repeating —
-    rather than one call for the whole line, so each segment gets its own
-    independent style span (verified: concatenating ``Content.styled`` calls
-    produces correctly offset, independent spans). A line with no highlight
-    range never reaches this function, so the common case is unaffected.
+    Builds the line as several concatenated ``Content.styled`` segments — a
+    row-tinted segment, a token-tinted highlighted segment, repeating — rather
+    than one call for the whole line, so each segment gets its own independent
+    style span (verified: concatenating ``Content.styled`` calls produces
+    correctly offset, independent spans). A line with no highlight range never
+    reaches this function, so the common case is unaffected.
     """
 
     marker_width = 1 if line[:1] in ("+", "-") else 0
     line_len = len(line)
-    highlighted_style = f"{base_style} {_DIFF_INTRA_HIGHLIGHT_MODIFIER}".strip()
 
     segments: list[tuple[int, int, bool]] = []  # (start, end, is_highlighted)
     cursor = marker_width
@@ -1428,7 +1431,7 @@ def _styled_line_with_intra_highlights(
 
     content = Content.styled(line[:marker_width], base_style) if marker_width else Content("")
     for start, end, is_highlighted in segments:
-        style = highlighted_style if is_highlighted else base_style
+        style = token_style if is_highlighted else base_style
         content += Content.styled(line[start:end], style)
     return content
 
@@ -1481,3 +1484,17 @@ def _diff_line_style(line: str) -> str:
     if line.startswith("-"):
         return _DIFF_DEL_STYLE
     return _DIFF_CONTEXT_STYLE
+
+
+def _diff_line_token_style(line: str) -> str:
+    """The stronger changed-token tint matching :func:`_diff_line_style`.
+
+    Only ``+``/``-`` lines have a distinct token tint; anything else reuses its
+    own line style so an unexpected emphasis range stays readable.
+    """
+
+    if line.startswith("+"):
+        return _DIFF_ADD_TOKEN_STYLE
+    if line.startswith("-"):
+        return _DIFF_DEL_TOKEN_STYLE
+    return _diff_line_style(line)
