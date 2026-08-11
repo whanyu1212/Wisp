@@ -437,7 +437,6 @@ class TextualTuiRenderer:
         self.app.set_skill_catalog(catalog)
 
     def skills_catalog(self, catalog: RpcSkillCatalogSnapshot) -> None:
-        self._suspend_progress()
         self.app.show_skill_catalog(catalog)
 
     def skill_invoked(self, event: SkillInvoked) -> None:

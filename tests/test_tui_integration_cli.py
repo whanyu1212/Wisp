@@ -3972,6 +3972,23 @@ def test_textual_trust_resolution_restores_working_activity() -> None:
     assert "Waiting for trust" not in resolved
 
 
+def test_textual_skills_catalog_keeps_active_working_indicator() -> None:
+    async def scenario() -> tuple[str, str]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.running()
+            await pilot.pause()
+            before = _working_activity(app_instance)
+
+            renderer.skills_catalog(RpcSkillCatalogSnapshot())
+            await pilot.pause()
+            return before, _working_activity(app_instance)
+
+    before, after = anyio.run(scenario)
+    assert "Working" in before
+    assert "Working" in after
+
+
 def test_textual_retry_progress_yields_to_approval_cancellation_and_rpc_failure() -> None:
     async def approval_scenario() -> tuple[bool, bool, str]:
         app_instance, renderer = create_textual_tui()
