@@ -2613,10 +2613,110 @@ class StreamMessage(Widget):
     StreamMessage {
         height: auto;
     }
+
     StreamMessage > Markdown,
     StreamMessage > .stream-fallback {
         height: auto;
         margin: 0;
+    }
+
+    StreamMessage > Markdown {
+        padding: 0;
+        color: $text;
+    }
+
+    StreamMessage MarkdownHeader {
+        width: 1fr;
+        content-align: left middle;
+        margin: 1 0 0 0;
+    }
+
+    StreamMessage MarkdownBlock,
+    StreamMessage MarkdownTableCellContents {
+        link-color: $text-primary;
+        link-color-hover: $text-accent;
+        link-style: underline;
+        link-style-hover: bold underline;
+    }
+
+    StreamMessage MarkdownBlock:dark > .code_inline,
+    StreamMessage MarkdownBlock:light > .code_inline {
+        color: $text-accent;
+        background: $panel;
+    }
+
+    StreamMessage MarkdownFence:dark,
+    StreamMessage MarkdownFence:light {
+        color: $text;
+        background: $panel;
+        border-left: outer $secondary;
+        padding: 0 1;
+        margin: 1 0;
+    }
+
+    StreamMessage MarkdownFence > Label {
+        padding: 0 1;
+    }
+
+    StreamMessage MarkdownFence:ansi {
+        color: $text;
+        background: transparent;
+        border-left: none;
+        padding: 0;
+        margin: 0;
+    }
+
+    StreamMessage MarkdownFence:ansi > Label {
+        padding: 1 0;
+    }
+
+    StreamMessage MarkdownBlockQuote:dark,
+    StreamMessage MarkdownBlockQuote:light {
+        color: $text-muted;
+        background: transparent;
+        border-left: outer $secondary;
+        padding: 0 1;
+        margin: 1 0;
+    }
+
+    StreamMessage MarkdownBlockQuote MarkdownParagraph {
+        margin: 0 0 1 0;
+    }
+
+    StreamMessage MarkdownBlockQuote MarkdownParagraph:last-child {
+        margin-bottom: 0;
+    }
+
+    StreamMessage MarkdownBullet:dark,
+    StreamMessage MarkdownBullet:light {
+        color: $accent;
+    }
+
+    StreamMessage MarkdownHorizontalRule {
+        height: 1;
+        padding-top: 0;
+        margin: 1 0;
+        border-bottom: solid $secondary;
+    }
+
+    StreamMessage MarkdownTableContent > .header {
+        color: $text-primary;
+    }
+
+    StreamMessage Markdown > MarkdownHeader:first-child,
+    StreamMessage Markdown > MarkdownFence:first-child,
+    StreamMessage Markdown > MarkdownBlockQuote:first-child,
+    StreamMessage Markdown > MarkdownHorizontalRule:first-child {
+        margin-top: 0;
+    }
+
+    StreamMessage Markdown > MarkdownParagraph:last-child,
+    StreamMessage Markdown > MarkdownList:last-child,
+    StreamMessage Markdown > MarkdownFence:last-child,
+    StreamMessage Markdown > MarkdownBlockQuote:last-child,
+    StreamMessage Markdown > MarkdownTable:last-child,
+    StreamMessage Markdown > MarkdownHorizontalRule:last-child {
+        margin-bottom: 0;
     }
     """
 
