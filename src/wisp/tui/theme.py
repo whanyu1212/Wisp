@@ -13,6 +13,20 @@ from __future__ import annotations
 
 from textual.theme import Theme
 
+
+def _markdown_theme_variables(*, heading_color: str) -> dict[str, str]:
+    """Textual's semantic Markdown heading hooks for one Wisp theme."""
+
+    variables: dict[str, str] = {}
+    for level in range(1, 7):
+        variables[f"markdown-h{level}-color"] = heading_color
+        variables[f"markdown-h{level}-text-style"] = "bold underline" if level == 1 else "bold"
+    return variables
+
+
+_DARK_WARNING = "#d3a25a"
+_LIGHT_WARNING = "#9c671a"
+
 # A cool, vaporous identity: a muted teal-cyan accent over cool-biased neutrals,
 # with semantic colors kept clearly distinct from the accent hue.
 WISP_THEME_DARK = Theme(
@@ -20,7 +34,7 @@ WISP_THEME_DARK = Theme(
     primary="#4aa3c7",  # cool blue — structural accent (borders, user)
     secondary="#7c8b99",
     accent="#3fb8b8",  # vapor teal — the one bold hue
-    warning="#d3a25a",
+    warning=_DARK_WARNING,
     error="#d16a7c",
     success="#5cc9a7",
     foreground="#dfe6ec",
@@ -28,6 +42,7 @@ WISP_THEME_DARK = Theme(
     surface="#151b21",
     panel="#1b232b",
     dark=True,
+    variables=_markdown_theme_variables(heading_color=_DARK_WARNING),
 )
 
 WISP_THEME_LIGHT = Theme(
@@ -35,7 +50,7 @@ WISP_THEME_LIGHT = Theme(
     primary="#277795",
     secondary="#55636d",
     accent="#2e7676",
-    warning="#9c671a",
+    warning=_LIGHT_WARNING,
     error="#b64a5e",
     success="#2b8164",
     foreground="#12171c",
@@ -43,6 +58,7 @@ WISP_THEME_LIGHT = Theme(
     surface="#ffffff",
     panel="#eef3f5",
     dark=False,
+    variables=_markdown_theme_variables(heading_color=_LIGHT_WARNING),
 )
 
 WISP_THEMES = (WISP_THEME_DARK, WISP_THEME_LIGHT)
