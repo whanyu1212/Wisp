@@ -109,6 +109,21 @@ def test_explicit_mcp_servers_override_user_settings(
     assert config.mcp_servers == (explicit,)
 
 
+def test_config_reads_openai_compatible_from_structured_env(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "WISP_OPENAI_COMPATIBLE_CONFIG",
+        '{"base_url":"https://openrouter.ai/api/v1","default_model":"openai/gpt-5"}',
+    )
+
+    config = WispConfig.from_env(session_dir=tmp_path)
+
+    assert config.openai_compatible is not None
+    assert config.openai_compatible.base_url == "https://openrouter.ai/api/v1"
+    assert config.openai_compatible.default_model == "openai/gpt-5"
+
+
 def test_config_reads_effort_from_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("WISP_EFFORT", "medium")
 

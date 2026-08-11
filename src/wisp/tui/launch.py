@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from wisp.config import WispConfig
+from wisp.config import OPENAI_COMPATIBLE_CONFIG_ENV, WispConfig
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore
@@ -39,6 +40,10 @@ class TuiOptions:
     ``TuiOptions(config=WispConfig(effort=...))``) would seed the parent
     shell/model picker with that tier while the subprocess never applied it to
     any prompt.
+
+    ``config.openai_compatible`` is also forwarded through a dedicated structured
+    environment value. The endpoint is user-only, so forwarding the resolved value is
+    safe and ensures direct embedders configure the RPC subprocess consistently.
 
     ``project_trusted`` carries the parent CLI's already-resolved decision into the
     child process. It remains optional so direct/embedded ``run_tui`` callers can
@@ -135,6 +140,12 @@ def _rpc_env(options: TuiOptions | None = None) -> dict[str, str]:
         # processes regardless of trust (see TuiOptions's docstring).
         env["WISP_EFFORT"] = options.config.effort
     if options is not None:
+        if options.config.openai_compatible is not None:
+            env[OPENAI_COMPATIBLE_CONFIG_ENV] = json.dumps(
+                options.config.openai_compatible.model_dump(mode="json"),
+                separators=(",", ":"),
+                sort_keys=True,
+            )
         env["WISP_CONTEXT_RESERVE_TOKENS"] = str(options.config.context_reserve_tokens)
         env["WISP_AUTO_COMPACTION"] = "1" if options.config.auto_compaction_enabled else "0"
     return env
