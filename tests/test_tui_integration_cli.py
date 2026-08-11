@@ -6263,6 +6263,31 @@ def test_textual_startup_wordmark_never_wraps_in_a_narrow_viewport(width: int) -
     assert anyio.run(scenario) in {1, 5}
 
 
+@pytest.mark.parametrize("width", [12, 16, 20, 24, 30, 40, 60, 90])
+@pytest.mark.parametrize("height", [10, 14, 16, 18, 20, 24, 30])
+def test_textual_startup_empty_state_fits_every_viewport(width: int, height: int) -> None:
+    # The visibility tiers are chosen by measuring each one's wrapped footprint,
+    # not by comparing height against fixed thresholds. Constants cannot work
+    # here: once the text rows wrap, their row count depends on the text, the
+    # available width AND the tier, so a value correct at one width overflows at
+    # another. Sweeping both axes together is the only way to see it — earlier
+    # single-axis sweeps missed thirteen overflowing combinations.
+    async def scenario() -> tuple[int, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(width, height)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            empty = app_instance.query_one("#transcript-empty", TranscriptEmptyState)
+            visible = [child for child in empty.children if child.display]
+            content_bottom = max((child.region.bottom for child in visible), default=0)
+            return content_bottom, transcript.region.bottom
+
+    content_bottom, transcript_bottom = anyio.run(scenario)
+
+    assert content_bottom <= transcript_bottom
+
+
 @pytest.mark.parametrize("width", [90, 40, 30, 24, 20, 16])
 def test_textual_startup_text_wraps_instead_of_truncating_when_narrow(width: int) -> None:
     # The children share one explicit width so Textual's block-centering keeps

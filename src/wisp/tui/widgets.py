@@ -1608,11 +1608,16 @@ class TranscriptEmptyState(Vertical):
     reports all three on the same screen, so repeating them here would be pure
     duplication rather than orientation.
 
-    The panel sheds rows as the viewport shortens rather than overflowing: first
-    the quick actions, then the tagline and hint, and finally the tall wordmark
-    is exchanged for a one-row badge. That exchange also happens when the
-    viewport is merely too *narrow* for the drawn mark, which wraps rather than
-    clips and would otherwise arrive at twice its expected height.
+    The panel sheds content as the viewport shrinks rather than overflowing:
+    first the quick actions, then the tagline and hint, and finally the tall
+    wordmark is exchanged for a one-row badge. That exchange also happens when
+    the viewport is merely too *narrow* for the drawn mark, which wraps rather
+    than clips and would otherwise arrive at several times its expected height.
+
+    Which tier applies is decided by measuring each one's wrapped footprint,
+    not by comparing height against fixed thresholds. Once the text rows wrap,
+    their row count depends on the text, the available width and the tier
+    itself, so no constant is correct at every width.
 
     The shared block width itself is also re-derived on every resize rather than
     fixed once at construction. `_MIN_BLOCK_WIDTH` is a comfortable width for the
@@ -1627,16 +1632,18 @@ class TranscriptEmptyState(Vertical):
     # value the panel can no longer honor.
     _MIN_BLOCK_WIDTH = 40
 
-    # Thresholds are measured against THIS PANEL's height, not the terminal's.
-    # The composer, status bar and hint row sit outside the transcript, so the
-    # panel receives roughly sixteen rows fewer than the window has.
-    #
-    # Everything shown needs 5 wordmark rows + 3 single rows + 3 margins = 11.
-    # Below that the quick actions go, then the tagline and hint; under 6 the
-    # tall wordmark no longer fits its own footprint and yields to the badge.
-    _FULL_HEIGHT = 11
-    _TAGLINE_HEIGHT = 8
-    _TALL_WORDMARK_HEIGHT = 6
+    # Rows the drawn mark occupies, and the margin every child but the first
+    # carries. Used to compute a tier's footprint, not to gate it directly.
+    _CHILD_MARGIN = 1
+
+    # Tiers from richest to sparsest. Each entry is the classes to apply; the
+    # first whose measured footprint fits is used, so the panel always shows as
+    # much as the viewport genuinely allows.
+    _TIERS: tuple[frozenset[str], ...] = (
+        frozenset(),
+        frozenset({"-compact"}),
+        frozenset({"-compact", "-minimal"}),
+    )
 
     DEFAULT_CSS = """
     TranscriptEmptyState.-compact #transcript-empty-actions {
@@ -1668,6 +1675,7 @@ class TranscriptEmptyState(Vertical):
             (len(line) for line in wordmark.splitlines()),
             default=0,
         )
+        self._actions = "/ commands  ·  /resume session"
         # Populated by compose(); every direct child gets the same width so
         # Textual's block-centering keeps them aligned with one another.
         self._centered_children: list[Widget] = []
@@ -1681,26 +1689,44 @@ class TranscriptEmptyState(Vertical):
         yield self._centered(self._wordmark_label)
         yield self._centered(Label(self._tagline, id="transcript-empty-tagline", markup=False))
         yield self._centered(Label(self._hint, id="transcript-empty-hint", markup=False))
-        yield self._centered(
-            Static(
-                "/ commands  ·  /resume session",
-                id="transcript-empty-actions",
-                markup=False,
-            )
-        )
+        yield self._centered(Static(self._actions, id="transcript-empty-actions", markup=False))
+
+    def _wrapped_rows(self, text: str, width: int) -> int:
+        """Rows ``text`` occupies once wrapped into ``width`` cells.
+
+        Delegates to Textual's own measurement rather than reimplementing its
+        word wrapping. A hand-rolled version drifted immediately: splitting on
+        whitespace collapsed the double spaces around the actions line's
+        separators, so a string that genuinely wrapped was measured as fitting.
+        """
+
+        if width <= 0:
+            return 0
+        return Content(text).get_height(self.styles.get_rules(), width)
+
+    def _tier_footprint(self, classes: frozenset[str], *, width: int, mark_rows: int) -> int:
+        """Rows this tier needs at ``width``, including inter-child margins."""
+
+        texts = [self._tagline, self._hint]
+        if "-minimal" in classes:
+            texts = []
+        if "-compact" not in classes:
+            texts.append(self._actions)
+        rows = mark_rows
+        for text in texts:
+            rows += self._CHILD_MARGIN + self._wrapped_rows(text, width)
+        return rows
 
     def on_resize(self, event: events.Resize) -> None:
         height = self.size.height
         width = self.size.width
-        self.set_class(height < self._FULL_HEIGHT, "-compact")
-        self.set_class(height < self._TAGLINE_HEIGHT, "-minimal")
 
-        # Both axes matter, and for different reasons. Too short and the drawn
-        # mark cannot fit its own five rows. Too narrow and Textual wraps each
-        # row instead of clipping it, which shears the letterforms *and* doubles
-        # the rendered height — invalidating the five-row assumption the height
-        # thresholds above are derived from.
-        drawn_mark_fits = height >= self._TALL_WORDMARK_HEIGHT and width >= self._wordmark_width
+        # The drawn mark needs room on both axes, for different reasons. Too
+        # short and it cannot fit its own rows. Too narrow and Textual wraps
+        # each row instead of clipping it, which shears the letterforms apart
+        # and multiplies its height.
+        mark_rows = len(self._wordmark.splitlines())
+        drawn_mark_fits = height >= mark_rows and width >= self._wordmark_width
         label = self._wordmark_label
         if label is not None:
             label.update(self._wordmark if drawn_mark_fits else self._compact_wordmark)
@@ -1714,6 +1740,19 @@ class TranscriptEmptyState(Vertical):
         block_width = min(width, max(mark_width, self._MIN_BLOCK_WIDTH))
         for child in self._centered_children:
             child.styles.width = block_width
+
+        # Shed tiers by MEASURING each one's wrapped footprint rather than
+        # comparing height against fixed thresholds. Once the text rows wrap,
+        # a row count is a function of the text, the available width and which
+        # tier is showing — so any constant is wrong at some width. At twelve
+        # cells the tagline alone occupies four rows, which a one-row-per-child
+        # budget under-counts badly enough to overflow the panel.
+        rows = mark_rows if drawn_mark_fits else 1
+        for classes in self._TIERS:
+            if self._tier_footprint(classes, width=block_width, mark_rows=rows) <= height:
+                break
+        for name in ("-compact", "-minimal"):
+            self.set_class(name in classes, name)
 
 
 class OperationIndicator(Vertical):
