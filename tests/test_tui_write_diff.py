@@ -16,6 +16,7 @@ from wisp.tui.diff_presentation import DiffOperation, DiffPresentation, DiffRowK
 from wisp.tui.tool_output import (
     _DIFF_ADD_STYLE,
     _DIFF_DEL_STYLE,
+    _DIFF_INTRA_HIGHLIGHT_MODIFIER,
     _DIFF_MAX_HUNK_CHARS,
     _DIFF_META_STYLE,
     render_tool_result,
@@ -69,11 +70,13 @@ def test_render_write_diff_equal_length_replace_highlights_changed_token() -> No
     # too, without re-deriving every edge case.
     content = render_write_diff("return old_value\n", _write("return new_value\n"))
     assert isinstance(content, Content)
-    bold_text = {
-        content.plain[span.start : span.end] for span in content.spans if "bold" in str(span.style)
+    highlighted_text = {
+        content.plain[span.start : span.end]
+        for span in content.spans
+        if _DIFF_INTRA_HIGHLIGHT_MODIFIER in str(span.style).split()
     }
-    assert "old" in bold_text
-    assert "new" in bold_text
+    assert "old" in highlighted_text
+    assert "new" in highlighted_text
 
 
 # --- render_write_diff: create (no prior content) ---------------------------

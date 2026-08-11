@@ -2,18 +2,58 @@
 
 from __future__ import annotations
 
+from textual.content import Content
+
 from wisp.tui.diff_presentation import (
+    DIFF_ADD_STYLE,
+    DIFF_CONTEXT_STYLE,
+    DIFF_DEL_STYLE,
     DIFF_EXPANDED_BYTES,
     DiffOperation,
     DiffRow,
     DiffRowKind,
+    DiffVisibleRow,
     select_diff_rows,
 )
 from wisp.tui.tool_output import build_edit_diff_presentation, build_write_diff_presentation
+from wisp.tui.widgets import _render_diff_presentation, _render_diff_visible_row
 
 
 def _edit(old: str, new: str) -> dict[str, object]:
     return {"path": "pkg/example.py", "edits": [{"oldText": old, "newText": new}]}
+
+
+def _styles_at(content: Content, needle: str) -> set[str]:
+    start = content.plain.index(needle)
+    return {str(span.style) for span in content.spans if span.start <= start < span.end}
+
+
+def test_diff_styles_use_foregrounds_without_nested_row_backgrounds() -> None:
+    assert DIFF_ADD_STYLE == "$text-success"
+    assert DIFF_DEL_STYLE == "$text-error"
+    assert " on " not in DIFF_ADD_STYLE
+    assert " on " not in DIFF_DEL_STYLE
+
+
+def test_structured_diff_colors_counts_independently() -> None:
+    presentation = build_edit_diff_presentation(_edit("old\n", "new\n"))
+
+    assert presentation is not None
+    content = _render_diff_presentation(presentation, width=80, expanded=False)
+    assert DIFF_ADD_STYLE in _styles_at(content, "+1")
+    assert DIFF_DEL_STYLE in _styles_at(content, "-1")
+
+
+def test_structured_context_is_muted_without_trailing_fill() -> None:
+    content = _render_diff_visible_row(
+        DiffVisibleRow(DiffRow(DiffRowKind.context, "keep")),
+        width=40,
+        show_line_numbers=False,
+    )
+
+    assert content.plain.endswith("keep")
+    assert len(content.plain) < 40
+    assert DIFF_CONTEXT_STYLE in _styles_at(content, "keep")
 
 
 def test_edit_presentation_preserves_literal_rows_and_line_positions() -> None:

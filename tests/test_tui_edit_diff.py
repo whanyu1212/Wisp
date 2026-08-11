@@ -13,6 +13,7 @@ from textual.content import Content
 from wisp.tui.diff_presentation import DiffPresentation, DiffRowKind
 from wisp.tui.tool_output import (
     _DIFF_ADD_STYLE,
+    _DIFF_CONTEXT_STYLE,
     _DIFF_DEL_STYLE,
     _DIFF_INTRA_HIGHLIGHT_MODIFIER,
     _DIFF_MAX_HUNK_CHARS,
@@ -62,11 +63,13 @@ def test_render_edit_diff_colors_additions_and_deletions() -> None:
     assert _DIFF_DEL_STYLE in _styles_at(content, "-old line")
 
 
-def test_render_edit_diff_context_lines_are_unstyled() -> None:
-    # A shared line between old and new is context — no add/delete color.
+def test_render_edit_diff_context_lines_are_muted() -> None:
+    # Shared context recedes while remaining distinct from add/delete evidence.
     content = render_edit_diff(_edit(("keep\ndrop", "keep\nadd")))
-    assert _DIFF_ADD_STYLE not in _styles_at(content, " keep")
-    assert _DIFF_DEL_STYLE not in _styles_at(content, " keep")
+    styles = _styles_at(content, " keep")
+    assert _DIFF_CONTEXT_STYLE in styles
+    assert _DIFF_ADD_STYLE not in styles
+    assert _DIFF_DEL_STYLE not in styles
 
 
 def test_render_edit_diff_hunk_header_is_meta_styled() -> None:
@@ -107,10 +110,10 @@ def test_render_edit_diff_markup_in_content_stays_literal() -> None:
 
 def test_render_edit_diff_injected_markup_carries_only_the_add_style() -> None:
     # The injected line is styled solely by the out-of-band add span (plus,
-    # since "old" -> "[red]evil[/red]" is a same-line-count replace, issue
-    # #111's legitimate intra-line bold variant on the changed sub-span) —
-    # the markup text itself produced no additional, unexpected spans (it was
-    # never parsed).
+    # since "old" -> "[red]evil[/red]" is a same-line-count replace, the
+    # legitimate intra-line reverse emphasis on the changed sub-span) — the
+    # markup text itself produced no additional, unexpected spans (it was never
+    # parsed).
     injected = "[red]evil[/red]"
     content = render_edit_diff(_edit(("old", injected)))
     styles = {
@@ -119,7 +122,10 @@ def test_render_edit_diff_injected_markup_carries_only_the_add_style() -> None:
         if injected in content.plain[span.start : span.end]
         or content.plain[span.start : span.end] in injected
     }
-    assert styles <= {_DIFF_ADD_STYLE, f"{_DIFF_ADD_STYLE} bold"}
+    assert styles <= {
+        _DIFF_ADD_STYLE,
+        f"{_DIFF_ADD_STYLE} {_DIFF_INTRA_HIGHLIGHT_MODIFIER}",
+    }
     assert styles  # sanity: the injected text was actually styled at all
 
 
@@ -786,8 +792,8 @@ def test_render_tool_result_oversize_edit_falls_back_to_generic() -> None:
 # --- Intra-line highlighting: equal-length replace groups (issue #111) --------
 
 
-def _bold_spans(content: Content) -> list[tuple[str, str]]:
-    """(substring, style) for every span whose style carries the bold modifier."""
+def _highlighted_spans(content: Content) -> list[tuple[str, str]]:
+    """Return substrings whose styles carry the intra-line modifier."""
 
     return [
         (content.plain[span.start : span.end], str(span.style))
@@ -798,50 +804,56 @@ def _bold_spans(content: Content) -> list[tuple[str, str]]:
 
 def test_render_edit_diff_equal_length_replace_highlights_changed_token() -> None:
     # A single-word change in a 1-line -> 1-line replace: the changed word is
-    # bold, the unchanged surrounding text is not.
+    # emphasized, while unchanged surrounding text is not.
     content = render_edit_diff(_edit(("return old_value", "return new_value")))
-    bold = _bold_spans(content)
-    bold_text = {text for text, _ in bold}
-    assert "old" in bold_text
-    assert "new" in bold_text
-    assert "return " not in bold_text
-    assert "_value" not in bold_text
+    highlighted = _highlighted_spans(content)
+    highlighted_text = {text for text, _ in highlighted}
+    assert "old" in highlighted_text
+    assert "new" in highlighted_text
+    assert "return " not in highlighted_text
+    assert "_value" not in highlighted_text
 
 
 def test_render_edit_diff_equal_length_replace_highlights_both_sides() -> None:
-    # Both the removed (old) and added (new) sub-spans get their own bold
-    # highlight — not "new side only".
+    # Both the removed (old) and added (new) sub-spans get their own reverse
+    # emphasis — not "new side only".
     content = render_edit_diff(_edit(("return old_value", "return new_value")))
-    bold = _bold_spans(content)
-    del_bold = [style for text, style in bold if text == "old"]
-    add_bold = [style for text, style in bold if text == "new"]
-    assert del_bold == [f"{_DIFF_DEL_STYLE} bold"]
-    assert add_bold == [f"{_DIFF_ADD_STYLE} bold"]
+    highlighted = _highlighted_spans(content)
+    del_highlight = [style for text, style in highlighted if text == "old"]
+    add_highlight = [style for text, style in highlighted if text == "new"]
+    assert del_highlight == [f"{_DIFF_DEL_STYLE} {_DIFF_INTRA_HIGHLIGHT_MODIFIER}"]
+    assert add_highlight == [f"{_DIFF_ADD_STYLE} {_DIFF_INTRA_HIGHLIGHT_MODIFIER}"]
 
 
 def test_render_edit_diff_multi_line_equal_length_replace_highlights_only_changed_line() -> None:
     content = render_edit_diff(_edit(("aaa\nbbb\nccc", "aaa\nBBB\nccc")))
-    bold_text = {text for text, _ in _bold_spans(content)}
-    assert bold_text == {"bbb", "BBB"}
+    highlighted_text = {text for text, _ in _highlighted_spans(content)}
+    assert highlighted_text == {"bbb", "BBB"}
 
 
 def test_render_edit_diff_unequal_length_replace_has_no_intra_line_highlight() -> None:
     # A replace where old/new have different line counts must fall back to
-    # whole-line-only styling — no bold anywhere, matching toad's own guard.
+    # whole-line-only styling — no intra-line emphasis anywhere.
     content = render_edit_diff(_edit(("one line", "one line\nanother line")))
-    assert _bold_spans(content) == []
+    assert _highlighted_spans(content) == []
     styles = {str(span.style) for span in content.spans}
-    assert styles <= {_DIFF_ADD_STYLE, _DIFF_DEL_STYLE, _DIFF_META_STYLE, ""}
+    assert styles <= {
+        _DIFF_ADD_STYLE,
+        _DIFF_CONTEXT_STYLE,
+        _DIFF_DEL_STYLE,
+        _DIFF_META_STYLE,
+        "",
+    }
 
 
 def test_render_edit_diff_insert_only_has_no_intra_line_highlight() -> None:
     content = render_edit_diff(_edit(("keep", "keep\nadded")))
-    assert _bold_spans(content) == []
+    assert _highlighted_spans(content) == []
 
 
 def test_render_edit_diff_delete_only_has_no_intra_line_highlight() -> None:
     content = render_edit_diff(_edit(("keep\nremoved", "keep")))
-    assert _bold_spans(content) == []
+    assert _highlighted_spans(content) == []
 
 
 def test_render_edit_diff_adjacent_replace_groups_with_different_lengths_do_not_merge() -> None:
@@ -852,17 +864,17 @@ def test_render_edit_diff_adjacent_replace_groups_with_different_lengths_do_not_
     old = "aaa\nx1\nx2"
     new = "aaa\ny1\ny2\ny3"
     content = render_edit_diff(_edit((old, new)))
-    assert _bold_spans(content) == []
+    assert _highlighted_spans(content) == []
 
 
 def test_render_edit_diff_intra_line_highlight_survives_terminator_note() -> None:
     # old has no trailing newline (annotated "no newline"); the intra-line
     # highlight must never touch that annotation's text, only the real content.
     content = render_edit_diff(_edit(("hello", "hallo\n")))
-    for text, _ in _bold_spans(content):
+    for text, _ in _highlighted_spans(content):
         assert "⏎" not in text
-    bold_text = {text for text, _ in _bold_spans(content)}
-    assert bold_text == {"e", "a"}
+    highlighted_text = {text for text, _ in _highlighted_spans(content)}
+    assert highlighted_text == {"e", "a"}
 
 
 def test_render_edit_diff_intra_line_highlight_covers_text_matching_a_note_spelling() -> None:
@@ -877,8 +889,8 @@ def test_render_edit_diff_intra_line_highlight_covers_text_matching_a_note_spell
     old = "status  ⏎ CRLF\n"
     new = "status\n"
     content = render_edit_diff(_edit((old, new)))
-    bold_text = {text for text, _ in _bold_spans(content)}
-    assert bold_text == {"  ⏎ CRLF"}
+    highlighted_text = {text for text, _ in _highlighted_spans(content)}
+    assert highlighted_text == {"  ⏎ CRLF"}
 
 
 def test_intra_line_highlight_runs_below_its_ceiling(monkeypatch) -> None:
@@ -901,7 +913,7 @@ def test_intra_line_highlight_runs_below_its_ceiling(monkeypatch) -> None:
     # two SequenceMatcher calls total: one from unified_diff, one from
     # _intra_line_ranges_for_group's own char-level pass.
     assert len(calls) == 2
-    assert _bold_spans(content) != []
+    assert _highlighted_spans(content) != []
 
 
 def test_intra_line_ranges_for_group_respects_own_size_ceiling(monkeypatch) -> None:
@@ -945,7 +957,7 @@ def test_render_edit_diff_large_group_falls_back_to_whole_line_via_preview_cutof
     content = render_edit_diff(_edit((old, new)))
 
     assert content is not None
-    assert _bold_spans(content) == []
+    assert _highlighted_spans(content) == []
     assert "old-0" in content.plain
 
 
@@ -968,7 +980,7 @@ def test_intra_line_highlight_respects_own_char_ceiling(monkeypatch) -> None:
 
     assert len(calls) == 1
     assert content is not None
-    assert _bold_spans(content) == []
+    assert _highlighted_spans(content) == []
 
 
 def test_intra_line_highlight_skips_groups_past_the_preview_window(monkeypatch) -> None:
@@ -999,8 +1011,8 @@ def test_intra_line_highlight_skips_groups_past_the_preview_window(monkeypatch) 
 
     assert len(calls) == 1  # only the group inside the preview window was checked
     assert content is not None
-    bold_text = {text for text, _ in _bold_spans(content)}
-    assert bold_text == {"old", "new"}  # the one visible group is still highlighted
+    highlighted_text = {text for text, _ in _highlighted_spans(content)}
+    assert highlighted_text == {"old", "new"}  # the one visible group is still highlighted
 
 
 def test_intra_line_highlight_never_scans_a_group_entirely_past_the_preview(
@@ -1045,7 +1057,7 @@ def test_intra_line_highlight_does_not_treat_a_truncated_replace_as_equal_length
     content = render_edit_diff(_edit((old, new)))
 
     assert content is not None
-    assert _bold_spans(content) == []
+    assert _highlighted_spans(content) == []
 
 
 def test_intra_line_highlight_still_applies_when_equal_length_group_ends_at_diff_end() -> None:
@@ -1059,13 +1071,13 @@ def test_intra_line_highlight_still_applies_when_equal_length_group_ends_at_diff
     new = "ctx\nA2\nB2\nC2"  # exactly 3-for-3, nothing follows
     content = render_edit_diff(_edit((old, new)))
 
-    bold_text = {text for text, _ in _bold_spans(content)}
-    assert bold_text == {"2"}
+    highlighted_text = {text for text, _ in _highlighted_spans(content)}
+    assert highlighted_text == {"2"}
 
 
 def test_intra_line_highlight_style_is_distinguishable_without_color() -> None:
     # The non-color-cue acceptance criterion, directly: the highlighted span's
-    # style carries the bold modifier; the surrounding whole-line span at the
+    # style carries reverse emphasis; the surrounding whole-line span on the
     # same line does not.
     content = render_edit_diff(_edit(("return old_value", "return new_value")))
     plain_del_spans = [
@@ -1073,10 +1085,12 @@ def test_intra_line_highlight_style_is_distinguishable_without_color() -> None:
         for span in content.spans
         if str(span.style) == _DIFF_DEL_STYLE and content.plain[span.start : span.end]
     ]
-    bold_del_spans = [style for _, style in _bold_spans(content) if _DIFF_DEL_STYLE in style]
+    highlighted_del_spans = [
+        style for _, style in _highlighted_spans(content) if _DIFF_DEL_STYLE in style
+    ]
     assert plain_del_spans  # unhighlighted portion of the line still present
-    assert bold_del_spans  # highlighted portion carries the extra modifier
-    assert plain_del_spans[0] != bold_del_spans[0]
+    assert highlighted_del_spans  # highlighted portion carries the extra modifier
+    assert plain_del_spans[0] != highlighted_del_spans[0]
 
 
 def test_render_edit_diff_intra_line_highlight_clipped_by_preview_bounds() -> None:

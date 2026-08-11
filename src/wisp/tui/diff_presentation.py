@@ -97,10 +97,11 @@ class DiffVisibleRow:
 # Theme style variables are shared by the legacy ``Content`` renderer and the
 # structured ToolCard painter. The literal +/- markers and header letters remain
 # non-color cues when Textual is running without color.
-DIFF_ADD_STYLE = "$text-success on $success-muted"
-DIFF_DEL_STYLE = "$text-error on $error-muted"
+DIFF_ADD_STYLE = "$text-success"
+DIFF_DEL_STYLE = "$text-error"
+DIFF_CONTEXT_STYLE = "$text-muted"
 DIFF_META_STYLE = "$text-muted"
-DIFF_INTRA_HIGHLIGHT_MODIFIER = "bold"
+DIFF_INTRA_HIGHLIGHT_MODIFIER = "reverse"
 
 DIFF_COLLAPSED_ROWS = 8
 DIFF_COLLAPSED_BYTES = 2_000
@@ -416,6 +417,7 @@ __all__ = [
     "DIFF_ADD_STYLE",
     "DIFF_COLLAPSED_BYTES",
     "DIFF_COLLAPSED_ROWS",
+    "DIFF_CONTEXT_STYLE",
     "DIFF_DEL_STYLE",
     "DIFF_EXPANDED_BYTES",
     "DIFF_EXPANDED_ROWS",
