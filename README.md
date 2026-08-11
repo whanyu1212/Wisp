@@ -151,6 +151,7 @@ produce a failed terminal event and leave the long-running host available for la
 |---|---|
 | `openai-codex` *(default)* | ChatGPT Plus/Pro via device-code OAuth — TUI `/connect` |
 | `openai` | Stored API key or `OPENAI_API_KEY` |
+| `openai-compatible` | Stored API key or `OPENAI_COMPATIBLE_API_KEY`; endpoint configured in user settings |
 | `anthropic` | Stored API key or `ANTHROPIC_API_KEY` |
 | `google` | Stored API key, `GOOGLE_API_KEY`, or `GEMINI_API_KEY` |
 | `fake` | None — deterministic offline provider for tests and smoke runs |
@@ -158,6 +159,38 @@ produce a failed terminal event and leave the long-running host available for la
 ```bash
 wisp -p "hello" --provider anthropic --model claude-sonnet-5
 ```
+
+OpenAI-compatible Chat Completions endpoints are configured only in the user settings file; project
+settings cannot redirect requests carrying your credentials. For example, OpenRouter uses:
+
+```json
+{
+  "provider": "openai-compatible",
+  "model": "anthropic/claude-sonnet-4",
+  "openai_compatible": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "default_model": "anthropic/claude-sonnet-4"
+  }
+}
+```
+
+Set `OPENAI_COMPATIBLE_API_KEY` or enter the key with `/connect openai-compatible`. Local servers
+that do not require authentication can use a loopback HTTP endpoint and `"requires_api_key": false`:
+
+```json
+{
+  "provider": "openai-compatible",
+  "openai_compatible": {
+    "base_url": "http://localhost:11434/v1",
+    "default_model": "qwen3-coder",
+    "requires_api_key": false
+  }
+}
+```
+
+Compatibility targets streaming `/chat/completions`, including client-defined function tools.
+Explicit model IDs pass through unchanged; add a user-only `~/.wisp/catalog.toml` overlay when model
+picker metadata, context limits, effort tiers, or pricing are desired.
 
 Credentials entered through `/connect` are stored in `WISP_AUTH_FILE` (default
 `~/.wisp/auth.json`) with private permissions. Explicit provider constructor keys take precedence,
@@ -326,7 +359,7 @@ CLI flag > environment variable > project ./.wisp/settings.json > user ~/.wisp/s
 
 | Variable | Purpose |
 |----------|---------|
-| `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `anthropic`, `google`, or `fake` |
+| `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `openai-compatible`, `anthropic`, `google`, or `fake` |
 | `WISP_MODEL` | Model override; blank uses the provider default |
 | `WISP_MODE` | Default mode; set to `tui` to open the TUI directly |
 | `WISP_TUI_RENDERER` | TUI renderer: `line`, `fullscreen`, or `textual` |
@@ -338,7 +371,7 @@ CLI flag > environment variable > project ./.wisp/settings.json > user ~/.wisp/s
 | `WISP_CONTEXT_RESERVE_TOKENS` | Minimum tokens reserved outside estimated input context; defaults to `16384` |
 | `WISP_AUTO_COMPACTION` | Automatic threshold compaction and overflow recovery; defaults to `true` |
 | `WISP_UPDATE_CHECK` | Six-hour non-blocking PyPI update notice; defaults to `true` |
-| `OPENAI_API_KEY` · `ANTHROPIC_API_KEY` · `GOOGLE_API_KEY` · `GEMINI_API_KEY` | Required only for the matching provider |
+| `OPENAI_API_KEY` · `OPENAI_COMPATIBLE_API_KEY` · `ANTHROPIC_API_KEY` · `GOOGLE_API_KEY` · `GEMINI_API_KEY` | Required only for the matching provider |
 
 ### Settings files
 
@@ -360,7 +393,7 @@ project may add `./.wisp/settings.json`, applied only after you trust the projec
 
 Some fields are **user-only** and a project file can never set them: `protected_paths`, `retry`,
 `effort`, `context_reserve_tokens`, `auto_compaction_enabled`, `update_check_enabled`, and
-`mcp_servers`. A repository cannot increase your API spending, prolong waits, trigger network update
+`mcp_servers`, and `openai_compatible`. A repository cannot increase your API spending, prolong waits, trigger network update
 checks, launch an MCP command, receive forwarded credentials, or weaken the secret guard.
 
 After a successful TUI `/model` or `/provider` change, Wisp atomically records the active provider,

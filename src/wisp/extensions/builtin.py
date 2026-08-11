@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from wisp.auth.storage import JsonAuthStore
+from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.providers.anthropic import AnthropicProvider
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.fake import FakeProvider
 from wisp.providers.google import GoogleProvider
 from wisp.providers.openai import OpenAIProvider
 from wisp.providers.openai_codex import OpenAICodexProvider
+from wisp.providers.openai_compatible import OpenAICompatibleProvider
 from wisp.retry import RetryPolicy
 from wisp.runtime.api import ExtensionAPI
 from wisp.runtime.builtin_commands import builtin_command_descriptors
@@ -49,12 +51,23 @@ def activate(
     auth_store: JsonAuthStore | None = None,
     retry_policy: RetryPolicy | None = None,
     process_supervisor: ProcessSupervisor | None = None,
+    openai_compatible: OpenAICompatibleSettings | None = None,
 ) -> None:
     """Register Wisp's baseline capabilities."""
 
     auth_resolver = StoredProviderAuthResolver(auth_store) if auth_store is not None else None
     api.register_provider(FakeProvider())
     api.register_provider(OpenAIProvider(auth_resolver=auth_resolver, retry_policy=retry_policy))
+    if openai_compatible is not None:
+        api.register_provider(
+            OpenAICompatibleProvider(
+                base_url=openai_compatible.base_url,
+                default_model=openai_compatible.default_model,
+                requires_api_key=openai_compatible.requires_api_key,
+                auth_resolver=auth_resolver,
+                retry_policy=retry_policy,
+            )
+        )
     api.register_provider(
         OpenAICodexProvider(
             auth_resolver=auth_resolver,

@@ -20,6 +20,7 @@ from .fake import FakeProvider, ProviderRequest, ScriptedProvider
 from .google import GoogleProvider
 from .openai import OpenAIProvider
 from .openai_codex import OpenAICodexProvider
+from .openai_compatible import OpenAICompatibleProvider
 
 __all__ = [
     "AnthropicProvider",
@@ -28,6 +29,7 @@ __all__ = [
     "GoogleProvider",
     "OpenAICodexProvider",
     "OpenAIProvider",
+    "OpenAICompatibleProvider",
     "ProviderEvent",
     "ProviderFinishReason",
     "ProviderRequest",

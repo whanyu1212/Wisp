@@ -9,6 +9,7 @@ import pytest
 import wisp.runtime.extensions as runtime_extensions
 from wisp.auth.storage import JsonAuthStore
 from wisp.events import AgentStarted
+from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.providers.anthropic import AnthropicProvider
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.catalog import ModelRegistry, effective_catalog
@@ -16,6 +17,7 @@ from wisp.providers.fake import FakeProvider
 from wisp.providers.google import GoogleProvider
 from wisp.providers.openai import OpenAIProvider
 from wisp.providers.openai_codex import OpenAICodexProvider
+from wisp.providers.openai_compatible import OpenAICompatibleProvider
 from wisp.retry import RetryPolicy
 from wisp.runtime import (
     CommandDescriptor,
@@ -361,6 +363,25 @@ def test_direct_runtime_activation_wires_process_tools_to_runtime_supervisor() -
         await runtime.aclose()
         with pytest.raises(RuntimeError, match="ProcessSupervisor is closed"):
             await runtime.process_supervisor.start("true", cwd=Path.cwd(), timeout=1)
+
+    anyio.run(run)
+
+
+def test_build_runtime_registers_configured_openai_compatible_provider() -> None:
+    settings = OpenAICompatibleSettings(
+        base_url="https://openrouter.ai/api/v1",
+        default_model="openai/gpt-5",
+    )
+
+    async def run() -> None:
+        runtime = await build_runtime(openai_compatible=settings)
+        try:
+            provider = runtime.providers.get("openai-compatible")
+            assert isinstance(provider, OpenAICompatibleProvider)
+            assert provider.default_model == "openai/gpt-5"
+            assert provider._base_url == "https://openrouter.ai/api/v1"  # noqa: SLF001
+        finally:
+            await runtime.aclose()
 
     anyio.run(run)
 

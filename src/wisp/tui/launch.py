@@ -65,6 +65,7 @@ async def _preflight_tui_options(options: TuiOptions) -> None:
     runtime = await build_runtime(
         auth_path=options.config.auth_path,
         retry_policy=options.config.retry_policy,
+        openai_compatible=options.config.openai_compatible,
     )
     try:
         runtime.providers.get(options.config.provider)

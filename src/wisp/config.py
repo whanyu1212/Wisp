@@ -17,6 +17,7 @@ from pydantic import (
 )
 
 from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
+from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.retry import RetryPolicy
 from wisp.settings import (
     DEFAULT_PROTECTED_PATHS,
@@ -52,6 +53,7 @@ class WispConfig(BaseModel):
     mcp_servers: tuple[McpServerConfig, ...] = Field(
         default=(), max_length=MAX_MCP_SERVERS, repr=False
     )
+    openai_compatible: OpenAICompatibleSettings | None = None
 
     @model_validator(mode="wrap")
     @classmethod
@@ -112,6 +114,7 @@ class WispConfig(BaseModel):
         auto_compaction_enabled: bool | None = None,
         update_check_enabled: bool | None = None,
         mcp_servers: tuple[McpServerConfig, ...] | None = None,
+        openai_compatible: OpenAICompatibleSettings | None = None,
         project_dir: Path | None = None,
         trusted: bool = False,
     ) -> WispConfig:
@@ -220,6 +223,9 @@ class WispConfig(BaseModel):
                 )
             ),
             mcp_servers=mcp_servers if mcp_servers is not None else settings.mcp_servers or (),
+            openai_compatible=(
+                openai_compatible if openai_compatible is not None else settings.openai_compatible
+            ),
         )
 
 
