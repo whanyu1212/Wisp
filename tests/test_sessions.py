@@ -2773,9 +2773,11 @@ def test_session_read_preserves_existing_parent_permissions(tmp_path: Path) -> N
     assert stat.S_IMODE(root.stat().st_mode) == 0o755
 
 
+@pytest.mark.parametrize("existing_lock", [False, True])
 def test_complete_session_reads_do_not_require_write_access(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
+    existing_lock: bool,
 ) -> None:
     root = tmp_path / "sessions"
     root.mkdir()
@@ -2787,6 +2789,8 @@ def test_complete_session_reads_do_not_require_write_access(
     path = root / "session.jsonl"
     path.write_text(f"{session_entry_to_json(entry)}\n", encoding="utf-8")
     lock_path = path.with_suffix(f"{path.suffix}.lock")
+    if existing_lock:
+        lock_path.touch()
     real_open = os.open
 
     def reject_session_write_open(
@@ -2808,7 +2812,7 @@ def test_complete_session_reads_do_not_require_write_access(
     assert store.load(path).read_entries() == (entry,)
     assert store.latest().read_entries() == (entry,)
     assert store.summaries()[0].session_id == entry.session_id
-    assert not lock_path.exists()
+    assert lock_path.exists() is existing_lock
 
 
 def test_recovery_rejects_symlink_session_file_without_no_follow(

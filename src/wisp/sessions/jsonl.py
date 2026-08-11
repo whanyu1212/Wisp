@@ -1355,24 +1355,22 @@ def _interprocess_lock(path: Path, *, prepare_parent: bool = True) -> Iterator[N
     try:
         fd = os.open(lock_path, flags, PRIVATE_FILE_MODE)
     except OSError as exc:
-        if (
-            not prepare_parent
-            and path_info is None
-            and exc.errno
-            in {
-                errno.EACCES,
-                errno.EPERM,
-                errno.EROFS,
-            }
-        ):
-            try:
-                lock_path.lstat()
-            except FileNotFoundError:
-                if _session_file_has_complete_tail(path):
-                    yield
-                    return
-            except OSError:
-                pass
+        if not prepare_parent and exc.errno in {
+            errno.EACCES,
+            errno.EPERM,
+            errno.EROFS,
+        }:
+            lock_unavailable = path_info is not None
+            if path_info is None:
+                try:
+                    lock_path.lstat()
+                except FileNotFoundError:
+                    lock_unavailable = True
+                except OSError:
+                    pass
+            if lock_unavailable and _session_file_has_complete_tail(path):
+                yield
+                return
         raise
     unlock: Callable[[], object] | None = None
     try:
