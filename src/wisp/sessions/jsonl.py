@@ -1348,6 +1348,8 @@ def _interprocess_lock(path: Path, *, prepare_parent: bool = True) -> Iterator[N
         stat.S_ISLNK(path_info.st_mode) or not stat.S_ISREG(path_info.st_mode)
     ):
         raise SessionError(f"Session lock is not a regular file: {lock_path}")
+    if path_info is not None and path_info.st_nlink != 1:
+        raise SessionError(f"Session lock has multiple hard links: {lock_path}")
 
     flags = os.O_CREAT | os.O_RDWR
     if hasattr(os, "O_NOFOLLOW"):
@@ -1381,6 +1383,8 @@ def _interprocess_lock(path: Path, *, prepare_parent: bool = True) -> Iterator[N
             raise SessionError(
                 f"Could not inspect session lock after opening: {lock_path}"
             ) from exc
+        if info.st_nlink != 1 or current_info.st_nlink != 1:
+            raise SessionError(f"Session lock has multiple hard links: {lock_path}")
         if (
             not stat.S_ISREG(info.st_mode)
             or not stat.S_ISREG(current_info.st_mode)
@@ -1490,6 +1494,7 @@ def _recover_incomplete_tail(path: Path) -> bool:
                     committed_size = position + newline + 1
                     break
             os.ftruncate(fd, committed_size)
+            os.utime(fd, ns=(info.st_atime_ns, info.st_mtime_ns))
             _sync_file(fd)
         signature = (info.st_dev, info.st_ino)
     finally:

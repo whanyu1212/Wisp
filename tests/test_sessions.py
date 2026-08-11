@@ -2860,6 +2860,30 @@ def test_recovery_rejects_symlink_sidecar_lock_without_no_follow(
     assert target.read_bytes() == original
 
 
+def test_recovery_rejects_hard_linked_sidecar_lock(tmp_path: Path) -> None:
+    entry = MessageSessionEntry(
+        id="entry-1",
+        session_id="session-id",
+        message=Message(role="user", content="hello"),
+    )
+    path = tmp_path / "session.jsonl"
+    path.write_text(f"{session_entry_to_json(entry)}\n", encoding="utf-8")
+    target = tmp_path / "lock-target"
+    target.write_bytes(b"")
+    lock_path = path.with_suffix(".jsonl.lock")
+    try:
+        os.link(target, lock_path)
+    except OSError as exc:
+        pytest.skip(f"hard links are not supported: {exc}")
+    original_mode = stat.S_IMODE(target.stat().st_mode)
+
+    with pytest.raises(SessionError, match="multiple hard links"):
+        JsonlSessionStore(tmp_path).summaries()
+
+    assert target.read_bytes() == b""
+    assert stat.S_IMODE(target.stat().st_mode) == original_mode
+
+
 def test_direct_load_rejects_symlink_session_file(tmp_path: Path) -> None:
     if not hasattr(os, "symlink"):
         pytest.skip("symlinks are not supported")
@@ -2914,6 +2938,27 @@ def test_session_store_opens_latest_session(tmp_path: Path) -> None:
 
     assert store.latest().path == newer.path
     assert store.latest().read_messages()[0].content == "new"
+
+
+def test_session_recovery_preserves_latest_ordering(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+    older = store.create()
+    newer = store.create()
+
+    async def write() -> None:
+        await older.append_message(Message(role="user", content="old"))
+        await newer.append_message(Message(role="user", content="new"))
+
+    anyio.run(write)
+    older.path.write_bytes(older.path.read_bytes() + b'{"kind":')
+    os.utime(older.path, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(newer.path, ns=(2_000_000_000, 2_000_000_000))
+
+    summaries = store.summaries()
+
+    assert [summary.session_id for summary in summaries] == [newer.session_id, older.session_id]
+    assert store.latest().path == newer.path
+    assert older.path.stat().st_mtime_ns == 1_000_000_000
 
 
 def test_session_store_reports_missing_and_ambiguous_refs(tmp_path: Path) -> None:
