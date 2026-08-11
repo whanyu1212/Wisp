@@ -291,6 +291,31 @@ def test_write_tool_failed_create_only_publish_leaves_no_partial_target(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_write_tool_reports_temporary_cleanup_failure_after_publish(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    context = ToolContext(cwd=tmp_path)
+    real_unlink = Path.unlink
+
+    def fail_temporary_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path.name.startswith(".wisp-write-"):
+            raise PermissionError(errno.EACCES, "permission denied")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_temporary_unlink)
+
+    with pytest.raises(ToolError, match="temporary-link cleanup failed"):
+        run_tool(
+            WriteTool(),
+            {"path": "target.txt", "content": "complete\n", "overwrite": False},
+            context,
+        )
+
+    assert (tmp_path / "target.txt").read_text(encoding="utf-8") == "complete\n"
+    assert len(tuple(tmp_path.glob(".wisp-write-*"))) == 1
+
+
 def test_write_tool_create_only_preserves_existing_file(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     path = tmp_path / "existing.txt"

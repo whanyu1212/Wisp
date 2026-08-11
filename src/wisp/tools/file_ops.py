@@ -139,12 +139,11 @@ class WriteTool:
             except OSError as exc:
                 raise ToolError(f"Could not inspect conflicting write path: {conflict}") from exc
             raise ToolError(f"Conflicting write path already exists: {conflict}")
-        cleanup_warning: str | None = None
         if overwrite:
             with path.open("w", encoding="utf-8", newline="") as file:
                 file.write(content)
         else:
-            cleanup_warning = _write_create_only(path, content, selected_path=selected_path)
+            _write_create_only(path, content, selected_path=selected_path)
         byte_count = len(content.encode("utf-8"))
         data: dict[str, object] = {
             "path": display_tool_path(path, context),
@@ -153,13 +152,13 @@ class WriteTool:
         }
         if before_text is not None:
             data["before_text"] = before_text
-        text = f"Wrote {byte_count} bytes to {display_tool_path(path, context)}"
-        if cleanup_warning is not None:
-            text = f"{text}\nWarning: {cleanup_warning}"
-        return ToolResult(text=text, data=data)
+        return ToolResult(
+            text=f"Wrote {byte_count} bytes to {display_tool_path(path, context)}",
+            data=data,
+        )
 
 
-def _write_create_only(path: Path, content: str, *, selected_path: str) -> str | None:
+def _write_create_only(path: Path, content: str, *, selected_path: str) -> None:
     """Publish complete content without exposing an empty or partial target."""
 
     descriptor, temporary = _open_write_temporary(path.parent, selected_path=selected_path)
@@ -189,8 +188,10 @@ def _write_create_only(path: Path, content: str, *, selected_path: str) -> str |
                 raise ToolError(
                     f"Could not clean up failed create-only write {temporary}: {exc}"
                 ) from exc
-            return f"could not remove temporary file {temporary}: {exc}"
-    return None
+            raise ToolError(
+                "Create-only file was published but temporary-link cleanup failed; "
+                f"destination: {path}; temporary: {temporary}: {exc}"
+            ) from exc
 
 
 def _open_write_temporary(directory: Path, *, selected_path: str) -> tuple[int, Path]:
