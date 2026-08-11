@@ -649,6 +649,7 @@ remains create-only if the filesystem changes during your inspection."""
             allowed_write_paths=(target,),
             conflicting_write_paths=(target.with_name("AGENTS.MD"),),
             require_create_only_writes=True,
+            require_non_empty_writes=True,
         ),
         target,
     )
@@ -713,19 +714,7 @@ class _ProjectInitCompletion:
                 return f"Could not inspect generated project guidance: {exc}"
             if (conflict_info.st_dev, conflict_info.st_ino) == self.created_file_id:
                 continue
-            cleanup_error = self._remove_created_target()
-            message = f"Conflicting project guidance appeared during initialization: {conflict}"
-            return f"{message}; {cleanup_error}" if cleanup_error is not None else message
-        return None
-
-    def _remove_created_target(self) -> str | None:
-        try:
-            current = self.target.lstat()
-            if (current.st_dev, current.st_ino) != self.created_file_id:
-                return f"generated file was replaced and could not be safely removed: {self.target}"
-            self.target.unlink()
-        except OSError as exc:
-            return f"could not remove generated file {self.target}: {exc}"
+            return f"Conflicting project guidance appeared during initialization: {conflict}"
         return None
 
 

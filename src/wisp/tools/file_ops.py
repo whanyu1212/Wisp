@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from pathlib import Path
+from uuid import uuid4
 
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _required_string, _truncate_text
@@ -101,6 +103,8 @@ class WriteTool:
         overwrite = _optional_bool(arguments, "overwrite", default=True)
         if context.require_create_only_writes and overwrite:
             raise ToolError("This operation requires write calls with overwrite=false")
+        if context.require_non_empty_writes and not content:
+            raise ToolError("This operation requires non-empty write content")
         path = resolve_tool_path(
             selected_path,
             context,
@@ -135,11 +139,12 @@ class WriteTool:
             except OSError as exc:
                 raise ToolError(f"Could not inspect conflicting write path: {conflict}") from exc
             raise ToolError(f"Conflicting write path already exists: {conflict}")
-        try:
-            with path.open("w" if overwrite else "x", encoding="utf-8", newline="") as file:
+        cleanup_warning: str | None = None
+        if overwrite:
+            with path.open("w", encoding="utf-8", newline="") as file:
                 file.write(content)
-        except FileExistsError as exc:
-            raise ToolError(f"File already exists: {selected_path}") from exc
+        else:
+            cleanup_warning = _write_create_only(path, content, selected_path=selected_path)
         byte_count = len(content.encode("utf-8"))
         data: dict[str, object] = {
             "path": display_tool_path(path, context),
@@ -148,10 +153,57 @@ class WriteTool:
         }
         if before_text is not None:
             data["before_text"] = before_text
-        return ToolResult(
-            text=f"Wrote {byte_count} bytes to {display_tool_path(path, context)}",
-            data=data,
-        )
+        text = f"Wrote {byte_count} bytes to {display_tool_path(path, context)}"
+        if cleanup_warning is not None:
+            text = f"{text}\nWarning: {cleanup_warning}"
+        return ToolResult(text=text, data=data)
+
+
+def _write_create_only(path: Path, content: str, *, selected_path: str) -> str | None:
+    """Publish complete content without exposing an empty or partial target."""
+
+    descriptor, temporary = _open_write_temporary(path.parent, selected_path=selected_path)
+    published = False
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as file:
+            descriptor = -1
+            file.write(content)
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise ToolError(f"File already exists: {selected_path}") from exc
+        except OSError as exc:
+            raise ToolError(f"Could not create file: {selected_path}: {exc}") from exc
+        published = True
+    except ToolError:
+        raise
+    except OSError as exc:
+        raise ToolError(f"Could not create file: {selected_path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as exc:
+            if not published:
+                raise ToolError(
+                    f"Could not clean up failed create-only write {temporary}: {exc}"
+                ) from exc
+            return f"could not remove temporary file {temporary}: {exc}"
+    return None
+
+
+def _open_write_temporary(directory: Path, *, selected_path: str) -> tuple[int, Path]:
+    for _attempt in range(10):
+        temporary = directory / f".wisp-write-{uuid4().hex}"
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise ToolError(f"Could not create file: {selected_path}: {exc}") from exc
+        return descriptor, temporary
+    raise ToolError(f"Could not allocate temporary file for create-only write: {selected_path}")
 
 
 class EditTool:

@@ -266,6 +266,7 @@ def test_init_dispatches_repository_specific_create_only_prompt(
             assert context.allowed_write_paths == (target,)
             assert context.conflicting_write_paths == (target.with_name("AGENTS.MD"),)
             assert context.require_create_only_writes is True
+            assert context.require_non_empty_writes is True
             target.write_text("# Agent guidance\n", encoding="utf-8")
             call = ToolCallSnapshot(
                 call_id="write-1",
@@ -313,7 +314,7 @@ def test_init_dispatches_repository_specific_create_only_prompt(
     anyio.run(scenario)
 
 
-def test_init_completion_removes_its_file_if_conflicting_guidance_appears(
+def test_init_completion_reports_conflict_without_unsafe_path_cleanup(
     tmp_path: Path,
 ) -> None:
     target = tmp_path / "AGENTS.md"
@@ -350,7 +351,7 @@ def test_init_completion_removes_its_file_if_conflicting_guidance_appears(
     assert completion.error() == (
         f"Conflicting project guidance appeared during initialization: {conflict}"
     )
-    assert not target.exists()
+    assert target.read_text(encoding="utf-8") == "generated\n"
     assert conflict.read_text(encoding="utf-8") == "concurrent\n"
 
 

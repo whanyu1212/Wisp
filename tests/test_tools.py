@@ -16,6 +16,7 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
+from wisp.tools import file_ops as file_ops_module
 from wisp.tools import process as process_tools_module
 from wisp.tools import process_manager as process_manager_module
 from wisp.tools import search as search_tools_module
@@ -182,6 +183,7 @@ def test_write_tool_honors_operation_write_path_restriction(tmp_path: Path) -> N
         cwd=tmp_path,
         allowed_write_paths=(allowed,),
         require_create_only_writes=True,
+        require_non_empty_writes=True,
     )
 
     run_tool(
@@ -199,6 +201,12 @@ def test_write_tool_honors_operation_write_path_restriction(tmp_path: Path) -> N
         run_tool(
             WriteTool(),
             {"path": "AGENTS.md", "content": "overwrite\n"},
+            context,
+        )
+    with pytest.raises(ToolError, match="requires non-empty write content"):
+        run_tool(
+            WriteTool(),
+            {"path": "AGENTS.md", "content": "", "overwrite": False},
             context,
         )
 
@@ -226,6 +234,61 @@ def test_write_tool_refuses_operation_conflicting_path(tmp_path: Path) -> None:
 
     assert not target.exists()
     assert conflict.read_text(encoding="utf-8") == "existing\n"
+
+
+def test_write_tool_failed_create_only_content_write_leaves_no_partial_target(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    context = ToolContext(cwd=tmp_path)
+    real_fdopen = file_ops_module.os.fdopen
+
+    class FailingWriter:
+        def __init__(self, descriptor: int, *args: object, **kwargs: object) -> None:
+            self.file = real_fdopen(descriptor, *args, **kwargs)
+
+        def __enter__(self) -> FailingWriter:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.file.close()
+
+        def write(self, _content: str) -> int:
+            raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(file_ops_module.os, "fdopen", FailingWriter)
+
+    with pytest.raises(ToolError, match="Could not create file: target.txt"):
+        run_tool(
+            WriteTool(),
+            {"path": "target.txt", "content": "partial\n", "overwrite": False},
+            context,
+        )
+
+    assert not (tmp_path / "target.txt").exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_tool_failed_create_only_publish_leaves_no_partial_target(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    context = ToolContext(cwd=tmp_path)
+
+    def fail_link(_source: object, _target: object) -> None:
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(file_ops_module.os, "link", fail_link)
+
+    with pytest.raises(ToolError, match="Could not create file: target.txt"):
+        run_tool(
+            WriteTool(),
+            {"path": "target.txt", "content": "partial\n", "overwrite": False},
+            context,
+        )
+
+    assert not (tmp_path / "target.txt").exists()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_write_tool_create_only_preserves_existing_file(tmp_path: Path) -> None:
