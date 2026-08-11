@@ -52,6 +52,10 @@ class MarkdownStreamController:
     def __init__(self, app: TextualTui) -> None:
         self._app = app
         self._turn: _StreamTurn | None = None
+        # Flushed turns finalize asynchronously after `_turn` is cleared so a new
+        # stream may begin. Retain their identities until completion so transcript
+        # replacement can invalidate every stale callback, not just the active turn.
+        self._finalizing_turns: list[_StreamTurn] = []
         self._last_completed_widget: StreamMessage | None = None
         self._last_completed_write_count = 0
         self._pending_callbacks = 0
@@ -103,6 +107,7 @@ class MarkdownStreamController:
             # async finalizer, so publish the stable widget identity immediately.
             self._last_completed_widget = turn.widget
             turn.finalize_requested = True
+            self._finalizing_turns.append(turn)
             if not self._cancel_drain(turn):
                 self._queue_finalize(turn)
 
@@ -113,9 +118,11 @@ class MarkdownStreamController:
         self._turn = None
         if turn is not None:
             turn.discarded = True
-            turn.finalize_requested = True
-            if not self._cancel_drain(turn):
-                self._queue_finalize(turn)
+            turn.finalize_requested = False
+            self._cancel_drain(turn)
+        for finalizing in self._finalizing_turns:
+            finalizing.discarded = True
+        self._last_completed_widget = None
 
     def resume_if_deferred(self) -> None:
         """Render buffered output when the reader returns to the transcript tail."""
@@ -157,7 +164,9 @@ class MarkdownStreamController:
         turn.drain_scheduled = True
         self._begin_callback()
         if immediate or turn.pending_bytes >= self._DRAIN_IMMEDIATE_BYTES:
-            self._app.call_after_refresh(self._drain, turn)
+            if not self._app.call_after_refresh(self._drain, turn):
+                turn.drain_scheduled = False
+                self._finish_callback()
             return
         turn.drain_timer = asyncio.get_running_loop().call_later(
             self._DRAIN_INTERVAL_SECONDS,
@@ -168,7 +177,9 @@ class MarkdownStreamController:
     def _schedule_drain_after_frame(self, turn: _StreamTurn) -> None:
         turn.drain_timer = None
         if not turn.discarded and turn.drain_scheduled:
-            self._app.call_after_refresh(self._drain, turn)
+            if not self._app.call_after_refresh(self._drain, turn):
+                turn.drain_scheduled = False
+                self._finish_callback()
 
     def _cancel_drain(self, turn: _StreamTurn) -> bool:
         if turn.drain_running:
@@ -183,11 +194,34 @@ class MarkdownStreamController:
         return False
 
     def _queue_finalize(self, turn: _StreamTurn) -> None:
+        # Preserve flush order even when an earlier turn was still draining while a
+        # later one completed. Settled-widget retention relies on chronological order.
+        if self._finalizing_turns and self._finalizing_turns[0] is not turn:
+            return
+        if turn.discarded:
+            self._forget_finalizing_turn(turn)
+            self._queue_next_finalizer()
+            return
         if turn.finalize_scheduled:
             return
         turn.finalize_scheduled = True
         self._begin_callback()
-        self._app.call_after_refresh(self._finalize, turn)
+        if not self._app.call_after_refresh(self._finalize, turn):
+            turn.finalize_scheduled = False
+            self._forget_finalizing_turn(turn)
+            self._queue_next_finalizer()
+            self._finish_callback()
+
+    def _forget_finalizing_turn(self, turn: _StreamTurn) -> None:
+        self._finalizing_turns = [
+            candidate for candidate in self._finalizing_turns if candidate is not turn
+        ]
+
+    def _queue_next_finalizer(self) -> None:
+        while self._finalizing_turns and self._finalizing_turns[0].discarded:
+            self._forget_finalizing_turn(self._finalizing_turns[0])
+        if self._finalizing_turns:
+            self._queue_finalize(self._finalizing_turns[0])
 
     def _begin_callback(self) -> None:
         self._pending_callbacks += 1
@@ -222,12 +256,16 @@ class MarkdownStreamController:
                 # Markdown child before calling the public append API.
                 await turn.mounted
                 await turn.widget.append_markdown(text)
-            except Exception:
+            except Exception as error:
                 # Keep the authoritative full source and repair the widget during
                 # finalization instead of allowing one incremental parser/layout
                 # failure to terminate the app or strand all later fragments.
+                if not turn.incremental_write_failed:
+                    turn.widget.log.error(f"Incremental Markdown update failed: {error}")
                 turn.incremental_write_failed = True
             else:
+                if turn.discarded:
+                    return
                 turn.has_written = True
                 turn.write_count += 1
                 self._app.note_transcript_update(turn.widget)
@@ -235,11 +273,13 @@ class MarkdownStreamController:
         finally:
             turn.drain_running = False
             turn.drain_scheduled = False
-            self._finish_callback()
+            # Schedule successor work before releasing this callback's count so
+            # wait_until_idle() cannot observe a transient idle state between stages.
             if turn.finalize_requested:
                 self._queue_finalize(turn)
             elif turn.pending and not turn.discarded:
                 self._queue_drain(turn)
+            self._finish_callback()
 
     def _queue_follow_tail(self, turn: _StreamTurn) -> None:
         if turn.follow_scheduled:
@@ -274,12 +314,19 @@ class MarkdownStreamController:
             # completion payload empty. Do not let that erase visible output.
             source = turn.completed_content or streamed_source
             await turn.mounted
+            if turn.discarded:
+                return
             await turn.widget.replace_markdown(source)
+            if turn.discarded:
+                return
             turn.write_count += 1
             self._last_completed_write_count = turn.write_count
             self._app.settle_stream_widget(turn.widget)
             self._app.note_transcript_update(turn.widget)
             self._queue_follow_tail(turn)
         finally:
+            self._forget_finalizing_turn(turn)
             turn.finalize_scheduled = False
+            # Keep the idle barrier closed while handing off to the next flushed turn.
+            self._queue_next_finalizer()
             self._finish_callback()

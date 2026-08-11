@@ -12,7 +12,7 @@ from rich.cells import cell_len
 from textual import events
 from textual.content import Content
 from textual.widget import Widget
-from textual.widgets import Header, Label, OptionList, Static
+from textual.widgets import Header, Label, Markdown, OptionList, Static
 
 import wisp.cli as cli_module
 from tests.tui_support import *
@@ -65,7 +65,11 @@ def _transcript_texts(app: TextualTui) -> list[str]:
         if isinstance(child, LineMessage | ToolCard):
             texts.append(child.render().plain)  # Textual Content
         elif isinstance(child, StreamMessage):
-            texts.append(child._markdown.source)
+            texts.append(
+                child._fallback.render().plain
+                if child._fallback.display
+                else child._markdown.source
+            )
     return texts
 
 
@@ -2871,6 +2875,200 @@ def test_textual_stream_completion_does_not_erase_deltas_with_empty_content() ->
     assert anyio.run(scenario) == "response that was streamed"
 
 
+def test_textual_stream_waits_for_markdown_mount_initialization(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    authoritative = "content written only after mount initialization"
+    mount_started = asyncio.Event()
+    release_mount = asyncio.Event()
+    original_on_mount = Markdown._on_mount
+    mount_calls = 0
+
+    async def delayed_on_mount(markdown: Markdown, event: events.Mount) -> None:
+        nonlocal mount_calls
+        mount_calls += 1
+        mount_started.set()
+        await release_mount.wait()
+        await original_on_mount(markdown, event)
+
+    monkeypatch.setattr(Markdown, "_on_mount", delayed_on_mount)
+
+    async def scenario() -> str:
+        app_instance, _renderer = create_textual_tui()
+        async with app_instance.run_test():
+            replacement: asyncio.Task[None] | None = None
+            try:
+                transcript = app_instance.query_one("#transcript", Transcript)
+                stream = StreamMessage()
+                mounted = transcript.mount_message(stream)
+                with anyio.fail_after(2):
+                    await mount_started.wait()
+                    replacement = asyncio.create_task(stream.replace_markdown(authoritative))
+                    await asyncio.sleep(0)
+                    assert not replacement.done()
+                    release_mount.set()
+                    await mounted
+                    await replacement
+                return stream._markdown.source
+            finally:
+                release_mount.set()
+                if replacement is not None and not replacement.done():
+                    replacement.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await replacement
+
+    assert anyio.run(scenario) == authoritative
+    assert mount_calls == 1
+
+
+def test_textual_stream_completion_falls_back_when_final_markdown_update_fails(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    authoritative = "[red]complete authoritative response[/red]"
+    original_update = Markdown.update
+
+    async def fail_authoritative_update(markdown: Markdown, content: str) -> object:
+        if content == authoritative:
+            raise RuntimeError("simulated final Markdown failure")
+        return await original_update(markdown, content)
+
+    monkeypatch.setattr(Markdown, "update", fail_authoritative_update)
+
+    async def scenario() -> tuple[Content, bool, bool, int, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            renderer.token_delta("partial response")
+            renderer.end_token_stream_with_content(authoritative)
+            renderer.record_streamed_message_completed(completed_message(content=authoritative))
+            await app_instance.wait_for_stream_idle()
+            stream = app_instance.query_one(StreamMessage)
+            return (
+                stream._fallback.render(),
+                stream._fallback.display,
+                stream._markdown.display,
+                len(app_instance.query(StreamMessage)),
+                renderer._history._live_entries[-1].widget is stream,
+            )
+
+    fallback, fallback_visible, markdown_visible, stream_count, history_retained = anyio.run(
+        scenario
+    )
+    assert fallback.plain == authoritative
+    assert not fallback.spans  # fallback content is literal, not parsed as markup
+    assert fallback_visible is True
+    assert markdown_visible is False
+    assert stream_count == 1
+    assert history_retained is True
+
+
+def test_textual_stream_failed_callback_scheduling_does_not_wedge_idle(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> tuple[int, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            monkeypatch.setattr(app_instance, "call_after_refresh", lambda *_args: False)
+            renderer.token_delta("response while the app is closing")
+            renderer.end_token_stream_with_content("authoritative response")
+            with anyio.fail_after(2):
+                await app_instance.wait_for_stream_idle()
+            return app_instance._stream._pending_callbacks, bool(
+                app_instance._stream._finalizing_turns
+            )
+
+    pending_callbacks, has_finalizers = anyio.run(scenario)
+    assert pending_callbacks == 0
+    assert has_finalizers is False
+
+
+def test_textual_stream_finalizers_preserve_flush_order(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    first_append_started = asyncio.Event()
+    release_first_append = asyncio.Event()
+    original_append = StreamMessage.append_markdown
+
+    async def delayed_first_append(stream: StreamMessage, fragment: str) -> None:
+        if fragment == "first partial":
+            first_append_started.set()
+            await release_first_append.wait()
+        await original_append(stream, fragment)
+
+    monkeypatch.setattr(StreamMessage, "append_markdown", delayed_first_append)
+
+    async def scenario() -> tuple[list[str], list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            try:
+                renderer.token_delta("first partial")
+                with anyio.fail_after(2):
+                    await first_append_started.wait()
+                    renderer.end_token_stream_with_content("first final")
+                    renderer.token_delta("second partial")
+                    renderer.end_token_stream_with_content("second final")
+                    release_first_append.set()
+                    await app_instance.wait_for_stream_idle()
+                transcript = app_instance.query_one("#transcript", Transcript)
+                mounted = [
+                    child._markdown.source
+                    for child in transcript.children
+                    if isinstance(child, StreamMessage)
+                ]
+                settled = [
+                    widget._markdown.source
+                    for widget, _entry_count in app_instance._transcript_controller._settled_widgets
+                    if isinstance(widget, StreamMessage)
+                ]
+                return mounted, settled
+            finally:
+                release_first_append.set()
+
+    mounted, settled = anyio.run(scenario)
+    assert mounted == ["first final", "second final"]
+    assert settled == mounted
+
+
+def test_textual_transcript_replacement_invalidates_a_flushed_stream_finalizer(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    authoritative = "response from the replaced session"
+    final_update_started = asyncio.Event()
+    release_final_update = asyncio.Event()
+    original_update = Markdown.update
+
+    async def delayed_final_update(markdown: Markdown, content: str) -> object:
+        if content == authoritative:
+            final_update_started.set()
+            await release_final_update.wait()
+        return await original_update(markdown, content)
+
+    monkeypatch.setattr(Markdown, "update", delayed_final_update)
+
+    async def scenario() -> tuple[int, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            try:
+                renderer.token_delta("partial response")
+                renderer.end_token_stream_with_content(authoritative)
+                with anyio.fail_after(2):
+                    await final_update_started.wait()
+                    app_instance.replace_transcript()
+                    release_final_update.set()
+                    await app_instance.wait_for_stream_idle()
+                return (
+                    app_instance._transcript_controller.settled_widget_count,
+                    app_instance.stream_widget_for_completed_message() is None,
+                    not app_instance._stream._finalizing_turns,
+                )
+            finally:
+                release_final_update.set()
+
+    settled_count, completed_cleared, finalizers_cleared = anyio.run(scenario)
+    assert settled_count == 0
+    assert completed_cleared is True
+    assert finalizers_cleared is True
+
+
 def test_textual_stream_completion_repairs_an_incremental_render_failure(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -2991,6 +3189,27 @@ def test_textual_single_tick_turn_keeps_its_content() -> None:
 
     texts = anyio.run(scenario)
     assert texts == ["first turn", "second turn"]  # neither turn lost to the clobber
+
+
+def test_textual_stream_completion_survives_an_immediate_tool_event() -> None:
+    authoritative = "assistant conclusion before the tool card"
+
+    async def scenario() -> tuple[list[str], list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test():
+            renderer.token_delta("partial conclusion")
+            renderer.end_token_stream_with_content(authoritative)
+            renderer.event(ToolCallRequested(call_id="c1", name="bash", arguments={}))
+            renderer.event(ToolResultReady(call_id="c1", name="bash", output="ok", is_error=False))
+            await app_instance.wait_for_stream_idle()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            kinds = [type(child).__name__ for child in transcript.children]
+            stream = transcript.query_one(StreamMessage)
+            return kinds, [stream._markdown.source, stream._fallback.render().plain]
+
+    kinds, rendered = anyio.run(scenario)
+    assert kinds == ["StreamMessage", "ToolCard"]
+    assert authoritative in rendered
 
 
 def test_textual_streamed_and_line_messages_use_distinct_widgets() -> None:
