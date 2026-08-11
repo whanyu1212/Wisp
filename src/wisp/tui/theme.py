@@ -24,6 +24,40 @@ def _markdown_theme_variables(*, heading_color: str) -> dict[str, str]:
     return variables
 
 
+# Diff rows are painted as full-width tinted bands (the row background) with a
+# stronger tint on the specific changed tokens, matching how conventional diff
+# viewers separate "this line changed" from "this is what changed in it".
+#
+# These are deliberately hand-picked rather than derived from `success`/`error`
+# via Textual's automatic `$success-muted`/`$text-success` variables. Those are
+# tuned for isolated UI chrome and label text; applied to a dense block of diff
+# rows they read far too saturated, which is why an earlier auto-derived attempt
+# was reverted. Fixing the values here keeps the tint under direct control.
+#
+# Every foreground clears WCAG AA (>= 4.5:1) against BOTH its row band and its
+# stronger token band — the token band is the tighter pairing, so it is the one
+# that governs. Row bands sit at ~1.1-1.2:1 against the app background: visible
+# as a band without reading as a separate raised surface. Re-verify with
+# `contrast_ratio` before changing any value; see
+# `test_diff_theme_colors_clear_contrast_thresholds`.
+_DARK_DIFF_VARIABLES = {
+    "diff-add-fg": "#8fbfa8",
+    "diff-add-bg": "#16241e",
+    "diff-add-token-bg": "#22432f",
+    "diff-del-fg": "#cf95a1",
+    "diff-del-bg": "#241a1d",
+    "diff-del-token-bg": "#4a2630",
+}
+_LIGHT_DIFF_VARIABLES = {
+    "diff-add-fg": "#265c48",
+    "diff-add-bg": "#eaf5ee",
+    "diff-add-token-bg": "#c3e4d0",
+    "diff-del-fg": "#8a3548",
+    "diff-del-bg": "#fbecef",
+    "diff-del-token-bg": "#f4ccd4",
+}
+
+
 _DARK_WARNING = "#d3a25a"
 _LIGHT_WARNING = "#9c671a"
 
@@ -42,7 +76,7 @@ WISP_THEME_DARK = Theme(
     surface="#151b21",
     panel="#1b232b",
     dark=True,
-    variables=_markdown_theme_variables(heading_color=_DARK_WARNING),
+    variables=_markdown_theme_variables(heading_color=_DARK_WARNING) | _DARK_DIFF_VARIABLES,
 )
 
 WISP_THEME_LIGHT = Theme(
@@ -58,7 +92,7 @@ WISP_THEME_LIGHT = Theme(
     surface="#ffffff",
     panel="#eef3f5",
     dark=False,
-    variables=_markdown_theme_variables(heading_color=_LIGHT_WARNING),
+    variables=_markdown_theme_variables(heading_color=_LIGHT_WARNING) | _LIGHT_DIFF_VARIABLES,
 )
 
 WISP_THEMES = (WISP_THEME_DARK, WISP_THEME_LIGHT)

@@ -1185,7 +1185,10 @@ def test_dark_theme_semantic_colors_meet_normal_text_contrast_target(color_attr:
     assert contrast_ratio(getattr(WISP_THEME_DARK, color_attr), WISP_THEME_DARK.background) >= 4.5
 
 
-def test_light_theme_derived_diff_colors_meet_normal_text_contrast_target() -> None:
+def test_light_theme_derived_semantic_muted_pairs_meet_text_contrast_target() -> None:
+    # Textual's auto-derived success/error pairs back general UI chrome. Diffs
+    # no longer use them — see the dedicated diff-color test below — but any
+    # widget pairing text-* on *-muted still depends on this holding.
     from wisp.tui.textual_app import TextualTui
     from wisp.tui.theme import contrast_ratio
 
@@ -1204,6 +1207,39 @@ def test_light_theme_derived_diff_colors_meet_normal_text_contrast_target() -> N
 
     assert contrast_ratio(variables["text-success"], variables["success-muted"]) >= 4.5
     assert contrast_ratio(variables["text-error"], variables["error-muted"]) >= 4.5
+
+
+@pytest.mark.parametrize("theme_name", ["wisp", "wisp-light"])
+@pytest.mark.parametrize(
+    ("foreground", "background"),
+    [
+        ("diff-add-fg", "diff-add-bg"),
+        ("diff-add-fg", "diff-add-token-bg"),
+        ("diff-del-fg", "diff-del-bg"),
+        ("diff-del-fg", "diff-del-token-bg"),
+    ],
+)
+def test_diff_theme_colors_clear_contrast_thresholds(
+    theme_name: str, foreground: str, background: str
+) -> None:
+    # Diff source text must stay legible on BOTH its row band and the stronger
+    # token band layered on top. The token band is the tighter pairing, so it
+    # governs: tuning against the row band alone once shipped a light theme
+    # below AA. Resolved through a live app so the assertion covers the values
+    # Textual actually hands the painter, not just the literals in theme.py.
+    from wisp.tui.textual_app import TextualTui
+    from wisp.tui.theme import contrast_ratio
+
+    async def scenario() -> dict[str, str]:
+        app = TextualTui()
+        async with app.run_test() as pilot:
+            app.theme = theme_name
+            await pilot.pause()
+            return dict(app.get_css_variables())
+
+    variables = anyio.run(scenario)
+
+    assert contrast_ratio(variables[foreground], variables[background]) >= 4.5
 
 
 def test_issue_118_does_not_change_dark_or_neutral_palette_values() -> None:

@@ -5,10 +5,15 @@ from __future__ import annotations
 from textual.content import Content
 
 from wisp.tui.diff_presentation import (
+    DIFF_ADD_COUNT_STYLE,
     DIFF_ADD_STYLE,
+    DIFF_ADD_TOKEN_STYLE,
     DIFF_CONTEXT_STYLE,
+    DIFF_DEL_COUNT_STYLE,
     DIFF_DEL_STYLE,
+    DIFF_DEL_TOKEN_STYLE,
     DIFF_EXPANDED_BYTES,
+    DIFF_META_STYLE,
     DiffOperation,
     DiffRow,
     DiffRowKind,
@@ -28,11 +33,34 @@ def _styles_at(content: Content, needle: str) -> set[str]:
     return {str(span.style) for span in content.spans if span.start <= start < span.end}
 
 
-def test_diff_styles_use_foregrounds_without_nested_row_backgrounds() -> None:
-    assert DIFF_ADD_STYLE == "$text-success"
-    assert DIFF_DEL_STYLE == "$text-error"
-    assert " on " not in DIFF_ADD_STYLE
-    assert " on " not in DIFF_DEL_STYLE
+def test_changed_row_styles_carry_a_row_tint_and_a_stronger_token_tint() -> None:
+    # Changed rows are painted as bands so coverage is uniform across every
+    # addition and deletion, including those with no line pairing to derive
+    # token emphasis from. The token tint is a distinct background rather than
+    # a `reverse` modifier, keeping emphasis subordinate to the band.
+    assert " on " in DIFF_ADD_STYLE
+    assert " on " in DIFF_DEL_STYLE
+    assert " on " in DIFF_ADD_TOKEN_STYLE
+    assert " on " in DIFF_DEL_TOKEN_STYLE
+    assert "reverse" not in DIFF_ADD_TOKEN_STYLE
+    assert "reverse" not in DIFF_DEL_TOKEN_STYLE
+    # A token tint must differ from its row tint, or emphasis is invisible.
+    assert DIFF_ADD_TOKEN_STYLE != DIFF_ADD_STYLE
+    assert DIFF_DEL_TOKEN_STYLE != DIFF_DEL_STYLE
+
+
+def test_unchanged_and_metadata_rows_take_no_background() -> None:
+    # Only changed rows are banded; a tint on context or metadata would make
+    # the whole card read as one block and destroy the add/delete signal.
+    assert " on " not in DIFF_CONTEXT_STYLE
+    assert " on " not in DIFF_META_STYLE
+
+
+def test_header_counts_take_the_diff_hues_without_a_band() -> None:
+    # The +N/-N summary sits outside the diff body, where a tinted rectangle
+    # would read as a stray row.
+    assert " on " not in DIFF_ADD_COUNT_STYLE
+    assert " on " not in DIFF_DEL_COUNT_STYLE
 
 
 def test_structured_diff_colors_counts_independently() -> None:
@@ -40,8 +68,8 @@ def test_structured_diff_colors_counts_independently() -> None:
 
     assert presentation is not None
     content = _render_diff_presentation(presentation, width=80, expanded=False)
-    assert DIFF_ADD_STYLE in _styles_at(content, "+1")
-    assert DIFF_DEL_STYLE in _styles_at(content, "-1")
+    assert DIFF_ADD_COUNT_STYLE in _styles_at(content, "+1")
+    assert DIFF_DEL_COUNT_STYLE in _styles_at(content, "-1")
 
 
 def test_structured_context_is_muted_without_trailing_fill() -> None:
@@ -54,6 +82,38 @@ def test_structured_context_is_muted_without_trailing_fill() -> None:
     assert content.plain.endswith("keep")
     assert len(content.plain) < 40
     assert DIFF_CONTEXT_STYLE in _styles_at(content, "keep")
+
+
+def test_changed_rows_pad_to_full_width_so_the_tint_forms_a_band() -> None:
+    # Without the fill, a row tint would stop at the end of the source text and
+    # read as a ragged coloured fragment rather than a band.
+    for kind, style in (
+        (DiffRowKind.addition, DIFF_ADD_STYLE),
+        (DiffRowKind.deletion, DIFF_DEL_STYLE),
+    ):
+        content = _render_diff_visible_row(
+            DiffVisibleRow(DiffRow(kind, "short")),
+            width=40,
+            show_line_numbers=False,
+        )
+
+        # Two leading indent cells sit outside the banded region.
+        assert len(content.plain) == 40 + 2
+        assert content.plain.endswith(" ")
+        # The trailing fill carries the row tint, not a bare unstyled gap.
+        assert style in _styles_at(content, content.plain[-1])
+
+
+def test_changed_rows_are_not_padded_past_the_available_width() -> None:
+    # A row whose source already fills the width must not overflow the card.
+    source = "x" * 60
+    content = _render_diff_visible_row(
+        DiffVisibleRow(DiffRow(DiffRowKind.addition, source)),
+        width=40,
+        show_line_numbers=False,
+    )
+
+    assert len(content.plain) == 40 + 2
 
 
 def test_edit_presentation_preserves_literal_rows_and_line_positions() -> None:

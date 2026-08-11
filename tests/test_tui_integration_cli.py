@@ -1675,8 +1675,10 @@ def test_textual_tool_card_edit_renders_colored_diff() -> None:
     assert "+ │ return 2" in text  # addition gutter + literal source
     # Diff spans carry semantic theme variables, not baked hex. Textual resolves
     # them per active theme at paint time, so a theme switch recolors the diff.
-    assert "$text-success" in styles  # additions
-    assert "$text-error" in styles  # deletions
+    # Asserted over the real RPC round-trip: a style that only exists in-process
+    # would render as an unstyled diff in the actual TUI.
+    assert "$diff-add-fg on $diff-add-bg" in styles  # addition row band
+    assert "$diff-del-fg on $diff-del-bg" in styles  # deletion row band
 
 
 @pytest.mark.parametrize("size", [(28, 20), (80, 24), (120, 40)])
@@ -2003,8 +2005,8 @@ def test_textual_tool_card_write_renders_colored_diff() -> None:
     assert "M src/foo.py  +1 -1" in text
     assert "- │ line a" in text  # deletion line (prior content)
     assert "+ │ line b" in text  # addition line (new content)
-    assert "$text-success" in styles  # additions
-    assert "$text-error" in styles  # deletions
+    assert "$diff-add-fg on $diff-add-bg" in styles  # addition row band
+    assert "$diff-del-fg on $diff-del-bg" in styles  # deletion row band
 
 
 def test_textual_tool_card_write_create_renders_pure_addition() -> None:

@@ -97,11 +97,29 @@ class DiffVisibleRow:
 # Theme style variables are shared by the legacy ``Content`` renderer and the
 # structured ToolCard painter. The literal +/- markers and header letters remain
 # non-color cues when Textual is running without color.
-DIFF_ADD_STYLE = "$text-success"
-DIFF_DEL_STYLE = "$text-error"
+#
+# Changed rows carry a full-width row tint; the specific changed tokens within a
+# row carry a stronger tint on top. Row tint is what makes coverage uniform: it
+# applies to every addition/deletion, including the pure inserts, pure deletes
+# and unequal replaces that have no line pairing and therefore can never receive
+# token-level emphasis. Token emphasis is a genuine refinement layered on the
+# band, not the only signal that a row changed.
+#
+# The token style is a distinct background rather than a `reverse` modifier.
+# `reverse` swaps in the *full-strength* foreground as a background, which
+# dominates the row tint and inverts the reading order — the eye lands on a
+# token before the line it belongs to. An explicit background keeps emphasis
+# subordinate to the band. Colors live in `theme.py`, contrast-verified there.
+DIFF_ADD_STYLE = "$diff-add-fg on $diff-add-bg"
+DIFF_DEL_STYLE = "$diff-del-fg on $diff-del-bg"
+DIFF_ADD_TOKEN_STYLE = "$diff-add-fg on $diff-add-token-bg"
+DIFF_DEL_TOKEN_STYLE = "$diff-del-fg on $diff-del-token-bg"
+# The header's +N/-N counts are a summary, not a row: they take the same hues
+# without a band, so a tinted rectangle never appears outside the diff body.
+DIFF_ADD_COUNT_STYLE = "$diff-add-fg"
+DIFF_DEL_COUNT_STYLE = "$diff-del-fg"
 DIFF_CONTEXT_STYLE = "$text-muted"
 DIFF_META_STYLE = "$text-muted"
-DIFF_INTRA_HIGHLIGHT_MODIFIER = "reverse"
 
 DIFF_COLLAPSED_ROWS = 8
 DIFF_COLLAPSED_BYTES = 2_000
@@ -414,14 +432,17 @@ def _clip_to_bytes(text: str, max_bytes: int) -> str:
 
 
 __all__ = [
+    "DIFF_ADD_COUNT_STYLE",
     "DIFF_ADD_STYLE",
+    "DIFF_ADD_TOKEN_STYLE",
     "DIFF_COLLAPSED_BYTES",
     "DIFF_COLLAPSED_ROWS",
     "DIFF_CONTEXT_STYLE",
+    "DIFF_DEL_COUNT_STYLE",
     "DIFF_DEL_STYLE",
+    "DIFF_DEL_TOKEN_STYLE",
     "DIFF_EXPANDED_BYTES",
     "DIFF_EXPANDED_ROWS",
-    "DIFF_INTRA_HIGHLIGHT_MODIFIER",
     "DIFF_META_STYLE",
     "DiffOperation",
     "DiffPresentation",

@@ -60,10 +60,13 @@ from wisp.tui.decision_content import (
     _trust_content,
 )
 from wisp.tui.diff_presentation import (
+    DIFF_ADD_COUNT_STYLE,
     DIFF_ADD_STYLE,
+    DIFF_ADD_TOKEN_STYLE,
     DIFF_CONTEXT_STYLE,
+    DIFF_DEL_COUNT_STYLE,
     DIFF_DEL_STYLE,
-    DIFF_INTRA_HIGHLIGHT_MODIFIER,
+    DIFF_DEL_TOKEN_STYLE,
     DIFF_META_STYLE,
     DiffPresentation,
     DiffRow,
@@ -324,9 +327,9 @@ def _render_diff_presentation(
     header = (
         Content.styled(f"{presentation.file_marker} {path}", "b")
         + Content("  ")
-        + Content.styled(additions, DIFF_ADD_STYLE)
+        + Content.styled(additions, DIFF_ADD_COUNT_STYLE)
         + Content(" ")
-        + Content.styled(deletions, DIFF_DEL_STYLE)
+        + Content.styled(deletions, DIFF_DEL_COUNT_STYLE)
     )
     content = Content("  ") + header
     for visible_row in presentation.visible_rows(expanded=expanded):
@@ -344,7 +347,13 @@ def _render_diff_visible_row(
     width: int,
     show_line_numbers: bool,
 ) -> Content:
-    """Render one selected row without adding presentation-only trailing cells."""
+    """Render one selected row, padding changed rows into a full-width band.
+
+    Context and metadata rows are never padded — a trailing fill on an untinted
+    row is invisible cells that only widen the transcript. A changed row, by
+    contrast, carries a background, so its fill is exactly what turns a ragged
+    coloured fragment into a band that ends at the card edge.
+    """
 
     row = visible_row.row
     if row.kind in {DiffRowKind.omission, DiffRowKind.hunk}:
@@ -367,9 +376,14 @@ def _render_diff_visible_row(
     source_width = max(1, width - cell_len(gutter))
     source, emphasis_ranges = _crop_diff_row_source(row, width=source_width)
     style = _diff_row_style(row)
-    return Content.styled("  " + gutter, style) + _styled_diff_source(
-        source, emphasis_ranges, style
+    content = Content.styled("  " + gutter, style) + _styled_diff_source(
+        source, emphasis_ranges, _diff_token_style(row), style
     )
+    if row.kind in {DiffRowKind.addition, DiffRowKind.deletion}:
+        fill = source_width - cell_len(source)
+        if fill > 0:
+            content += Content.styled(" " * fill, style)
+    return content
 
 
 def _crop_diff_row_source(
@@ -415,6 +429,21 @@ def _diff_row_style(row: DiffRow) -> str:
     if row.kind is DiffRowKind.context:
         return DIFF_CONTEXT_STYLE
     return DIFF_META_STYLE
+
+
+def _diff_token_style(row: DiffRow) -> str:
+    """The stronger tint for changed tokens inside an already-tinted row.
+
+    Only addition and deletion rows have a distinct token tint. Any other kind
+    falls back to its own row style, so emphasis on an unexpected row degrades
+    to no visible change rather than an unreadable inverted block.
+    """
+
+    if row.kind is DiffRowKind.addition:
+        return DIFF_ADD_TOKEN_STYLE
+    if row.kind is DiffRowKind.deletion:
+        return DIFF_DEL_TOKEN_STYLE
+    return _diff_row_style(row)
 
 
 def _crop_diff_source(
@@ -517,9 +546,15 @@ def _take_cell_suffix(text: str, width: int) -> str:
 def _styled_diff_source(
     source: str,
     ranges: tuple[tuple[int, int], ...],
+    token_style: str,
     base_style: str,
 ) -> Content:
-    """Keep literal source styled while retaining bounded intra-line emphasis."""
+    """Keep literal source styled while retaining bounded intra-line emphasis.
+
+    ``token_style`` is a complete style for the changed spans rather than a
+    modifier appended to ``base_style``, so emphasis is a deliberate second tint
+    layered on the row band instead of an inversion of it.
+    """
 
     if not ranges:
         return Content.styled(source, base_style) if base_style else Content(source)
@@ -535,8 +570,7 @@ def _styled_diff_source(
                 else Content(source[cursor:start])
             )
         if end > start:
-            style = f"{base_style} {DIFF_INTRA_HIGHLIGHT_MODIFIER}".strip()
-            content += Content.styled(source[start:end], style)
+            content += Content.styled(source[start:end], token_style)
         cursor = end
     if cursor < len(source):
         content += (

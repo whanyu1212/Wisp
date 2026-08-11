@@ -13,9 +13,10 @@ from textual.content import Content
 from wisp.tui.diff_presentation import DiffPresentation, DiffRowKind
 from wisp.tui.tool_output import (
     _DIFF_ADD_STYLE,
+    _DIFF_ADD_TOKEN_STYLE,
     _DIFF_CONTEXT_STYLE,
     _DIFF_DEL_STYLE,
-    _DIFF_INTRA_HIGHLIGHT_MODIFIER,
+    _DIFF_DEL_TOKEN_STYLE,
     _DIFF_MAX_HUNK_CHARS,
     _DIFF_MAX_HUNK_LINES,
     _DIFF_MAX_TOTAL_CHARS,
@@ -111,7 +112,7 @@ def test_render_edit_diff_markup_in_content_stays_literal() -> None:
 def test_render_edit_diff_injected_markup_carries_only_the_add_style() -> None:
     # The injected line is styled solely by the out-of-band add span (plus,
     # since "old" -> "[red]evil[/red]" is a same-line-count replace, the
-    # legitimate intra-line reverse emphasis on the changed sub-span) — the
+    # legitimate intra-line token emphasis on the changed sub-span) — the
     # markup text itself produced no additional, unexpected spans (it was never
     # parsed).
     injected = "[red]evil[/red]"
@@ -122,10 +123,7 @@ def test_render_edit_diff_injected_markup_carries_only_the_add_style() -> None:
         if injected in content.plain[span.start : span.end]
         or content.plain[span.start : span.end] in injected
     }
-    assert styles <= {
-        _DIFF_ADD_STYLE,
-        f"{_DIFF_ADD_STYLE} {_DIFF_INTRA_HIGHLIGHT_MODIFIER}",
-    }
+    assert styles <= {_DIFF_ADD_STYLE, _DIFF_ADD_TOKEN_STYLE}
     assert styles  # sanity: the injected text was actually styled at all
 
 
@@ -793,12 +791,13 @@ def test_render_tool_result_oversize_edit_falls_back_to_generic() -> None:
 
 
 def _highlighted_spans(content: Content) -> list[tuple[str, str]]:
-    """Return substrings whose styles carry the intra-line modifier."""
+    """Return substrings styled with a changed-token tint."""
 
+    token_styles = {_DIFF_ADD_TOKEN_STYLE, _DIFF_DEL_TOKEN_STYLE}
     return [
         (content.plain[span.start : span.end], str(span.style))
         for span in content.spans
-        if _DIFF_INTRA_HIGHLIGHT_MODIFIER in str(span.style).split()
+        if str(span.style) in token_styles
     ]
 
 
@@ -815,14 +814,14 @@ def test_render_edit_diff_equal_length_replace_highlights_changed_token() -> Non
 
 
 def test_render_edit_diff_equal_length_replace_highlights_both_sides() -> None:
-    # Both the removed (old) and added (new) sub-spans get their own reverse
+    # Both the removed (old) and added (new) sub-spans get their own token
     # emphasis — not "new side only".
     content = render_edit_diff(_edit(("return old_value", "return new_value")))
     highlighted = _highlighted_spans(content)
     del_highlight = [style for text, style in highlighted if text == "old"]
     add_highlight = [style for text, style in highlighted if text == "new"]
-    assert del_highlight == [f"{_DIFF_DEL_STYLE} {_DIFF_INTRA_HIGHLIGHT_MODIFIER}"]
-    assert add_highlight == [f"{_DIFF_ADD_STYLE} {_DIFF_INTRA_HIGHLIGHT_MODIFIER}"]
+    assert del_highlight == [_DIFF_DEL_TOKEN_STYLE]
+    assert add_highlight == [_DIFF_ADD_TOKEN_STYLE]
 
 
 def test_render_edit_diff_multi_line_equal_length_replace_highlights_only_changed_line() -> None:
@@ -1075,10 +1074,17 @@ def test_intra_line_highlight_still_applies_when_equal_length_group_ends_at_diff
     assert highlighted_text == {"2"}
 
 
-def test_intra_line_highlight_style_is_distinguishable_without_color() -> None:
-    # The non-color-cue acceptance criterion, directly: the highlighted span's
-    # style carries reverse emphasis; the surrounding whole-line span on the
-    # same line does not.
+def test_intra_line_highlight_is_a_distinct_style_from_its_row() -> None:
+    # A changed token must be styled distinctly from the rest of its row, or
+    # the emphasis is invisible.
+    #
+    # Note the deliberate trade-off this encodes. Emphasis used to be a
+    # `reverse` SGR attribute, which survived on a no-color terminal; it is now
+    # a background tint, which does not. What remains as the non-color cue is
+    # the literal `+`/`-` marker on every changed row — so "which rows changed"
+    # is still legible without color, while "which token changed within a row"
+    # is now colour-dependent. Row markers were chosen as the cue to protect
+    # because they carry the primary signal.
     content = render_edit_diff(_edit(("return old_value", "return new_value")))
     plain_del_spans = [
         str(span.style)
@@ -1086,11 +1092,21 @@ def test_intra_line_highlight_style_is_distinguishable_without_color() -> None:
         if str(span.style) == _DIFF_DEL_STYLE and content.plain[span.start : span.end]
     ]
     highlighted_del_spans = [
-        style for _, style in _highlighted_spans(content) if _DIFF_DEL_STYLE in style
+        style for _, style in _highlighted_spans(content) if style == _DIFF_DEL_TOKEN_STYLE
     ]
     assert plain_del_spans  # unhighlighted portion of the line still present
-    assert highlighted_del_spans  # highlighted portion carries the extra modifier
+    assert highlighted_del_spans  # highlighted portion carries the token tint
     assert plain_del_spans[0] != highlighted_del_spans[0]
+
+
+def test_changed_rows_keep_literal_markers_as_the_non_color_cue() -> None:
+    # The accessibility floor for the tinted design: every changed row is still
+    # identifiable from its text alone, with no styling applied at all.
+    content = render_edit_diff(_edit(("return old_value", "return new_value")))
+    lines = [line for line in content.plain.split("\n") if line and not line.startswith("@@")]
+
+    assert any(line.startswith("-") for line in lines)
+    assert any(line.startswith("+") for line in lines)
 
 
 def test_render_edit_diff_intra_line_highlight_clipped_by_preview_bounds() -> None:
