@@ -1464,6 +1464,8 @@ def _recover_incomplete_tail(path: Path) -> bool:
         raise SessionError(f"Could not inspect session file: {path}") from exc
     if stat.S_ISLNK(path_info.st_mode) or not stat.S_ISREG(path_info.st_mode):
         raise SessionError(f"Session file is not a regular file: {path}")
+    if path_info.st_nlink != 1:
+        raise SessionError(f"Session file has multiple hard links: {path}")
     expected_signature = (path_info.st_dev, path_info.st_ino)
     flags = os.O_RDWR
     if hasattr(os, "O_NOFOLLOW"):
@@ -1493,6 +1495,8 @@ def _recover_incomplete_tail(path: Path) -> bool:
                 if newline != -1:
                     committed_size = position + newline + 1
                     break
+            if os.fstat(fd).st_nlink != 1:
+                raise SessionError(f"Session file has multiple hard links: {path}")
             os.ftruncate(fd, committed_size)
             os.utime(fd, ns=(info.st_atime_ns, info.st_mtime_ns))
             _sync_file(fd)

@@ -2884,6 +2884,29 @@ def test_recovery_rejects_hard_linked_sidecar_lock(tmp_path: Path) -> None:
     assert stat.S_IMODE(target.stat().st_mode) == original_mode
 
 
+def test_recovery_rejects_hard_linked_session_file(tmp_path: Path) -> None:
+    entry = MessageSessionEntry(
+        id="entry-1",
+        session_id="session-id",
+        message=Message(role="user", content="hello"),
+    )
+    committed = f"{session_entry_to_json(entry)}\n".encode()
+    target = tmp_path / "session-target"
+    target.write_bytes(committed + b'{"kind":')
+    path = tmp_path / "session.jsonl"
+    try:
+        os.link(target, path)
+    except OSError as exc:
+        pytest.skip(f"hard links are not supported: {exc}")
+    original = target.read_bytes()
+
+    with pytest.raises(SessionError, match="multiple hard links"):
+        JsonlSessionStore(tmp_path).summaries()
+
+    assert target.read_bytes() == original
+    assert path.read_bytes() == original
+
+
 def test_direct_load_rejects_symlink_session_file(tmp_path: Path) -> None:
     if not hasattr(os, "symlink"):
         pytest.skip("symlinks are not supported")
