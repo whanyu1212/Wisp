@@ -17,6 +17,7 @@ from wisp.tool_presentation import tool_result_status
 from wisp.tui.tool_output import (
     _ERROR_TAIL_BYTES,
     _ERROR_TAIL_LINES,
+    full_tool_result_for_display,
     render_error,
     render_generic,
     render_tool_result,
@@ -390,3 +391,83 @@ def test_render_tool_result_failed_read_uses_error_not_summary() -> None:
     )
     assert result == render_error("read failed: file not found", exit_code=None)
     assert "read 40 lines" not in result
+
+
+def test_render_grep_result_keeps_summary_and_match_evidence() -> None:
+    output = "src/a.py:1:TODO first\nsrc/b.py:2:TODO second\n"
+
+    rendered = render_tool_result(
+        "grep",
+        {"pattern": "TODO"},
+        output,
+        is_error=False,
+        exit_code=None,
+        summary="grep: 2 matches",
+    )
+
+    assert rendered == "grep: 2 matches\nsrc/a.py:1:TODO first\nsrc/b.py:2:TODO second"
+    assert full_tool_result_for_display("grep", output, None, summary="grep: 2 matches") == rendered
+
+
+def test_render_long_grep_result_reports_hidden_match_lines() -> None:
+    output = "\n".join(f"src/file.py:{index}:match" for index in range(20))
+
+    rendered = render_tool_result(
+        "grep",
+        {"pattern": "match"},
+        output,
+        is_error=False,
+        exit_code=None,
+        summary="grep: 20 matches",
+    )
+
+    assert rendered.startswith("grep: 20 matches\nsrc/file.py:0:match")
+    assert "src/file.py:7:match" in rendered
+    assert "src/file.py:8:match" not in rendered
+    assert "12 more lines" in rendered
+    assert "bytes hidden" in rendered
+
+
+def test_render_zero_match_grep_does_not_repeat_raw_empty_result() -> None:
+    rendered = render_tool_result(
+        "grep",
+        {"pattern": "absent"},
+        "No matches found",
+        is_error=False,
+        exit_code=None,
+        summary="grep: no matches",
+    )
+
+    assert rendered == "grep: no matches"
+    assert (
+        full_tool_result_for_display(
+            "grep",
+            "No matches found",
+            None,
+            summary="grep: no matches",
+        )
+        == "grep: no matches"
+    )
+
+
+def test_successful_bash_result_shows_tail_and_expands_in_original_order() -> None:
+    output = "\n".join(f"line-{index}" for index in range(40))
+
+    rendered = render_tool_result("bash", {}, output, is_error=False, exit_code=0)
+    full = full_tool_result_for_display("bash", output, 0)
+
+    assert "line-39" in rendered
+    assert "line-0" not in rendered
+    assert "earlier lines" in rendered
+    assert full.startswith("line-0\n")
+    assert full.endswith("line-39")
+
+
+def test_successful_extension_result_still_shows_head() -> None:
+    output = "\n".join(f"line-{index}" for index in range(40))
+
+    rendered = render_tool_result("extension", {}, output, is_error=False, exit_code=None)
+
+    assert "line-0" in rendered
+    assert "line-39" not in rendered
+    assert "more lines" in rendered

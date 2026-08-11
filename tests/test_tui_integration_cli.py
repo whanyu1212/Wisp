@@ -1023,7 +1023,7 @@ def test_textual_tui_renderer_renders_historical_edit_with_structured_diff() -> 
 
 
 def test_textual_tui_renderer_enriches_result_at_a_history_page_boundary() -> None:
-    async def scenario() -> tuple[int, str, str]:
+    async def scenario() -> tuple[str, int, str, str]:
         app_instance, renderer = create_textual_tui()
         result = HistoricalToolCard(
             card_id="history:result",
@@ -1047,6 +1047,7 @@ def test_textual_tui_renderer_enriches_result_at_a_history_page_boundary() -> No
         async with app_instance.run_test() as pilot:
             renderer.replace_history_entries((result,), session_label="Paged session")
             await pilot.pause()
+            initial_arguments = _first_tool_card(app_instance)._call_arguments.plain
             renderer.prepend_history_entries((paged_call,))
             await pilot.pause()
             await pilot.pause()
@@ -1056,16 +1057,22 @@ def test_textual_tui_renderer_enriches_result_at_a_history_page_boundary() -> No
                 if isinstance(child, ToolCard)
             ]
             assert len(cards) == 1
-            return len(cards), cards[0]._tool_name, cards[0]._summary
+            return (
+                initial_arguments,
+                len(cards),
+                cards[0]._tool_name,
+                cards[0]._call_arguments.plain,
+            )
 
-    card_count, tool_name, summary = anyio.run(scenario)
+    initial_arguments, card_count, tool_name, call_arguments = anyio.run(scenario)
+    assert initial_arguments == ""  # missing calls must not fabricate default arguments
     assert card_count == 1
     assert tool_name == "bash"
-    assert summary == "command=printf done"
+    assert call_arguments == "printf done"
 
 
 def test_textual_tui_renderer_remounts_boundary_result_without_visible_call() -> None:
-    async def scenario() -> tuple[int, str, int, str, int, str, str, str]:
+    async def scenario() -> tuple[int, str, int, str, int, str, str, str, str]:
         app_instance, renderer = create_textual_tui()
         result = HistoricalToolCard(
             card_id="history:result",
@@ -1131,11 +1138,12 @@ def test_textual_tui_renderer_remounts_boundary_result_without_visible_call() ->
                     else result_only_cards[0]._detail
                 ),
                 len(paired_cards),
-                paired_cards[0]._summary,
+                paired_cards[0]._call_arguments.plain,
                 len(remounted_result_cards),
                 remounted_detail.plain
                 if isinstance(remounted_detail, Content)
                 else remounted_detail,
+                remounted_result_cards[0]._call_arguments.plain,
                 activity_before_remount,
                 activity_after_remount,
             )
@@ -1144,20 +1152,42 @@ def test_textual_tui_renderer_remounts_boundary_result_without_visible_call() ->
         result_count,
         detail,
         paired_count,
-        summary,
+        call_arguments,
         remounted_count,
         remounted_detail,
+        remounted_call_arguments,
         activity_before_remount,
         activity_after_remount,
     ) = anyio.run(scenario)
     assert result_count == 1
     assert detail == "done"
     assert paired_count == 1
-    assert summary == "command=printf done"
+    assert call_arguments == "printf done"
     assert remounted_count == 1
     assert remounted_detail == "done"
+    assert remounted_call_arguments == "printf done"
     assert "Working" in activity_before_remount
     assert "Working" in activity_after_remount
+
+
+def test_textual_history_result_without_call_id_suppresses_fabricated_defaults() -> None:
+    async def scenario() -> str:
+        app_instance, renderer = create_textual_tui()
+        entry = HistoricalToolCard(
+            card_id="history:orphan",
+            name="grep",
+            arguments={},
+            output="No matches found",
+            is_error=False,
+            summary="grep: no matches",
+            call_missing=True,
+        )
+        async with app_instance.run_test() as pilot:
+            renderer.replace_history_entries((entry,), session_label="Legacy session")
+            await pilot.pause()
+            return _first_tool_card(app_instance)._call_arguments.plain
+
+    assert anyio.run(scenario) == ""
 
 
 def test_textual_tui_renderer_remounted_boundary_pair_is_not_pending() -> None:
@@ -1251,12 +1281,12 @@ def test_textual_tui_renderer_matches_reused_history_tool_call_ids_by_occurrence
             await pilot.pause()
             await pilot.pause()
             return [
-                card._summary
+                card._call_arguments.plain
                 for card in app_instance.query_one("#transcript", Transcript).children
                 if isinstance(card, ToolCard)
             ]
 
-    assert anyio.run(scenario) == ["command=first", "command=second"]
+    assert anyio.run(scenario) == ["first", "second"]
 
 
 def test_textual_tui_renderer_normalizes_historical_bash_full_output() -> None:
@@ -1528,10 +1558,11 @@ def test_textual_tool_card_bounds_large_multiline_output() -> None:
         ]
     )
 
-    assert "line-0" in rendered
-    assert "line-7" in rendered
-    assert "line-8" not in rendered
-    assert "... 4 more lines" in rendered
+    assert "line-0" not in rendered
+    assert "line-3" not in rendered
+    assert "line-4" in rendered
+    assert "line-11" in rendered
+    assert "... 4 earlier lines" in rendered
 
 
 def test_textual_tool_card_error_shows_tail_and_exit_code() -> None:
@@ -2126,7 +2157,7 @@ def test_textual_tool_card_read_shows_summary_not_raw_output() -> None:
     assert "import os" not in text  # the raw output is replaced by the summary
 
 
-def test_textual_tool_card_grep_shows_match_summary() -> None:
+def test_textual_tool_card_grep_shows_summary_and_match_preview() -> None:
     async def scenario() -> str:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
@@ -2145,9 +2176,10 @@ def test_textual_tool_card_grep_shows_match_summary() -> None:
             return "\n".join(_transcript_texts(app_instance))
 
     text = anyio.run(scenario)
-    assert "✓ grep" in text
+    assert "✓ grep  /x/ in ." in text  # semantic call arguments survive resolution
     assert "grep: 3 matches" in text
-    assert "a.py:1:x" not in text  # raw matches replaced by the summary
+    assert "a.py:1:x" in text  # bounded evidence accompanies the structured count
+    assert "c.py:3:x" in text
 
 
 def _first_tool_card(app: TextualTui) -> ToolCard:

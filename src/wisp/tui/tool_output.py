@@ -9,8 +9,8 @@ Design — strict core, tolerant edge:
 
 * Built-in tools are a small, known set whose result shape we own. They get
   explicit rendering from promoted, typed facts — a shell ``exit_code``, an edit or
-  write before/after diff, and a read-type tool's one-line summary — for
-  high-fidelity detail.
+  write before/after diff, and a read-type tool's one-line summary. Grep also keeps
+  a bounded match preview, while Bash keeps the useful output tail.
 * Custom / third-party tools are an open set we do not control. They fall through
   to a permissive generic renderer that never assumes a shape and degrades
   gracefully to bounded output.
@@ -202,8 +202,8 @@ def render_tool_result(
     tools (read/grep/find/ls), or None. ``process_state`` is the promoted managed
     Bash state; terminal failure states use the error path even without an exit code.
 
-    Returns a plain ``str`` for the error/generic/summary paths (the widget escapes
-    it as untrusted markup), a Textual ``Content`` for legacy direct diff callers,
+    Returns a plain ``str`` for the error/generic/summary/preview paths (the widget
+    escapes it as untrusted markup), a Textual ``Content`` for legacy direct diff callers,
     or a structured :class:`DiffPresentation` for edit/write cards. Unknown
     tools and successful results without a summary fall back to
     :func:`render_generic`.
@@ -227,20 +227,25 @@ def render_tool_result(
         diff = build_write_diff_presentation(before_text, arguments, created=created)
         if diff is not None:
             return diff
-    # A read-type tool (read/grep/find/ls) carries a one-line success summary the
-    # executor built from its structured data. The summary is only ever set for
-    # those tools, so its presence is the signal — no per-tool check needed here.
-    # It replaces the raw output dump; the full output returns via expand/collapse.
+    # Read-type summaries stay concise, except grep: match lines are the useful
+    # evidence, so keep the authoritative count and add a bounded head preview.
+    # Prefixing both collapsed and expanded grep output with the same summary keeps
+    # ToolCard's equality-based expansion check honest for short complete results.
     if summary is not None:
+        if name == "grep":
+            return _summary_with_grep_output(summary, output)
         return summary
     # Successful shell results carry the same model-facing synthetic exit prefix
-    # as failures. Their cards already communicate success, so keep the previous
-    # raw-output presentation by removing only a matching promoted prefix.
+    # as failures. Their cards already communicate success, so remove only a
+    # matching promoted prefix. Bash then shows the tail, where test/build summaries
+    # ordinarily live; unknown and extension tools retain the generic head preview.
     display_output = normalize_tool_output_for_display(
         output,
         exit_code,
         output_has_exit_status=output_has_exit_status,
     )
+    if name == "bash":
+        return render_bash_success(display_output)
     return render_generic(display_output)
 
 
@@ -323,13 +328,15 @@ def normalize_tool_output_for_display(
     return output
 
 
-def full_tool_output_for_display(
+def full_tool_result_for_display(
+    name: str,
     output: str,
     exit_code: int | None,
     *,
     output_has_exit_status: bool = False,
+    summary: str | None = None,
 ) -> str:
-    """Return normalized full output with a human-readable failure status."""
+    """Return the full tool-bounded output corresponding to the collapsed view."""
 
     body = normalize_tool_output_for_display(
         output,
@@ -337,11 +344,29 @@ def full_tool_output_for_display(
         output_has_exit_status=output_has_exit_status,
     )
     status = _exit_status_line(exit_code)
-    if status is None:
-        return body
-    if not body:
-        return status
-    return f"{status}\n{body}"
+    if status is not None:
+        if not body:
+            return status
+        return f"{status}\n{body}"
+    if name == "grep" and summary is not None:
+        return _summary_with_grep_output(summary, body, preview=False)
+    return body
+
+
+def _summary_with_grep_output(summary: str, output: str, *, preview: bool = True) -> str:
+    """Keep grep's structured count alongside its literal match evidence."""
+
+    if summary == "grep: no matches" or not output.strip():
+        return summary
+    body = render_generic(output) if preview else output.rstrip("\n")
+    return f"{summary}\n{body}"
+
+
+def render_bash_success(output: str) -> str:
+    """Render a successful Bash result from the tail, where summaries usually live."""
+
+    tail = _tail_preview(output, max_lines=_ERROR_TAIL_LINES, max_bytes=_ERROR_TAIL_BYTES)
+    return tail or "(no output)"
 
 
 def _exit_status_line(exit_code: int | None) -> str | None:

@@ -39,7 +39,7 @@ def test_collapsed_shows_detail_and_expand_affordance() -> None:
     text = _rendered(card)
     assert "short preview" in text
     assert "line 4" not in text  # full output hidden while collapsed
-    assert "▸" in text  # collapsed affordance
+    assert "▸ more (Enter)" in text  # labeled collapsed affordance
 
 
 def test_toggle_expands_to_full_output() -> None:
@@ -51,11 +51,28 @@ def test_toggle_expands_to_full_output() -> None:
     text = _rendered(card)
     assert card._expanded is True
     assert "line 19" in text  # the full output is now visible
-    assert "▾" in text  # expanded affordance
+    assert "▾ less (Enter)" in text  # labeled expanded affordance
 
     card.action_toggle_expand()
     assert card._expanded is False
     assert "line 19" not in _rendered(card)  # collapsed again
+
+
+def test_resolved_card_keeps_semantic_call_arguments_in_header() -> None:
+    card = ToolCard(
+        "grep",
+        {"pattern": "TODO", "path": "src", "glob": "*.py"},
+    )
+    card.set_state(
+        "done",
+        detail="grep: 2 matches",
+        elapsed=0.1,
+        full_output="grep: 2 matches\nsrc/a.py:1:TODO\nsrc/b.py:2:TODO",
+    )
+
+    rendered = _rendered(card)
+    assert "grep  /TODO/ in src (*.py)" in rendered
+    assert "grep: 2 matches" in rendered
 
 
 def test_toggle_is_noop_without_expandable_content() -> None:
@@ -64,14 +81,14 @@ def test_toggle_is_noop_without_expandable_content() -> None:
     assert card._can_expand() is False
     card.action_toggle_expand()
     assert card._expanded is False
-    assert "▸" not in _rendered(card)  # no affordance offered
+    assert "more (Enter)" not in _rendered(card)  # no affordance offered
 
 
 def test_error_card_without_full_output_cannot_expand() -> None:
     card = ToolCard("bash", {})
     card.set_state("error", detail="command failed: not found", elapsed=0.1)
     assert card._can_expand() is False
-    assert "▸" not in _rendered(card)
+    assert "more (Enter)" not in _rendered(card)
 
 
 def test_truncation_marker_shows_when_truncated_collapsed_and_expanded() -> None:
@@ -98,7 +115,7 @@ def test_truncation_marker_shows_when_capped_output_fits_and_cannot_expand() -> 
     card = _resolved(detail="line 1\nline 2", full_output="line 1\nline 2", truncated=True)
     assert card._can_expand() is False  # nothing more to reveal
     rendered = _rendered(card)
-    assert "▸" not in rendered  # no expand affordance offered
+    assert "more (Enter)" not in rendered  # no expand affordance offered
     assert "truncated at the tool's limit" in rendered  # but the marker is still honest
 
 

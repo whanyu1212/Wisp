@@ -1888,6 +1888,7 @@ class TextualTui(App[None]):
         *,
         historical_card_id: str | None = None,
         historical: bool = False,
+        arguments_available: bool = True,
         before: Widget | None = None,
     ) -> ToolCard | None:
         """Mount and register one evolving live or retained-history tool card."""
@@ -1898,6 +1899,7 @@ class TextualTui(App[None]):
             arguments,
             historical_card_id=historical_card_id,
             historical=historical,
+            arguments_available=arguments_available,
             before=before,
         )
 

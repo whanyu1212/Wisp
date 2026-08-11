@@ -30,7 +30,7 @@ from wisp.tui.history import (
     historical_tool_status,
 )
 from wisp.tui.skills import format_skill_invocation
-from wisp.tui.tool_output import full_tool_output_for_display, render_tool_result
+from wisp.tui.tool_output import full_tool_result_for_display, render_tool_result
 from wisp.tui.transcript_window import TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, TranscriptWindow
 
 
@@ -79,6 +79,7 @@ class TextualHistorySurface(Protocol):
         *,
         historical_card_id: str | None = None,
         historical: bool = False,
+        arguments_available: bool = True,
         before: Widget | None = None,
     ) -> Widget | None: ...
 
@@ -116,6 +117,14 @@ class _RetainedHistoryEntry:
 
 
 @dataclass(frozen=True)
+class _BoundaryToolCall:
+    """Call metadata retained while its paired result remains pageable."""
+
+    name: str
+    arguments: JsonObject
+
+
+@dataclass(frozen=True)
 class _LiveHistoryEntry:
     """One persisted entry already represented by a live transcript widget."""
 
@@ -146,6 +155,7 @@ class TextualHistoryController:
         self._historical_tool_results: dict[str, deque[tuple[str, HistoricalToolCard]]] = {}
         self._resolved_boundary_results: dict[str, HistoricalToolCard] = {}
         self._boundary_result_calls: dict[str, str] = {}
+        self._boundary_tool_calls: dict[str, _BoundaryToolCall] = {}
         self._window = TranscriptWindow[_RetainedHistoryEntry](retained_capacity=retained_capacity)
         self._widgets: dict[int, Widget] = {}
         self._next_entry_id = 0
@@ -355,6 +365,7 @@ class TextualHistoryController:
         self._historical_tool_results.clear()
         self._resolved_boundary_results.clear()
         self._boundary_result_calls.clear()
+        self._boundary_tool_calls.clear()
         self._window.clear()
         self._widgets.clear()
         self._next_entry_id = 0
@@ -431,10 +442,18 @@ class TextualHistoryController:
             for card_id, result in self._resolved_boundary_results.items()
             if card_id not in card_ids and result.card_id not in card_ids
         }
+        # The call can age out before its newer result. Keep the pairing snapshot
+        # until the result itself leaves retention so a later remount preserves the
+        # semantic header and argument-dependent diff.
         self._boundary_result_calls = {
             result_card_id: call_card_id
             for result_card_id, call_card_id in self._boundary_result_calls.items()
-            if result_card_id not in card_ids and call_card_id not in card_ids
+            if result_card_id not in card_ids
+        }
+        self._boundary_tool_calls = {
+            result_card_id: tool_call
+            for result_card_id, tool_call in self._boundary_tool_calls.items()
+            if result_card_id not in card_ids
         }
 
     def _reconcile(self) -> None:
@@ -514,15 +533,26 @@ class TextualHistoryController:
             card = self._surface.historical_tool_card(paired_call_id)
             if card is not None:
                 return card
+            paired_call = self._boundary_tool_calls.get(entry.card_id)
+            resolved_name = paired_call.name if paired_call is not None else entry.name
+            resolved_arguments = (
+                paired_call.arguments if paired_call is not None else entry.arguments
+            )
             card = self._surface.mount_tool_call(
                 entry.card_id,
-                entry.name,
-                entry.arguments,
+                resolved_name,
+                resolved_arguments,
                 historical_card_id=entry.card_id,
                 historical=True,
+                arguments_available=paired_call is not None or not entry.call_missing,
                 before=before,
             )
-            self._apply_tool_result(entry.card_id, entry)
+            self._apply_tool_result(
+                entry.card_id,
+                entry,
+                name=resolved_name,
+                arguments=resolved_arguments,
+            )
             return card
 
         tool_call_id = entry.tool_call_id
@@ -544,6 +574,7 @@ class TextualHistoryController:
                         entry.arguments,
                         historical_card_id=entry.card_id,
                         historical=True,
+                        arguments_available=not entry.call_missing,
                         before=before,
                     )
                     if card is not None:
@@ -560,7 +591,7 @@ class TextualHistoryController:
                             truncated=truncated,
                         )
                 if card is not None:
-                    self._boundary_result_calls[result.card_id] = entry.card_id
+                    self._remember_boundary_call(result, entry)
                 return card
 
             results = self._historical_tool_results.get(tool_call_id)
@@ -576,7 +607,7 @@ class TextualHistoryController:
                     if not results:
                         del self._historical_tool_results[tool_call_id]
                     self._resolved_boundary_results[entry.card_id] = result
-                    self._boundary_result_calls[result.card_id] = entry.card_id
+                    self._remember_boundary_call(result, entry)
                     return self._surface.historical_tool_card(result_card_id)
 
         card = self._surface.mount_tool_call(
@@ -585,6 +616,7 @@ class TextualHistoryController:
             entry.arguments,
             historical_card_id=entry.card_id if entry.call_missing else None,
             historical=True,
+            arguments_available=not entry.call_missing,
             before=before,
         )
         if entry.call_missing and tool_call_id is not None:
@@ -617,8 +649,30 @@ class TextualHistoryController:
             truncated=truncated,
         )
 
-    def _apply_tool_result(self, card_id: str, entry: HistoricalToolCard) -> None:
-        status, detail, full_output, truncated = self._tool_presentation(entry)
+    def _remember_boundary_call(
+        self,
+        result: HistoricalToolCard,
+        call: HistoricalToolCard,
+    ) -> None:
+        self._boundary_result_calls[result.card_id] = call.card_id
+        self._boundary_tool_calls[result.card_id] = _BoundaryToolCall(
+            name=call.name,
+            arguments=dict(call.arguments),
+        )
+
+    def _apply_tool_result(
+        self,
+        card_id: str,
+        entry: HistoricalToolCard,
+        *,
+        name: str | None = None,
+        arguments: JsonObject | None = None,
+    ) -> None:
+        status, detail, full_output, truncated = self._tool_presentation(
+            entry,
+            name=name,
+            arguments=arguments,
+        )
         self._surface.resolve_tool_call(
             card_id,
             status,
@@ -652,10 +706,12 @@ class TextualHistoryController:
                 created=entry.created,
                 summary=entry.summary,
             ),
-            full_tool_output_for_display(
+            full_tool_result_for_display(
+                resolved_name,
                 entry.output,
                 entry.exit_code,
                 output_has_exit_status=entry.output_has_exit_status,
+                summary=entry.summary if status == "done" else None,
             ),
             entry.truncated,
         )
