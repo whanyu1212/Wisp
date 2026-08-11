@@ -96,6 +96,10 @@ WISP_THEME_LIGHT = Theme(
 )
 
 WISP_THEMES = (WISP_THEME_DARK, WISP_THEME_LIGHT)
+# Textual also registers ~20 built-in themes on every app. Wisp's own names are
+# tracked separately so a persisted or user-supplied theme can be validated
+# against the palettes whose role colors and diff variables actually exist.
+WISP_THEME_NAMES = frozenset(theme.name for theme in WISP_THEMES)
 
 
 # Muted-text color for the `dim`/`session` roles (issue #76). These roles used
