@@ -164,7 +164,8 @@ def test_write_tool_creates_parent_directories_and_overwrites(tmp_path: Path) ->
 
 
 def test_write_tool_create_only_creates_new_file(tmp_path: Path) -> None:
-    context = ToolContext(cwd=tmp_path)
+    receipt = file_ops_module.CreateOnlyWriteReceipt()
+    context = ToolContext(cwd=tmp_path, create_only_write_receipt=receipt)
 
     result = run_tool(
         WriteTool(),
@@ -174,7 +175,11 @@ def test_write_tool_create_only_creates_new_file(tmp_path: Path) -> None:
 
     assert result.data["created"] is True
     assert "before_text" not in result.data
-    assert (tmp_path / "nested/new.txt").read_text(encoding="utf-8") == "new\n"
+    path = tmp_path / "nested/new.txt"
+    assert path.read_text(encoding="utf-8") == "new\n"
+    info = path.lstat()
+    assert receipt.path == path
+    assert receipt.file_id == (info.st_dev, info.st_ino)
 
 
 def test_write_tool_honors_operation_write_path_restriction(tmp_path: Path) -> None:

@@ -21,6 +21,20 @@ from wisp.tools.result import ToolError, ToolResult
 _WRITE_SNAPSHOT_MAX_CHARS = 1_000_000
 
 
+class CreateOnlyWriteReceipt:
+    """Operation-local identity of a successfully published create-only write."""
+
+    __slots__ = ("file_id", "path")
+
+    def __init__(self) -> None:
+        self.path: Path | None = None
+        self.file_id: tuple[int, int] | None = None
+
+    def record(self, path: Path, file_id: tuple[int, int]) -> None:
+        self.path = path
+        self.file_id = file_id
+
+
 class ReadTool:
     """Read text files with optional line slicing."""
 
@@ -143,7 +157,9 @@ class WriteTool:
             with path.open("w", encoding="utf-8", newline="") as file:
                 file.write(content)
         else:
-            _write_create_only(path, content, selected_path=selected_path)
+            file_id = _write_create_only(path, content, selected_path=selected_path)
+            if context.create_only_write_receipt is not None:
+                context.create_only_write_receipt.record(path, file_id)
         byte_count = len(content.encode("utf-8"))
         data: dict[str, object] = {
             "path": display_tool_path(path, context),
@@ -158,15 +174,23 @@ class WriteTool:
         )
 
 
-def _write_create_only(path: Path, content: str, *, selected_path: str) -> None:
+def _write_create_only(
+    path: Path,
+    content: str,
+    *,
+    selected_path: str,
+) -> tuple[int, int]:
     """Publish complete content without exposing an empty or partial target."""
 
     descriptor, temporary = _open_write_temporary(path.parent, selected_path=selected_path)
     published = False
+    file_id: tuple[int, int] | None = None
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as file:
             descriptor = -1
             file.write(content)
+            info = os.fstat(file.fileno())
+            file_id = (info.st_dev, info.st_ino)
         try:
             os.link(temporary, path)
         except FileExistsError as exc:
@@ -192,6 +216,9 @@ def _write_create_only(path: Path, content: str, *, selected_path: str) -> None:
                 "Create-only file was published but temporary-link cleanup failed; "
                 f"destination: {path}; temporary: {temporary}: {exc}"
             ) from exc
+    if file_id is None:
+        raise ToolError(f"Could not record created file identity: {selected_path}")
+    return file_id
 
 
 def _open_write_temporary(directory: Path, *, selected_path: str) -> tuple[int, Path]:

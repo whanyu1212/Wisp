@@ -81,6 +81,7 @@ from wisp.sessions.jsonl import (
 )
 from wisp.sessions.replay import replay_session_entries, resolve_session_tree
 from wisp.tools.context import ToolContext
+from wisp.tools.file_ops import CreateOnlyWriteReceipt
 
 from .configuration import _RpcConfigureOverrides
 from .coordinator import (
@@ -263,9 +264,12 @@ class RpcCommandExecutor:
                 running_command=None,
                 selected_session=self.session_state.session,
             )
+        receipt = tool_context.create_only_write_receipt
+        assert receipt is not None
         completion = _ProjectInitCompletion(
             target,
             conflicting_paths=(target.with_name("AGENTS.MD"),),
+            receipt=receipt,
         )
         new_running_command, new_session = start_rpc_prompt_command(
             {**command, "prompt": "/init"},
@@ -622,6 +626,7 @@ def _project_init_request(agent: CodingSession) -> tuple[str, ToolContext, Path]
         raise ValueError("Project initialization requires the write tool.")
 
     target = project_root / "AGENTS.md"
+    receipt = CreateOnlyWriteReceipt()
     encoded_target = json.dumps(str(target), ensure_ascii=False)
     prompt = f"""Initialize this repository for future coding agents.
 
@@ -650,6 +655,7 @@ remains create-only if the filesystem changes during your inspection."""
             conflicting_write_paths=(target.with_name("AGENTS.MD"),),
             require_create_only_writes=True,
             require_non_empty_writes=True,
+            create_only_write_receipt=receipt,
         ),
         target,
     )
@@ -659,6 +665,7 @@ remains create-only if the filesystem changes during your inspection."""
 class _ProjectInitCompletion:
     target: Path
     conflicting_paths: tuple[Path, ...]
+    receipt: CreateOnlyWriteReceipt
     matching_call_ids: set[str] = field(default_factory=set)
     created_file_id: tuple[int, int] | None = None
 
@@ -681,11 +688,8 @@ class _ProjectInitCompletion:
             and not event.is_error
             and event.created
         ):
-            try:
-                info = self.target.lstat()
-            except OSError:
-                return
-            self.created_file_id = (info.st_dev, info.st_ino)
+            if self.receipt.path == self.target:
+                self.created_file_id = self.receipt.file_id
 
     def error(self) -> str | None:
         if self.created_file_id is None:

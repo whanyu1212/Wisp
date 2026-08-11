@@ -59,6 +59,7 @@ from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionTreeNavigation
 from wisp.skills.models import SkillCatalog, SkillDiagnostic, SkillEntry
 from wisp.tools.context import ToolContext
+from wisp.tools.file_ops import CreateOnlyWriteReceipt
 
 
 class _ApprovalResolver:
@@ -267,7 +268,11 @@ def test_init_dispatches_repository_specific_create_only_prompt(
             assert context.conflicting_write_paths == (target.with_name("AGENTS.MD"),)
             assert context.require_create_only_writes is True
             assert context.require_non_empty_writes is True
+            receipt = context.create_only_write_receipt
+            assert receipt is not None
             target.write_text("# Agent guidance\n", encoding="utf-8")
+            info = target.lstat()
+            receipt.record(target, (info.st_dev, info.st_ino))
             call = ToolCallSnapshot(
                 call_id="write-1",
                 name="write",
@@ -319,9 +324,11 @@ def test_init_completion_reports_conflict_without_unsafe_path_cleanup(
 ) -> None:
     target = tmp_path / "AGENTS.md"
     conflict = tmp_path / "conflict.md"
+    receipt = CreateOnlyWriteReceipt()
     completion = rpc_execution_module._ProjectInitCompletion(
         target,
         conflicting_paths=(conflict,),
+        receipt=receipt,
     )
     call = ToolCallSnapshot(
         call_id="write-1",
@@ -329,6 +336,8 @@ def test_init_completion_reports_conflict_without_unsafe_path_cleanup(
         arguments={"path": "AGENTS.md", "content": "generated\n", "overwrite": False},
     )
     target.write_text("generated\n", encoding="utf-8")
+    info = target.lstat()
+    receipt.record(target, (info.st_dev, info.st_ino))
     completion.observe(
         MessageCompleted(
             turn=1,
@@ -353,6 +362,49 @@ def test_init_completion_reports_conflict_without_unsafe_path_cleanup(
     )
     assert target.read_text(encoding="utf-8") == "generated\n"
     assert conflict.read_text(encoding="utf-8") == "concurrent\n"
+
+
+def test_init_completion_rejects_replacement_before_tool_event(tmp_path: Path) -> None:
+    target = tmp_path / "AGENTS.md"
+    receipt = CreateOnlyWriteReceipt()
+    completion = rpc_execution_module._ProjectInitCompletion(
+        target,
+        conflicting_paths=(),
+        receipt=receipt,
+    )
+    target.write_text("generated\n", encoding="utf-8")
+    created_info = target.lstat()
+    receipt.record(target, (created_info.st_dev, created_info.st_ino))
+    replacement = tmp_path / "replacement.md"
+    replacement.write_text("replacement\n", encoding="utf-8")
+    replacement.replace(target)
+    call = ToolCallSnapshot(
+        call_id="write-1",
+        name="write",
+        arguments={"path": "AGENTS.md", "content": "generated\n", "overwrite": False},
+    )
+    completion.observe(
+        MessageCompleted(
+            turn=1,
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=(call,),
+        )
+    )
+    completion.observe(
+        ToolExecutionEnded(
+            call_id=call.call_id,
+            name="write",
+            output="Wrote 10 bytes to AGENTS.md",
+            is_error=False,
+            created=True,
+        )
+    )
+
+    assert (
+        completion.error() == f"Generated project guidance was replaced before completion: {target}"
+    )
+    assert target.read_text(encoding="utf-8") == "replacement\n"
 
 
 def test_init_fails_when_agent_does_not_create_guidance(
