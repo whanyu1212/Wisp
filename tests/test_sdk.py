@@ -405,6 +405,47 @@ def test_in_process_sdk_reports_trust_persistence_errors_through_prompt(
     anyio.run(scenario)
 
 
+def test_in_process_sdk_recovers_after_unexpected_prompt_exception(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        host = controller._in_process_transport._host
+
+        def fail_run(*_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("unexpected SDK prompt failure")
+
+        monkeypatch.setattr(host.agent, "run", fail_run)
+        prompt_id = await controller.prompt("hello", command_id="prompt-1")
+        state_id: str | None = None
+        events = []
+        try:
+            async for event in controller.events():
+                events.append(event)
+                if isinstance(event, RpcCommandFinished) and event.command_id == prompt_id:
+                    state_id = await controller.get_state(command_id="state-1")
+                elif isinstance(event, RpcCommandFinished) and event.command_id == state_id:
+                    break
+        finally:
+            await controller.aclose()
+
+        terminals = [event for event in events if isinstance(event, RpcCommandFinished)]
+        assert [(event.command_id, event.ok, event.error) for event in terminals] == [
+            ("prompt-1", False, "unexpected SDK prompt failure"),
+            ("state-1", True, None),
+        ]
+        assert any(
+            isinstance(event, RpcStateReported) and event.command_id == "state-1"
+            for event in events
+        )
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_runs_the_shared_command_event_contract(tmp_path: Path) -> None:
     async def scenario() -> None:
         controller = await InProcessWisp.start(

@@ -214,6 +214,82 @@ def test_executor_dispatches_validation_and_shutdown_without_stdin(tmp_path: Pat
     anyio.run(scenario)
 
 
+def test_prompt_worker_converts_unexpected_exception_to_failed_completion(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+
+        def fail_run(*_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("unexpected prompt failure")
+
+        monkeypatch.setattr(fixture.agent, "run", fail_run)
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = executor.dispatch(
+                {"id": "prompt-1", "type": "prompt", "prompt": "hello"},
+                None,
+            )
+            completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is not None
+        assert isinstance(completed, _RpcCommandCompleted)
+        assert completed.command_id == "prompt-1"
+        assert completed.ok is False
+        finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
+        assert [(event.command_id, event.ok, event.error) for event in finished] == [
+            ("prompt-1", False, "unexpected prompt failure")
+        ]
+
+    anyio.run(scenario)
+
+
+def test_prompt_worker_converts_unexpected_renderer_exception_to_failed_completion(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+
+        async def fail_render(_events: AsyncIterator[WispEvent]) -> None:
+            raise RuntimeError("renderer failed")
+
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = RpcCommandExecutor(
+                agent=fixture.agent,
+                runtime=fixture.runtime,
+                sessions=fixture.sessions,
+                session_state=fixture.session_state,
+                task_group=task_group,
+                send=send,
+                approval_policy=fixture.approval_policy,
+                trust_gate=fixture.trust_gate,
+                configure_overrides=fixture.configure_overrides,
+                coordinator=fixture.coordinator,
+                write_event=fixture.writer,
+                render_events=fail_render,
+            )
+            result = executor.dispatch(
+                {"id": "prompt-1", "type": "prompt", "prompt": "hello"},
+                None,
+            )
+            completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is not None
+        assert isinstance(completed, _RpcCommandCompleted)
+        assert completed.ok is False
+        finished = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
+        assert [(event.command_id, event.ok, event.error) for event in finished] == [
+            ("prompt-1", False, "renderer failed")
+        ]
+
+    anyio.run(scenario)
+
+
 def test_executor_queue_state_is_idle_safe_and_mutations_fail_cleanly(tmp_path: Path) -> None:
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)

@@ -992,6 +992,45 @@ def test_rpc_pending_queue_is_bounded_while_prompt_is_blocked(
     assert state["follow_up"] == []
 
 
+def test_rpc_mode_rejects_duplicate_outstanding_command_id(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    provider = BlockingOperationProvider(block_prompt=True)
+
+    async def build_runtime() -> WispRuntime:
+        return await _runtime_with_provider(provider)
+
+    monkeypatch.setattr(cli_module.rpc, "build_runtime", build_runtime)
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=(
+            '{"id":"same","type":"prompt","prompt":"block"}\n'
+            '{"id":"same","type":"prompt","prompt":"duplicate"}\n'
+            '{"id":"cancel","type":"cancel","target_id":"same"}\n'
+        ),
+        env={"WISP_PROVIDER": provider.name, "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    terminals = [record for record in records if record["type"] == "rpc.command.finished"]
+    original = [record for record in terminals if record["command_id"] == "same"]
+    duplicate = [
+        record
+        for record in terminals
+        if record.get("error") == "RPC command id is already outstanding: same"
+    ]
+    assert len(original) == 1
+    assert original[0]["ok"] is False
+    assert original[0]["error"] == "RPC command cancelled: same"
+    assert len(duplicate) == 1
+    assert duplicate[0]["ok"] is False
+    assert duplicate[0]["command_id"] not in {"same", "cancel"}
+    assert any(record["command_id"] == "cancel" and record["ok"] is True for record in terminals)
+
+
 def test_rpc_repeat_compaction_failure_leaves_process_usable(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
