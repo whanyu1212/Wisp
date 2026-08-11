@@ -102,7 +102,8 @@ def test_connect_rejects_unknown_providers() -> None:
 
     anyio.run(run)
     assert renderer.errors == [
-        "Unknown provider. Choose one of: openai-codex, openai, anthropic, google."
+        "Unknown provider. Choose one of: openai-codex, openai, openai-compatible, "
+        "anthropic, google."
     ]
 
 

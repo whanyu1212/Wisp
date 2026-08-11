@@ -41,6 +41,7 @@ from pydantic import (
 )
 
 from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
+from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.retry import RetrySettings
 from wisp.validation import redact_validation_error_inputs
 
@@ -56,6 +57,7 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "auto_compaction_enabled",
         "update_check_enabled",
         "mcp_servers",
+        "openai_compatible",
     }
 )
 
@@ -122,6 +124,7 @@ class WispSettings(BaseModel):
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(
         default=None, max_length=MAX_MCP_SERVERS, repr=False
     )
+    openai_compatible: OpenAICompatibleSettings | None = None
 
     @model_validator(mode="wrap")
     @classmethod
@@ -199,6 +202,7 @@ class ResolvedSettings(BaseModel):
     auto_compaction_enabled: bool | None = None
     update_check_enabled: bool | None = None
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(default=None, repr=False)
+    openai_compatible: OpenAICompatibleSettings | None = None
     # Provenance used only while applying higher-precedence provider overrides.
     # Excluded from serialization because these are resolver details, not settings.
     user_provider: str | None = Field(default=None, exclude=True)
@@ -285,6 +289,7 @@ def resolve_settings(
         auto_compaction_enabled=user_settings.auto_compaction_enabled,
         update_check_enabled=user_settings.update_check_enabled,
         mcp_servers=user_settings.mcp_servers,
+        openai_compatible=user_settings.openai_compatible,
         user_provider=user_provider,
         model_from_user=project_model is None and user_model is not None,
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Self
@@ -17,6 +18,7 @@ from pydantic import (
 )
 
 from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
+from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.retry import RetryPolicy
 from wisp.settings import (
     DEFAULT_PROTECTED_PATHS,
@@ -30,6 +32,7 @@ DEFAULT_PROVIDER = "openai-codex"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
 DEFAULT_AUTO_COMPACTION_ENABLED = True
 DEFAULT_UPDATE_CHECK_ENABLED = True
+OPENAI_COMPATIBLE_CONFIG_ENV = "WISP_OPENAI_COMPATIBLE_CONFIG"
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
 
@@ -52,6 +55,7 @@ class WispConfig(BaseModel):
     mcp_servers: tuple[McpServerConfig, ...] = Field(
         default=(), max_length=MAX_MCP_SERVERS, repr=False
     )
+    openai_compatible: OpenAICompatibleSettings | None = None
 
     @model_validator(mode="wrap")
     @classmethod
@@ -112,6 +116,7 @@ class WispConfig(BaseModel):
         auto_compaction_enabled: bool | None = None,
         update_check_enabled: bool | None = None,
         mcp_servers: tuple[McpServerConfig, ...] | None = None,
+        openai_compatible: OpenAICompatibleSettings | None = None,
         project_dir: Path | None = None,
         trusted: bool = False,
     ) -> WispConfig:
@@ -147,6 +152,7 @@ class WispConfig(BaseModel):
         """
 
         settings = resolve_settings(project_dir=project_dir, trust_project=trusted)
+        compatible_override = openai_compatible or _openai_compatible_from_env()
 
         provider_override = _first_non_empty(provider, os.environ.get("WISP_PROVIDER"))
         model_override = _first_non_empty(model, os.environ.get("WISP_MODEL"))
@@ -220,7 +226,19 @@ class WispConfig(BaseModel):
                 )
             ),
             mcp_servers=mcp_servers if mcp_servers is not None else settings.mcp_servers or (),
+            openai_compatible=compatible_override or settings.openai_compatible,
         )
+
+
+def _openai_compatible_from_env() -> OpenAICompatibleSettings | None:
+    raw = os.environ.get(OPENAI_COMPATIBLE_CONFIG_ENV)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{OPENAI_COMPATIBLE_CONFIG_ENV} must contain valid JSON") from exc
+    return OpenAICompatibleSettings.model_validate(value)
 
 
 def default_auth_path(*, settings: ResolvedSettings | None = None) -> Path:

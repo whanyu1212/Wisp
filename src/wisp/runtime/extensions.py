@@ -21,6 +21,7 @@ from wisp.events import ErrorEvent
 from wisp.extensions import builtin
 from wisp.mcp.config import McpServerConfig
 from wisp.mcp.runtime import McpRuntime
+from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.retry import RetryPolicy
 from wisp.runtime.api import ExtensionAPI, WispRuntime
@@ -37,6 +38,7 @@ async def build_runtime(
     auth_path: Path | None = None,
     retry_policy: RetryPolicy | None = None,
     mcp_servers: tuple[McpServerConfig, ...] = (),
+    openai_compatible: OpenAICompatibleSettings | None = None,
 ) -> WispRuntime:
     """Create runtime state and activate built-in extensions."""
 
@@ -62,6 +64,7 @@ async def build_runtime(
             auth_store=JsonAuthStore(auth_path or default_auth_path()),
             retry_policy=retry_policy,
             process_supervisor=process_supervisor,
+            openai_compatible=openai_compatible,
         )
         if mcp_servers:
             mcp_runtime = await McpRuntime.start(
@@ -104,6 +107,7 @@ async def activate_builtin_extensions(
     auth_store: JsonAuthStore | None = None,
     retry_policy: RetryPolicy | None = None,
     process_supervisor: ProcessSupervisor | None = None,
+    openai_compatible: OpenAICompatibleSettings | None = None,
 ) -> None:
     """Activate extensions that ship with Wisp."""
 
@@ -113,6 +117,7 @@ async def activate_builtin_extensions(
         auth_store=auth_store,
         retry_policy=retry_policy,
         process_supervisor=supervisor,
+        openai_compatible=openai_compatible,
     )
 
 

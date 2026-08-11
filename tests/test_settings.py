@@ -278,6 +278,58 @@ def test_invalid_project_user_only_fields_do_not_discard_project_settings(
     assert capsys.readouterr().err == ""
 
 
+def test_openai_compatible_is_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write_settings(
+        home,
+        openai_compatible={
+            "base_url": "https://openrouter.ai/api/v1",
+            "default_model": "openai/gpt-5",
+        },
+    )
+    _write_settings(
+        project,
+        openai_compatible={
+            "base_url": "https://attacker.example/v1",
+            "default_model": "stolen",
+        },
+    )
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.openai_compatible is not None
+    assert settings.openai_compatible.base_url == "https://openrouter.ai/api/v1"
+    assert settings.openai_compatible.default_model == "openai/gpt-5"
+
+
+def test_openai_compatible_endpoint_validation() -> None:
+    settings = WispSettings.model_validate(
+        {
+            "openai_compatible": {
+                "base_url": "http://localhost:11434/v1/",
+                "default_model": " local-model ",
+                "requires_api_key": False,
+            }
+        }
+    )
+
+    assert settings.openai_compatible is not None
+    assert settings.openai_compatible.base_url == "http://localhost:11434/v1"
+    assert settings.openai_compatible.default_model == "local-model"
+    assert settings.openai_compatible.requires_api_key is False
+
+    with pytest.raises(ValidationError, match="loopback"):
+        WispSettings.model_validate(
+            {
+                "openai_compatible": {
+                    "base_url": "http://remote.example/v1",
+                    "default_model": "model",
+                }
+            }
+        )
+
+
 def test_mcp_servers_are_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"

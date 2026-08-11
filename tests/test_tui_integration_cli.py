@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -310,6 +311,31 @@ def test_tui_rpc_env_forwards_explicit_config_effort(
 
     assert child_env["WISP_EFFORT"] == "high"
     assert "WISP_EFFORT" not in os.environ
+
+
+def test_tui_rpc_env_forwards_embedded_openai_compatible_config(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.delenv("WISP_OPENAI_COMPATIBLE_CONFIG", raising=False)
+    options = TuiOptions(
+        config=WispConfig(
+            provider="openai-compatible",
+            session_dir=tmp_path,
+            openai_compatible={
+                "base_url": "https://openrouter.ai/api/v1",
+                "default_model": "anthropic/claude-sonnet-4",
+            },
+        )
+    )
+
+    child_env = tui_app_module._rpc_env(options)
+
+    assert json.loads(child_env["WISP_OPENAI_COMPATIBLE_CONFIG"]) == {
+        "base_url": "https://openrouter.ai/api/v1",
+        "default_model": "anthropic/claude-sonnet-4",
+        "requires_api_key": True,
+    }
+    assert "WISP_OPENAI_COMPATIBLE_CONFIG" not in os.environ
 
 
 def test_tui_rpc_env_omits_effort_when_config_effort_is_unset(

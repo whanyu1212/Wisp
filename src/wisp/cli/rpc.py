@@ -97,6 +97,17 @@ async def _build_runtime_for_config(config: WispConfig) -> WispRuntime:
             "auth_path": config.auth_path,
             "retry_policy": config.retry_policy,
             "mcp_servers": config.mcp_servers,
+            "openai_compatible": config.openai_compatible,
+        },
+        {
+            "auth_path": config.auth_path,
+            "retry_policy": config.retry_policy,
+            "openai_compatible": config.openai_compatible,
+        },
+        {
+            "auth_path": config.auth_path,
+            "retry_policy": config.retry_policy,
+            "mcp_servers": config.mcp_servers,
         },
         {"auth_path": config.auth_path, "retry_policy": config.retry_policy},
         {"auth_path": config.auth_path},

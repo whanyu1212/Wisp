@@ -83,7 +83,8 @@ class AuthCommands:
         method = _find_method(catalog, provider)
         if method is None:
             self._renderer.command_error(
-                "Unknown provider. Choose one of: openai-codex, openai, anthropic, google."
+                "Unknown provider. Choose one of: openai-codex, openai, openai-compatible, "
+                "anthropic, google."
             )
             return
         picker = getattr(self._renderer, "connect_picker_request", None)
@@ -206,6 +207,17 @@ class AuthCommands:
                         source="stored" if isinstance(openai_codex, OAuthCredential) else "missing",
                     ),
                     self._api_key_method("openai", "OpenAI API key", store.get("openai")),
+                ),
+            ),
+            ConnectionProviderStatus(
+                id="openai-compatible",
+                label="OpenAI-compatible",
+                methods=(
+                    self._api_key_method(
+                        "openai-compatible",
+                        "OpenAI-compatible API key",
+                        store.get("openai-compatible"),
+                    ),
                 ),
             ),
             ConnectionProviderStatus(

@@ -15,6 +15,7 @@ from wisp.providers import (
     FakeProvider,
     GoogleProvider,
     OpenAICodexProvider,
+    OpenAICompatibleProvider,
     OpenAIProvider,
 )
 
@@ -25,6 +26,7 @@ def test_all_built_in_providers_are_exported_from_the_package() -> None:
     assert GoogleProvider.name == "google"
     assert OpenAICodexProvider.name == "openai-codex"
     assert OpenAIProvider.name == "openai"
+    assert OpenAICompatibleProvider.name == "openai-compatible"
 
 
 def test_all_built_in_provider_names_are_listed_in_dunder_all() -> None:
@@ -34,4 +36,5 @@ def test_all_built_in_provider_names_are_listed_in_dunder_all() -> None:
         "GoogleProvider",
         "OpenAICodexProvider",
         "OpenAIProvider",
+        "OpenAICompatibleProvider",
     } <= set(providers_package.__all__)
