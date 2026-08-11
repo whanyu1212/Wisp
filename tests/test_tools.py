@@ -162,6 +162,52 @@ def test_write_tool_creates_parent_directories_and_overwrites(tmp_path: Path) ->
     assert (tmp_path / "nested/file.txt").read_text(encoding="utf-8") == "second"
 
 
+def test_write_tool_create_only_creates_new_file(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+
+    result = run_tool(
+        WriteTool(),
+        {"path": "nested/new.txt", "content": "new\n", "overwrite": False},
+        context,
+    )
+
+    assert result.data["created"] is True
+    assert "before_text" not in result.data
+    assert (tmp_path / "nested/new.txt").read_text(encoding="utf-8") == "new\n"
+
+
+def test_write_tool_create_only_preserves_existing_file(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    path = tmp_path / "existing.txt"
+    path.write_text("original\n", encoding="utf-8")
+
+    with pytest.raises(ToolError, match="File already exists: existing.txt"):
+        run_tool(
+            WriteTool(),
+            {"path": "existing.txt", "content": "replacement\n", "overwrite": False},
+            context,
+        )
+
+    assert path.read_text(encoding="utf-8") == "original\n"
+
+
+def test_write_tool_create_only_refuses_dangling_symlink(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    target = tmp_path / "target.txt"
+    link = tmp_path / "new.txt"
+    link.symlink_to(target)
+
+    with pytest.raises(ToolError, match="File already exists: new.txt"):
+        run_tool(
+            WriteTool(),
+            {"path": "new.txt", "content": "content\n", "overwrite": False},
+            context,
+        )
+
+    assert link.is_symlink()
+    assert not target.exists()
+
+
 def test_write_tool_preserves_exact_newline_bytes(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
 

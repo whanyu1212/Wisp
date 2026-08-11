@@ -169,6 +169,7 @@ class ScriptedController:
         self.shutdown_events = deque(shutdown_events or [])
         self.close_after_prompt = close_after_prompt
         self.prompts: list[str] = []
+        self.init_requests: list[str] = []
         self.compactions: list[str | None] = []
         self.approvals: list[tuple[str, bool, str | None]] = []
         self.approval_scopes: list[ApprovalScope | None] = []
@@ -198,6 +199,15 @@ class ScriptedController:
         )
         if self.close_after_prompt:
             await self._send.aclose()
+        return selected_id
+
+    async def init(self, *, command_id: str | None = None) -> str:
+        selected_id = command_id or f"init-{len(self.init_requests) + 1}"
+        self.init_requests.append(selected_id)
+        await self._emit_scripted(
+            self.prompt_events,
+            default=[RpcCommandFinished(command_id=selected_id, command_type="init", ok=True)],
+        )
         return selected_id
 
     async def compact(

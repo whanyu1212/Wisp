@@ -99,6 +99,16 @@ def test_agent_mode_commands_parse_and_are_available_in_slash_menu(
     assert spec.takes_args is False
 
 
+def test_init_command_parses_and_is_available_in_slash_menu() -> None:
+    command = parse_tui_slash_command("/init")
+    spec = next(spec for spec in SLASH_COMMAND_SPECS if spec.command == "/init")
+
+    assert command is not None
+    assert command.name is TuiSlashCommandName.init
+    assert command.args == ()
+    assert spec.takes_args is False
+
+
 def test_new_command_parses_and_is_available_in_slash_menu() -> None:
     command = parse_tui_slash_command("/new")
     spec = next(spec for spec in SLASH_COMMAND_SPECS if spec.command == "/new")

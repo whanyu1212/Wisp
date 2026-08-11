@@ -693,6 +693,49 @@ def test_coding_session_retains_unconsumed_queues_for_same_session_retry(
     ]
 
 
+def test_coding_session_operation_tool_context_overrides_tool_root(tmp_path: Path) -> None:
+    class CwdTool:
+        name = "cwd"
+        safety = "read"
+        description = "Report the tool working directory."
+        input_schema: ToolInputSchema = {"type": "object", "properties": {}}
+
+        async def run(
+            self,
+            arguments: ToolArguments,
+            context: ToolContext,
+        ) -> ToolResult:
+            return ToolResult(text=str(context.cwd))
+
+    tool_call = ToolCall(
+        call_id="call-1",
+        name="cwd",
+        arguments={},
+        response_id="response-1",
+    )
+    provider = ToolLoopProvider([[tool_call], ["done"]])
+    registry = ToolRegistry()
+    registry.register(CwdTool())
+    launch_directory = tmp_path / "project" / "src"
+    project_root = tmp_path / "project"
+    launch_directory.mkdir(parents=True)
+    agent = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=launch_directory),
+    )
+
+    async def run_agent() -> None:
+        events = agent.run("inspect", tool_context=ToolContext(cwd=project_root))
+        _ = [event async for event in events]
+
+    anyio.run(run_agent)
+
+    assert provider.calls[1][0] == (ToolCallResult(call_id="call-1", output=str(project_root)),)
+    assert agent.tool_context.cwd == launch_directory
+
+
 def test_coding_session_persists_completion_before_exposing_it(
     tmp_path: Path,
 ) -> None:

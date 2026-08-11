@@ -65,6 +65,7 @@ from wisp.rpc import (
     GetSessionTreeCommand,
     GetSkillsCommand,
     GetStateCommand,
+    InitCommand,
     JsonlSubprocessRpcTransport,
     NavigateSessionTreeCommand,
     NewSessionCommand,
@@ -1234,6 +1235,13 @@ def test_rpc_commands_allow_protocol_optional_id() -> None:
     assert parsed == command
 
 
+def test_rpc_init_command_round_trips_without_arguments() -> None:
+    command = InitCommand()
+
+    assert json.loads(command.to_json_line()) == {"type": "init"}
+    assert rpc_command_from_json('{"type":"init"}') == command
+
+
 def test_wisp_event_from_json_returns_typed_event() -> None:
     event = wisp_event_from_json(
         '{"schema_version":6,"type":"rpc.command.finished","command_id":"cmd-1",'
@@ -1298,6 +1306,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         )
 
         prompt_id = await controller.prompt("hello")
+        init_id = await controller.init()
         compact_id = await controller.compact("Keep paths")
         stats_id = await controller.get_session_stats()
         state_id = await controller.get_state()
@@ -1336,6 +1345,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
 
         assert [
             prompt_id,
+            init_id,
             compact_id,
             stats_id,
             state_id,
@@ -1364,6 +1374,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             shutdown_id,
         ] == [
             "prompt-id",
+            "init-id",
             "compact-id",
             "stats-id",
             "state-id",
@@ -1393,6 +1404,7 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         ]
         assert transport.commands == [
             PromptCommand(id="prompt-id", prompt="hello"),
+            InitCommand(id="init-id"),
             CompactCommand(id="compact-id", instructions="Keep paths"),
             GetSessionStatsCommand(id="stats-id"),
             GetStateCommand(id="state-id"),

@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
-from wisp.tools.common import _optional_int, _required_string, _truncate_text
+from wisp.tools.common import _optional_bool, _optional_int, _required_string, _truncate_text
 from wisp.tools.context import ToolContext
 from wisp.tools.paths import display_tool_path, resolve_tool_path
 from wisp.tools.result import ToolError, ToolResult
@@ -81,25 +81,35 @@ class WriteTool:
 
     name = "write"
     safety: ToolSafety = "mutating"
-    description = "Create or overwrite a UTF-8 text file, creating parent directories."
+    description = (
+        "Create or overwrite a UTF-8 text file, creating parent directories. "
+        "Set overwrite=false to fail if the target already exists."
+    )
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
             "path": {"type": "string"},
             "content": {"type": "string"},
+            "overwrite": {"type": "boolean", "default": True},
         },
         "required": ["path", "content"],
     }
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
-        path = resolve_tool_path(_required_string(arguments, "path"), context)
+        selected_path = _required_string(arguments, "path")
         content = _required_string(arguments, "content", allow_empty=True)
+        overwrite = _optional_bool(arguments, "overwrite", default=True)
+        path = resolve_tool_path(
+            selected_path,
+            context,
+            follow_leaf_symlink=overwrite,
+        )
 
         # Distinguish a create from an overwrite *before* the write, so the renderer
         # can tell "brand-new file" (show its content as a pure-addition diff) from
         # "overwrote an existing file whose prior text we couldn't capture" (fall back
         # to the plain summary — never imply a create by rendering pure additions).
-        created = not path.exists()
+        created = not path.exists() if overwrite else True
         # Snapshot the prior contents *before* the write clobbers them, so the TUI can
         # render a before/after diff. This is the only moment the "before" exists: the
         # open("w") below destroys it and the tool args carry only the new content. The
@@ -107,11 +117,14 @@ class WriteTool:
         # file; ``created`` is what separates those, since only a real create should
         # still render (as additions). Bounding here (not renderer-side) keeps the
         # snapshot off the RPC wire when it would be too large to diff anyway.
-        before_text = _snapshot_before_write(path)
+        before_text = _snapshot_before_write(path) if overwrite else None
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8", newline="") as file:
-            file.write(content)
+        try:
+            with path.open("w" if overwrite else "x", encoding="utf-8", newline="") as file:
+                file.write(content)
+        except FileExistsError as exc:
+            raise ToolError(f"File already exists: {selected_path}") from exc
         byte_count = len(content.encode("utf-8"))
         data: dict[str, object] = {
             "path": display_tool_path(path, context),

@@ -33,6 +33,7 @@ from wisp.rpc.commands import (
     GetSessionTreeCommand,
     GetSkillsCommand,
     GetStateCommand,
+    InitCommand,
     NavigateSessionTreeCommand,
     NewSessionCommand,
     PopQueueCommand,
@@ -78,6 +79,13 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("prompt")
         await self._transport.send(PromptCommand(id=selected_id, prompt=prompt))
+        return selected_id
+
+    async def init(self, *, command_id: str | None = None) -> str:
+        """Initialize project guidance and return the command id."""
+
+        selected_id = command_id or self._command_id_factory("init")
+        await self._transport.send(InitCommand(id=selected_id))
         return selected_id
 
     async def compact(

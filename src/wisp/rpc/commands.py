@@ -43,6 +43,12 @@ class PromptCommand(RpcCommandModel):
     prompt: str
 
 
+class InitCommand(RpcCommandModel):
+    """Inspect the active project and create its root AGENTS.md."""
+
+    type: Literal["init"] = "init"
+
+
 class CompactCommand(RpcCommandModel):
     """Compact the active persisted session context."""
 
@@ -247,6 +253,7 @@ class ConfigureCommand(RpcCommandModel):
 
 type RpcCommand = Annotated[
     PromptCommand
+    | InitCommand
     | CompactCommand
     | GetSessionStatsCommand
     | GetStateCommand

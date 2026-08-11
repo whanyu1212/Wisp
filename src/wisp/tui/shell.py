@@ -109,6 +109,8 @@ class TuiController(Protocol):
 
     async def prompt(self, prompt: str, *, command_id: str | None = None) -> str: ...
 
+    async def init(self, *, command_id: str | None = None) -> str: ...
+
     async def compact(
         self,
         instructions: str | None = None,
@@ -792,6 +794,11 @@ class TuiShell:
         if command.name is TuiSlashCommandName.update:
             self._start_update(command.args)
             return False
+        if command.name is TuiSlashCommandName.init:
+            if command.args:
+                self.renderer.command_error("Usage: /init")
+                return False
+            return await self._start_init()
         if command.name in {TuiSlashCommandName.plan, TuiSlashCommandName.build}:
             if command.args:
                 self.renderer.command_error(f"Usage: /{command.name.value}")
@@ -1288,6 +1295,30 @@ class TuiShell:
             cancel_scope.cancel()
             self.renderer.notice(message)
         return True
+
+    async def _start_init(self) -> bool:
+        self.state.status = TuiStatus.running
+        self.state.current_command_type = "init"
+        self.state.pending_approval = None
+        self.state.cancel_requested = False
+        self.state.token_stream_started = False
+        self.state.rendered_tokens = False
+        self._sync_view()
+        self.renderer.prompt_submitted("/init")
+        self.renderer.running()
+        try:
+            command_id = await self.controller.init()
+        except Exception as exc:
+            self.state.current_command_type = None
+            self._update_view(status="error")
+            self._call_renderer_optional("discard_live_prompt", "/init")
+            self.renderer.send_failed("init", exc)
+            pagination = self._history_pagination
+            if pagination is not None and pagination.latest_reload_pending:
+                await self._request_latest_history_page()
+            return True
+        self.state.current_command_id = command_id
+        return False
 
     async def _start_prompt(self, prompt: str) -> bool:
         self.state.status = TuiStatus.running
@@ -1987,7 +2018,7 @@ class TuiShell:
             self.renderer.end_token_stream()
             self.state.token_stream_started = False
         self.state.rendered_tokens = False
-        if finished_command_type in {"prompt", "compact"}:
+        if finished_command_type in {"prompt", "init", "compact"}:
             await self._request_session_stats()
         if self.state.exit_requested or (not event.ok and finished_command_type != "compact"):
             self._clear_queued_prompts()

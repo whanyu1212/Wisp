@@ -245,6 +245,7 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
         ("read", "write", "edit", "bash", "grep", "find", "ls", "skill"),
         (
             "help",
+            "init",
             "compact",
             "context",
             "history",

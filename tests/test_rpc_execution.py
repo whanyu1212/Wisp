@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import threading
 from collections.abc import AsyncIterator, Callable
@@ -10,7 +11,7 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
-from tests.rpc_support import build_rpc_executor_fixture
+from tests.rpc_support import RpcExecutorFixture, build_rpc_executor_fixture
 from wisp.agent.harness import QueuedMessages
 from wisp.agent.messages import Message
 from wisp.coding import CodingSession
@@ -38,6 +39,7 @@ from wisp.events import (
     RpcStateSnapshot,
     WispEvent,
 )
+from wisp.providers.base import ToolSpec
 from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc.configuration import _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
@@ -53,6 +55,7 @@ from wisp.runtime.extensions import build_runtime
 from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionTreeNavigation
 from wisp.skills.models import SkillCatalog, SkillDiagnostic, SkillEntry
+from wisp.tools.context import ToolContext
 
 
 class _ApprovalResolver:
@@ -69,6 +72,16 @@ class _TrustResolver:
 
     def resolve_request(self, **_kwargs: object) -> bool:
         return False
+
+
+def _enable_project_init(fixture: RpcExecutorFixture, project_root: Path) -> None:
+    fixture.agent = CodingSession(
+        provider=fixture.runtime.providers.get("fake"),
+        sessions=fixture.sessions,
+        tools=(ToolSpec.from_tool(fixture.runtime.tools.get("write")),),
+        tool_context=ToolContext(cwd=project_root),
+        project_context_root=project_root,
+    )
 
 
 def test_approval_resolution_waits_for_lifecycle_flush() -> None:
@@ -210,6 +223,189 @@ def test_executor_dispatches_validation_and_shutdown_without_stdin(tmp_path: Pat
         assert isinstance(finished_event, RpcCommandFinished)
         assert error_event.message == "RPC prompt command requires string field: prompt"
         assert finished_event.command_id == "bye"
+
+    anyio.run(scenario)
+
+
+def test_init_dispatches_repository_specific_create_only_prompt(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+        subdirectory = project / "src"
+        subdirectory.mkdir()
+        fixture = await build_rpc_executor_fixture(tmp_path / "sessions")
+        _enable_project_init(fixture, project)
+        fixture.agent.project_context_root = None
+        fixture.agent.tool_context = ToolContext(cwd=subdirectory)
+        prompts: list[str] = []
+        operation_contexts: list[ToolContext] = []
+
+        async def capture_run(
+            prompt: str,
+            **kwargs: object,
+        ) -> AsyncIterator[WispEvent]:
+            prompts.append(prompt)
+            context = kwargs.get("tool_context")
+            assert isinstance(context, ToolContext)
+            operation_contexts.append(context)
+            (context.cwd / "AGENTS.md").write_text("# Agent guidance\n", encoding="utf-8")
+            if False:
+                yield ErrorEvent(message="unreachable")
+
+        monkeypatch.setattr(fixture.agent, "run", capture_run)
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = executor.dispatch({"id": "init-1", "type": "init"}, None)
+            completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is not None
+        assert result.running_command.command_type == "init"
+        assert isinstance(completed, _RpcCommandCompleted)
+        assert completed.command_id == "init-1"
+        assert completed.ok is True
+        assert len(prompts) == 1
+        assert [context.cwd for context in operation_contexts] == [project]
+        assert json.dumps(str(project / "AGENTS.md"), ensure_ascii=False) in prompts[0]
+        assert "overwrite=false" in prompts[0]
+        assert "Modify no other file" in prompts[0]
+
+    anyio.run(scenario)
+
+
+def test_init_fails_when_agent_does_not_create_guidance(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        fixture = await build_rpc_executor_fixture(tmp_path / "sessions")
+        _enable_project_init(fixture, project)
+
+        async def no_op_run(
+            _prompt: str,
+            **_kwargs: object,
+        ) -> AsyncIterator[WispEvent]:
+            if False:
+                yield ErrorEvent(message="unreachable")
+
+        monkeypatch.setattr(fixture.agent, "run", no_op_run)
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = fixture.executor(task_group=task_group, send=send).dispatch(
+                {"id": "init-1", "type": "init"},
+                None,
+            )
+            completed = await receive.receive()
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is not None
+        assert isinstance(completed, _RpcCommandCompleted)
+        assert completed.command_type == "init"
+        assert completed.ok is False
+        finished = next(event for event in fixture.events if isinstance(event, RpcCommandFinished))
+        assert finished.error == (
+            f"Project initialization completed without creating {project / 'AGENTS.md'}"
+        )
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("existing_name", ["AGENTS.md", "AGENTS.MD"])
+def test_init_refuses_existing_project_guidance(
+    tmp_path: Path,
+    existing_name: str,
+) -> None:
+    async def scenario() -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        existing = project / existing_name
+        existing.write_text("Keep me.\n", encoding="utf-8")
+        fixture = await build_rpc_executor_fixture(tmp_path / "sessions")
+        _enable_project_init(fixture, project)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = fixture.executor(task_group=task_group, send=send).dispatch(
+                {"id": "init-1", "type": "init"},
+                None,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is None
+        assert fixture.session_state.session is None
+        assert [type(event) for event in fixture.events] == [
+            RpcCommandStarted,
+            ErrorEvent,
+            RpcCommandFinished,
+        ]
+        error = fixture.events[1]
+        finished = fixture.events[2]
+        assert isinstance(error, ErrorEvent)
+        assert isinstance(finished, RpcCommandFinished)
+        assert str(existing).casefold() in error.message.casefold()
+        assert finished.command_type == "init"
+        assert finished.ok is False
+        assert existing.read_text(encoding="utf-8") == "Keep me.\n"
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("entry_kind", ["directory", "symlink"])
+def test_init_refuses_non_file_guidance_entries(tmp_path: Path, entry_kind: str) -> None:
+    async def scenario() -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        target = project / "AGENTS.md"
+        if entry_kind == "directory":
+            target.mkdir()
+        else:
+            target.symlink_to(project / "missing-guidance")
+        fixture = await build_rpc_executor_fixture(tmp_path / "sessions")
+        _enable_project_init(fixture, project)
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            result = fixture.executor(task_group=task_group, send=send).dispatch(
+                {"id": "init-1", "type": "init"},
+                None,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is None
+        error = next(event for event in fixture.events if isinstance(event, ErrorEvent))
+        assert error.message == f"Project guidance already exists: {target}"
+        if entry_kind == "directory":
+            assert target.is_dir()
+        else:
+            assert target.is_symlink()
+
+    anyio.run(scenario)
+
+
+def test_init_requires_build_mode_and_write_tool(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        fixture.agent.mode = "plan"
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            plan_result = executor.dispatch({"id": "plan-init", "type": "init"}, None)
+            fixture.agent.mode = "build"
+            no_write_result = executor.dispatch({"id": "no-write-init", "type": "init"}, None)
+            task_group.cancel_scope.cancel()
+
+        assert plan_result.running_command is None
+        assert no_write_result.running_command is None
+        errors = [event.message for event in fixture.events if isinstance(event, ErrorEvent)]
+        assert errors == [
+            "Project initialization requires build mode. Run /build first.",
+            "Project initialization requires the write tool.",
+        ]
 
     anyio.run(scenario)
 
@@ -643,6 +839,7 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
         assert inspected.prefill_on_partial_enter is True
         assert [descriptor.name for descriptor in report.commands[1:]] == [
             "help",
+            "init",
             "compact",
             "context",
             "history",

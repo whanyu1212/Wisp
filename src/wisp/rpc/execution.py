@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import stat
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
@@ -16,6 +18,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 
 from wisp.agent.messages import Message
 from wisp.agent.mode import AgentMode, is_agent_mode
+from wisp.agent.prompt import resolve_project_context_root
 from wisp.coding import CodingSession
 from wisp.events import (
     AgentStarted,
@@ -75,6 +78,7 @@ from wisp.sessions.jsonl import (
     SessionTreePage,
 )
 from wisp.sessions.replay import replay_session_entries, resolve_session_tree
+from wisp.tools.context import ToolContext
 
 from .configuration import _RpcConfigureOverrides
 from .coordinator import (
@@ -178,6 +182,8 @@ class RpcCommandExecutor:
         command_type = rpc_command_type(command)
         if command_type == "prompt":
             return self._dispatch_prompt(command)
+        if command_type == "init":
+            return self._dispatch_init(command)
         if command_type == "compact":
             return self._dispatch_compact(command)
         if command_type == "get_session_stats":
@@ -237,6 +243,35 @@ class RpcCommandExecutor:
             trust_gate=self.trust_gate,
             write_event=self.write_event,
             render_events=self.render_events,
+            running_command_factory=self.running_command_factory,
+            command_completed_factory=self.command_completed_factory,
+        )
+        return _RpcDispatchResult(
+            running_command=new_running_command,
+            selected_session=new_session,
+        )
+
+    def _dispatch_init(self, command: dict[str, object]) -> _RpcDispatchResult:
+        try:
+            prompt, tool_context, target = _project_init_request(self.agent)
+        except ValueError as exc:
+            self.reject(command, str(exc))
+            return _RpcDispatchResult(
+                running_command=None,
+                selected_session=self.session_state.session,
+            )
+        new_running_command, new_session = start_rpc_prompt_command(
+            {**command, "prompt": prompt},
+            agent=self.agent,
+            sessions=self.sessions,
+            session_state=self.session_state,
+            task_group=self.task_group,
+            send=self.send,
+            trust_gate=self.trust_gate,
+            write_event=self.write_event,
+            render_events=self.render_events,
+            tool_context=tool_context,
+            completion_error=partial(_project_init_completion_error, target),
             running_command_factory=self.running_command_factory,
             command_completed_factory=self.command_completed_factory,
         )
@@ -556,6 +591,63 @@ def rpc_session_state(session: JsonlSession | None) -> _RpcSessionState:
     )
 
 
+def _project_init_request(agent: CodingSession) -> tuple[str, ToolContext, Path]:
+    if agent.mode != "build":
+        raise ValueError("Project initialization requires build mode. Run /build first.")
+
+    project_root = (
+        agent.project_context_root or resolve_project_context_root(agent.tool_context.cwd)
+    ).resolve(strict=False)
+    for filename in ("AGENTS.md", "AGENTS.MD"):
+        candidate = project_root / filename
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError(f"Could not inspect project guidance path: {candidate}") from exc
+        raise ValueError(f"Project guidance already exists: {candidate}")
+
+    if "write" not in {tool.name for tool in agent.tools}:
+        raise ValueError("Project initialization requires the write tool.")
+
+    target = project_root / "AGENTS.md"
+    encoded_target = json.dumps(str(target), ensure_ascii=False)
+    prompt = f"""Initialize this repository for future coding agents.
+
+Inspect the repository using read-only tools before writing anything. Base the guidance on verified
+README files, manifests, lockfiles, CI configuration, source layout, and existing contributor
+instructions. Do not run project code or copy secrets.
+
+Create concise, repository-specific guidance at the exact absolute path
+{encoded_target}. Include:
+- a short project overview and mission;
+- verified setup, build, format, lint, type-check, and test commands;
+- the important architecture and module boundaries;
+- repository-specific development conventions and safety rules;
+- a practical definition of done.
+
+Avoid generic advice and do not invent commands. Modify no other file. Immediately before writing,
+check that neither AGENTS.md nor AGENTS.MD exists at the project root. If either exists, stop
+without changing it. Create the target with the write tool using overwrite=false so the operation
+remains create-only if the filesystem changes during your inspection."""
+    return prompt, replace(agent.tool_context, cwd=project_root), target
+
+
+def _project_init_completion_error(target: Path) -> str | None:
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return f"Project initialization completed without creating {target}"
+    except OSError as exc:
+        return f"Could not inspect generated project guidance: {exc}"
+    if not stat.S_ISREG(info.st_mode):
+        return f"Project initialization did not create a regular file: {target}"
+    if info.st_size == 0:
+        return f"Project initialization created an empty file: {target}"
+    return None
+
+
 def start_rpc_prompt_command(
     command: dict[str, object],
     *,
@@ -567,6 +659,8 @@ def start_rpc_prompt_command(
     trust_gate: RpcTrustResolver,
     write_event: RpcEventWriter,
     render_events: RpcEventRenderer,
+    tool_context: ToolContext | None = None,
+    completion_error: Callable[[], str | None] | None = None,
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
 ) -> tuple[_RpcRunningCommand | None, JsonlSession | None]:
@@ -608,11 +702,13 @@ def start_rpc_prompt_command(
         write_event,
         render_events,
         command_completed_factory,
+        tool_context,
+        completion_error,
     )
     return (
         running_command_factory(
             command_id=command_id,
-            command_type="prompt",
+            command_type=command_type,
             cancel_scope=cancel_scope,
         ),
         selected_session,
@@ -2195,6 +2291,8 @@ async def run_rpc_prompt_command(
     write_event: RpcEventWriter,
     render_events: RpcEventRenderer,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+    tool_context: ToolContext | None = None,
+    completion_error: Callable[[], str | None] | None = None,
 ) -> None:
     error: str | None = None
     run_entry_start = entry_start
@@ -2221,16 +2319,25 @@ async def run_rpc_prompt_command(
     with cancel_scope:
         try:
             agent.trusted = await trust_gate.resolve()
-            await render_events(
-                track_run_start(
-                    agent.run(
-                        prompt,
-                        session=session,
-                        history=committed_history,
-                        operation_id=command_id,
-                    )
+            agent_events = (
+                agent.run(
+                    prompt,
+                    session=session,
+                    history=committed_history,
+                    operation_id=command_id,
+                )
+                if tool_context is None
+                else agent.run(
+                    prompt,
+                    session=session,
+                    history=committed_history,
+                    operation_id=command_id,
+                    tool_context=tool_context,
                 )
             )
+            await render_events(track_run_start(agent_events))
+            if completion_error is not None:
+                error = await anyio.to_thread.run_sync(completion_error)
         except RpcOutputAlreadyReportedError as exc:
             error = str(exc)
         except anyio.get_cancelled_exc_class():
@@ -2288,7 +2395,7 @@ async def run_rpc_prompt_command(
         await send.send(
             command_completed_factory(
                 command_id=command_id,
-                command_type="prompt",
+                command_type=command_type,
                 ok=error is None,
                 history=updated_history,
                 entry_count=entry_count,
