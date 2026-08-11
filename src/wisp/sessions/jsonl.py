@@ -1303,6 +1303,16 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[written:]
 
 
+def _read_exact(fd: int, size: int) -> bytes:
+    data = bytearray()
+    while len(data) < size:
+        chunk = os.read(fd, size - len(data))
+        if not chunk:
+            raise OSError("Session read ended before the expected file size")
+        data.extend(chunk)
+    return bytes(data)
+
+
 def _sync_file(fd: int) -> None:
     os.fsync(fd)
 
@@ -1365,6 +1375,15 @@ def _interprocess_lock(path: Path) -> Iterator[None]:
 def _recover_incomplete_tail(path: Path) -> bool:
     """Discard bytes after the final newline; return whether the file changed."""
 
+    try:
+        path_info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise SessionError(f"Could not inspect session file: {path}") from exc
+    if stat.S_ISLNK(path_info.st_mode) or not stat.S_ISREG(path_info.st_mode):
+        raise SessionError(f"Session file is not a regular file: {path}")
+
     flags = os.O_RDWR
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -1376,14 +1395,24 @@ def _recover_incomplete_tail(path: Path) -> bool:
         raise SessionError(f"Session file is not a regular file: {path}") from exc
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise SessionError(f"Session file is not a regular file: {path}")
+        try:
+            current_info = path.lstat()
+        except OSError as exc:
+            raise SessionError(f"Could not inspect session file after opening: {path}") from exc
+        expected_signature = (path_info.st_dev, path_info.st_ino)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or not stat.S_ISREG(current_info.st_mode)
+            or (info.st_dev, info.st_ino) != expected_signature
+            or (current_info.st_dev, current_info.st_ino) != expected_signature
+        ):
+            raise SessionError(f"Session file changed while being opened: {path}")
         if info.st_size == 0:
             committed_size = 0
             signature = (info.st_dev, info.st_ino)
         else:
             os.lseek(fd, -1, os.SEEK_END)
-            if os.read(fd, 1) == b"\n":
+            if _read_exact(fd, 1) == b"\n":
                 return False
 
             position = info.st_size
@@ -1392,7 +1421,7 @@ def _recover_incomplete_tail(path: Path) -> bool:
                 chunk_size = min(position, 64 * 1024)
                 position -= chunk_size
                 os.lseek(fd, position, os.SEEK_SET)
-                chunk = os.read(fd, chunk_size)
+                chunk = _read_exact(fd, chunk_size)
                 newline = chunk.rfind(b"\n")
                 if newline != -1:
                     committed_size = position + newline + 1

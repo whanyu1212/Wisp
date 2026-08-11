@@ -1954,6 +1954,29 @@ def test_session_recovers_unterminated_final_bytes(
     assert session.path.read_bytes() == committed_bytes
 
 
+def test_session_recovery_fills_short_reads_before_scanning_earlier_bytes(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    committed = MessageSessionEntry(
+        id="committed",
+        session_id=session.session_id,
+        message=Message(role="user", content="safe"),
+    )
+    committed_bytes = f"{session_entry_to_json(committed)}\n".encode()
+    session.path.write_bytes(committed_bytes + b"x" * (64 * 1024 + 1))
+    real_read = os.read
+
+    def short_read(fd: int, size: int) -> bytes:
+        return real_read(fd, min(size, 64))
+
+    monkeypatch.setattr(os, "read", short_read)
+
+    assert session.read_entries() == (committed,)
+    assert session.path.read_bytes() == committed_bytes
+
+
 def test_session_removes_file_with_only_uncommitted_bytes(tmp_path: Path) -> None:
     path = tmp_path / "incomplete-only.jsonl"
     path.write_bytes(b'{"valid":"json"}')
@@ -2727,9 +2750,13 @@ def test_session_store_rejects_symlink_session_directory(tmp_path: Path) -> None
         anyio.run(write)
 
 
-def test_recovery_rejects_symlink_session_file(tmp_path: Path) -> None:
-    if not hasattr(os, "symlink") or not hasattr(os, "O_NOFOLLOW"):
-        pytest.skip("no-follow symlink opens are not supported")
+def test_recovery_rejects_symlink_session_file_without_no_follow(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are not supported")
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
     root = tmp_path / "sessions"
     root.mkdir()
     target = tmp_path / "target.jsonl"

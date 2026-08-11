@@ -294,9 +294,9 @@ also synchronizes the session file before returning. Appends are serialized acro
 processes and rolled back to the previous committed size if writing or synchronization fails. On the
 next read, Wisp discards any unterminated final bytes left by an interrupted writer—even if those
 bytes happen to form valid JSON—while preserving all newline-terminated records. A malformed
-newline-terminated record remains a session error rather than being silently removed. Newly created
-session files and recovery deletions also synchronize the parent directory on supported POSIX
-systems.
+newline-terminated record remains a session error rather than being silently removed. Session files
+first created by an append and recovery deletions also synchronize the parent directory on supported
+POSIX systems.
 
 Records form a parent-linked tree, and an append-only active-leaf record selects the root-to-leaf
 path used by continuation — abandoned or cancelled work stays in the audit log without entering
