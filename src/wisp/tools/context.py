@@ -23,6 +23,7 @@ class ToolContext:
     # ``None`` permits the normal project-root sandbox. Operations with a narrower
     # write contract can name the only exact paths that the write tool may mutate.
     allowed_write_paths: tuple[Path, ...] | None = None
+    conflicting_write_paths: tuple[Path, ...] = ()
     require_create_only_writes: bool = False
     # Secure by default: every construction path (including a bare
     # ``ToolContext(cwd=...)`` from embedding/SDK code) protects secrets unless a

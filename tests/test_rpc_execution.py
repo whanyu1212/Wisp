@@ -264,6 +264,7 @@ def test_init_dispatches_repository_specific_create_only_prompt(
             )
             target = context.cwd / "AGENTS.md"
             assert context.allowed_write_paths == (target,)
+            assert context.conflicting_write_paths == (target.with_name("AGENTS.MD"),)
             assert context.require_create_only_writes is True
             target.write_text("# Agent guidance\n", encoding="utf-8")
             call = ToolCallSnapshot(
@@ -310,6 +311,47 @@ def test_init_dispatches_repository_specific_create_only_prompt(
         assert "Modify no other file" in instructions[0]
 
     anyio.run(scenario)
+
+
+def test_init_completion_removes_its_file_if_conflicting_guidance_appears(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "AGENTS.md"
+    conflict = tmp_path / "conflict.md"
+    completion = rpc_execution_module._ProjectInitCompletion(
+        target,
+        conflicting_paths=(conflict,),
+    )
+    call = ToolCallSnapshot(
+        call_id="write-1",
+        name="write",
+        arguments={"path": "AGENTS.md", "content": "generated\n", "overwrite": False},
+    )
+    target.write_text("generated\n", encoding="utf-8")
+    completion.observe(
+        MessageCompleted(
+            turn=1,
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=(call,),
+        )
+    )
+    completion.observe(
+        ToolExecutionEnded(
+            call_id=call.call_id,
+            name="write",
+            output="Wrote 10 bytes to AGENTS.md",
+            is_error=False,
+            created=True,
+        )
+    )
+    conflict.write_text("concurrent\n", encoding="utf-8")
+
+    assert completion.error() == (
+        f"Conflicting project guidance appeared during initialization: {conflict}"
+    )
+    assert not target.exists()
+    assert conflict.read_text(encoding="utf-8") == "concurrent\n"
 
 
 def test_init_fails_when_agent_does_not_create_guidance(

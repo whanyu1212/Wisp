@@ -126,6 +126,15 @@ class WriteTool:
         before_text = _snapshot_before_write(path) if overwrite else None
 
         path.parent.mkdir(parents=True, exist_ok=True)
+        for conflict in context.conflicting_write_paths:
+            candidate = conflict if conflict.is_absolute() else context.cwd / conflict
+            try:
+                candidate.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ToolError(f"Could not inspect conflicting write path: {conflict}") from exc
+            raise ToolError(f"Conflicting write path already exists: {conflict}")
         try:
             with path.open("w" if overwrite else "x", encoding="utf-8", newline="") as file:
                 file.write(content)

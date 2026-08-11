@@ -263,7 +263,10 @@ class RpcCommandExecutor:
                 running_command=None,
                 selected_session=self.session_state.session,
             )
-        completion = _ProjectInitCompletion(target)
+        completion = _ProjectInitCompletion(
+            target,
+            conflicting_paths=(target.with_name("AGENTS.MD"),),
+        )
         new_running_command, new_session = start_rpc_prompt_command(
             {**command, "prompt": "/init"},
             agent=self.agent,
@@ -644,6 +647,7 @@ remains create-only if the filesystem changes during your inspection."""
             agent.tool_context,
             cwd=project_root,
             allowed_write_paths=(target,),
+            conflicting_write_paths=(target.with_name("AGENTS.MD"),),
             require_create_only_writes=True,
         ),
         target,
@@ -653,8 +657,9 @@ remains create-only if the filesystem changes during your inspection."""
 @dataclass(slots=True)
 class _ProjectInitCompletion:
     target: Path
+    conflicting_paths: tuple[Path, ...]
     matching_call_ids: set[str] = field(default_factory=set)
-    created: bool = False
+    created_file_id: tuple[int, int] | None = None
 
     def observe(self, event: WispEvent) -> None:
         if isinstance(event, MessageCompleted):
@@ -675,10 +680,14 @@ class _ProjectInitCompletion:
             and not event.is_error
             and event.created
         ):
-            self.created = True
+            try:
+                info = self.target.lstat()
+            except OSError:
+                return
+            self.created_file_id = (info.st_dev, info.st_ino)
 
     def error(self) -> str | None:
-        if not self.created:
+        if self.created_file_id is None:
             return (
                 "Project initialization completed without a successful create-only write to "
                 f"{self.target}"
@@ -691,8 +700,32 @@ class _ProjectInitCompletion:
             return f"Could not inspect generated project guidance: {exc}"
         if not stat.S_ISREG(info.st_mode):
             return f"Project initialization did not create a regular file: {self.target}"
+        if (info.st_dev, info.st_ino) != self.created_file_id:
+            return f"Generated project guidance was replaced before completion: {self.target}"
         if info.st_size == 0:
             return f"Project initialization created an empty file: {self.target}"
+        for conflict in self.conflicting_paths:
+            try:
+                conflict_info = conflict.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                return f"Could not inspect generated project guidance: {exc}"
+            if (conflict_info.st_dev, conflict_info.st_ino) == self.created_file_id:
+                continue
+            cleanup_error = self._remove_created_target()
+            message = f"Conflicting project guidance appeared during initialization: {conflict}"
+            return f"{message}; {cleanup_error}" if cleanup_error is not None else message
+        return None
+
+    def _remove_created_target(self) -> str | None:
+        try:
+            current = self.target.lstat()
+            if (current.st_dev, current.st_ino) != self.created_file_id:
+                return f"generated file was replaced and could not be safely removed: {self.target}"
+            self.target.unlink()
+        except OSError as exc:
+            return f"could not remove generated file {self.target}: {exc}"
         return None
 
 

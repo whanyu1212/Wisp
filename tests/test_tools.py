@@ -206,6 +206,28 @@ def test_write_tool_honors_operation_write_path_restriction(tmp_path: Path) -> N
     assert not (tmp_path / "other.txt").exists()
 
 
+def test_write_tool_refuses_operation_conflicting_path(tmp_path: Path) -> None:
+    target = tmp_path / "AGENTS.md"
+    conflict = tmp_path / "other-guidance.md"
+    conflict.write_text("existing\n", encoding="utf-8")
+    context = ToolContext(
+        cwd=tmp_path,
+        allowed_write_paths=(target,),
+        conflicting_write_paths=(conflict,),
+        require_create_only_writes=True,
+    )
+
+    with pytest.raises(ToolError, match="Conflicting write path already exists"):
+        run_tool(
+            WriteTool(),
+            {"path": "AGENTS.md", "content": "generated\n", "overwrite": False},
+            context,
+        )
+
+    assert not target.exists()
+    assert conflict.read_text(encoding="utf-8") == "existing\n"
+
+
 def test_write_tool_create_only_preserves_existing_file(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     path = tmp_path / "existing.txt"
