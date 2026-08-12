@@ -8,6 +8,9 @@ tool itself truncated. Focus/keybinding wiring is covered by the integration tes
 
 from __future__ import annotations
 
+import gc
+import weakref
+
 from textual.content import Content
 
 from wisp.tui.widgets import ToolCard, _tree_detail, _tree_line
@@ -53,6 +56,23 @@ def test_fitting_styled_action_preserves_separator_before_arguments() -> None:
 
     assert _rendered(card).startswith("• Wrote  src/example.py")
     assert "Wrotesrc" not in _rendered(card)
+
+
+def test_card_does_not_retain_raw_write_payload_after_bounding_arguments() -> None:
+    class Payload:
+        pass
+
+    payload = Payload()
+    retained = weakref.ref(payload)
+    arguments = {"path": "src/example.py", "content": payload}
+
+    card = ToolCard("write", arguments)
+    del arguments, payload
+    gc.collect()
+
+    assert retained() is None
+    card.set_state("done", detail="written")
+    assert _rendered(card).startswith("• Wrote  src/example.py")
 
 
 def test_tree_helpers_use_hanging_indents_when_wrapping() -> None:

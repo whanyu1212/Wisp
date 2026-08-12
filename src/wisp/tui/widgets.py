@@ -81,7 +81,7 @@ from wisp.tui.rendering import (
 )
 from wisp.tui.tool_call import (
     ToolActionStatus,
-    format_tool_call_action,
+    _format_tool_call_action_from_rendered,
     format_tool_call_arguments,
 )
 
@@ -2390,10 +2390,9 @@ class ToolCard(Static):
         # `name` property (typed str | None), so a distinct field avoids
         # shadowing it and keeps this a plain str.
         self._tool_name = name
-        self._arguments = arguments
         self._arguments_available = arguments_available
-        # Retained as the compact argument snapshot used by history reconciliation
-        # tests and diagnostics; the action formatter consumes the raw pair above.
+        # Retain only the compact bounded snapshot. Write/edit arguments can carry
+        # complete file payloads, which settled cards must not keep alive.
         self._call_arguments = (
             format_tool_call_arguments(name, arguments) if arguments_available else Content("")
         )
@@ -2436,7 +2435,6 @@ class ToolCard(Static):
         """Enrich a historical result when its paged-in call arrives later."""
 
         self._tool_name = name
-        self._arguments = arguments
         self._arguments_available = True
         self._call_arguments = format_tool_call_arguments(name, arguments)
         self._repaint()
@@ -2565,9 +2563,9 @@ class ToolCard(Static):
         # text. Trusted bullets and branches are also literal chrome; semantic state
         # is explicit in the action words and available to styling via the role class.
         width = max(8, self.content_size.width or self.size.width or 80)
-        action = format_tool_call_action(
+        action = _format_tool_call_action_from_rendered(
             self._tool_name,
-            self._arguments,
+            self._call_arguments,
             status=self._status,
             arguments_available=self._arguments_available,
         )

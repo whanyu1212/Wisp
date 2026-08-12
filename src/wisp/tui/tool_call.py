@@ -98,13 +98,32 @@ def format_tool_call_action(
 ) -> Content:
     """Return one literal, status-aware action label for a tool-card header."""
 
+    rendered_arguments = (
+        format_tool_call_arguments(name, arguments) if arguments_available else Content("")
+    )
+    return _format_tool_call_action_from_rendered(
+        name,
+        rendered_arguments,
+        status=status,
+        arguments_available=arguments_available,
+    )
+
+
+def _format_tool_call_action_from_rendered(
+    name: str,
+    rendered_arguments: Content,
+    *,
+    status: ToolActionStatus,
+    arguments_available: bool = True,
+) -> Content:
+    """Build an action from an already-bounded literal argument snapshot."""
+
     words = _ACTION_WORDS.get(name)
     content = Content.styled((words or _EXTENSION_ACTION_WORDS)[status], "b")
     if words is None:
         content += Content(" ") + Content(name)
     if not arguments_available:
         return content + Content.styled("  (arguments unavailable)", _TOOL_MUTED_STYLE)
-    rendered_arguments = format_tool_call_arguments(name, arguments)
     if rendered_arguments.plain:
         # Textual's terminal line wrapper consumes one break-space at a style
         # boundary; two literal cells preserve one visible separator between the
@@ -323,4 +342,8 @@ _FORMATTERS: dict[str, _ToolFormatter] = {
 }
 
 
-__all__ = ["ToolActionStatus", "format_tool_call_action", "format_tool_call_arguments"]
+__all__ = [
+    "ToolActionStatus",
+    "format_tool_call_action",
+    "format_tool_call_arguments",
+]
