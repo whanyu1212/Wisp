@@ -181,8 +181,15 @@ def provider_history_message(message: Message) -> Message | None:
 
     if message.role == "tool":
         return historical_tool_observation(message)
-    if message.role == "assistant" and message.tool_calls and not message.content.strip():
-        return None
+    if message.role == "assistant" and message.tool_calls:
+        if not message.content.strip():
+            return None
+        # The paired tool result is narrated into user-role history text (above),
+        # not replayed as a native ``tool``-role message — so a structured
+        # ``tool_calls`` here would be a live function call with no matching
+        # function output, which strict providers reject. Drop the call
+        # structure and keep the assistant's own text.
+        return message.model_copy(update={"tool_calls": None})
     return message
 
 

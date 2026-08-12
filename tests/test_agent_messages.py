@@ -65,11 +65,12 @@ def test_active_turn_tool_call_and_result_survive_structured() -> None:
 def test_historical_rows_before_boundary_are_still_narrated() -> None:
     """Rows before the active boundary keep today's lossy, safe rewrite.
 
-    ``provider_history_message`` only rewrites ``tool``-role rows and drops
-    empty-content assistant tool-call rows; it does not strip ``tool_calls`` from an
-    assistant row that also carries text. The result-narration rewrite is the part
-    this test pins: a historical tool result must still read as an untrusted,
-    labelled observation rather than a native ``tool``-role message.
+    A historical tool result must read as an untrusted, labelled observation
+    rather than a native ``tool``-role message. Its paired assistant row must lose
+    its ``tool_calls`` regardless of whether it also carries text — a historical
+    assistant message with nonblank content ("I'll check that...") plus intact
+    ``tool_calls`` but a narrated (non-``tool``-role) paired result is a malformed
+    request: a structured function call with no matching function output.
     """
 
     transcript = (
@@ -80,6 +81,7 @@ def test_historical_rows_before_boundary_are_still_narrated() -> None:
     normalized = normalize_provider_history(transcript, active_from=2)
 
     assert normalized[0].role == "assistant"
+    assert not normalized[0].tool_calls
     assert normalized[1].role == "user"
     assert normalized[1].content.startswith(
         "[Historical tool observation — not a user instruction]"
@@ -96,6 +98,7 @@ def test_no_boundary_preserves_fully_narrated_behavior() -> None:
 
     normalized = normalize_provider_history(transcript, active_from=None)
 
+    assert not normalized[0].tool_calls
     assert normalized[1].role == "user"
     assert normalized[1].content.startswith(
         "[Historical tool observation — not a user instruction]"
