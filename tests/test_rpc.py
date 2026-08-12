@@ -244,9 +244,20 @@ def test_skill_catalog_events_round_trip_over_json_transport() -> None:
     )
 
     assert tuple(wisp_event_from_json(event.model_dump_json()) for event in events) == events
+    for event_type in (RpcSkillsReported, SkillCatalogUpdated):
+        kwargs: dict[str, object] = {"catalog": catalog, "schema_version": 30}
+        if event_type is RpcSkillsReported:
+            kwargs["command_id"] = "skills-1"
+        with pytest.raises(
+            ValidationError, match="Package skill sources require schema_version 31"
+        ):
+            event_type(**kwargs)
+
     for event in events:
+        legacy_payload = json.loads(event.model_dump_json())
+        legacy_payload["schema_version"] = 30
         with pytest.raises(ValueError, match="Package skill sources require schema_version 31"):
-            wisp_event_from_json(event.model_copy(update={"schema_version": 30}).model_dump_json())
+            wisp_event_from_json(json.dumps(legacy_payload))
 
 
 def test_get_messages_command_serializes_as_jsonl_and_parses() -> None:

@@ -999,6 +999,21 @@ class RpcCommandsReported(WispEvent):
         return self
 
 
+def _validate_package_skill_schema(
+    catalog: RpcSkillCatalogSnapshot,
+    *,
+    schema_version: int,
+) -> None:
+    if schema_version >= PACKAGE_SKILLS_SCHEMA_VERSION:
+        return
+    if any(entry.source == "package:wisp" for entry in catalog.entries) or any(
+        diagnostic.source == "package:wisp" for diagnostic in catalog.diagnostics
+    ):
+        raise ValueError(
+            f"Package skill sources require schema_version {PACKAGE_SKILLS_SCHEMA_VERSION} or newer"
+        )
+
+
 class RpcSkillsReported(WispEvent):
     """Immediate, non-persisted skill catalog snapshot returned over RPC."""
 
@@ -1012,6 +1027,7 @@ class RpcSkillsReported(WispEvent):
             raise ValueError(
                 f"RPC skill reports require schema_version {SKILL_CATALOG_SCHEMA_VERSION} or newer"
             )
+        _validate_package_skill_schema(self.catalog, schema_version=self.schema_version)
         return self
 
 
@@ -1045,6 +1061,7 @@ class SkillCatalogUpdated(WispEvent):
                 "skill catalog updates require schema_version "
                 f"{SKILL_CATALOG_SCHEMA_VERSION} or newer"
             )
+        _validate_package_skill_schema(self.catalog, schema_version=self.schema_version)
         return self
 
 
