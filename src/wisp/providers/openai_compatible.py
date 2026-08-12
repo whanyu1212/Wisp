@@ -11,8 +11,14 @@ from typing import Protocol, cast, runtime_checkable
 from uuid import uuid4
 
 import anyio
-import httpx
-from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, OpenAIError
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    DefaultAsyncHttpxClient,
+    OpenAIError,
+)
 from openai.types.chat import ChatCompletionChunk
 
 from wisp.agent.messages import Message
@@ -308,7 +314,7 @@ class OpenAICompatibleProvider:
         if self._client is not None:
             await self._client.close()
         http_client = (
-            httpx.AsyncClient(verify=self._ca_bundle) if self._ca_bundle is not None else None
+            DefaultAsyncHttpxClient(verify=self._ca_bundle) if self._ca_bundle is not None else None
         )
         self._client = AsyncOpenAI(
             api_key=api_key,

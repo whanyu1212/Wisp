@@ -6,11 +6,10 @@ from typing import cast
 
 import anyio
 import pytest
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from openai.types.chat import ChatCompletionChunk
 from pytest import MonkeyPatch
 
-import wisp.providers.openai_compatible as openai_compatible_module
 from wisp.agent.messages import Message
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
 from wisp.providers.auth import StoredProviderAuthResolver
@@ -372,15 +371,17 @@ def test_custom_ca_bundle_configures_http_transport(
     ca_bundle = tmp_path / "private-ca.pem"
     ca_bundle.write_text("test CA", encoding="utf-8")
     captured: dict[str, object] = {}
-    original_async_client = openai_compatible_module.httpx.AsyncClient
 
-    class RecordingAsyncClient(original_async_client):
+    class RecordingDefaultAsyncHttpxClient(DefaultAsyncHttpxClient):
         def __init__(self, *args: object, **kwargs: object) -> None:
             captured.update(kwargs)
             kwargs.pop("verify", None)
             super().__init__(*args, **kwargs)
 
-    monkeypatch.setattr(openai_compatible_module.httpx, "AsyncClient", RecordingAsyncClient)
+    monkeypatch.setattr(
+        "wisp.providers.openai_compatible.DefaultAsyncHttpxClient",
+        RecordingDefaultAsyncHttpxClient,
+    )
     provider = OpenAICompatibleProvider(
         provider_name="openrouter",
         base_url="https://openrouter.ai/api/v1",
@@ -390,8 +391,9 @@ def test_custom_ca_bundle_configures_http_transport(
     )
 
     async def run() -> None:
-        await provider._client_or_create()  # noqa: SLF001
+        client = await provider._client_or_create()  # noqa: SLF001
         assert captured["verify"] == str(ca_bundle)
+        assert client._client.follow_redirects is True  # noqa: SLF001
         await provider.aclose()
 
     anyio.run(run)
