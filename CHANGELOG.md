@@ -11,10 +11,18 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+## 0.1.0b4 — 2026-08-12
+
 - Added the package-owned `wisp-development` skill with progressively loaded architecture,
-  extension API, safety, authoring, and verification guidance.
-- Added a deterministic static extension example for Python embedders, covering a read-only tool,
-  frontend-neutral command metadata, event handling, and synchronous or asynchronous activation.
+  extension API, safety, authoring, and verification guidance, plus a deterministic static
+  extension example for Python embedders.
+- Added named OpenAI-compatible providers with provider-scoped authentication, model metadata,
+  reasoning effort, and private CA support, and improved Codex recovery from context overflow while
+  preserving tool context.
+- Added session-scoped prompt-cache keys, explicit stable-prefix cache boundaries for supported
+  OpenAI models, and cache read/write telemetry in context usage views.
+- Replaced TUI tool-card chrome with compact, expandable action and result trees that retain
+  lifecycle state, bounded previews, structured diffs, and restored-session presentation.
 
 ## 0.1.0b3 — 2026-08-12
 
