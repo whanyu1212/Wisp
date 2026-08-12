@@ -421,9 +421,9 @@ Caller-injected HTTP clients retain their caller-selected timeout policy.
 
 ## Project trust
 
-Project-local settings, context files (`AGENTS.md` / `CLAUDE.md`), skills, and project extensions
-are loaded only after the project is trusted. Untrusted projects remain fully usable — Wisp simply
-ignores their local configuration and instructions.
+Project-local settings, context files (`AGENTS.md` / `CLAUDE.md`), and skills are loaded only after
+the project is trusted. Untrusted projects remain fully usable — Wisp simply ignores their local
+configuration and instructions. Project-authored executable extensions are not currently loaded.
 
 The first run in an untrusted directory asks `Do you trust the files in /path/to/project?`. Answer
 yes and the decision is remembered globally in `~/.wisp/trust.json`, keyed by resolved path.
@@ -461,6 +461,7 @@ wisp skills [project-path]
 | 2 | `<project>/.agents/skills/<name>/SKILL.md` |
 | 3 | `~/.wisp/skills/<name>/SKILL.md` |
 | 4 | `~/.agents/skills/<name>/SKILL.md` |
+| 5 (lowest) | Wisp package-owned skills |
 
 Each `SKILL.md` must begin with bounded YAML frontmatter containing a specification-valid `name`
 and `description`; the declared name must match its parent directory. Invalid skills are skipped
@@ -468,8 +469,13 @@ individually and reported without hiding valid entries. Symlinked, protected, ou
 oversized metadata is rejected. Project locations are not scanned until project trust is granted;
 user locations remain available in untrusted projects.
 
-For a complete opt-in example, including installation instructions and a progressively loaded
-review checklist, see [`examples/skills/wisp-code-review`](examples/skills/wisp-code-review/).
+Wisp ships a read-only `wisp-development` skill with current architecture, extension API, safety,
+authoring, and verification guidance. It is available from source checkouts and installed wheels,
+including in untrusted projects. Higher-precedence project or user skills may shadow it using the
+same deterministic conflict rules.
+
+For a complete opt-in review example, including installation instructions and a progressively
+loaded checklist, see [`examples/skills/wisp-code-review`](examples/skills/wisp-code-review/).
 
 When the read-only `skill` tool is exposed, Wisp adds a separately bounded index of escaped skill
 names and descriptions to model context. The model can call `skill` with `name` to load the selected
@@ -501,8 +507,9 @@ access or approval.
 
 The TUI fetches the active immutable snapshot at startup. Type `/skill:` to see deterministic
 prefix completions for the available names, or run `/skills` to inspect the cached catalog and its
-discovery diagnostics without rescanning the filesystem. Both surfaces refresh after first-time
-project trust is applied and remain available while a prompt is running. Skill descriptions,
+discovery diagnostics without rescanning the filesystem. Package and user skills are always
+available; project skills refresh after first-time project trust is applied. Both surfaces remain
+available while a prompt is running. Skill descriptions,
 diagnostics, paths, and requests are displayed as literal text rather than terminal markup.
 
 Sessions retain the exact submitted directive, additional request, instruction-content SHA-256,

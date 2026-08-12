@@ -29,11 +29,17 @@ def _write_skill(
     return skill_root
 
 
-def _discover(home: Path, project: Path | None = None, *protected: str):
+def _discover(
+    home: Path,
+    project: Path | None = None,
+    *protected: str,
+    package: Path | None = None,
+):
     return discover_skills(
         home_dir=home,
         project_root=project,
         protected_paths=protected,
+        package_root=package,
     )
 
 
@@ -308,6 +314,38 @@ def test_applies_documented_precedence_and_reports_shadowing(tmp_path: Path) -> 
         "shadowed",
         "shadowed",
     ]
+
+
+def test_package_skills_have_lowest_precedence(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    package = tmp_path / "package"
+    _write_skill(package, "review", description="package")
+    _write_skill(home / ".agents" / "skills", "review", description="user")
+    _write_skill(project / ".wisp" / "skills", "review", description="project")
+    _write_skill(package, "wisp-development", description="bundled")
+
+    catalog = _discover(home, project, package=package)
+
+    assert catalog.names() == ("review", "wisp-development")
+    review = catalog.get("review")
+    bundled = catalog.get("wisp-development")
+    assert review is not None and review.source == "project:wisp"
+    assert bundled is not None and bundled.source == "package:wisp"
+    assert [diagnostic.source for diagnostic in catalog.diagnostics] == [
+        "user:agents",
+        "package:wisp",
+    ]
+
+
+def test_package_skills_are_available_without_project_trust(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    _write_skill(package, "wisp-development", description="bundled")
+
+    catalog = _discover(tmp_path / "home", package=package)
+
+    assert catalog.names() == ("wisp-development",)
+    assert catalog.entries[0].source == "package:wisp"
 
 
 def test_deduplicates_project_root_that_matches_home(tmp_path: Path) -> None:

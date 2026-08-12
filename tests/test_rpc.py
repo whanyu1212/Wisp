@@ -221,6 +221,11 @@ def test_skill_catalog_events_round_trip_over_json_transport() -> None:
                 description="Review [b]literal[/b] output",
                 source="user:wisp",
             ),
+            RpcSkillCatalogEntry(
+                name="wisp-development",
+                description="Develop Wisp",
+                source="package:wisp",
+            ),
         ),
         diagnostics=(
             RpcSkillDiagnostic(
@@ -239,6 +244,9 @@ def test_skill_catalog_events_round_trip_over_json_transport() -> None:
     )
 
     assert tuple(wisp_event_from_json(event.model_dump_json()) for event in events) == events
+    for event in events:
+        with pytest.raises(ValueError, match="Package skill sources require schema_version 31"):
+            wisp_event_from_json(event.model_copy(update={"schema_version": 30}).model_dump_json())
 
 
 def test_get_messages_command_serializes_as_jsonl_and_parses() -> None:
