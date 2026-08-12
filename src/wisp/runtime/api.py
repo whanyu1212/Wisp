@@ -168,11 +168,17 @@ class WispRuntime:
             for name, provider in previous_configured.items()
             if id(provider) in retained_ids
         }
-        adopted = {**retained, **candidate._configured_providers}
+        transferred = {
+            name: provider
+            for name, provider in candidate._configured_providers.items()
+            if id(provider) in retained_ids
+        }
+        adopted = {**retained, **transferred}
         self.providers.replace_all(providers)
         self._configured_providers.clear()
         self._configured_providers.update(adopted)
-        candidate._configured_providers.clear()
+        for name in transferred:
+            candidate._configured_providers.pop(name, None)
         displaced = tuple(
             provider
             for provider in previous_configured.values()

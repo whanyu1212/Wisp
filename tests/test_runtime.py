@@ -505,28 +505,40 @@ def test_provider_adoption_tracks_retained_and_transferred_ownership() -> None:
         displaced = _ClosableFakeProvider("replaced")
         replacement = _ClosableFakeProvider("replaced")
         added = _ClosableFakeProvider("added")
-        current = runtime_with(retained, displaced)
-        candidate = runtime_with(replacement, added)
+        shadowed = _ClosableFakeProvider("shadowed")
+        extension_override = _ClosableFakeProvider("shadowed")
+        masked_candidate = _ClosableFakeProvider("shadowed")
+        current = runtime_with(retained, displaced, shadowed)
+        current.providers.register(extension_override)
+        candidate = runtime_with(replacement, added, masked_candidate)
 
         await current.adopt_provider_configuration(candidate)
 
         assert current.providers.get("retained") is retained
         assert current.providers.get("replaced") is replacement
         assert current.providers.get("added") is added
+        assert current.providers.get("shadowed") is extension_override
         assert retained.close_count == 0
         assert displaced.close_count == 1
         assert replacement.close_count == 0
         assert added.close_count == 0
+        assert shadowed.close_count == 1
+        assert extension_override.close_count == 0
+        assert masked_candidate.close_count == 0
 
         await candidate.aclose()
         assert replacement.close_count == 0
         assert added.close_count == 0
+        assert masked_candidate.close_count == 1
 
         await current.aclose()
         assert retained.close_count == 1
         assert displaced.close_count == 1
         assert replacement.close_count == 1
         assert added.close_count == 1
+        assert shadowed.close_count == 1
+        assert extension_override.close_count == 0
+        assert masked_candidate.close_count == 1
 
     anyio.run(run)
 
