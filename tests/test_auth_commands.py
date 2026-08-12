@@ -210,7 +210,9 @@ def test_custom_provider_auth_uses_named_environment_with_generic_fallback(
     catalog = commands._connection_catalog()  # noqa: SLF001
     custom = next(family for family in catalog if family.id == "openrouter")
 
-    assert renderer.notices == ["openrouter: api key configured via OPENROUTER_API_KEY"]
+    assert renderer.notices == [
+        "openrouter: api key configured via OPENROUTER_API_KEY, OPENAI_COMPATIBLE_API_KEY"
+    ]
     assert custom.label == "openrouter"
     assert custom.methods[0].provider == "openrouter"
     assert custom.methods[0].source == "environment"
@@ -221,6 +223,40 @@ def test_custom_provider_auth_uses_named_environment_with_generic_fallback(
     commands.status(())
 
     assert renderer.notices == ["openrouter: api key configured via OPENAI_COMPATIBLE_API_KEY"]
+
+
+def test_custom_provider_connect_and_disconnect_report_all_active_environment_variables(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    store = _FakeStore()
+    renderer = _FakeRenderer()
+    commands = AuthCommands(
+        renderer,
+        lambda: store,
+        lambda: "openrouter",
+        openai_compatible_provider="openrouter",
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "provider-environment")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "fallback-environment")
+
+    async def run() -> None:
+        await commands.connect_api_key("openrouter", "stored-key")
+
+    anyio.run(run)
+
+    assert renderer.notices == [
+        "Stored API key for openrouter; OPENROUTER_API_KEY, OPENAI_COMPATIBLE_API_KEY "
+        "still take precedence. Unset them in your shell to use the stored key."
+    ]
+
+    renderer.notices.clear()
+    commands.disconnect(("openrouter",))
+
+    assert renderer.notices == [
+        "Removed stored credentials for openrouter; still connected through "
+        "OPENROUTER_API_KEY, OPENAI_COMPATIBLE_API_KEY. "
+        "Unset them in your shell to disconnect."
+    ]
 
 
 def test_custom_provider_connect_stores_under_custom_name() -> None:

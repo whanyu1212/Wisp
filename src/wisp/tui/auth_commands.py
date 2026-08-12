@@ -60,9 +60,10 @@ class AuthCommands:
             self._renderer.command_error("Usage: /auth [provider]")
             return
         provider = args[0] if args else self._get_default_provider()
-        environment_variable = self._configured_environment_variable(provider)
-        if environment_variable is not None:
-            self._renderer.notice(f"{provider}: api key configured via {environment_variable}")
+        environment_variables = self._configured_environment_variables(provider)
+        if environment_variables:
+            configured_via = ", ".join(environment_variables)
+            self._renderer.notice(f"{provider}: api key configured via {configured_via}")
             return
         try:
             credential = self._get_store().get(provider)
@@ -120,13 +121,16 @@ class AuthCommands:
             self._connect_error(f"Auth storage error: {exc}")
             return
         self._call_renderer_optional("connect_completed", provider)
-        environment_variable = self._configured_environment_variable(provider)
-        if environment_variable is None:
+        environment_variables = self._configured_environment_variables(provider)
+        if not environment_variables:
             self._renderer.notice(f"Connected: {provider}")
         else:
+            names = ", ".join(environment_variables)
+            verb = "takes" if len(environment_variables) == 1 else "take"
+            pronoun = "it" if len(environment_variables) == 1 else "them"
             self._renderer.notice(
-                f"Stored API key for {provider}; {environment_variable} still takes precedence. "
-                "Unset it in your shell to use the stored key."
+                f"Stored API key for {provider}; {names} still {verb} precedence. "
+                f"Unset {pronoun} in your shell to use the stored key."
             )
 
     async def _connect_openai_codex(self) -> None:
@@ -169,23 +173,24 @@ class AuthCommands:
         self._disconnect_provider(args[0])
 
     def _disconnect_provider(self, provider: str) -> None:
-        environment_variable = self._configured_environment_variable(provider)
+        environment_variables = self._configured_environment_variables(provider)
         try:
             deleted = self._get_store().delete(provider)
         except AuthStorageError as exc:
             self._renderer.command_error(f"Auth storage error: {exc}")
             return
-        if environment_variable is not None:
+        if environment_variables:
+            names = ", ".join(environment_variables)
+            pronoun = "it" if len(environment_variables) == 1 else "them"
             if deleted:
                 self._call_renderer_optional("connect_completed", provider)
                 self._renderer.notice(
                     f"Removed stored credentials for {provider}; still connected through "
-                    f"{environment_variable}. Unset it in your shell to disconnect."
+                    f"{names}. Unset {pronoun} in your shell to disconnect."
                 )
             else:
                 self._connect_error(
-                    f"{provider} is connected through {environment_variable}; "
-                    "unset it in your shell."
+                    f"{provider} is connected through {names}; unset {pronoun} in your shell."
                 )
             return
         if deleted:
@@ -263,13 +268,13 @@ class AuthCommands:
         )
 
     def _configured_environment_variable(self, provider: str) -> str | None:
-        return next(
-            (
-                name
-                for name in self._api_key_environment(provider)
-                if _environment_value(name) is not None
-            ),
-            None,
+        return next(iter(self._configured_environment_variables(provider)), None)
+
+    def _configured_environment_variables(self, provider: str) -> tuple[str, ...]:
+        return tuple(
+            name
+            for name in self._api_key_environment(provider)
+            if _environment_value(name) is not None
         )
 
     def _api_key_environment(self, provider: str) -> tuple[str, ...]:
