@@ -333,6 +333,9 @@ Do not mention this summarization request. Return only these sections:
     return prompt
 
 
+_MAX_COMPACTION_AGGREGATION_DEPTH = 8
+
+
 async def summarize_manual_compaction(
     plan: ManualCompactionPlan,
     *,
@@ -350,9 +353,50 @@ async def summarize_manual_compaction(
     max_transcript_chars = (
         max(4_000, usable_tokens * 3) if usable_tokens is not None and usable_tokens > 0 else None
     )
+    final, partials = await _summarize_bounded(
+        plan,
+        provider=provider,
+        model=model,
+        effort=effort,
+        instructions=instructions,
+        cost_estimator=cost_estimator,
+        max_transcript_chars=max_transcript_chars,
+        depth=0,
+    )
+    summaries = (*partials, final)
+    return CompactionSummary(
+        summary=final.summary,
+        usage=_sum_token_usage(tuple(summary.usage for summary in summaries)),
+        cost=_sum_usage_cost(tuple(summary.cost for summary in summaries)),
+    )
+
+
+async def _summarize_bounded(
+    plan: ManualCompactionPlan,
+    *,
+    provider: Provider,
+    model: str | None,
+    effort: str | None,
+    instructions: str | None,
+    cost_estimator: Callable[[str, str | None, str | None, TokenUsage], UsageCost] | None,
+    max_transcript_chars: int | None,
+    depth: int,
+) -> tuple[CompactionSummary, tuple[CompactionSummary, ...]]:
+    """Summarize ``plan``, respecting ``max_transcript_chars`` on every request sent.
+
+    A checkpoint prompt whose sections (like ``## Already Investigated``) repeat in
+    every partial can make the *aggregate* of already-summarized partials exceed the
+    same budget the original chunking was meant to respect — chunking once and then
+    assuming the combined partials are always small is not sound. Recurses on the
+    aggregate step the same way it recurses on the original oversized transcript, so
+    every request this makes — including nested aggregation rounds — stays within
+    ``max_transcript_chars``. Returns the final summary plus every partial summary
+    that contributed to it, so the caller can sum usage/cost across all of them.
+    """
+
     transcript = serialize_compaction_transcript(plan.rows_to_summarize)
     if max_transcript_chars is None or len(transcript) <= max_transcript_chars:
-        return await _summarize_compaction_once(
+        summary = await _summarize_compaction_once(
             plan,
             provider=provider,
             model=model,
@@ -360,8 +404,16 @@ async def summarize_manual_compaction(
             instructions=instructions,
             cost_estimator=cost_estimator,
         )
+        return summary, ()
+
+    if depth >= _MAX_COMPACTION_AGGREGATION_DEPTH:
+        raise CompactionSummaryError(
+            "Compaction transcript could not be bounded within "
+            f"{_MAX_COMPACTION_AGGREGATION_DEPTH} aggregation rounds"
+        )
 
     partials: list[CompactionSummary] = []
+    all_contributors: list[CompactionSummary] = []
     for chunk_index, chunk in enumerate(
         _chunk_compaction_rows(plan.rows_to_summarize, max_transcript_chars),
         start=1,
@@ -372,16 +424,19 @@ async def summarize_manual_compaction(
             rows_to_summarize=chunk,
             retained_rows=(),
         )
-        partials.append(
-            await _summarize_compaction_once(
-                chunk_plan,
-                provider=provider,
-                model=model,
-                effort=effort,
-                instructions=f"Checkpoint chunk {chunk_index}. {instructions or ''}".strip(),
-                cost_estimator=cost_estimator,
-            )
+        chunk_summary, chunk_contributors = await _summarize_bounded(
+            chunk_plan,
+            provider=provider,
+            model=model,
+            effort=effort,
+            instructions=f"Checkpoint chunk {chunk_index}. {instructions or ''}".strip(),
+            cost_estimator=cost_estimator,
+            max_transcript_chars=max_transcript_chars,
+            depth=depth + 1,
         )
+        partials.append(chunk_summary)
+        all_contributors.extend(chunk_contributors)
+        all_contributors.append(chunk_summary)
 
     aggregate_rows = tuple(
         SessionContextRow(
@@ -396,20 +451,18 @@ async def summarize_manual_compaction(
         rows_to_summarize=aggregate_rows,
         retained_rows=(),
     )
-    final = await _summarize_compaction_once(
+    final, final_contributors = await _summarize_bounded(
         aggregate_plan,
         provider=provider,
         model=model,
         effort=effort,
         instructions=instructions,
         cost_estimator=cost_estimator,
+        max_transcript_chars=max_transcript_chars,
+        depth=depth + 1,
     )
-    summaries = (*partials, final)
-    return CompactionSummary(
-        summary=final.summary,
-        usage=_sum_token_usage(tuple(summary.usage for summary in summaries)),
-        cost=_sum_usage_cost(tuple(summary.cost for summary in summaries)),
-    )
+    all_contributors.extend(final_contributors)
+    return final, tuple(all_contributors)
 
 
 async def _summarize_compaction_once(

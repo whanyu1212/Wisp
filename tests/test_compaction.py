@@ -691,10 +691,11 @@ def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:
 
     assert summary.summary == VALID_COMPACTION_SUMMARY
     assert len(provider.calls) > 2
-    # The final call aggregates the partial summaries and is not itself bounded by
-    # ``max_transcript_chars`` (partial summaries are assumed small); only the
-    # per-chunk transcript calls need to respect the chunking bound.
-    assert all(len(call[-1].content) <= 4_800 for call in provider.calls[:-1])
+    # Every request, including the final aggregation of partial summaries, must
+    # respect the chunking bound — aggregation recurses the same way the original
+    # oversized transcript does, so a large enough number of partials cannot
+    # produce an unbounded aggregate request.
+    assert all(len(call[-1].content) <= 4_800 for call in provider.calls)
     assert summary.usage == TokenUsage(
         input_tokens=10 * len(provider.calls),
         output_tokens=2 * len(provider.calls),
@@ -704,6 +705,69 @@ def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:
     assert summary.cost.estimated_usd == Decimal("0.25") * len(provider.calls)
     assert summary.cost.billable is not None
     assert summary.cost.billable.input_tokens == 10 * len(provider.calls)
+
+
+def test_provider_summary_recursively_bounds_oversized_aggregate() -> None:
+    """When enough partial summaries are produced that their own aggregate
+    transcript exceeds the bound, the aggregate step must itself be chunked and
+    recursively summarized rather than sent as one unbounded request.
+
+    A large enough original transcript (40,000 chars here) splits into more than
+    the ~11 chunks needed to push a first-level aggregate of ``VALID_COMPACTION_
+    SUMMARY``-sized partials over the same 4,800-char bound — forcing a second
+    recursive aggregation round.
+    """
+
+    class RecordingSummaryProvider:
+        name = "recording-summary"
+        default_model: str | None = "summary-model"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[Message, ...]] = []
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            *,
+            model: str | None = None,
+            tools: Sequence[ToolSpec] = (),
+            tool_results: Sequence[ToolCallResult] = (),
+            previous_response_id: str | None = None,
+            effort: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del tools, tool_results, previous_response_id, effort
+            self.calls.append(tuple(messages))
+            yield ProviderResponseStarted(model=model or self.default_model or self.name)
+            yield ProviderResponseCompleted(
+                content=VALID_COMPACTION_SUMMARY,
+                usage=ProviderUsage(input_tokens=10, output_tokens=2, total_tokens=12),
+            )
+
+    provider = RecordingSummaryProvider()
+    oversized = SessionReplay(
+        rows=(
+            _row("huge-user", Message(role="user", content="x" * 40_000)),
+            _row("huge-answer", Message(role="assistant", content="done", finish_reason="stop")),
+            *_turn("retained"),
+        )
+    )
+    plan = plan_manual_compaction(oversized)
+
+    async def run() -> CompactionSummary:
+        return await summarize_manual_compaction(
+            plan,
+            provider=provider,
+            context_window=2_000,
+            reserve_tokens=400,
+        )
+
+    summary = anyio.run(run)
+
+    assert summary.summary == VALID_COMPACTION_SUMMARY
+    # Enough chunks that a second, recursive aggregation round was required: more
+    # calls than the single-level case above needs, and every one still bounded.
+    assert len(provider.calls) > 11
+    assert all(len(call[-1].content) <= 4_800 for call in provider.calls)
 
 
 @pytest.mark.parametrize(
