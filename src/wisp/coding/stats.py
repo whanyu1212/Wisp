@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import cast
 
 from pydantic import ValidationError
 
@@ -167,16 +168,24 @@ def _sum_usage(records: Sequence[TokenUsage]) -> TokenUsage:
         input_tokens=sum(record.input_tokens for record in records),
         output_tokens=sum(record.output_tokens for record in records),
         total_tokens=sum(record.total_tokens for record in records),
-        cache_read_input_tokens=_sum_optional(records, "cache_read_input_tokens"),
-        cache_write_input_tokens=_sum_optional(records, "cache_write_input_tokens"),
+        cache_read_input_tokens=_sum_complete_optional(records, "cache_read_input_tokens"),
+        cache_write_input_tokens=_sum_complete_optional(records, "cache_write_input_tokens"),
         reasoning_output_tokens=_sum_optional(records, "reasoning_output_tokens"),
     )
 
 
 def _sum_optional(records: Sequence[TokenUsage], field: str) -> int | None:
-    values = [getattr(record, field) for record in records]
-    present = [value for value in values if value is not None]
-    return sum(present) if present else None
+    values = [cast(int | None, getattr(record, field)) for record in records]
+    if not values or all(value is None for value in values):
+        return None
+    return sum(value for value in values if value is not None)
+
+
+def _sum_complete_optional(records: Sequence[TokenUsage], field: str) -> int | None:
+    values = [cast(int | None, getattr(record, field)) for record in records]
+    if not values or any(value is None for value in values):
+        return None
+    return sum(value for value in values if value is not None)
 
 
 def _latest_observation(

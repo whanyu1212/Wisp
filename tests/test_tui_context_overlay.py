@@ -43,6 +43,8 @@ def _stats(
     over_budget: bool | None = False,
     policy: CompactionPolicyStatus | None = _DEFAULT_POLICY,
     cost: SessionCostSummary = _DEFAULT_COST,
+    cache_read: int | None = None,
+    cache_write: int | None = None,
 ) -> SessionStats:
     return SessionStats(
         session_id="session-1",
@@ -50,7 +52,13 @@ def _stats(
         active_message_count=4,
         compaction_count=0,
         usage_record_count=1,
-        usage=TokenUsage(input_tokens=90_000, output_tokens=2_000, total_tokens=92_000),
+        usage=TokenUsage(
+            input_tokens=90_000,
+            output_tokens=2_000,
+            total_tokens=92_000,
+            cache_read_input_tokens=cache_read,
+            cache_write_input_tokens=cache_write,
+        ),
         context=ContextBudget(
             estimate=ContextEstimate(
                 system_tokens=1_000,
@@ -89,7 +97,28 @@ def test_context_presentation_prefers_current_provider_observation() -> None:
     assert view.compaction == "on"
     assert view.eligibility == "eligible"
     assert view.overflow_recovery == "on"
+    assert view.prompt_cache == "unavailable"
     assert view.cost == "$0.420"
+
+
+@pytest.mark.parametrize(
+    ("cache_read", "cache_write", "expected"),
+    [
+        (24_000, 8_000, "24k read · 8k written"),
+        (24_000, None, "24k read · writes unreported"),
+        (None, 8_000, "reads unreported · 8k written"),
+        (0, 0, "0 read · 0 written"),
+    ],
+)
+def test_context_presentation_reports_cache_telemetry_honestly(
+    cache_read: int | None, cache_write: int | None, expected: str
+) -> None:
+    assert (
+        context_status_presentation(
+            _stats(cache_read=cache_read, cache_write=cache_write)
+        ).prompt_cache
+        == expected
+    )
 
 
 def test_context_presentation_recomputes_remaining_from_displayed_observation() -> None:
@@ -164,6 +193,7 @@ def test_context_overlay_renders_progress_and_authoritative_policy() -> None:
                     "#context-status-policy",
                     "#context-status-eligibility",
                     "#context-status-recovery",
+                    "#context-status-prompt-cache",
                     "#context-status-cost",
                 )
             ]
@@ -180,6 +210,7 @@ def test_context_overlay_renders_progress_and_authoritative_policy() -> None:
         "Automatic compaction: on · Trigger: >120k",
         "Threshold: eligible",
         "Overflow recovery: on",
+        "Prompt cache (reported): unavailable",
         "Cost: $0.420",
     ]
     assert not warning

@@ -39,6 +39,7 @@ from wisp.events import (
 from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tool_presentation import tool_result_status
 from wisp.tui.commands import TuiCommandCatalog
+from wisp.tui.context_widget import format_prompt_cache_usage
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
     HistoricalSkillInvocation,
@@ -1219,6 +1220,7 @@ def format_compaction_status(stats: SessionStats) -> str:
             f"Trigger: {trigger}",
             f"Reserve: {_format_token_count(context.reserve_tokens)}",
             f"Usage source: {usage_source}",
+            f"Prompt cache (reported): {format_prompt_cache_usage(stats.usage)}",
             f"Threshold eligibility: {eligibility}",
             (
                 "Overflow recovery: unavailable"

@@ -439,12 +439,23 @@ def _usage_from_openai(response: Response) -> ProviderUsage | None:
         output_tokens=max(0, usage.output_tokens),
         total_tokens=max(0, usage.total_tokens),
         cache_read_input_tokens=(
-            max(0, input_details.cached_tokens) if input_details is not None else None
+            _nonnegative_int(input_details.cached_tokens) if input_details is not None else None
+        ),
+        cache_write_input_tokens=(
+            _nonnegative_int(getattr(input_details, "cache_write_tokens", None))
+            if input_details is not None
+            else None
         ),
         reasoning_output_tokens=(
-            max(0, output_details.reasoning_tokens) if output_details is not None else None
+            _nonnegative_int(output_details.reasoning_tokens)
+            if output_details is not None
+            else None
         ),
     )
+
+
+def _nonnegative_int(value: object) -> int | None:
+    return max(0, value) if type(value) is int else None
 
 
 def _normalize_optional(value: str | None) -> str | None:

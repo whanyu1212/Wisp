@@ -18,6 +18,7 @@ from wisp.coding.compaction import (
     CompactionSummary,
     CompactionSummaryError,
     NothingToCompactError,
+    _sum_token_usage,
     build_compaction_checkpoint_prompt,
     plan_manual_compaction,
     plan_preflight_compaction,
@@ -626,6 +627,30 @@ def test_provider_summary_uses_no_tools_no_continuation_and_captures_usage() -> 
     assert "## Additional focus\nFocus on tests" in request.messages[0].content
     assert request.messages[1].role == "user"
     assert "<historical_transcript>" in request.messages[1].content
+
+
+def test_compaction_usage_marks_partially_reported_cache_totals_incomplete() -> None:
+    usage = _sum_token_usage(
+        (
+            TokenUsage(
+                input_tokens=40,
+                output_tokens=10,
+                total_tokens=50,
+                cache_read_input_tokens=10,
+                cache_write_input_tokens=5,
+                reasoning_output_tokens=2,
+            ),
+            TokenUsage(input_tokens=20, output_tokens=5, total_tokens=25),
+            None,
+        )
+    )
+
+    assert usage == TokenUsage(
+        input_tokens=60,
+        output_tokens=15,
+        total_tokens=75,
+        reasoning_output_tokens=2,
+    )
 
 
 def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:

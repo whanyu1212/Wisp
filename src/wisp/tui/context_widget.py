@@ -11,7 +11,7 @@ from textual.message import Message
 from textual.widgets import Button, Label, ProgressBar, Static
 
 from wisp.coding.costs import format_cost_summary
-from wisp.events import SessionCostSummary, SessionStats
+from wisp.events import SessionCostSummary, SessionStats, TokenUsage
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,7 @@ class ContextStatusPresentation:
     compaction: str
     eligibility: str
     overflow_recovery: str
+    prompt_cache: str
     cost: str
     over_budget: bool
 
@@ -78,6 +79,7 @@ def context_status_presentation(stats: SessionStats) -> ContextStatusPresentatio
             if policy is None
             else ("on" if policy.overflow_recovery_enabled else "off")
         ),
+        prompt_cache=format_prompt_cache_usage(stats.usage),
         cost=_format_cost(stats.cost),
         over_budget=bool(window is not None and current_tokens >= window - context.reserve_tokens),
     )
@@ -100,6 +102,20 @@ def _format_cost(cost: SessionCostSummary) -> str:
     if not summary:
         return "unavailable"
     return summary.removeprefix("cost ")
+
+
+def format_prompt_cache_usage(usage: TokenUsage) -> str:
+    """Format provider-reported cache reads and writes without inventing missing data."""
+
+    cache_read = usage.cache_read_input_tokens
+    cache_write = usage.cache_write_input_tokens
+    if cache_read is None and cache_write is None:
+        return "unavailable"
+    read = f"{_format_tokens(cache_read)} read" if cache_read is not None else "reads unreported"
+    write = (
+        f"{_format_tokens(cache_write)} written" if cache_write is not None else "writes unreported"
+    )
+    return f"{read} · {write}"
 
 
 class ContextStatusOverlay(Vertical):
@@ -191,6 +207,9 @@ class ContextStatusOverlay(Vertical):
         self._policy = Label("", classes="context-status-row", id="context-status-policy")
         self._eligibility = Label("", classes="context-status-row", id="context-status-eligibility")
         self._recovery = Label("", classes="context-status-row", id="context-status-recovery")
+        self._prompt_cache = Label(
+            "", classes="context-status-row", id="context-status-prompt-cache"
+        )
         self._cost = Label("", classes="context-status-row", id="context-status-cost")
         self._warning = Static("Context threshold reached", id="context-status-warning")
         self._close = Button("Close", id="context-status-close")
@@ -206,6 +225,7 @@ class ContextStatusOverlay(Vertical):
             yield self._policy
             yield self._eligibility
             yield self._recovery
+            yield self._prompt_cache
             yield self._cost
             with Horizontal(id="context-status-actions"):
                 yield self._close
@@ -234,6 +254,7 @@ class ContextStatusOverlay(Vertical):
         self._policy.update(f"Automatic compaction: {view.compaction} · Trigger: {view.trigger}")
         self._eligibility.update(f"Threshold: {view.eligibility}")
         self._recovery.update(f"Overflow recovery: {view.overflow_recovery}")
+        self._prompt_cache.update(f"Prompt cache (reported): {view.prompt_cache}")
         self._cost.update(f"Cost: {view.cost}")
         self._warning.display = view.over_budget
         self.display = True
