@@ -17,13 +17,15 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
+from math import ceil
 from typing import ClassVar
 
 from rich.cells import cell_len
+from rich.color import Color
 from rich.console import Console, ConsoleOptions, RenderResult
 from rich.markdown import CodeBlock, Heading
 from rich.markdown import Markdown as RichMarkdown
-from rich.segment import Segment
+from rich.segment import Segment, Segments
 from rich.style import Style as RichStyle
 from rich.syntax import Syntax
 from rich.text import Text
@@ -34,6 +36,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
+from textual.scrollbar import ScrollBar, ScrollBarRender
 from textual.timer import Timer
 from textual.widget import AwaitMount, Widget
 from textual.widgets import (
@@ -1885,6 +1888,76 @@ class JumpToLatest(Static):
         self.post_message(self.Selected())
 
 
+_SCROLLBAR_DEFAULT_BACK_COLOR = Color.parse("#555555")
+_SCROLLBAR_DEFAULT_BAR_COLOR = Color.parse("bright_magenta")
+
+
+class _SolidVerticalScrollBarRender(ScrollBarRender):
+    """A stable whole-cell vertical thumb with Textual's interaction metadata."""
+
+    @classmethod
+    def render_bar(
+        cls,
+        size: int = 25,
+        virtual_size: float = 50,
+        window_size: float = 20,
+        position: float = 0,
+        thickness: int = 1,
+        vertical: bool = True,
+        back_color: Color = _SCROLLBAR_DEFAULT_BACK_COLOR,
+        bar_color: Color = _SCROLLBAR_DEFAULT_BAR_COLOR,
+    ) -> Segments:
+        if not vertical:
+            return super().render_bar(
+                size=size,
+                virtual_size=virtual_size,
+                window_size=window_size,
+                position=position,
+                thickness=thickness,
+                vertical=False,
+                back_color=back_color,
+                bar_color=bar_color,
+            )
+
+        row_count = max(0, int(size))
+        blank = cls.BLANK_GLYPH * thickness
+        background = RichStyle(bgcolor=back_color)
+        if not window_size or not row_count or virtual_size <= window_size:
+            return Segments(
+                [Segment(blank, background)] * row_count,
+                new_lines=True,
+            )
+
+        # Textual normally tracks both ends at eighth-cell precision. Removing
+        # only those fractional glyphs makes the number of fully painted rows
+        # oscillate. Quantize the size once, then move that fixed-size thumb.
+        thumb_rows = min(
+            row_count,
+            max(1, ceil(window_size * row_count / virtual_size)),
+        )
+        travel = row_count - thumb_rows
+        position_ratio = min(1.0, max(0.0, position / (virtual_size - window_size)))
+        start = min(travel, max(0, round(travel * position_ratio)))
+        end = start + thumb_rows
+
+        upper = Segment(
+            blank,
+            RichStyle(bgcolor=back_color, meta={"@mouse.down": "scroll_up"}),
+        )
+        thumb = Segment(
+            blank,
+            RichStyle(bgcolor=bar_color, meta={"@mouse.down": "grab"}),
+        )
+        lower = Segment(
+            blank,
+            RichStyle(bgcolor=back_color, meta={"@mouse.down": "scroll_down"}),
+        )
+        return Segments(
+            [upper] * start + [thumb] * thumb_rows + [lower] * (row_count - end),
+            new_lines=True,
+        )
+
+
 class Transcript(VerticalScroll):
     """Scrollable message container that follows the newest output like `tail -f`.
 
@@ -1961,6 +2034,16 @@ class Transcript(VerticalScroll):
                 self._empty_hint,
             )
             yield self._empty_state
+
+    @property
+    def vertical_scrollbar(self) -> ScrollBar:
+        """Create Textual's scrollbar lazily and install the stable renderer."""
+
+        scrollbar = super().vertical_scrollbar
+        # Textual documents per-instance renderer assignment, despite annotating
+        # the attribute as ClassVar in 8.2.8.
+        scrollbar.renderer = _SolidVerticalScrollBarRender  # type: ignore[misc]
+        return scrollbar
 
     def mount_message(self, widget: Widget, *, before: Widget | None = None) -> AwaitMount:
         """Mount output after permanently dismissing the initial empty state."""
