@@ -13,17 +13,6 @@ from __future__ import annotations
 
 from textual.theme import Theme
 
-
-def _markdown_theme_variables(*, heading_color: str) -> dict[str, str]:
-    """Textual's semantic Markdown heading hooks for one Wisp theme."""
-
-    variables: dict[str, str] = {}
-    for level in range(1, 7):
-        variables[f"markdown-h{level}-color"] = heading_color
-        variables[f"markdown-h{level}-text-style"] = "bold underline" if level == 1 else "bold"
-    return variables
-
-
 # Diff rows are painted as full-width tinted bands (the row background) with a
 # stronger tint on the specific changed tokens, matching how conventional diff
 # viewers separate "this line changed" from "this is what changed in it".
@@ -76,7 +65,7 @@ WISP_THEME_DARK = Theme(
     surface="#151b21",
     panel="#1b232b",
     dark=True,
-    variables=_markdown_theme_variables(heading_color=_DARK_WARNING) | _DARK_DIFF_VARIABLES,
+    variables=_DARK_DIFF_VARIABLES,
 )
 
 WISP_THEME_LIGHT = Theme(
@@ -92,7 +81,7 @@ WISP_THEME_LIGHT = Theme(
     surface="#ffffff",
     panel="#eef3f5",
     dark=False,
-    variables=_markdown_theme_variables(heading_color=_LIGHT_WARNING) | _LIGHT_DIFF_VARIABLES,
+    variables=_LIGHT_DIFF_VARIABLES,
 )
 
 WISP_THEMES = (WISP_THEME_DARK, WISP_THEME_LIGHT)
