@@ -19,12 +19,23 @@ narrated identically regardless of turn boundary.
 
 from __future__ import annotations
 
+from wisp.agent.context import context_fingerprint
 from wisp.agent.messages import Message, normalize_provider_history
 from wisp.events import ToolCallSnapshot
 
 
 def _call(call_id: str = "call-1") -> ToolCallSnapshot:
     return ToolCallSnapshot(call_id=call_id, name="lookup", arguments={"query": "wisp"})
+
+
+def test_prompt_cache_boundary_is_transient_provider_metadata() -> None:
+    marked = Message(role="system", content="stable", prompt_cache_boundary=True)
+    unmarked = Message(role="system", content="stable")
+
+    assert marked.prompt_cache_boundary is True
+    assert "prompt_cache_boundary" not in marked.model_dump()
+    assert "prompt_cache_boundary" not in marked.model_dump_json()
+    assert context_fingerprint((marked,)) == context_fingerprint((unmarked,))
 
 
 def test_active_turn_tool_call_and_result_survive_structured() -> None:
