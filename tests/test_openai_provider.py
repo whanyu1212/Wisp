@@ -76,6 +76,7 @@ class StubOpenAIProvider(OpenAIProvider):
         self.seen_tool_results: Sequence[ToolCallResult] | None = None
         self.seen_previous_response_id: str | None = None
         self.seen_effort: str | None = None
+        self.seen_prompt_cache_key: str | None = None
         self.created_stream: _ClosableStubStream | None = None
 
     async def _create_stream(
@@ -87,6 +88,7 @@ class StubOpenAIProvider(OpenAIProvider):
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
+        prompt_cache_key: str | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         self.seen_model = model
         self.seen_messages = messages
@@ -94,6 +96,7 @@ class StubOpenAIProvider(OpenAIProvider):
         self.seen_tool_results = tool_results
         self.seen_previous_response_id = previous_response_id
         self.seen_effort = effort
+        self.seen_prompt_cache_key = prompt_cache_key
 
         self.created_stream = _ClosableStubStream(self.events)
         return self.created_stream
@@ -321,6 +324,45 @@ def test_openai_provider_omits_reasoning_when_effort_is_not_provided() -> None:
     assert "reasoning" not in responses.calls[0]
 
 
+def test_openai_provider_sends_prompt_cache_key_when_provided() -> None:
+    responses = StubResponsesResource()
+    provider = OpenAIProvider(
+        api_key="test-key",
+        client=cast(AsyncOpenAI, StubAsyncOpenAI(responses)),
+    )
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [Message(role="user", content="hello")],
+            model="gpt-test",
+            prompt_cache_key="wisp:session-1",
+        )
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert responses.calls[0]["prompt_cache_key"] == "wisp:session-1"
+
+
+def test_openai_provider_omits_prompt_cache_key_when_not_provided() -> None:
+    responses = StubResponsesResource()
+    provider = OpenAIProvider(
+        api_key="test-key",
+        client=cast(AsyncOpenAI, StubAsyncOpenAI(responses)),
+    )
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [Message(role="user", content="hello")],
+            model="gpt-test",
+        )
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert "prompt_cache_key" not in responses.calls[0]
+
+
 def test_openai_provider_stream_forwards_effort_to_create_stream() -> None:
     provider = StubOpenAIProvider([_text_delta("hi"), _completed_event()])
 
@@ -335,6 +377,23 @@ def test_openai_provider_stream_forwards_effort_to_create_stream() -> None:
     anyio.run(run)
 
     assert provider.seen_effort == "low"
+
+
+def test_openai_provider_stream_forwards_prompt_cache_key_to_create_stream() -> None:
+    provider = StubOpenAIProvider([_text_delta("hi"), _completed_event()])
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in provider.stream(
+                [Message(role="user", content="hello")],
+                prompt_cache_key="wisp:session-1",
+            )
+        ]
+
+    anyio.run(run)
+
+    assert provider.seen_prompt_cache_key == "wisp:session-1"
 
 
 def test_openai_provider_omits_tools_when_no_tool_specs_are_provided() -> None:

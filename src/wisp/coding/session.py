@@ -528,6 +528,7 @@ class CodingSession:
                 tools=effective_tools,
                 max_tool_iterations=self.max_tool_iterations,
                 effort=self.effort,
+                prompt_cache_key=_prompt_cache_key(session.session_id),
                 context_window=self._context_window(),
                 context_reserve_tokens=self._effective_context_reserve_tokens(),
                 cost_estimator=self._cost_estimator,
@@ -1253,6 +1254,7 @@ class CodingSession:
                 provider=self.provider,
                 model=self.model,
                 effort=self.effort,
+                prompt_cache_key=_prompt_cache_key(session.session_id),
                 instructions=instructions,
                 cost_estimator=self._cost_estimator,
                 context_window=self._context_window(),
@@ -1713,6 +1715,12 @@ class CodingSession:
                     self._history_refresh_session_ids.add(pending.entry.session_id)
                     raise
                 self._pending_entries.popleft()
+
+
+def _prompt_cache_key(session_id: str) -> str:
+    """Return the stable prompt-cache namespace for one durable session."""
+
+    return f"wisp:{session_id}"
 
 
 def _tool_result_status(event: ToolExecutionEnded) -> ToolPresentationStatus:

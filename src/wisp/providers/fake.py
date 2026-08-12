@@ -28,6 +28,7 @@ class ProviderRequest:
     tool_results: tuple[ToolCallResult, ...]
     previous_response_id: str | None
     effort: str | None = None
+    prompt_cache_key: str | None = None
 
 
 class FakeProvider:
@@ -80,6 +81,7 @@ class ScriptedProvider:
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
+        prompt_cache_key: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         self.calls.append(
             ProviderRequest(
@@ -89,6 +91,7 @@ class ScriptedProvider:
                 tool_results=tuple(tool_results),
                 previous_response_id=previous_response_id,
                 effort=effort,
+                prompt_cache_key=prompt_cache_key,
             )
         )
         if not self._streams:

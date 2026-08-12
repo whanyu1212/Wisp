@@ -74,6 +74,13 @@ from wisp.tools.builtin import ReadTool
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolResult
 
+
+class CacheAwareScriptedProvider(ScriptedProvider):
+    """Scripted provider opting into the prompt-cache-key capability."""
+
+    supports_prompt_cache_key = True
+
+
 VALID_COMPACTION_SUMMARY = """## Goal
 Preserve the active coding objective.
 ## Constraints & Preferences
@@ -582,7 +589,7 @@ def test_compaction_transcript_is_labelled_and_truncates_tool_results() -> None:
 
 def test_provider_summary_uses_no_tools_no_continuation_and_captures_usage() -> None:
     usage = ProviderUsage(input_tokens=40, output_tokens=10, total_tokens=50)
-    provider = ScriptedProvider(
+    provider = CacheAwareScriptedProvider(
         [
             [
                 ProviderResponseStarted(model="summary-model"),
@@ -598,6 +605,7 @@ def test_provider_summary_uses_no_tools_no_continuation_and_captures_usage() -> 
             provider=provider,
             model="summary-model",
             effort="high",
+            prompt_cache_key="wisp:session-1",
             instructions="Focus on tests",
         )
 
@@ -609,6 +617,7 @@ def test_provider_summary_uses_no_tools_no_continuation_and_captures_usage() -> 
     request = provider.calls[0]
     assert request.model == "summary-model"
     assert request.effort == "high"
+    assert request.prompt_cache_key == "wisp:session-1"
     assert request.tools == ()
     assert request.tool_results == ()
     assert request.previous_response_id is None
@@ -623,9 +632,11 @@ def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:
     class RecordingSummaryProvider:
         name = "recording-summary"
         default_model: str | None = "summary-model"
+        supports_prompt_cache_key = True
 
         def __init__(self) -> None:
             self.calls: list[tuple[Message, ...]] = []
+            self.prompt_cache_keys: list[str | None] = []
 
         async def stream(
             self,
@@ -636,9 +647,11 @@ def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:
             tool_results: Sequence[ToolCallResult] = (),
             previous_response_id: str | None = None,
             effort: str | None = None,
+            prompt_cache_key: str | None = None,
         ) -> AsyncIterator[ProviderEvent]:
             del tools, tool_results, previous_response_id, effort
             self.calls.append(tuple(messages))
+            self.prompt_cache_keys.append(prompt_cache_key)
             yield ProviderResponseStarted(model=model or self.default_model or self.name)
             yield ProviderResponseCompleted(
                 content=VALID_COMPACTION_SUMMARY,
@@ -684,6 +697,7 @@ def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:
             provider=provider,
             context_window=2_000,
             reserve_tokens=400,
+            prompt_cache_key="wisp:session-1",
             cost_estimator=estimate_cost,
         )
 
@@ -691,6 +705,7 @@ def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:
 
     assert summary.summary == VALID_COMPACTION_SUMMARY
     assert len(provider.calls) > 2
+    assert provider.prompt_cache_keys == ["wisp:session-1"] * len(provider.calls)
     # Every request, including the final aggregation of partial summaries, must
     # respect the chunking bound — aggregation recurses the same way the original
     # oversized transcript does, so a large enough number of partials cannot
@@ -3129,7 +3144,7 @@ def test_coding_session_compaction_is_durable_and_next_run_uses_active_context(
     tmp_path: Path,
 ) -> None:
     usage = ProviderUsage(input_tokens=20, output_tokens=5, total_tokens=25)
-    provider = ScriptedProvider(
+    provider = CacheAwareScriptedProvider(
         [
             [
                 ProviderResponseStarted(model="model"),
@@ -3181,6 +3196,10 @@ def test_coding_session_compaction_is_durable_and_next_run_uses_active_context(
     )
     assert completed.compaction_id == persisted_compaction.id
     assert any(event.type == "agent.completed" for event in run_events)
+    assert [call.prompt_cache_key for call in provider.calls] == [
+        f"wisp:{session.session_id}",
+        f"wisp:{session.session_id}",
+    ]
 
     replay = session.read_context()
     assert [row.message.role for row in replay.rows] == [

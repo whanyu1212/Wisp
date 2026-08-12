@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from json import JSONDecodeError
-from typing import cast
+from typing import Literal, cast
 
 import anyio
 import httpx
@@ -62,6 +62,7 @@ class OpenAICodexProvider:
     """Provider for ChatGPT Plus/Pro Codex subscription access."""
 
     name = "openai-codex"
+    supports_prompt_cache_key: Literal[True] = True
 
     def __init__(
         self,
@@ -90,6 +91,7 @@ class OpenAICodexProvider:
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
+        prompt_cache_key: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         """Stream a normalized OpenAI Codex response lifecycle.
 
@@ -120,6 +122,7 @@ class OpenAICodexProvider:
             tools=tools,
             continuation_input=continuation_input,
             effort=effort,
+            prompt_cache_key=prompt_cache_key,
         )
         response_id: str | None = previous_response_id
         pending_tool_calls: dict[str, dict[str, object]] = {}
@@ -375,6 +378,7 @@ def _codex_request_body(
     tools: Sequence[ToolSpec],
     continuation_input: Sequence[Mapping[str, object]],
     effort: str | None = None,
+    prompt_cache_key: str | None = None,
 ) -> dict[str, object]:
     body: dict[str, object] = {
         "model": model,
@@ -393,6 +397,8 @@ def _codex_request_body(
         body["tools"] = [_tool_spec_to_codex_tool(tool) for tool in tools]
     if effort is not None:
         body["reasoning"] = {"effort": effort}
+    if prompt_cache_key is not None:
+        body["prompt_cache_key"] = prompt_cache_key
     return body
 
 

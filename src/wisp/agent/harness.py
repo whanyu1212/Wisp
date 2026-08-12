@@ -42,6 +42,7 @@ class AgentHarnessConfig:
     tools: tuple[ToolSpec, ...] = ()
     max_tool_iterations: int | None = None
     effort: str | None = None
+    prompt_cache_key: str | None = None
     context_window: int | None = None
     context_reserve_tokens: int = 16_384
     context_pressure_threshold: float = 0.8
@@ -387,6 +388,7 @@ class AgentHarness:
                     max_tool_iterations=self._config.max_tool_iterations,
                     cancellation_token=token,
                     effort=self._config.effort,
+                    prompt_cache_key=self._config.prompt_cache_key,
                     context_window=self._config.context_window,
                     context_reserve_tokens=self._config.context_reserve_tokens,
                     context_pressure_threshold=self._config.context_pressure_threshold,

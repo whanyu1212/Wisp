@@ -50,6 +50,12 @@ class NeverToolExecutor:
         yield  # pragma: no cover - makes this an async generator
 
 
+class CacheAwareScriptedProvider(ScriptedProvider):
+    """Scripted provider opting into the prompt-cache-key capability."""
+
+    supports_prompt_cache_key = True
+
+
 class RecordingToolExecutor:
     def __init__(self) -> None:
         self.calls: list[ToolCall] = []
@@ -326,6 +332,7 @@ class _LegacyProviderWithoutEffortParameter:
 
     name = "legacy"
     default_model: str | None = "legacy"
+    supports_prompt_cache_key = False
 
     async def stream(
         self,
@@ -353,7 +360,11 @@ def test_pure_loop_does_not_break_a_provider_without_an_effort_parameter() -> No
         return [
             event
             async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),  # type: ignore[arg-type]
+                AgentLoopConfig(  # type: ignore[arg-type]
+                    provider=provider,
+                    tool_executor=NeverToolExecutor(),
+                    prompt_cache_key="wisp:session-1",
+                ),
                 messages=messages,
             )
         ]
@@ -407,7 +418,7 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
         arguments={"command": "pwd"},
         response_id="response-1",
     )
-    provider = ScriptedProvider(
+    provider = CacheAwareScriptedProvider(
         [
             [
                 ProviderResponseStarted(model="test", response_id="response-1"),
@@ -433,7 +444,11 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
         return [
             event
             async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=executor),
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=executor,
+                    prompt_cache_key="wisp:session-1",
+                ),
                 messages=(Message(role="user", content="run pwd"),),
             )
         ]
@@ -465,6 +480,10 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
     assert result.output == "tool output"
     assert provider.calls[1].tool_results[0].output == "tool output"
     assert provider.calls[1].previous_response_id == "response-1"
+    assert [call.prompt_cache_key for call in provider.calls] == [
+        "wisp:session-1",
+        "wisp:session-1",
+    ]
     estimates = [event for event in events if isinstance(event, ContextEstimated)]
     assert len(estimates) == 2
     assert estimates[1].budget.estimate.total_tokens > estimates[0].budget.estimate.total_tokens

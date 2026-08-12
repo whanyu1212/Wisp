@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import wisp.providers.events as provider_events
 from wisp.agent.context import build_context_budget, estimate_context
@@ -37,6 +37,7 @@ from wisp.events import (
 )
 from wisp.providers.base import (
     ContextOverflowError,
+    PromptCacheKeyProvider,
     Provider,
     ProviderError,
     ProviderProtocolError,
@@ -98,6 +99,7 @@ class AgentLoopConfig:
     # forwarded to Provider.stream() as-is. None means "use the provider's
     # own default behavior."
     effort: str | None = None
+    prompt_cache_key: str | None = None
     context_window: int | None = None
     context_reserve_tokens: int = 16_384
     context_pressure_threshold: float = 0.8
@@ -122,6 +124,57 @@ class AgentLoopConfig:
 def _is_cancelled(config: AgentLoopConfig) -> bool:
     token = config.cancellation_token
     return token is not None and token.is_cancelled()
+
+
+def _provider_stream(
+    config: AgentLoopConfig,
+    *,
+    messages: Sequence[Message],
+    tool_results: Sequence[ToolCallResult],
+    previous_response_id: str | None,
+) -> AsyncIterator[provider_events.ProviderEvent]:
+    """Call one provider without imposing optional keywords on legacy adapters."""
+
+    provider = config.provider
+    if (
+        config.prompt_cache_key is not None
+        and getattr(provider, "supports_prompt_cache_key", False) is True
+    ):
+        cache_provider = cast(PromptCacheKeyProvider, provider)
+        if config.effort is not None:
+            return cache_provider.stream(
+                messages,
+                model=config.model,
+                tools=config.tools,
+                tool_results=tool_results,
+                previous_response_id=previous_response_id,
+                effort=config.effort,
+                prompt_cache_key=config.prompt_cache_key,
+            )
+        return cache_provider.stream(
+            messages,
+            model=config.model,
+            tools=config.tools,
+            tool_results=tool_results,
+            previous_response_id=previous_response_id,
+            prompt_cache_key=config.prompt_cache_key,
+        )
+    if config.effort is not None:
+        return provider.stream(
+            messages,
+            model=config.model,
+            tools=config.tools,
+            tool_results=tool_results,
+            previous_response_id=previous_response_id,
+            effort=config.effort,
+        )
+    return provider.stream(
+        messages,
+        model=config.model,
+        tools=config.tools,
+        tool_results=tool_results,
+        previous_response_id=previous_response_id,
+    )
 
 
 def _cancelled_turn_events(turn: int) -> tuple[ErrorEvent, TurnCompleted]:
@@ -267,30 +320,13 @@ async def run_agent_loop(
                 ),
             )
 
-            # `effort` is only passed when actually set, not unconditionally
-            # as None: it is a newer, optional Provider.stream() keyword, and
-            # Provider is a structural Protocol with no runtime enforcement
-            # -- a third-party provider implemented against the pre-effort
-            # signature would otherwise get a TypeError on every turn instead
-            # of keeping its unchanged default behavior.
             try:
-                if config.effort is not None:
-                    provider_stream = config.provider.stream(
-                        messages,
-                        model=config.model,
-                        tools=config.tools,
-                        tool_results=pending_tool_results,
-                        previous_response_id=previous_response_id,
-                        effort=config.effort,
-                    )
-                else:
-                    provider_stream = config.provider.stream(
-                        messages,
-                        model=config.model,
-                        tools=config.tools,
-                        tool_results=pending_tool_results,
-                        previous_response_id=previous_response_id,
-                    )
+                provider_stream = _provider_stream(
+                    config,
+                    messages=messages,
+                    tool_results=pending_tool_results,
+                    previous_response_id=previous_response_id,
+                )
             except Exception as exc:
                 if is_context_overflow_message(str(exc)):
                     raise ContextOverflowError(str(exc)) from exc

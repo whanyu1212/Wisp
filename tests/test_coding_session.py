@@ -13,7 +13,7 @@ import wisp.coding.tool_execution as tool_execution
 from wisp.agent.execution import ToolResultProcessingError
 from wisp.agent.messages import Message
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
-from wisp.coding.session import CodingSession, _tool_result_status
+from wisp.coding.session import CodingSession, _prompt_cache_key, _tool_result_status
 from wisp.events import (
     AgentCompleted,
     AgentStarted,
@@ -71,11 +71,13 @@ from wisp.tools.result import ToolResult
 class CapturingProvider:
     name = "capturing"
     default_model: str | None = "default"
+    supports_prompt_cache_key = True
 
     def __init__(self) -> None:
         self.seen_messages: Sequence[Message] | None = None
         self.seen_tools: Sequence[ToolSpec] | None = None
         self.seen_effort: str | None = None
+        self.seen_prompt_cache_keys: list[str | None] = []
 
     async def stream(
         self,
@@ -86,10 +88,12 @@ class CapturingProvider:
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
+        prompt_cache_key: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         self.seen_messages = messages
         self.seen_tools = tools
         self.seen_effort = effort
+        self.seen_prompt_cache_keys.append(prompt_cache_key)
         yield ProviderResponseStarted(model=model or self.default_model or self.name)
         yield ProviderTextDelta(delta="done")
         yield ProviderResponseCompleted(content="done")
@@ -1663,6 +1667,37 @@ def test_coding_session_defaults_effort_to_none(tmp_path: Path) -> None:
     anyio.run(run_agent)
 
     assert provider.seen_effort is None
+
+
+def test_coding_session_reuses_cache_key_for_session_and_isolates_sessions(
+    tmp_path: Path,
+) -> None:
+    provider = CapturingProvider()
+    sessions = JsonlSessionStore(tmp_path)
+    first = sessions.create()
+    second = sessions.create()
+
+    async def run_agent() -> None:
+        agent = CodingSession(provider=provider, sessions=sessions)
+        _ = [event async for event in agent.run("first", session=first)]
+        _ = [
+            event
+            async for event in agent.run(
+                "resume",
+                session=first,
+                history=first.read_context_messages(),
+            )
+        ]
+        _ = [event async for event in agent.run("other", session=second)]
+
+    anyio.run(run_agent)
+
+    assert provider.seen_prompt_cache_keys == [
+        _prompt_cache_key(first.session_id),
+        _prompt_cache_key(first.session_id),
+        _prompt_cache_key(second.session_id),
+    ]
+    assert provider.seen_prompt_cache_keys[0] != provider.seen_prompt_cache_keys[2]
 
 
 def test_coding_session_skips_project_context_when_untrusted(tmp_path: Path) -> None:
