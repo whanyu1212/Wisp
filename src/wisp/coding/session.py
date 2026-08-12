@@ -33,6 +33,7 @@ from wisp.coding.compaction import (
     plan_preflight_compaction,
     should_auto_compact,
     summarize_manual_compaction,
+    truncate_active_turn_tool_results,
 )
 from wisp.coding.configuration import CodingSessionConfiguration
 from wisp.coding.costs import CostEstimator
@@ -845,6 +846,10 @@ class CodingSession:
                             (*prompt_messages, *self._conversation_history(active_history))
                         )
                     remaining_budget = self._harness_context_budget(harness)
+                    if self._exceeds_provider_auto_compaction_limit(
+                        remaining_budget
+                    ) and self._recover_via_tool_result_truncation(harness, remaining_budget):
+                        remaining_budget = self._harness_context_budget(harness)
                     if self._exceeds_provider_auto_compaction_limit(remaining_budget):
                         error_message = (
                             "Active tool result exceeds the provider auto-compaction limit "
@@ -1038,6 +1043,52 @@ class CodingSession:
             budget.context_window is not None and budget.reserve_tokens >= budget.context_window
         ) or should_auto_compact(budget, enabled=True)
 
+    @staticmethod
+    def _provider_auto_compaction_excess_tokens(budget: ContextBudget) -> int | None:
+        """Return how far over the provider's auto-compaction limit ``budget`` is.
+
+        Returns ``None`` when the overage cannot be a truncatable token excess — a
+        ``reserve_tokens >= context_window`` configuration is unfixable by shrinking
+        message content, so the caller must not attempt truncation recovery for it.
+        """
+
+        if budget.context_window is None or budget.reserve_tokens >= budget.context_window:
+            return None
+        tokens = (
+            budget.observed_tokens
+            if budget.observed_is_current and budget.observed_tokens is not None
+            else budget.estimate.total_tokens
+        )
+        excess = tokens - (budget.context_window - budget.reserve_tokens)
+        return excess if excess > 0 else None
+
+    def _recover_via_tool_result_truncation(
+        self, harness: AgentHarness, budget: ContextBudget
+    ) -> bool:
+        """Shrink the active turn's tool results to fit under the provider limit.
+
+        Called after a compaction attempt still leaves the budget exceeded —
+        whether because compaction had nothing left to summarize, or because it
+        fully compacted history and the active turn's own tool results are what's
+        left over budget. Compaction can never touch the active turn (it is always
+        retained), so shrinking its tool results is the only remaining lever before
+        the terminal overflow error. Returns whether truncation changed the
+        transcript; the caller re-checks the budget afterward regardless.
+        """
+
+        excess_tokens = self._provider_auto_compaction_excess_tokens(budget)
+        if excess_tokens is None:
+            return False
+        # Reclaim a margin beyond the bare excess so one truncation pass is enough
+        # in the common case, rather than converging token-by-token across retries.
+        truncated = truncate_active_turn_tool_results(
+            harness.messages, excess_tokens=excess_tokens + excess_tokens // 4 + 64
+        )
+        if truncated is None:
+            return False
+        harness.replace_messages(truncated)
+        return True
+
     def _harness_context_budget(self, harness: AgentHarness) -> ContextBudget:
         return build_context_budget(
             estimate_context(
@@ -1093,6 +1144,10 @@ class CodingSession:
                 else plan_manual_compaction(replay)
             )
         except NothingToCompactError:
+            # Over budget, but every row is already part of the active turn or a
+            # prior summary — there is nothing left this call can summarize away.
+            # The caller falls back to truncating the active turn's own tool
+            # results (the only lever left) once it sees the budget still exceeded.
             return
         except Exception as exc:
             status.skip_final_save = any(

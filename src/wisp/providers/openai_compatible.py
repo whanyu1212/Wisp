@@ -6,7 +6,7 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
-from json import JSONDecodeError, loads
+from json import JSONDecodeError, dumps, loads
 from typing import Protocol, cast, runtime_checkable
 from uuid import uuid4
 
@@ -345,6 +345,28 @@ def _messages_to_chat(messages: Sequence[Message]) -> list[ChatPayload]:
         if message.role == "tool" and message.tool_call_id:
             result.append(
                 {"role": "tool", "content": message.content, "tool_call_id": message.tool_call_id}
+            )
+        elif message.role == "assistant" and message.tool_calls:
+            # A structured tool-call row from the still-active turn (see
+            # ``normalize_provider_history``). Emit it as the model's own function
+            # call rather than flattening it to plain text, or a Chat Completions
+            # replay loses the record of the call it made and repeats it.
+            result.append(
+                {
+                    "role": "assistant",
+                    "content": message.content or None,
+                    "tool_calls": [
+                        {
+                            "id": call.call_id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": dumps(call.arguments),
+                            },
+                        }
+                        for call in message.tool_calls
+                    ],
+                }
             )
         else:
             role = "user" if message.role == "tool" else message.role

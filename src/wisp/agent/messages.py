@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal, Self, cast
 
@@ -183,6 +184,33 @@ def provider_history_message(message: Message) -> Message | None:
     if message.role == "assistant" and message.tool_calls and not message.content.strip():
         return None
     return message
+
+
+def normalize_provider_history(
+    messages: Sequence[Message], *, active_from: int | None = None
+) -> tuple[Message, ...]:
+    """Normalize a transcript for provider replay, keeping the active turn structured.
+
+    Rows before ``active_from`` are prior-turn history: rewritten through
+    ``provider_history_message`` so replayed tool calls/results can never be mistaken
+    for a live instruction. Rows at or after ``active_from`` are still part of the
+    turn currently running — they keep their native assistant ``tool_calls`` and
+    paired ``tool``-role result, exactly as the model produced them, because a
+    mid-turn transcript rebuild (e.g. after auto-compaction) must not cause the model
+    to lose the record of tool calls it just made in this same turn.
+
+    ``active_from is None`` preserves prior behavior: every row is narrated.
+    """
+
+    normalized: list[Message] = []
+    for index, message in enumerate(messages):
+        if active_from is not None and index >= active_from:
+            normalized.append(message)
+            continue
+        provider_message = provider_history_message(message)
+        if provider_message is not None:
+            normalized.append(provider_message)
+    return tuple(normalized)
 
 
 def SessionEntry(  # noqa: N802

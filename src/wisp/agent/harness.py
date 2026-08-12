@@ -13,7 +13,7 @@ from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, UsageCostEstimator,
 from wisp.agent.messages import (
     Message,
     message_from_completion_event,
-    provider_history_message,
+    normalize_provider_history,
 )
 from wisp.agent.transcript import plan_interrupted_tool_repairs
 from wisp.events import (
@@ -64,6 +64,22 @@ type AgentHarnessEvent = AgentLoopEvent | QueueMessageInjected | QueueUpdated
 def _require_queue_mode(mode: object) -> None:
     if not isinstance(mode, str) or mode not in {"one_at_a_time", "all"}:
         raise ValueError(f"Unsupported queue mode: {mode!r}")
+
+
+def _active_turn_start(messages: Sequence[Message]) -> int | None:
+    """Return the index of the still-running turn's user message, if any.
+
+    The most recent ``user``-role message starts the turn currently in progress —
+    every assistant/tool row after it is this turn's own in-flight work, not
+    replayed prior-turn history. A transcript rebuild mid-turn (e.g. after
+    auto-compaction replaces ``self._messages``) must keep those rows structured so
+    the model retains a record of tool calls it just made in this same turn.
+    """
+
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].role == "user":
+            return index
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,10 +395,8 @@ class AgentHarness:
                     cost_estimator=self._config.cost_estimator,
                     defer_context_overflow_errors=defer_context_overflow_errors,
                 )
-                provider_messages = tuple(
-                    provider_message
-                    for message in self._messages
-                    if (provider_message := provider_history_message(message)) is not None
+                provider_messages = normalize_provider_history(
+                    self._messages, active_from=_active_turn_start(self._messages)
                 )
                 loop_events = run_agent_loop(config, messages=provider_messages)
                 try:

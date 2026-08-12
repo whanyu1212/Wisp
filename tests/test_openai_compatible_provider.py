@@ -12,6 +12,7 @@ from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
+from wisp.events import ToolCallSnapshot
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import ProviderConfigurationError, ToolCallResult, ToolSpec
 from wisp.providers.events import (
@@ -258,6 +259,51 @@ def test_replays_assistant_tool_calls_and_tool_results_on_follow_up() -> None:
         },
         {"role": "tool", "tool_call_id": "call-1", "content": "result"},
     ]
+
+
+def test_replayed_history_tool_call_keeps_structured_tool_calls_and_paired_result() -> None:
+    """A pre-existing assistant ``tool_calls`` message in ``messages`` (not the live
+    in-flight round) must round-trip onto the wire as structured tool_calls with its
+    result paired as a native ``role: tool`` message.
+
+    ``_messages_to_chat`` currently drops ``tool_calls`` on every history message and
+    flattens tool-role rows into ``{"role": "tool", "content": ...}`` without a
+    ``tool_call_id`` on the assistant side — so a provider replaying an
+    already-in-transcript tool round (as happens when Wisp rebuilds the harness
+    transcript after mid-turn compaction) loses the model's record of having made the
+    call. This asserts the wire payload actually preserves it end to end.
+    """
+
+    provider, completions = _provider([[_chunk(content="done", finish_reason="stop")]])
+
+    history = [
+        Message(role="user", content="search"),
+        Message(
+            role="assistant",
+            content="checking",
+            tool_calls=(
+                ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"query": "wisp"}),
+            ),
+        ),
+        Message(role="tool", content="found it", tool_name="lookup", tool_call_id="call-1"),
+    ]
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream(history)]
+
+    anyio.run(run)
+
+    sent = completions.calls[0]["messages"]
+    assistant_sent = sent[1]
+    assert assistant_sent.get("tool_calls") == [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": '{"query": "wisp"}'},
+        }
+    ]
+    tool_sent = sent[2]
+    assert tool_sent == {"role": "tool", "tool_call_id": "call-1", "content": "found it"}
 
 
 def test_rejects_eof_without_finish_reason() -> None:

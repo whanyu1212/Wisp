@@ -403,10 +403,38 @@ def _instructions_from_messages(messages: Sequence[Message]) -> str | None:
     return "\n\n".join(instructions) or None
 
 
-def _messages_to_codex_input(messages: Sequence[Message]) -> list[dict[str, str]]:
-    result: list[dict[str, str]] = []
+def _messages_to_codex_input(messages: Sequence[Message]) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
     for message in messages:
         if message.role in {"system", "developer"}:
+            continue
+        if message.role == "tool" and message.tool_call_id:
+            result.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message.tool_call_id,
+                    "output": message.content,
+                }
+            )
+            continue
+        if message.role == "assistant" and message.tool_calls:
+            # A structured tool-call row from the still-active turn (see
+            # ``normalize_provider_history``). The Responses API `store: false`
+            # continuation chain does not survive a fresh ``run_agent_loop`` call, so
+            # a mid-turn transcript rebuild (e.g. after auto-compaction) must replay
+            # these as native function-call items — otherwise the model has no
+            # record of tool calls it just made and repeats them.
+            if message.content:
+                result.append({"role": "assistant", "content": message.content})
+            for call in message.tool_calls:
+                result.append(
+                    {
+                        "type": "function_call",
+                        "call_id": call.call_id,
+                        "name": call.name,
+                        "arguments": json.dumps(dict(call.arguments), separators=(",", ":")),
+                    }
+                )
             continue
         result.append({"role": _to_codex_role(message.role), "content": message.content})
     return result

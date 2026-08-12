@@ -44,6 +44,8 @@ Reviewed the prior turn.
 Continue implementation.
 ### Blocked
 None.
+## Already Investigated
+Reviewed the prior turn's transcript.
 ## Key Decisions
 Use append-only replay.
 ## Next Steps
