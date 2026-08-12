@@ -66,6 +66,54 @@ def test_json_auth_store_deletes_provider(tmp_path: Path) -> None:
     assert store.get("openai") is None
 
 
+def test_json_auth_store_retries_read_racing_with_atomic_replacement(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    store = JsonAuthStore(tmp_path / "auth.json")
+    credential = ApiKeyCredential(key="sk-test")
+    store.set("openai", credential)
+    real_read = auth_storage_module._read_auth_file  # noqa: SLF001
+    calls = 0
+
+    def race_once(path: Path) -> str | None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise auth_storage_module._AuthFileChangedError(  # noqa: SLF001
+                f"Auth file changed while being opened: {path}"
+            )
+        return real_read(path)
+
+    monkeypatch.setattr(auth_storage_module, "_read_auth_file", race_once)
+
+    assert store.get("openai") == credential
+    assert calls == 2
+
+
+def test_json_auth_store_bounds_retries_during_sustained_replacement(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    store = JsonAuthStore(tmp_path / "auth.json")
+    store.set("openai", ApiKeyCredential(key="sk-test"))
+    calls = 0
+
+    def always_racing(path: Path) -> str | None:
+        nonlocal calls
+        calls += 1
+        raise auth_storage_module._AuthFileChangedError(  # noqa: SLF001
+            f"Auth file changed while being opened: {path}"
+        )
+
+    monkeypatch.setattr(auth_storage_module, "_read_auth_file", always_racing)
+
+    with pytest.raises(AuthStorageError, match="changed while being opened"):
+        store.get("openai")
+
+    assert calls == 3
+
+
 def test_stored_provider_auth_resolver_refreshes_expired_oauth(tmp_path: Path) -> None:
     store = JsonAuthStore(tmp_path / "auth.json")
     store.set(

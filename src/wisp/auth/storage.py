@@ -23,6 +23,10 @@ class AuthStorageError(RuntimeError):
     """Raised when Wisp auth credentials cannot be read or written."""
 
 
+class _AuthFileChangedError(AuthStorageError):
+    """Raised internally when an atomic replacement races with one read."""
+
+
 @dataclass(frozen=True)
 class ApiKeyCredential:
     """Persisted API key credential."""
@@ -136,7 +140,17 @@ class JsonAuthStore:
                 yield
 
     def _load_unlocked(self) -> dict[str, AuthCredential]:
-        raw_text = _read_auth_file(self.path)
+        # Atomic publication may replace the pathname between lstat/open/lstat.
+        # Retry a bounded number of times so ordinary concurrent credential
+        # updates do not surface as read failures while sustained churn remains
+        # actionable instead of spinning forever.
+        for attempt in range(3):
+            try:
+                raw_text = _read_auth_file(self.path)
+                break
+            except _AuthFileChangedError:
+                if attempt == 2:
+                    raise
         if raw_text is None:
             return {}
         try:
@@ -247,7 +261,7 @@ def _read_auth_file(path: Path) -> str | None:
             current_info.st_dev,
             current_info.st_ino,
         ) != expected:
-            raise AuthStorageError(f"Auth file changed while being opened: {path}")
+            raise _AuthFileChangedError(f"Auth file changed while being opened: {path}")
         _validate_auth_file_metadata(path, info)
         with os.fdopen(fd, "r", encoding="utf-8") as auth_file:
             fd = -1
