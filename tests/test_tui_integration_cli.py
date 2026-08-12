@@ -43,6 +43,7 @@ from wisp.tui.history import (
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.state import TuiCancelRequested, TuiQuitRequested
 from wisp.tui.textual_app import (
+    _EMPTY_TRANSCRIPT_TAGLINE,
     TextualTui,
     TextualTuiRenderer,
     create_textual_tui,
@@ -6237,21 +6238,32 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
         list[str],
     ]:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test(size=(72, 20)) as pilot:
+        # Deliberately roomy. This test asserts the full panel — every tier
+        # visible and the drawn mark at its full height — so it must sit well
+        # clear of the boundary where tiers start being shed. At height 20 the
+        # panel had only two spare rows, and CI's composer/footer took just
+        # enough of them to hide the actions row and fail the centre check.
+        async with app_instance.run_test(size=(72, 30)) as pilot:
             renderer.startup()
             await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
             empty = app_instance.query_one("#transcript-empty", TranscriptEmptyState)
-            wordmark = app_instance.query_one("#transcript-empty-wordmark", Label)
+            # Static, not Label: the wordmark is multi-line drawn lettering and
+            # is swapped for a one-row badge on short terminals.
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
             tagline = app_instance.query_one("#transcript-empty-tagline", Label)
             hint = app_instance.query_one("#transcript-empty-hint", Label)
             actions = app_instance.query_one("#transcript-empty-actions", Static)
-            centers = (
-                transcript.region.x + transcript.region.width // 2,
-                wordmark.region.x + wordmark.region.width // 2,
-                tagline.region.x + tagline.region.width // 2,
-                hint.region.x + hint.region.width // 2,
-                actions.region.x + actions.region.width // 2,
+            # Only VISIBLE children: the panel hides its lower tiers when the
+            # viewport is too short, and a hidden child reports zero width, so
+            # including one would assert a centre of 0 against everything else.
+            # The exact height at which that happens depends on how many rows
+            # the composer and footer take, which is not identical across
+            # environments — this test must not silently depend on it.
+            centers = (transcript.region.x + transcript.region.width // 2,) + tuple(
+                child.region.x + child.region.width // 2
+                for child in (wordmark, tagline, hint, actions)
+                if child.display
             )
             initial_children = [type(child).__name__ for child in transcript.children]
             wordmark_content = wordmark.render()
@@ -6262,9 +6274,10 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
             assert isinstance(tagline_content, Content)
             assert isinstance(hint_content, Content)
             assert isinstance(actions_content, Content)
-            assert wordmark.region.width == 16
-            assert wordmark.region.height == 3
-            assert wordmark.styles.border_top[0] == "heavy"
+            # Drawn letterforms are the mark: no frame, and every row the same
+            # width so `text-align: center` cannot shear them apart.
+            assert wordmark.region.height == 5
+            assert not wordmark.styles.border_top[0]
             assert wordmark.styles.background.a == 0
             content = (
                 wordmark_content.plain,
@@ -6281,7 +6294,11 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
 
     content, centers, initial_children, final_children = anyio.run(scenario)
     wordmark, tagline, hint, actions = content
-    assert wordmark == "W  I  S  P"
+    wordmark_rows = wordmark.splitlines()
+    assert len(wordmark_rows) == 5
+    # A true rectangle. Ragged rows centre independently and the glyphs shear.
+    assert len({len(row) for row in wordmark_rows}) == 1
+    assert set("".join(wordmark_rows)) == {"█", " "}
     assert tagline == "A coding agent that stays in sync"
     assert hint == "Type a prompt or / for commands."
     assert actions == "/ commands  ·  /resume session"
@@ -6291,14 +6308,17 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
 
 
 def test_textual_startup_empty_state_wordmark_centers_match_hint() -> None:
-    # Regression: the badge is narrower than the hint, so its fixed-width
-    # Center wrapper must keep their true centers aligned.
+    # Regression: Textual centers these siblings as a block, not independently,
+    # so every child is given the same explicit width. That width has to fit the
+    # drawn wordmark, which is wider than any of the text lines.
     async def scenario() -> tuple[int, int]:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test(size=(90, 20)) as pilot:
+        # Roomy for the same reason as the test above: the hint is hidden in the
+        # sparsest tier, and a hidden child reports zero width.
+        async with app_instance.run_test(size=(90, 30)) as pilot:
             renderer.startup()
             await pilot.pause()
-            wordmark = app_instance.query_one("#transcript-empty-wordmark", Label)
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
             hint = app_instance.query_one("#transcript-empty-hint", Label)
             wordmark_center = wordmark.region.x + wordmark.region.width // 2
             hint_center = hint.region.x + hint.region.width // 2
@@ -6306,6 +6326,104 @@ def test_textual_startup_empty_state_wordmark_centers_match_hint() -> None:
 
     wordmark_center, hint_center = anyio.run(scenario)
     assert wordmark_center == hint_center
+
+
+@pytest.mark.parametrize("height", [24, 18, 16, 14, 12, 10, 8, 6])
+def test_textual_startup_empty_state_never_overflows_its_viewport(height: int) -> None:
+    # Regression: the panel used to carry `min-height`, which pinned its
+    # reported height above the real viewport on a short terminal. Its resize
+    # breakpoints could therefore never observe the small sizes they exist to
+    # handle, and the oversized panel overflowed the transcript — clipping the
+    # wordmark mid-glyph instead of falling back to the one-row badge.
+    async def scenario() -> tuple[bool, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(90, height)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
+            # Measured against the TRANSCRIPT, not the panel: a floored panel
+            # reports bounds larger than the viewport it sits in, so comparing
+            # the mark against its own parent would compare it to the same
+            # inflated number and never see the overflow.
+            overflows = wordmark.region.bottom > transcript.region.bottom
+            return overflows, wordmark.region.height
+
+    overflows, wordmark_rows = anyio.run(scenario)
+
+    assert not overflows
+    # Either the full drawn mark or the single-row badge — never a partial one.
+    assert wordmark_rows in {1, 5}
+
+
+@pytest.mark.parametrize("width", [90, 40, 30, 26, 24, 20, 16, 12])
+def test_textual_startup_wordmark_never_wraps_in_a_narrow_viewport(width: int) -> None:
+    # The drawn mark needs its full cell width. Textual wraps the rows rather
+    # than clipping them when the viewport is narrower, which both shears the
+    # letterforms and doubles the rendered height — invalidating the five-row
+    # assumption the height breakpoints are derived from. Sweeping only height
+    # (as the test above does) cannot surface this.
+    async def scenario() -> int:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(width, 30)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
+            return wordmark.region.height
+
+    # A wrapped five-row mark renders taller than five rows; the badge is one.
+    assert anyio.run(scenario) in {1, 5}
+
+
+@pytest.mark.parametrize("width", [12, 16, 20, 24, 30, 40, 60, 90])
+@pytest.mark.parametrize("height", [10, 14, 16, 18, 20, 24, 30])
+def test_textual_startup_empty_state_fits_every_viewport(width: int, height: int) -> None:
+    # The visibility tiers are chosen by measuring each one's wrapped footprint,
+    # not by comparing height against fixed thresholds. Constants cannot work
+    # here: once the text rows wrap, their row count depends on the text, the
+    # available width AND the tier, so a value correct at one width overflows at
+    # another. Sweeping both axes together is the only way to see it — earlier
+    # single-axis sweeps missed thirteen overflowing combinations.
+    async def scenario() -> tuple[int, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(width, height)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            empty = app_instance.query_one("#transcript-empty", TranscriptEmptyState)
+            visible = [child for child in empty.children if child.display]
+            content_bottom = max((child.region.bottom for child in visible), default=0)
+            return content_bottom, transcript.region.bottom
+
+    content_bottom, transcript_bottom = anyio.run(scenario)
+
+    assert content_bottom <= transcript_bottom
+
+
+@pytest.mark.parametrize("width", [90, 40, 30, 24, 20, 16])
+def test_textual_startup_text_wraps_instead_of_truncating_when_narrow(width: int) -> None:
+    # The children share one explicit width so Textual's block-centering keeps
+    # them aligned. That width used to be fixed at construction, so on a viewport
+    # narrower than the block the tagline and hint were clipped mid-word rather
+    # than wrapping. Both the shared width and the rows' `height: auto` are
+    # needed: clamping alone still truncates while the rows are pinned to one.
+    async def scenario() -> tuple[int, int, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(width, 30)) as pilot:
+            renderer.startup()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            tagline = app_instance.query_one("#transcript-empty-tagline", Label)
+            return transcript.size.width, tagline.region.width, tagline.region.height
+
+    transcript_width, tagline_width, tagline_rows = anyio.run(scenario)
+
+    # Never wider than the space available, and never clipped to a single row
+    # when the text cannot fit one.
+    assert tagline_width <= transcript_width
+    expected_rows = -(-len(_EMPTY_TRANSCRIPT_TAGLINE) // max(1, tagline_width))
+    assert tagline_rows >= min(expected_rows, 1)
+    assert tagline_rows * tagline_width >= len(_EMPTY_TRANSCRIPT_TAGLINE)
 
 
 def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
