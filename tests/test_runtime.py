@@ -38,6 +38,15 @@ from wisp.tools.selection import select_tools
 from wisp.tools.shell import BashTool
 
 
+class _ClosableFakeProvider(FakeProvider):
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.close_count = 0
+
+    async def aclose(self) -> None:
+        self.close_count += 1
+
+
 def test_provider_registry_registers_and_resolves_provider() -> None:
     registry = ProviderRegistry()
     provider = FakeProvider()
@@ -473,6 +482,51 @@ def test_direct_runtime_construction_captures_configured_providers() -> None:
         await current.adopt_provider_configuration(candidate)
 
         assert current.providers.get("fake") is candidate_provider
+
+    anyio.run(run)
+
+
+def test_provider_adoption_tracks_retained_and_transferred_ownership() -> None:
+    def runtime_with(*providers: _ClosableFakeProvider) -> WispRuntime:
+        registry = ProviderRegistry()
+        registry.replace_all(providers)
+        tools = ToolRegistry()
+        events = EventBus()
+        return WispRuntime(
+            providers=registry,
+            tools=tools,
+            events=events,
+            api=ExtensionAPI(providers=registry, tools=tools, events=events),
+            models=ModelRegistry(effective_catalog()),
+        )
+
+    async def run() -> None:
+        retained = _ClosableFakeProvider("retained")
+        displaced = _ClosableFakeProvider("replaced")
+        replacement = _ClosableFakeProvider("replaced")
+        added = _ClosableFakeProvider("added")
+        current = runtime_with(retained, displaced)
+        candidate = runtime_with(replacement, added)
+
+        await current.adopt_provider_configuration(candidate)
+
+        assert current.providers.get("retained") is retained
+        assert current.providers.get("replaced") is replacement
+        assert current.providers.get("added") is added
+        assert retained.close_count == 0
+        assert displaced.close_count == 1
+        assert replacement.close_count == 0
+        assert added.close_count == 0
+
+        await candidate.aclose()
+        assert replacement.close_count == 0
+        assert added.close_count == 0
+
+        await current.aclose()
+        assert retained.close_count == 1
+        assert displaced.close_count == 1
+        assert replacement.close_count == 1
+        assert added.close_count == 1
 
     anyio.run(run)
 

@@ -160,14 +160,25 @@ class WispRuntime:
         Provider registrations that exist only in the live runtime remain available.
         """
 
-        previous_configured = tuple(self._configured_providers.values())
+        previous_configured = dict(self._configured_providers)
         providers = self.providers_for_configuration(candidate)
-        adopted = dict(candidate._configured_providers)
+        retained_ids = {id(provider) for provider in providers}
+        retained = {
+            name: provider
+            for name, provider in previous_configured.items()
+            if id(provider) in retained_ids
+        }
+        adopted = {**retained, **candidate._configured_providers}
         self.providers.replace_all(providers)
         self._configured_providers.clear()
         self._configured_providers.update(adopted)
         candidate._configured_providers.clear()
-        await _close_providers(previous_configured)
+        displaced = tuple(
+            provider
+            for provider in previous_configured.values()
+            if id(provider) not in retained_ids
+        )
+        await _close_providers(displaced)
 
     async def aclose(self) -> None:
         """Release runtime-owned providers, MCP connections, and managed processes."""
