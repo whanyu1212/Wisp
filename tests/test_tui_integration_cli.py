@@ -6468,7 +6468,11 @@ def test_textual_transcript_scrollbar_uses_square_thumb_without_losing_mouse_act
         for segments in segments_by_position.values()
     )
     assert all(
-        sum(segment.text == "█" for segment in segments) == 2
+        sum(
+            bool(segment.style is not None and segment.style.bgcolor == Color.parse("#7C8B99"))
+            for segment in segments
+        )
+        == 2
         for segments in segments_by_position.values()
     )
 

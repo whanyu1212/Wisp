@@ -1895,8 +1895,6 @@ _SCROLLBAR_DEFAULT_BAR_COLOR = Color.parse("bright_magenta")
 class _SolidVerticalScrollBarRender(ScrollBarRender):
     """A stable whole-cell vertical thumb with Textual's interaction metadata."""
 
-    THUMB_GLYPH = "█"
-
     @classmethod
     def render_bar(
         cls,
@@ -1923,7 +1921,6 @@ class _SolidVerticalScrollBarRender(ScrollBarRender):
 
         row_count = max(0, int(size))
         blank = cls.BLANK_GLYPH * thickness
-        thumb_glyph = cls.THUMB_GLYPH * thickness
         background = RichStyle(bgcolor=back_color)
         if not window_size or not row_count or virtual_size <= window_size:
             return Segments(
@@ -1948,12 +1945,8 @@ class _SolidVerticalScrollBarRender(ScrollBarRender):
             RichStyle(bgcolor=back_color, meta={"@mouse.down": "scroll_up"}),
         )
         thumb = Segment(
-            thumb_glyph,
-            RichStyle(
-                color=bar_color,
-                bgcolor=back_color,
-                meta={"@mouse.down": "grab"},
-            ),
+            blank,
+            RichStyle(bgcolor=bar_color, meta={"@mouse.down": "grab"}),
         )
         lower = Segment(
             blank,
