@@ -6137,7 +6137,12 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
         list[str],
     ]:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test(size=(72, 20)) as pilot:
+        # Deliberately roomy. This test asserts the full panel — every tier
+        # visible and the drawn mark at its full height — so it must sit well
+        # clear of the boundary where tiers start being shed. At height 20 the
+        # panel had only two spare rows, and CI's composer/footer took just
+        # enough of them to hide the actions row and fail the centre check.
+        async with app_instance.run_test(size=(72, 30)) as pilot:
             renderer.startup()
             await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
@@ -6148,12 +6153,16 @@ def test_textual_startup_shows_a_disposable_centered_empty_state() -> None:
             tagline = app_instance.query_one("#transcript-empty-tagline", Label)
             hint = app_instance.query_one("#transcript-empty-hint", Label)
             actions = app_instance.query_one("#transcript-empty-actions", Static)
-            centers = (
-                transcript.region.x + transcript.region.width // 2,
-                wordmark.region.x + wordmark.region.width // 2,
-                tagline.region.x + tagline.region.width // 2,
-                hint.region.x + hint.region.width // 2,
-                actions.region.x + actions.region.width // 2,
+            # Only VISIBLE children: the panel hides its lower tiers when the
+            # viewport is too short, and a hidden child reports zero width, so
+            # including one would assert a centre of 0 against everything else.
+            # The exact height at which that happens depends on how many rows
+            # the composer and footer take, which is not identical across
+            # environments — this test must not silently depend on it.
+            centers = (transcript.region.x + transcript.region.width // 2,) + tuple(
+                child.region.x + child.region.width // 2
+                for child in (wordmark, tagline, hint, actions)
+                if child.display
             )
             initial_children = [type(child).__name__ for child in transcript.children]
             wordmark_content = wordmark.render()
@@ -6203,7 +6212,9 @@ def test_textual_startup_empty_state_wordmark_centers_match_hint() -> None:
     # drawn wordmark, which is wider than any of the text lines.
     async def scenario() -> tuple[int, int]:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test(size=(90, 20)) as pilot:
+        # Roomy for the same reason as the test above: the hint is hidden in the
+        # sparsest tier, and a hidden child reports zero width.
+        async with app_instance.run_test(size=(90, 30)) as pilot:
             renderer.startup()
             await pilot.pause()
             wordmark = app_instance.query_one("#transcript-empty-wordmark", Static)
