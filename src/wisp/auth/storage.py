@@ -243,10 +243,10 @@ def _read_auth_file(path: Path) -> str | None:
             current_info = path.lstat()
         except OSError as exc:
             raise AuthStorageError(f"Could not inspect auth file after opening: {path}") from exc
-        if (
-            (info.st_dev, info.st_ino) != expected
-            or (current_info.st_dev, current_info.st_ino) != expected
-        ):
+        if (info.st_dev, info.st_ino) != expected or (
+            current_info.st_dev,
+            current_info.st_ino,
+        ) != expected:
             raise AuthStorageError(f"Auth file changed while being opened: {path}")
         _validate_auth_file_metadata(path, info)
         with os.fdopen(fd, "r", encoding="utf-8") as auth_file:
@@ -335,10 +335,7 @@ def _interprocess_lock(path: Path) -> Iterator[None]:
             or info.st_nlink != 1
             or current.st_nlink != 1
             or (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino)
-            or (
-                before is not None
-                and (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino)
-            )
+            or (before is not None and (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino))
         ):
             raise AuthStorageError(f"Auth lock changed while being opened: {lock_path}")
         if os.name == "posix":

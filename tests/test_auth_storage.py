@@ -258,11 +258,14 @@ def test_json_auth_store_compare_and_set_preserves_newer_credential(tmp_path: Pa
     store.set("openai-codex", original)
     store.set("openai-codex", newer)
 
-    assert store.compare_and_set(
-        "openai-codex",
-        expected=original,
-        replacement=stale,
-    ) is False
+    assert (
+        store.compare_and_set(
+            "openai-codex",
+            expected=original,
+            replacement=stale,
+        )
+        is False
+    )
     assert store.get("openai-codex") == newer
 
 
