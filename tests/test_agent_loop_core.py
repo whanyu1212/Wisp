@@ -126,6 +126,28 @@ class ExtraEventExecutor:
         )
 
 
+def test_agent_loop_config_preserves_legacy_positional_field_order() -> None:
+    config = AgentLoopConfig(
+        ScriptedProvider([]),
+        NeverToolExecutor(),
+        None,
+        (),
+        None,
+        None,
+        None,
+        None,
+        16_384,
+        0.8,
+        0,
+        0,
+        None,
+        True,
+    )
+
+    assert config.defer_context_overflow_errors is True
+    assert config.prompt_cache_key is None
+
+
 def test_pure_loop_streams_without_application_dependencies() -> None:
     provider = ScriptedProvider(
         [

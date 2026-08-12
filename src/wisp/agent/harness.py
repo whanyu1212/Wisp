@@ -42,7 +42,6 @@ class AgentHarnessConfig:
     tools: tuple[ToolSpec, ...] = ()
     max_tool_iterations: int | None = None
     effort: str | None = None
-    prompt_cache_key: str | None = None
     context_window: int | None = None
     context_reserve_tokens: int = 16_384
     context_pressure_threshold: float = 0.8
@@ -50,6 +49,7 @@ class AgentHarnessConfig:
     steering_mode: QueueMode = "one_at_a_time"
     follow_up_mode: QueueMode = "one_at_a_time"
     max_pending_queue_messages: int = _MAX_PENDING_QUEUE_MESSAGES
+    prompt_cache_key: str | None = None
 
     def __post_init__(self) -> None:
         """Reject invalid queue modes even when callers bypass static typing."""

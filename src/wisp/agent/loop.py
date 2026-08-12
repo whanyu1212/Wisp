@@ -99,7 +99,6 @@ class AgentLoopConfig:
     # forwarded to Provider.stream() as-is. None means "use the provider's
     # own default behavior."
     effort: str | None = None
-    prompt_cache_key: str | None = None
     context_window: int | None = None
     context_reserve_tokens: int = 16_384
     context_pressure_threshold: float = 0.8
@@ -107,6 +106,7 @@ class AgentLoopConfig:
     tool_iteration_offset: int = 0
     cost_estimator: UsageCostEstimator | None = None
     defer_context_overflow_errors: bool = False
+    prompt_cache_key: str | None = None
 
     def __post_init__(self) -> None:
         if self.context_window is not None and self.context_window <= 0:
