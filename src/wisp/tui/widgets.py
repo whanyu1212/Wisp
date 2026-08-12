@@ -79,7 +79,11 @@ from wisp.tui.rendering import (
     _truncate_to_cell_width,
     format_tui_footer_text,
 )
-from wisp.tui.tool_call import format_tool_call_arguments
+from wisp.tui.tool_call import (
+    ToolActionStatus,
+    _format_tool_call_action_from_rendered,
+    format_tool_call_arguments,
+)
 
 _TOOL_OUTPUT_PREVIEW_LINES = 8
 _TOOL_OUTPUT_PREVIEW_BYTES = 2_000
@@ -293,21 +297,49 @@ def _has_detail(detail: str | Content | DiffPresentation) -> bool:
     return bool(detail)
 
 
-def _indent_content(detail: Content) -> Content:
-    """Indent each line of a pre-styled ``Content`` by two spaces.
+def _tree_line(
+    value: Content,
+    *,
+    width: int,
+    first_prefix: str,
+    continuation_prefix: str,
+) -> Content:
+    """Wrap one literal line with stable tree prefixes and hanging indentation."""
 
-    Matches the plain-string detail's `"  " + line` indent, preserving the
-    detail's own styled spans. The indent is trusted literal chrome; the detail's
-    text stays literal (never re-parsed as markup).
-    """
+    available = max(1, width - max(cell_len(first_prefix), cell_len(continuation_prefix)))
+    # Content.wrap() performs word-boundary normalization even when no wrapping is
+    # needed, which can consume a literal separator between differently styled spans
+    # (for example ``Ran `` + a muted command becoming ``Ranpytest`` on screen).
+    # Preserve the original styled content on the overwhelmingly common fitting path.
+    wrapped = (
+        [value]
+        if cell_len(value.plain) <= available
+        else value.wrap(available, overflow="fold") or [Content("")]
+    )
+    content = Content(first_prefix) + wrapped[0]
+    for line in wrapped[1:]:
+        content += Content("\n" + continuation_prefix) + line
+    return content
 
-    lines = detail.split("\n")
-    indented = Content("")
-    for offset, line in enumerate(lines):
-        if offset:
-            indented += Content("\n")
-        indented += Content("  ") + line
-    return indented
+
+def _tree_detail(detail: str | Content, *, width: int) -> Content:
+    """Render literal result text beneath a tool action using one tree branch."""
+
+    source = detail if isinstance(detail, Content) else Content(detail)
+    logical_lines = source.split("\n", allow_blank=True) or [Content("")]
+    content = Content("")
+    first = True
+    for logical_line in logical_lines:
+        if not first:
+            content += Content("\n")
+        content += _tree_line(
+            logical_line,
+            width=width,
+            first_prefix="  └ " if first else "    ",
+            continuation_prefix="    ",
+        )
+        first = False
+    return content
 
 
 def _render_diff_presentation(
@@ -316,9 +348,9 @@ def _render_diff_presentation(
     width: int,
     expanded: bool,
 ) -> Content:
-    """Paint one structured diff with a fixed gutter and no ambiguous wrapping."""
+    """Paint one structured diff beneath the tool action's tree branch."""
 
-    inner_width = max(1, width - 2)  # ToolCard indents details by two cells.
+    inner_width = max(1, width - 4)  # ``  └ `` / four-space continuation gutter.
     additions = f"+{presentation.additions}"
     deletions = f"-{presentation.deletions}"
     counts_width = cell_len(additions) + 1 + cell_len(deletions)
@@ -331,9 +363,9 @@ def _render_diff_presentation(
         + Content(" ")
         + Content.styled(deletions, DIFF_DEL_COUNT_STYLE)
     )
-    content = Content("  ") + header
+    content = Content("  └ ") + header
     for visible_row in presentation.visible_rows(expanded=expanded):
-        content += Content("\n") + _render_diff_visible_row(
+        content += Content("\n  ") + _render_diff_visible_row(
             visible_row,
             width=inner_width,
             show_line_numbers=presentation.show_line_numbers,
@@ -2269,8 +2301,8 @@ class SlashSuggest(OptionList):
 
 # CSS role classes style every message independently of visible labels.
 # Conversation roles intentionally have no border title; their role metadata and
-# colored left rail remain. ToolCard.set_state() uses the remaining labels, with
-# its own _STATUS_LABELS override for statuses such as cancelled.
+# colored left rail remain. Flat ToolCards also omit titles and express status in
+# their action text; the remaining labels belong to operational LineMessages.
 _ROLE_LABELS: dict[str, str] = {
     "user": "",
     "assistant": "",
@@ -2306,10 +2338,10 @@ class ToolCard(Static):
     approval resolution (only for safety-gated tools), and a result. Rather than
     mint a separate line per event, one ``ToolCard`` is mounted on the request and
     then *mutated in place* as the later events arrive. The card carries its status
-    in a semantically colored glyph plus the role CSS class (which styles its rail),
-    so the whole lifecycle reads as one card transitioning pending → running →
-    done/error instead of three stacked cards the reader has to reconcile. Resolved
-    cards add a bounded multiline output preview below their compact status row.
+    in an explicit action phrase plus a semantic role class, so the whole lifecycle
+    reads as one compact tree transitioning pending → done/error instead of three
+    stacked cards the reader has to reconcile. Resolved cards add a bounded result
+    beneath the action using a ``└`` branch.
 
     Parallel calls each own a stable card regardless of finish order, because the
     registry (in ``TextualTui``) routes every event to the card for its call_id.
@@ -2324,38 +2356,14 @@ class ToolCard(Static):
     tool. Escape returns focus to the prompt or active safety decision.
     """
 
-    # status → (leading glyph, role class). The role class drives the rail via the
-    # shared `.message--{role}` CSS in TextualTui; glyph color is applied separately.
-    #
-    # denied and error previously shared both the "✗" glyph AND the "denied"
-    # role class, making a user-denied tool call visually identical to a
-    # genuine execution failure (issue #76). denied now gets its own glyph
-    # ("⊘", already used for cancelled — both mean "stopped by a decision,
-    # not a failure") and error gets its own "error" role class (CSS already
-    # defines `.message--error`, it just was never applied here) — denied and
-    # error are now distinguishable by glyph, label (_ROLE_LABELS below), and
-    # color, not by color alone.
-    _STATUS: dict[str, tuple[str, str]] = {
-        "pending": ("⋯", "tool"),
-        "denied": ("⊘", "denied"),
-        "error": ("✗", "error"),
-        "cancelled": ("⊘", "denied"),
-        "done": ("✓", "approved"),
-    }
-    _GLYPH_STYLES: dict[str, str] = {
-        "tool": "$text-accent",
-        "approved": "$text-success",
-        "denied": "$text-warning",
-        "error": "$text-error",
-    }
-
-    # Border-title override for statuses whose role class (above) is shared
-    # with another status that must read differently — "cancelled" reuses
-    # "denied"'s role (same color/glyph family), but a cancelled tool call
-    # was never actually denied, so its title must not say "denied". Statuses
-    # not listed here fall back to _ROLE_LABELS keyed by role, as normal.
-    _STATUS_LABELS: dict[str, str] = {
-        "cancelled": "cancelled",
+    # Status drives the semantic CSS role while the visible action phrase carries
+    # the same state in text, independent of theme or color support.
+    _STATUS_ROLE: dict[ToolActionStatus, str] = {
+        "pending": "tool",
+        "denied": "denied",
+        "error": "error",
+        "cancelled": "denied",
+        "done": "approved",
     }
     _TICK = 1.0  # the running counter only needs whole-second granularity
 
@@ -2382,6 +2390,9 @@ class ToolCard(Static):
         # `name` property (typed str | None), so a distinct field avoids
         # shadowing it and keeps this a plain str.
         self._tool_name = name
+        self._arguments_available = arguments_available
+        # Retain only the compact bounded snapshot. Write/edit arguments can carry
+        # complete file payloads, which settled cards must not keep alive.
         self._call_arguments = (
             format_tool_call_arguments(name, arguments) if arguments_available else Content("")
         )
@@ -2398,7 +2409,7 @@ class ToolCard(Static):
         # tool's limit" marker on the expanded view.
         self._truncated = False
         self._role = ""
-        self._glyph = "⋯"
+        self._status: ToolActionStatus = "pending"
         # While running, `_elapsed` is a live whole-second tick count (looks alive,
         # exact precision doesn't matter mid-flight). On resolve it's replaced by
         # the true wall-clock duration derived from event timestamps (see
@@ -2416,15 +2427,15 @@ class ToolCard(Static):
             self._repaint()
 
     def on_resize(self, event: events.Resize) -> None:
-        """Repaint structured rows when a terminal resize changes source width."""
+        """Rewrap the tree when a terminal resize changes available width."""
 
-        if isinstance(self._detail, DiffPresentation):
-            self._repaint()
+        self._repaint()
 
     def update_call(self, name: str, arguments: object) -> None:
         """Enrich a historical result when its paged-in call arrives later."""
 
         self._tool_name = name
+        self._arguments_available = True
         self._call_arguments = format_tool_call_arguments(name, arguments)
         self._repaint()
 
@@ -2445,14 +2456,14 @@ class ToolCard(Static):
 
     def set_state(
         self,
-        status: str,
+        status: ToolActionStatus,
         *,
         detail: str | Content | DiffPresentation = "",
         elapsed: float | None = None,
         full_output: str = "",
         truncated: bool = False,
     ) -> None:
-        """Transition the card to a new status, swapping glyph, color, and detail.
+        """Transition the card to a new status, action wording, and detail.
 
         ``detail`` adds a denial reason or bounded result preview below the persistent
         call header. A plain ``str`` is untrusted output escaped at
@@ -2466,8 +2477,8 @@ class ToolCard(Static):
         current state.
         """
 
-        glyph, role = self._STATUS.get(status, self._STATUS["pending"])
-        self._glyph = glyph
+        role = self._STATUS_ROLE[status]
+        self._status = status
         if _has_detail(detail):
             self._detail = detail
         if full_output:
@@ -2486,7 +2497,7 @@ class ToolCard(Static):
                 self.remove_class(f"message--{self._role}")
             self.add_class("message", f"message--{role}")
             self._role = role
-        self.border_title = self._STATUS_LABELS.get(status, _ROLE_LABELS.get(role, "tool"))
+        self.border_title = ""
         self._repaint()
         self.refresh_bindings()
 
@@ -2548,27 +2559,29 @@ class ToolCard(Static):
         """A focused card asked to hand focus back to the prompt input."""
 
     def _repaint(self, *, layout: bool = True) -> None:
-        # Build the whole card as Content, appending every untrusted value
-        # (name, call arguments, detail) as LITERAL styled text. Nothing untrusted is
-        # ever routed through a markup parser, so no escaping is needed and no
-        # content — however it is truncated or whatever brackets it contains —
-        # can inject or break a style span. Trusted chrome is literal too; only the
-        # lifecycle glyph gets semantic color, applied out-of-band.
-        glyph_style = self._GLYPH_STYLES.get(self._role, "$text-accent")
-        content = (
-            Content.styled(self._glyph, glyph_style)
-            + Content(" ")
-            + Content.styled(self._tool_name, "b")
+        # Build the whole tree as Content, appending every untrusted value as literal
+        # text. Trusted bullets and branches are also literal chrome; semantic state
+        # is explicit in the action words and available to styling via the role class.
+        width = max(8, self.content_size.width or self.size.width or 80)
+        action = _format_tool_call_action_from_rendered(
+            self._tool_name,
+            self._call_arguments,
+            status=self._status,
+            arguments_available=self._arguments_available,
         )
-        if self._call_arguments.plain:
-            content += Content("  ") + self._call_arguments
         if self._elapsed is not None:
-            content += Content(f" · {_format_duration(self._elapsed)}")
+            action += Content(f" · {_format_duration(self._elapsed)}")
         # Label the affordance so a reader does not have to infer what a bare
         # triangle means. Enter is the primary binding; Space remains supported.
         if self._can_expand():
             label = " ▾ less (Enter)" if self._expanded else " ▸ more (Enter)"
-            content += Content(label)
+            action += Content(label)
+        content = _tree_line(
+            action,
+            width=width,
+            first_prefix="• ",
+            continuation_prefix="  ",
+        )
 
         if isinstance(self._detail, DiffPresentation):
             # Structured edit/write cards retain diff rows for both states; unlike
@@ -2576,18 +2589,18 @@ class ToolCard(Static):
             # raw "Applied" or "Wrote" acknowledgement kept in _full_output.
             content += Content("\n") + _render_diff_presentation(
                 self._detail,
-                width=max(12, self.content_size.width or self.size.width or 80),
+                width=max(12, width),
                 expanded=self._expanded,
             )
         elif self._expanded and self._full_output:
             # Expanded: show the full (tool-bounded) output in place of the collapsed
             # detail, so the reader sees what the preview/summary stood in for.
-            content += Content("\n") + self._indent_str(self._full_output)
+            content += Content("\n") + _tree_detail(self._full_output, width=width)
         elif isinstance(self._detail, Content):
             # A pre-styled renderable is composed directly, preserving literal text.
-            content += Content("\n") + _indent_content(self._detail)
+            content += Content("\n") + _tree_detail(self._detail, width=width)
         elif self._detail:
-            content += Content("\n") + self._indent_str(self._detail)
+            content += Content("\n") + _tree_detail(self._detail, width=width)
 
         if self._truncated:
             # The tool capped its own output before it ever reached here, so what the
@@ -2595,16 +2608,9 @@ class ToolCard(Static):
             # story. Say so honestly regardless of expand state: a capped output that
             # fits the preview budget (so there's nothing extra to expand) would
             # otherwise present as complete, which is exactly the case this marks.
-            content += Content("\n  ⋯ output truncated at the tool's limit")
+            content += Content("\n    ⋯ output truncated at the tool's limit")
 
         self.update(content, layout=layout)
-
-    @staticmethod
-    def _indent_str(text: str) -> Content:
-        """Indent untrusted output as literal text that inherits the card color."""
-
-        indented = "\n".join(f"  {line}" for line in text.split("\n"))
-        return Content(indented)
 
 
 class WorkingIndicator(Static):

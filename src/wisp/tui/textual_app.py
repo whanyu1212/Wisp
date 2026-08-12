@@ -63,6 +63,7 @@ from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.textual_transcript import TextualTranscriptController
 from wisp.tui.theme import WISP_THEME_NAMES, WISP_THEMES, role_styles
 from wisp.tui.theme_preference import load_theme_preference, save_theme_preference
+from wisp.tui.tool_call import ToolActionStatus
 from wisp.tui.widgets import (
     DecisionPanel,
     JumpToLatest,
@@ -310,8 +311,9 @@ class TextualTui(App[None]):
         color: $text-muted;
     }
 
-    /* Tool text recedes behind assistant prose; the semantic rail and glyph carry
-       lifecycle state. Keyboard focus adds only a stronger left cue, not a box. */
+    /* Tool activity is a flat action/result tree rather than another bordered
+       message card. Semantic classes still identify lifecycle states; focus adds the
+       only rail so keyboard navigation remains visible. */
     ToolCard {
         color: $text-muted;
     }
@@ -320,7 +322,9 @@ class TextualTui(App[None]):
     ToolCard.message--approved,
     ToolCard.message--denied,
     ToolCard.message--error {
+        border-left: none;
         background: transparent;
+        padding-left: 0;
         padding-right: 0;
     }
 
@@ -2000,7 +2004,7 @@ class TextualTui(App[None]):
         name: str,
         arguments: object,
         *,
-        status: str,
+        status: ToolActionStatus,
         detail: str | Content | DiffPresentation,
         full_output: str,
         truncated: bool,
@@ -2020,7 +2024,7 @@ class TextualTui(App[None]):
     def resolve_tool_call(
         self,
         call_id: str,
-        status: str,
+        status: ToolActionStatus,
         *,
         detail: str | Content | DiffPresentation = "",
         elapsed: float | None = None,

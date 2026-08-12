@@ -1096,7 +1096,8 @@ def test_textual_tui_renderer_renders_historical_tool_cards() -> None:
     rendered, card_count = anyio.run(scenario)
     assert card_count == 1
     assert "old prompt" in rendered
-    assert "✗ bash" in rendered
+    assert "• Failed to run  false" in rendered
+    assert "  └ exit 1" in rendered
     assert "[red]boom[/red]" in rendered
 
 
@@ -1276,8 +1277,8 @@ def test_textual_tui_renderer_remounts_boundary_result_without_visible_call() ->
     assert "Working" in activity_after_remount
 
 
-def test_textual_history_result_without_call_id_suppresses_fabricated_defaults() -> None:
-    async def scenario() -> str:
+def test_textual_history_result_without_call_id_reports_unavailable_arguments() -> None:
+    async def scenario() -> tuple[str, str]:
         app_instance, renderer = create_textual_tui()
         entry = HistoricalToolCard(
             card_id="history:orphan",
@@ -1291,9 +1292,13 @@ def test_textual_history_result_without_call_id_suppresses_fabricated_defaults()
         async with app_instance.run_test() as pilot:
             renderer.replace_history_entries((entry,), session_label="Legacy session")
             await pilot.pause()
-            return _first_tool_card(app_instance)._call_arguments.plain
+            card = _first_tool_card(app_instance)
+            return card._call_arguments.plain, card.render().plain
 
-    assert anyio.run(scenario) == ""
+    arguments, rendered = anyio.run(scenario)
+    assert arguments == ""  # no fabricated ``/ / in .`` argument snapshot
+    assert rendered.startswith("• Searched  (arguments unavailable)")
+    assert "// in ." not in rendered
 
 
 def test_textual_tui_renderer_remounted_boundary_pair_is_not_pending() -> None:
@@ -1337,16 +1342,16 @@ def test_textual_tui_renderer_remounted_boundary_pair_is_not_pending() -> None:
             card = _first_tool_card(app_instance)
             pending_count = app_instance._transcript_controller.pending_tool_count
             detail = card._detail.plain if isinstance(card._detail, Content) else card._detail
-            before_cancel = (card._glyph, str(card.border_title), detail)
+            before_cancel = (card._status, str(card.border_title), detail)
             renderer.cancelled()
             await pilot.pause()
             detail = card._detail.plain if isinstance(card._detail, Content) else card._detail
-            after_cancel = (card._glyph, str(card.border_title), detail)
+            after_cancel = (card._status, str(card.border_title), detail)
             return pending_count, before_cancel, after_cancel
 
     pending_count, before_cancel, after_cancel = anyio.run(scenario)
     assert pending_count == 0
-    assert before_cancel == ("✓", "tool", "done")
+    assert before_cancel == ("done", "", "done")
     assert after_cancel == before_cancel
 
 
@@ -1477,9 +1482,9 @@ def test_textual_tui_renderer_preserves_historical_denied_tool_cards() -> None:
             return "\n".join(_transcript_texts(app_instance))
 
     rendered = anyio.run(scenario)
-    assert "⊘ write" in rendered
+    assert "• Denied writing  x.py" in rendered
     assert "too risky" in rendered
-    assert "✗ write" not in rendered
+    assert "Failed to write" not in rendered
 
 
 def _render_events_to_transcript(events: list[object]) -> str:
@@ -1574,13 +1579,13 @@ def test_textual_renderer_dispatches_events_by_type() -> None:
 
     assert "hello there" in rendered
     # One card for c1: done glyph + name + the bounded multiline output preview.
-    assert "✓ bash" in rendered
+    assert "• Ran" in rendered
+    assert "  └ file-a\n    file-b" in rendered
     assert "file-a" in rendered
     assert "file-b" in rendered
-    # The denied card carries the reason. Issue #76: denied now uses the "⊘"
-    # glyph (shared with cancelled — both mean "stopped by a decision, not a
-    # failure"), distinct from a genuine tool error's "✗".
-    assert "⊘ write" in rendered
+    # The denied card carries an explicit action and the reason without relying
+    # on a status glyph or color.
+    assert "• Denied writing  x" in rendered
     assert "too risky" in rendered
     assert "error: boom" in rendered
     assert "command failed: nope" in rendered
@@ -1624,7 +1629,7 @@ def test_textual_renderer_collapses_call_and_result_into_one_card() -> None:
 
     texts, count = anyio.run(scenario)
     assert count == 1  # one card carried the whole lifecycle
-    assert texts[0].startswith("✗ grep")
+    assert texts[0].startswith("• Failed to search")
     assert "match" in texts[0]
 
 
@@ -1716,7 +1721,7 @@ def test_textual_tool_card_error_shows_tail_and_exit_code() -> None:
         ]
     )
 
-    assert "✗ bash" in rendered
+    assert "• Failed to run" in rendered
     assert "exit 2" in rendered
     assert "line-39" in rendered  # the tail (the error) is shown
     assert "line-0" not in rendered  # the head is dropped
@@ -1741,7 +1746,7 @@ def test_textual_tool_card_nonzero_exit_renders_as_failure() -> None:
         ]
     )
 
-    assert "✗ bash" in rendered  # failure glyph despite is_error=False
+    assert "• Failed to run" in rendered  # failure words despite is_error=False
     assert "exit 1" in rendered
     assert "line-39" in rendered
 
@@ -1764,7 +1769,7 @@ def test_textual_tool_card_timed_out_process_state_renders_as_failure() -> None:
         ]
     )
 
-    assert "✗ bash" in rendered
+    assert "• Failed to run  poll proc-1" in rendered
     assert "Process proc-1 timed out" in rendered
 
 
@@ -1802,7 +1807,7 @@ def test_textual_tool_card_edit_renders_colored_diff() -> None:
             return text, styles
 
     text, styles = anyio.run(scenario)
-    assert "✓ edit" in text
+    assert "• Edited  src/foo.py · 1 edit" in text
     assert "M src/foo.py  +1 -1" in text
     assert "- │ return 1" in text  # deletion gutter + literal source
     assert "+ │ return 2" in text  # addition gutter + literal source
@@ -1851,7 +1856,7 @@ def test_textual_tool_card_edit_diff_rows_stay_unambiguous_at_supported_widths(
             return card.render().plain, rows, card.content_size.width, card.region.width
 
     text, row_widths, content_width, card_width = anyio.run(scenario)
-    assert "✓ edit" in text  # rendered without error at every supported width
+    assert "• Edited  src/foo.py" in text  # rendered without error at every supported width
     assert "- │" in text  # deletion row retained its gutter
     assert "+ │" in text  # addition row retained its gutter
     assert len(row_widths) == 2  # no soft-wrapped source continuation rows
@@ -2134,7 +2139,7 @@ def test_textual_tool_card_write_renders_colored_diff() -> None:
             return text, styles
 
     text, styles = anyio.run(scenario)
-    assert "✓ write" in text
+    assert "• Wrote  src/foo.py" in text
     assert "M src/foo.py  +1 -1" in text
     assert "- │ line a" in text  # deletion line (prior content)
     assert "+ │ line b" in text  # addition line (new content)
@@ -2170,7 +2175,7 @@ def test_textual_tool_card_write_create_renders_pure_addition() -> None:
             return "\n".join(_transcript_texts(app_instance))
 
     text = anyio.run(scenario)
-    assert "✓ write" in text
+    assert "• Wrote  new.py" in text
     assert "A new.py  +1 -0" in text
     assert "+ │ fresh line" in text
 
@@ -2256,7 +2261,7 @@ def test_textual_tool_card_write_overwrite_without_snapshot_shows_summary() -> N
             return "\n".join(_transcript_texts(app_instance))
 
     text = anyio.run(scenario)
-    assert "✓ write" in text
+    assert "• Wrote  data.bin" in text
     assert "Wrote 12 bytes to data.bin" in text
     assert "+replacement" not in text  # not rendered as a create-style diff
 
@@ -2285,7 +2290,7 @@ def test_textual_tool_card_read_shows_summary_not_raw_output() -> None:
             return "\n".join(_transcript_texts(app_instance))
 
     text = anyio.run(scenario)
-    assert "✓ read" in text
+    assert "• Read  foo.py" in text
     assert "read 3 lines from foo.py" in text
     assert "import os" not in text  # the raw output is replaced by the summary
 
@@ -2309,7 +2314,7 @@ def test_textual_tool_card_grep_shows_summary_and_match_preview() -> None:
             return "\n".join(_transcript_texts(app_instance))
 
     text = anyio.run(scenario)
-    assert "✓ grep  /x/ in ." in text  # semantic call arguments survive resolution
+    assert "• Searched  /x/ in ." in text  # semantic call arguments survive resolution
     assert "grep: 3 matches" in text
     assert "a.py:1:x" in text  # bounded evidence accompanies the structured count
     assert "c.py:3:x" in text
@@ -2355,7 +2360,7 @@ def test_textual_parallel_tool_cards_resolve_by_call_id_out_of_order() -> None:
             )
             await pilot.pause()
             resolved = [
-                (card._tool_name, card._glyph, card._full_output)
+                (card._tool_name, card._status, card._full_output)
                 for card in _all_tool_cards(app_instance)
             ]
             return pending, resolved
@@ -2365,8 +2370,8 @@ def test_textual_parallel_tool_cards_resolve_by_call_id_out_of_order() -> None:
     # Each result routed to its own card despite the reversed finish order; mount order
     # is preserved (the earlier request stays first).
     assert resolved == [
-        ("read", "✓", "OUTPUT_A"),
-        ("bash", "✓", "OUTPUT_B"),
+        ("read", "done", "OUTPUT_A"),
+        ("bash", "done", "OUTPUT_B"),
     ]
 
 
@@ -2907,7 +2912,7 @@ def test_textual_tool_card_carries_role_class_for_lifecycle_styling() -> None:
     # A ToolCard's rail lives in its `message--<role>` CSS class; glyph color is
     # a separate Content span. Assert the class here rather than a span color.
     cards = _cards_for_events([ToolCallRequested(call_id="c1", name="bash", arguments={})])
-    assert cards == [("message--tool", "tool")]
+    assert cards == [("message--tool", "")]
 
 
 def test_textual_theme_switch_rederives_transcript_styles() -> None:
@@ -3444,13 +3449,13 @@ def test_textual_turn_rails_distinguish_conversation_roles_without_color() -> No
     assert anyio.run(scenario) == [
         ("message--user", "heavy"),
         ("message--assistant", "outer"),
-        ("message--tool", "outer"),
+        ("message--tool", ""),
     ]
 
 
 @pytest.mark.parametrize("theme", ["wisp", "wisp-light"])
 def test_textual_transcript_keeps_tool_cards_minimal_and_semantic(theme: str) -> None:
-    async def scenario() -> tuple[dict[str, tuple[str, int, float, str, set[str]]], str]:
+    async def scenario() -> tuple[dict[str, tuple[str, int, int, str]], str]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             app_instance.theme = theme
@@ -3471,25 +3476,18 @@ def test_textual_transcript_keeps_tool_cards_minimal_and_semantic(theme: str) ->
             )
             await pilot.pause()
 
-            states: dict[str, tuple[str, int, float, str, set[str]]] = {}
+            states: dict[str, tuple[str, int, int, str]] = {}
             for card in _all_tool_cards(app_instance):
                 role = _transcript_role_class(card)
                 assert role is not None
                 content = card.render()
-                glyph_styles = {
-                    str(span.style) for span in content.spans if span.start <= 0 < span.end
-                }
-                name_styles = {
-                    str(span.style) for span in content.spans if span.start <= 2 < span.end
-                }
-                assert name_styles == {"b"}
+                assert content.plain.startswith("• ")
                 assert all("dim" not in str(span.style).split() for span in content.spans)
                 states[role] = (
                     card.styles.background.hex.lower(),
+                    card.styles.padding.left,
                     card.styles.padding.right,
-                    card.styles.color.a,
-                    card._glyph,
-                    glyph_styles,
+                    content.plain,
                 )
             transcript = app_instance.query_one("#transcript", Transcript)
             user = next(child for child in transcript.children if child.has_class("message--user"))
@@ -3497,20 +3495,19 @@ def test_textual_transcript_keeps_tool_cards_minimal_and_semantic(theme: str) ->
 
     states, user_background = anyio.run(scenario)
     assert user_background != "#00000000"
-    expected_glyphs = {
-        "message--tool": ("⋯", "$text-accent"),
-        "message--approved": ("✓", "$text-success"),
-        "message--error": ("✗", "$text-error"),
-        "message--denied": ("⊘", "$text-warning"),
+    expected_actions = {
+        "message--tool": "• Reading",
+        "message--approved": "• Read",
+        "message--error": "• Failed to read",
+        "message--denied": "• Denied writing",
     }
-    assert set(states) == set(expected_glyphs)
-    for role, (glyph, glyph_style) in expected_glyphs.items():
-        background, padding_right, text_alpha, rendered_glyph, glyph_styles = states[role]
+    assert set(states) == set(expected_actions)
+    for role, action in expected_actions.items():
+        background, padding_left, padding_right, rendered = states[role]
         assert background == "#00000000"
+        assert padding_left == 0
         assert padding_right == 0
-        assert text_alpha == pytest.approx(0.6)
-        assert rendered_glyph == glyph
-        assert glyph_styles == {glyph_style}
+        assert rendered.startswith(action)
 
 
 @pytest.mark.parametrize("theme", ["wisp", "wisp-light"])
@@ -3560,13 +3557,8 @@ def test_textual_focused_tool_card_uses_only_a_left_outline() -> None:
     assert keeps_role
 
 
-def test_textual_denied_and_error_tool_cards_render_distinct_glyphs() -> None:
-    # Issue #76, live-rendering counterpart to the pure-dict test in
-    # test_tui_rendering.py: drives an actual denial and an actual error
-    # through a live app and asserts the two mounted cards diverge on glyph
-    # and border title, not just in the underlying _STATUS/_ROLE_LABELS dicts
-    # (catches any wiring bug between them and set_state/_repaint).
-    async def scenario() -> list[tuple[str, str]]:
+def test_textual_denied_and_error_tool_cards_render_distinct_actions() -> None:
+    async def scenario() -> list[str]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.event(ToolCallRequested(call_id="denied", name="write", arguments={}))
@@ -3579,22 +3571,14 @@ def test_textual_denied_and_error_tool_cards_render_distinct_glyphs() -> None:
             )
             await pilot.pause()
             cards = _all_tool_cards(app_instance)
-            return [(card._glyph, str(card.border_title)) for card in cards]
+            return [card.render().plain for card in cards]
 
     denied_card, error_card = anyio.run(scenario)
-    denied_glyph, denied_title = denied_card
-    error_glyph, error_title = error_card
-
-    assert denied_glyph != error_glyph
-    assert denied_title != error_title
+    assert denied_card.startswith("• Denied writing")
+    assert error_card.startswith("• Failed to run")
 
 
-def test_textual_cancelled_tool_card_border_title_is_not_denied() -> None:
-    # Regression (P2 review on #76's denied/error fix): cancelled shares
-    # denied's CSS role class intentionally, but fail_pending_tool_calls()
-    # (the real live-app path that produces a "cancelled" status, e.g. on
-    # renderer.cancelled()) must not leave the card's border_title reading
-    # "denied" — a cancelled tool call was never actually denied approval.
+def test_textual_cancelled_tool_card_action_is_not_denied() -> None:
     async def scenario() -> str:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
@@ -3603,11 +3587,11 @@ def test_textual_cancelled_tool_card_border_title_is_not_denied() -> None:
             renderer.cancelled()
             await pilot.pause()
             card = _first_tool_card(app_instance)
-            return str(card.border_title)
+            return card.render().plain
 
-    title = anyio.run(scenario)
-    assert title == "cancelled"
-    assert title != "denied"
+    rendered = anyio.run(scenario)
+    assert rendered.startswith("• Cancelled calling read_file")
+    assert "Denied" not in rendered
 
 
 def test_textual_no_color_env_var_keeps_transcript_legible(monkeypatch: MonkeyPatch) -> None:
@@ -3657,11 +3641,10 @@ def test_textual_no_color_env_var_keeps_transcript_legible(monkeypatch: MonkeyPa
     rendered = "\n".join(texts)
 
     assert no_color is True  # the env var was actually observed
-    # Every mounted card's glyph/label/text content survives color removal —
-    # nothing here depended on color alone to be legible or present.
-    assert "✓ bash" in rendered
-    assert "⊘ write" in rendered
-    assert "✗ bash" in rendered
+    # Explicit action words survive color removal; status never depends on hue.
+    assert "• Ran" in rendered
+    assert "• Denied writing" in rendered
+    assert "• Failed to run" in rendered
     assert "M plain.py  +1 -1" in rendered
     assert "- │ old" in rendered
     assert "+ │ new" in rendered
@@ -3669,8 +3652,8 @@ def test_textual_no_color_env_var_keeps_transcript_legible(monkeypatch: MonkeyPa
 
 
 def test_textual_conversation_messages_have_no_role_title() -> None:
-    # Conversation roles remain attached as CSS classes, but their titles are
-    # intentionally absent. Operational cards retain their visible titles.
+    # Conversation roles remain attached as CSS classes. Flat tool trees also
+    # avoid border titles; standalone operational errors retain theirs.
     cards = _cards_for_events(
         [
             completed_message(content="hi"),
@@ -3679,7 +3662,7 @@ def test_textual_conversation_messages_have_no_role_title() -> None:
         ]
     )
     titles = [title for _, title in cards]
-    assert titles == [None, _ROLE_LABELS["tool"], _ROLE_LABELS["error"]]
+    assert titles == [None, "", _ROLE_LABELS["error"]]
 
 
 def test_textual_running_uses_transcript_heartbeat_and_stable_status_bar() -> None:
@@ -4175,7 +4158,7 @@ def test_textual_cancel_drains_pending_tool_cards() -> None:
             )
 
     texts, timers_stopped, app_registry, started_registry = anyio.run(scenario)
-    assert all(t.startswith("⊘ ") and "cancelled" in t for t in texts)  # cancelled glyph + label
+    assert all(t.startswith("• Cancelled ") for t in texts)
     assert all(timers_stopped)  # no card keeps ticking
     assert app_registry == 0  # app _tool_cards drained
     assert started_registry == 0  # renderer _tool_started drained
@@ -4232,13 +4215,8 @@ def test_textual_stream_message_carries_the_label_free_assistant_role() -> None:
     assert title is None
 
 
-def test_textual_card_css_resolves_under_the_light_theme() -> None:
-    # The app starts on the dark theme, so card CSS is only exercised in light on a
-    # runtime switch. Guard that the message's left-rule color resolves (bad CSS
-    # fails app startup) AND tracks the light palette, not dark's — so a future
-    # theme edit that drops a variable the rules use is caught in CI, not only at
-    # runtime.
-    async def scenario() -> object:
+def test_textual_tool_tree_has_no_resting_rail_under_the_light_theme() -> None:
+    async def scenario() -> str:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(60, 16)) as pilot:
             app_instance.theme = "wisp-light"
@@ -4246,12 +4224,10 @@ def test_textual_card_css_resolves_under_the_light_theme() -> None:
             await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
             (tool_card,) = transcript.children
-            _kind, color = tool_card.styles.border_left
-            return color
+            kind, _color = tool_card.styles.border_left
+            return kind
 
-    border_color = anyio.run(scenario)
-    # tool messages use a $accent left rule; light wisp accent is #2e7676, dark #3fb8b8.
-    assert border_color.hex.lower() == "#2e7676"
+    assert anyio.run(scenario) == ""
 
 
 def _status_after_snapshots(snapshots: list[TuiViewSnapshot]) -> tuple[str, bool]:

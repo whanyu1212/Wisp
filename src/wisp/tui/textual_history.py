@@ -30,6 +30,7 @@ from wisp.tui.history import (
     historical_tool_status,
 )
 from wisp.tui.skills import format_skill_invocation
+from wisp.tui.tool_call import ToolActionStatus
 from wisp.tui.tool_output import full_tool_result_for_display, render_tool_result
 from wisp.tui.transcript_window import TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT, TranscriptWindow
 
@@ -89,7 +90,7 @@ class TextualHistorySurface(Protocol):
         name: str,
         arguments: JsonObject,
         *,
-        status: str,
+        status: ToolActionStatus,
         detail: str | Content | DiffPresentation,
         full_output: str,
         truncated: bool,
@@ -98,7 +99,7 @@ class TextualHistorySurface(Protocol):
     def resolve_tool_call(
         self,
         call_id: str,
-        status: str,
+        status: ToolActionStatus,
         *,
         detail: str | Content | DiffPresentation = "",
         full_output: str = "",
@@ -687,7 +688,7 @@ class TextualHistoryController:
         *,
         name: str | None = None,
         arguments: JsonObject | None = None,
-    ) -> tuple[str, str | Content | DiffPresentation, str, bool]:
+    ) -> tuple[ToolActionStatus, str | Content | DiffPresentation, str, bool]:
         status = historical_tool_status(entry)
         if status in {"cancelled", "denied"}:
             return status, entry.output, "", False

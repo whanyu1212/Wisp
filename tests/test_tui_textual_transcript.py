@@ -183,11 +183,11 @@ def test_tool_cards_resolve_by_id_and_terminal_states_do_not_leak() -> None:
 
     controller.resolve_tool_call("two", "done", detail="two complete")
     assert controller.pending_tool_count == 1
-    assert second._glyph == "✓"
+    assert second._status == "done"
 
     controller.fail_pending_tool_calls("cancelled")
     assert controller.pending_tool_count == 0
-    assert first._glyph == "⊘"
+    assert first._status == "cancelled"
     assert first._timer is None
 
 
