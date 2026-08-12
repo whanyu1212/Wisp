@@ -9,7 +9,9 @@ layer.
 
 A Python embedder may pass ordered static factories to the runtime activation helper. Such factories
 can register capabilities through `ExtensionAPI`; this is an embedding API, not filesystem plugin
-discovery.
+discovery. The deterministic [`examples/extensions`](../../../../../../examples/extensions/) source
+checkout example demonstrates a read-only tool, command metadata, an event handler, and synchronous
+and asynchronous activation. Installed wheels do not include repository examples.
 
 ## Installed package
 
