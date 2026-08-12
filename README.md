@@ -206,9 +206,12 @@ Explicit model IDs pass through unchanged; add a user-only `~/.wisp/catalog.toml
 picker metadata, context limits, effort tiers, or pricing are desired.
 
 Credentials entered through `/connect` are stored in `WISP_AUTH_FILE` (default
-`~/.wisp/auth.json`) with private permissions. Explicit provider constructor keys take precedence,
-followed by environment variables and then stored keys. Secrets entered in the panel are masked and
-never enter prompt history, transcripts, RPC events, or session JSONL.
+`~/.wisp/auth.json`) with private permissions. Credential updates are serialized across cooperating
+Wisp processes and atomically publish a synchronized, uniquely staged replacement; unsafe symlink,
+hard-link, ownership, or permission state is rejected rather than read. Explicit provider
+constructor keys take precedence, followed by environment variables and then stored keys. Secrets
+entered in the panel are masked and never enter prompt history, transcripts, RPC events, or session
+JSONL.
 
 In the TUI, `/model` with no arguments lists every catalog model grouped by provider. If a model id
 belongs to only one registered provider, `/model <id>` switches providers to match; otherwise use
@@ -342,7 +345,8 @@ next read, Wisp discards any unterminated final bytes left by an interrupted wri
 bytes happen to form valid JSON—while preserving all newline-terminated records. A malformed
 newline-terminated record remains a session error rather than being silently removed. Session files
 first created by an append and recovery deletions also synchronize the parent directory on supported
-POSIX systems.
+POSIX systems. Operations that remove a session suffix stage and validate a complete replacement
+before atomically publishing it, so a failed rewrite does not truncate the last committed history.
 
 Records form a parent-linked tree, and an append-only active-leaf record selects the root-to-leaf
 path used by continuation — abandoned or cancelled work stays in the audit log without entering

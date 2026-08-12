@@ -1272,27 +1272,46 @@ class JsonlSession:
             return
         entries = tuple(_read_entries_unlocked(self.path))[:count]
         if not entries:
-            self.path.unlink(missing_ok=True)
+            info = self._validate_session_file()
+            if info is not None:
+                _unlink_expected_file(self.path, (info.st_dev, info.st_ino))
+                _sync_directory(self.path.parent)
             return
         self._replace_lines([session_entry_to_json(entry) for entry in entries])
 
     def _replace_lines(self, lines: list[str]) -> None:
+        """Atomically publish a complete replacement for the live session file."""
+
         _ensure_private_directory(self.path.parent)
-        flags = os.O_CREAT | os.O_TRUNC | os.O_WRONLY
+        data = "".join(f"{line}\n" for line in lines).encode()
+        temp_path = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
-        fd = os.open(self.path, flags, PRIVATE_FILE_MODE)
+        fd = -1
+        signature: tuple[int, int] | None = None
         try:
+            fd = os.open(temp_path, flags, PRIVATE_FILE_MODE)
+            info = os.fstat(fd)
+            signature = (info.st_dev, info.st_ino)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise SessionError(f"Session temporary file is not regular: {temp_path}")
             if os.name == "posix":
                 os.fchmod(fd, PRIVATE_FILE_MODE)
-            with os.fdopen(fd, "w", encoding="utf-8") as session_file:
-                fd = -1
-                for line in lines:
-                    session_file.write(line)
-                    session_file.write("\n")
+            _write_all(fd, data)
+            _sync_file(fd)
+            os.close(fd)
+            fd = -1
+            # Validate the staged JSONL before replacing the last committed file.
+            _read_entries_unlocked(temp_path)
+            os.replace(temp_path, self.path)
+            signature = None
+            _sync_directory(self.path.parent)
         finally:
             if fd != -1:
                 os.close(fd)
+            if signature is not None:
+                _unlink_if_same_file(temp_path, signature)
 
 
 def _write_all(fd: int, data: bytes) -> None:
@@ -1577,8 +1596,20 @@ def _validate_private_directory(path: Path) -> None:
             raise SessionError(f"Session directory is not private: {path}")
 
 
+def _unlink_expected_file(path: Path, expected: tuple[int, int]) -> None:
+    """Remove the expected live file, reporting disappearance or replacement."""
+
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise SessionError(f"Could not inspect session file before deletion: {path}") from exc
+    if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != expected:
+        raise SessionError(f"Session file changed before deletion: {path}")
+    path.unlink()
+
+
 def _unlink_if_same_file(path: Path, expected: tuple[int, int]) -> None:
-    """Remove a failed new file only while it is still the inode we created."""
+    """Best-effort cleanup only while the path still names the expected inode."""
 
     try:
         info = path.lstat()

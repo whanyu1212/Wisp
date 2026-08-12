@@ -69,8 +69,21 @@ class StoredProviderAuthResolver:
         if _oauth_expired(credential, skew_seconds=self.expiry_skew_seconds):
             if refresh is None:
                 return None
-            credential = await refresh(credential)
-            self.store.set(provider, credential)
+            refreshed = await refresh(credential)
+            if self.store.compare_and_set(
+                provider,
+                expected=credential,
+                replacement=refreshed,
+            ):
+                credential = refreshed
+            else:
+                current = self.store.get(provider)
+                if not isinstance(current, OAuthCredential) or _oauth_expired(
+                    current,
+                    skew_seconds=self.expiry_skew_seconds,
+                ):
+                    return None
+                credential = current
         return BearerTokenAuth(token=credential.access, account_id=credential.account_id)
 
 

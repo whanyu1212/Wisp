@@ -2855,6 +2855,7 @@ def test_tui_shell_auth_status_uses_current_provider(tmp_path: Path) -> None:
 def test_tui_shell_auth_status_reports_storage_errors(tmp_path: Path) -> None:
     auth_path = tmp_path / "auth.json"
     auth_path.write_text("{not json", encoding="utf-8")
+    auth_path.chmod(0o600)
 
     async def run() -> None:
         controller = ScriptedController()
@@ -2880,6 +2881,7 @@ def test_tui_shell_auth_status_reports_storage_errors(tmp_path: Path) -> None:
 def test_tui_shell_logout_reports_storage_errors(tmp_path: Path) -> None:
     auth_path = tmp_path / "auth.json"
     auth_path.write_text("{not json", encoding="utf-8")
+    auth_path.chmod(0o600)
 
     async def run() -> None:
         controller = ScriptedController()
@@ -2918,6 +2920,7 @@ def test_tui_shell_connect_reports_storage_errors(
     monkeypatch.setattr(tui_auth_commands_module, "login_openai_codex_device_code", fake_login)
     auth_path = tmp_path / "auth.json"
     auth_path.write_text("{not json", encoding="utf-8")
+    auth_path.chmod(0o600)
 
     async def run() -> None:
         controller = ScriptedController()
