@@ -265,11 +265,9 @@ def test_approval_panel_exposes_once_tool_session_and_yolo_choices() -> None:
     assert highlighted == 0
 
 
-@pytest.mark.parametrize("cancel_key", ["enter", "2", "escape"])
-def test_approval_panel_yolo_confirmation_defaults_back(cancel_key: str) -> None:
-    async def scenario() -> tuple[str, str, int | None, str]:
+def test_approval_panel_yolo_choice_submits_without_second_question() -> None:
+    async def scenario() -> str:
         app, renderer = create_textual_tui()
-        approval = _approval("bash", {"command": "echo hi"}, safety="command")
         async with app.run_test(size=(80, 24)) as pilot:
             renderer.view_updated(
                 TuiViewSnapshot(
@@ -279,53 +277,29 @@ def test_approval_panel_yolo_confirmation_defaults_back(cancel_key: str) -> None
                     cwd="/work/project",
                 )
             )
-            renderer.approval_request(approval)
+            renderer.approval_request(_approval("bash", {"command": "echo hi"}, safety="command"))
             await pilot.pause()
             await pilot.press("3")
             with anyio.fail_after(1):
-                first = await app._input_controller.receive_stream.receive()
-            assert isinstance(first, str)
+                answer = await app._input_controller.receive_stream.receive()
+            assert isinstance(answer, str)
+            return answer
 
-            renderer.approval_all_confirmation(approval)
-            await pilot.pause()
-            options = app.query_one("#decision-options", OptionList)
-            highlighted = options.highlighted
-            title = _static_plain(app.query_one("#decision-title", Static))
-            await pilot.press(cancel_key)
-            with anyio.fail_after(1):
-                second = await app._input_controller.receive_stream.receive()
-            assert isinstance(second, str)
-            return first, second, highlighted, title
-
-    first, second, highlighted, title = anyio.run(scenario)
-    assert first == "a"
-    assert second == "cancel-all"
-    assert highlighted == 1
-    assert title == "Enable YOLO for this TUI run?"
+    assert anyio.run(scenario) == "a"
 
 
-def test_approval_panel_yolo_confirmation_hides_composer_and_preserves_draft() -> None:
-    async def scenario() -> tuple[bool, str, bool]:
+def test_approval_panel_matches_main_background_and_has_border() -> None:
+    async def scenario() -> tuple[object, object, object]:
         app, renderer = create_textual_tui()
-        approval = _approval("bash", {"command": "echo hi"}, safety="command")
         async with app.run_test(size=(80, 24)) as pilot:
-            input_widget = app.query_one("#input", Input)
-            input_widget.value = "draft follow-up"
-            renderer.approval_request(approval)
+            renderer.approval_request(_approval("bash", {"command": "echo hi"}, safety="command"))
             await pilot.pause()
-            renderer.approval_all_confirmation(approval)
-            await pilot.pause()
-            hidden = not input_widget.display
-            draft = input_widget.value
-            renderer.view_updated(TuiViewSnapshot(status="idle", input_hint="wisp> "))
-            await pilot.pause()
-            restored = input_widget.display and app.focused is input_widget
-            return hidden, draft, restored
+            panel = app.query_one("#decision-panel", DecisionPanel)
+            return panel.styles.background, app.styles.background, panel.styles.border
 
-    hidden, draft, restored = anyio.run(scenario)
-    assert hidden
-    assert draft == "draft follow-up"
-    assert restored
+    background, app_background, border = anyio.run(scenario)
+    assert background == app_background
+    assert all(edge[0] == "round" for edge in border)
 
 
 @pytest.mark.parametrize(("key", "expected"), [("4", "n"), ("escape", "n")])
@@ -569,8 +543,8 @@ def test_trust_panel_stale_home_does_not_move_deny_first_highlight() -> None:
     # Enter/digits: those are app-level priority bindings (see BINDINGS),
     # dispatched via App._check_bindings before DecisionPanel.on_key ever sees
     # them, so a per-widget guard couldn't catch a stale one regardless. The
-    # trust and YOLO-confirmation panels are deny-first (highlighted defaults
-    # to the safe option) — a stale Home/PageUp must not flip that highlight
+    # The trust panel is deny-first (highlighted defaults to the safe option),
+    # so a stale Home/PageUp must not flip that highlight
     # to the affirmative option before a legitimate Enter lands.
     async def scenario() -> tuple[int | None, int | None]:
         app, renderer = create_textual_tui()
@@ -742,8 +716,43 @@ def test_decision_panel_fits_above_footer_in_narrow_terminal(theme: str) -> None
 
     panel_bottom, footer_top, panel_height, transcript_height = anyio.run(scenario)
     assert panel_bottom <= footer_top
-    assert panel_height <= 12
+    assert panel_height <= 14
     assert transcript_height > 0
+
+
+def test_decision_panel_shows_every_option_with_a_full_detail_preview() -> None:
+    # A five-line detail preview needs 12 content rows (title 1 + meta 2 +
+    # detail 5 + options 4) plus the two rounded-border rows. When the panel
+    # caps below that, the options box overflows past the panel's bottom edge
+    # and "4 Deny" scrolls out of reach with no visible affordance.
+    async def scenario() -> tuple[int, int, int]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(72, 30)) as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="waiting for approval",
+                    input_hint="approve> ",
+                    input_mode="approval",
+                    cwd="/work/project",
+                )
+            )
+            renderer.approval_request(
+                _approval(
+                    "write",
+                    {
+                        "path": "a/long/path/that/must/still/fit/deeply/nested/settings.json",
+                        "content": "\n".join(f"line {index}" for index in range(20)),
+                    },
+                )
+            )
+            await pilot.pause()
+            panel = app.query_one("#decision-panel", DecisionPanel)
+            options = app.query_one("#decision-options")
+            return panel.region.bottom, options.region.bottom, panel.max_scroll_y
+
+    panel_bottom, options_bottom, panel_max_scroll_y = anyio.run(scenario)
+    assert options_bottom <= panel_bottom
+    assert panel_max_scroll_y == 0
 
 
 def test_approval_panel_options_stay_unwrapped_with_long_tool_name() -> None:

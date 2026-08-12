@@ -1623,14 +1623,6 @@ class TextualTui(App[None]):
         overlays.open(OverlayKind.decision)
         panel.show_approval(event, cwd=cwd)
 
-    def show_approval_all_confirmation(self, event: ToolApprovalRequested) -> None:
-        panel = self._decision_panel
-        overlays = self._overlay_controller
-        if panel is None or overlays is None:
-            return
-        overlays.open(OverlayKind.decision)
-        panel.show_all_confirmation(event)
-
     def show_trust(self, event: TrustRequested) -> None:
         panel = self._decision_panel
         overlays = self._overlay_controller

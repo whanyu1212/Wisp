@@ -699,15 +699,6 @@ class TuiShell:
                     f"Cannot submit prompts while {self._session_operation_name()}."
                 )
             return False
-        if (
-            self.state.status is TuiStatus.confirming_all_tools
-            and self.state.pending_approval is not None
-        ):
-            if signal.mode is _InputMode.all_tools_confirmation:
-                return await self._answer_all_tools_confirmation(text)
-            if has_content and self.state.current_command_id is not None:
-                self._queue_prompt(text)
-            return False
         if self.state.pending_trust is not None:
             if signal.mode is _InputMode.trust or _is_trust_answer(text):
                 return await self._answer_pending_trust(text)
@@ -1421,13 +1412,12 @@ class TuiShell:
         if approval is None:
             return False
         normalized = answer.strip().lower()
-        if approved is None and normalized in {"a", "all", "yolo"}:
-            self.state.status = TuiStatus.confirming_all_tools
-            self._sync_view()
-            self.renderer.approval_all_confirmation(approval)
-            return False
         selected_scope: ApprovalScope = scope or (
-            "tool_session" if normalized in {"t", "tool"} else "once"
+            "all_session"
+            if normalized in {"a", "all", "yolo"}
+            else "tool_session"
+            if normalized in {"t", "tool"}
+            else "once"
         )
         selected_approved = (
             approved
@@ -1438,6 +1428,9 @@ class TuiShell:
                 "yes",
                 "t",
                 "tool",
+                "a",
+                "all",
+                "yolo",
             }
         )
         selected_reason = None if selected_approved else reason or "Denied from TUI"
@@ -1460,22 +1453,6 @@ class TuiShell:
         if exit_after_denial and not selected_approved:
             self.state.exit_requested = True
         self._sync_view()
-        return False
-
-    async def _answer_all_tools_confirmation(self, answer: str) -> bool:
-        approval = self.state.pending_approval
-        if approval is None:
-            return False
-        if answer.strip().lower() in {"y", "yes", "confirm-all"}:
-            return await self._answer_pending_approval(
-                "",
-                approved=True,
-                scope="all_session",
-                exit_after_denial=False,
-            )
-        self.state.status = TuiStatus.waiting_for_approval
-        self._sync_view()
-        self.renderer.approval_request(approval)
         return False
 
     async def _send_approval(

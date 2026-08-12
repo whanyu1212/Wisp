@@ -618,9 +618,8 @@ class DecisionPanel(Vertical):
     """Approval/trust selector that temporarily replaces the composer.
 
     The main approval prompt defaults its highlight to "Approve once" (Enter
-    approves); the YOLO-confirmation and trust prompts remain deny-first
-    (Enter/Escape decline). Escape always denies/cancels on every panel,
-    regardless of which option is highlighted.
+    approves); the trust prompt remains deny-first (Enter/Escape declines).
+    Escape always denies on every panel, regardless of which option is highlighted.
     """
 
     BINDING_GROUP_TITLE = "Safety decision"
@@ -630,15 +629,14 @@ class DecisionPanel(Vertical):
     **Approve once** permits only this request. A tool-session choice permits the
     named tool until this Wisp process exits. **YOLO** permits every mutating and
     command tool for the process. Project trust permits loading that project's
-    local configuration. Escape always chooses the conservative deny or go-back
-    result.
+    local configuration. Escape always chooses the conservative deny result.
     """
     BINDINGS = [
         Binding("1", "choose(1)", "Choose option 1", show=False),
         Binding("2", "choose(2)", "Choose option 2", show=False),
         Binding("3", "choose(3)", "Choose option 3", show=False),
         Binding("4", "choose(4)", "Choose option 4", show=False),
-        Binding("escape", "conservative_cancel", "Deny / go back", show=False),
+        Binding("escape", "conservative_cancel", "Deny", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -647,11 +645,11 @@ class DecisionPanel(Vertical):
         width: 72;
         max-width: 90%;
         height: auto;
-        max-height: 15;
+        max-height: 14;
         margin: 0 1;
         padding: 0 1;
-        border-left: heavy $warning;
-        background: $surface;
+        border: round $warning;
+        background: $background;
     }
 
     DecisionPanel #decision-title {
@@ -756,24 +754,6 @@ class DecisionPanel(Vertical):
             mode="approval",
         )
 
-    def show_all_confirmation(self, event: ToolApprovalRequested) -> None:
-        self._show(
-            _DecisionContent(
-                title="Enable YOLO for this TUI run?",
-                meta=f"Requested while approving {event.name}",
-                detail=(
-                    "All mutating and command tools will run without further approval "
-                    "until this Wisp process exits."
-                ),
-            ),
-            options=[
-                Option("1  Enable YOLO for this run", id="confirm_all"),
-                Option("2  Go back (default)", id="cancel_all"),
-            ],
-            default_index=1,
-            mode="all_confirmation",
-        )
-
     def show_trust(self, event: TrustRequested) -> None:
         self._show(
             _trust_content(event),
@@ -834,8 +814,6 @@ class DecisionPanel(Vertical):
             "approve_once": "y",
             "tool_session": "t",
             "all_session": "a",
-            "confirm_all": "confirm-all",
-            "cancel_all": "cancel-all",
             "deny": "n",
         }.get(option_id)
         if answer is not None:
@@ -868,15 +846,13 @@ class DecisionPanel(Vertical):
     def action_choose(self, number: int) -> None:
         answers = {
             "approval": {1: "y", 2: "t", 3: "a", 4: "n"},
-            "all_confirmation": {1: "confirm-all", 2: "cancel-all"},
             "trust": {1: "y", 2: "n"},
         }
         if answer := answers.get(self._mode, {}).get(number):
             self.submit_answer(answer)
 
     def action_conservative_cancel(self) -> None:
-        answer = "cancel-all" if self._mode == "all_confirmation" else "n"
-        self.submit_answer(answer)
+        self.submit_answer("n")
 
 
 class ModelPicker(Vertical):
