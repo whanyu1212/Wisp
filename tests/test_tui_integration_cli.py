@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 import pytest
 from pytest import MonkeyPatch
 from rich.cells import cell_len
+from rich.color import Color
 from textual import events
 from textual.content import Content
 from textual.widget import Widget
@@ -59,6 +60,7 @@ from wisp.tui.widgets import (
     Transcript,
     TranscriptEmptyState,
     WorkingIndicator,
+    _SolidVerticalScrollBarRender,
 )
 from wisp.tui.widgets import (
     PromptEditor as Input,
@@ -6435,6 +6437,47 @@ def test_textual_scrollbar_colors_resolve_for_both_themes() -> None:
         "wisp": ("#7C8B99", "#4AA3C7", "#3FB8B8", 1),
         "wisp-light": ("#55636D", "#277795", "#2E7676", 1),
     }
+
+
+def test_textual_transcript_scrollbar_uses_square_thumb_without_losing_mouse_actions() -> None:
+    async def scenario() -> type[object]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 20)) as pilot:
+            _fill_transcript(renderer, 40)
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            return type(transcript.vertical_scrollbar.render())
+
+    assert anyio.run(scenario) is _SolidVerticalScrollBarRender
+
+    segments_by_position = {
+        position: _SolidVerticalScrollBarRender.render_bar(
+            size=10,
+            virtual_size=67,
+            window_size=12,
+            position=position,
+            vertical=True,
+            back_color=Color.parse("#000000"),
+            bar_color=Color.parse("#7C8B99"),
+        ).segments
+        for position in (0, 1, 6, 7, 8, 27, 54, 55)
+    }
+    assert all(
+        not set("".join(segment.text for segment in segments)) & set("▁▂▃▄▅▆▇")
+        for segments in segments_by_position.values()
+    )
+    assert all(
+        sum(segment.text == "█" for segment in segments) == 2
+        for segments in segments_by_position.values()
+    )
+
+    middle_segments = segments_by_position[27]
+    actions = {
+        str(segment.style.meta["@mouse.down"])
+        for segment in middle_segments
+        if segment.style is not None and "@mouse.down" in segment.style.meta
+    }
+    assert actions == {"scroll_up", "grab", "scroll_down"}
 
 
 def test_textual_input_is_pinned_to_the_bottom() -> None:
