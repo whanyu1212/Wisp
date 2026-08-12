@@ -13,6 +13,8 @@ This log starts at schema v27. Earlier history is in the git log.
 
 - Added the package-owned `wisp-development` skill with progressively loaded architecture,
   extension API, safety, authoring, and verification guidance.
+- Added a deterministic static extension example for Python embedders, covering a read-only tool,
+  frontend-neutral command metadata, event handling, and synchronous or asynchronous activation.
 
 ## 0.1.0b3 — 2026-08-12
 

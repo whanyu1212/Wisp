@@ -474,8 +474,12 @@ authoring, and verification guidance. It is available from source checkouts and 
 including in untrusted projects. Higher-precedence project or user skills may shadow it using the
 same deterministic conflict rules.
 
-For a complete opt-in review example, including installation instructions and a progressively
-loaded checklist, see [`examples/skills/wisp-code-review`](examples/skills/wisp-code-review/).
+For static extension authoring, see the deterministic Python embedder example in
+[`examples/extensions`](examples/extensions/). Wisp does not discover or import that example (or
+other user/project Python files) automatically.
+
+For a complete opt-in review skill, including installation instructions and a progressively loaded
+checklist, see [`examples/skills/wisp-code-review`](examples/skills/wisp-code-review/).
 
 When the read-only `skill` tool is exposed, Wisp adds a separately bounded index of escaped skill
 names and descriptions to model context. The model can call `skill` with `name` to load the selected
