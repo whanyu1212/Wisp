@@ -6443,9 +6443,10 @@ def test_textual_transcript_scrollbar_uses_square_thumb_without_losing_mouse_act
     async def scenario() -> type[object]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(60, 20)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            assert transcript._vertical_scrollbar is None
             _fill_transcript(renderer, 40)
             await pilot.pause()
-            transcript = app_instance.query_one("#transcript", Transcript)
             return type(transcript.vertical_scrollbar.render())
 
     assert anyio.run(scenario) is _SolidVerticalScrollBarRender

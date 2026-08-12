@@ -36,7 +36,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
-from textual.scrollbar import ScrollBarRender
+from textual.scrollbar import ScrollBar, ScrollBarRender
 from textual.timer import Timer
 from textual.widget import AwaitMount, Widget
 from textual.widgets import (
@@ -2042,14 +2042,15 @@ class Transcript(VerticalScroll):
             )
             yield self._empty_state
 
-    def on_mount(self) -> None:
-        # Textual's default vertical renderer uses eighth-block glyphs at the
-        # thumb ends. Terminal font rasterization makes those caps appear jagged
-        # while scrolling, so keep Textual's geometry and interaction metadata
-        # but render this transcript's thumb in whole cells.
+    @property
+    def vertical_scrollbar(self) -> ScrollBar:
+        """Create Textual's scrollbar lazily and install the stable renderer."""
+
+        scrollbar = super().vertical_scrollbar
         # Textual documents per-instance renderer assignment, despite annotating
         # the attribute as ClassVar in 8.2.8.
-        self.vertical_scrollbar.renderer = _SolidVerticalScrollBarRender  # type: ignore[misc]
+        scrollbar.renderer = _SolidVerticalScrollBarRender  # type: ignore[misc]
+        return scrollbar
 
     def mount_message(self, widget: Widget, *, before: Widget | None = None) -> AwaitMount:
         """Mount output after permanently dismissing the initial empty state."""
