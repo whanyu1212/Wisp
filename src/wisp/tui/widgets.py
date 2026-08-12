@@ -645,7 +645,7 @@ class DecisionPanel(Vertical):
         width: 72;
         max-width: 90%;
         height: auto;
-        max-height: 12;
+        max-height: 14;
         margin: 0 1;
         padding: 0 1;
         border: round $warning;

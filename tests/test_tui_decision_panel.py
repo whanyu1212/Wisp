@@ -716,8 +716,43 @@ def test_decision_panel_fits_above_footer_in_narrow_terminal(theme: str) -> None
 
     panel_bottom, footer_top, panel_height, transcript_height = anyio.run(scenario)
     assert panel_bottom <= footer_top
-    assert panel_height <= 12
+    assert panel_height <= 14
     assert transcript_height > 0
+
+
+def test_decision_panel_shows_every_option_with_a_full_detail_preview() -> None:
+    # A five-line detail preview needs 12 content rows (title 1 + meta 2 +
+    # detail 5 + options 4) plus the two rounded-border rows. When the panel
+    # caps below that, the options box overflows past the panel's bottom edge
+    # and "4 Deny" scrolls out of reach with no visible affordance.
+    async def scenario() -> tuple[int, int, int]:
+        app, renderer = create_textual_tui()
+        async with app.run_test(size=(72, 30)) as pilot:
+            renderer.view_updated(
+                TuiViewSnapshot(
+                    status="waiting for approval",
+                    input_hint="approve> ",
+                    input_mode="approval",
+                    cwd="/work/project",
+                )
+            )
+            renderer.approval_request(
+                _approval(
+                    "write",
+                    {
+                        "path": "a/long/path/that/must/still/fit/deeply/nested/settings.json",
+                        "content": "\n".join(f"line {index}" for index in range(20)),
+                    },
+                )
+            )
+            await pilot.pause()
+            panel = app.query_one("#decision-panel", DecisionPanel)
+            options = app.query_one("#decision-options")
+            return panel.region.bottom, options.region.bottom, panel.max_scroll_y
+
+    panel_bottom, options_bottom, panel_max_scroll_y = anyio.run(scenario)
+    assert options_bottom <= panel_bottom
+    assert panel_max_scroll_y == 0
 
 
 def test_approval_panel_options_stay_unwrapped_with_long_tool_name() -> None:
