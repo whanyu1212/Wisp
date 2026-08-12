@@ -47,17 +47,23 @@ class ToolContext:
         globs come from the resolved config so file tools deny reads of secrets
         (``.env`` and friends) unless the policy is relaxed.
 
-        The active credential and user settings files are guaranteed to be in the
-        returned context's ``protected_paths``. ``WispConfig`` already enforces this
-        on construction; re-asserting it here is a defensive backstop so the secrets
-        stay protected even for a config produced by a path that skipped validation
-        (e.g. ``model_copy``).
+        The active credential, user settings, and provider CA bundle files are guaranteed
+        to be in the returned context's ``protected_paths``. ``WispConfig`` already
+        enforces this on construction; re-asserting it here is a defensive backstop so
+        the secrets stay protected even for a config produced by a path that skipped
+        validation (e.g. ``model_copy``).
         """
 
         protected_paths = config.protected_paths
         required = (
             config.auth_path.expanduser().resolve(strict=False).as_posix(),
             user_settings_path().resolve(strict=False).as_posix(),
+            *(
+                (config.openai_compatible.ca_bundle.expanduser().resolve(strict=False).as_posix(),)
+                if config.openai_compatible is not None
+                and config.openai_compatible.ca_bundle is not None
+                else ()
+            ),
         )
         missing = tuple(pattern for pattern in required if pattern not in protected_paths)
         if missing:
