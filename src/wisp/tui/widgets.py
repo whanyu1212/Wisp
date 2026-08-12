@@ -7,18 +7,27 @@ Stage 2 replaces the append-only ``RichLog`` transcript with a
   approvals, errors, notices, and user input. Content is escaped Rich markup in
   a ``Static`` (never fed to the Markdown parser), preserving the
   escape-at-boundary invariant for untrusted tool/error payloads.
-- ``StreamMessage`` — the streaming assistant turn, backed by a ``Markdown``
-  widget so model output renders code blocks, lists, and emphasis. Textual's
-  native ``MarkdownStream`` incrementally appends provider fragments.
+- ``StreamMessage`` — the streaming assistant turn, backed by one ``Static``
+  whose Rich Markdown renderable preserves structure without mounting a nested
+  Textual widget for every block.
 """
 
 from __future__ import annotations
 
-import asyncio
+import re
 import time
 from dataclasses import dataclass
+from typing import ClassVar
 
 from rich.cells import cell_len
+from rich.console import Console, ConsoleOptions, RenderResult
+from rich.markdown import CodeBlock, Heading
+from rich.markdown import Markdown as RichMarkdown
+from rich.segment import Segment
+from rich.style import Style as RichStyle
+from rich.syntax import Syntax
+from rich.text import Text
+from rich.theme import Theme as RichTheme
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -31,7 +40,6 @@ from textual.widgets import (
     DataTable,
     Label,
     LoadingIndicator,
-    Markdown,
     OptionList,
     RadioButton,
     RadioSet,
@@ -88,6 +96,7 @@ from wisp.tui.tool_call import (
 _TOOL_OUTPUT_PREVIEW_LINES = 8
 _TOOL_OUTPUT_PREVIEW_BYTES = 2_000
 PASTE_DISPLAY_THRESHOLD = 2_000
+_MARKDOWN_FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 
 
 class PromptEditor(TextArea):
@@ -2717,211 +2726,240 @@ class StatusBar(Static):
         self.update(format_tui_footer_text(self._snapshot, width=width if width > 0 else None))
 
 
-class _StreamMarkdown(Markdown):
-    """Markdown child whose mount-time empty update has definitely completed."""
+class _AssistantCodeBlock(CodeBlock):
+    """Compact, wrapping code fence for the single-widget assistant renderer."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._ready = asyncio.Event()
+    @classmethod
+    def create(cls, markdown: RichMarkdown, token: object) -> _AssistantCodeBlock:
+        # markdown-it's Token is intentionally kept at this parser boundary. Rich's
+        # public CodeBlock factory reads only ``info``; mirror that without importing
+        # markdown-it as another direct dependency.
+        info = str(getattr(token, "info", "") or "")
+        lexer_name = info.partition(" ")[0] or "text"
+        return cls(
+            lexer_name,
+            markdown.code_theme,
+            native_ansi=bool(getattr(markdown, "native_ansi", False)),
+        )
 
-    # Textual's runtime Markdown handler is async although its inherited type is sync.
-    async def _on_mount(self, event: events.Mount) -> None:  # type: ignore[override]
-        # Textual 8.2.8 dispatches named handlers for every class in the widget MRO.
-        # Prevent that default traversal because we must signal readiness *after*
-        # Markdown's mount-time update("") and Widget's mount setup both finish.
-        # Calling super() without this guard would run Markdown._on_mount twice.
-        event.prevent_default()
+    def __init__(self, lexer_name: str, theme: str, *, native_ansi: bool) -> None:
+        super().__init__(lexer_name, theme)
+        self._native_ansi = native_ansi
+
+    def __rich_console__(
+        self,
+        console: Console,
+        options: ConsoleOptions,
+    ) -> RenderResult:
+        code = str(self.text).rstrip()
+        if self.lexer_name.lower() == "ansi":
+            decoded = Text.from_ansi(code)
+            if not self._native_ansi:
+                decoded = Text(decoded.plain)
+            yield decoded
+            return
+        yield Syntax(
+            code,
+            self.lexer_name,
+            theme=self.theme,
+            word_wrap=True,
+            background_color="default",
+            padding=(0, 2),
+        )
+
+
+class _AssistantHeading(Heading):
+    """Keep every heading left-aligned in a terminal conversation."""
+
+    LEVEL_ALIGN: ClassVar = {f"h{level}": "left" for level in range(1, 7)}
+
+
+class _AssistantMarkdown(RichMarkdown):
+    """Rich Markdown with Wisp theming and Textual-safe clickable links."""
+
+    elements: ClassVar = {
+        **RichMarkdown.elements,
+        "heading_open": _AssistantHeading,
+        "fence": _AssistantCodeBlock,
+        "code_block": _AssistantCodeBlock,
+    }
+
+    def __init__(
+        self,
+        source: str,
+        *,
+        theme: RichTheme,
+        code_theme: str,
+        native_ansi: bool,
+    ) -> None:
+        super().__init__(source, code_theme=code_theme, hyperlinks=True)
+        self._wisp_theme = theme
+        self.native_ansi = native_ansi
+
+    def __rich_console__(
+        self,
+        console: Console,
+        options: ConsoleOptions,
+    ) -> RenderResult:
+        with console.use_theme(self._wisp_theme):
+            for renderable in super().__rich_console__(console, options):
+                segments = (renderable,) if isinstance(renderable, Segment) else console.render(
+                    renderable, options
+                )
+                for segment in segments:
+                    style = segment.style
+                    if style is not None and style.link:
+                        action = f"open_markdown_link({style.link!r})"
+                        style = style.update_link(None) + RichStyle(meta={"@click": action})
+                    yield Segment(segment.text, style, segment.control)
+
+
+class _SafeAssistantMarkdown:
+    """Render a prepared Markdown document, preserving source on render failure."""
+
+    def __init__(self, source: str, markdown: _AssistantMarkdown) -> None:
+        self.source = source
+        self.markdown = markdown
+
+    def __rich_console__(
+        self,
+        console: Console,
+        options: ConsoleOptions,
+    ) -> RenderResult:
         try:
-            await super()._on_mount(event)
-            Widget._on_mount(self, event)
-        finally:
-            self._ready.set()
-
-    async def wait_until_ready(self) -> None:
-        """Wait until Textual can no longer overwrite content during mounting."""
-
-        await self._ready.wait()
+            yield from console.render(self.markdown, options)
+        except Exception:
+            yield Text(self.source)
 
 
-class StreamMessage(Widget):
-    """One assistant turn rendered through Textual's public Markdown API."""
+class StreamMessage(Static):
+    """One assistant turn rendered as Rich Markdown in a single Textual widget."""
 
     DEFAULT_CSS = """
     StreamMessage {
         height: auto;
-    }
-
-    StreamMessage > Markdown,
-    StreamMessage > .stream-fallback {
-        height: auto;
-        margin: 0;
-    }
-
-    StreamMessage > Markdown {
-        padding: 0;
         color: $text;
-    }
-
-    StreamMessage MarkdownHeader {
-        width: 1fr;
-        content-align: left middle;
-        margin: 1 0 0 0;
-    }
-
-    StreamMessage MarkdownBlock,
-    StreamMessage MarkdownTableCellContents {
         link-color: $text-primary;
         link-color-hover: $text-accent;
         link-style: underline;
         link-style-hover: bold underline;
     }
-
-    StreamMessage MarkdownBlock:dark > .code_inline,
-    StreamMessage MarkdownBlock:light > .code_inline {
-        color: $text-accent;
-        background: $panel;
-    }
-
-    /* Fences and blockquotes carry no surface and no rail of their own. Each
-       assistant turn already owns a `border-left` that encodes its ROLE
-       (.message--assistant and friends in textual_app.py); a second rail a few
-       cells inside it puts an unrelated meaning on the same visual channel and
-       renders as two disagreeing bars, the inner one broken across the block's
-       lines. A panel background instead gives prose content the weight of an
-       interactive surface, since `$panel` is what the composer and indicators
-       use.
-
-       Indentation alone is sufficient here in a way it would not be on the web:
-       fenced content is already monospaced, syntax-colored and non-wrapping, so
-       it separates from surrounding prose without added chrome. */
-    StreamMessage MarkdownFence:dark,
-    StreamMessage MarkdownFence:light {
-        color: $text;
-        background: transparent;
-        border-left: none;
-        padding: 0;
-        margin: 1 0;
-    }
-
-    /* The fence's whole indent lives here rather than being split across the
-       fence and its Label, so it can be read against MarkdownBlockQuote's
-       matching value below: both block constructs indent by 2 and therefore
-       line up in a turn that contains both. */
-    StreamMessage MarkdownFence > Label {
-        padding: 0 0 0 2;
-    }
-
-    StreamMessage MarkdownFence:ansi {
-        color: $text;
-        background: transparent;
-        border-left: none;
-        padding: 0;
-        margin: 0;
-    }
-
-    StreamMessage MarkdownFence:ansi > Label {
-        padding: 1 0;
-    }
-
-    /* A blockquote deliberately KEEPS its rail, unlike the fence above. Its
-       only other cue is `$text-muted`, which is purely chromatic — strip color
-       and a quote becomes an ordinary paragraph. A fence has monospace
-       alignment and syntax coloring to fall back on; a quote has nothing. The
-       rail is therefore load-bearing here in a way it is not for fences, and
-       quotes are rare enough in assistant output that the double-rail overlap
-       stays uncommon. See `test_assistant_markdown_keeps_non_color_cues`. */
-    StreamMessage MarkdownBlockQuote:dark,
-    StreamMessage MarkdownBlockQuote:light {
-        color: $text-muted;
-        background: transparent;
-        border-left: outer $secondary;
-        padding: 0 1;
-        margin: 1 0;
-    }
-
-    StreamMessage MarkdownBlockQuote MarkdownParagraph {
-        margin: 0 0 1 0;
-    }
-
-    StreamMessage MarkdownBlockQuote MarkdownParagraph:last-child {
-        margin-bottom: 0;
-    }
-
-    StreamMessage MarkdownBullet:dark,
-    StreamMessage MarkdownBullet:light {
-        color: $accent;
-    }
-
-    StreamMessage MarkdownHorizontalRule {
-        height: 1;
-        padding-top: 0;
-        margin: 1 0;
-        border-bottom: solid $secondary;
-    }
-
-    StreamMessage MarkdownTableContent > .header {
-        color: $text-primary;
-    }
-
-    StreamMessage Markdown > MarkdownHeader:first-child,
-    StreamMessage Markdown > MarkdownFence:first-child,
-    StreamMessage Markdown > MarkdownBlockQuote:first-child,
-    StreamMessage Markdown > MarkdownHorizontalRule:first-child {
-        margin-top: 0;
-    }
-
-    StreamMessage Markdown > MarkdownParagraph:last-child,
-    StreamMessage Markdown > MarkdownList:last-child,
-    StreamMessage Markdown > MarkdownFence:last-child,
-    StreamMessage Markdown > MarkdownBlockQuote:last-child,
-    StreamMessage Markdown > MarkdownTable:last-child,
-    StreamMessage Markdown > MarkdownHorizontalRule:last-child {
-        margin-bottom: 0;
-    }
     """
 
     def __init__(self, initial_markdown: str | None = None) -> None:
-        super().__init__()
-        self._initial_markdown = initial_markdown
+        super().__init__(Content(), markup=False)
+        self._source = initial_markdown or ""
+        self._render_failed = False
         self.add_class("message", "message--assistant")
-        # Match settled assistant turns: role styling remains, but conversation
-        # cards intentionally have no visible role title.
-        self._markdown = _StreamMarkdown()
-        # Keep the literal fallback mounted but hidden. If Markdown's authoritative
-        # replacement fails, switching already-mounted children is synchronous and
-        # preserves this StreamMessage's history identity.
-        self._fallback = Static(Content(), classes="stream-fallback")
-        self._fallback.display = False
 
-    def compose(self) -> ComposeResult:
-        yield self._markdown
-        yield self._fallback
+    @property
+    def source(self) -> str:
+        """Return the authoritative Markdown source currently represented."""
 
-    async def on_mount(self) -> None:
-        """Render settled content after the Markdown child finishes mounting."""
+        return self._source
 
-        initial_markdown = self._initial_markdown
-        self._initial_markdown = None
-        if initial_markdown is not None:
-            await self.replace_markdown(initial_markdown)
+    def on_mount(self) -> None:
+        if self._source:
+            self._render_source()
+
+    def notify_style_update(self) -> None:
+        super().notify_style_update()
+        if self.is_mounted and self._source:
+            self._render_source()
 
     async def append_markdown(self, fragment: str) -> None:
-        """Append one provider fragment after Markdown mount initialization."""
+        """Append a coalesced provider fragment and rerender the retained source."""
 
-        await self._markdown.wait_until_ready()
-        await self._markdown.append(fragment)
+        self._source += fragment
+        self._render_source()
 
     async def replace_markdown(self, content: str) -> None:
-        """Render authoritative content, falling back to literal text on failure."""
+        """Replace the document from authoritative completion or history content."""
 
-        await self._markdown.wait_until_ready()
+        self._source = content
+        self._render_source()
+
+    def action_open_markdown_link(self, href: str) -> None:
+        """Open a Rich Markdown hyperlink through Textual's application boundary."""
+
+        self.app.open_url(href)
+
+    def _render_source(self) -> None:
         try:
-            await self._markdown.update(content)
+            markdown = self._build_markdown(self._source)
         except Exception as error:
-            # MessageCompleted is suppressed after streaming starts, making this
-            # authoritative source the only live copy. Preserve it as literal text
-            # rather than allowing a parser/layout failure to leave a blank turn.
-            self.log.error(f"Markdown finalization failed; using literal fallback: {error}")
-            self._fallback.update(Content(content))
-            self._markdown.display = False
-            self._fallback.display = True
+            if not self._render_failed:
+                self.log.error(f"Markdown rendering failed; using literal fallback: {error}")
+            self._render_failed = True
+            self.update(Content(self._source))
+            return
+        self._render_failed = False
+        self.update(_SafeAssistantMarkdown(self._source, markdown))
+
+    def _build_markdown(self, source: str) -> _AssistantMarkdown:
+        theme = self.app.current_theme
+        foreground = theme.foreground or "default"
+        secondary = theme.secondary or foreground
+        accent = theme.accent or foreground
+        panel = theme.panel or "default"
+        heading = theme.warning or foreground
+        styles = {
+            "markdown.paragraph": foreground,
+            "markdown.text": foreground,
+            "markdown.strong": f"bold {foreground}",
+            "markdown.code": f"bold {accent} on {panel}",
+            "markdown.code_block": foreground,
+            "markdown.block_quote": secondary,
+            "markdown.list": accent,
+            "markdown.item": foreground,
+            "markdown.item.bullet": f"bold {accent}",
+            "markdown.item.number": accent,
+            "markdown.hr": secondary,
+            "markdown.h1": f"bold underline {heading}",
+            **{f"markdown.h{level}": f"bold {heading}" for level in range(2, 7)},
+            "markdown.link": f"underline {foreground}",
+            "markdown.link_url": f"underline {foreground}",
+            "markdown.table.border": secondary,
+            "markdown.table.header": f"bold {foreground}",
+        }
+        return _AssistantMarkdown(
+            _sanitize_markdown_controls(source),
+            theme=RichTheme(styles),
+            code_theme="monokai" if theme.dark else "friendly",
+            native_ansi=self.app.native_ansi_color,
+        )
+
+
+def _sanitize_markdown_controls(source: str) -> str:
+    """Strip terminal controls except inside an explicitly tagged ANSI fence."""
+
+    fence_character: str | None = None
+    fence_length = 0
+    ansi_fence = False
+    sanitized: list[str] = []
+    for line in source.splitlines(keepends=True):
+        marker = _MARKDOWN_FENCE_RE.match(line)
+        if fence_character is None and marker is not None:
+            delimiter, info = marker.groups()
+            fence_character = delimiter[0]
+            fence_length = len(delimiter)
+            stripped_info = info.strip()
+            ansi_fence = bool(
+                stripped_info and stripped_info.split(maxsplit=1)[0].lower() == "ansi"
+            )
+            sanitized.append(line)
+            continue
+        if fence_character is not None and marker is not None:
+            delimiter, info = marker.groups()
+            if (
+                delimiter[0] == fence_character
+                and len(delimiter) >= fence_length
+                and not info.strip()
+            ):
+                fence_character = None
+                fence_length = 0
+                ansi_fence = False
+                sanitized.append(line)
+                continue
+        sanitized.append(line if ansi_fence else Text.from_ansi(line).plain)
+    return "".join(sanitized)

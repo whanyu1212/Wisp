@@ -119,7 +119,7 @@ def test_history_marker_falls_back_to_the_attached_transcript_head() -> None:
             transcript = app._transcript
             assert transcript is not None
             lines = [
-                child._markdown.source if isinstance(child, StreamMessage) else child.render().plain
+                child.source if isinstance(child, StreamMessage) else child.render().plain
                 for child in transcript.children
                 if isinstance(child, LineMessage | StreamMessage)
             ]

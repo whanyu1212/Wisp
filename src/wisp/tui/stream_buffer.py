@@ -1,4 +1,4 @@
-"""Native Textual Markdown streaming for one assistant turn at a time."""
+"""Paced single-widget Markdown streaming for one assistant turn at a time."""
 
 from __future__ import annotations
 
@@ -37,13 +37,12 @@ class _StreamTurn:
 
 
 class MarkdownStreamController:
-    """Bridge synchronous renderer calls to Textual's async Markdown API.
+    """Bridge synchronous renderer calls to the async assistant message API.
 
     Provider fragments are retained in an amortized buffer until the turn settles.
-    Textual's public ``Markdown.append`` API is awaited directly, avoiding the private
-    ``MarkdownStream`` background queue. Finalization replaces the document from
-    the completed message, so an interrupted incremental render cannot leave a
-    permanently partial response.
+    Each paced write replaces the renderable inside one mounted ``StreamMessage``;
+    finalization replaces it from the completed message, so an interrupted
+    incremental render cannot leave a permanently partial response.
     """
 
     # Paced to leave headroom for the cost of the write it schedules, rather than
@@ -265,8 +264,8 @@ class MarkdownStreamController:
             turn.follow_generation = transcript.follow_generation
             try:
                 # The first provider fragment can arrive in the same event-loop
-                # tick as the StreamMessage mount. Wait for compose() to mount its
-                # Markdown child before calling the public append API.
+                # tick as the StreamMessage mount. Wait until its app/theme context
+                # exists before building the Rich Markdown renderable.
                 await turn.mounted
                 await turn.widget.append_markdown(text)
             except Exception as error:

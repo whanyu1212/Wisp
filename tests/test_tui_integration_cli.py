@@ -14,7 +14,7 @@ from rich.cells import cell_len
 from textual import events
 from textual.content import Content
 from textual.widget import Widget
-from textual.widgets import Header, Label, Markdown, OptionList, Static
+from textual.widgets import Header, Label, OptionList, Static
 
 import wisp.cli as cli_module
 from tests.tui_support import *
@@ -76,11 +76,7 @@ def _transcript_texts(app: TextualTui) -> list[str]:
         if isinstance(child, LineMessage | ToolCard):
             texts.append(child.render().plain)  # Textual Content
         elif isinstance(child, StreamMessage):
-            texts.append(
-                child._fallback.render().plain
-                if child._fallback.display
-                else child._markdown.source
-            )
+            texts.append(child.source)
     return texts
 
 
@@ -987,7 +983,7 @@ def test_textual_tui_preserves_brackets_in_streamed_output() -> None:
 def test_textual_tui_renderer_renders_hydrated_history_in_order_and_markdown() -> None:
     restored_markdown = "# Restored answer\n\n- first\n- second\n\n```python\nprint('ok')\n```"
 
-    async def scenario() -> tuple[list[str], list[str], int]:
+    async def scenario() -> tuple[list[str], int, int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.render_history(
@@ -1001,17 +997,13 @@ def test_textual_tui_renderer_renders_hydrated_history_in_order_and_markdown() -
             assistants = [
                 child for child in transcript.children if isinstance(child, StreamMessage)
             ]
-            block_names = [
-                type(widget).__name__
-                for assistant in assistants
-                for widget in assistant._markdown.walk_children()
-            ]
-            return _transcript_texts(app_instance), block_names, len(assistants)
+            child_count = sum(len(assistant.children) for assistant in assistants)
+            return _transcript_texts(app_instance), child_count, len(assistants)
 
-    rendered, block_names, assistant_count = anyio.run(scenario)
+    rendered, child_count, assistant_count = anyio.run(scenario)
     assert rendered == ["old [red]prompt[/red]", restored_markdown]
     assert assistant_count == 1
-    assert {"MarkdownH1", "MarkdownBullet", "MarkdownFence"} <= set(block_names)
+    assert child_count == 0
 
 
 def test_textual_tui_renders_resumed_markdown_after_rpc_json_round_trip() -> None:
@@ -1032,7 +1024,7 @@ def test_textual_tui_renders_resumed_markdown_after_rpc_json_round_trip() -> Non
     restored = wisp_event_from_json(report.model_dump_json())
     assert isinstance(restored, RpcMessagesReported)
 
-    async def scenario() -> tuple[str, list[str]]:
+    async def scenario() -> tuple[str, int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.replace_history_entries(
@@ -1044,17 +1036,15 @@ def test_textual_tui_renders_resumed_markdown_after_rpc_json_round_trip() -> Non
             assistant = next(
                 child for child in transcript.children if isinstance(child, StreamMessage)
             )
-            return assistant._markdown.source, [
-                type(widget).__name__ for widget in assistant._markdown.walk_children()
-            ]
+            return assistant.source, len(assistant.children)
 
-    source, block_names = anyio.run(scenario)
+    source, child_count = anyio.run(scenario)
     assert source == restored_markdown
-    assert {"MarkdownH3", "MarkdownOrderedList"} <= set(block_names)
+    assert child_count == 0
 
 
 def test_textual_completed_message_without_deltas_renders_markdown() -> None:
-    async def scenario() -> tuple[str, list[str]]:
+    async def scenario() -> tuple[str, int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.event(completed_message(content="## Settled answer\n\n`inline`"))
@@ -1062,13 +1052,11 @@ def test_textual_completed_message_without_deltas_renders_markdown() -> None:
             transcript = app_instance.query_one("#transcript", Transcript)
             (assistant,) = transcript.children
             assert isinstance(assistant, StreamMessage)
-            return assistant._markdown.source, [
-                type(widget).__name__ for widget in assistant._markdown.walk_children()
-            ]
+            return assistant.source, len(assistant.children)
 
-    source, block_names = anyio.run(scenario)
+    source, child_count = anyio.run(scenario)
     assert source == "## Settled answer\n\n`inline`"
-    assert "MarkdownH2" in block_names
+    assert child_count == 0
 
 
 def test_textual_tui_renderer_renders_historical_tool_cards() -> None:
@@ -3026,7 +3014,7 @@ def test_textual_stream_completion_reconciles_authoritative_content() -> None:
             renderer.end_token_stream_with_content("complete authoritative response")
             await app_instance.wait_for_stream_idle()
             stream = app_instance.query_one(StreamMessage)
-            return stream._markdown.source
+            return stream.source
 
     assert anyio.run(scenario) == "complete authoritative response"
 
@@ -3040,71 +3028,42 @@ def test_textual_stream_completion_does_not_erase_deltas_with_empty_content() ->
             renderer.end_token_stream_with_content("")
             await app_instance.wait_for_stream_idle()
             stream = app_instance.query_one(StreamMessage)
-            return stream._markdown.source
+            return stream.source
 
     assert anyio.run(scenario) == "response that was streamed"
 
 
-def test_textual_stream_waits_for_markdown_mount_initialization(
-    monkeypatch: MonkeyPatch,
-) -> None:
-    authoritative = "content written only after mount initialization"
-    mount_started = asyncio.Event()
-    release_mount = asyncio.Event()
-    original_on_mount = Markdown._on_mount
-    mount_calls = 0
+def test_textual_stream_uses_one_widget_without_a_markdown_mount_barrier() -> None:
+    authoritative = "content written through one static widget"
 
-    async def delayed_on_mount(markdown: Markdown, event: events.Mount) -> None:
-        nonlocal mount_calls
-        mount_calls += 1
-        mount_started.set()
-        await release_mount.wait()
-        await original_on_mount(markdown, event)
-
-    monkeypatch.setattr(Markdown, "_on_mount", delayed_on_mount)
-
-    async def scenario() -> str:
+    async def scenario() -> tuple[str, int]:
         app_instance, _renderer = create_textual_tui()
         async with app_instance.run_test():
-            replacement: asyncio.Task[None] | None = None
-            try:
-                transcript = app_instance.query_one("#transcript", Transcript)
-                stream = StreamMessage()
-                mounted = transcript.mount_message(stream)
-                with anyio.fail_after(2):
-                    await mount_started.wait()
-                    replacement = asyncio.create_task(stream.replace_markdown(authoritative))
-                    await asyncio.sleep(0)
-                    assert not replacement.done()
-                    release_mount.set()
-                    await mounted
-                    await replacement
-                return stream._markdown.source
-            finally:
-                release_mount.set()
-                if replacement is not None and not replacement.done():
-                    replacement.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await replacement
+            transcript = app_instance.query_one("#transcript", Transcript)
+            stream = StreamMessage()
+            await transcript.mount_message(stream)
+            await stream.replace_markdown(authoritative)
+            return stream.source, len(stream.children)
 
-    assert anyio.run(scenario) == authoritative
-    assert mount_calls == 1
+    source, child_count = anyio.run(scenario)
+    assert source == authoritative
+    assert child_count == 0
 
 
 def test_textual_stream_completion_falls_back_when_final_markdown_update_fails(
     monkeypatch: MonkeyPatch,
 ) -> None:
     authoritative = "[red]complete authoritative response[/red]"
-    original_update = Markdown.update
+    original_build = StreamMessage._build_markdown
 
-    async def fail_authoritative_update(markdown: Markdown, content: str) -> object:
+    def fail_authoritative_update(stream: StreamMessage, content: str) -> object:
         if content == authoritative:
             raise RuntimeError("simulated final Markdown failure")
-        return await original_update(markdown, content)
+        return original_build(stream, content)
 
-    monkeypatch.setattr(Markdown, "update", fail_authoritative_update)
+    monkeypatch.setattr(StreamMessage, "_build_markdown", fail_authoritative_update)
 
-    async def scenario() -> tuple[Content, bool, bool, int, bool]:
+    async def scenario() -> tuple[Content, str, int, bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test():
             renderer.token_delta("partial response")
@@ -3112,21 +3071,18 @@ def test_textual_stream_completion_falls_back_when_final_markdown_update_fails(
             renderer.record_streamed_message_completed(completed_message(content=authoritative))
             await app_instance.wait_for_stream_idle()
             stream = app_instance.query_one(StreamMessage)
+            assert isinstance(stream.content, Content)
             return (
-                stream._fallback.render(),
-                stream._fallback.display,
-                stream._markdown.display,
+                stream.content,
+                stream.source,
                 len(app_instance.query(StreamMessage)),
                 renderer._history._live_entries[-1].widget is stream,
             )
 
-    fallback, fallback_visible, markdown_visible, stream_count, history_retained = anyio.run(
-        scenario
-    )
+    fallback, source, stream_count, history_retained = anyio.run(scenario)
     assert fallback.plain == authoritative
     assert not fallback.spans  # fallback content is literal, not parsed as markup
-    assert fallback_visible is True
-    assert markdown_visible is False
+    assert source == authoritative
     assert stream_count == 1
     assert history_retained is True
 
@@ -3180,12 +3136,12 @@ def test_textual_stream_finalizers_preserve_flush_order(
                     await app_instance.wait_for_stream_idle()
                 transcript = app_instance.query_one("#transcript", Transcript)
                 mounted = [
-                    child._markdown.source
+                    child.source
                     for child in transcript.children
                     if isinstance(child, StreamMessage)
                 ]
                 settled = [
-                    widget._markdown.source
+                    widget.source
                     for widget, _entry_count in app_instance._transcript_controller._settled_widgets
                     if isinstance(widget, StreamMessage)
                 ]
@@ -3204,15 +3160,15 @@ def test_textual_transcript_replacement_invalidates_a_flushed_stream_finalizer(
     authoritative = "response from the replaced session"
     final_update_started = asyncio.Event()
     release_final_update = asyncio.Event()
-    original_update = Markdown.update
+    original_replace = StreamMessage.replace_markdown
 
-    async def delayed_final_update(markdown: Markdown, content: str) -> object:
+    async def delayed_final_update(stream: StreamMessage, content: str) -> None:
         if content == authoritative:
             final_update_started.set()
             await release_final_update.wait()
-        return await original_update(markdown, content)
+        await original_replace(stream, content)
 
-    monkeypatch.setattr(Markdown, "update", delayed_final_update)
+    monkeypatch.setattr(StreamMessage, "replace_markdown", delayed_final_update)
 
     async def scenario() -> tuple[int, bool, bool]:
         app_instance, renderer = create_textual_tui()
@@ -3262,7 +3218,7 @@ def test_textual_stream_completion_repairs_an_incremental_render_failure(
             renderer.end_token_stream_with_content("first half second half")
             await app_instance.wait_for_stream_idle()
             stream = app_instance.query_one(StreamMessage)
-            return stream._markdown.source
+            return stream.source
 
     assert anyio.run(scenario) == "first half second half"
 
@@ -3375,7 +3331,7 @@ def test_textual_stream_completion_survives_an_immediate_tool_event() -> None:
             transcript = app_instance.query_one("#transcript", Transcript)
             kinds = [type(child).__name__ for child in transcript.children]
             stream = transcript.query_one(StreamMessage)
-            return kinds, [stream._markdown.source, stream._fallback.render().plain]
+            return kinds, [stream.source]
 
     kinds, rendered = anyio.run(scenario)
     assert kinds == ["StreamMessage", "ToolCard"]
@@ -4564,7 +4520,7 @@ def test_textual_history_page_prepend_preserves_viewport_and_session_marker() ->
                 child
                 for child in transcript.children
                 if (isinstance(child, LineMessage) and "current 8" in child.render().plain)
-                or (isinstance(child, StreamMessage) and "current 8" in child._markdown.source)
+                or (isinstance(child, StreamMessage) and "current 8" in child.source)
             )
             anchor_y_before = anchor.region.y
             scroll_y_before = transcript.scroll_y
@@ -4829,7 +4785,7 @@ def test_textual_streaming_keeps_a_large_many_block_reply_pinned_to_the_tail() -
             return (
                 transcript.scroll_y,
                 transcript.max_scroll_y,
-                stream._markdown.source,
+                stream.source,
                 app_instance.last_stream_write_count,
             )
 
@@ -4886,7 +4842,7 @@ def test_textual_streaming_reconciles_deferred_output_after_returning_to_tail() 
             stream = next(
                 child for child in transcript.children if isinstance(child, StreamMessage)
             )
-            assert stream._markdown.source == "visible"
+            assert stream.source == "visible"
             transcript.return_to_latest()
             # Two distinct waits, in this order. The pause delivers the
             # FollowChanged message, whose handler is what re-queues the
@@ -4899,7 +4855,7 @@ def test_textual_streaming_reconciles_deferred_output_after_returning_to_tail() 
             await pilot.pause()
             await app_instance.wait_for_stream_idle()
             await pilot.pause()
-            return stream._markdown.source, transcript.is_following
+            return stream.source, transcript.is_following
 
     content, following = anyio.run(scenario)
     assert content == "visible deferred"
