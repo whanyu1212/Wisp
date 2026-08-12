@@ -44,9 +44,7 @@ def _plain(segments: list[Segment]) -> str:
 
 def _style_for(segments: list[Segment], text: str) -> RichStyle:
     return next(
-        segment.style
-        for segment in segments
-        if text in segment.text and segment.style is not None
+        segment.style for segment in segments if text in segment.text and segment.style is not None
     )
 
 

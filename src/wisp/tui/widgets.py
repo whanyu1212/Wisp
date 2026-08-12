@@ -2803,8 +2803,10 @@ class _AssistantMarkdown(RichMarkdown):
     ) -> RenderResult:
         with console.use_theme(self._wisp_theme):
             for renderable in super().__rich_console__(console, options):
-                segments = (renderable,) if isinstance(renderable, Segment) else console.render(
-                    renderable, options
+                segments = (
+                    (renderable,)
+                    if isinstance(renderable, Segment)
+                    else console.render(renderable, options)
                 )
                 for segment in segments:
                     style = segment.style

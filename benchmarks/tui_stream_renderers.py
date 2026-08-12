@@ -96,9 +96,7 @@ async def run_comparison(config: ScenarioConfig, *, runs: int) -> dict[str, obje
 
     samples: list[dict[str, object]] = []
     for run in range(1, runs + 1):
-        modes: tuple[StreamMode, ...] = (
-            ("rich", "plain") if run % 2 else ("plain", "rich")
-        )
+        modes: tuple[StreamMode, ...] = ("rich", "plain") if run % 2 else ("plain", "rich")
         for mode in modes:
             report = await _run_mode(mode, config)
             samples.append(_sample(mode, run, report))
