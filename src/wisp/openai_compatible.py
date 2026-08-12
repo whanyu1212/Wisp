@@ -9,7 +9,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-_RESERVED_PROVIDER_NAMES = frozenset({"anthropic", "fake", "google", "openai", "openai-codex"})
+_RESERVED_PROVIDER_NAMES = frozenset(
+    {"anthropic", "fake", "gemini", "google", "openai", "openai-codex"}
+)
 _PROVIDER_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 _PROVIDER_NAME_MAX_LENGTH = 64
 
@@ -85,7 +87,9 @@ def validate_openai_compatible_provider_name(value: str) -> str:
             "letters, digits, or single hyphens"
         )
     if normalized in _RESERVED_PROVIDER_NAMES:
-        raise ValueError(f"provider_name conflicts with built-in provider {normalized!r}")
+        raise ValueError(
+            f"provider_name conflicts with built-in provider or credential namespace {normalized!r}"
+        )
     return normalized
 
 

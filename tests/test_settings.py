@@ -354,16 +354,20 @@ def test_openai_compatible_endpoint_validation(tmp_path: Path) -> None:
                 }
             }
         )
-    with pytest.raises(ValidationError, match="conflicts with built-in provider"):
-        WispSettings.model_validate(
-            {
-                "openai_compatible": {
-                    "provider_name": "openai",
-                    "base_url": "https://example.test/v1",
-                    "default_model": "model",
+    for reserved_name in ("openai", "gemini"):
+        with pytest.raises(
+            ValidationError,
+            match="conflicts with built-in provider or credential namespace",
+        ):
+            WispSettings.model_validate(
+                {
+                    "openai_compatible": {
+                        "provider_name": reserved_name,
+                        "base_url": "https://example.test/v1",
+                        "default_model": "model",
+                    }
                 }
-            }
-        )
+            )
     for invalid_name in (
         "123ai",
         "OpenRouter",
