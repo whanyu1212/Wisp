@@ -58,7 +58,7 @@ _PATH_FALLBACK_SUPPORTED = os.name == "nt"
 class _SkillRoot:
     source: SkillSource
     base: Path
-    components: tuple[str, str]
+    components: tuple[str, ...]
 
     @property
     def path(self) -> Path:
@@ -86,6 +86,7 @@ def discover_skills(
     home_dir: Path,
     project_root: Path | None,
     protected_paths: tuple[str, ...],
+    package_root: Path | None = None,
 ) -> SkillCatalog:
     """Discover one immutable skill catalog from allowed user and project roots.
 
@@ -116,6 +117,14 @@ def discover_skills(
         )
     if home is not None:
         roots.extend(_SkillRoot(source, home, components) for source, components in home_specs)
+    if package_root is not None:
+        package, package_diagnostics = _resolve_source_base(
+            package_root,
+            (("package:wisp", ()),),
+        )
+        diagnostics.extend(package_diagnostics)
+        if package is not None:
+            roots.append(_SkillRoot("package:wisp", package, ()))
 
     context = ToolContext(
         cwd=project or home or home_dir,
@@ -165,7 +174,7 @@ def discover_skills(
 
 def _resolve_source_base(
     base: Path,
-    specs: tuple[tuple[SkillSource, tuple[str, str]], ...],
+    specs: tuple[tuple[SkillSource, tuple[str, ...]], ...],
 ) -> tuple[Path | None, tuple[SkillDiagnostic, ...]]:
     try:
         return base.expanduser().resolve(strict=False), ()

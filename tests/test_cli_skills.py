@@ -43,8 +43,9 @@ def test_skills_lists_user_catalog_in_name_order(
 
     assert result.exit_code == 0, result.output
     assert result.stdout.startswith(
-        "Skills (2):\nalpha [user:agents]\n  Alpha tasks.\nzebra [user:wisp]\n  Zebra tasks.\n"
+        "Skills (3):\nalpha [user:agents]\n  Alpha tasks.\nwisp-development [package:wisp]\n"
     )
+    assert "zebra [user:wisp]\n  Zebra tasks.\n" in result.stdout
     assert "Project skills skipped" in result.stdout
 
 
@@ -152,13 +153,13 @@ def test_skills_reports_diagnostics_without_hiding_valid_entries(
     assert "invalid-frontmatter [user:wisp]" in result.stdout
 
 
-def test_skills_reports_empty_catalog(tmp_path: Path) -> None:
+def test_skills_lists_package_catalog_when_no_filesystem_skills_exist(tmp_path: Path) -> None:
     home = tmp_path / "home"
 
     result = CliRunner().invoke(app, ["skills"], env=_env(home, trusted="1"))
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == "No skills found.\n"
+    assert result.stdout.startswith("Skills (1):\nwisp-development [package:wisp]\n")
 
 
 def test_skills_strips_terminal_control_characters(

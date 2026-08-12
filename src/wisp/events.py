@@ -26,7 +26,7 @@ from wisp.skills.models import (
     SkillSource,
 )
 
-EVENT_SCHEMA_VERSION: Literal[30] = 30
+EVENT_SCHEMA_VERSION: Literal[31] = 31
 THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
 OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
 COST_ACCOUNTING_SCHEMA_VERSION = 12
@@ -48,6 +48,7 @@ AGENT_MODE_SCHEMA_VERSION = 27
 SKILL_INVOCATION_SCHEMA_VERSION = 28
 SKILL_CATALOG_SCHEMA_VERSION = 29
 MCP_STATUS_SCHEMA_VERSION = 30
+PACKAGE_SKILLS_SCHEMA_VERSION = 31
 JsonObject = dict[str, object]
 MessageRole = Literal["system", "user", "assistant", "tool"]
 RunOutcome = Literal["completed", "failed", "cancelled"]
@@ -111,6 +112,7 @@ class WispEvent(BaseModel):
         28,
         29,
         30,
+        31,
     ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
 
@@ -997,6 +999,21 @@ class RpcCommandsReported(WispEvent):
         return self
 
 
+def _validate_package_skill_schema(
+    catalog: RpcSkillCatalogSnapshot,
+    *,
+    schema_version: int,
+) -> None:
+    if schema_version >= PACKAGE_SKILLS_SCHEMA_VERSION:
+        return
+    if any(entry.source == "package:wisp" for entry in catalog.entries) or any(
+        diagnostic.source == "package:wisp" for diagnostic in catalog.diagnostics
+    ):
+        raise ValueError(
+            f"Package skill sources require schema_version {PACKAGE_SKILLS_SCHEMA_VERSION} or newer"
+        )
+
+
 class RpcSkillsReported(WispEvent):
     """Immediate, non-persisted skill catalog snapshot returned over RPC."""
 
@@ -1010,6 +1027,7 @@ class RpcSkillsReported(WispEvent):
             raise ValueError(
                 f"RPC skill reports require schema_version {SKILL_CATALOG_SCHEMA_VERSION} or newer"
             )
+        _validate_package_skill_schema(self.catalog, schema_version=self.schema_version)
         return self
 
 
@@ -1043,6 +1061,7 @@ class SkillCatalogUpdated(WispEvent):
                 "skill catalog updates require schema_version "
                 f"{SKILL_CATALOG_SCHEMA_VERSION} or newer"
             )
+        _validate_package_skill_schema(self.catalog, schema_version=self.schema_version)
         return self
 
 
@@ -1600,6 +1619,25 @@ def _require_current_schema(data: JsonObject) -> None:
         raise ValueError(
             f"RPC MCP status events require schema_version {MCP_STATUS_SCHEMA_VERSION} or newer"
         )
+    if data.get("type") in {"rpc.skills", "skill.catalog.updated"} and (
+        version < PACKAGE_SKILLS_SCHEMA_VERSION
+    ):
+        catalog = data.get("catalog")
+        if isinstance(catalog, dict):
+            entries = catalog.get("entries")
+            diagnostics = catalog.get("diagnostics")
+            descriptors = (
+                *(entries if isinstance(entries, list) else ()),
+                *(diagnostics if isinstance(diagnostics, list) else ()),
+            )
+            if any(
+                isinstance(descriptor, dict) and descriptor.get("source") == "package:wisp"
+                for descriptor in descriptors
+            ):
+                raise ValueError(
+                    "Package skill sources require schema_version "
+                    f"{PACKAGE_SKILLS_SCHEMA_VERSION} or newer"
+                )
     if data.get("type") == "rpc.messages" and version < RPC_MESSAGES_SCHEMA_VERSION:
         raise ValueError(
             "RPC message report events require schema_version "

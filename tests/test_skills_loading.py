@@ -8,8 +8,10 @@ import anyio
 import pytest
 
 import wisp.skills.loading as loading_module
+from wisp.skills.discovery import discover_skills
 from wisp.skills.loading import load_skill_resource
 from wisp.skills.models import SkillCatalog, SkillEntry
+from wisp.skills.package import bundled_skills_root
 from wisp.skills.tool import SkillTool
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError
@@ -35,6 +37,34 @@ def test_loads_instruction_body_without_frontmatter(tmp_path: Path) -> None:
     assert resource.text == "Follow these instructions.\n"
     assert resource.resource == "SKILL.md"
     assert resource.truncated is False
+
+
+def test_loads_all_bundled_wisp_development_resources(tmp_path: Path) -> None:
+    catalog = discover_skills(
+        home_dir=tmp_path,
+        project_root=None,
+        protected_paths=(),
+        package_root=bundled_skills_root(),
+    )
+    entry = catalog.get("wisp-development")
+
+    assert entry is not None
+    assert entry.source == "package:wisp"
+    for resource_name in (
+        None,
+        "references/architecture.md",
+        "references/extension-api.md",
+        "references/safety.md",
+        "references/authoring.md",
+        "references/verification.md",
+    ):
+        resource = load_skill_resource(
+            entry,
+            resource_name,
+            context=ToolContext(cwd=tmp_path),
+        )
+        assert resource.text
+        assert resource.truncated is False
 
 
 def test_loads_nested_relative_resource(tmp_path: Path) -> None:

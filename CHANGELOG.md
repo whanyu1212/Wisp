@@ -11,6 +11,9 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+- Added the package-owned `wisp-development` skill with progressively loaded architecture,
+  extension API, safety, authoring, and verification guidance.
+
 ## 0.1.0b3 — 2026-08-12
 
 - Added configurable OpenAI-compatible endpoints for using provider APIs beyond the built-in OpenAI
@@ -77,7 +80,12 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
   protected paths, and explicit unsafe-tool approvals.
 - Publishes provider-neutral lifecycle events at schema v27.
 
-## Schema v30 — current
+## Schema v31 — current
+
+Adds `package:wisp` as a skill catalog source for package-owned skills. RPC clients that
+exhaustively validate skill sources must accept the new value.
+
+## Schema v30
 
 Adds the `rpc.mcp` event carrying configured server connection status, registered tool names, and
 sanitized startup failures. RPC clients can issue `get_mcp_status`; consumers that exhaustively
@@ -102,7 +110,7 @@ Adds `mode` (`"plan" | "build"`, default `"build"`) to `CodingSessionState`, so 
 reports the active agent mode. The field is stripped for consumers reading at an older schema
 version.
 
-Events at schema v5 through v30 remain readable.
+Events at schema v5 through v31 remain readable.
 
 ---
 

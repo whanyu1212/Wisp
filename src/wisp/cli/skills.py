@@ -11,6 +11,7 @@ from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.trust import resolve_cli_trust
 from wisp.config import WispConfig
 from wisp.skills import SkillCatalog, SkillDiagnostic, discover_skills
+from wisp.skills.package import bundled_skills_root
 
 
 def skills_command(
@@ -53,6 +54,7 @@ def skills_command(
         home_dir=_home_dir(),
         project_root=project_root if trusted else None,
         protected_paths=config.protected_paths,
+        package_root=bundled_skills_root(),
     )
     if resolution_diagnostics:
         catalog = SkillCatalog(

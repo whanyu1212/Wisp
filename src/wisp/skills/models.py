@@ -8,7 +8,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-type SkillSource = Literal["project:wisp", "project:agents", "user:wisp", "user:agents"]
+type SkillSource = Literal[
+    "project:wisp",
+    "project:agents",
+    "user:wisp",
+    "user:agents",
+    "package:wisp",
+]
 type SkillDiagnosticSeverity = Literal["warning", "error"]
 type SkillDiagnosticCode = Literal[
     "catalog-limit",

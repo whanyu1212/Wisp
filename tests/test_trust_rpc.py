@@ -202,7 +202,7 @@ def test_rpc_first_trust_refreshes_project_skills_before_provider_request(
     )
     catalog = cast(dict[str, object], catalog_updated["catalog"])
     entries = cast(list[dict[str, object]], catalog["entries"])
-    assert [entry["name"] for entry in entries] == ["project-demo"]
+    assert [entry["name"] for entry in entries] == ["project-demo", "wisp-development"]
     assert catalog["project_trusted"] is True
 
 
