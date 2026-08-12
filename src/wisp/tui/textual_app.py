@@ -182,6 +182,7 @@ class TextualTui(App[None]):
         height: 1fr;
         border: none;
         padding: 0 1 3 1;
+        overflow-x: hidden;
         scrollbar-size-vertical: 1;
         scrollbar-color: $secondary;
         scrollbar-color-hover: $primary;

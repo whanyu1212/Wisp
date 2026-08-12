@@ -2839,7 +2839,10 @@ class StreamMessage(Static):
 
     DEFAULT_CSS = """
     StreamMessage {
+        width: 1fr;
+        max-width: 100%;
         height: auto;
+        overflow-x: hidden;
         color: $text;
         link-color: $text-primary;
         link-color-hover: $text-accent;
