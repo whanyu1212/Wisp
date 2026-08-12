@@ -271,10 +271,18 @@ class OpenAIProvider:
     ) -> AsyncIterator[ResponseStreamEvent]:
         client = await self._client_or_create()
         openai_tools = _tool_specs_to_openai_tools(tools)
+        explicit_prompt_cache = _uses_explicit_prompt_cache(
+            messages,
+            model=model,
+            prompt_cache_key=prompt_cache_key,
+        )
         response_input = (
             _tool_results_to_response_input(tool_results)
             if tool_results
-            else _messages_to_response_input(messages)
+            else _messages_to_response_input(
+                messages,
+                explicit_prompt_cache=explicit_prompt_cache,
+            )
         )
 
         # Built as a single kwargs dict rather than a create() call per
@@ -299,6 +307,11 @@ class OpenAIProvider:
             kwargs["reasoning"] = {"effort": effort}
         if prompt_cache_key is not None:
             kwargs["prompt_cache_key"] = prompt_cache_key
+        if explicit_prompt_cache:
+            # openai-python 2.44 does not yet expose GPT-5.6's request-wide
+            # prompt_cache_options field, so use its documented forward-compatible
+            # escape hatch while keeping every typed field above unchanged.
+            kwargs["extra_body"] = {"prompt_cache_options": {"mode": "explicit"}}
         create = cast(Callable[..., Awaitable[object]], client.responses.create)
         stream = await create(**kwargs)
         return cast(AsyncIterator[ResponseStreamEvent], stream)
@@ -384,15 +397,49 @@ def _incomplete_response_message(response: Response) -> str:
     return "OpenAI response incomplete"
 
 
-def _messages_to_response_input(messages: Sequence[Message]) -> ResponseInputParam:
+def _messages_to_response_input(
+    messages: Sequence[Message],
+    *,
+    explicit_prompt_cache: bool = False,
+) -> ResponseInputParam:
     response_input: ResponseInputParam = []
+    boundary_written = False
     for message in messages:
-        message_param: EasyInputMessageParam = {
-            "role": _to_openai_role(message.role),
-            "content": message.content,
-        }
+        if explicit_prompt_cache and message.prompt_cache_boundary and not boundary_written:
+            message_param = cast(
+                EasyInputMessageParam,
+                {
+                    "role": _to_openai_role(message.role),
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": message.content,
+                            "prompt_cache_breakpoint": {"mode": "explicit"},
+                        }
+                    ],
+                },
+            )
+            boundary_written = True
+        else:
+            message_param = {
+                "role": _to_openai_role(message.role),
+                "content": message.content,
+            }
         response_input.append(message_param)
     return response_input
+
+
+def _uses_explicit_prompt_cache(
+    messages: Sequence[Message],
+    *,
+    model: str,
+    prompt_cache_key: str | None,
+) -> bool:
+    return (
+        prompt_cache_key is not None
+        and (model == "gpt-5.6" or model.startswith("gpt-5.6-"))
+        and any(message.prompt_cache_boundary and message.content for message in messages)
+    )
 
 
 def _tool_results_to_response_input(tool_results: Sequence[ToolCallResult]) -> ResponseInputParam:

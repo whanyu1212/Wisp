@@ -622,11 +622,15 @@ def test_provider_summary_uses_no_tools_no_continuation_and_captures_usage() -> 
     assert request.tools == ()
     assert request.tool_results == ()
     assert request.previous_response_id is None
-    assert len(request.messages) == 2
+    assert len(request.messages) == 3
     assert request.messages[0].role == "system"
-    assert "## Additional focus\nFocus on tests" in request.messages[0].content
-    assert request.messages[1].role == "user"
-    assert "<historical_transcript>" in request.messages[1].content
+    assert request.messages[0].prompt_cache_boundary is True
+    assert "## Additional focus" not in request.messages[0].content
+    assert request.messages[1].role == "system"
+    assert request.messages[1].content == "## Additional focus\nFocus on tests"
+    assert request.messages[1].prompt_cache_boundary is False
+    assert request.messages[2].role == "user"
+    assert "<historical_transcript>" in request.messages[2].content
 
 
 def test_compaction_usage_marks_partially_reported_cache_totals_incomplete() -> None:

@@ -29,6 +29,8 @@ def test_build_prompt_messages_includes_default_instructions_and_context(tmp_pat
 
     assert [message.role for message in messages] == ["system", "system", "system"]
     assert "You are Wisp" in messages[0].content
+    assert messages[0].prompt_cache_boundary is True
+    assert all(not message.prompt_cache_boundary for message in messages[1:])
     assert "Operate like a careful software engineering assistant" in messages[0].content
     assert f"cwd: {tmp_path.resolve(strict=False)}" in messages[1].content
     assert "project files:\n  pyproject.toml" in messages[1].content

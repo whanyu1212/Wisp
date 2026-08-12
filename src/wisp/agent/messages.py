@@ -47,6 +47,7 @@ class Message(BaseModel):
 
     role: Role
     content: str
+    prompt_cache_boundary: bool = Field(default=False, exclude=True, repr=False)
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_calls: tuple[ToolCallSnapshot, ...] | None = None

@@ -103,7 +103,11 @@ def build_prompt_messages(
         else build_untrusted_project_context(tools=tools, max_chars=max_context_chars)
     )
     messages = [
-        Message(role="system", content=DEFAULT_SYSTEM_PROMPT),
+        Message(
+            role="system",
+            content=DEFAULT_SYSTEM_PROMPT,
+            prompt_cache_boundary=True,
+        ),
         Message(role="system", content=context),
     ]
     if tool_guidance := _tool_guidance(tool_prompt_metadata):

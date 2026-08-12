@@ -334,6 +334,24 @@ Do not mention this summarization request. Return only these sections:
     return prompt
 
 
+def _compaction_prompt_messages(*, instructions: str | None) -> tuple[Message, ...]:
+    messages = [
+        Message(
+            role="system",
+            content=build_compaction_checkpoint_prompt(),
+            prompt_cache_boundary=True,
+        )
+    ]
+    if instructions is not None and instructions.strip():
+        messages.append(
+            Message(
+                role="system",
+                content=f"## Additional focus\n{instructions.strip()}",
+            )
+        )
+    return tuple(messages)
+
+
 _MAX_COMPACTION_AGGREGATION_DEPTH = 8
 
 
@@ -483,10 +501,7 @@ async def _summarize_compaction_once(
     cost_estimator: Callable[[str, str | None, str | None, TokenUsage], UsageCost] | None,
 ) -> CompactionSummary:
     messages = (
-        Message(
-            role="system",
-            content=build_compaction_checkpoint_prompt(instructions=instructions),
-        ),
+        *_compaction_prompt_messages(instructions=instructions),
         Message(role="user", content=serialize_compaction_transcript(plan.rows_to_summarize)),
     )
     completions: list[MessageCompleted] = []
