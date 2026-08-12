@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 from wisp.agent.messages import Message
 from wisp.providers.events import JsonObject, ProviderEvent
@@ -104,4 +104,24 @@ class Provider(Protocol):
         does not recognize, or ``None``, sends its own unmodified default
         behavior; providers with no effort concept ignore it entirely.
         """
+        ...
+
+
+class PromptCacheKeyProvider(Protocol):
+    """Opt-in provider capability for request-level prompt-cache routing."""
+
+    supports_prompt_cache_key: Literal[True]
+
+    def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+        effort: str | None = None,
+        prompt_cache_key: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        """Yield one response lifecycle with an optional stable cache-routing key."""
         ...

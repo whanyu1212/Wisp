@@ -49,6 +49,7 @@ class AgentHarnessConfig:
     steering_mode: QueueMode = "one_at_a_time"
     follow_up_mode: QueueMode = "one_at_a_time"
     max_pending_queue_messages: int = _MAX_PENDING_QUEUE_MESSAGES
+    prompt_cache_key: str | None = None
 
     def __post_init__(self) -> None:
         """Reject invalid queue modes even when callers bypass static typing."""
@@ -387,6 +388,7 @@ class AgentHarness:
                     max_tool_iterations=self._config.max_tool_iterations,
                     cancellation_token=token,
                     effort=self._config.effort,
+                    prompt_cache_key=self._config.prompt_cache_key,
                     context_window=self._config.context_window,
                     context_reserve_tokens=self._config.context_reserve_tokens,
                     context_pressure_threshold=self._config.context_pressure_threshold,

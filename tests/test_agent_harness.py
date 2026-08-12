@@ -102,6 +102,27 @@ def _harness(
     )
 
 
+def test_agent_harness_config_preserves_legacy_positional_field_order() -> None:
+    config = AgentHarnessConfig(
+        ScriptedProvider([]),
+        RecordingToolExecutor(),
+        None,
+        (),
+        None,
+        None,
+        None,
+        16_384,
+        0.8,
+        None,
+        "all",
+        "all",
+        0,
+    )
+
+    assert config.max_pending_queue_messages == 0
+    assert config.prompt_cache_key is None
+
+
 def test_harness_prompt_owns_transcript_and_returns_immutable_snapshots() -> None:
     initial = Message(role="system", content="system prompt")
     provider = ScriptedProvider(

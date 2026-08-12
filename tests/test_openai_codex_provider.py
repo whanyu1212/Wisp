@@ -193,6 +193,52 @@ def test_openai_codex_provider_omits_reasoning_when_effort_is_not_provided(
     assert "reasoning" not in provider.seen_body
 
 
+def test_openai_codex_provider_sends_prompt_cache_key_when_provided(tmp_path: Path) -> None:
+    store = _store_with_oauth(tmp_path)
+    provider = StubOpenAICodexProvider(
+        [
+            {"type": "response.created", "response": {"id": "response-id"}},
+            _completed_event("response-id"),
+        ],
+        auth_resolver=StoredProviderAuthResolver(store),
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in provider.stream(
+                [Message(role="user", content="hi")],
+                prompt_cache_key="wisp:session-1",
+            )
+        ]
+
+    anyio.run(run)
+
+    assert provider.seen_body is not None
+    assert provider.seen_body["prompt_cache_key"] == "wisp:session-1"
+
+
+def test_openai_codex_provider_omits_prompt_cache_key_when_not_provided(
+    tmp_path: Path,
+) -> None:
+    store = _store_with_oauth(tmp_path)
+    provider = StubOpenAICodexProvider(
+        [
+            {"type": "response.created", "response": {"id": "response-id"}},
+            _completed_event("response-id"),
+        ],
+        auth_resolver=StoredProviderAuthResolver(store),
+    )
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream([Message(role="user", content="hi")])]
+
+    anyio.run(run)
+
+    assert provider.seen_body is not None
+    assert "prompt_cache_key" not in provider.seen_body
+
+
 def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path) -> None:
     store = _store_with_oauth(tmp_path)
     provider = StubOpenAICodexProvider(
@@ -379,7 +425,7 @@ def test_openai_codex_provider_preserves_continuation_after_opening_failure(
     tool_result = ToolCallResult(call_id="call-1", output="found")
 
     async def run() -> None:
-        async for _event in provider.stream(messages):
+        async for _event in provider.stream(messages, prompt_cache_key="wisp:session-1"):
             pass
 
         provider.opening_errors.append(httpx.ConnectError("temporary failure"))
@@ -388,6 +434,7 @@ def test_openai_codex_provider_preserves_continuation_after_opening_failure(
                 messages,
                 tool_results=[tool_result],
                 previous_response_id="response-1",
+                prompt_cache_key="wisp:session-1",
             ):
                 pass
 
@@ -402,6 +449,7 @@ def test_openai_codex_provider_preserves_continuation_after_opening_failure(
                 messages,
                 tool_results=[tool_result],
                 previous_response_id="response-1",
+                prompt_cache_key="wisp:session-1",
             )
         ] == [
             ProviderResponseStarted(model="gpt-test"),
@@ -425,6 +473,7 @@ def test_openai_codex_provider_preserves_continuation_after_opening_failure(
     failed_body, retry_body = provider.seen_bodies[-2:]
     assert failed_body == retry_body
     assert "previous_response_id" not in retry_body
+    assert retry_body["prompt_cache_key"] == "wisp:session-1"
 
 
 def test_openai_codex_provider_yields_tool_calls(tmp_path: Path) -> None:

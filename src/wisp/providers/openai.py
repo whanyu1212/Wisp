@@ -63,6 +63,7 @@ class OpenAIProvider:
     """Provider backed by OpenAI's Responses API."""
 
     name = "openai"
+    supports_prompt_cache_key: Literal[True] = True
 
     def __init__(
         self,
@@ -90,6 +91,7 @@ class OpenAIProvider:
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
+        prompt_cache_key: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         """Stream a normalized OpenAI response lifecycle.
 
@@ -102,14 +104,25 @@ class OpenAIProvider:
         stream: AsyncIterator[ResponseStreamEvent] | None = None
         for retry_number in range(self._retry_policy.max_retries + 1):
             try:
-                stream = await self._create_stream(
-                    messages,
-                    model=selected_model,
-                    tools=tools,
-                    tool_results=tool_results,
-                    previous_response_id=previous_response_id,
-                    effort=effort,
-                )
+                if prompt_cache_key is not None:
+                    stream = await self._create_stream(
+                        messages,
+                        model=selected_model,
+                        tools=tools,
+                        tool_results=tool_results,
+                        previous_response_id=previous_response_id,
+                        effort=effort,
+                        prompt_cache_key=prompt_cache_key,
+                    )
+                else:
+                    stream = await self._create_stream(
+                        messages,
+                        model=selected_model,
+                        tools=tools,
+                        tool_results=tool_results,
+                        previous_response_id=previous_response_id,
+                        effort=effort,
+                    )
                 break
             except OpenAIError as exc:
                 decision = _openai_retry_decision(exc)
@@ -254,6 +267,7 @@ class OpenAIProvider:
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
+        prompt_cache_key: str | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         client = await self._client_or_create()
         openai_tools = _tool_specs_to_openai_tools(tools)
@@ -283,6 +297,8 @@ class OpenAIProvider:
             kwargs["previous_response_id"] = previous_response_id
         if effort is not None:
             kwargs["reasoning"] = {"effort": effort}
+        if prompt_cache_key is not None:
+            kwargs["prompt_cache_key"] = prompt_cache_key
         create = cast(Callable[..., Awaitable[object]], client.responses.create)
         stream = await create(**kwargs)
         return cast(AsyncIterator[ResponseStreamEvent], stream)
