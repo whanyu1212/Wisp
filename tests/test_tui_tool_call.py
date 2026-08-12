@@ -2,11 +2,125 @@
 
 from __future__ import annotations
 
-from wisp.tui.tool_call import format_tool_call_arguments
+import pytest
+
+from wisp.tui.tool_call import format_tool_call_action, format_tool_call_arguments
 
 
 def _plain(name: str, arguments: object) -> str:
     return format_tool_call_arguments(name, arguments).plain
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "pending", "done", "error", "denied", "cancelled"),
+    [
+        (
+            "bash",
+            {"command": "pytest"},
+            "Running",
+            "Ran",
+            "Failed to run",
+            "Denied running",
+            "Cancelled running",
+        ),
+        (
+            "read",
+            {"path": "a.py"},
+            "Reading",
+            "Read",
+            "Failed to read",
+            "Denied reading",
+            "Cancelled reading",
+        ),
+        (
+            "grep",
+            {"pattern": "x", "path": "."},
+            "Searching",
+            "Searched",
+            "Failed to search",
+            "Denied searching",
+            "Cancelled searching",
+        ),
+        (
+            "find",
+            {"pattern": "*.py", "path": "."},
+            "Searching",
+            "Searched",
+            "Failed to search",
+            "Denied searching",
+            "Cancelled searching",
+        ),
+        (
+            "ls",
+            {"path": "."},
+            "Listing",
+            "Listed",
+            "Failed to list",
+            "Denied listing",
+            "Cancelled listing",
+        ),
+        (
+            "edit",
+            {"path": "a.py", "edits": []},
+            "Editing",
+            "Edited",
+            "Failed to edit",
+            "Denied editing",
+            "Cancelled editing",
+        ),
+        (
+            "write",
+            {"path": "a.py"},
+            "Writing",
+            "Wrote",
+            "Failed to write",
+            "Denied writing",
+            "Cancelled writing",
+        ),
+    ],
+)
+def test_builtin_action_words_follow_lifecycle(
+    name: str,
+    arguments: object,
+    pending: str,
+    done: str,
+    error: str,
+    denied: str,
+    cancelled: str,
+) -> None:
+    for status, prefix in (
+        ("pending", pending),
+        ("done", done),
+        ("error", error),
+        ("denied", denied),
+        ("cancelled", cancelled),
+    ):
+        assert format_tool_call_action(name, arguments, status=status).plain.startswith(
+            prefix + " "
+        )
+
+
+def test_extension_action_includes_literal_name_and_arguments() -> None:
+    rendered = format_tool_call_action(
+        "plugin[/bold]",
+        {"query": "[red]literal[/red]"},
+        status="done",
+    )
+
+    assert rendered.plain == "Called plugin[/bold]  query=[red]literal[/red]"
+    assert all("red" not in str(span.style).lower() for span in rendered.spans)
+
+
+def test_action_reports_unavailable_arguments_without_fabricating_defaults() -> None:
+    assert (
+        format_tool_call_action(
+            "read",
+            {},
+            status="done",
+            arguments_available=False,
+        ).plain
+        == "Read  (arguments unavailable)"
+    )
 
 
 def test_read_header_formats_line_range() -> None:

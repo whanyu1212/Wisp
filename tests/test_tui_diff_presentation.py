@@ -70,6 +70,7 @@ def test_structured_diff_colors_counts_independently() -> None:
     content = _render_diff_presentation(presentation, width=80, expanded=False)
     assert DIFF_ADD_COUNT_STYLE in _styles_at(content, "+1")
     assert DIFF_DEL_COUNT_STYLE in _styles_at(content, "-1")
+    assert content.plain.startswith("  └ M pkg/example.py  +1 -1\n    ")
 
 
 def test_structured_context_is_muted_without_trailing_fill() -> None:

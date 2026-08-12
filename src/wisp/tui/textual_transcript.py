@@ -20,6 +20,7 @@ from textual.widget import Widget
 
 from wisp.tui.diff_presentation import DiffPresentation
 from wisp.tui.history import TUI_HISTORY_PAGE_LIMIT
+from wisp.tui.tool_call import ToolActionStatus
 from wisp.tui.widgets import ToolCard, WorkingIndicator
 
 # Keep an evicted widget inside the next durable latest-page reload, whose first
@@ -235,7 +236,7 @@ class TextualTranscriptController:
         name: str,
         arguments: object,
         *,
-        status: str,
+        status: ToolActionStatus,
         detail: str | Content | DiffPresentation,
         full_output: str,
         truncated: bool,
@@ -259,7 +260,7 @@ class TextualTranscriptController:
     def resolve_tool_call(
         self,
         call_id: str,
-        status: str,
+        status: ToolActionStatus,
         *,
         detail: str | Content | DiffPresentation = "",
         elapsed: float | None = None,

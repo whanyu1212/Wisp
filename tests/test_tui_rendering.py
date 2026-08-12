@@ -1063,41 +1063,23 @@ def test_denied_role_uses_warning_instead_of_execution_error_color() -> None:
         assert theme.error not in styles["denied"]
 
 
-def test_denied_and_error_tool_cards_have_distinct_glyph_and_label() -> None:
-    # Issue #76: a user-denied tool call and a genuine execution error
-    # previously shared the same glyph ("✗"), the same "denied" CSS role
-    # class, and (denied falling through to the generic "tool" label) the
-    # same border title — visually indistinguishable apart from buried detail
-    # text. denied now gets its own glyph and label; error gets its own role
-    # class. All three signals (glyph, label, color-driving role) now differ.
-    from wisp.tui.widgets import _ROLE_LABELS, ToolCard
+def test_denied_and_error_tool_cards_keep_distinct_semantic_roles() -> None:
+    from wisp.tui.widgets import ToolCard
 
-    denied_glyph, denied_role = ToolCard._STATUS["denied"]
-    error_glyph, error_role = ToolCard._STATUS["error"]
+    denied_role = ToolCard._STATUS_ROLE["denied"]
+    error_role = ToolCard._STATUS_ROLE["error"]
 
-    assert denied_glyph != error_glyph
     assert denied_role != error_role
-    assert _ROLE_LABELS[denied_role] != _ROLE_LABELS[error_role]
-    assert _ROLE_LABELS[denied_role]
-    assert _ROLE_LABELS[error_role]
 
 
-def test_cancelled_tool_card_label_does_not_read_denied() -> None:
-    # Regression (P2 review on #76's denied/error fix): "cancelled" shares
-    # "denied"'s CSS role class intentionally (same left-rule color and glyph
-    # family — both mean "stopped by a decision, not a failure"), but a
-    # cancelled tool call was never actually denied approval. Its
-    # border-title must come from ToolCard._STATUS_LABELS's status-keyed
-    # override, not fall through to _ROLE_LABELS[role] and read "denied".
-    from wisp.tui.widgets import _ROLE_LABELS, ToolCard
+def test_cancelled_tool_card_uses_explicit_cancelled_action() -> None:
+    from wisp.tui.widgets import ToolCard
 
-    _, cancelled_role = ToolCard._STATUS["cancelled"]
-    resolved_title = ToolCard._STATUS_LABELS.get(
-        "cancelled", _ROLE_LABELS.get(cancelled_role, "tool")
-    )
+    card = ToolCard("write", {"path": "x.py"})
+    card.set_state("cancelled", detail="cancelled")
 
-    assert resolved_title == "cancelled"
-    assert resolved_title != _ROLE_LABELS["denied"]
+    assert card.render().plain.startswith("• Cancelled writing  x.py")
+    assert "Denied" not in card.render().plain
 
 
 def test_contrast_ratio_helper_matches_known_wcag_examples() -> None:

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
+from typing import Literal
 
 from textual.content import Content
 
@@ -24,6 +25,92 @@ _GENERIC_MAX_ITEMS = 8
 _BUILTIN_LIMIT = 200
 _NUMBER_LIMIT = 24
 _TOOL_MUTED_STYLE = "$text-muted"
+
+type ToolActionStatus = Literal["pending", "done", "error", "denied", "cancelled"]
+
+_ACTION_WORDS: dict[str, dict[ToolActionStatus, str]] = {
+    "bash": {
+        "pending": "Running",
+        "done": "Ran",
+        "error": "Failed to run",
+        "denied": "Denied running",
+        "cancelled": "Cancelled running",
+    },
+    "read": {
+        "pending": "Reading",
+        "done": "Read",
+        "error": "Failed to read",
+        "denied": "Denied reading",
+        "cancelled": "Cancelled reading",
+    },
+    "grep": {
+        "pending": "Searching",
+        "done": "Searched",
+        "error": "Failed to search",
+        "denied": "Denied searching",
+        "cancelled": "Cancelled searching",
+    },
+    "find": {
+        "pending": "Searching",
+        "done": "Searched",
+        "error": "Failed to search",
+        "denied": "Denied searching",
+        "cancelled": "Cancelled searching",
+    },
+    "ls": {
+        "pending": "Listing",
+        "done": "Listed",
+        "error": "Failed to list",
+        "denied": "Denied listing",
+        "cancelled": "Cancelled listing",
+    },
+    "edit": {
+        "pending": "Editing",
+        "done": "Edited",
+        "error": "Failed to edit",
+        "denied": "Denied editing",
+        "cancelled": "Cancelled editing",
+    },
+    "write": {
+        "pending": "Writing",
+        "done": "Wrote",
+        "error": "Failed to write",
+        "denied": "Denied writing",
+        "cancelled": "Cancelled writing",
+    },
+}
+
+_EXTENSION_ACTION_WORDS: dict[ToolActionStatus, str] = {
+    "pending": "Calling",
+    "done": "Called",
+    "error": "Failed to call",
+    "denied": "Denied calling",
+    "cancelled": "Cancelled calling",
+}
+
+
+def format_tool_call_action(
+    name: str,
+    arguments: object,
+    *,
+    status: ToolActionStatus,
+    arguments_available: bool = True,
+) -> Content:
+    """Return one literal, status-aware action label for a tool-card header."""
+
+    words = _ACTION_WORDS.get(name)
+    content = Content.styled((words or _EXTENSION_ACTION_WORDS)[status], "b")
+    if words is None:
+        content += Content(" ") + Content(name)
+    if not arguments_available:
+        return content + Content.styled("  (arguments unavailable)", _TOOL_MUTED_STYLE)
+    rendered_arguments = format_tool_call_arguments(name, arguments)
+    if rendered_arguments.plain:
+        # Textual's terminal line wrapper consumes one break-space at a style
+        # boundary; two literal cells preserve one visible separator between the
+        # bold action and muted arguments without using a non-breaking character.
+        content += Content("  ") + rendered_arguments
+    return content
 
 
 def format_tool_call_arguments(name: str, arguments: object) -> Content:
@@ -236,4 +323,4 @@ _FORMATTERS: dict[str, _ToolFormatter] = {
 }
 
 
-__all__ = ["format_tool_call_arguments"]
+__all__ = ["ToolActionStatus", "format_tool_call_action", "format_tool_call_arguments"]

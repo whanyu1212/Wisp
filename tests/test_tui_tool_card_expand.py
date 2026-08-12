@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from textual.content import Content
 
-from wisp.tui.widgets import ToolCard
+from wisp.tui.widgets import ToolCard, _tree_detail, _tree_line
 
 
 def _resolved(
@@ -32,6 +32,40 @@ def _resolved(
 
 def _rendered(card: ToolCard) -> str:
     return card.render().plain
+
+
+def test_pending_card_has_only_a_flat_action_row() -> None:
+    card = ToolCard("bash", {"command": "pytest -q"})
+
+    assert _rendered(card) == "• Running  pytest -q"
+
+
+def test_multiline_result_uses_one_branch_and_aligned_continuations() -> None:
+    card = ToolCard("bash", {"command": "pytest -q"})
+    card.set_state("done", detail="first line\nsecond line", elapsed=1.2)
+
+    assert _rendered(card) == "• Ran  pytest -q · 1.2s\n  └ first line\n    second line"
+
+
+def test_fitting_styled_action_preserves_separator_before_arguments() -> None:
+    card = ToolCard("write", {"path": "src/example.py"})
+    card.set_state("done", detail="written")
+
+    assert _rendered(card).startswith("• Wrote  src/example.py")
+    assert "Wrotesrc" not in _rendered(card)
+
+
+def test_tree_helpers_use_hanging_indents_when_wrapping() -> None:
+    parent = _tree_line(
+        Content("Ran abcdefghij"),
+        width=10,
+        first_prefix="• ",
+        continuation_prefix="  ",
+    )
+    detail = _tree_detail("abcdefghijkl", width=10)
+
+    assert parent.plain == "• Ran\n  abcdefgh\n  ij"
+    assert detail.plain == "  └ abcdef\n    ghijkl"
 
 
 def test_collapsed_shows_detail_and_expand_affordance() -> None:
@@ -71,8 +105,8 @@ def test_resolved_card_keeps_semantic_call_arguments_in_header() -> None:
     )
 
     rendered = _rendered(card)
-    assert "grep  /TODO/ in src (*.py)" in rendered
-    assert "grep: 2 matches" in rendered
+    assert "• Searched  /TODO/ in src (*.py) · 0.1s" in rendered
+    assert "  └ grep: 2 matches" in rendered
 
 
 def test_toggle_is_noop_without_expandable_content() -> None:
