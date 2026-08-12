@@ -61,9 +61,11 @@ def activate(
     if openai_compatible is not None:
         api.register_provider(
             OpenAICompatibleProvider(
+                provider_name=openai_compatible.provider_name,
                 base_url=openai_compatible.base_url,
                 default_model=openai_compatible.default_model,
                 requires_api_key=openai_compatible.requires_api_key,
+                ca_bundle=openai_compatible.ca_bundle,
                 auth_resolver=auth_resolver,
                 retry_policy=retry_policy,
             )

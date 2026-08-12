@@ -151,7 +151,7 @@ produce a failed terminal event and leave the long-running host available for la
 |---|---|
 | `openai-codex` *(default)* | ChatGPT Plus/Pro via device-code OAuth — TUI `/connect` |
 | `openai` | Stored API key or `OPENAI_API_KEY` |
-| `openai-compatible` | Stored API key or `OPENAI_COMPATIBLE_API_KEY`; endpoint configured in user settings |
+| Custom OpenAI-compatible name | Stored API key, `<PROVIDER_NAME>_API_KEY`, or fallback `OPENAI_COMPATIBLE_API_KEY`; endpoint configured in user settings |
 | `anthropic` | Stored API key or `ANTHROPIC_API_KEY` |
 | `google` | Stored API key, `GOOGLE_API_KEY`, or `GEMINI_API_KEY` |
 | `fake` | None — deterministic offline provider for tests and smoke runs |
@@ -165,28 +165,41 @@ settings cannot redirect requests carrying your credentials. For example, OpenRo
 
 ```json
 {
-  "provider": "openai-compatible",
+  "provider": "openrouter",
   "model": "anthropic/claude-sonnet-4",
   "openai_compatible": {
+    "provider_name": "openrouter",
     "base_url": "https://openrouter.ai/api/v1",
     "default_model": "anthropic/claude-sonnet-4"
   }
 }
 ```
 
-Set `OPENAI_COMPATIBLE_API_KEY` or enter the key with `/connect openai-compatible`. Local servers
-that do not require authentication can use a loopback HTTP endpoint and `"requires_api_key": false`:
+Set `OPENROUTER_API_KEY`, use the optional `OPENAI_COMPATIBLE_API_KEY` fallback, or enter the key
+with `/connect openrouter`. Provider names must start with a lowercase letter. Hyphens become
+underscores in environment variables (for example, `local-openai` uses `LOCAL_OPENAI_API_KEY`).
+Local servers that do not require
+authentication can use a loopback HTTP endpoint and `"requires_api_key": false`:
 
 ```json
 {
-  "provider": "openai-compatible",
+  "provider": "local-openai",
   "openai_compatible": {
+    "provider_name": "local-openai",
     "base_url": "http://localhost:11434/v1",
     "default_model": "qwen3-coder",
     "requires_api_key": false
   }
 }
 ```
+
+For a private certificate authority, set `"ca_bundle"` to an existing absolute PEM bundle path
+inside `openai_compatible`. This provider-level setting overrides the default trust bundle for that
+endpoint. Alternatively, Python HTTP clients honor `SSL_CERT_FILE` process-wide.
+
+Custom-provider models and reasoning-effort choices can be added to the user-only
+`~/.wisp/catalog.toml` overlay. The catalog provider `name` must equal `provider_name`; list models
+in `models` and provider-native effort strings under `[providers.effort_levels]`.
 
 Compatibility targets streaming `/chat/completions`, including client-defined function tools.
 Explicit model IDs pass through unchanged; add a user-only `~/.wisp/catalog.toml` overlay when model
@@ -371,7 +384,7 @@ CLI flag > environment variable > project ./.wisp/settings.json > user ~/.wisp/s
 | `WISP_CONTEXT_RESERVE_TOKENS` | Minimum tokens reserved outside estimated input context; defaults to `16384` |
 | `WISP_AUTO_COMPACTION` | Automatic threshold compaction and overflow recovery; defaults to `true` |
 | `WISP_UPDATE_CHECK` | Six-hour non-blocking PyPI update notice; defaults to `true` |
-| `OPENAI_API_KEY` · `OPENAI_COMPATIBLE_API_KEY` · `ANTHROPIC_API_KEY` · `GOOGLE_API_KEY` · `GEMINI_API_KEY` | Required only for the matching provider |
+| `OPENAI_API_KEY` · `<CUSTOM_PROVIDER>_API_KEY` · `OPENAI_COMPATIBLE_API_KEY` · `ANTHROPIC_API_KEY` · `GOOGLE_API_KEY` · `GEMINI_API_KEY` | Required only for the matching provider; `OPENAI_COMPATIBLE_API_KEY` is a fallback for custom providers |
 
 ### Settings files
 

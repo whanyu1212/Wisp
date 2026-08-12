@@ -38,6 +38,15 @@ from wisp.tools.selection import select_tools
 from wisp.tools.shell import BashTool
 
 
+class _ClosableFakeProvider(FakeProvider):
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.close_count = 0
+
+    async def aclose(self) -> None:
+        self.close_count += 1
+
+
 def test_provider_registry_registers_and_resolves_provider() -> None:
     registry = ProviderRegistry()
     provider = FakeProvider()
@@ -368,19 +377,27 @@ def test_direct_runtime_activation_wires_process_tools_to_runtime_supervisor() -
     anyio.run(run)
 
 
-def test_build_runtime_registers_configured_openai_compatible_provider() -> None:
+def test_build_runtime_registers_configured_openai_compatible_provider(tmp_path: Path) -> None:
+    ca_bundle = tmp_path / "openrouter-ca.pem"
+    ca_bundle.write_text("test CA", encoding="utf-8")
     settings = OpenAICompatibleSettings(
+        provider_name="openrouter",
         base_url="https://openrouter.ai/api/v1",
         default_model="openai/gpt-5",
+        ca_bundle=ca_bundle,
     )
 
     async def run() -> None:
         runtime = await build_runtime(openai_compatible=settings)
         try:
-            provider = runtime.providers.get("openai-compatible")
+            provider = runtime.providers.get("openrouter")
             assert isinstance(provider, OpenAICompatibleProvider)
+            assert provider.name == "openrouter"
             assert provider.default_model == "openai/gpt-5"
             assert provider._base_url == "https://openrouter.ai/api/v1"  # noqa: SLF001
+            assert provider._ca_bundle == str(ca_bundle)  # noqa: SLF001
+            with pytest.raises(UnknownProviderError):
+                runtime.providers.get("openai-compatible")
         finally:
             await runtime.aclose()
 
@@ -462,9 +479,66 @@ def test_direct_runtime_construction_captures_configured_providers() -> None:
             models=template.models,
         )
 
-        current.adopt_provider_configuration(candidate)
+        await current.adopt_provider_configuration(candidate)
 
         assert current.providers.get("fake") is candidate_provider
+
+    anyio.run(run)
+
+
+def test_provider_adoption_tracks_retained_and_transferred_ownership() -> None:
+    def runtime_with(*providers: _ClosableFakeProvider) -> WispRuntime:
+        registry = ProviderRegistry()
+        registry.replace_all(providers)
+        tools = ToolRegistry()
+        events = EventBus()
+        return WispRuntime(
+            providers=registry,
+            tools=tools,
+            events=events,
+            api=ExtensionAPI(providers=registry, tools=tools, events=events),
+            models=ModelRegistry(effective_catalog()),
+        )
+
+    async def run() -> None:
+        retained = _ClosableFakeProvider("retained")
+        displaced = _ClosableFakeProvider("replaced")
+        replacement = _ClosableFakeProvider("replaced")
+        added = _ClosableFakeProvider("added")
+        shadowed = _ClosableFakeProvider("shadowed")
+        extension_override = _ClosableFakeProvider("shadowed")
+        masked_candidate = _ClosableFakeProvider("shadowed")
+        current = runtime_with(retained, displaced, shadowed)
+        current.providers.register(extension_override)
+        candidate = runtime_with(replacement, added, masked_candidate)
+
+        await current.adopt_provider_configuration(candidate)
+
+        assert current.providers.get("retained") is retained
+        assert current.providers.get("replaced") is replacement
+        assert current.providers.get("added") is added
+        assert current.providers.get("shadowed") is extension_override
+        assert retained.close_count == 0
+        assert displaced.close_count == 1
+        assert replacement.close_count == 0
+        assert added.close_count == 0
+        assert shadowed.close_count == 1
+        assert extension_override.close_count == 0
+        assert masked_candidate.close_count == 0
+
+        await candidate.aclose()
+        assert replacement.close_count == 0
+        assert added.close_count == 0
+        assert masked_candidate.close_count == 1
+
+        await current.aclose()
+        assert retained.close_count == 1
+        assert displaced.close_count == 1
+        assert replacement.close_count == 1
+        assert added.close_count == 1
+        assert shadowed.close_count == 1
+        assert extension_override.close_count == 0
+        assert masked_candidate.close_count == 1
 
     anyio.run(run)
 

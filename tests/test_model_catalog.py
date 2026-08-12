@@ -333,6 +333,33 @@ def test_effective_catalog_is_builtin_only_when_no_overlay(tmp_path: Path) -> No
     assert catalog == builtin_catalog()
 
 
+def test_custom_provider_catalog_exposes_models_and_effort_metadata(tmp_path: Path) -> None:
+    _write_overlay(
+        tmp_path,
+        """
+schema_version = 2
+
+[[providers]]
+name = "openrouter"
+display_name = "OpenRouter"
+default_model = "vendor/reasoning-model"
+docs_url = "https://openrouter.ai/docs"
+models = ["vendor/reasoning-model"]
+
+[providers.effort_levels]
+"vendor/reasoning-model" = ["low", "high"]
+""",
+    )
+
+    registry = ModelRegistry(effective_catalog(home_dir=tmp_path))
+
+    assert registry.list_models(provider="openrouter") == (
+        ("openrouter", "vendor/reasoning-model"),
+    )
+    assert registry.supports_effort("openrouter", "vendor/reasoning-model", "high") is True
+    assert registry.supports_effort("openrouter", "vendor/reasoning-model", "medium") is False
+
+
 def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
     # This deliberate exact-set assertion makes vendor catalog drift visible in
     # review without making CI depend on credentials or a live vendor endpoint.

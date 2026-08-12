@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from wisp.events import WispEvent
 from wisp.providers.base import Provider
@@ -151,25 +152,62 @@ class WispRuntime:
                 providers.append(provider)
         return (*providers, *remaining.values())
 
-    def adopt_provider_configuration(self, candidate: WispRuntime) -> None:
-        """Adopt configured provider instances without replacing shared runtime state.
+    async def adopt_provider_configuration(self, candidate: WispRuntime) -> None:
+        """Adopt configured providers and release the displaced provider adapters.
 
-        A runtime rebuilt for another auth path owns fresh provider adapters, but
-        its event bus, extension API, and tool registry must not displace those
-        already connected to an active coding session. Provider registrations that
-        exist only in the live runtime are extension-owned and remain available.
+        The adopted providers transfer from ``candidate`` to this runtime so closing
+        the temporary candidate cannot close clients now owned by the live runtime.
+        Provider registrations that exist only in the live runtime remain available.
         """
 
+        previous_configured = dict(self._configured_providers)
         providers = self.providers_for_configuration(candidate)
+        retained_ids = {id(provider) for provider in providers}
+        retained = {
+            name: provider
+            for name, provider in previous_configured.items()
+            if id(provider) in retained_ids
+        }
+        transferred = {
+            name: provider
+            for name, provider in candidate._configured_providers.items()
+            if id(provider) in retained_ids
+        }
+        adopted = {**retained, **transferred}
         self.providers.replace_all(providers)
         self._configured_providers.clear()
-        self._configured_providers.update(candidate._configured_providers)
+        self._configured_providers.update(adopted)
+        for name in transferred:
+            candidate._configured_providers.pop(name, None)
+        displaced = tuple(
+            provider
+            for provider in previous_configured.values()
+            if id(provider) not in retained_ids
+        )
+        await _close_providers(displaced)
 
     async def aclose(self) -> None:
-        """Release runtime-owned MCP connections and managed processes."""
+        """Release runtime-owned providers, MCP connections, and managed processes."""
 
         try:
-            if self.mcp_runtime is not None:
-                await self.mcp_runtime.aclose()
+            await _close_providers(tuple(self._configured_providers.values()))
+            self._configured_providers.clear()
         finally:
-            await self.process_supervisor.aclose()
+            try:
+                if self.mcp_runtime is not None:
+                    await self.mcp_runtime.aclose()
+            finally:
+                await self.process_supervisor.aclose()
+
+
+async def _close_providers(providers: tuple[Provider, ...]) -> None:
+    """Close provider adapters that expose an asynchronous cleanup hook."""
+
+    seen: set[int] = set()
+    for provider in providers:
+        if id(provider) in seen:
+            continue
+        seen.add(id(provider))
+        close = getattr(provider, "aclose", None)
+        if callable(close):
+            await cast(Callable[[], Awaitable[None]], close)()

@@ -27,8 +27,10 @@ from wisp.auth.storage import (
     JsonAuthStore,
     OAuthCredential,
 )
+from wisp.openai_compatible import openai_compatible_api_key_environment
 from wisp.tui.connections import (
     API_KEY_ENVIRONMENT_VARIABLES,
+    OPENAI_COMPATIBLE_API_KEY_ENVIRONMENT_VARIABLE,
     ConnectionMethodStatus,
     ConnectionProviderStatus,
     ConnectionSource,
@@ -44,8 +46,10 @@ class AuthCommands:
         renderer: TuiRenderer,
         get_store: Callable[[], JsonAuthStore],
         get_default_provider: Callable[[], str],
+        openai_compatible_provider: str = "openai-compatible",
     ) -> None:
         self._renderer = renderer
+        self._openai_compatible_provider = openai_compatible_provider
         # Read the store lazily: the shell swaps it on a trusted-project rebuild.
         self._get_store = get_store
         # The default provider tracks live shell state (pending configs + current).
@@ -56,9 +60,10 @@ class AuthCommands:
             self._renderer.command_error("Usage: /auth [provider]")
             return
         provider = args[0] if args else self._get_default_provider()
-        environment_variable = _configured_environment_variable(provider)
-        if environment_variable is not None:
-            self._renderer.notice(f"{provider}: api key configured via {environment_variable}")
+        environment_variables = self._configured_environment_variables(provider)
+        if environment_variables:
+            configured_via = ", ".join(environment_variables)
+            self._renderer.notice(f"{provider}: api key configured via {configured_via}")
             return
         try:
             credential = self._get_store().get(provider)
@@ -82,10 +87,8 @@ class AuthCommands:
         provider = args[0]
         method = _find_method(catalog, provider)
         if method is None:
-            self._renderer.command_error(
-                "Unknown provider. Choose one of: openai-codex, openai, openai-compatible, "
-                "anthropic, google."
-            )
+            choices = ", ".join(item.provider for family in catalog for item in family.methods)
+            self._renderer.command_error(f"Unknown provider. Choose one of: {choices}.")
             return
         picker = getattr(self._renderer, "connect_picker_request", None)
         if callable(picker):
@@ -105,7 +108,7 @@ class AuthCommands:
     async def connect_api_key(self, provider: str, api_key: str) -> None:
         """Persist a key received through the renderer's redacted callback."""
 
-        if provider not in API_KEY_ENVIRONMENT_VARIABLES:
+        if not self._supports_api_key(provider):
             self._connect_error(f"API-key connection is not supported for {provider}.")
             return
         normalized = api_key.strip()
@@ -118,13 +121,16 @@ class AuthCommands:
             self._connect_error(f"Auth storage error: {exc}")
             return
         self._call_renderer_optional("connect_completed", provider)
-        environment_variable = _configured_environment_variable(provider)
-        if environment_variable is None:
+        environment_variables = self._configured_environment_variables(provider)
+        if not environment_variables:
             self._renderer.notice(f"Connected: {provider}")
         else:
+            names = ", ".join(environment_variables)
+            verb = "takes" if len(environment_variables) == 1 else "take"
+            pronoun = "it" if len(environment_variables) == 1 else "them"
             self._renderer.notice(
-                f"Stored API key for {provider}; {environment_variable} still takes precedence. "
-                "Unset it in your shell to use the stored key."
+                f"Stored API key for {provider}; {names} still {verb} precedence. "
+                f"Unset {pronoun} in your shell to use the stored key."
             )
 
     async def _connect_openai_codex(self) -> None:
@@ -167,23 +173,24 @@ class AuthCommands:
         self._disconnect_provider(args[0])
 
     def _disconnect_provider(self, provider: str) -> None:
-        environment_variable = _configured_environment_variable(provider)
+        environment_variables = self._configured_environment_variables(provider)
         try:
             deleted = self._get_store().delete(provider)
         except AuthStorageError as exc:
             self._renderer.command_error(f"Auth storage error: {exc}")
             return
-        if environment_variable is not None:
+        if environment_variables:
+            names = ", ".join(environment_variables)
+            pronoun = "it" if len(environment_variables) == 1 else "them"
             if deleted:
                 self._call_renderer_optional("connect_completed", provider)
                 self._renderer.notice(
                     f"Removed stored credentials for {provider}; still connected through "
-                    f"{environment_variable}. Unset it in your shell to disconnect."
+                    f"{names}. Unset {pronoun} in your shell to disconnect."
                 )
             else:
                 self._connect_error(
-                    f"{provider} is connected through {environment_variable}; "
-                    "unset it in your shell."
+                    f"{provider} is connected through {names}; unset {pronoun} in your shell."
                 )
             return
         if deleted:
@@ -210,13 +217,13 @@ class AuthCommands:
                 ),
             ),
             ConnectionProviderStatus(
-                id="openai-compatible",
-                label="OpenAI-compatible",
+                id=self._openai_compatible_provider,
+                label=self._openai_compatible_provider,
                 methods=(
                     self._api_key_method(
-                        "openai-compatible",
-                        "OpenAI-compatible API key",
-                        store.get("openai-compatible"),
+                        self._openai_compatible_provider,
+                        f"{self._openai_compatible_provider} API key",
+                        store.get(self._openai_compatible_provider),
                     ),
                 ),
             ),
@@ -240,7 +247,7 @@ class AuthCommands:
         label: str,
         credential: AuthCredential | None,
     ) -> ConnectionMethodStatus:
-        environment_variable = _configured_environment_variable(provider)
+        environment_variable = self._configured_environment_variable(provider)
         if environment_variable is not None:
             source: ConnectionSource = "environment"
         elif isinstance(credential, ApiKeyCredential):
@@ -252,10 +259,34 @@ class AuthCommands:
             label=label,
             kind="api_key",
             source=source,
-            environment_variable=(
-                environment_variable or API_KEY_ENVIRONMENT_VARIABLES[provider][0]
-            ),
+            environment_variable=(environment_variable or self._api_key_environment(provider)[0]),
         )
+
+    def _supports_api_key(self, provider: str) -> bool:
+        return provider in API_KEY_ENVIRONMENT_VARIABLES or (
+            provider == self._openai_compatible_provider
+        )
+
+    def _configured_environment_variable(self, provider: str) -> str | None:
+        return next(iter(self._configured_environment_variables(provider)), None)
+
+    def _configured_environment_variables(self, provider: str) -> tuple[str, ...]:
+        return tuple(
+            name
+            for name in self._api_key_environment(provider)
+            if _environment_value(name) is not None
+        )
+
+    def _api_key_environment(self, provider: str) -> tuple[str, ...]:
+        if provider == self._openai_compatible_provider:
+            provider_environment = openai_compatible_api_key_environment(provider)
+            if provider_environment == OPENAI_COMPATIBLE_API_KEY_ENVIRONMENT_VARIABLE:
+                return (provider_environment,)
+            return (
+                provider_environment,
+                OPENAI_COMPATIBLE_API_KEY_ENVIRONMENT_VARIABLE,
+            )
+        return API_KEY_ENVIRONMENT_VARIABLES.get(provider, ())
 
     def _show_device_code(self, info: DeviceCodeInfo) -> None:
         self._call_renderer_optional("connect_device_code", info.verification_uri, info.user_code)
@@ -316,17 +347,6 @@ def _environment_value(name: str) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
-
-
-def _configured_environment_variable(provider: str) -> str | None:
-    return next(
-        (
-            name
-            for name in API_KEY_ENVIRONMENT_VARIABLES.get(provider, ())
-            if _environment_value(name) is not None
-        ),
-        None,
-    )
 
 
 def _oauth_expiry_text(credential: OAuthCredential) -> str:

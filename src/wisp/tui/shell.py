@@ -252,6 +252,7 @@ class TuiShell:
         model: str | None = None,
         effort: str | None = None,
         auth_path: Path | None = None,
+        openai_compatible_provider: str = "openai-compatible",
         settings_home_dir: Path | None = None,
         update_checker: UpdateChecker | None = None,
         manual_update_checker: UpdateStatusChecker = get_update_status,
@@ -333,6 +334,7 @@ class TuiShell:
             self.renderer,
             lambda: self.auth_store,
             self._default_auth_provider,
+            openai_compatible_provider,
         )
         self._call_renderer_optional(
             "set_connect_api_key_hook",

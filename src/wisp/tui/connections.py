@@ -35,10 +35,10 @@ class ConnectionProviderStatus:
 
 API_KEY_ENVIRONMENT_VARIABLES = {
     "openai": ("OPENAI_API_KEY",),
-    "openai-compatible": ("OPENAI_COMPATIBLE_API_KEY",),
     "anthropic": ("ANTHROPIC_API_KEY",),
     "google": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
 }
+OPENAI_COMPATIBLE_API_KEY_ENVIRONMENT_VARIABLE = "OPENAI_COMPATIBLE_API_KEY"
 
 
 __all__ = [
@@ -47,4 +47,5 @@ __all__ = [
     "ConnectionMethodStatus",
     "ConnectionProviderStatus",
     "ConnectionSource",
+    "OPENAI_COMPATIBLE_API_KEY_ENVIRONMENT_VARIABLE",
 ]

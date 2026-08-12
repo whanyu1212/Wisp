@@ -535,6 +535,26 @@ def test_from_config_backstops_auth_protection_after_model_copy(tmp_path: Path) 
         run_tool(ReadTool(), {"path": "codex-auth.json"}, context)
 
 
+def test_from_config_backstops_ca_bundle_protection_after_model_copy(tmp_path: Path) -> None:
+    from wisp.config import WispConfig
+    from wisp.openai_compatible import OpenAICompatibleSettings
+
+    ca_bundle = tmp_path / "private-ca.pem"
+    ca_bundle.write_text("private certificate authority", encoding="utf-8")
+    compatible = OpenAICompatibleSettings(
+        provider_name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        default_model="test-model",
+        ca_bundle=ca_bundle,
+    )
+    config = WispConfig().model_copy(update={"openai_compatible": compatible})
+
+    context = ToolContext.from_config(config, cwd=tmp_path)
+
+    with pytest.raises(ToolError, match="protected path"):
+        run_tool(ReadTool(), {"path": "private-ca.pem"}, context)
+
+
 def test_from_config_backstops_settings_protection_after_model_copy(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

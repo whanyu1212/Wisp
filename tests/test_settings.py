@@ -303,21 +303,27 @@ def test_openai_compatible_is_user_only_even_for_trusted_projects(tmp_path: Path
     assert settings.openai_compatible.default_model == "openai/gpt-5"
 
 
-def test_openai_compatible_endpoint_validation() -> None:
+def test_openai_compatible_endpoint_validation(tmp_path: Path) -> None:
+    ca_bundle = tmp_path / "private-ca.pem"
+    ca_bundle.write_text("test CA", encoding="utf-8")
     settings = WispSettings.model_validate(
         {
             "openai_compatible": {
+                "provider_name": " local-openai ",
                 "base_url": "http://localhost:11434/v1/",
                 "default_model": " local-model ",
                 "requires_api_key": False,
+                "ca_bundle": str(ca_bundle),
             }
         }
     )
 
     assert settings.openai_compatible is not None
+    assert settings.openai_compatible.provider_name == "local-openai"
     assert settings.openai_compatible.base_url == "http://localhost:11434/v1"
     assert settings.openai_compatible.default_model == "local-model"
     assert settings.openai_compatible.requires_api_key is False
+    assert settings.openai_compatible.ca_bundle == ca_bundle.resolve()
 
     with pytest.raises(ValidationError, match="loopback"):
         WispSettings.model_validate(
@@ -328,6 +334,57 @@ def test_openai_compatible_endpoint_validation() -> None:
                 }
             }
         )
+    with pytest.raises(ValidationError, match="absolute path"):
+        WispSettings.model_validate(
+            {
+                "openai_compatible": {
+                    "base_url": "https://example.test/v1",
+                    "default_model": "model",
+                    "ca_bundle": "relative-ca.pem",
+                }
+            }
+        )
+    with pytest.raises(ValidationError, match="existing file"):
+        WispSettings.model_validate(
+            {
+                "openai_compatible": {
+                    "base_url": "https://example.test/v1",
+                    "default_model": "model",
+                    "ca_bundle": str(tmp_path / "missing-ca.pem"),
+                }
+            }
+        )
+    for reserved_name in ("openai", "gemini"):
+        with pytest.raises(
+            ValidationError,
+            match="conflicts with built-in provider or credential namespace",
+        ):
+            WispSettings.model_validate(
+                {
+                    "openai_compatible": {
+                        "provider_name": reserved_name,
+                        "base_url": "https://example.test/v1",
+                        "default_model": "model",
+                    }
+                }
+            )
+    for invalid_name in (
+        "123ai",
+        "OpenRouter",
+        "open_router",
+        "openrouter::model",
+        "openrouter--alt",
+    ):
+        with pytest.raises(ValidationError, match="start with a lowercase letter"):
+            WispSettings.model_validate(
+                {
+                    "openai_compatible": {
+                        "provider_name": invalid_name,
+                        "base_url": "https://example.test/v1",
+                        "default_model": "model",
+                    }
+                }
+            )
 
 
 def test_mcp_servers_are_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
