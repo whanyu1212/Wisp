@@ -6,6 +6,7 @@ import json
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import cast
 
 from wisp.agent.execution import ToolExecutionEvent
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
@@ -579,19 +580,27 @@ def _sum_token_usage(usages: Sequence[TokenUsage | None]) -> TokenUsage | None:
         return None
 
     def optional_sum(field: str) -> int | None:
-        values = tuple(getattr(usage, field) for usage in present)
+        values = tuple(cast(int | None, getattr(usage, field)) for usage in present)
         return (
             sum(value for value in values if value is not None)
             if any(value is not None for value in values)
             else None
         )
 
+    def complete_optional_sum(field: str) -> int | None:
+        if len(present) != len(usages):
+            return None
+        values = tuple(cast(int | None, getattr(usage, field)) for usage in present)
+        if any(value is None for value in values):
+            return None
+        return sum(value for value in values if value is not None)
+
     return TokenUsage(
         input_tokens=sum(usage.input_tokens for usage in present),
         output_tokens=sum(usage.output_tokens for usage in present),
         total_tokens=sum(usage.total_tokens for usage in present),
-        cache_read_input_tokens=optional_sum("cache_read_input_tokens"),
-        cache_write_input_tokens=optional_sum("cache_write_input_tokens"),
+        cache_read_input_tokens=complete_optional_sum("cache_read_input_tokens"),
+        cache_write_input_tokens=complete_optional_sum("cache_write_input_tokens"),
         reasoning_output_tokens=optional_sum("reasoning_output_tokens"),
     )
 
