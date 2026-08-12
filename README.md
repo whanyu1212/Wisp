@@ -583,7 +583,7 @@ cost.
 Unlike print mode, **the TUI exposes the full tool registry by default** — otherwise it would be a
 chatbot that can't read files or run commands. Mutating and command tools still pause for approval:
 approve once, allow that tool for the session, YOLO all mutating/command tools for the process
-(requires a second confirmation, never persisted), or deny.
+(never persisted), or deny.
 
 ### Slash commands
 

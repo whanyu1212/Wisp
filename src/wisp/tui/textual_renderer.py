@@ -422,10 +422,6 @@ class TextualTuiRenderer:
         self._show_activity("Waiting for approval…")
         self.app.show_approval(event, cwd=self._visible_cwd)
 
-    def approval_all_confirmation(self, event: ToolApprovalRequested) -> None:
-        self._show_activity("Waiting for approval…")
-        self.app.show_approval_all_confirmation(event)
-
     def trust_request(self, event: TrustRequested) -> None:
         self._show_activity("Waiting for trust…")
         self.app.show_trust(event)
