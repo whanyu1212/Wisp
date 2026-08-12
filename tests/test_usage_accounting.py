@@ -30,7 +30,7 @@ def test_openai_usage_preserves_cache_and_reasoning_details() -> None:
     usage = ResponseUsage.model_validate(
         {
             "input_tokens": 12,
-            "input_tokens_details": {"cached_tokens": 4},
+            "input_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 3},
             "output_tokens": 7,
             "output_tokens_details": {"reasoning_tokens": 3},
             "total_tokens": 19,
@@ -43,6 +43,7 @@ def test_openai_usage_preserves_cache_and_reasoning_details() -> None:
         output_tokens=7,
         total_tokens=19,
         cache_read_input_tokens=4,
+        cache_write_input_tokens=3,
         reasoning_output_tokens=3,
     )
 
@@ -68,7 +69,7 @@ def test_codex_usage_validates_required_counts_and_preserves_details() -> None:
     assert _usage_from_codex(
         {
             "input_tokens": 12,
-            "input_tokens_details": {"cached_tokens": 4},
+            "input_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 3},
             "output_tokens": 7,
             "output_tokens_details": {"reasoning_tokens": 3},
             "total_tokens": 19,
@@ -78,6 +79,7 @@ def test_codex_usage_validates_required_counts_and_preserves_details() -> None:
         output_tokens=7,
         total_tokens=19,
         cache_read_input_tokens=4,
+        cache_write_input_tokens=3,
         reasoning_output_tokens=3,
     )
     assert _usage_from_codex({"input_tokens": 12}) is None
@@ -229,7 +231,7 @@ def test_provider_adapters_normalize_negative_counts() -> None:
     assert _usage_from_codex(
         {
             "input_tokens": -12,
-            "input_tokens_details": {"cached_tokens": -4},
+            "input_tokens_details": {"cached_tokens": -4, "cache_write_tokens": -3},
             "output_tokens": -7,
             "output_tokens_details": {"reasoning_tokens": -3},
             "total_tokens": -19,
@@ -239,6 +241,7 @@ def test_provider_adapters_normalize_negative_counts() -> None:
         output_tokens=0,
         total_tokens=0,
         cache_read_input_tokens=0,
+        cache_write_input_tokens=0,
         reasoning_output_tokens=0,
     )
 
@@ -261,3 +264,38 @@ def test_provider_adapters_normalize_negative_counts() -> None:
 def test_token_usage_rejects_negative_counts() -> None:
     with pytest.raises(ValidationError):
         TokenUsage(input_tokens=-1, output_tokens=0, total_tokens=0)
+
+
+def test_openai_usage_ignores_malformed_cache_write_details() -> None:
+    usage = ResponseUsage.model_validate(
+        {
+            "input_tokens": 12,
+            "input_tokens_details": {
+                "cached_tokens": 4,
+                "cache_write_tokens": "not-a-count",
+            },
+            "output_tokens": 7,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 19,
+        }
+    )
+    response = Response.model_construct(usage=usage)
+
+    assert _usage_from_openai(response) == ProviderUsage(
+        input_tokens=12,
+        output_tokens=7,
+        total_tokens=19,
+        cache_read_input_tokens=4,
+        reasoning_output_tokens=0,
+    )
+
+
+def test_codex_usage_ignores_boolean_cache_details() -> None:
+    assert _usage_from_codex(
+        {
+            "input_tokens": 12,
+            "input_tokens_details": {"cached_tokens": True, "cache_write_tokens": False},
+            "output_tokens": 7,
+            "total_tokens": 19,
+        }
+    ) == ProviderUsage(input_tokens=12, output_tokens=7, total_tokens=19)

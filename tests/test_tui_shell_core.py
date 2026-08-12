@@ -476,7 +476,13 @@ def test_tui_context_command_renders_authoritative_compaction_status() -> None:
             active_message_count=4,
             compaction_count=0,
             usage_record_count=1,
-            usage=TokenUsage(input_tokens=90_000, output_tokens=2_000, total_tokens=92_000),
+            usage=TokenUsage(
+                input_tokens=90_000,
+                output_tokens=2_000,
+                total_tokens=92_000,
+                cache_read_input_tokens=24_000,
+                cache_write_input_tokens=8_000,
+            ),
             context=_context_budget(estimated=80_000, observed=92_000, current=True),
             compaction=CompactionPolicyStatus(
                 threshold_eligible=True,
@@ -507,6 +513,7 @@ def test_tui_context_command_renders_authoritative_compaction_status() -> None:
             "Trigger: >120k",
             "Reserve: 8k",
             "Usage source: provider observation",
+            "Prompt cache (reported): 24k read · 8k written",
             "Threshold eligibility: eligible",
             "Overflow recovery: on",
         ]

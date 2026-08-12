@@ -94,14 +94,55 @@ def test_estimator_prices_openai_cache_once_and_resolves_alias() -> None:
             output_tokens=500,
             total_tokens=1_500,
             cache_read_input_tokens=400,
+            cache_write_input_tokens=300,
         ),
     )
 
     assert estimate.model == "model"
     assert estimate.billable is not None
-    assert estimate.billable.input_tokens == 600
+    assert estimate.billable.input_tokens == 300
     assert estimate.billable.cache_read_input_tokens == 400
-    assert estimate.estimated_usd == Decimal("0.0054")
+    assert estimate.billable.cache_write_input_tokens == 300
+    assert estimate.estimated_usd == Decimal("0.00555")
+
+
+def test_estimator_rejects_openai_cache_buckets_larger_than_input() -> None:
+    estimate = CostEstimator(_models())(
+        "openai",
+        "model",
+        "model",
+        TokenUsage(
+            input_tokens=100,
+            output_tokens=10,
+            total_tokens=110,
+            cache_read_input_tokens=60,
+            cache_write_input_tokens=50,
+        ),
+    )
+
+    assert estimate.estimated_usd is None
+    assert estimate.unavailable_reason == "usage_incomplete"
+
+
+def test_estimator_normalizes_codex_cache_buckets_before_pricing_lookup() -> None:
+    estimate = CostEstimator(_models())(
+        "openai-codex",
+        "model",
+        "model",
+        TokenUsage(
+            input_tokens=1_000,
+            output_tokens=100,
+            total_tokens=1_100,
+            cache_read_input_tokens=400,
+            cache_write_input_tokens=300,
+        ),
+    )
+
+    assert estimate.billable is not None
+    assert estimate.billable.input_tokens == 300
+    assert estimate.billable.cache_read_input_tokens == 400
+    assert estimate.billable.cache_write_input_tokens == 300
+    assert estimate.unavailable_reason == "pricing_unavailable"
 
 
 def test_estimator_uses_long_context_band_and_never_prices_unknown_models() -> None:

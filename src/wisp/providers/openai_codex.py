@@ -634,6 +634,7 @@ def _usage_from_codex(value: object) -> ProviderUsage | None:
         output_tokens=max(0, output_tokens),
         total_tokens=max(0, total_tokens),
         cache_read_input_tokens=_nested_int(value, "input_tokens_details", "cached_tokens"),
+        cache_write_input_tokens=_nested_int(value, "input_tokens_details", "cache_write_tokens"),
         reasoning_output_tokens=_nested_int(value, "output_tokens_details", "reasoning_tokens"),
     )
 
@@ -643,7 +644,7 @@ def _nested_int(value: Mapping[str, object], group: str, field: str) -> int | No
     if not isinstance(details, Mapping):
         return None
     count = details.get(field)
-    return max(0, count) if isinstance(count, int) else None
+    return max(0, count) if type(count) is int else None
 
 
 def _string_value(value: object) -> str | None:

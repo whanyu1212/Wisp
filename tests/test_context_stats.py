@@ -25,11 +25,20 @@ from wisp.sessions.entries import (
 from wisp.sessions.replay import replay_session_entries
 
 
-def _usage(input_tokens: int, output_tokens: int, total_tokens: int) -> TokenUsage:
+def _usage(
+    input_tokens: int,
+    output_tokens: int,
+    total_tokens: int,
+    *,
+    cache_read: int | None = None,
+    cache_write: int | None = None,
+) -> TokenUsage:
     return TokenUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=total_tokens,
+        cache_read_input_tokens=cache_read,
+        cache_write_input_tokens=cache_write,
     )
 
 
@@ -253,7 +262,7 @@ def test_session_stats_sum_authoritative_usage_and_invalidate_pre_compaction_obs
             role="assistant",
             content="b",
             finish_reason="stop",
-            usage=_usage(40, 10, 75),
+            usage=_usage(40, 10, 75, cache_read=10, cache_write=5),
         ),
     )
     retained_user = MessageSessionEntry(
@@ -266,7 +275,7 @@ def test_session_stats_sum_authoritative_usage_and_invalidate_pre_compaction_obs
             role="assistant",
             content="d",
             finish_reason="stop",
-            usage=_usage(20, 5, 40),
+            usage=_usage(20, 5, 40, cache_read=4),
         ),
     )
     compaction = CompactionSessionEntry(
@@ -276,7 +285,7 @@ def test_session_stats_sum_authoritative_usage_and_invalidate_pre_compaction_obs
             summary="Earlier work",
             replaced_entry_ids=("old-user", "old-assistant"),
             provider="test",
-            usage=_usage(10, 5, 30),
+            usage=_usage(10, 5, 30, cache_write=3),
         ),
     )
     entries = (old_user, old_assistant, retained_user, retained_assistant, compaction)
@@ -296,6 +305,8 @@ def test_session_stats_sum_authoritative_usage_and_invalidate_pre_compaction_obs
     assert stats.usage.input_tokens == 70
     assert stats.usage.output_tokens == 20
     assert stats.usage.total_tokens == 145
+    assert stats.usage.cache_read_input_tokens == 14
+    assert stats.usage.cache_write_input_tokens == 8
     assert stats.compaction_count == 1
     assert stats.active_message_count == 3
     assert stats.context.observed_tokens is None
