@@ -368,19 +368,27 @@ def test_direct_runtime_activation_wires_process_tools_to_runtime_supervisor() -
     anyio.run(run)
 
 
-def test_build_runtime_registers_configured_openai_compatible_provider() -> None:
+def test_build_runtime_registers_configured_openai_compatible_provider(tmp_path: Path) -> None:
+    ca_bundle = tmp_path / "openrouter-ca.pem"
+    ca_bundle.write_text("test CA", encoding="utf-8")
     settings = OpenAICompatibleSettings(
+        provider_name="openrouter",
         base_url="https://openrouter.ai/api/v1",
         default_model="openai/gpt-5",
+        ca_bundle=ca_bundle,
     )
 
     async def run() -> None:
         runtime = await build_runtime(openai_compatible=settings)
         try:
-            provider = runtime.providers.get("openai-compatible")
+            provider = runtime.providers.get("openrouter")
             assert isinstance(provider, OpenAICompatibleProvider)
+            assert provider.name == "openrouter"
             assert provider.default_model == "openai/gpt-5"
             assert provider._base_url == "https://openrouter.ai/api/v1"  # noqa: SLF001
+            assert provider._ca_bundle == str(ca_bundle)  # noqa: SLF001
+            with pytest.raises(UnknownProviderError):
+                runtime.providers.get("openai-compatible")
         finally:
             await runtime.aclose()
 
@@ -462,7 +470,7 @@ def test_direct_runtime_construction_captures_configured_providers() -> None:
             models=template.models,
         )
 
-        current.adopt_provider_configuration(candidate)
+        await current.adopt_provider_configuration(candidate)
 
         assert current.providers.get("fake") is candidate_provider
 

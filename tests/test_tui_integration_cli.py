@@ -334,7 +334,9 @@ def test_tui_rpc_env_forwards_embedded_openai_compatible_config(
 
     assert json.loads(child_env["WISP_OPENAI_COMPATIBLE_CONFIG"]) == {
         "base_url": "https://openrouter.ai/api/v1",
+        "ca_bundle": None,
         "default_model": "anthropic/claude-sonnet-4",
+        "provider_name": "openai-compatible",
         "requires_api_key": True,
     }
     assert "WISP_OPENAI_COMPATIBLE_CONFIG" not in os.environ

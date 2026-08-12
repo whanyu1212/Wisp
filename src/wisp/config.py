@@ -96,6 +96,12 @@ class WispConfig(BaseModel):
         required = (
             self.auth_path.expanduser().resolve(strict=False).as_posix(),
             user_settings_path().resolve(strict=False).as_posix(),
+            *(
+                (self.openai_compatible.ca_bundle.as_posix(),)
+                if self.openai_compatible is not None
+                and self.openai_compatible.ca_bundle is not None
+                else ()
+            ),
         )
         missing = tuple(pattern for pattern in required if pattern not in self.protected_paths)
         if missing:

@@ -617,7 +617,7 @@ def test_trusted_provider_refresh_preserves_runtime_identities() -> None:
 
         assert staged.get("extension-provider") is extension_provider
         assert staged.get("openai") is openai_override
-        original.adopt_provider_configuration(trusted)
+        await original.adopt_provider_configuration(trusted)
 
         assert original.providers is providers
         assert original.events is events

@@ -139,7 +139,7 @@ class RpcProjectConfiguration:
                     effort=overrides.effort,
                     has_effort=overrides.has_effort,
                 )
-                runtime.adopt_provider_configuration(trusted_runtime)
+                await runtime.adopt_provider_configuration(trusted_runtime)
             finally:
                 await trusted_runtime.aclose()
         if overrides.has_auto_compaction_enabled and overrides.auto_compaction_enabled is not None:

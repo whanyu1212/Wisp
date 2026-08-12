@@ -11,10 +11,15 @@ from typing import Protocol, cast, runtime_checkable
 from uuid import uuid4
 
 import anyio
+import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, OpenAIError
 from openai.types.chat import ChatCompletionChunk
 
 from wisp.agent.messages import Message
+from wisp.openai_compatible import (
+    openai_compatible_api_key_environment,
+    validate_openai_compatible_provider_name,
+)
 from wisp.providers.auth import ProviderAuthResolver
 from wisp.providers.base import ProviderConfigurationError, ToolCallResult, ToolSpec
 from wisp.providers.continuations import ContinuationStore
@@ -64,15 +69,19 @@ class OpenAICompatibleProvider:
         *,
         base_url: str,
         default_model: str,
+        provider_name: str = OPENAI_COMPATIBLE_PROVIDER_NAME,
         requires_api_key: bool = True,
+        ca_bundle: str | os.PathLike[str] | None = None,
         api_key: str | None = None,
         client: AsyncOpenAI | None = None,
         auth_resolver: ProviderAuthResolver | None = None,
         retry_policy: RetryPolicy | None = None,
     ) -> None:
+        self.name = validate_openai_compatible_provider_name(provider_name)
         self.default_model: str | None = default_model
         self._base_url = base_url
         self._requires_api_key = requires_api_key
+        self._ca_bundle = os.fspath(ca_bundle) if ca_bundle is not None else None
         self._api_key = _normalize_optional(api_key)
         self._client = client
         self._client_is_injected = client is not None
@@ -95,7 +104,7 @@ class OpenAICompatibleProvider:
 
         selected_model = model or self.default_model
         if selected_model is None:
-            raise ProviderConfigurationError("openai-compatible requires a model")
+            raise ProviderConfigurationError(f"{self.name} requires a model")
 
         native_stream: AsyncIterator[ChatCompletionChunk] | None = None
         for retry_number in range(self._retry_policy.max_retries + 1):
@@ -129,7 +138,7 @@ class OpenAICompatibleProvider:
                 )
                 await anyio.sleep(delay)
         if native_stream is None:
-            raise AssertionError("openai-compatible retry loop completed without a stream or error")
+            raise AssertionError(f"{self.name} retry loop completed without a stream or error")
 
         yield ProviderResponseStarted(model=selected_model)
         response_id: str | None = None
@@ -167,7 +176,7 @@ class OpenAICompatibleProvider:
                         finish_reason = choice.finish_reason
         except OpenAIError as exc:
             failure = ProviderResponseFailed(
-                message=f"OpenAI-compatible stream error: {exc}",
+                message=f"{self.name} stream error: {exc}",
                 partial_content="".join(chunks),
                 response_id=response_id,
             )
@@ -177,13 +186,13 @@ class OpenAICompatibleProvider:
 
         if failure is None and finish_reason is None:
             failure = ProviderResponseFailed(
-                message="OpenAI-compatible stream ended before a finish reason was received",
+                message=f"{self.name} stream ended before a finish reason was received",
                 partial_content="".join(chunks),
                 response_id=response_id,
             )
         if failure is None and finish_reason not in {"stop", "tool_calls", "length"}:
             failure = ProviderResponseFailed(
-                message=f"OpenAI-compatible stream ended with unsupported reason: {finish_reason}",
+                message=f"{self.name} stream ended with unsupported reason: {finish_reason}",
                 partial_content="".join(chunks),
                 response_id=response_id,
             )
@@ -195,7 +204,7 @@ class OpenAICompatibleProvider:
         if finish_reason == "tool_calls" and not accumulators:
             self._continuations.discard(previous_response_id)
             yield ProviderResponseFailed(
-                message="OpenAI-compatible response reported tool_calls without any tool calls",
+                message=f"{self.name} response reported tool_calls without any tool calls",
                 partial_content="".join(chunks),
                 response_id=response_id,
             )
@@ -281,29 +290,44 @@ class OpenAICompatibleProvider:
             assert self._client is not None
             return self._client
 
-        api_key = self._api_key or _normalize_optional(
-            os.environ.get(OPENAI_COMPATIBLE_API_KEY_ENV)
-        )
+        provider_api_key_env = openai_compatible_api_key_environment(self.name)
+        api_key = self._api_key or _normalize_optional(os.environ.get(provider_api_key_env))
+        if api_key is None:
+            api_key = _normalize_optional(os.environ.get(OPENAI_COMPATIBLE_API_KEY_ENV))
         if api_key is None and self._auth_resolver is not None:
             api_key = await self._auth_resolver.api_key(self.name)
         if api_key is None:
             if self._requires_api_key:
                 raise ProviderConfigurationError(
-                    "openai-compatible credentials are required; run `/connect "
-                    "openai-compatible` in the TUI or set OPENAI_COMPATIBLE_API_KEY"
+                    f"{self.name} credentials are required; run `/connect {self.name}` in the TUI "
+                    f"or set {provider_api_key_env} (fallback: {OPENAI_COMPATIBLE_API_KEY_ENV})"
                 )
             api_key = "not-required"
         if self._client is not None and self._client_api_key == api_key:
             return self._client
         if self._client is not None:
             await self._client.close()
+        http_client = (
+            httpx.AsyncClient(verify=self._ca_bundle) if self._ca_bundle is not None else None
+        )
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=self._base_url,
             max_retries=0,
+            http_client=http_client,
         )
         self._client_api_key = api_key
         return self._client
+
+    async def aclose(self) -> None:
+        """Close the Wisp-owned OpenAI client and its HTTP transport."""
+
+        if self._client_is_injected or self._client is None:
+            return
+        client = self._client
+        self._client = None
+        self._client_api_key = None
+        await client.close()
 
     def _get_continuation(self, response_id: str | None) -> tuple[ChatPayload, ...]:
         return self._continuations.get(response_id) or ()

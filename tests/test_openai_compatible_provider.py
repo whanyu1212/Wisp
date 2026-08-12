@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import cast
 
 import anyio
+import pytest
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionChunk
+from pytest import MonkeyPatch
 
+import wisp.providers.openai_compatible as openai_compatible_module
 from wisp.agent.messages import Message
-from wisp.providers.base import ToolCallResult, ToolSpec
+from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
+from wisp.providers.auth import StoredProviderAuthResolver
+from wisp.providers.base import ProviderConfigurationError, ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseFailed,
@@ -289,3 +295,103 @@ def test_reports_malformed_tool_arguments_without_executing_early() -> None:
     tool_event = next(event for event in events if isinstance(event, ProviderToolCallCompleted))
     assert tool_event.tool_call.arguments == {}
     assert tool_event.tool_call.parse_error is not None
+
+
+def test_custom_provider_api_key_precedence_and_stored_lookup(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    store = JsonAuthStore(tmp_path / "auth.json")
+    store.set("openrouter", ApiKeyCredential(key="stored-key"))
+    resolver = StoredProviderAuthResolver(store)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "provider-env-key")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "fallback-env-key")
+
+    def provider(*, api_key: str | None = None) -> OpenAICompatibleProvider:
+        return OpenAICompatibleProvider(
+            provider_name="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            default_model="test-model",
+            api_key=api_key,
+            auth_resolver=resolver,
+        )
+
+    async def run() -> None:
+        explicit = provider(api_key="explicit-key")
+        provider_env = provider()
+        explicit_client = await explicit._client_or_create()  # noqa: SLF001
+        provider_env_client = await provider_env._client_or_create()  # noqa: SLF001
+
+        monkeypatch.delenv("OPENROUTER_API_KEY")
+        fallback_env = provider()
+        fallback_env_client = await fallback_env._client_or_create()  # noqa: SLF001
+
+        monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY")
+        stored = provider()
+        stored_client = await stored._client_or_create()  # noqa: SLF001
+
+        assert explicit_client.api_key == "explicit-key"
+        assert provider_env_client.api_key == "provider-env-key"
+        assert fallback_env_client.api_key == "fallback-env-key"
+        assert stored_client.api_key == "stored-key"
+
+        await explicit.aclose()
+        await provider_env.aclose()
+        await fallback_env.aclose()
+        await stored.aclose()
+
+    anyio.run(run)
+
+
+def test_custom_provider_error_uses_provider_name_and_environment_hint(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    provider = OpenAICompatibleProvider(
+        provider_name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        default_model="test-model",
+    )
+
+    async def run() -> None:
+        with pytest.raises(
+            ProviderConfigurationError,
+            match=(
+                "openrouter credentials are required.*`/connect openrouter`.*"
+                "OPENROUTER_API_KEY.*OPENAI_COMPATIBLE_API_KEY"
+            ),
+        ):
+            await provider._client_or_create()  # noqa: SLF001
+
+    anyio.run(run)
+
+
+def test_custom_ca_bundle_configures_http_transport(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ca_bundle = tmp_path / "private-ca.pem"
+    ca_bundle.write_text("test CA", encoding="utf-8")
+    captured: dict[str, object] = {}
+    original_async_client = openai_compatible_module.httpx.AsyncClient
+
+    class RecordingAsyncClient(original_async_client):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            captured.update(kwargs)
+            kwargs.pop("verify", None)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(openai_compatible_module.httpx, "AsyncClient", RecordingAsyncClient)
+    provider = OpenAICompatibleProvider(
+        provider_name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        default_model="test-model",
+        ca_bundle=ca_bundle,
+        api_key="test-key",
+    )
+
+    async def run() -> None:
+        await provider._client_or_create()  # noqa: SLF001
+        assert captured["verify"] == str(ca_bundle)
+        await provider.aclose()
+
+    anyio.run(run)
