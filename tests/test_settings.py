@@ -364,8 +364,14 @@ def test_openai_compatible_endpoint_validation(tmp_path: Path) -> None:
                 }
             }
         )
-    for invalid_name in ("OpenRouter", "open_router", "openrouter::model", "openrouter--alt"):
-        with pytest.raises(ValidationError, match="lowercase letters or digits"):
+    for invalid_name in (
+        "123ai",
+        "OpenRouter",
+        "open_router",
+        "openrouter::model",
+        "openrouter--alt",
+    ):
+        with pytest.raises(ValidationError, match="start with a lowercase letter"):
             WispSettings.model_validate(
                 {
                     "openai_compatible": {

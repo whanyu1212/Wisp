@@ -176,8 +176,9 @@ settings cannot redirect requests carrying your credentials. For example, OpenRo
 ```
 
 Set `OPENROUTER_API_KEY`, use the optional `OPENAI_COMPATIBLE_API_KEY` fallback, or enter the key
-with `/connect openrouter`. Hyphens in provider names become underscores in environment variables
-(for example, `local-openai` uses `LOCAL_OPENAI_API_KEY`). Local servers that do not require
+with `/connect openrouter`. Provider names must start with a lowercase letter. Hyphens become
+underscores in environment variables (for example, `local-openai` uses `LOCAL_OPENAI_API_KEY`).
+Local servers that do not require
 authentication can use a loopback HTTP endpoint and `"requires_api_key": false`:
 
 ```json
