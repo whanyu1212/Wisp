@@ -51,7 +51,7 @@ Wisp is published on PyPI as `wisp-ai`, installs a `wisp` command, and requires 
 newer. The current release is a beta, so request it explicitly:
 
 ```bash
-uv tool install "wisp-ai==0.1.0b2"
+uv tool install "wisp-ai==0.1.0b3"
 ```
 
 If `wisp` is not on your `PATH`, run `uv tool update-shell` once and restart your shell.
@@ -59,7 +59,7 @@ If `wisp` is not on your `PATH`, run `uv tool update-shell` once and restart you
 To run Wisp without installing it:
 
 ```bash
-uvx --from "wisp-ai==0.1.0b2" wisp
+uvx --from "wisp-ai==0.1.0b3" wisp
 ```
 
 Check the installed version with `wisp --version`.

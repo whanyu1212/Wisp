@@ -11,6 +11,15 @@ This log starts at schema v27. Earlier history is in the git log.
 
 ## Unreleased
 
+## 0.1.0b3 — 2026-08-12
+
+- Added configurable OpenAI-compatible endpoints for using provider APIs beyond the built-in OpenAI
+  service.
+- Added a project initialization command and refined TUI themes, permission prompts, transcript
+  surfaces, streamed Markdown, diffs, and startup presentation.
+- Fixed resumed and completed assistant response rendering, working-indicator visibility, truthful
+  RPC command lifecycles, and recovery from incomplete session JSONL appends.
+
 ## 0.1.0b2 — 2026-08-11
 
 - Added typed MCP status RPC snapshots and a TUI `/mcp` command that reports configured servers,
