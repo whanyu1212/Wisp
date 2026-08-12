@@ -616,6 +616,16 @@ class CodingSession:
                         (*prompt_messages, *self._conversation_history(active_history))
                     )
             remaining_budget = self._harness_context_budget(harness)
+            if self._exceeds_provider_auto_compaction_limit(
+                remaining_budget
+            ) and self._recover_via_tool_result_truncation(harness, remaining_budget):
+                # Recovers a session resumed after a crash mid-turn: the crashed
+                # turn's full, untruncated tool result was already durably
+                # persisted before any in-memory truncation could run, and an
+                # incomplete turn (no closing assistant message) can never be
+                # compacted away, so it would otherwise re-trigger this same
+                # overflow on every future prompt in the session, forever.
+                remaining_budget = self._harness_context_budget(harness)
             if self._exceeds_provider_auto_compaction_limit(remaining_budget):
                 error_message = (
                     "Active prompt exceeds the provider auto-compaction limit "

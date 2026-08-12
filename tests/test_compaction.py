@@ -1533,6 +1533,76 @@ def test_coding_session_stops_when_prompt_remains_over_provider_limit(
     assert session.read_context_messages() == history
 
 
+def test_coding_session_recovers_a_session_resumed_after_a_crashed_oversized_tool_turn(
+    tmp_path: Path,
+) -> None:
+    """A crash mid-turn persists the full, untruncated tool result to disk before
+    any in-memory recovery can run, and leaves that turn without a closing
+    assistant message — so it can never be summarized away by compaction (which
+    only replaces *complete* turns). Resuming with a new prompt must not
+    immediately re-hit the same overflow: the preflight budget check has to
+    truncate that stuck turn's tool result the same way the tool-round path
+    truncates an oversized active-turn result, or every future prompt in the
+    session fails identically, forever.
+    """
+
+    call = ToolCallSnapshot(call_id="call-1", name="huge_read", arguments={})
+    crashed_turn = (
+        Message(role="user", content="read the huge file"),
+        Message(role="assistant", content="", tool_calls=(call,), finish_reason="tool_calls"),
+        Message(
+            role="tool",
+            content="x" * 8_000,
+            tool_name="huge_read",
+            tool_call_id="call-1",
+        ),
+        # No closing assistant message: the process crashed here.
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer after resume"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def run() -> list[WispEvent]:
+        for message in crashed_turn:
+            await session.append_message(message)
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=_model_registry(
+                context_window=2_000,
+                auto_compact_token_limit=1_600,
+            ),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=100,
+        )
+        return [
+            event
+            async for event in agent.run(
+                "continue",
+                session=session,
+                history=crashed_turn,
+            )
+        ]
+
+    events = anyio.run(run)
+
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+    assert len(provider.calls) == 1
+    assert any(
+        isinstance(event, MessageCompleted) and event.content == "answer after resume"
+        for event in events
+    )
+
+
 def test_coding_session_rechecks_provider_limit_after_tool_round(tmp_path: Path) -> None:
     class LargeReadTool:
         name = "large_read"
