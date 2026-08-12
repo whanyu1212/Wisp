@@ -220,9 +220,7 @@ def test_custom_provider_auth_uses_named_environment_with_generic_fallback(
     renderer.notices.clear()
     commands.status(())
 
-    assert renderer.notices == [
-        "openrouter: api key configured via OPENAI_COMPATIBLE_API_KEY"
-    ]
+    assert renderer.notices == ["openrouter: api key configured via OPENAI_COMPATIBLE_API_KEY"]
 
 
 def test_custom_provider_connect_stores_under_custom_name() -> None:
