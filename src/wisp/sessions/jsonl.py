@@ -1274,7 +1274,7 @@ class JsonlSession:
         if not entries:
             info = self._validate_session_file()
             if info is not None:
-                _unlink_if_same_file(self.path, (info.st_dev, info.st_ino))
+                _unlink_expected_file(self.path, (info.st_dev, info.st_ino))
                 _sync_directory(self.path.parent)
             return
         self._replace_lines([session_entry_to_json(entry) for entry in entries])
@@ -1596,8 +1596,20 @@ def _validate_private_directory(path: Path) -> None:
             raise SessionError(f"Session directory is not private: {path}")
 
 
+def _unlink_expected_file(path: Path, expected: tuple[int, int]) -> None:
+    """Remove the expected live file, reporting disappearance or replacement."""
+
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise SessionError(f"Could not inspect session file before deletion: {path}") from exc
+    if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != expected:
+        raise SessionError(f"Session file changed before deletion: {path}")
+    path.unlink()
+
+
 def _unlink_if_same_file(path: Path, expected: tuple[int, int]) -> None:
-    """Remove a failed new file only while it is still the inode we created."""
+    """Best-effort cleanup only while the path still names the expected inode."""
 
     try:
         info = path.lstat()

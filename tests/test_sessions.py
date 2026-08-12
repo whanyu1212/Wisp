@@ -2688,6 +2688,67 @@ def test_truncate_rewrite_failure_preserves_original_session(
     assert tuple(tmp_path.glob(f".{session.path.name}.*.tmp")) == ()
 
 
+def test_truncate_to_zero_propagates_deletion_failure(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def seed() -> None:
+        await session.append_message(Message(role="user", content="first"))
+
+    anyio.run(seed)
+    original = session.path.read_bytes()
+    real_unlink = Path.unlink
+
+    def reject_session_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path == session.path:
+            raise OSError(errno.EROFS, "read-only file system")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", reject_session_unlink)
+
+    async def truncate() -> None:
+        await session.truncate_entries(0)
+
+    with pytest.raises(OSError, match="read-only file system"):
+        anyio.run(truncate)
+
+    assert session.path.read_bytes() == original
+    assert len(session.read_entries()) == 1
+
+
+def test_truncate_to_zero_rejects_replaced_file(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def seed() -> None:
+        await session.append_message(Message(role="user", content="first"))
+
+    anyio.run(seed)
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_bytes(session.path.read_bytes())
+    real_validate = session._validate_session_file  # noqa: SLF001
+
+    def replace_after_validation() -> os.stat_result | None:
+        info = real_validate()
+        if info is not None:
+            os.replace(replacement, session.path)
+        return info
+
+    monkeypatch.setattr(session, "_validate_session_file", replace_after_validation)
+
+    async def truncate() -> None:
+        await session.truncate_entries(0)
+
+    with pytest.raises(SessionError, match="changed before deletion"):
+        anyio.run(truncate)
+
+    assert session.path.exists()
+
+
 def test_truncate_to_zero_syncs_parent_directory(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
