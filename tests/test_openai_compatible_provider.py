@@ -12,6 +12,7 @@ from pytest import MonkeyPatch
 
 from wisp.agent.messages import Message
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
+from wisp.events import ToolCallSnapshot
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import ProviderConfigurationError, ToolCallResult, ToolSpec
 from wisp.providers.events import (
@@ -258,6 +259,92 @@ def test_replays_assistant_tool_calls_and_tool_results_on_follow_up() -> None:
         },
         {"role": "tool", "tool_call_id": "call-1", "content": "result"},
     ]
+
+
+def test_replayed_history_tool_call_keeps_structured_tool_calls_and_paired_result() -> None:
+    """A pre-existing assistant ``tool_calls`` message in ``messages`` (not the live
+    in-flight round) must round-trip onto the wire as structured tool_calls with its
+    result paired as a native ``role: tool`` message.
+
+    ``_messages_to_chat`` currently drops ``tool_calls`` on every history message and
+    flattens tool-role rows into ``{"role": "tool", "content": ...}`` without a
+    ``tool_call_id`` on the assistant side — so a provider replaying an
+    already-in-transcript tool round (as happens when Wisp rebuilds the harness
+    transcript after mid-turn compaction) loses the model's record of having made the
+    call. This asserts the wire payload actually preserves it end to end.
+    """
+
+    provider, completions = _provider([[_chunk(content="done", finish_reason="stop")]])
+
+    history = [
+        Message(role="user", content="search"),
+        Message(
+            role="assistant",
+            content="checking",
+            tool_calls=(
+                ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"query": "wisp"}),
+            ),
+        ),
+        Message(role="tool", content="found it", tool_name="lookup", tool_call_id="call-1"),
+    ]
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream(history)]
+
+    anyio.run(run)
+
+    sent = completions.calls[0]["messages"]
+    assistant_sent = sent[1]
+    assert assistant_sent.get("tool_calls") == [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": '{"query": "wisp"}'},
+        }
+    ]
+    tool_sent = sent[2]
+    assert tool_sent == {"role": "tool", "tool_call_id": "call-1", "content": "found it"}
+
+
+def test_normalized_historical_tool_call_never_reaches_wire_dangling() -> None:
+    """A historical (pre-active-turn) assistant tool-call row with nonblank content
+    must not reach the wire with structured ``tool_calls`` once its paired result
+    has been narrated into user-role text — that combination is a live function
+    call with no matching function output, which strict endpoints reject.
+
+    ``normalize_provider_history`` is the layer responsible for stripping
+    ``tool_calls`` from historical rows; this integration test drives its output
+    through the real provider serializer to confirm the malformed shape can never
+    reach the wire, rather than only asserting on the normalizer's return value.
+    """
+
+    from wisp.agent.messages import normalize_provider_history
+
+    transcript = [
+        Message(role="user", content="search"),
+        Message(
+            role="assistant",
+            content="I'll check that",
+            tool_calls=(
+                ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"query": "wisp"}),
+            ),
+        ),
+        Message(role="tool", content="found it", tool_name="lookup", tool_call_id="call-1"),
+        Message(role="user", content="what next?"),
+    ]
+    # active_from=3: only the final user row is still in progress. The
+    # assistant/tool pair above it is historical and must be fully narrated.
+    normalized = normalize_provider_history(transcript, active_from=3)
+
+    provider, completions = _provider([[_chunk(content="done", finish_reason="stop")]])
+
+    async def run() -> list[object]:
+        return [event async for event in provider.stream(normalized)]
+
+    anyio.run(run)
+
+    sent = completions.calls[0]["messages"]
+    assert all(message.get("tool_calls") is None for message in sent)
 
 
 def test_rejects_eof_without_finish_reason() -> None:

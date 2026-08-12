@@ -588,6 +588,13 @@ When a provider explicitly rejects an input for context overflow, Wisp can compa
 same prompt once. Recovery is skipped after mutating or command tools, or after deltas have already
 reached an interface, because side effects and partial responses cannot be safely repeated.
 
+On providers with a cataloged compaction limit (see Model catalog above — this currently means
+`openai-codex`), Wisp also checks the budget proactively before and after each tool round, since
+those providers report overflow as a generic error rather than a distinguishable one. Compaction can
+only replace turns before the one currently in progress, so if the active turn's own tool results
+are what's driving the overage, Wisp truncates the oldest of them (preserving each result's tail,
+where diagnostic output usually is) before falling back to a terminal error.
+
 ## TUI
 
 ```bash

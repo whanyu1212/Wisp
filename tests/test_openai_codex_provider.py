@@ -15,6 +15,7 @@ from pytest import MonkeyPatch
 from wisp.agent.messages import Message
 from wisp.auth import openai_codex as openai_codex_auth_module
 from wisp.auth.storage import JsonAuthStore, OAuthCredential
+from wisp.events import ToolCallSnapshot
 from wisp.providers import openai_codex as openai_codex_module
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
@@ -276,6 +277,58 @@ def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path)
             "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
             "strict": False,
         }
+    ]
+
+
+def test_openai_codex_provider_replays_active_turn_tool_call_from_history(
+    tmp_path: Path,
+) -> None:
+    """A structured assistant ``tool_calls`` row (plus its paired ``tool`` result)
+    passed in ``messages`` — not carried via ``previous_response_id`` continuation —
+    must serialize to native ``function_call``/``function_call_output`` items.
+
+    This is the shape Wisp sends after a mid-turn transcript rebuild: the Responses
+    API `store: false` continuation chain does not survive a fresh
+    ``run_agent_loop`` call (each call starts ``previous_response_id=None``), so an
+    in-flight tool round from the turn currently running has to be replayed through
+    plain message history instead. Losing the structure here means the model has no
+    record of having made the call and repeats it.
+    """
+
+    store = _store_with_oauth(tmp_path)
+    provider = StubOpenAICodexProvider(
+        [_completed_event("response-id")],
+        auth_resolver=StoredProviderAuthResolver(store),
+    )
+
+    history = [
+        Message(role="user", content="search"),
+        Message(
+            role="assistant",
+            content="checking",
+            tool_calls=(
+                ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"query": "wisp"}),
+            ),
+        ),
+        Message(role="tool", content="found it", tool_name="lookup", tool_call_id="call-1"),
+    ]
+
+    async def run() -> None:
+        _events = [event async for event in provider.stream(history)]
+
+    anyio.run(run)
+
+    assert provider.seen_body is not None
+    assert provider.seen_body["input"] == [
+        {"role": "user", "content": "search"},
+        {"role": "assistant", "content": "checking"},
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "lookup",
+            "arguments": '{"query":"wisp"}',
+        },
+        {"type": "function_call_output", "call_id": "call-1", "output": "found it"},
     ]
 
 

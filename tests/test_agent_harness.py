@@ -252,6 +252,13 @@ def test_harness_preserves_assistant_tool_result_order_across_runs() -> None:
         ("assistant", "done"),
         ("user", "what next?"),
     ]
+    # The historical "checking " assistant row has nonblank content, so it is not
+    # dropped outright — but its paired result was narrated into user-role text
+    # above, not replayed as a native tool-role message. A structured tool_calls
+    # here would be a dangling function call with no matching function output.
+    narrated_assistant = provider.calls[2].messages[1]
+    assert narrated_assistant.role == "assistant"
+    assert not narrated_assistant.tool_calls
 
 
 def test_harness_omits_empty_tool_call_assistant_from_follow_up_history() -> None:
