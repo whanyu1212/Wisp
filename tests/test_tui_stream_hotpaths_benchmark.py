@@ -52,12 +52,13 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     sample = report.samples[0]
     assert sample.run == 1
     assert sample.mounted_history_entries == 4
-    assert sample.mounted_widget_count == 5
+    assert sample.mounted_widget_count == 6
     assert sample.stream_total_ms >= 0
     assert 1 <= sample.stream_update_count <= report.config.stream_chunks + 1
     assert sample.event_loop_delay.sample_count >= 1
     assert sample.layout_passes.sample_count >= 1
     assert sample.compositor_renders.sample_count >= 1
+    assert sample.working_indicator_active
     assert sample.final_following
     assert sample.final_at_tail
     assert sample.source_complete

@@ -27,7 +27,7 @@ from benchmarks.tui_long_session import append_benchmark_messages
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tui.history import history_entries_from_rpc_messages
 from wisp.tui.textual_app import TextualTui, TextualTuiRenderer, create_textual_tui
-from wisp.tui.widgets import StreamMessage, Transcript
+from wisp.tui.widgets import StreamMessage, Transcript, WorkingIndicator
 
 
 @dataclass(frozen=True)
@@ -78,6 +78,7 @@ class StreamHotpathSample:
     event_loop_delay: TimingDistribution
     layout_passes: TimingDistribution
     compositor_renders: TimingDistribution
+    working_indicator_active: bool
     final_following: bool
     final_at_tail: bool
     source_complete: bool
@@ -234,18 +235,31 @@ async def _run_sample(
                     "Streaming hotpath fixture mounted "
                     f"{retained_count} history entries instead of {mounted_history_entries}"
                 )
+            # Match the production command lifecycle: TuiShell calls running()
+            # before delivering tokens, leaving this 80 ms heartbeat mounted at
+            # the transcript tail for the complete streaming phase.
+            renderer.running()
+            await pilot.pause()
+            indicator = app.query_one(WorkingIndicator)
+            if indicator.parent is not transcript or transcript.children[-1] is not indicator:
+                raise RuntimeError("Working indicator did not settle at the transcript tail")
             mounted_widget_count = len(transcript.children)
-            return await _measure_stream(
-                app,
-                renderer,
-                pilot,
-                transcript,
-                config=config,
-                run=run,
-                mounted_history_entries=mounted_history_entries,
-                mounted_widget_count=mounted_widget_count,
-                profile_output=profile_output,
-            )
+            try:
+                return await _measure_stream(
+                    app,
+                    renderer,
+                    pilot,
+                    transcript,
+                    indicator,
+                    config=config,
+                    run=run,
+                    mounted_history_entries=mounted_history_entries,
+                    mounted_widget_count=mounted_widget_count,
+                    profile_output=profile_output,
+                )
+            finally:
+                app.hide_working_indicator()
+                await pilot.pause()
 
 
 async def _measure_stream(
@@ -253,6 +267,7 @@ async def _measure_stream(
     renderer: TextualTuiRenderer,
     pilot: Pilot[None],
     transcript: Transcript,
+    indicator: WorkingIndicator,
     *,
     config: BenchmarkConfig,
     run: int,
@@ -304,6 +319,11 @@ async def _measure_stream(
         event_loop_delay=TimingDistribution.from_samples(heartbeat_delays),
         layout_passes=TimingDistribution.from_samples(collector.layout_ms),
         compositor_renders=TimingDistribution.from_samples(collector.compositor_ms),
+        working_indicator_active=(
+            indicator.is_mounted
+            and indicator.parent is transcript
+            and app._transcript_controller.working_indicator is indicator
+        ),
         final_following=transcript.is_following,
         final_at_tail=transcript.scroll_y >= transcript.max_scroll_y - 3,
         source_complete=source_complete,

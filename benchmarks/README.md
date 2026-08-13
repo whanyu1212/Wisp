@@ -37,7 +37,8 @@ uv run python -m benchmarks.tui_stream_hotpaths --runs 5 \
   --output profiles/tui-stream-hotpaths.json
 ```
 
-The default matrix mounts exactly 75, 120, and 300 retained history entries before streaming
+The default matrix mounts exactly 75, 120, and 300 retained history entries, then starts the same
+command lifecycle that keeps Wisp's 80 ms working indicator at the transcript tail while streaming
 100 chunks at 20 ms intervals. It rotates condition order between runs and reports individual
 samples plus per-condition medians. `event_loop_delay` comes from a separate 10 ms
 absolute-deadline heartbeat. `layout_passes` wraps Textual's private `_refresh_layout` seam and
