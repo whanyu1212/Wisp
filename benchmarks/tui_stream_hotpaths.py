@@ -221,9 +221,7 @@ async def _run_sample(
         entries = history_entries_from_rpc_messages(page.messages)
         app, renderer = create_textual_tui()
         assert isinstance(renderer, TextualTuiRenderer)
-        async with app.run_test(
-            size=(config.viewport_width, config.viewport_height)
-        ) as pilot:
+        async with app.run_test(size=(config.viewport_width, config.viewport_height)) as pilot:
             renderer.replace_history_entries(entries, session_label="Streaming hotpath benchmark")
             await app.wait_for_history_render()
             await pilot.pause()
