@@ -26,6 +26,39 @@ suite.
 The CPU worker runs until it is cancelled immediately after the scroll measurement,
 with a 60-second safety timeout. Streaming metrics therefore run without its load.
 
+## TUI Streaming Hotpaths
+
+Measure the real Rich Markdown stream path at the production first-page size, a candidate
+smaller mounted window, and the current maximum mounted-history window:
+
+```bash
+mkdir -p profiles
+uv run python -m benchmarks.tui_stream_hotpaths --runs 5 \
+  --output profiles/tui-stream-hotpaths.json
+```
+
+The default matrix mounts exactly 75, 120, and 300 retained history entries, then starts the same
+command lifecycle that keeps Wisp's 80 ms working indicator at the transcript tail while streaming
+100 chunks at 20 ms intervals. It rotates condition order between runs and reports individual
+samples plus per-condition medians. `event_loop_delay` comes from a separate 10 ms
+absolute-deadline heartbeat. `layout_passes` wraps Textual's private `_refresh_layout` seam and
+`compositor_renders` wraps `_compositor_refresh` only during the streaming phase. These timings
+may overlap and must not be added together.
+
+Capture a profile for one unambiguous streaming condition without import, fixture-construction,
+or initial-history-render noise:
+
+```bash
+uv run python -m benchmarks.tui_stream_hotpaths --mounted-history 300 --runs 1 \
+  --profile-output profiles/tui-stream-300.prof
+uv run python -m pstats profiles/tui-stream-300.prof
+```
+
+The instrumentation is installed and restored inside the benchmark process; production TUI code
+is unchanged. Treat JSON and profile files as machine-local evidence. Compare timings only on the
+same machine, Python/Textual versions, viewport, and arguments, and report individual samples
+alongside medians rather than promoting one run to a portable threshold.
+
 Compare absolute timings only on the same machine. `warm_newest_page_read_ms` and
 `older_page_read_ms` measure cache-backed paging after the cold initial read.
 `mounted_widget_counts` remains bounded by the 300-entry history window (plus the
