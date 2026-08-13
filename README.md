@@ -663,9 +663,16 @@ policy, so secrets are never offered.
 | `Ctrl+T` | Switch between the light and dark themes (remembered across runs) |
 | `Ctrl+G` | Toggle contextual help for the focused Textual surface |
 | `Ctrl+R` | Search prompt history for this TUI run |
+| Mouse wheel / trackpad | Scroll the transcript without moving editor focus |
+| `PageUp` / `PageDown` | Scroll the transcript by one page |
+| `Home` / `End` | Jump to the oldest loaded content / return to the latest output |
 | `Escape` | Dismiss nearest menu or overlay, then cancel an active prompt |
 | `Ctrl+C` | Copy selection; otherwise press twice within 1.5s to quit |
 | `Ctrl+D` | Delete right; EOF only from an empty editor |
+
+The Textual transcript has no visible scrollbar, but all transcript scrolling remains available
+through the controls above. When new output arrives while you are reading earlier content, select
+the `↓ new` indicator to return to the live tail.
 
 `Ctrl+T` switches between Wisp's dark and light palettes. The choice is written to
 `~/.wisp/tui.json` and restored on the next run. It is presentation state owned by the TUI client,

@@ -183,11 +183,10 @@ class TextualTui(App[None]):
         border: none;
         padding: 0 1 3 1;
         overflow-x: hidden;
-        scrollbar-size-vertical: 1;
-        scrollbar-gutter: stable;
-        scrollbar-color: $secondary;
-        scrollbar-color-hover: $primary;
-        scrollbar-color-active: $accent;
+        /* Keep native scrolling and overflow state without painting scrollbar
+           chrome or reserving transcript width for an invisible gutter. */
+        scrollbar-visibility: hidden;
+        scrollbar-size-vertical: 0;
     }
 
     /* No `min-height`: a floor here would keep `size.height` pinned above the
@@ -198,11 +197,6 @@ class TextualTui(App[None]):
     #transcript-empty {
         width: 1fr;
         height: 1fr;
-        /* The transcript reserves its one-column scrollbar gutter even before
-           content overflows. The disposable empty state has no scrollbar, so
-           reclaim that blank column to keep the wordmark centered on the full
-           transcript instead of visibly shifting it left. */
-        margin-right: -1;
         align: center middle;
     }
 
@@ -1264,10 +1258,10 @@ class TextualTui(App[None]):
 
     async def run_shell(self, runner: Callable[[], Awaitable[None]]) -> None:
         self._runner = runner
-        # Textual must enable terminal mouse reporting for wheel/trackpad events and
-        # scrollbar interaction to reach the Transcript. Keep this explicit: the
-        # default is also True, but silently reverting to mouse=False makes the
-        # visible scrollbar inert in a real terminal while headless widget tests pass.
+        # Textual must enable terminal mouse reporting for wheel/trackpad events to
+        # reach the Transcript. Keep this explicit: the default is also True, but
+        # silently reverting to mouse=False breaks real-terminal scrolling while
+        # headless widget tests continue to pass.
         await self.run_async(mouse=True)
         # Textual restores the terminal before returning; re-raise any error
         # from the shell worker here so it surfaces as a normal traceback

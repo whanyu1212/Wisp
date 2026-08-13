@@ -140,7 +140,7 @@ def test_assistant_markdown_wraps_without_horizontal_transcript_overflow(
             await transcript.mount(stream)
             await stream.replace_markdown(source)
             await pilot.pause()
-            await pilot.pause()  # settle the vertical-scrollbar gutter reflow
+            await pilot.pause()  # settle the overflowing transcript layout
             return (
                 stream.source,
                 stream.content_size.width,
