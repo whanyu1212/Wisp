@@ -99,7 +99,9 @@ async def _wait_for(pilot: Pilot[None], predicate: Callable[[], bool]) -> None:
     raise RuntimeError("Textual benchmark scenario did not settle")
 
 
-async def _append_messages(session: JsonlSession, count: int) -> None:
+async def append_benchmark_messages(session: JsonlSession, count: int) -> None:
+    """Populate a session with the shared deterministic TUI benchmark fixture."""
+
     for index in range(count):
         position = index % 5
         if position == 0:
@@ -160,7 +162,7 @@ async def run_scenario(config: ScenarioConfig) -> ScenarioReport:
         root = Path(temporary_directory)
         store = JsonlSessionStore(root)
         session = store.create()
-        await _append_messages(session, config.message_count)
+        await append_benchmark_messages(session, config.message_count)
         session = store.load(session.path)
         newest_page, newest_page_read_ms = _read_page(session, limit=config.page_size)
         _warm_newest_page, warm_newest_page_read_ms = _read_page(session, limit=config.page_size)
