@@ -184,6 +184,7 @@ class TextualTui(App[None]):
         padding: 0 1 3 1;
         overflow-x: hidden;
         scrollbar-size-vertical: 1;
+        scrollbar-gutter: stable;
         scrollbar-color: $secondary;
         scrollbar-color-hover: $primary;
         scrollbar-color-active: $accent;
@@ -197,6 +198,11 @@ class TextualTui(App[None]):
     #transcript-empty {
         width: 1fr;
         height: 1fr;
+        /* The transcript reserves its one-column scrollbar gutter even before
+           content overflows. The disposable empty state has no scrollbar, so
+           reclaim that blank column to keep the wordmark centered on the full
+           transcript instead of visibly shifting it left. */
+        margin-right: -1;
         align: center middle;
     }
 

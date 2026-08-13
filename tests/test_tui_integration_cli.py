@@ -1854,6 +1854,158 @@ def test_textual_tool_card_edit_diff_rows_stay_unambiguous_at_supported_widths(
     assert card_width <= size[0]  # no horizontal overflow past the viewport
 
 
+@pytest.mark.parametrize("size", [(28, 20), (84, 24), (168, 40)])
+def test_textual_transcript_reserves_scrollbar_gutter_before_tool_diff_overflows(
+    size: tuple[int, int],
+) -> None:
+    """Scrollbar activation must not temporarily leave a diff one column too wide."""
+
+    async def scenario() -> tuple[int, int, bool, bool, tuple[int, ...], int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=size) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            renderer.event(
+                ToolCallRequested(
+                    call_id="c1",
+                    name="edit",
+                    arguments={
+                        "path": "src/wisp/coding/session.py",
+                        "edits": [
+                            {
+                                "oldText": "expected_active_leaf_id=snapshot.active_leaf_id,",
+                                "newText": "expected_active_leaf_id=replay.active_leaf_id,",
+                            }
+                        ],
+                    },
+                )
+            )
+            renderer.event(
+                ToolResultReady(call_id="c1", name="edit", output="Applied", is_error=False)
+            )
+            await pilot.pause()
+            await pilot.pause()
+            card = _first_tool_card(app_instance)
+            width_before = transcript.scrollable_content_region.width
+            scrollbar_before = transcript.scrollbars_enabled[0]
+
+            # Cross the vertical-overflow boundary in one event-loop turn. With an
+            # automatic gutter Textual narrows the transcript immediately, while a
+            # manually formatted ToolCard can retain the previous width for another
+            # two layout frames and paint its final column beneath the scrollbar.
+            for index in range(size[1] + 8):
+                renderer.notice(f"filler row {index}")
+            await pilot.pause(0)
+
+            row_widths = tuple(cell_len(line) for line in card.render().plain.splitlines())
+            return (
+                width_before,
+                transcript.scrollable_content_region.width,
+                scrollbar_before,
+                transcript.scrollbars_enabled[0],
+                row_widths,
+                transcript.max_scroll_x,
+            )
+
+    width_before, width_after, scrollbar_before, scrollbar_after, row_widths, max_x = (
+        anyio.run(scenario)
+    )
+    assert not scrollbar_before
+    assert scrollbar_after
+    assert width_after == width_before  # gutter was reserved before it became visible
+    assert all(width <= width_after for width in row_widths)
+    assert max_x == 0
+
+
+@pytest.mark.parametrize("resized_width", [28, 84, 120])
+def test_textual_transcript_content_stays_inside_scrollbar_gutter_after_resize(
+    resized_width: int,
+) -> None:
+    """Every transcript row family respects the shared gutter after reflow."""
+
+    async def scenario() -> tuple[str, bool, int, bool, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(120, 24)) as pilot:
+            renderer.prompt_submitted("user " + "u" * 180)
+            renderer.notice("notice " + "n" * 180)
+            renderer.command_error("error " + "e" * 180)
+            renderer.event(
+                ToolCallRequested(
+                    call_id="pending",
+                    name="bash",
+                    arguments={"command": "x" * 180},
+                )
+            )
+            renderer.event(
+                ToolCallRequested(
+                    call_id="output",
+                    name="bash",
+                    arguments={"command": "run"},
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id="output",
+                    name="bash",
+                    output="\n".join(f"output {index} " + "o" * 80 for index in range(20)),
+                    is_error=False,
+                )
+            )
+            renderer.event(
+                ToolCallRequested(
+                    call_id="diff",
+                    name="edit",
+                    arguments={
+                        "path": "src/long.py",
+                        "edits": [
+                            {
+                                "oldText": "before " + "x" * 180,
+                                "newText": "after " + "y" * 180,
+                            }
+                        ],
+                    },
+                )
+            )
+            renderer.event(
+                ToolResultReady(call_id="diff", name="edit", output="Applied", is_error=False)
+            )
+            renderer.token_delta("## Markdown\n\n" + "wrapped prose " * 80)
+            renderer.end_token_stream()
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            await pilot.resize_terminal(resized_width, 24)
+            await pilot.pause(0)
+
+            transcript = app_instance.query_one("#transcript", Transcript)
+            content_right = transcript.scrollable_content_region.right
+            child_regions_fit = all(
+                not child.display or child.region.right <= content_right
+                for child in transcript.children
+            )
+            card_rows_fit = all(
+                cell_len(line) <= card.content_size.width
+                for card in transcript.query(ToolCard)
+                for line in card.render().plain.splitlines()
+            )
+            stream_fits = all(
+                stream.content_size.width <= transcript.scrollable_content_region.width
+                for stream in transcript.query(StreamMessage)
+            )
+            return (
+                transcript.styles.scrollbar_gutter,
+                transcript.scrollbars_enabled[0],
+                transcript.max_scroll_x,
+                child_regions_fit and card_rows_fit,
+                stream_fits,
+            )
+
+    gutter, scrollbar_visible, max_x, non_markdown_fits, markdown_fits = anyio.run(scenario)
+    assert gutter == "stable"
+    assert scrollbar_visible
+    assert max_x == 0
+    assert non_markdown_fits
+    assert markdown_fits
+
+
 def test_textual_tool_card_narrow_diff_keeps_tail_changed_tokens_visible() -> None:
     """Width cropping must not hide the only changed evidence at a line's tail."""
 
