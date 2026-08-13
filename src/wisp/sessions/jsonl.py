@@ -9,6 +9,7 @@ import stat
 import threading
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -61,6 +62,7 @@ from wisp.sessions.errors import (
     SessionNavigationCancelledError,
     SessionUnrevertUnavailableError,
     StaleSessionTreeError,
+    StaleSessionWriterError,
     UnsupportedPersistedEventVersionError,
     UnsupportedSessionEntryVersionError,
 )
@@ -86,6 +88,21 @@ MESSAGE_TOOL_CALL_LIMIT = 16
 MESSAGE_PAGE_TEXT_BYTE_LIMIT = 512 * 1024
 _FileSignature = tuple[int, int, int, int]
 
+
+class _UnconditionalAppend:
+    """Sentinel distinguishing no concurrency check from an expected empty leaf."""
+
+
+_UNCONDITIONAL_APPEND = _UnconditionalAppend()
+_EXPECTED_APPEND_LEAF: ContextVar[str | None | _UnconditionalAppend] = ContextVar(
+    "wisp_expected_append_leaf",
+    default=_UNCONDITIONAL_APPEND,
+)
+_EXPECTED_COMPACTION_LEAF: ContextVar[str | None | _UnconditionalAppend] = ContextVar(
+    "wisp_expected_compaction_leaf",
+    default=_UNCONDITIONAL_APPEND,
+)
+
 __all__ = [
     "AmbiguousSessionError",
     "DEFAULT_SESSION_MESSAGE_PAGE_LIMIT",
@@ -97,6 +114,7 @@ __all__ = [
     "SessionForkResult",
     "SessionMessagePage",
     "SessionNameChange",
+    "SessionRunSnapshot",
     "SessionSummary",
     "SessionTreeNavigation",
     "SessionTreeNodeSummary",
@@ -105,6 +123,7 @@ __all__ = [
     "SessionError",
     "SessionNotFoundError",
     "StaleCompactionError",
+    "StaleSessionWriterError",
 ]
 
 
@@ -147,6 +166,15 @@ class SessionForkResult:
     fork_leaf_id: str | None
     selected_entry_id: str
     selected_prompt: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRunSnapshot:
+    """One coherent provider context and durable position for starting a run."""
+
+    entry_count: int
+    active_leaf_id: str | None
+    replay: SessionReplay
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,7 +519,28 @@ class JsonlSession:
             message=message,
             operation_id=operation_id,
         )
-        return await self.append_entry(entry)
+        expected_active_leaf_id = _EXPECTED_APPEND_LEAF.get()
+        if isinstance(expected_active_leaf_id, _UnconditionalAppend):
+            return await self.append_entry(entry)
+        return await self.append_entry_if_current(
+            entry,
+            expected_active_leaf_id=expected_active_leaf_id,
+        )
+
+    async def append_message_if_current(
+        self,
+        message: Message,
+        *,
+        expected_active_leaf_id: str | None,
+        operation_id: str | None = None,
+    ) -> SessionEntry:
+        """Append a message through the public seam while enforcing run ownership."""
+
+        token = _EXPECTED_APPEND_LEAF.set(expected_active_leaf_id)
+        try:
+            return await self.append_message(message, operation_id=operation_id)
+        finally:
+            _EXPECTED_APPEND_LEAF.reset(token)
 
     async def append_event(
         self,
@@ -537,7 +586,25 @@ class JsonlSession:
                 f"Session entry belongs to {entry.session_id}, not {self.session_id}"
             )
         async with self._append_lock:
-            return await anyio.to_thread.run_sync(self._append_entry_once, entry)
+            return await anyio.to_thread.run_sync(
+                self._append_entry_once,
+                entry,
+                _EXPECTED_APPEND_LEAF.get(),
+            )
+
+    async def append_entry_if_current(
+        self,
+        entry: SessionEntry,
+        *,
+        expected_active_leaf_id: str | None,
+    ) -> SessionEntry:
+        """Persist an entry only against the active leaf observed by its run."""
+
+        token = _EXPECTED_APPEND_LEAF.set(expected_active_leaf_id)
+        try:
+            return await self.append_entry(entry)
+        finally:
+            _EXPECTED_APPEND_LEAF.reset(token)
 
     async def append_compaction_entry(
         self,
@@ -559,7 +626,26 @@ class JsonlSession:
                 self._append_compaction_entry_once,
                 entry,
                 expected,
+                _EXPECTED_COMPACTION_LEAF.get(),
             )
+
+    async def append_compaction_entry_if_current(
+        self,
+        entry: SessionEntry,
+        *,
+        expected_context_entry_ids: Sequence[str],
+        expected_active_leaf_id: str | None,
+    ) -> SessionEntry:
+        """Append a compaction only against the active leaf observed by its run."""
+
+        token = _EXPECTED_COMPACTION_LEAF.set(expected_active_leaf_id)
+        try:
+            return await self.append_compaction_entry(
+                entry,
+                expected_context_entry_ids=expected_context_entry_ids,
+            )
+        finally:
+            _EXPECTED_COMPACTION_LEAF.reset(token)
 
     async def select_active_leaf(
         self,
@@ -661,6 +747,21 @@ class JsonlSession:
         """Read all committed entries, repairing an incomplete final record first."""
 
         return tuple(_read_entries(self.path))
+
+    def read_run_snapshot(self) -> SessionRunSnapshot:
+        """Read provider context and its active leaf under one session lock."""
+
+        with self._file_state.lock:
+            with self._interprocess_lock():
+                self._refresh_entry_index()
+                assert self._entry_index is not None
+                entries = tuple(self._entry_index.values())
+                replay = replay_session_entries(entries)
+                return SessionRunSnapshot(
+                    entry_count=len(entries),
+                    active_leaf_id=replay.active_leaf_id,
+                    replay=replay,
+                )
 
     def read_entry_snapshot(self) -> tuple[SessionEntry, ...]:
         """Read an append-ordered snapshot through the validated entry index."""
@@ -911,15 +1012,23 @@ class JsonlSession:
         else:
             os.close(fd)
 
-    def _append_entry_once(self, entry: SessionEntry) -> SessionEntry:
+    def _append_entry_once(
+        self,
+        entry: SessionEntry,
+        expected_active_leaf_id: str | None | _UnconditionalAppend,
+    ) -> SessionEntry:
         with self._file_state.lock:
             with self._interprocess_lock():
-                return self._append_entry_locked(entry)
+                return self._append_entry_locked(
+                    entry,
+                    expected_active_leaf_id=expected_active_leaf_id,
+                )
 
     def _append_compaction_entry_once(
         self,
         entry: SessionEntry,
         expected_context_entry_ids: tuple[str, ...],
+        expected_active_leaf_id: str | None | _UnconditionalAppend,
     ) -> SessionEntry:
         with self._file_state.lock:
             with self._interprocess_lock():
@@ -935,7 +1044,10 @@ class JsonlSession:
                         "Compaction plan is stale: expected context entry ids "
                         f"{expected_context_entry_ids}, found {replay.context_entry_ids}"
                     )
-                return self._append_entry_locked(entry)
+                return self._append_entry_locked(
+                    entry,
+                    expected_active_leaf_id=expected_active_leaf_id,
+                )
 
     def _set_name_once(
         self,
@@ -1086,7 +1198,12 @@ class JsonlSession:
                     entry_count=len(self._entry_index),
                 )
 
-    def _append_entry_locked(self, entry: SessionEntry) -> SessionEntry:
+    def _append_entry_locked(
+        self,
+        entry: SessionEntry,
+        *,
+        expected_active_leaf_id: str | None | _UnconditionalAppend = _UNCONDITIONAL_APPEND,
+    ) -> SessionEntry:
         _ensure_private_directory(self.path.parent)
         self._refresh_entry_index()
         existing = self._persisted_entry_locked(entry)
@@ -1096,13 +1213,28 @@ class JsonlSession:
         assert self._entry_index is not None
         active_leaf_id = _active_leaf_id(self._entry_index)
         if (
+            not isinstance(expected_active_leaf_id, _UnconditionalAppend)
+            and active_leaf_id != expected_active_leaf_id
+        ):
+            raise StaleSessionWriterError(
+                f"Session {self.session_id} changed before operation "
+                f"{entry.operation_id!r} could append: expected active leaf "
+                f"{expected_active_leaf_id!r}, found {active_leaf_id!r}"
+            )
+        if (
             is_session_tree_entry(entry)
             and entry.parent_id is not None
             and entry.parent_id != active_leaf_id
         ):
-            raise SessionError(
-                f"Session entry {entry.id} specifies parent {entry.parent_id!r}, "
-                f"but the active leaf is {active_leaf_id!r}"
+            if isinstance(expected_active_leaf_id, _UnconditionalAppend):
+                raise SessionError(
+                    f"Session entry {entry.id} specifies parent {entry.parent_id!r}, "
+                    f"but the active leaf is {active_leaf_id!r}"
+                )
+            raise StaleSessionWriterError(
+                f"Session {self.session_id} changed before operation "
+                f"{entry.operation_id!r} could append: expected active leaf "
+                f"{entry.parent_id!r}, found {active_leaf_id!r}"
             )
         persisted = (
             entry.model_copy(update={"parent_id": active_leaf_id})

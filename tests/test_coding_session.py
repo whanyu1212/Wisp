@@ -60,6 +60,7 @@ from wisp.sessions.entries import (
     SessionEntry,
     ToolResultPresentationSnapshot,
 )
+from wisp.sessions.errors import StaleSessionWriterError
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolPromptMetadata
@@ -97,6 +98,30 @@ class CapturingProvider:
         yield ProviderResponseStarted(model=model or self.default_model or self.name)
         yield ProviderTextDelta(delta="done")
         yield ProviderResponseCompleted(content="done")
+
+
+class BlockingCapturingProvider(CapturingProvider):
+    def __init__(self, *, started: anyio.Event, release: anyio.Event) -> None:
+        super().__init__()
+        self.started = started
+        self.release = release
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+        effort: str | None = None,
+        prompt_cache_key: str | None = None,
+    ) -> AsyncIterator[ProviderEvent]:
+        self.seen_messages = messages
+        self.started.set()
+        await self.release.wait()
+        yield ProviderResponseStarted(model=model or self.default_model or self.name)
+        yield ProviderResponseCompleted(content="stale answer")
 
 
 class ToolLoopProvider:
@@ -208,6 +233,69 @@ class MutatingTool:
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         return ToolResult(text="mutated")
+
+
+def test_concurrent_coding_session_rejects_stale_provider_result(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store = JsonlSessionStore(tmp_path)
+        session = store.create()
+        seed = await session.append_message(Message(role="user", content="seed"))
+        started = anyio.Event()
+        release = anyio.Event()
+        stale_provider = BlockingCapturingProvider(started=started, release=release)
+        stale_agent = CodingSession(provider=stale_provider, sessions=store)
+        winner_provider = CapturingProvider()
+        winner_agent = CodingSession(provider=winner_provider, sessions=store)
+        stale_error: BaseException | None = None
+
+        async def stale_run() -> None:
+            nonlocal stale_error
+            try:
+                _events = [
+                    event
+                    async for event in stale_agent.run(
+                        "left",
+                        session=store.load(session.path),
+                        history=session.read_context_messages(),
+                    )
+                ]
+            except BaseException as exc:
+                stale_error = exc
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(stale_run)
+            await started.wait()
+            _events = [
+                event
+                async for event in winner_agent.run(
+                    "right",
+                    session=store.load(session.path),
+                    history=session.read_context_messages(),
+                )
+            ]
+            release.set()
+
+        assert isinstance(stale_error, StaleSessionWriterError)
+        assert stale_provider.seen_messages is not None
+        assert winner_provider.seen_messages is not None
+        assert [message.content for message in stale_provider.seen_messages[-2:]] == [
+            "seed",
+            "left",
+        ]
+        assert [message.content for message in winner_provider.seen_messages[-3:]] == [
+            "seed",
+            "left",
+            "right",
+        ]
+        assert [message.content for message in session.read_context_messages()] == [
+            "seed",
+            "left",
+            "right",
+            "done",
+        ]
+        assert session.read_entries()[0].id == seed.id
+
+    anyio.run(scenario)
 
 
 def test_coding_session_streams_fake_response_and_saves_session(tmp_path: Path) -> None:

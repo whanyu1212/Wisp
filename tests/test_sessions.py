@@ -53,6 +53,7 @@ from wisp.sessions.errors import (
     SessionNavigationCancelledError,
     SessionUnrevertUnavailableError,
     StaleSessionTreeError,
+    StaleSessionWriterError,
     UnsupportedPersistedEventVersionError,
     UnsupportedSessionEntryVersionError,
 )
@@ -2375,6 +2376,57 @@ def test_concurrent_session_handles_append_one_record(
         seed,
         entry.model_copy(update={"parent_id": seed.id}),
     )
+
+
+def test_conditional_append_rejects_stale_session_handle(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def write() -> None:
+        seed = await session.append_message(Message(role="user", content="seed"))
+        left = MessageSessionEntry(
+            session_id=session.session_id,
+            message=Message(role="assistant", content="left"),
+        )
+        right = MessageSessionEntry(
+            session_id=session.session_id,
+            message=Message(role="assistant", content="right"),
+        )
+        first = store.load(session.path)
+        second = store.load(session.path)
+        await first.append_entry_if_current(left, expected_active_leaf_id=seed.id)
+        with pytest.raises(StaleSessionWriterError, match="expected active leaf"):
+            await second.append_entry_if_current(right, expected_active_leaf_id=seed.id)
+
+    anyio.run(write)
+
+    assert [message.content for message in session.read_messages()] == ["seed", "left"]
+
+
+def test_conditional_append_reconciles_uncertain_stable_id_retry(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> tuple[SessionEntry, SessionEntry]:
+        seed = await session.append_message(Message(role="user", content="seed"))
+        entry = MessageSessionEntry(
+            id="stable-answer",
+            session_id=session.session_id,
+            message=Message(role="assistant", content="done"),
+        )
+        first = await session.append_entry_if_current(
+            entry,
+            expected_active_leaf_id=seed.id,
+        )
+        retried = await session.append_entry_if_current(
+            entry,
+            expected_active_leaf_id=seed.id,
+        )
+        return first, retried
+
+    first, retried = anyio.run(write)
+
+    assert first == retried
+    assert len(session.read_entries()) == 2
 
 
 def test_repeated_append_does_not_rescan_full_session_tree(
