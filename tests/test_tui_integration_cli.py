@@ -1906,8 +1906,8 @@ def test_textual_transcript_reserves_scrollbar_gutter_before_tool_diff_overflows
                 transcript.max_scroll_x,
             )
 
-    width_before, width_after, scrollbar_before, scrollbar_after, row_widths, max_x = (
-        anyio.run(scenario)
+    width_before, width_after, scrollbar_before, scrollbar_after, row_widths, max_x = anyio.run(
+        scenario
     )
     assert not scrollbar_before
     assert scrollbar_after
