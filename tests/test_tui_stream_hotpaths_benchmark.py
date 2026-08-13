@@ -36,7 +36,7 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
         run_benchmark,
         BenchmarkConfig(
             message_count=8,
-            mounted_history_entries=(4,),
+            retained_history_entries=(4,),
             stream_chunks=2,
             stream_interval_seconds=0.001,
             heartbeat_interval_seconds=0.001,
@@ -51,6 +51,7 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert len(report.samples) == 1
     sample = report.samples[0]
     assert sample.run == 1
+    assert sample.retained_history_entries == 4
     assert sample.mounted_history_entries == 4
     assert sample.mounted_widget_count == 6
     assert sample.stream_total_ms >= 0
@@ -62,8 +63,10 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert sample.final_following
     assert sample.final_at_tail
     assert sample.source_complete
+    assert report.summaries[0].retained_history_entries == 4
     assert report.summaries[0].mounted_history_entries == 4
     assert report.summaries[0].sample_count == 1
+    assert '"retained_history_entries": 4' in report.to_json()
     assert '"mounted_history_entries": 4' in report.to_json()
 
 
@@ -71,7 +74,7 @@ def test_tui_stream_hotpaths_profile_is_readable_and_rejects_matrix(tmp_path: Pa
     profile_path = tmp_path / "stream.prof"
     config = BenchmarkConfig(
         message_count=4,
-        mounted_history_entries=(2,),
+        retained_history_entries=(2,),
         stream_chunks=1,
         stream_interval_seconds=0.001,
         heartbeat_interval_seconds=0.001,
@@ -86,13 +89,13 @@ def test_tui_stream_hotpaths_profile_is_readable_and_rejects_matrix(tmp_path: Pa
     assert profile_path.stat().st_size > 0
     assert pstats.Stats(str(profile_path)).total_calls > 0
 
-    with pytest.raises(ValueError, match="exactly one run and one mounted-history value"):
+    with pytest.raises(ValueError, match="exactly one run and one retained-history value"):
         anyio.run(
             partial(
                 run_benchmark,
                 BenchmarkConfig(
                     message_count=4,
-                    mounted_history_entries=(2, 3),
+                    retained_history_entries=(2, 3),
                     stream_chunks=1,
                     stream_interval_seconds=0.001,
                     heartbeat_interval_seconds=0.001,
@@ -119,7 +122,7 @@ def test_tui_stream_hotpaths_restores_textual_methods_after_stream_failure(
             run_benchmark,
             BenchmarkConfig(
                 message_count=4,
-                mounted_history_entries=(2,),
+                retained_history_entries=(2,),
                 stream_chunks=1,
                 stream_interval_seconds=0.001,
                 heartbeat_interval_seconds=0.001,

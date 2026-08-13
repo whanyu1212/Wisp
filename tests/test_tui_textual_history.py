@@ -14,7 +14,11 @@ from wisp.tui.history import (
     HistoricalTranscriptMessage,
 )
 from wisp.tui.textual_history import TextualHistoryController
-from wisp.tui.transcript_window import TranscriptWindow
+from wisp.tui.transcript_window import (
+    TUI_TRANSCRIPT_WINDOW_SHIFT,
+    TUI_TRANSCRIPT_WINDOW_SIZE,
+    TranscriptWindow,
+)
 
 
 @dataclass(eq=False)
@@ -212,8 +216,8 @@ def test_history_controller_reconciles_a_bounded_window_without_full_history_sca
 ) -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)
-    current = _messages("assistant", "current", 300)
-    older = _messages("user", "older", 75)
+    current = _messages("assistant", "current", TUI_TRANSCRIPT_WINDOW_SIZE)
+    older = _messages("user", "older", TUI_TRANSCRIPT_WINDOW_SHIFT)
 
     controller.replace_entries(current, session_label="Windowed")
     surface.add_live_widget("live: output")
@@ -226,15 +230,17 @@ def test_history_controller_reconciles_a_bounded_window_without_full_history_sca
 
     assert controller.shift_older()
     assert surface.history_labels[0] == "user: older 0"
-    assert surface.history_labels[-1] == "assistant: current 224"
-    assert len(surface.history_labels) == 300
+    assert surface.history_labels[-1] == (
+        f"assistant: current {TUI_TRANSCRIPT_WINDOW_SIZE - TUI_TRANSCRIPT_WINDOW_SHIFT - 1}"
+    )
+    assert len(surface.history_labels) == TUI_TRANSCRIPT_WINDOW_SIZE
     assert any(widget.label == "live: output" for widget in surface.widgets)
     assert surface.window_availability[-1] is False
 
     assert controller.show_latest()
     assert surface.history_labels[0] == "assistant: current 0"
-    assert surface.history_labels[-1] == "assistant: current 299"
-    assert len(surface.history_labels) == 300
+    assert surface.history_labels[-1] == (f"assistant: current {TUI_TRANSCRIPT_WINDOW_SIZE - 1}")
+    assert len(surface.history_labels) == TUI_TRANSCRIPT_WINDOW_SIZE
     assert any(widget.label == "live: output" for widget in surface.widgets)
     assert surface.window_availability[-1] is True
 
@@ -345,9 +351,12 @@ def test_history_controller_finishes_a_render_batch_when_mounting_fails() -> Non
 
 def test_history_controller_reloads_latest_after_older_paging_evicts_it() -> None:
     surface = _HistorySurface(at_top=True)
-    controller = TextualHistoryController(surface, retained_capacity=300)
-    current = _messages("assistant", "current", 300)
-    older = _messages("user", "older", 75)
+    controller = TextualHistoryController(
+        surface,
+        retained_capacity=TUI_TRANSCRIPT_WINDOW_SIZE,
+    )
+    current = _messages("assistant", "current", TUI_TRANSCRIPT_WINDOW_SIZE)
+    older = _messages("user", "older", TUI_TRANSCRIPT_WINDOW_SHIFT)
 
     controller.replace_entries(current, session_label="Windowed")
     controller.prepend_entries(older)
@@ -505,9 +514,15 @@ def test_history_controller_discards_a_failed_live_prompt() -> None:
 
 def test_history_controller_uses_the_live_snapshot_from_the_reload_request() -> None:
     surface = _HistorySurface(at_top=True)
-    controller = TextualHistoryController(surface, retained_capacity=300)
-    controller.replace_entries(_messages("assistant", "current", 300), session_label="Windowed")
-    controller.prepend_entries(_messages("user", "older", 75))
+    controller = TextualHistoryController(
+        surface,
+        retained_capacity=TUI_TRANSCRIPT_WINDOW_SIZE,
+    )
+    controller.replace_entries(
+        _messages("assistant", "current", TUI_TRANSCRIPT_WINDOW_SIZE),
+        session_label="Windowed",
+    )
+    controller.prepend_entries(_messages("user", "older", TUI_TRANSCRIPT_WINDOW_SHIFT))
     controller.record_live_message("user", "persisted before reload")
 
     assert controller.show_latest()
