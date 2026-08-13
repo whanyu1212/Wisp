@@ -666,7 +666,7 @@ def test_trust_panel_uses_deny_first_project_wording() -> None:
 
 
 @pytest.mark.parametrize("size", [(72, 20), (80, 24), (120, 40)])
-def test_decision_panel_leaves_transcript_scrollbar_gutter(size: tuple[int, int]) -> None:
+def test_decision_panel_leaves_transcript_edge_margin(size: tuple[int, int]) -> None:
     async def scenario() -> tuple[int, int]:
         app, renderer = create_textual_tui()
         async with app.run_test(size=size) as pilot:

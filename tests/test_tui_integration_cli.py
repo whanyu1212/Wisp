@@ -11,7 +11,6 @@ from datetime import UTC, datetime
 import pytest
 from pytest import MonkeyPatch
 from rich.cells import cell_len
-from rich.color import Color
 from textual import events
 from textual.content import Content
 from textual.widget import Widget
@@ -64,7 +63,6 @@ from wisp.tui.widgets import (
     Transcript,
     TranscriptEmptyState,
     WorkingIndicator,
-    _SolidVerticalScrollBarRender,
 )
 from wisp.tui.widgets import (
     PromptEditor as Input,
@@ -1859,12 +1857,21 @@ def test_textual_tool_card_edit_diff_rows_stay_unambiguous_at_supported_widths(
 
 
 @pytest.mark.parametrize("size", [(28, 20), (84, 24), (168, 40)])
-def test_textual_transcript_reserves_scrollbar_gutter_before_tool_diff_overflows(
+def test_textual_transcript_hides_scrollbar_without_reflowing_tool_diff(
     size: tuple[int, int],
 ) -> None:
-    """Scrollbar activation must not temporarily leave a diff one column too wide."""
+    """Vertical overflow stays scrollable without changing the visible width."""
 
-    async def scenario() -> tuple[int, int, bool, bool, tuple[int, ...], int]:
+    async def scenario() -> tuple[
+        int,
+        int,
+        bool,
+        bool,
+        tuple[int, ...],
+        int,
+        str,
+        tuple[int, int],
+    ]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=size) as pilot:
             transcript = app_instance.query_one("#transcript", Transcript)
@@ -1892,10 +1899,9 @@ def test_textual_transcript_reserves_scrollbar_gutter_before_tool_diff_overflows
             width_before = transcript.scrollable_content_region.width
             scrollbar_before = transcript.scrollbars_enabled[0]
 
-            # Cross the vertical-overflow boundary in one event-loop turn. With an
-            # automatic gutter Textual narrows the transcript immediately, while a
-            # manually formatted ToolCard can retain the previous width for another
-            # two layout frames and paint its final column beneath the scrollbar.
+            # Cross the vertical-overflow boundary in one event-loop turn. The
+            # logical scrollbar should activate for scrolling, but hidden zero-width
+            # chrome must not narrow or repaint the manually formatted ToolCard.
             for index in range(size[1] + 8):
                 renderer.notice(f"filler row {index}")
             await pilot.pause(0)
@@ -1908,25 +1914,36 @@ def test_textual_transcript_reserves_scrollbar_gutter_before_tool_diff_overflows
                 transcript.scrollbars_enabled[0],
                 row_widths,
                 transcript.max_scroll_x,
+                transcript.styles.scrollbar_visibility,
+                transcript.scrollbars_space,
             )
 
-    width_before, width_after, scrollbar_before, scrollbar_after, row_widths, max_x = anyio.run(
-        scenario
-    )
+    (
+        width_before,
+        width_after,
+        scrollbar_before,
+        scrollbar_after,
+        row_widths,
+        max_x,
+        visibility,
+        scrollbar_space,
+    ) = anyio.run(scenario)
     assert not scrollbar_before
-    assert scrollbar_after
-    assert width_after == width_before  # gutter was reserved before it became visible
+    assert scrollbar_after  # logical overflow state remains available to scrolling
+    assert visibility == "hidden"
+    assert scrollbar_space == (0, 0)
+    assert width_after == width_before
     assert all(width <= width_after for width in row_widths)
     assert max_x == 0
 
 
 @pytest.mark.parametrize("resized_width", [28, 84, 120])
-def test_textual_transcript_content_stays_inside_scrollbar_gutter_after_resize(
+def test_textual_transcript_content_stays_inside_viewport_after_resize(
     resized_width: int,
 ) -> None:
-    """Every transcript row family respects the shared gutter after reflow."""
+    """Every transcript row family uses the full width without horizontal overflow."""
 
-    async def scenario() -> tuple[str, bool, int, bool, bool]:
+    async def scenario() -> tuple[bool, int, bool, bool, tuple[int, int], bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(120, 24)) as pilot:
             renderer.prompt_submitted("user " + "u" * 180)
@@ -1995,19 +2012,28 @@ def test_textual_transcript_content_stays_inside_scrollbar_gutter_after_resize(
                 for stream in transcript.query(StreamMessage)
             )
             return (
-                transcript.styles.scrollbar_gutter,
                 transcript.scrollbars_enabled[0],
                 transcript.max_scroll_x,
                 child_regions_fit and card_rows_fit,
                 stream_fits,
+                transcript.scrollbars_space,
+                transcript.scrollable_content_region.width == transcript.content_region.width,
             )
 
-    gutter, scrollbar_visible, max_x, non_markdown_fits, markdown_fits = anyio.run(scenario)
-    assert gutter == "stable"
-    assert scrollbar_visible
+    (
+        scrollbar_enabled,
+        max_x,
+        non_markdown_fits,
+        markdown_fits,
+        scrollbar_space,
+        full_content_width,
+    ) = anyio.run(scenario)
+    assert scrollbar_enabled
     assert max_x == 0
     assert non_markdown_fits
     assert markdown_fits
+    assert scrollbar_space == (0, 0)
+    assert full_content_width
 
 
 def test_textual_tool_card_narrow_diff_keeps_tail_changed_tokens_visible() -> None:
@@ -6687,74 +6713,29 @@ def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
         assert delay == 0.2
 
 
-def test_textual_scrollbar_colors_resolve_for_both_themes() -> None:
-    async def scenario() -> dict[str, tuple[str, str, str, int]]:
-        colors: dict[str, tuple[str, str, str, int]] = {}
-        for theme in ("wisp", "wisp-light"):
-            app_instance = TextualTui()
-            async with app_instance.run_test() as pilot:
-                app_instance.theme = theme
-                await pilot.pause()
-                transcript = app_instance.query_one("#transcript", Transcript)
-                colors[theme] = (
-                    transcript.styles.scrollbar_color.hex,
-                    transcript.styles.scrollbar_color_hover.hex,
-                    transcript.styles.scrollbar_color_active.hex,
-                    transcript.styles.scrollbar_size_vertical,
-                )
-        return colors
-
-    colors = anyio.run(scenario)
-    assert colors == {
-        "wisp": ("#7C8B99", "#4AA3C7", "#3FB8B8", 1),
-        "wisp-light": ("#55636D", "#277795", "#2E7676", 1),
-    }
-
-
-def test_textual_transcript_scrollbar_uses_square_thumb_without_losing_mouse_actions() -> None:
-    async def scenario() -> type[object]:
+def test_textual_transcript_hides_scrollbar_chrome_without_disabling_scrolling() -> None:
+    async def scenario() -> tuple[str, int, tuple[int, int], bool, float, bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(60, 20)) as pilot:
             transcript = app_instance.query_one("#transcript", Transcript)
-            assert transcript._vertical_scrollbar is None
             _fill_transcript(renderer, 40)
             await pilot.pause()
-            return type(transcript.vertical_scrollbar.render())
+            return (
+                transcript.styles.scrollbar_visibility,
+                transcript.styles.scrollbar_size_vertical,
+                transcript.scrollbars_space,
+                transcript.scrollbars_enabled[0],
+                transcript.max_scroll_y,
+                transcript.scrollable_content_region.width == transcript.content_region.width,
+            )
 
-    assert anyio.run(scenario) is _SolidVerticalScrollBarRender
-
-    segments_by_position = {
-        position: _SolidVerticalScrollBarRender.render_bar(
-            size=10,
-            virtual_size=67,
-            window_size=12,
-            position=position,
-            vertical=True,
-            back_color=Color.parse("#000000"),
-            bar_color=Color.parse("#7C8B99"),
-        ).segments
-        for position in (0, 1, 6, 7, 8, 27, 54, 55)
-    }
-    assert all(
-        not set("".join(segment.text for segment in segments)) & set("▁▂▃▄▅▆▇")
-        for segments in segments_by_position.values()
-    )
-    assert all(
-        sum(
-            bool(segment.style is not None and segment.style.bgcolor == Color.parse("#7C8B99"))
-            for segment in segments
-        )
-        == 2
-        for segments in segments_by_position.values()
-    )
-
-    middle_segments = segments_by_position[27]
-    actions = {
-        str(segment.style.meta["@mouse.down"])
-        for segment in middle_segments
-        if segment.style is not None and "@mouse.down" in segment.style.meta
-    }
-    assert actions == {"scroll_up", "grab", "scroll_down"}
+    visibility, width, space, enabled, max_y, full_content_width = anyio.run(scenario)
+    assert visibility == "hidden"
+    assert width == 0
+    assert space == (0, 0)
+    assert enabled
+    assert max_y > 0
+    assert full_content_width
 
 
 def test_textual_input_is_pinned_to_the_bottom() -> None:
