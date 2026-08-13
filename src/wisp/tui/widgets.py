@@ -2078,6 +2078,11 @@ class Transcript(VerticalScroll):
         if self._follow != previous:
             if not self._follow:
                 self._follow_generation += 1
+                # A followed Markdown stream may have armed Textual's native
+                # compositor anchor. Reader navigation owns the viewport now,
+                # so disarm it in the same state transition instead of waiting
+                # for a later stream callback or final layout.
+                self.anchor(False)
             self.post_message(self.FollowChanged(self._follow))
         if new_value > 0:
             self._history_request_armed = True
@@ -2152,6 +2157,7 @@ class Transcript(VerticalScroll):
             return
         previous = self._follow
         target_y = min(max(0.0, state.scroll_y), self.max_scroll_y)
+        self.anchor(False)
         self.scroll_to(y=target_y, animate=False)
         self._follow = False
         if previous:
@@ -2207,6 +2213,7 @@ class Transcript(VerticalScroll):
 
     def _stop_following(self) -> None:
         self._follow_generation += 1
+        self.anchor(False)
         if not self._follow:
             return
         self._follow = False
@@ -2619,6 +2626,16 @@ class ToolCard(Static):
 
         if not self._can_expand():
             return
+        # The content update below invalidates layout immediately. Disarm an
+        # active Markdown stream anchor before that invalidation can be composed;
+        # the app will explicitly re-pin a newest card when focus began at the
+        # tail, while an older card must keep its own top in view.
+        transcript = next(
+            (ancestor for ancestor in self.ancestors if isinstance(ancestor, Transcript)),
+            None,
+        )
+        if transcript is not None:
+            transcript.anchor(False)
         self._expanded = not self._expanded
         self._repaint()
         # A followed transcript should stay pinned to the tail when the *newest* card

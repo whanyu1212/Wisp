@@ -184,6 +184,7 @@ class TextualTui(App[None]):
         padding: 0 1 3 1;
         overflow-x: hidden;
         scrollbar-size-vertical: 1;
+        scrollbar-gutter: stable;
         scrollbar-color: $secondary;
         scrollbar-color-hover: $primary;
         scrollbar-color-active: $accent;
@@ -197,6 +198,11 @@ class TextualTui(App[None]):
     #transcript-empty {
         width: 1fr;
         height: 1fr;
+        /* The transcript reserves its one-column scrollbar gutter even before
+           content overflows. The disposable empty state has no scrollbar, so
+           reclaim that blank column to keep the wordmark centered on the full
+           transcript instead of visibly shifting it left. */
+        margin-right: -1;
         align: center middle;
     }
 
@@ -841,6 +847,11 @@ class TextualTui(App[None]):
         # card can drop it; the controller clears this intent after user scrolling.
         if isinstance(event.widget, ToolCard):
             self._transcript_controller.tool_card_focused(event.widget)
+            transcript = self._transcript
+            if transcript is not None and not self.is_newest_transcript_widget(event.widget):
+                # An active stream may have Textual's same-pass anchor armed.
+                # Release it before an older focused card can expand and reflow.
+                transcript.anchor(False)
 
     def on_tool_card_toggled(self, event: ToolCard.Toggled) -> None:
         # A card grew or shrank. Re-pin the tail only when the *newest* card (the
@@ -849,6 +860,12 @@ class TextualTui(App[None]):
         # off first. Expanding an older card, or one the reader scrolled up to reach,
         # leaves the viewport alone so the freshly revealed content isn't yanked away.
         event.stop()
+        transcript = self._transcript
+        if transcript is not None and not self.is_newest_transcript_widget(event.card):
+            # A provider delta may have re-armed the stream anchor after this
+            # older card received focus. Disarm it again before the toggle's
+            # invalidated layout is composed.
+            transcript.anchor(False)
         self._transcript_controller.tool_card_toggled(event.card)
 
     def on_tool_card_leave_requested(self, event: ToolCard.LeaveRequested) -> None:
