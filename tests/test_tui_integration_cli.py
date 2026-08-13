@@ -2807,7 +2807,7 @@ def test_textual_tool_card_expand_of_older_card_does_not_yank_viewport() -> None
     def _output(tag: str) -> str:
         return "".join(f"{tag} line {i}\n" for i in range(30))
 
-    async def scenario() -> tuple[float, float, float]:
+    async def scenario() -> tuple[float, float, float, bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(80, 24)) as pilot:
             for idx in (1, 2):
@@ -2832,22 +2832,37 @@ def test_textual_tool_card_expand_of_older_card_does_not_yank_viewport() -> None
             assert transcript.is_following  # resting at the tail, both cards fit
             cards = [c for c in transcript.children if isinstance(c, ToolCard)]
             older = cards[0]
-            older.focus()  # short card fits, so no center-scroll; follow stays on
+            # Keep the viewport at the followed tail while delivering the same
+            # focus event a visible older card receives. This isolates the race
+            # Codex identified from Textual's optional deferred center-scroll.
+            app_instance.screen.set_focus(older, scroll_visible=False)
             await pilot.pause()
+            assert not transcript.is_anchored  # focus disarmed the active stream
+            assert transcript.is_following
+            renderer.token_delta(" while the reader examines an older card")
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            assert transcript.is_anchored  # a later provider delta can re-arm it
             top_before = older.region.y
             await pilot.press("enter")
             await pilot.pause()
-            result = (top_before, older.region.y, transcript.scroll_y)
+            result = (
+                top_before,
+                older.region.y,
+                transcript.scroll_y,
+                transcript.is_anchored,
+            )
             renderer.end_token_stream()
             await app_instance.wait_for_stream_idle()
             return result
 
-    top_before, top_after, scroll_y = anyio.run(scenario)
+    top_before, top_after, scroll_y, anchored_after = anyio.run(scenario)
     # The older card's top was visible before expanding and must remain in view — a
     # re-pin would push it off the top (its region.y going sharply negative).
     assert top_before >= 0
     assert top_after >= 0  # not yanked: the older card's top is still on-screen
     assert scroll_y == 0  # the viewport did not jump to the tail
+    assert not anchored_after  # toggle disarmed the delta that arrived after focus
 
 
 def test_textual_tool_card_expand_does_not_repin_after_user_scrolls_away() -> None:
@@ -5033,6 +5048,48 @@ def test_textual_streaming_does_not_yank_a_reader_who_scrolled_up() -> None:
     scroll_y, follow = anyio.run(scenario)
     assert not follow  # scrolling away cleared the follow intent
     assert scroll_y <= 7  # stayed roughly where the user left it, not the bottom
+
+
+def test_textual_streaming_releases_active_anchor_when_reader_scrolls_up() -> None:
+    """Reader navigation wins even when final reconciliation grows the stream."""
+
+    async def scenario() -> tuple[bool, bool, float, float, float]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(60, 12)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.return_to_latest()
+            await pilot.pause()
+
+            renderer.token_delta("visible streamed prefix")
+            await pilot.pause()
+            anchored_before = transcript.is_anchored
+            transcript.scroll_to(y=6, animate=False)
+            await pilot.pause()
+            anchored_after = transcript.is_anchored
+            reader_y = transcript.scroll_y
+
+            # The authoritative completion is much taller than the displayed
+            # prefix. A stale native anchor would move the viewport to the new
+            # tail during this replacement even though follow intent is off.
+            final = "visible streamed prefix\n\n" + "final reconciliation row\n\n" * 40
+            renderer.end_token_stream_with_content(final)
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            return (
+                anchored_before,
+                anchored_after,
+                reader_y,
+                transcript.scroll_y,
+                transcript.max_scroll_y,
+            )
+
+    anchored_before, anchored_after, reader_y, final_y, max_y = anyio.run(scenario)
+    assert anchored_before
+    assert not anchored_after
+    assert final_y == reader_y
+    assert final_y < max_y
 
 
 def test_textual_streaming_reconciles_deferred_output_after_returning_to_tail() -> None:
