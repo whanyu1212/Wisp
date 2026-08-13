@@ -1772,9 +1772,7 @@ class CodingSession:
                 expected_active_leaf_id=session.read_active_leaf_id(),
                 operation_id=operation_id,
             )
-        self._pending_entries.append(
-            _PendingSessionEntry(persistence=persistence, entry=entry)
-        )
+        self._pending_entries.append(_PendingSessionEntry(persistence=persistence, entry=entry))
         return entry.id
 
     async def _repair_and_flush(
