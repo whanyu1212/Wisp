@@ -1104,6 +1104,11 @@ class CodingSession:
             )
             try:
                 replay = await self._prepare_compaction_replay(session)
+                self._active_persistence = _RunPersistence(
+                    session=session,
+                    expected_active_leaf_id=replay.active_leaf_id,
+                    operation_id=None,
+                )
                 plan = plan_manual_compaction(replay)
                 async for event in self._compact_locked(
                     session,
@@ -1422,6 +1427,8 @@ class CodingSession:
                         + "; ".join(publication_errors)
                     )
                 )
+        except StaleSessionWriterError:
+            raise
         except Exception as exc:
             error = str(exc)
             summary_usage = exc.usage if isinstance(exc, CompactionSummaryError) else None
@@ -1449,16 +1456,16 @@ class CodingSession:
             )
             if not summary_committed and (summary_usage is not None or summary_cost is not None):
                 try:
-                    persisted_failure = await session.append_event(
-                        failed,
-                        operation_id=operation_id,
-                    )
                     persistence = self._active_persistence
                     if (
                         persistence is not None
                         and persistence.session.session_id == session.session_id
                     ):
-                        persistence.expected_active_leaf_id = persisted_failure.id
+                        await persistence.append_event(failed)
+                    else:
+                        await session.append_event(failed, operation_id=operation_id)
+                except StaleSessionWriterError:
+                    raise
                 except Exception:
                     if not recover_failure:
                         raise

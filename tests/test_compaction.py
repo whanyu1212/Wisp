@@ -63,6 +63,7 @@ from wisp.providers.fake import ScriptedProvider
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry
 from wisp.sessions.entries import CompactionSessionEntry, MessageSessionEntry, SessionEntry
+from wisp.sessions.errors import StaleSessionWriterError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import (
     HISTORICAL_CONTEXT_SUMMARY_LABEL,
@@ -3118,6 +3119,100 @@ def test_coding_session_overflow_recovery_cancellation_does_not_retry(tmp_path: 
     assert terminal.will_retry is False
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
     assert provider.calls == 2
+
+
+def test_coding_session_rejects_stale_compaction_without_writing_failure_event(
+    tmp_path: Path,
+) -> None:
+    async def run() -> tuple[JsonlSession, BaseException | None]:
+        summary_started = anyio.Event()
+        release_summary = anyio.Event()
+        provider = GatedPreflightSummaryProvider(summary_started, release_summary)
+        store = JsonlSessionStore(tmp_path)
+        session = store.create()
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(provider=provider, sessions=store)
+        error: BaseException | None = None
+
+        async def compact() -> None:
+            nonlocal error
+            try:
+                _events = [event async for event in agent.compact(session)]
+            except BaseException as exc:  # noqa: BLE001 - asserted below
+                error = exc
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(compact)
+            await summary_started.wait()
+            await session.append_message(Message(role="user", content="competing prompt"))
+            release_summary.set()
+
+        return session, error
+
+    session, error = anyio.run(run)
+
+    assert isinstance(error, StaleSessionWriterError)
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
+    assert not any(event["type"] == "compaction.completed" for event in session.read_events())
+    assert session.read_context_messages()[-1].content == "competing prompt"
+
+
+def test_manual_compaction_snapshots_cursor_after_pending_entry_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="first answer"),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+        ]
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    agent = CodingSession(provider=provider, sessions=store)
+    append_if_current = session.append_entry_if_current
+    reject_completion = True
+
+    async def fail_completion_once(
+        entry: SessionEntry,
+        *,
+        expected_active_leaf_id: str | None,
+    ) -> SessionEntry:
+        if (
+            reject_completion
+            and isinstance(entry, MessageSessionEntry)
+            and entry.message.role == "assistant"
+        ):
+            raise OSError("completion storage unavailable")
+        return await append_if_current(
+            entry,
+            expected_active_leaf_id=expected_active_leaf_id,
+        )
+
+    monkeypatch.setattr(session, "append_entry_if_current", fail_completion_once)
+
+    async def run() -> list[WispEvent]:
+        nonlocal reject_completion
+        await _append_turn(session, "seed")
+        with pytest.raises(OSError, match="completion storage unavailable"):
+            _events = [event async for event in agent.run("first", session=session)]
+        reject_completion = False
+        return [event async for event in agent.compact(session)]
+
+    events = anyio.run(run)
+
+    assert any(
+        isinstance(event, CompactionCompleted) and event.outcome == "completed" for event in events
+    )
+    assert [message.content for message in session.read_messages()][-1] == "first answer"
+    assert sum(entry.kind == "compaction" for entry in session.read_entries()) == 1
 
 
 def test_coding_session_reconciles_append_that_commits_then_raises(
