@@ -2,7 +2,19 @@ from __future__ import annotations
 
 import pytest
 
-from wisp.tui.transcript_window import TranscriptWindow
+from wisp.tui.transcript_window import TUI_TRANSCRIPT_WINDOW_SIZE, TranscriptWindow
+
+
+def test_default_window_retains_more_entries_than_it_exposes() -> None:
+    window = TranscriptWindow[int]()
+    retained_count = TUI_TRANSCRIPT_WINDOW_SIZE + 1
+
+    window.replace(range(retained_count))
+
+    assert window.retained_count == retained_count
+    assert len(window.visible) == TUI_TRANSCRIPT_WINDOW_SIZE
+    assert window.visible[0] == 1
+    assert window.visible[-1] == retained_count - 1
 
 
 def test_window_keeps_latest_entries_bounded() -> None:

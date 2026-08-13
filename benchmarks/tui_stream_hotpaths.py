@@ -59,7 +59,7 @@ class TimingDistribution:
 @dataclass(frozen=True)
 class BenchmarkConfig:
     message_count: int = 400
-    mounted_history_entries: tuple[int, ...] = (75, 120, 300)
+    retained_history_entries: tuple[int, ...] = (75, 120, 300)
     stream_chunks: int = 100
     stream_interval_seconds: float = 0.02
     heartbeat_interval_seconds: float = 0.01
@@ -71,6 +71,7 @@ class BenchmarkConfig:
 @dataclass(frozen=True)
 class StreamHotpathSample:
     run: int
+    retained_history_entries: int
     mounted_history_entries: int
     mounted_widget_count: int
     stream_total_ms: float
@@ -86,6 +87,7 @@ class StreamHotpathSample:
 
 @dataclass(frozen=True)
 class StreamHotpathSummary:
+    retained_history_entries: int
     mounted_history_entries: int
     sample_count: int
     stream_total_median_ms: float
@@ -186,14 +188,14 @@ async def run_benchmark(
     selected = config or BenchmarkConfig()
     _validate_config(selected, profile_output=profile_output)
     samples: list[StreamHotpathSample] = []
-    orders = _rotated_orders(selected.mounted_history_entries, selected.runs)
+    orders = _rotated_orders(selected.retained_history_entries, selected.runs)
     for run, order in enumerate(orders, start=1):
-        for mounted_history_entries in order:
+        for retained_history_entries in order:
             samples.append(
                 await _run_sample(
                     selected,
                     run=run,
-                    mounted_history_entries=mounted_history_entries,
+                    retained_history_entries=retained_history_entries,
                     profile_output=profile_output,
                 )
             )
@@ -202,7 +204,7 @@ async def run_benchmark(
     return StreamHotpathReport(
         config=selected,
         environment=report_environment,
-        summaries=_summarize(samples, selected.mounted_history_entries),
+        summaries=_summarize(samples, selected.retained_history_entries),
         samples=tuple(samples),
     )
 
@@ -211,14 +213,14 @@ async def _run_sample(
     config: BenchmarkConfig,
     *,
     run: int,
-    mounted_history_entries: int,
+    retained_history_entries: int,
     profile_output: Path | None,
 ) -> StreamHotpathSample:
     with tempfile.TemporaryDirectory(prefix="wisp-tui-hotpaths-") as temporary_directory:
         store = JsonlSessionStore(Path(temporary_directory))
         session = store.create()
         await append_benchmark_messages(session, config.message_count)
-        page = session.read_message_page(limit=mounted_history_entries)
+        page = session.read_message_page(limit=retained_history_entries)
         entries = history_entries_from_rpc_messages(page.messages)
         app, renderer = create_textual_tui()
         assert isinstance(renderer, TextualTuiRenderer)
@@ -230,10 +232,10 @@ async def _run_sample(
             transcript.return_to_latest()
             await pilot.pause()
             retained_count = renderer.retained_history_entry_count
-            if retained_count != mounted_history_entries:
+            if retained_count != retained_history_entries:
                 raise RuntimeError(
-                    "Streaming hotpath fixture mounted "
-                    f"{retained_count} history entries instead of {mounted_history_entries}"
+                    "Streaming hotpath fixture retained "
+                    f"{retained_count} history entries instead of {retained_history_entries}"
                 )
             # Match the production command lifecycle: TuiShell calls running()
             # before delivering tokens, leaving this 80 ms heartbeat mounted at
@@ -244,6 +246,14 @@ async def _run_sample(
             if indicator.parent is not transcript or transcript.children[-1] is not indicator:
                 raise RuntimeError("Working indicator did not settle at the transcript tail")
             mounted_widget_count = len(transcript.children)
+            # This fixture has exactly one session marker and one working indicator
+            # outside its mounted historical messages.
+            mounted_history_entries = mounted_widget_count - 2
+            if mounted_history_entries < 1 or mounted_history_entries > retained_count:
+                raise RuntimeError(
+                    "Streaming hotpath fixture mounted an invalid history count: "
+                    f"{mounted_history_entries} of {retained_count} retained entries"
+                )
             try:
                 return await _measure_stream(
                     app,
@@ -253,6 +263,7 @@ async def _run_sample(
                     indicator,
                     config=config,
                     run=run,
+                    retained_history_entries=retained_history_entries,
                     mounted_history_entries=mounted_history_entries,
                     mounted_widget_count=mounted_widget_count,
                     profile_output=profile_output,
@@ -271,6 +282,7 @@ async def _measure_stream(
     *,
     config: BenchmarkConfig,
     run: int,
+    retained_history_entries: int,
     mounted_history_entries: int,
     mounted_widget_count: int,
     profile_output: Path | None,
@@ -312,6 +324,7 @@ async def _measure_stream(
     source_complete = isinstance(completed, StreamMessage) and completed.source == "".join(chunks)
     return StreamHotpathSample(
         run=run,
+        retained_history_entries=retained_history_entries,
         mounted_history_entries=mounted_history_entries,
         mounted_widget_count=mounted_widget_count,
         stream_total_ms=stream_total_ms,
@@ -343,10 +356,16 @@ def _summarize(
 ) -> tuple[StreamHotpathSummary, ...]:
     summaries = []
     for condition in conditions:
-        selected = [sample for sample in samples if sample.mounted_history_entries == condition]
+        selected = [sample for sample in samples if sample.retained_history_entries == condition]
+        mounted_counts = {sample.mounted_history_entries for sample in selected}
+        if len(mounted_counts) != 1:
+            raise RuntimeError(
+                f"Retained-history condition {condition} produced inconsistent mounted counts"
+            )
         summaries.append(
             StreamHotpathSummary(
-                mounted_history_entries=condition,
+                retained_history_entries=condition,
+                mounted_history_entries=mounted_counts.pop(),
                 sample_count=len(selected),
                 stream_total_median_ms=statistics.median(
                     sample.stream_total_ms for sample in selected
@@ -380,18 +399,18 @@ def _validate_config(config: BenchmarkConfig, *, profile_output: Path | None) ->
         raise ValueError(
             "message_count, stream_chunks, viewport dimensions, and runs must be positive"
         )
-    if not config.mounted_history_entries or any(
-        count < 1 or count > config.message_count for count in config.mounted_history_entries
+    if not config.retained_history_entries or any(
+        count < 1 or count > config.message_count for count in config.retained_history_entries
     ):
         raise ValueError(
-            "mounted history entries must be positive and no larger than message_count"
+            "retained history entries must be positive and no larger than message_count"
         )
     if config.stream_interval_seconds <= 0 or config.heartbeat_interval_seconds <= 0:
         raise ValueError("stream and heartbeat intervals must be positive")
     if profile_output is not None and (
-        config.runs != 1 or len(config.mounted_history_entries) != 1
+        config.runs != 1 or len(config.retained_history_entries) != 1
     ):
-        raise ValueError("profiling requires exactly one run and one mounted-history value")
+        raise ValueError("profiling requires exactly one run and one retained-history value")
 
 
 def _parse_positive_csv(value: str) -> tuple[int, ...]:
@@ -408,9 +427,11 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--messages", type=int, default=BenchmarkConfig.message_count)
     parser.add_argument(
+        "--retained-history",
         "--mounted-history",
+        dest="retained_history",
         type=_parse_positive_csv,
-        default=BenchmarkConfig.mounted_history_entries,
+        default=BenchmarkConfig.retained_history_entries,
     )
     parser.add_argument("--stream-chunks", type=int, default=BenchmarkConfig.stream_chunks)
     parser.add_argument(
@@ -434,7 +455,7 @@ async def _main(arguments: Sequence[str] | None = None) -> None:
     report = await run_benchmark(
         BenchmarkConfig(
             message_count=parsed.messages,
-            mounted_history_entries=parsed.mounted_history,
+            retained_history_entries=parsed.retained_history,
             stream_chunks=parsed.stream_chunks,
             stream_interval_seconds=parsed.stream_interval_seconds,
             heartbeat_interval_seconds=parsed.heartbeat_interval_seconds,

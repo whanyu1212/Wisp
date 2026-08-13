@@ -49,6 +49,10 @@ from wisp.tui.textual_app import (
     TextualTuiRenderer,
     create_textual_tui,
 )
+from wisp.tui.transcript_window import (
+    TUI_TRANSCRIPT_WINDOW_SHIFT,
+    TUI_TRANSCRIPT_WINDOW_SIZE,
+)
 from wisp.tui.widgets import (
     _ROLE_LABELS,
     JumpToLatest,
@@ -1192,11 +1196,11 @@ def test_textual_tui_renderer_remounts_boundary_result_without_visible_call() ->
         )
         newer = tuple(
             HistoricalTranscriptMessage(role="assistant", content=f"newer {index}")
-            for index in range(299)
+            for index in range(TUI_TRANSCRIPT_WINDOW_SIZE - 1)
         )
         older = tuple(
             HistoricalTranscriptMessage(role="user", content=f"older {index}")
-            for index in range(300)
+            for index in range(TUI_TRANSCRIPT_WINDOW_SIZE)
         )
         async with app_instance.run_test() as pilot:
             renderer.replace_history_entries((result, *newer), session_label="Paged session")
@@ -4812,11 +4816,11 @@ def test_textual_history_window_shifts_without_evicting_live_output() -> None:
         async with app_instance.run_test(size=(60, 12)) as pilot:
             current = tuple(
                 HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
-                for index in range(300)
+                for index in range(TUI_TRANSCRIPT_WINDOW_SIZE)
             )
             older = tuple(
                 HistoricalTranscriptMessage(role="user", content=f"older {index}")
-                for index in range(75)
+                for index in range(TUI_TRANSCRIPT_WINDOW_SHIFT)
             )
             renderer.replace_history_entries(current, session_label="Windowed session")
             await pilot.pause()
@@ -4857,10 +4861,10 @@ def test_textual_history_window_shifts_without_evicting_live_output() -> None:
     newest_texts, older_texts, initial_count, older_count, newest_count = anyio.run(scenario)
     assert "older 0" in older_texts
     assert "older 0" not in newest_texts
-    assert "current 299" in newest_texts
+    assert f"current {TUI_TRANSCRIPT_WINDOW_SIZE - 1}" in newest_texts
     assert "live output" in newest_texts
     # Marker and one live line sit outside the bounded persisted-history window.
-    assert initial_count == older_count == newest_count == 302
+    assert initial_count == older_count == newest_count == TUI_TRANSCRIPT_WINDOW_SIZE + 2
 
 
 def test_textual_history_window_shift_rearms_durable_paging() -> None:
@@ -4876,14 +4880,14 @@ def test_textual_history_window_shift_rearms_durable_paging() -> None:
             renderer.replace_history_entries(
                 tuple(
                     HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
-                    for index in range(300)
+                    for index in range(TUI_TRANSCRIPT_WINDOW_SIZE)
                 ),
                 session_label="Windowed session",
             )
             renderer.prepend_history_entries(
                 tuple(
                     HistoricalTranscriptMessage(role="user", content=f"older {index}")
-                    for index in range(75)
+                    for index in range(TUI_TRANSCRIPT_WINDOW_SHIFT)
                 )
             )
             renderer.set_history_page_request_hook(request_history_page)
