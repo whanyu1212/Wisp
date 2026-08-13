@@ -10,6 +10,7 @@ import pytest
 from rich.console import RenderableType
 from rich.segment import Segment
 from rich.style import Style as RichStyle
+from textual import events
 
 from wisp.tui.textual_app import TextualTui
 from wisp.tui.widgets import StreamMessage, Transcript
@@ -99,6 +100,51 @@ def test_assistant_markdown_renders_structure_in_one_widget() -> None:
         assert visible in rendered
     assert "▌" in rendered
     assert "•" in rendered
+
+
+def test_assistant_markdown_drag_selection_copies_rendered_structure() -> None:
+    source = (
+        "## Heading\n\n"
+        "Paragraph with `inline code` and more text.\n\n"
+        "- first item\n"
+        "- second item\n\n"
+        '```python\nprint("hello")\n```'
+    )
+
+    async def scenario() -> tuple[str | None, list[str]]:
+        app = TextualTui()
+        copied: list[str] = []
+        app.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+        async with app.run_test(size=(60, 24)) as pilot:
+            stream = StreamMessage(source)
+            await app.query_one("#transcript", Transcript).mount(stream)
+            await pilot.pause()
+
+            # Drag from the heading through the fenced code row. These pointer
+            # coordinates exercise Textual's rendered-row offset lookup rather
+            # than constructing a Selection object directly in the test.
+            await pilot._post_mouse_events(
+                [events.MouseDown], widget=stream, offset=(2, 0), button=1
+            )
+            await pilot._post_mouse_events(
+                [events.MouseMove], widget=stream, offset=(18, 7), button=1
+            )
+            await pilot._post_mouse_events(
+                [events.MouseUp], widget=stream, offset=(18, 7), button=1
+            )
+            await pilot.pause()
+            return app.screen.get_selected_text(), copied
+
+    selected, copied = anyio.run(scenario)
+    expected = (
+        "Heading\n\n"
+        "Paragraph with inline code and more text.\n\n"
+        " • first item\n"
+        " • second item\n\n"
+        '  print("hello")'
+    )
+    assert selected == expected
+    assert copied == [expected]
 
 
 def test_assistant_markdown_link_metadata_routes_through_the_app() -> None:

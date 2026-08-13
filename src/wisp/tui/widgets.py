@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from rich.cells import cell_len
-from rich.console import Console, ConsoleOptions, RenderResult
+from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
 from rich.markdown import CodeBlock, Heading
 from rich.markdown import Markdown as RichMarkdown
 from rich.segment import Segment
@@ -34,7 +34,11 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.message import Message
+from textual.selection import Selection
+from textual.strip import Strip
+from textual.style import Style
 from textual.timer import Timer
+from textual.visual import RenderOptions, RichVisual
 from textual.widget import AwaitMount, Widget
 from textual.widgets import (
     DataTable,
@@ -2851,6 +2855,65 @@ class _SafeAssistantMarkdown:
             yield Text(self.source)
 
 
+class _SelectableMarkdownVisual(RichVisual):
+    """Rich Markdown visual with rendered-row offsets and selection styling."""
+
+    def __init__(self, widget: Widget, renderable: RenderableType) -> None:
+        super().__init__(widget, renderable)
+        self._markdown_renderable = renderable
+        self.plain = ""
+
+    def __rich_console__(
+        self,
+        console: Console,
+        options: ConsoleOptions,
+    ) -> RenderResult:
+        # Preserve StreamMessage.content's existing Rich-renderable contract for
+        # focused presentation tests and callers outside Textual's Visual path.
+        yield from console.render(self._markdown_renderable, options)
+
+    def render_strips(
+        self,
+        width: int,
+        height: int | None,
+        style: Style,
+        options: RenderOptions,
+    ) -> list[Strip]:
+        strips = super().render_strips(width, height, style, options)
+        # Selection offsets address the rendered rows, not the Markdown source:
+        # bullets, code chrome, and soft wrapping must match what was highlighted.
+        self.plain = "\n".join(strip.text.rstrip() for strip in strips)
+        selection = options.selection
+        selection_style = options.selection_style
+        rendered: list[Strip] = []
+        for y, strip in enumerate(strips):
+            if selection is not None and selection_style is not None:
+                span = selection.get_span(y)
+                if span is not None:
+                    start, end = span
+                    line_length = len(strip.text)
+                    if not line_length:
+                        rendered.append(strip)
+                        continue
+                    start = min(max(0, start), line_length)
+                    end = line_length if end < 0 else min(max(start, end), line_length)
+                    start_cell = strip.index_to_cell_position(start)
+                    end_cell = strip.index_to_cell_position(end)
+                    strip = Strip.join(
+                        [
+                            strip.crop(0, start_cell),
+                            strip.crop(start_cell, end_cell).apply_style(
+                                selection_style.rich_style
+                            ),
+                            strip.crop(end_cell),
+                        ]
+                    )
+            # Textual's compositor uses this metadata to translate a pointer cell
+            # back to the character offset consumed by ``Selection.extract``.
+            rendered.append(strip.apply_offsets(0, y))
+        return rendered
+
+
 class StreamMessage(Static):
     """One assistant turn rendered as Rich Markdown in a single Textual widget."""
 
@@ -2872,6 +2935,7 @@ class StreamMessage(Static):
         super().__init__(Content(), markup=False)
         self._source = initial_markdown or ""
         self._render_failed = False
+        self._selection_visual: _SelectableMarkdownVisual | None = None
         self.add_class("message", "message--assistant")
 
     @property
@@ -2906,6 +2970,14 @@ class StreamMessage(Static):
 
         self.app.open_url(href)
 
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        """Extract the selected rendered Markdown text for Textual's copy action."""
+
+        visual = self._selection_visual
+        if visual is None:
+            return super().get_selection(selection)
+        return selection.extract(visual.plain), "\n"
+
     def _render_source(self) -> None:
         try:
             markdown = self._build_markdown(self._source)
@@ -2913,10 +2985,16 @@ class StreamMessage(Static):
             if not self._render_failed:
                 self.log.error(f"Markdown rendering failed; using literal fallback: {error}")
             self._render_failed = True
+            self._selection_visual = None
             self.update(Content(self._source))
             return
         self._render_failed = False
-        self.update(_SafeAssistantMarkdown(self._source, markdown))
+        visual = _SelectableMarkdownVisual(
+            self,
+            _SafeAssistantMarkdown(self._source, markdown),
+        )
+        self._selection_visual = visual
+        self.update(visual)
 
     def _build_markdown(self, source: str) -> _AssistantMarkdown:
         theme = self.app.current_theme
