@@ -2674,6 +2674,9 @@ def test_textual_tool_card_expand_of_older_card_does_not_yank_viewport() -> None
                 )
                 await pilot.pause()
             transcript = app_instance.query_one("#transcript", Transcript)
+            renderer.token_delta("live output keeps the stream layout anchored")
+            await pilot.pause()
+            assert transcript.is_anchored
             assert transcript.is_following  # resting at the tail, both cards fit
             cards = [c for c in transcript.children if isinstance(c, ToolCard)]
             older = cards[0]
@@ -2682,7 +2685,10 @@ def test_textual_tool_card_expand_of_older_card_does_not_yank_viewport() -> None
             top_before = older.region.y
             await pilot.press("enter")
             await pilot.pause()
-            return top_before, older.region.y, transcript.scroll_y
+            result = (top_before, older.region.y, transcript.scroll_y)
+            renderer.end_token_stream()
+            await app_instance.wait_for_stream_idle()
+            return result
 
     top_before, top_after, scroll_y = anyio.run(scenario)
     # The older card's top was visible before expanding and must remain in view — a
@@ -4750,12 +4756,65 @@ def test_textual_streaming_keeps_the_growing_tail_visible() -> None:
                 await pilot.pause()
             renderer.end_token_stream()
             await app_instance.wait_for_stream_idle()
-            await pilot.pause()  # settle the final layout and follow callback
+            await pilot.pause()
             return transcript.scroll_y, transcript.max_scroll_y
 
     scroll_y, max_scroll_y = anyio.run(scenario)
     assert max_scroll_y > 0  # content actually overflowed
-    assert scroll_y >= max_scroll_y - 3  # pinned to the tail
+    assert scroll_y == max_scroll_y  # pinned to the exact tail
+
+
+def test_textual_streaming_keeps_wrapped_final_row_above_scrollbar() -> None:
+    source = """## Files inspected
+
+- `src/wisp/coding/session.py`
+- `src/wisp/sessions/jsonl.py`
+- `src/wisp/sessions/errors.py`
+- `src/wisp/sessions/entries.py`
+- `src/wisp/sessions/__init__.py`
+- `src/wisp/sessions/replay.py`
+- `src/wisp/rpc/execution.py`
+- `src/wisp/rpc/coordinator.py`
+- `src/wisp/cli/__init__.py`
+- `tests/test_sessions.py`
+- `tests/test_session_replay.py`
+- `tests/test_session_branching.py`
+- `tests/test_coding_session.py`
+- `tests/test_rpc_execution.py`
+- `tests/test_cli_rpc.py`
+- `tests/test_sdk.py`
+
+No files were changed and no tests were run in plan mode. GitHub freshness was not checked.
+"""
+
+    async def scenario() -> tuple[float, float, int, str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(84, 40)) as pilot:
+            transcript = app_instance.query_one("#transcript", Transcript)
+            _fill_transcript(renderer, 30)
+            await pilot.pause()
+            transcript.return_to_latest()
+            await pilot.pause()
+            renderer.token_delta(source[:-13])
+            await pilot.pause()
+            renderer.token_delta(source[-13:])
+            renderer.end_token_stream_with_content(source)
+            await app_instance.wait_for_stream_idle()
+            await pilot.pause()
+            stream = transcript.query_one(StreamMessage)
+            return (
+                transcript.scroll_y,
+                transcript.max_scroll_y,
+                transcript.max_scroll_x,
+                stream.source,
+                transcript.is_anchored,
+            )
+
+    scroll_y, max_scroll_y, max_scroll_x, rendered, anchored = anyio.run(scenario)
+    assert scroll_y == max_scroll_y
+    assert max_scroll_x == 0
+    assert rendered.endswith("GitHub freshness was not checked.\n")
+    assert not anchored  # native anchoring is scoped to active stream layout
 
 
 def test_textual_streaming_keeps_a_large_many_block_reply_pinned_to_the_tail() -> None:
@@ -4781,7 +4840,7 @@ def test_textual_streaming_keeps_a_large_many_block_reply_pinned_to_the_tail() -
             await app_instance.wait_for_stream_idle()
             await pilot.pause()
             with anyio.fail_after(2):
-                while transcript.scroll_y < transcript.max_scroll_y - 3:
+                while transcript.scroll_y < transcript.max_scroll_y:
                     await pilot.pause()
             stream = transcript.query_one(StreamMessage)
             return (
@@ -4795,7 +4854,7 @@ def test_textual_streaming_keeps_a_large_many_block_reply_pinned_to_the_tail() -
     assert rendered == body
     assert write_count == 1
     assert max_scroll_y > 100  # a genuinely large, overflowing reply
-    assert scroll_y >= max_scroll_y - 3  # still pinned to the tail
+    assert scroll_y == max_scroll_y  # still pinned to the exact tail
 
 
 def test_textual_streaming_does_not_yank_a_reader_who_scrolled_up() -> None:

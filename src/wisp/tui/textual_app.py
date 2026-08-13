@@ -841,6 +841,11 @@ class TextualTui(App[None]):
         # card can drop it; the controller clears this intent after user scrolling.
         if isinstance(event.widget, ToolCard):
             self._transcript_controller.tool_card_focused(event.widget)
+            transcript = self._transcript
+            if transcript is not None and not self.is_newest_transcript_widget(event.widget):
+                # An active stream may have Textual's same-pass anchor armed.
+                # Release it before an older focused card can expand and reflow.
+                transcript.release_anchor()
 
     def on_tool_card_toggled(self, event: ToolCard.Toggled) -> None:
         # A card grew or shrank. Re-pin the tail only when the *newest* card (the

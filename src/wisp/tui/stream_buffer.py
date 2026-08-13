@@ -12,6 +12,7 @@ from wisp.tui.widgets import StreamMessage
 
 if TYPE_CHECKING:
     from wisp.tui.textual_app import TextualTui
+    from wisp.tui.widgets import Transcript
 
 
 @dataclass
@@ -27,8 +28,6 @@ class _StreamTurn:
     drain_running: bool = False
     finalize_requested: bool = False
     finalize_scheduled: bool = False
-    follow_scheduled: bool = False
-    follow_generation: int | None = None
     drain_timer: asyncio.TimerHandle | None = None
     has_written: bool = False
     write_count: int = 0
@@ -72,6 +71,8 @@ class MarkdownStreamController:
         self._finalizing_turns: list[_StreamTurn] = []
         self._last_completed_widget: StreamMessage | None = None
         self._last_completed_write_count = 0
+        self._anchored_turn: _StreamTurn | None = None
+        self._anchored_transcript: Transcript | None = None
         self._pending_callbacks = 0
         self._idle = asyncio.Event()
         self._idle.set()
@@ -93,8 +94,6 @@ class MarkdownStreamController:
             widget = StreamMessage()
             mounted = self._app.mount_stream_widget(widget)
             turn = _StreamTurn(widget=widget, mounted=mounted)
-            if transcript.is_following:
-                turn.follow_generation = transcript.follow_generation
             self._turn = turn
             self._last_completed_widget = None
 
@@ -134,6 +133,9 @@ class MarkdownStreamController:
             self._cancel_drain(turn)
         for finalizing in self._finalizing_turns:
             finalizing.discarded = True
+        anchored_turn = self._anchored_turn
+        if anchored_turn is not None:
+            self._release_stream_anchor(anchored_turn)
         self._last_completed_widget = None
 
     def resume_if_deferred(self) -> None:
@@ -261,7 +263,7 @@ class MarkdownStreamController:
                 turn.deferred.append(text)
                 self._app.note_transcript_update(turn.widget)
                 return
-            turn.follow_generation = transcript.follow_generation
+            self._anchor_stream_tail(turn, transcript)
             try:
                 # The first provider fragment can arrive in the same event-loop
                 # tick as the StreamMessage mount. Wait until its app/theme context
@@ -281,7 +283,6 @@ class MarkdownStreamController:
                 turn.has_written = True
                 turn.write_count += 1
                 self._app.note_transcript_update(turn.widget)
-                self._queue_follow_tail(turn)
         finally:
             turn.drain_running = False
             turn.drain_scheduled = False
@@ -293,20 +294,6 @@ class MarkdownStreamController:
                 self._queue_drain(turn)
             self._finish_callback()
 
-    def _queue_follow_tail(self, turn: _StreamTurn) -> None:
-        if turn.follow_scheduled:
-            return
-        turn.follow_scheduled = True
-        self._app.call_after_refresh(self._follow_tail, turn)
-
-    def _follow_tail(self, turn: _StreamTurn) -> None:
-        turn.follow_scheduled = False
-        if turn.discarded:
-            return
-        transcript = self._app.transcript
-        if transcript is not None and turn.follow_generation == transcript.follow_generation:
-            transcript.return_to_latest()
-
     async def _finalize(self, turn: _StreamTurn) -> None:
         try:
             if turn.discarded:
@@ -314,10 +301,6 @@ class MarkdownStreamController:
             turn.pending.clear()
             turn.pending_bytes = 0
             turn.deferred.clear()
-            transcript = self._app.transcript
-            if transcript is not None and transcript.is_following:
-                turn.follow_generation = transcript.follow_generation
-
             # Always reconcile from authoritative source. Besides repairing failed
             # incremental writes, this replaces provider deltas with the exact
             # MessageCompleted content when providers normalize their final text.
@@ -328,6 +311,9 @@ class MarkdownStreamController:
             await turn.mounted
             if turn.discarded:
                 return
+            transcript = self._app.transcript
+            if transcript is not None and transcript.is_following:
+                self._anchor_stream_tail(turn, transcript)
             await turn.widget.replace_markdown(source)
             if turn.discarded:
                 return
@@ -335,10 +321,32 @@ class MarkdownStreamController:
             self._last_completed_write_count = turn.write_count
             self._app.settle_stream_widget(turn.widget)
             self._app.note_transcript_update(turn.widget)
-            self._queue_follow_tail(turn)
         finally:
+            if self._anchored_turn is turn and not self._app.call_after_refresh(
+                self._release_stream_anchor,
+                turn,
+            ):
+                self._release_stream_anchor(turn)
             self._forget_finalizing_turn(turn)
             turn.finalize_scheduled = False
             # Keep the idle barrier closed while handing off to the next flushed turn.
             self._queue_next_finalizer()
             self._finish_callback()
+
+    def _anchor_stream_tail(self, turn: _StreamTurn, transcript: Transcript) -> None:
+        """Pin one followed stream inside the compositor pass that grows it."""
+
+        transcript.anchor()
+        self._anchored_turn = turn
+        self._anchored_transcript = transcript
+
+    def _release_stream_anchor(self, turn: _StreamTurn) -> None:
+        """Disable native anchoring after the owning stream's final layout."""
+
+        if self._anchored_turn is not turn:
+            return
+        transcript = self._anchored_transcript
+        self._anchored_turn = None
+        self._anchored_transcript = None
+        if transcript is not None:
+            transcript.anchor(False)
