@@ -71,10 +71,14 @@ from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
 from wisp.sessions.entries import (
     CompactionSessionEntry,
+    EventSessionEntry,
     MessageSessionEntry,
+    PersistedEventEnvelope,
     SessionEntry,
     ToolResultPresentationSnapshot,
+    is_session_tree_entry,
 )
+from wisp.sessions.errors import StaleSessionWriterError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import SessionReplay, replay_session_entries
 from wisp.skills.invocation import expand_skill_invocation
@@ -100,9 +104,60 @@ PERSISTED_SESSION_EVENT_TYPES = frozenset(
 )
 
 
+@dataclass(slots=True)
+class _RunPersistence:
+    """Advance one run only along the session branch it has observed."""
+
+    session: JsonlSession
+    expected_active_leaf_id: str | None
+    operation_id: str | None
+
+    async def append_entry(self, entry: SessionEntry) -> SessionEntry:
+        persisted = await self.session.append_entry_if_current(
+            entry,
+            expected_active_leaf_id=self.expected_active_leaf_id,
+        )
+        if is_session_tree_entry(persisted):
+            self.expected_active_leaf_id = persisted.id
+        return persisted
+
+    async def append_message(self, message: Message) -> SessionEntry:
+        persisted = await self.session.append_message_if_current(
+            message,
+            expected_active_leaf_id=self.expected_active_leaf_id,
+            operation_id=self.operation_id,
+        )
+        self.expected_active_leaf_id = persisted.id
+        return persisted
+
+    async def append_event(self, event: WispEvent) -> SessionEntry:
+        persisted = await self.append_entry(
+            EventSessionEntry(
+                session_id=self.session.session_id,
+                event=PersistedEventEnvelope(payload=event.model_dump(mode="json")),
+                operation_id=self.operation_id,
+            )
+        )
+        return persisted
+
+    async def append_compaction(
+        self,
+        entry: CompactionSessionEntry,
+        *,
+        expected_context_entry_ids: Sequence[str],
+    ) -> SessionEntry:
+        persisted = await self.session.append_compaction_entry_if_current(
+            entry,
+            expected_context_entry_ids=expected_context_entry_ids,
+            expected_active_leaf_id=self.expected_active_leaf_id,
+        )
+        self.expected_active_leaf_id = persisted.id
+        return persisted
+
+
 @dataclass(frozen=True, slots=True)
 class _PendingSessionEntry:
-    session: JsonlSession
+    persistence: _RunPersistence
     entry: SessionEntry
 
 
@@ -188,6 +243,7 @@ class CodingSession:
         self._operation_active = False
         self._active_harness: AgentHarness | None = None
         self._active_session_id: str | None = None
+        self._active_persistence: _RunPersistence | None = None
         self._last_session_id: str | None = None
         self._accepting_queued_messages = False
         self._retained_queues: dict[str, _RetainedQueueState] = {}
@@ -449,6 +505,7 @@ class CodingSession:
                             self._retained_queues.pop(self._active_session_id, None)
                     self._active_harness = None
                     self._active_session_id = None
+                    self._active_persistence = None
                     self._operation_active = False
 
     async def _run(
@@ -471,9 +528,16 @@ class CodingSession:
             pending.entry.session_id == session.session_id for pending in self._pending_entries
         )
         await self._flush_pending_entries()
-        if recover_history:
-            history = await anyio.to_thread.run_sync(session.read_context_messages)
+        snapshot = await anyio.to_thread.run_sync(session.read_run_snapshot)
+        if snapshot.entry_count or recover_history:
+            history = snapshot.replay.messages
             self._history_refresh_session_ids.discard(session.session_id)
+        persistence = _RunPersistence(
+            session=session,
+            expected_active_leaf_id=snapshot.active_leaf_id,
+            operation_id=operation_id,
+        )
+        self._active_persistence = persistence
 
         async def emit(event: WispEvent) -> WispEvent:
             return await self._emit(event, session=session, operation_id=operation_id)
@@ -547,20 +611,19 @@ class CodingSession:
         self._active_harness = harness
         self._accepting_queued_messages = True
         await self._repair_and_flush(session, harness)
-        if session.path.is_file():
-            run_entry_start = len(await anyio.to_thread.run_sync(session.read_entries))
-            run_start_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
-        else:
-            run_entry_start = 0
-            run_start_leaf_id = None
+        run_snapshot = await anyio.to_thread.run_sync(session.read_run_snapshot)
+        run_entry_start = run_snapshot.entry_count
+        run_start_leaf_id = run_snapshot.active_leaf_id
 
         async def rollback_active_prompt() -> None:
             if operation_id is not None:
-                await session.restore_active_leaf_for_operation(
+                restored = await session.restore_active_leaf_for_operation(
                     run_entry_start,
                     run_start_leaf_id,
                     operation_id=operation_id,
                 )
+                if restored:
+                    persistence.expected_active_leaf_id = run_start_leaf_id
                 return
             current_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
             if current_leaf_id != run_start_leaf_id:
@@ -569,13 +632,14 @@ class CodingSession:
                     expected_active_leaf_id=current_leaf_id,
                     operation_id=operation_id,
                 )
+                persistence.expected_active_leaf_id = run_start_leaf_id
 
         yield await emit(AgentStarted(session_id=session.session_id))
 
         for prompt_message in prompt_messages:
-            await session.append_message(prompt_message, operation_id=operation_id)
+            await persistence.append_message(prompt_message)
 
-        user_entry = await session.append_message(user_message, operation_id=operation_id)
+        user_entry = await persistence.append_message(user_message)
         # Add the persisted prompt before checking the threshold so provider limits
         # apply to the complete next request, not only the resumed history.
         harness.append_message(user_message)
@@ -1033,6 +1097,11 @@ class CodingSession:
 
         async with self._operation_lock:
             self._operation_active = True
+            self._active_persistence = _RunPersistence(
+                session=session,
+                expected_active_leaf_id=session.read_active_leaf_id(),
+                operation_id=None,
+            )
             try:
                 replay = await self._prepare_compaction_replay(session)
                 plan = plan_manual_compaction(replay)
@@ -1046,6 +1115,7 @@ class CodingSession:
                 ):
                     yield event
             finally:
+                self._active_persistence = None
                 self._operation_active = False
 
     @staticmethod
@@ -1281,15 +1351,18 @@ class CodingSession:
             )
             publication_errors: list[str] = []
             with anyio.CancelScope(shield=True):
+                persistence = self._active_persistence
+                if persistence is None or persistence.session.session_id != session.session_id:
+                    raise RuntimeError("Compaction has no active session persistence cursor")
                 try:
-                    await session.append_compaction_entry(
+                    await persistence.append_compaction(
                         entry,
                         expected_context_entry_ids=plan.expected_context_entry_ids,
                     )
                 except Exception:
                     # A write can commit and then fail during post-append validation.
                     # Retrying the stable entry id reconciles that uncertain outcome.
-                    await session.append_compaction_entry(
+                    await persistence.append_compaction(
                         entry,
                         expected_context_entry_ids=plan.expected_context_entry_ids,
                     )
@@ -1376,7 +1449,16 @@ class CodingSession:
             )
             if not summary_committed and (summary_usage is not None or summary_cost is not None):
                 try:
-                    await session.append_event(failed, operation_id=operation_id)
+                    persisted_failure = await session.append_event(
+                        failed,
+                        operation_id=operation_id,
+                    )
+                    persistence = self._active_persistence
+                    if (
+                        persistence is not None
+                        and persistence.session.session_id == session.session_id
+                    ):
+                        persistence.expected_active_leaf_id = persisted_failure.id
                 except Exception:
                     if not recover_failure:
                         raise
@@ -1631,7 +1713,11 @@ class CodingSession:
     ) -> WispEvent:
         await self._flush_pending_entries()
         if session is not None and event.type in PERSISTED_SESSION_EVENT_TYPES:
-            await session.append_event(event, operation_id=operation_id)
+            persistence = self._active_persistence
+            if persistence is not None and persistence.session.session_id == session.session_id:
+                await persistence.append_event(event)
+            else:
+                await session.append_event(event, operation_id=operation_id)
         if self.events is not None:
             await self.events.emit(event)
         return event
@@ -1679,7 +1765,16 @@ class CodingSession:
             created_at=message.created_at,
             tool_result=tool_result,
         )
-        self._pending_entries.append(_PendingSessionEntry(session=session, entry=entry))
+        persistence = self._active_persistence
+        if persistence is None or persistence.session.session_id != session.session_id:
+            persistence = _RunPersistence(
+                session=session,
+                expected_active_leaf_id=session.read_active_leaf_id(),
+                operation_id=operation_id,
+            )
+        self._pending_entries.append(
+            _PendingSessionEntry(persistence=persistence, entry=entry)
+        )
         return entry.id
 
     async def _repair_and_flush(
@@ -1710,7 +1805,15 @@ class CodingSession:
             while self._pending_entries:
                 pending = self._pending_entries[0]
                 try:
-                    await pending.session.append_entry(pending.entry)
+                    await pending.persistence.append_entry(pending.entry)
+                except StaleSessionWriterError:
+                    self._history_refresh_session_ids.add(pending.entry.session_id)
+                    self._pending_entries = deque(
+                        queued
+                        for queued in self._pending_entries
+                        if queued.persistence is not pending.persistence
+                    )
+                    raise
                 except BaseException:
                     self._history_refresh_session_ids.add(pending.entry.session_id)
                     raise
