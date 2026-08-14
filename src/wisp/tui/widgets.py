@@ -92,6 +92,7 @@ from wisp.tui.rendering import (
     TuiViewSnapshot,
     _footer_context_text,
     _format_cwd_for_footer,
+    _sanitize_footer_text,
     _truncate_to_cell_width,
 )
 from wisp.tui.tool_call import (
@@ -2744,7 +2745,7 @@ def _textual_footer_parts(snapshot: TuiViewSnapshot) -> _TextualFooterParts:
     if snapshot.queued_follow_ups:
         activity_parts.append(f"queued {snapshot.queued_follow_ups}")
     activity = " · ".join(activity_parts)
-    cwd = _format_cwd_for_footer(snapshot.cwd)
+    cwd = _sanitize_footer_text(_format_cwd_for_footer(snapshot.cwd))
     left = " · ".join(part for part in (cwd, activity) if part)
     center = (
         "esc cancel"
@@ -2758,7 +2759,7 @@ def _textual_footer_parts(snapshot: TuiViewSnapshot) -> _TextualFooterParts:
         left=left,
         activity=activity,
         center=center,
-        model=snapshot.model or "",
+        model=_sanitize_footer_text(snapshot.model or ""),
         billing=_textual_billing_text(snapshot),
         context_wide=context_wide,
         context_compact=context_compact,

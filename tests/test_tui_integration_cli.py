@@ -3437,12 +3437,11 @@ def test_textual_stream_completion_retries_a_failed_incremental_markdown_build(
     monkeypatch: MonkeyPatch,
 ) -> None:
     original_build = StreamMessage._build_markdown
-    failed_once = False
+    incremental_build_failed = asyncio.Event()
 
     def fail_first_build(stream: StreamMessage, content: str) -> object:
-        nonlocal failed_once
-        if not failed_once:
-            failed_once = True
+        if not incremental_build_failed.is_set():
+            incremental_build_failed.set()
             raise RuntimeError("simulated incremental Markdown build failure")
         return original_build(stream, content)
 
@@ -3450,9 +3449,10 @@ def test_textual_stream_completion_retries_a_failed_incremental_markdown_build(
 
     async def scenario() -> tuple[str, bool]:
         app_instance, renderer = create_textual_tui()
-        async with app_instance.run_test() as pilot:
+        async with app_instance.run_test():
             renderer.token_delta("same final content")
-            await pilot.pause()
+            with anyio.fail_after(2):
+                await incremental_build_failed.wait()
             renderer.end_token_stream_with_content("same final content")
             await app_instance.wait_for_stream_idle()
             stream = app_instance.query_one(StreamMessage)
@@ -4635,6 +4635,20 @@ def test_textual_footer_renders_markup_in_cwd_and_model_literally() -> None:
     assert "[bold]" in plain
     assert "[/]" in plain  # model markup survives as literal text
     assert span_count == 1
+
+
+def test_textual_footer_sanitizes_control_characters_before_layout() -> None:
+    parts = _textual_footer_parts(
+        TuiViewSnapshot(
+            status="idle",
+            input_hint="wisp> ",
+            cwd="/tmp/control\nname\tleaf",
+            model="gpt\rmodel",
+        )
+    )
+
+    assert parts.left == "/tmp/control name leaf"
+    assert parts.model == "gpt model"
 
 
 @pytest.mark.parametrize(
