@@ -102,8 +102,9 @@ def _summarize_ls(data: Mapping[str, object], truncated: bool) -> str | None:
     path = _path(data)
     if count == 0:
         return f"ls: empty ({path})" if path else "ls: empty"
-    # ``entries`` is the kept (possibly capped) list, so a truncated ls means "at
-    # least this many" — the "+ more" marker says the count is a floor, not the total.
+    # New results provide the exact directory count separately from the bounded
+    # ``entries`` list. Legacy results fall back to the kept-list length, where the
+    # "+ more" marker communicates that the count is only a floor.
     entry_count = _count(count, "entry", "entries")
     body = f"{entry_count} in {path}" if path else entry_count
     return f"ls: {body}{_more(truncated)}"
