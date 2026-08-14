@@ -579,6 +579,32 @@ def test_active_turn_truncation_sizes_floor_from_retained_unicode_tail(content: 
     assert len(result.encode("utf-8")) <= len(content[-200:].encode("utf-8"))
 
 
+def test_active_turn_truncation_tolerates_surrogate_in_smaller_candidate() -> None:
+    large_content = "a" * 500
+    malformed_content = "b" * 250 + "\ud800"
+    messages = (
+        Message(role="tool", content=large_content, tool_call_id="large"),
+        Message(role="tool", content=malformed_content, tool_call_id="malformed"),
+    )
+
+    truncated = truncate_active_turn_tool_results(messages, excess_tokens=25)
+
+    assert truncated is not None
+    assert truncated[0].content != large_content
+    assert truncated[1].content == malformed_content
+
+
+def test_active_turn_truncation_escapes_surrogate_when_selected() -> None:
+    content = "a" * 250 + "\ud800"
+    messages = (Message(role="tool", content=content, tool_call_id="call-1"),)
+
+    truncated = truncate_active_turn_tool_results(messages, excess_tokens=10)
+
+    assert truncated is not None
+    assert "\ud800" not in truncated[0].content
+    assert "\\ud800" in truncated[0].content
+
+
 def test_active_turn_truncation_prioritizes_largest_utf8_payload() -> None:
     ascii_content = "a" * 500
     unicode_content = "界" * 300

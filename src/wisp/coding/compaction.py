@@ -274,7 +274,7 @@ def truncate_active_turn_tool_results(
             for index, message in enumerate(messages)
             if message.role == "tool" and len(message.content) > _MIN_TRUNCATED_TOOL_RESULT_CHARS
         ),
-        key=lambda index: len(messages[index].content.encode("utf-8")),
+        key=lambda index: _utf8_size(messages[index].content),
         reverse=True,
     )
     if not candidates:
@@ -287,20 +287,31 @@ def truncate_active_turn_tool_results(
         if reclaimed_bytes >= target_bytes:
             break
         message = truncated[index]
-        content_bytes = len(message.content.encode("utf-8"))
+        safe_content = _surrogate_safe_text(message.content)
+        content_bytes = _utf8_size(safe_content)
         remaining_target = target_bytes - reclaimed_bytes
-        minimum_bytes = len(message.content[-_MIN_TRUNCATED_TOOL_RESULT_CHARS:].encode("utf-8"))
+        minimum_bytes = _utf8_size(message.content[-_MIN_TRUNCATED_TOOL_RESULT_CHARS:])
         max_bytes = max(minimum_bytes, content_bytes - remaining_target)
-        result = truncate_text_tail(message.content, max_bytes=max_bytes, max_lines=10_000_000)
+        result = truncate_text_tail(safe_content, max_bytes=max_bytes, max_lines=10_000_000)
         if not result.truncated:
             continue
-        reclaimed_bytes += content_bytes - len(result.text.encode("utf-8"))
+        reclaimed_bytes += content_bytes - _utf8_size(result.text)
         truncated[index] = message.model_copy(update={"content": result.text})
         changed = True
 
     if not changed:
         return None
     return tuple(truncated)
+
+
+def _surrogate_safe_text(text: str) -> str:
+    """Preserve malformed Unicode scalar values as deterministic escapes."""
+
+    return text.encode("utf-8", errors="backslashreplace").decode("utf-8")
+
+
+def _utf8_size(text: str) -> int:
+    return len(text.encode("utf-8", errors="backslashreplace"))
 
 
 def build_compaction_checkpoint_prompt(*, instructions: str | None = None) -> str:
