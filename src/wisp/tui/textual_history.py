@@ -315,6 +315,20 @@ class TextualHistoryController:
             self._surface.finish_history_prepend()
         return True
 
+    def show_oldest(self) -> bool:
+        """Move the mounted window to the oldest retained history."""
+
+        if not self._window.show_oldest():
+            return False
+        self._surface.begin_history_prepend()
+        self._surface.begin_history_render()
+        try:
+            self._reconcile()
+        finally:
+            self._surface.finish_history_render()
+            self._surface.finish_history_prepend()
+        return True
+
     def show_latest(self) -> bool:
         """Move the mounted window to the newest retained history."""
 

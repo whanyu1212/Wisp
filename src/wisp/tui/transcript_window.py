@@ -125,6 +125,13 @@ class TranscriptWindow[Entry]:
         self._start = target
         return changed
 
+    def show_oldest(self) -> bool:
+        """Move the mounted window directly to the oldest retained entries."""
+
+        changed = self._start != 0
+        self._start = 0
+        return changed
+
     def shift_older(self) -> bool:
         target = max(0, self._start - self.shift)
         changed = target != self._start

@@ -106,6 +106,7 @@ class TextualTuiRenderer:
         app.set_live_widget_evicted_hook(self._history.forget_live_widget)
         app.set_history_window_hooks(
             shift_older=self._history.shift_older,
+            show_oldest=self._history.show_oldest,
             show_latest=self._history.show_latest,
         )
         self._progress_active = False
@@ -300,9 +301,7 @@ class TextualTuiRenderer:
         self.app.history_page_loaded(has_more=has_more)
 
     def history_page_request_failed(self) -> None:
-        transcript = self.app.transcript
-        if transcript is not None:
-            transcript.history_page_request_failed()
+        self.app.history_page_request_failed()
 
     @property
     def retained_history_entry_count(self) -> int:

@@ -57,6 +57,18 @@ def test_window_shifts_through_retained_entries() -> None:
     assert window.visible == (2, 3, 4)
 
 
+def test_window_moves_directly_to_oldest_retained_entries() -> None:
+    window = TranscriptWindow[int](capacity=3, shift=1)
+    window.replace(range(8))
+
+    assert window.show_oldest()
+    assert window.visible == (0, 1, 2)
+    assert window.is_at_oldest
+    assert not window.show_oldest()
+    assert window.entries == tuple(range(8))
+    assert window.latest_is_retained
+
+
 def test_prepend_preserves_visible_entries() -> None:
     window = TranscriptWindow[int](capacity=3, shift=1)
     window.replace((3, 4, 5))
