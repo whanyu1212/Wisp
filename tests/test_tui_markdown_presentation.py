@@ -317,6 +317,33 @@ def test_assistant_markdown_drag_selection_paints_selection_style(
     assert trailing_after.bold == trailing_before.bold
 
 
+def test_assistant_markdown_cached_strips_preserve_link_hover_style() -> None:
+    async def scenario() -> tuple[RichStyle, RichStyle, str]:
+        app = TextualTui()
+        async with app.run_test(size=(60, 20)) as pilot:
+            stream = StreamMessage("A [link](https://example.com) here.")
+            await app.query_one("#transcript", Transcript).mount(stream)
+            await pilot.pause()
+            link_x, before = next(
+                (x, style)
+                for x in range(stream.size.width)
+                if "@click" in (style := stream.get_style_at(x, 0)).meta
+            )
+
+            await pilot.hover(stream, offset=(link_x, 0))
+            await pilot.pause()
+            after = stream.get_style_at(link_x, 0)
+            return before, after, stream.hover_style.link_id
+
+    before, after, hover_link_id = anyio.run(scenario)
+
+    assert hover_link_id
+    assert before.color != after.color
+    assert not before.bold
+    assert after.bold
+    assert before.meta == after.meta
+
+
 def test_assistant_markdown_link_metadata_routes_through_the_app() -> None:
     async def scenario() -> tuple[str, list[str]]:
         app = TextualTui()
