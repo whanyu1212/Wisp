@@ -122,6 +122,7 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert sample.markdown_renders.active > 0
     assert sample.markdown_renders.active < sample.markdown_source_rebuild_count * 2
     assert sample.markdown_source_rebuild_count >= sample.stream_update_count
+    assert sample.markdown_source_chars_processed >= sample.markdown_source_rebuild_count
     assert sample.event_loop_delay.sample_count >= 1
     assert sample.layout_passes.sample_count >= 1
     assert sample.compositor_renders.sample_count >= 1
@@ -139,12 +140,14 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert summary.content_height_call_count_median == sample.content_height_call_count
     assert summary.active_markdown_render_median == sample.markdown_renders.active
     assert summary.settled_markdown_render_median == sample.markdown_renders.settled
+    assert summary.markdown_source_chars_processed_median == sample.markdown_source_chars_processed
     assert '"retained_history_entries": 4' in report.to_json()
     assert '"mounted_history_entries": 4' in report.to_json()
     assert '"stream_cpu_ms":' in report.to_json()
     assert '"layout_requests":' in report.to_json()
     assert '"layout_passes_per_stream_update":' in report.to_json()
     assert '"markdown_renders":' in report.to_json()
+    assert '"markdown_source_chars_processed":' in report.to_json()
 
 
 def test_tui_stream_hotpaths_profile_is_readable_and_rejects_matrix(tmp_path: Path) -> None:

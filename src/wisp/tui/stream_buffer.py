@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,22 @@ from wisp.tui.widgets import StreamMessage
 if TYPE_CHECKING:
     from wisp.tui.textual_app import TextualTui
     from wisp.tui.widgets import Transcript
+
+
+_MIN_DRAIN_INTERVAL_SECONDS = 1 / 15
+_MAX_DRAIN_INTERVAL_SECONDS = 0.25
+_RENDER_COOLDOWN_MULTIPLIER = 2.0
+
+
+def _next_drain_delay(render_seconds: float | None) -> float:
+    """Bound stream cadence from the previous successful Markdown rebuild cost."""
+
+    if render_seconds is None:
+        return _MIN_DRAIN_INTERVAL_SECONDS
+    return min(
+        _MAX_DRAIN_INTERVAL_SECONDS,
+        max(_MIN_DRAIN_INTERVAL_SECONDS, render_seconds * _RENDER_COOLDOWN_MULTIPLIER),
+    )
 
 
 @dataclass
@@ -31,6 +48,7 @@ class _StreamTurn:
     drain_timer: asyncio.TimerHandle | None = None
     has_written: bool = False
     write_count: int = 0
+    last_render_seconds: float | None = None
     discarded: bool = False
     incremental_write_failed: bool = False
 
@@ -56,10 +74,9 @@ class MarkdownStreamController:
     # so writes settle into a steady cadence.
     #
     # This bounds *repaints*, never throughput: fragments accumulate in
-    # `turn.pending` between drains and a burst still cuts the wait short via
-    # `_DRAIN_IMMEDIATE_BYTES`, so a fast provider renders the same text in the
-    # same wall-clock time with fewer, more even repaints.
-    _DRAIN_INTERVAL_SECONDS = 1 / 15
+    # `turn.pending` between drains. A first-write burst still cuts the initial
+    # wait short, while later bursts respect the cooldown established by the
+    # previous full-source rebuild.
     _DRAIN_IMMEDIATE_BYTES = 4 * 1024
 
     def __init__(self, app: TextualTui) -> None:
@@ -177,13 +194,16 @@ class MarkdownStreamController:
             return
         turn.drain_scheduled = True
         self._begin_callback()
-        if immediate or turn.pending_bytes >= self._DRAIN_IMMEDIATE_BYTES:
+        burst_before_first_write = (
+            turn.last_render_seconds is None and turn.pending_bytes >= self._DRAIN_IMMEDIATE_BYTES
+        )
+        if immediate or burst_before_first_write:
             if not self._app.call_after_refresh(self._drain, turn):
                 turn.drain_scheduled = False
                 self._finish_callback()
             return
         turn.drain_timer = asyncio.get_running_loop().call_later(
-            self._DRAIN_INTERVAL_SECONDS,
+            _next_drain_delay(turn.last_render_seconds),
             self._schedule_drain_after_frame,
             turn,
         )
@@ -269,7 +289,9 @@ class MarkdownStreamController:
                 # tick as the StreamMessage mount. Wait until its app/theme context
                 # exists before building the Rich Markdown renderable.
                 await turn.mounted
+                render_started = time.perf_counter()
                 await turn.widget.append_markdown(text)
+                render_seconds = time.perf_counter() - render_started
             except Exception as error:
                 # Keep the authoritative full source and repair the widget during
                 # finalization instead of allowing one incremental parser/layout
@@ -282,6 +304,7 @@ class MarkdownStreamController:
                     return
                 turn.has_written = True
                 turn.write_count += 1
+                turn.last_render_seconds = render_seconds
                 self._app.note_transcript_update(turn.widget)
         finally:
             turn.drain_running = False

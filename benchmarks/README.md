@@ -74,9 +74,11 @@ process CPU time to exclude intentional sleeps without pretending CPU cost is a 
 `layout_passes_per_stream_update` shows whether paced writes trigger additional settlement layouts.
 `content_height_calls` attributes Textual height measurements by concrete widget class.
 `markdown_source_rebuild_count` counts source-to-renderable rebuilds separately from Rich visual
-renders, while `markdown_renders` splits those visual renders between the mutable streaming widget
-(`active`) and `StreamMessage` widgets mounted before streaming (`settled`). A zero settled count is
-valid when Textual reuses prior measurements during the measured phase.
+renders. `markdown_source_chars_processed` sums the full source length at each rebuild, exposing
+repeated whole-document work as the response grows; compare it only with identical streamed content.
+`markdown_renders` splits visual renders between the mutable streaming widget (`active`) and
+`StreamMessage` widgets mounted before streaming (`settled`). A zero settled count is valid when
+Textual reuses prior measurements during the measured phase.
 
 Treat JSON and profile files as machine-local evidence. Compare timings only on the same machine,
 Python/Textual versions, viewport, and arguments, and report individual samples alongside medians
