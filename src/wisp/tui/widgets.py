@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import ClassVar
 
 from rich.cells import cell_len
@@ -1894,6 +1895,24 @@ class JumpToLatest(Static):
         self.post_message(self.Selected())
 
 
+class HistoryNavigationIntent(Enum):
+    """Reader intent carried across a retained-history window replacement."""
+
+    PRESERVE = auto()
+    PAGE_UP = auto()
+    WHEEL_UP = auto()
+    OLDEST = auto()
+
+
+@dataclass(frozen=True)
+class HistoryNavigation:
+    """Viewport movement left to apply after older history has mounted."""
+
+    intent: HistoryNavigationIntent = HistoryNavigationIntent.PRESERVE
+    remaining_rows: float = 0.0
+    reader_generation: int = -1
+
+
 class Transcript(VerticalScroll):
     """Scrollable message container that follows the newest output like `tail -f`.
 
@@ -1921,9 +1940,10 @@ class Transcript(VerticalScroll):
     HELP = """
     # Conversation
 
-    Page through the transcript with PageUp and PageDown. Home loads the oldest
-    available history and End returns to live output. Wisp follows new output only
-    while the viewport is resting at the latest message.
+    Page through the transcript with PageUp and PageDown; older history loads as
+    needed. Home reaches the beginning of the session and End returns to live output.
+    The scrollbar represents the mounted history window. Wisp follows new output
+    only while the viewport is resting at the latest message.
     """
 
     class FollowChanged(Message):
@@ -1935,6 +1955,10 @@ class Transcript(VerticalScroll):
 
     class NeedMoreHistory(Message):
         """The user reached the oldest mounted transcript content."""
+
+        def __init__(self, navigation: HistoryNavigation) -> None:
+            super().__init__()
+            self.navigation = navigation
 
     def __init__(
         self,
@@ -1960,6 +1984,7 @@ class Transcript(VerticalScroll):
         self._has_retained_history = False
         self._history_loading = False
         self._history_request_armed = True
+        self._history_navigation = HistoryNavigation()
 
     def _size_updated(
         self,
@@ -2001,6 +2026,7 @@ class Transcript(VerticalScroll):
         self._has_retained_history = False
         self._history_loading = False
         self._history_request_armed = True
+        self._history_navigation = HistoryNavigation()
         self.remove_children()
         self.scroll_home(animate=False)
 
@@ -2023,6 +2049,7 @@ class Transcript(VerticalScroll):
             self.post_message(self.FollowChanged(self._follow))
         if new_value > 0:
             self._history_request_armed = True
+            self._history_navigation = HistoryNavigation()
         else:
             self._request_more_history_if_needed()
 
@@ -2046,9 +2073,14 @@ class Transcript(VerticalScroll):
 
         return self._has_more_history
 
-    def request_history_at_top(self) -> None:
+    def request_history_at_top(
+        self,
+        navigation: HistoryNavigation | None = None,
+    ) -> None:
         """Request another page only when the settled viewport remains at the top."""
 
+        if navigation is not None:
+            self._history_navigation = self._current_navigation(navigation)
         if self.scroll_y == 0:
             self._request_more_history_if_needed()
 
@@ -2061,13 +2093,25 @@ class Transcript(VerticalScroll):
             return
         self._history_loading = True
         self._history_request_armed = False
-        self.post_message(self.NeedMoreHistory())
+        navigation = self._current_navigation(self._history_navigation)
+        self._history_navigation = HistoryNavigation()
+        self.post_message(self.NeedMoreHistory(navigation))
+
+    def _current_navigation(self, navigation: HistoryNavigation) -> HistoryNavigation:
+        if navigation.reader_generation >= 0:
+            return navigation
+        return HistoryNavigation(
+            navigation.intent,
+            navigation.remaining_rows,
+            self._follow_generation,
+        )
 
     def history_page_request_failed(self) -> None:
         """Allow a transient page-load failure to be retried at the top."""
 
         self._history_loading = False
         self._history_request_armed = True
+        self._history_navigation = HistoryNavigation()
 
     @property
     def is_following(self) -> bool:
@@ -2107,16 +2151,24 @@ class Transcript(VerticalScroll):
         anchor: Widget | None,
         anchor_y_before: float,
         following: bool,
+        navigation: HistoryNavigation | None = None,
     ) -> None:
         """Keep the same content visible after older entries were prepended."""
 
         if following:
             self.return_to_latest()
             return
-        height_delta = max(0.0, anchor.region.y - anchor_y_before) if anchor is not None else 0.0
+        navigation = navigation or HistoryNavigation()
+        if navigation.intent is HistoryNavigationIntent.OLDEST:
+            target_y = 0.0
+        else:
+            height_delta = (
+                max(0.0, anchor.region.y - anchor_y_before) if anchor is not None else 0.0
+            )
+            target_y = scroll_y + height_delta - navigation.remaining_rows
         self.restore_viewport_state(
             TranscriptViewportState(
-                scroll_y=scroll_y + height_delta,
+                scroll_y=target_y,
                 following=False,
             )
         )
@@ -2126,12 +2178,41 @@ class Transcript(VerticalScroll):
         if self._follow:
             self.scroll_end(animate=False)
 
-    def page_up(self) -> None:
+    def page_up(self) -> HistoryNavigation | None:
         """Move away from the tail before a page-up layout can re-pin it."""
 
         self._stop_following()
+        page_height = float(self.scrollable_content_region.height)
+        navigation = None
+        if (
+            page_height > 0
+            and self.scroll_y <= page_height
+            and (self._has_more_history or self._has_retained_history)
+        ):
+            navigation = HistoryNavigation(
+                HistoryNavigationIntent.PAGE_UP,
+                remaining_rows=page_height - self.scroll_y,
+                reader_generation=self._follow_generation,
+            )
+            self._history_navigation = navigation
         self.scroll_page_up(animate=False)
         self.request_history_at_top()
+        return navigation
+
+    def prepare_wheel_up(self) -> HistoryNavigation | None:
+        """Arm the unconsumed wheel step before Textual processes the event."""
+
+        self._stop_following()
+        step = float(self.scroll_sensitivity_y)
+        if self.scroll_y <= step and (self._has_more_history or self._has_retained_history):
+            navigation = HistoryNavigation(
+                HistoryNavigationIntent.WHEEL_UP,
+                remaining_rows=max(0.0, step - self.scroll_y),
+                reader_generation=self._follow_generation,
+            )
+            self.request_history_at_top(navigation)
+            return navigation
+        return None
 
     def page_down(self) -> None:
         """Scroll one transcript page without Textual's default animation."""

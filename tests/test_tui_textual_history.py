@@ -246,6 +246,50 @@ def test_history_controller_reconciles_a_bounded_window_without_full_history_sca
     assert surface.window_availability[-1] is True
 
 
+def test_history_controller_moves_directly_to_oldest_retained_window() -> None:
+    surface = _HistorySurface()
+    controller = TextualHistoryController(surface)
+    current = _messages("assistant", "current", TUI_TRANSCRIPT_WINDOW_SIZE)
+    older = _messages("user", "older", TUI_TRANSCRIPT_WINDOW_SHIFT * 2)
+
+    controller.replace_entries(current, session_label="Windowed")
+    controller.prepend_entries(older)
+
+    assert controller.show_oldest()
+    assert surface.history_labels[0] == "user: older 0"
+    assert len(surface.history_labels) == TUI_TRANSCRIPT_WINDOW_SIZE
+    assert surface.window_availability[-1] is False
+    assert not controller.show_oldest()
+
+
+def test_history_controller_reaches_oldest_entries_beyond_retention_limit() -> None:
+    surface = _HistorySurface(at_top=True)
+    controller = TextualHistoryController(surface)
+    controller.replace_entries(
+        _messages("assistant", "message", TUI_HISTORY_PAGE_LIMIT),
+        session_label="Windowed",
+    )
+
+    next_newest = 1_925
+    while next_newest > 0:
+        page_start = max(0, next_newest - TUI_HISTORY_PAGE_LIMIT)
+        controller.prepend_entries(
+            tuple(
+                HistoricalTranscriptMessage(
+                    role="assistant",
+                    content=f"older {index}",
+                )
+                for index in range(page_start, next_newest)
+            )
+        )
+        controller.show_oldest()
+        next_newest = page_start
+
+    assert surface.history_labels[0] == "assistant: older 0"
+    assert controller.retained_entry_count == 1_200
+    assert not controller.show_oldest()
+
+
 def test_history_controller_mounts_session_marker_before_restored_history() -> None:
     surface = _HistorySurface()
     controller = TextualHistoryController(surface)
