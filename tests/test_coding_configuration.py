@@ -188,3 +188,54 @@ def test_effort_reconfigure_preserves_valid_context_observation(tmp_path: Path) 
     agent.reconfigure(replace(agent.configuration, effort="high"))
 
     assert agent._context_observations[session.session_id] is observation  # noqa: SLF001
+
+
+@pytest.mark.parametrize("invalid_limit", [-1, True])
+def test_coding_session_rejects_invalid_tool_iteration_limit(
+    tmp_path: Path, invalid_limit: object
+) -> None:
+    with pytest.raises(ValueError, match="max_tool_iterations"):
+        CodingSession(
+            provider=FakeProvider(),
+            sessions=JsonlSessionStore(tmp_path),
+            max_tool_iterations=invalid_limit,  # type: ignore[arg-type]
+        )
+
+
+def test_coding_session_accepts_zero_tool_iteration_limit(tmp_path: Path) -> None:
+    agent = CodingSession(
+        provider=FakeProvider(),
+        sessions=JsonlSessionStore(tmp_path),
+        max_tool_iterations=0,
+    )
+    assert agent.max_tool_iterations == 0
+
+
+@pytest.mark.parametrize("invalid_reserve", [-1, True])
+def test_reconfigure_rejects_invalid_reserve_without_partial_mutation(
+    tmp_path: Path, invalid_reserve: object
+) -> None:
+    initial_provider = FakeProvider()
+    replacement_provider = _OpenAIProvider()
+    agent = CodingSession(
+        provider=initial_provider,
+        sessions=JsonlSessionStore(tmp_path),
+        model="initial-model",
+        tool_context=ToolContext(cwd=tmp_path, protected_paths=("initial",)),
+        trusted=False,
+        context_reserve_tokens=10,
+    )
+    before = agent.configuration
+    invalid = CodingSessionConfiguration(
+        provider=replacement_provider,
+        model="replacement-model",
+        effort="replacement-effort",
+        models=None,
+        tool_context=ToolContext(cwd=tmp_path, protected_paths=("replacement",)),
+        trusted=True,
+        context_reserve_tokens=invalid_reserve,  # type: ignore[arg-type]
+        auto_compaction_enabled=False,
+    )
+    with pytest.raises(ValueError, match="context_reserve_tokens"):
+        agent.reconfigure(invalid)
+    assert agent.configuration == before

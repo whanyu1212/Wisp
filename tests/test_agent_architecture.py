@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-_PURE_AGENT_MODULES = ("loop.py", "execution.py", "harness.py")
+_PURE_AGENT_MODULES = ("configuration.py", "loop.py", "execution.py", "harness.py")
 _FORBIDDEN_IMPORTS = (
     "wisp.agent.compat",
     "wisp.agent.prompt",
