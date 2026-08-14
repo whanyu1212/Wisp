@@ -4756,7 +4756,7 @@ def test_textual_footer_preserves_activity_before_right_only_fallbacks() -> None
             input_hint="wisp(running)> ",
             mode="plan",
             provider="openai",
-            context=threshold_budget(),
+            cost=SessionCostSummary(known_usd=Decimal("0.042"), priced_record_count=1),
         )
     )
 
@@ -4764,7 +4764,7 @@ def test_textual_footer_preserves_activity_before_right_only_fallbacks() -> None
 
     assert "plan" in narrow
     assert "API" in narrow
-    assert "~81%" not in narrow
+    assert "session" not in narrow
 
 
 def test_textual_footer_marks_current_observed_context_as_exact() -> None:

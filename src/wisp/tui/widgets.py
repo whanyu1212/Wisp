@@ -2735,9 +2735,14 @@ class _TextualFooterParts:
     activity: str
     center: str
     model: str
-    billing: str
+    billing_route: str
+    session_cost: str
     context_wide: str
     context_compact: str
+
+    @property
+    def billing(self) -> str:
+        return _joined_footer_fields(self.billing_route, self.session_cost)
 
 
 def _textual_footer_parts(snapshot: TuiViewSnapshot) -> _TextualFooterParts:
@@ -2755,18 +2760,20 @@ def _textual_footer_parts(snapshot: TuiViewSnapshot) -> _TextualFooterParts:
         else ""
     )
     context_wide, context_compact = _textual_context_parts(snapshot)
+    billing_route, session_cost = _textual_billing_parts(snapshot)
     return _TextualFooterParts(
         left=left,
         activity=activity,
         center=center,
         model=_sanitize_footer_text(snapshot.model or ""),
-        billing=_textual_billing_text(snapshot),
+        billing_route=billing_route,
+        session_cost=session_cost,
         context_wide=context_wide,
         context_compact=context_compact,
     )
 
 
-def _textual_billing_text(snapshot: TuiViewSnapshot) -> str:
+def _textual_billing_parts(snapshot: TuiViewSnapshot) -> tuple[str, str]:
     if snapshot.provider == "openai-codex":
         route = "ChatGPT plan"
     elif snapshot.provider == "fake":
@@ -2778,14 +2785,14 @@ def _textual_billing_text(snapshot: TuiViewSnapshot) -> str:
 
     cost = snapshot.cost
     if cost is None or (cost.priced_record_count == 0 and cost.unpriced_record_count == 0):
-        return route
+        return route, ""
     summary = format_cost_summary(cost)
     session_cost = (
         "session unpriced"
         if summary == "cost unknown"
         else f"session {summary.removeprefix('cost ')}"
     )
-    return _joined_footer_fields(route, session_cost)
+    return route, session_cost
 
 
 def _textual_context_parts(snapshot: TuiViewSnapshot) -> tuple[str, str]:
@@ -2877,6 +2884,8 @@ def _format_textual_footer_line(
             for right in (
                 compact_context,
                 parts.billing,
+                parts.billing_route,
+                parts.session_cost,
                 parts.context_compact,
                 parts.model,
             )
@@ -2887,6 +2896,8 @@ def _format_textual_footer_line(
         for right in (
             compact_context,
             parts.billing,
+            parts.billing_route,
+            parts.session_cost,
             parts.context_compact,
             parts.model,
         )
@@ -2900,7 +2911,14 @@ def _format_textual_footer_line(
         if line is not None:
             return line
 
-    fallback = parts.activity or parts.billing or parts.context_compact or parts.left or parts.model
+    fallback = (
+        parts.activity
+        or parts.billing_route
+        or parts.session_cost
+        or parts.context_compact
+        or parts.left
+        or parts.model
+    )
     return _truncate_to_cell_width(fallback, selected_width)
 
 
