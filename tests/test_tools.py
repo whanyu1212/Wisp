@@ -4245,7 +4245,7 @@ def test_find_tool_python_fallback_stops_after_truncation_lookahead(
             visited.append(name)
             yield tmp_path / name
 
-    monkeypatch.setattr(search_tools_module, "_iter_files", files)
+    monkeypatch.setattr(search_tools_module, "_iter_find_files", files)
     context = ToolContext(cwd=tmp_path, protected_paths=("*.key",))
 
     result = run_tool(
@@ -4258,6 +4258,25 @@ def test_find_tool_python_fallback_stops_after_truncation_lookahead(
     assert result.data == {"count": 2, "files": ["a.py"]}
     assert result.truncated is True
     assert visited == ["skip.txt", "a.py", "secret.key", "b.py"]
+
+
+def test_find_tool_python_fallback_preserves_global_sorted_prefix(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "first.py").write_text("", encoding="utf-8")
+    (tmp_path / "y.py").write_text("", encoding="utf-8")
+    (tmp_path / "z.py").write_text("", encoding="utf-8")
+
+    result = run_tool(
+        FindTool(),
+        {"path": ".", "pattern": "*.py", "max_results": 1},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == "a/first.py\n[truncated]"
+    assert result.data == {"count": 2, "files": ["a/first.py"]}
 
 
 def test_find_tool_python_fallback_runs_off_event_loop(
