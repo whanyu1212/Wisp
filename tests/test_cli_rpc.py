@@ -1213,13 +1213,21 @@ def test_rpc_mode_reports_active_skill_catalog(tmp_path: Path) -> None:
     assert report["catalog"] == {
         "entries": [
             {
+                "name": "github-pr-delivery",
+                "description": (
+                    "Deliver focused changes through a GitHub pull request with verified commits, "
+                    "current-head CI, thread-aware review, and explicit authorization boundaries."
+                ),
+                "source": "package:wisp",
+            },
+            {
                 "name": "wisp-development",
                 "description": (
                     "Develop Wisp and its current extension surfaces while preserving "
                     "architecture and safety boundaries."
                 ),
                 "source": "package:wisp",
-            }
+            },
         ],
         "diagnostics": [],
         "project_trusted": False,
