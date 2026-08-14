@@ -3428,6 +3428,36 @@ def test_textual_stream_completion_repairs_an_incremental_render_failure(
     assert anyio.run(scenario) == "first half second half"
 
 
+def test_textual_stream_completion_retries_a_failed_incremental_markdown_build(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    original_build = StreamMessage._build_markdown
+    failed_once = False
+
+    def fail_first_build(stream: StreamMessage, content: str) -> object:
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise RuntimeError("simulated incremental Markdown build failure")
+        return original_build(stream, content)
+
+    monkeypatch.setattr(StreamMessage, "_build_markdown", fail_first_build)
+
+    async def scenario() -> tuple[str, bool]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("same final content")
+            await pilot.pause()
+            renderer.end_token_stream_with_content("same final content")
+            await app_instance.wait_for_stream_idle()
+            stream = app_instance.query_one(StreamMessage)
+            return stream.source, stream.needs_reconciliation(stream.source)
+
+    source, needs_reconciliation = anyio.run(scenario)
+    assert source == "same final content"
+    assert needs_reconciliation is False
+
+
 def test_textual_end_token_stream_finalizes_the_bubble() -> None:
     # end_token_stream() is the ONLY place a streamed assistant turn is finalized
     # (the shell suppresses the trailing MessageCompleted when tokens rendered).
@@ -3444,6 +3474,34 @@ def test_textual_end_token_stream_finalizes_the_bubble() -> None:
     text, is_streaming = anyio.run(scenario)
     assert text == "final answer"
     assert not is_streaming
+
+
+def test_textual_stream_completion_skips_identical_final_rerender(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    replacements: list[str] = []
+    original_replace = StreamMessage.replace_markdown
+
+    async def track_replace(stream: StreamMessage, content: str) -> None:
+        replacements.append(content)
+        await original_replace(stream, content)
+
+    monkeypatch.setattr(StreamMessage, "replace_markdown", track_replace)
+
+    async def scenario() -> tuple[str, int]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            renderer.token_delta("same final content")
+            await pilot.pause()
+            renderer.end_token_stream_with_content("same final content")
+            await app_instance.wait_for_stream_idle()
+            stream = app_instance.query_one(StreamMessage)
+            return stream.source, app_instance.last_stream_write_count
+
+    source, write_count = anyio.run(scenario)
+    assert source == "same final content"
+    assert write_count == 1
+    assert replacements == []
 
 
 def test_textual_stream_widget_is_available_before_async_finalization() -> None:

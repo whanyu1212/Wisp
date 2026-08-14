@@ -2967,6 +2967,11 @@ class StreamMessage(Static):
 
         return self._source
 
+    def needs_reconciliation(self, content: str) -> bool:
+        """Return whether authoritative content requires another Markdown render."""
+
+        return self._render_failed or self._source != content
+
     def on_mount(self) -> None:
         if self._source:
             self._render_source()

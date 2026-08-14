@@ -314,10 +314,11 @@ class MarkdownStreamController:
             transcript = self._app.transcript
             if transcript is not None and transcript.is_following:
                 self._anchor_stream_tail(turn, transcript)
-            await turn.widget.replace_markdown(source)
-            if turn.discarded:
-                return
-            turn.write_count += 1
+            if turn.incremental_write_failed or turn.widget.needs_reconciliation(source):
+                await turn.widget.replace_markdown(source)
+                if turn.discarded:
+                    return
+                turn.write_count += 1
             self._last_completed_write_count = turn.write_count
             self._app.settle_stream_widget(turn.widget)
             self._app.note_transcript_update(turn.widget)
