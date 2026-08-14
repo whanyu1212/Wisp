@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, replace
+from enum import Enum, auto
 
 import anyio
 
@@ -133,6 +134,65 @@ def _cancelled_events(
             )
         )
     return tuple(events)
+
+
+@dataclass(slots=True)
+class _HarnessRunState:
+    """Offsets and active-turn state retained across loop segments."""
+
+    next_turn_offset: int
+    next_tool_iteration_offset: int
+    active_turn: int | None = None
+    active_turn_completed: bool = False
+
+    def cancelled_events(self) -> tuple[AgentLoopEvent, ...]:
+        return _cancelled_events(
+            self.active_turn,
+            active_turn_completed=self.active_turn_completed,
+        )
+
+
+@dataclass(slots=True)
+class _HarnessSegmentState:
+    """Observable completion state for one invocation of the pure loop."""
+
+    run_finished: bool = False
+    had_tool_calls: bool = False
+    outcome: str | None = None
+    stream_ended: bool = False
+    restart_for_steering: bool = False
+
+    def observe(self, event: AgentLoopEvent, run: _HarnessRunState) -> None:
+        if isinstance(event, TurnStarted):
+            run.active_turn = event.turn
+            run.active_turn_completed = False
+            run.next_turn_offset = event.turn
+            self.run_finished = False
+        if isinstance(event, MessageCompleted):
+            self.run_finished = not event.tool_calls
+            if event.tool_calls:
+                self.had_tool_calls = True
+                run.next_tool_iteration_offset += 1
+        elif isinstance(event, TurnCompleted):
+            run.active_turn_completed = True
+            self.outcome = event.outcome
+            self.run_finished = self.run_finished or event.outcome != "completed"
+
+    def can_drain_follow_up(self, *, cancelled: bool) -> bool:
+        return (
+            self.stream_ended
+            and not cancelled
+            and self.outcome == "completed"
+            and self.run_finished
+        )
+
+
+class _SegmentDisposition(Enum):
+    """Next harness action after a completed loop segment."""
+
+    RESTART_FOR_STEERING = auto()
+    DRAIN_FOLLOW_UP = auto()
+    FINISH = auto()
 
 
 class AgentHarness:
@@ -278,26 +338,15 @@ class AgentHarness:
         """Inject the next steering batch before a provider request starts."""
 
         self._ensure_idle()
-        drain_batch = tuple(self._steering_queue)
-        if self._config.steering_mode == "one_at_a_time":
-            drain_batch = drain_batch[:1]
+        drain_batch = self._queued_batch("steering")
         if not drain_batch:
             return ()
 
         events: list[QueueMessageInjected | QueueUpdated] = []
         for message in drain_batch:
-            if not self._steering_queue or self._steering_queue[0] is not message:
-                continue
-            self._steering_queue.popleft()
-            self._messages.append(message)
-            events.append(
-                QueueMessageInjected(
-                    kind="steering",
-                    content=message.content,
-                    skill_invocation=message.skill_invocation,
-                    timestamp=message.created_at,
-                )
-            )
+            event = self._inject_queued_message("steering", message)
+            if event is not None:
+                events.append(event)
         events.append(self.queue_updated_event())
         return tuple(events)
 
@@ -376,17 +425,13 @@ class AgentHarness:
         if prompt_message is not None:
             self._messages.append(prompt_message)
 
-        active_turn: int | None = None
-        active_turn_completed = False
-        next_turn_offset = turn_offset
-        next_tool_iteration_offset = tool_iteration_offset
+        run = _HarnessRunState(
+            next_turn_offset=turn_offset,
+            next_tool_iteration_offset=tool_iteration_offset,
+        )
         try:
             while True:
-                run_finished = False
-                segment_had_tool_calls = False
-                segment_outcome: str | None = None
-                stream_ended = False
-                restart_for_steering = False
+                segment = _HarnessSegmentState()
                 config = AgentLoopConfig(
                     provider=self._config.provider,
                     tool_executor=self._config.tool_executor,
@@ -399,8 +444,8 @@ class AgentHarness:
                     context_window=self._config.context_window,
                     context_reserve_tokens=self._config.context_reserve_tokens,
                     context_pressure_threshold=self._config.context_pressure_threshold,
-                    turn_offset=next_turn_offset,
-                    tool_iteration_offset=next_tool_iteration_offset,
+                    turn_offset=run.next_turn_offset,
+                    tool_iteration_offset=run.next_tool_iteration_offset,
                     cost_estimator=self._config.cost_estimator,
                     defer_context_overflow_errors=defer_context_overflow_errors,
                 )
@@ -410,11 +455,8 @@ class AgentHarness:
                 loop_events = run_agent_loop(config, messages=provider_messages)
                 try:
                     while True:
-                        if token.is_cancelled() and not run_finished:
-                            for cancellation_event in _cancelled_events(
-                                active_turn,
-                                active_turn_completed=active_turn_completed,
-                            ):
+                        if token.is_cancelled() and not segment.run_finished:
+                            for cancellation_event in run.cancelled_events():
                                 yield cancellation_event
                             return
 
@@ -425,47 +467,30 @@ class AgentHarness:
                             try:
                                 event = await anext(loop_events)
                             except StopAsyncIteration:
-                                stream_ended = True
+                                segment.stream_ended = True
                         if self._current_scope is scope:
                             self._current_scope = None
 
                         if scope.cancel_called:
-                            if not run_finished:
-                                for cancellation_event in _cancelled_events(
-                                    active_turn,
-                                    active_turn_completed=active_turn_completed,
-                                ):
+                            if not segment.run_finished:
+                                for cancellation_event in run.cancelled_events():
                                     yield cancellation_event
                             return
-                        if stream_ended:
+                        if segment.stream_ended:
                             break
                         assert event is not None
 
-                        if isinstance(event, TurnStarted):
-                            active_turn = event.turn
-                            active_turn_completed = False
-                            next_turn_offset = event.turn
-                            run_finished = False
-                        if isinstance(event, MessageCompleted):
+                        segment.observe(event, run)
+                        if isinstance(event, MessageCompleted | ToolExecutionEnded):
+                            # ToolResultReady copies the terminal tool payload; retain it now
+                            # so closing at this visible boundary cannot lose output.
                             self._messages.append(message_from_completion_event(event))
-                            run_finished = not event.tool_calls
-                            if event.tool_calls:
-                                segment_had_tool_calls = True
-                                next_tool_iteration_offset += 1
-                        elif isinstance(event, ToolExecutionEnded):
-                            # ToolResultReady copies this terminal payload; retain it now so
-                            # closing the stream at this visible boundary cannot lose output.
-                            self._messages.append(message_from_completion_event(event))
-                        elif isinstance(event, TurnCompleted):
-                            active_turn_completed = True
-                            segment_outcome = event.outcome
-                            run_finished = run_finished or event.outcome != "completed"
                         yield event
                         if (
                             pause_after_tool_round
                             and isinstance(event, TurnCompleted)
                             and event.outcome == "completed"
-                            and segment_had_tool_calls
+                            and segment.had_tool_calls
                             and not self._steering_queue
                         ):
                             return
@@ -474,85 +499,85 @@ class AgentHarness:
                             and event.outcome == "completed"
                             and self._steering_queue
                         ):
-                            restart_for_steering = True
+                            segment.restart_for_steering = True
                             break
                 finally:
                     self._current_scope = None
                     with anyio.CancelScope(shield=True):
                         await loop_events.aclose()
 
-                if restart_for_steering:
+                disposition = self._segment_disposition(segment, cancelled=token.is_cancelled())
+                if disposition is _SegmentDisposition.RESTART_FOR_STEERING:
                     if token.is_cancelled():
-                        for cancellation_event in _cancelled_events(
-                            active_turn,
-                            active_turn_completed=active_turn_completed,
-                        ):
+                        for cancellation_event in run.cancelled_events():
                             yield cancellation_event
                         return
-                    drain_batch = tuple(self._steering_queue)
-                    if self._config.steering_mode == "one_at_a_time":
-                        drain_batch = drain_batch[:1]
+                    drain_batch = self._queued_batch("steering")
                     for message in drain_batch:
                         if token.is_cancelled():
-                            for cancellation_event in _cancelled_events(
-                                active_turn,
-                                active_turn_completed=active_turn_completed,
-                            ):
+                            for cancellation_event in run.cancelled_events():
                                 yield cancellation_event
                             return
-                        if not self._steering_queue or self._steering_queue[0] is not message:
-                            continue
-                        self._steering_queue.popleft()
-                        self._messages.append(message)
-                        yield QueueMessageInjected(
-                            kind="steering",
-                            content=message.content,
-                            skill_invocation=message.skill_invocation,
-                            timestamp=message.created_at,
-                        )
+                        injected_event = self._inject_queued_message("steering", message)
+                        if injected_event is not None:
+                            yield injected_event
                     yield self.queue_updated_event()
-                    if pause_after_tool_round and segment_had_tool_calls:
+                    if pause_after_tool_round and segment.had_tool_calls:
                         return
                     continue
 
-                if (
-                    not stream_ended
-                    or token.is_cancelled()
-                    or segment_outcome != "completed"
-                    or not run_finished
-                ):
+                if disposition is _SegmentDisposition.FINISH:
                     break
 
-                drain_batch = tuple(self._follow_up_queue)
-                if self._config.follow_up_mode == "one_at_a_time":
-                    drain_batch = drain_batch[:1]
+                drain_batch = self._queued_batch("follow_up")
                 if not drain_batch:
                     break
 
                 for message in drain_batch:
                     if token.is_cancelled():
-                        for cancellation_event in _cancelled_events(
-                            active_turn,
-                            active_turn_completed=active_turn_completed,
-                        ):
+                        for cancellation_event in run.cancelled_events():
                             yield cancellation_event
                         return
-                    if not self._follow_up_queue or self._follow_up_queue[0] is not message:
-                        continue
-                    self._follow_up_queue.popleft()
-                    self._messages.append(message)
-                    yield QueueMessageInjected(
-                        kind="follow_up",
-                        content=message.content,
-                        skill_invocation=message.skill_invocation,
-                        timestamp=message.created_at,
-                    )
+                    injected_event = self._inject_queued_message("follow_up", message)
+                    if injected_event is not None:
+                        yield injected_event
                 yield self.queue_updated_event()
         finally:
             self._current_scope = None
             if self._current_token is token:
                 self._current_token = None
             self._running = False
+
+    def _queued_batch(self, kind: QueueKind) -> tuple[Message, ...]:
+        queue = self._queue_for(kind)
+        batch = tuple(queue)
+        mode = self._config.steering_mode if kind == "steering" else self._config.follow_up_mode
+        return batch[:1] if mode == "one_at_a_time" else batch
+
+    def _inject_queued_message(
+        self, kind: QueueKind, expected: Message
+    ) -> QueueMessageInjected | None:
+        queue = self._queue_for(kind)
+        if not queue or queue[0] is not expected:
+            return None
+        message = queue.popleft()
+        self._messages.append(message)
+        return QueueMessageInjected(
+            kind=kind,
+            content=message.content,
+            skill_invocation=message.skill_invocation,
+            timestamp=message.created_at,
+        )
+
+    @staticmethod
+    def _segment_disposition(
+        segment: _HarnessSegmentState, *, cancelled: bool
+    ) -> _SegmentDisposition:
+        if segment.restart_for_steering:
+            return _SegmentDisposition.RESTART_FOR_STEERING
+        if segment.can_drain_follow_up(cancelled=cancelled):
+            return _SegmentDisposition.DRAIN_FOLLOW_UP
+        return _SegmentDisposition.FINISH
 
     def _ensure_idle(self) -> None:
         if self._running:
