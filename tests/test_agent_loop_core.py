@@ -26,9 +26,11 @@ from wisp.events import (
     UsageCostRates,
     wisp_event_from_json,
 )
-from wisp.providers.base import ToolCallResult
+from wisp.providers.base import ProviderError, ProviderProtocolError, ToolCallResult
 from wisp.providers.events import (
+    ProviderEvent,
     ProviderResponseCompleted,
+    ProviderResponseFailed,
     ProviderResponseStarted,
     ProviderTextDelta,
     ProviderThinkingDelta,
@@ -202,6 +204,212 @@ def test_pure_loop_streams_without_application_dependencies() -> None:
     assert completed.usage is not None
     assert completed.usage.total_tokens == 19
     assert provider.calls[0].messages == messages
+
+
+@pytest.mark.parametrize(
+    ("started_id", "terminal_id", "tool_call_id"),
+    [
+        ("response-1", None, None),
+        (None, "response-1", None),
+        (None, None, "response-1"),
+        ("response-1", "response-1", "response-1"),
+    ],
+)
+def test_pure_loop_resolves_response_id_for_messages_and_tool_continuation(
+    started_id: str | None,
+    terminal_id: str | None,
+    tool_call_id: str | None,
+) -> None:
+    call = ToolCall(
+        call_id="call-1",
+        name="bash",
+        arguments={"command": "pwd"},
+        response_id=tool_call_id,
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id=started_id),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    response_id=terminal_id,
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="response-2"),
+                ProviderResponseCompleted(content="done", response_id="response-2"),
+            ],
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=RecordingToolExecutor()),
+                messages=(Message(role="user", content="run pwd"),),
+            )
+        ]
+
+    events = anyio.run(run)
+
+    completed = [event for event in events if isinstance(event, MessageCompleted)]
+    assert completed[0].response_id == "response-1"
+    assert provider.calls[1].previous_response_id == "response-1"
+
+
+@pytest.mark.parametrize(
+    "provider_events",
+    [
+        [
+            ProviderResponseStarted(model="test", response_id="started-id"),
+            ProviderResponseCompleted(content="done", response_id="terminal-id"),
+        ],
+        [
+            ProviderResponseStarted(model="test", response_id="started-id"),
+            ProviderToolCallCompleted(
+                tool_call=ToolCall(
+                    call_id="call-1",
+                    name="bash",
+                    arguments={"command": "pwd"},
+                    response_id="tool-id",
+                )
+            ),
+            ProviderResponseCompleted(
+                content="",
+                tool_calls=(
+                    ToolCall(
+                        call_id="call-1",
+                        name="bash",
+                        arguments={"command": "pwd"},
+                        response_id="tool-id",
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+        ],
+        [
+            ProviderResponseStarted(model="test"),
+            ProviderToolCallCompleted(
+                tool_call=ToolCall(
+                    call_id="call-1", name="bash", arguments={}, response_id="tool-id"
+                )
+            ),
+            ProviderResponseCompleted(
+                content="",
+                tool_calls=(
+                    ToolCall(call_id="call-1", name="bash", arguments={}, response_id="tool-id"),
+                ),
+                response_id="terminal-id",
+                finish_reason="tool_calls",
+            ),
+        ],
+        [
+            ProviderResponseStarted(model="test"),
+            ProviderToolCallCompleted(
+                tool_call=ToolCall(
+                    call_id="call-1", name="bash", arguments={}, response_id="response-1"
+                )
+            ),
+            ProviderToolCallCompleted(
+                tool_call=ToolCall(
+                    call_id="call-2", name="bash", arguments={}, response_id="response-2"
+                )
+            ),
+            ProviderResponseCompleted(
+                content="",
+                tool_calls=(
+                    ToolCall(call_id="call-1", name="bash", arguments={}, response_id="response-1"),
+                    ToolCall(call_id="call-2", name="bash", arguments={}, response_id="response-2"),
+                ),
+                finish_reason="tool_calls",
+            ),
+        ],
+    ],
+)
+def test_pure_loop_rejects_conflicting_provider_response_ids(
+    provider_events: list[ProviderEvent],
+) -> None:
+    provider = ScriptedProvider([provider_events])
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(ProviderProtocolError, match="conflicting response ids"):
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+                messages=(Message(role="user", content="hi"),),
+            ):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+
+    assert not any(isinstance(event, MessageCompleted) for event in events)
+    assert not any(event.type == "tool.call" for event in events)
+
+
+def test_pure_loop_validates_failed_terminal_response_id() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                ProviderResponseFailed(message="upstream failed", response_id="response-1"),
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="started-id"),
+                ProviderResponseFailed(message="upstream failed", response_id="terminal-id"),
+            ],
+        ]
+    )
+
+    async def run_expected(error: type[Exception], match: str) -> None:
+        with pytest.raises(error, match=match):
+            async for _ in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+                messages=(Message(role="user", content="hi"),),
+            ):
+                pass
+
+    anyio.run(run_expected, ProviderError, "upstream failed")
+    anyio.run(run_expected, ProviderProtocolError, "conflicting response ids")
+
+
+def test_failed_response_id_does_not_leak_into_a_later_run() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="failed-response"),
+                ProviderResponseFailed(message="upstream failed", response_id="failed-response"),
+            ],
+            [
+                ProviderResponseStarted(model="test", response_id="response-2"),
+                ProviderResponseCompleted(content="done", response_id="response-2"),
+            ],
+        ]
+    )
+
+    async def fail() -> None:
+        with pytest.raises(ProviderError, match="upstream failed"):
+            async for _ in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+                messages=(Message(role="user", content="first"),),
+            ):
+                pass
+
+    async def succeed() -> None:
+        async for _ in run_agent_loop(
+            AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+            messages=(Message(role="user", content="second"),),
+        ):
+            pass
+
+    anyio.run(fail)
+    anyio.run(succeed)
+
+    assert provider.calls[1].previous_response_id is None
 
 
 def test_pure_loop_recovers_empty_completion_from_streamed_text() -> None:
