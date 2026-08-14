@@ -1068,6 +1068,13 @@ def test_denied_and_error_tool_cards_keep_distinct_semantic_roles() -> None:
     assert denied_role != error_role
 
 
+def test_tool_card_role_rules_preserve_muted_content_color() -> None:
+    from wisp.tui.textual_app import TextualTui
+
+    role_rule = TextualTui.CSS.split("ToolCard.message--tool,", 1)[1].split("}", 1)[0]
+    assert "color: $text-muted;" in role_rule
+
+
 def test_cancelled_tool_card_uses_explicit_cancelled_action() -> None:
     from wisp.tui.widgets import ToolCard
 

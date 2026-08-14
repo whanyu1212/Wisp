@@ -318,6 +318,7 @@ class TextualTui(App[None]):
     ToolCard.message--error {
         border-left: none;
         background: transparent;
+        color: $text-muted;
         padding-left: 0;
         padding-right: 0;
     }
