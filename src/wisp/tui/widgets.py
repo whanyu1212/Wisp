@@ -2058,7 +2058,12 @@ class Transcript(VerticalScroll):
 
         self._has_more_history = has_more
         self._history_loading = False
-        self._history_request_armed = has_more or self._has_retained_history
+        self._history_request_armed = self._has_retained_history
+
+    def history_page_layout_settled(self) -> None:
+        """Arm edge paging after the completed page has reached stable geometry."""
+
+        self._history_request_armed = self._has_more_history or self._has_retained_history
 
     def history_window_available(self, *, has_older: bool) -> None:
         """Record whether the UI can shift to already retained history."""

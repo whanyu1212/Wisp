@@ -2408,6 +2408,7 @@ class TextualTui(App[None]):
             or transcript is not self._transcript
         ):
             return
+        transcript.history_page_layout_settled()
         if (
             oldest_generation is not None
             and oldest_generation == self._oldest_navigation_generation
