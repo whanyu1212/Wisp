@@ -41,7 +41,7 @@ work after the active run ends.
 ## Preserve a checkpoint
 
 Track repository, PR URL and number, base and head branches, current head SHA, latest push, required
-checks, latest review trigger and reviewed SHA, and unresolved non-outdated actionable thread IDs.
+checks, latest review trigger and reviewed SHA, and unresolved actionable thread IDs, including outdated threads not yet revalidated against the current head.
 After interruption or compaction, refresh remote head, CI, review, and thread state before continuing.
 Never resume from stale conclusions.
 

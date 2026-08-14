@@ -4,7 +4,7 @@ Inspect all relevant surfaces: issue comments, formal reviews and decisions, inl
 resolution/outdated state, file/line context, timestamps, and reviewed commit identifiers. A flat list
 of comments is not sufficient thread state when the platform exposes richer data.
 
-For each unresolved, non-outdated actionable finding:
+For each unresolved actionable finding:
 
 1. refresh the thread and current head;
 2. verify the diagnosis against current code rather than accepting it mechanically;
@@ -15,7 +15,7 @@ For each unresolved, non-outdated actionable finding:
 7. resolve only the thread actually addressed; explain invalid findings with evidence;
 8. return to current-head CI after every push.
 
-Resolved or outdated threads are historical context, not active findings.
+Resolved threads are historical context. An unresolved outdated thread is not automatically cleared: revalidate its finding against the current head, then fix or rebut it with current evidence before excluding it from the actionable set.
 
 ## Exact-head automated re-review
 
@@ -29,7 +29,7 @@ requires it:
 5. inspect reviews, comments, reactions, and threads created after the trigger;
 6. accept clean only when the verdict identifies the recorded commit, or arrives after the trigger and
    the PR head has not changed;
-7. require both a current-head clean result and zero unresolved non-outdated actionable threads;
+7. require both a current-head clean result and zero unresolved actionable threads; revalidate outdated unresolved findings before classifying them as non-actionable;
 8. if findings require a push, wait for replacement CI and trigger a new review for the new head;
 9. keep polling until that exact-head review is clean and all actionable threads are resolved, or a
    genuine external blocker is established.

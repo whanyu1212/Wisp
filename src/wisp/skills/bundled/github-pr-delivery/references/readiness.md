@@ -6,7 +6,7 @@ Refresh state immediately before the final report. Verify:
 - local task HEAD equals the pushed branch head;
 - all required checks for that exact head are terminal and successful;
 - any required clean review applies to the current head;
-- no unresolved, non-outdated actionable thread remains;
+- no unresolved actionable thread remains; every outdated unresolved finding has been revalidated against the current head;
 - no newer comment or review invalidates the verdict;
 - merge conflict and policy-block status are known;
 - no task-owned change remains uncommitted;
