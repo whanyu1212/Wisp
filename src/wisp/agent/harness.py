@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 
 import anyio
 
+from wisp.agent.configuration import validate_agent_runtime_limits
 from wisp.agent.execution import ToolExecutor
 from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent, UsageCostEstimator, run_agent_loop
 from wisp.agent.messages import (
@@ -52,7 +53,13 @@ class AgentHarnessConfig:
     prompt_cache_key: str | None = None
 
     def __post_init__(self) -> None:
-        """Reject invalid queue modes even when callers bypass static typing."""
+        """Reject invalid runtime settings even when callers bypass static typing."""
+        validate_agent_runtime_limits(
+            max_tool_iterations=self.max_tool_iterations,
+            context_window=self.context_window,
+            context_reserve_tokens=self.context_reserve_tokens,
+            context_pressure_threshold=self.context_pressure_threshold,
+        )
         _require_queue_mode(self.steering_mode)
         _require_queue_mode(self.follow_up_mode)
         if type(self.max_pending_queue_messages) is not int or self.max_pending_queue_messages < 0:

@@ -9,6 +9,10 @@ from pathlib import Path
 
 import anyio
 
+from wisp.agent.configuration import (
+    validate_non_negative_integer,
+    validate_optional_non_negative_integer,
+)
 from wisp.agent.context import build_context_budget, context_fingerprint, estimate_context
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages
 from wisp.agent.messages import (
@@ -233,6 +237,7 @@ class CodingSession:
         self.prompt_messages = tuple(prompt_messages) if prompt_messages is not None else None
         self.project_context_max_chars = project_context_max_chars
         self.project_context_root = project_context_root
+        validate_optional_non_negative_integer(max_tool_iterations, field="max_tool_iterations")
         self.max_tool_iterations = max_tool_iterations
         self.mode = mode
         self._pending_entries: deque[_PendingSessionEntry] = deque()
@@ -454,8 +459,9 @@ class CodingSession:
         )
 
     def _apply_configuration(self, configuration: CodingSessionConfiguration) -> None:
-        if configuration.context_reserve_tokens < 0:
-            raise ValueError("context_reserve_tokens must be non-negative")
+        validate_non_negative_integer(
+            configuration.context_reserve_tokens, field="context_reserve_tokens"
+        )
         self.provider = configuration.provider
         self.model = configuration.model
         self.effort = configuration.effort
