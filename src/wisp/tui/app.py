@@ -6,8 +6,11 @@ state, shell, and launch helpers live in focused sibling modules.
 
 from __future__ import annotations
 
+import asyncio
+import sys
 from functools import partial
 
+import anyio
 from rich.console import Console
 
 from wisp.rpc import JsonlSubprocessRpcTransport, RpcController
@@ -49,6 +52,38 @@ _TuiSignal = _state._TuiSignal
 _view_status_for_status = _state._view_status_for_status
 
 
+async def _run_tui_cleanup(
+    *,
+    textual_tui: object | None,
+    live_tui: LiveFullscreenTui | None,
+    controller: TuiController | None,
+) -> None:
+    """Release TUI-owned resources even when the caller task is cancelled."""
+
+    first_error: BaseException | None = None
+    with anyio.CancelScope(shield=True):
+        for resource in (textual_tui, live_tui, controller):
+            if resource is None:
+                continue
+            try:
+                await resource.close()  # type: ignore[attr-defined]
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+    if first_error is not None:
+        raise first_error
+
+
+async def _await_cleanup(task: asyncio.Task[None]) -> None:
+    """Wait for cleanup in a separate task while preserving raw asyncio cancellation."""
+
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.shield(task)
+        raise
+
+
 async def run_tui(
     options: TuiOptions,
     *,
@@ -61,78 +96,88 @@ async def run_tui(
     selected_console = console or Console()
     selected_controller = controller
     owns_controller = selected_controller is None
-    if selected_controller is None:
-        await _preflight_tui_options(options)
-        transport = await JsonlSubprocessRpcTransport.start(
-            _rpc_command(options),
-            env=_rpc_env(options),
-        )
-        selected_controller = RpcController(transport)
-
     textual_tui = None
     live_tui: LiveFullscreenTui | None = None
-    selected_prompt_reader = prompt_reader or _default_prompt_reader
-    # An injected prompt_reader means the caller is driving input themselves
-    # (scripted/headless embeds and tests). The Textual app seizes the terminal
-    # on launch, so only stand it up when no reader was supplied; otherwise fall
-    # back to a line renderer and consume the injected reader, mirroring how the
-    # fullscreen path declines to start the live UI when a reader is provided.
-    if options.renderer is TuiRendererKind.textual and prompt_reader is None:
-        # Hand the picker the policy this process already resolved rather than
-        # letting it re-derive one. `options.config` reflects the `--auth-file`
-        # override and the parent's trust decision; a fresh resolution inside the
-        # app would see neither and could leave the real credential file listable.
-        # `from_config` also guarantees `auth_path` is in the returned globs.
-        textual_tui, selected_renderer = create_textual_tui(
-            protected_paths=ToolContext.from_config(options.config).protected_paths,
-        )
-        selected_prompt_reader = textual_tui.read_prompt
-    else:
-        line_console_renderer = (
-            TuiRendererKind.line
-            if options.renderer is TuiRendererKind.textual
-            else options.renderer
-        )
-        selected_renderer = create_tui_renderer(line_console_renderer, selected_console)
-    if (
-        options.renderer is TuiRendererKind.fullscreen
-        and prompt_reader is None
-        and console is None
-        and _stdio_is_interactive()
-    ):
-        live_tui = LiveFullscreenTui()
-        selected_renderer = live_tui
-        selected_prompt_reader = live_tui.read_prompt
-
-    shell = TuiShell(
-        selected_controller,
-        renderer=selected_renderer,
-        prompt_reader=selected_prompt_reader,
-        provider=options.config.provider,
-        model=options.config.model,
-        effort=options.config.effort,
-        auth_path=options.config.auth_path,
-        openai_compatible_provider=(
-            options.config.openai_compatible.provider_name
-            if options.config.openai_compatible is not None
-            else "openai-compatible"
-        ),
-        update_checker=partial(
-            check_for_update,
-            enabled=options.config.update_check_enabled,
-        ),
-    )
     try:
+        if selected_controller is None:
+            await _preflight_tui_options(options)
+            transport = await JsonlSubprocessRpcTransport.start(
+                _rpc_command(options),
+                env=_rpc_env(options),
+            )
+            try:
+                selected_controller = RpcController(transport)
+            except BaseException:
+                await transport.close()
+                raise
+
+        selected_prompt_reader = prompt_reader or _default_prompt_reader
+        # An injected prompt_reader means the caller is driving input themselves
+        # (scripted/headless embeds and tests). The Textual app seizes the terminal
+        # on launch, so only stand it up when no reader was supplied; otherwise fall
+        # back to a line renderer and consume the injected reader, mirroring how the
+        # fullscreen path declines to start the live UI when a reader is provided.
+        if options.renderer is TuiRendererKind.textual and prompt_reader is None:
+            # Hand the picker the policy this process already resolved rather than
+            # letting it re-derive one. `options.config` reflects the `--auth-file`
+            # override and the parent's trust decision; a fresh resolution inside the
+            # app would see neither and could leave the real credential file listable.
+            # `from_config` also guarantees `auth_path` is in the returned globs.
+            textual_tui, selected_renderer = create_textual_tui(
+                protected_paths=ToolContext.from_config(options.config).protected_paths,
+            )
+            selected_prompt_reader = textual_tui.read_prompt
+        else:
+            line_console_renderer = (
+                TuiRendererKind.line
+                if options.renderer is TuiRendererKind.textual
+                else options.renderer
+            )
+            selected_renderer = create_tui_renderer(line_console_renderer, selected_console)
+        if (
+            options.renderer is TuiRendererKind.fullscreen
+            and prompt_reader is None
+            and console is None
+            and _stdio_is_interactive()
+        ):
+            live_tui = LiveFullscreenTui()
+            selected_renderer = live_tui
+            selected_prompt_reader = live_tui.read_prompt
+
+        assert selected_controller is not None
+        shell = TuiShell(
+            selected_controller,
+            renderer=selected_renderer,
+            prompt_reader=selected_prompt_reader,
+            provider=options.config.provider,
+            model=options.config.model,
+            effort=options.config.effort,
+            auth_path=options.config.auth_path,
+            openai_compatible_provider=(
+                options.config.openai_compatible.provider_name
+                if options.config.openai_compatible is not None
+                else "openai-compatible"
+            ),
+            update_checker=partial(
+                check_for_update,
+                enabled=options.config.update_check_enabled,
+            ),
+        )
         if textual_tui is not None:
             await textual_tui.run_shell(shell.run)
         else:
             await shell.run()
     finally:
+        active_error = sys.exception()
+        cleanup = asyncio.create_task(
+            _run_tui_cleanup(
+                textual_tui=textual_tui,
+                live_tui=live_tui,
+                controller=selected_controller if owns_controller else None,
+            )
+        )
         try:
-            if textual_tui is not None:
-                await textual_tui.close()
-            if live_tui is not None:
-                await live_tui.close()
-        finally:
-            if owns_controller:
-                await selected_controller.close()
+            await _await_cleanup(cleanup)
+        except BaseException:
+            if active_error is None:
+                raise

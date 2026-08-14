@@ -1391,6 +1391,8 @@ class TuiShell:
             self._sync_view()
             return False
         self.state.status = TuiStatus.exiting
+        self._ignored_session_stats_command_ids.update(self._pending_session_stats_command_ids)
+        self._pending_session_stats_command_ids.clear()
         self._sync_view()
         try:
             shutdown_id = await self.controller.shutdown()
@@ -1997,13 +1999,14 @@ class TuiShell:
             self.renderer.end_token_stream()
             self.state.token_stream_started = False
         self.state.rendered_tokens = False
-        if finished_command_type in {"prompt", "init", "compact"}:
-            await self._request_session_stats()
-        if self.state.exit_requested or (not event.ok and finished_command_type != "compact"):
-            self._clear_queued_prompts()
         if self.state.exit_requested:
+            self._clear_queued_prompts()
             self.state.cancel_requested = False
             return await self._request_shutdown()
+        if finished_command_type in {"prompt", "init", "compact"}:
+            await self._request_session_stats()
+        if not event.ok and finished_command_type != "compact":
+            self._clear_queued_prompts()
         if self.state.queued_prompts:
             queued_prompt = self.state.queued_prompts.popleft()
             self._update_view(

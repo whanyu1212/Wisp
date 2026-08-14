@@ -406,11 +406,17 @@ class RpcController:
         await self._transport.close()
 
 
+_SUBPROCESS_CLOSE_TIMEOUT_SECONDS = 2
+
+
 class JsonlSubprocessRpcTransport:
     """Subprocess transport for `wisp --mode rpc` JSONL stdin/stdout."""
 
     def __init__(self, process: Process) -> None:
         self._process = process
+        self._close_lock = anyio.Lock()
+        self._closed = False
+        self._close_error: RuntimeError | None = None
 
     @classmethod
     async def start(
@@ -445,15 +451,46 @@ class JsonlSubprocessRpcTransport:
         await self._process.stdin.send(command.to_json_line().encode("utf-8"))
 
     async def close(self) -> None:
-        """Close stdin and wait briefly for the subprocess to exit."""
+        """Close the subprocess through bounded graceful, terminate, and kill stages."""
 
-        if self._process.stdin is not None:
-            await self._process.stdin.aclose()
-        with anyio.move_on_after(2) as cancel_scope:
+        with anyio.CancelScope(shield=True):
+            async with self._close_lock:
+                if self._closed:
+                    if self._close_error is not None:
+                        raise self._close_error
+                    return
+                if self._process.stdin is not None:
+                    await self._process.stdin.aclose()
+                if await self._wait_for_exit():
+                    self._closed = True
+                    return
+                self._signal_process(self._process.terminate)
+                if await self._wait_for_exit():
+                    self._closed = True
+                    return
+                self._signal_process(self._process.kill)
+                if await self._wait_for_exit():
+                    self._closed = True
+                    return
+                error = RuntimeError("RPC subprocess did not exit after kill")
+                self._closed = True
+                self._close_error = error
+                raise error
+
+    async def _wait_for_exit(self) -> bool:
+        if self._process.returncode is not None:
+            return True
+        with anyio.move_on_after(_SUBPROCESS_CLOSE_TIMEOUT_SECONDS) as scope:
             await self._process.wait()
-        if cancel_scope.cancel_called:
-            self._process.terminate()
-            await self._process.wait()
+        return not scope.cancel_called
+
+    def _signal_process(self, signal: Callable[[], None]) -> None:
+        if self._process.returncode is not None:
+            return
+        try:
+            signal()
+        except ProcessLookupError:
+            pass
 
     def events(self) -> AsyncIterator[KnownWispEvent]:
         """Yield typed events parsed from subprocess stdout."""

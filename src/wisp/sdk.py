@@ -432,7 +432,12 @@ class _InProcessTransport(RpcTransport):
                             owner_cancel_scope = self._owner_cancel_scope
                             if owner_cancel_scope is not None:
                                 owner_cancel_scope.cancel()
-                        await self._finished.wait()
+                            with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS) as cancel_wait:
+                                await self._finished.wait()
+                            if cancel_wait.cancel_called:
+                                raise RuntimeError(
+                                    "In-process Wisp owner did not stop after cancellation"
+                                )
                     if self._run_error is not None:
                         close_error = self._run_error
                     await self._control_send.aclose()
