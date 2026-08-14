@@ -101,6 +101,7 @@ class StreamHotpathSample:
     content_height_calls: dict[str, int]
     markdown_renders: MarkdownRenderCounts
     markdown_source_rebuild_count: int
+    markdown_source_chars_processed: int
     event_loop_delay: TimingDistribution
     layout_passes: TimingDistribution
     compositor_renders: TimingDistribution
@@ -122,6 +123,7 @@ class StreamHotpathSummary:
     content_height_call_count_median: float
     active_markdown_render_median: float
     settled_markdown_render_median: float
+    markdown_source_chars_processed_median: float
     event_loop_p95_median_ms: float
     event_loop_max_median_ms: float
     layout_total_median_ms: float
@@ -153,6 +155,7 @@ class _HotpathCollector:
     active_markdown_renders: int = 0
     settled_markdown_renders: int = 0
     markdown_source_rebuild_count: int = 0
+    markdown_source_chars_processed: int = 0
 
 
 def _nearest_rank(ordered: Sequence[float], percentile: float) -> float:
@@ -248,6 +251,7 @@ def _measure_textual_hotpaths(collector: _HotpathCollector) -> Iterator[None]:
     def render_source(widget: StreamMessage) -> None:
         if _is_on_target_screen(widget, collector.target_screen):
             collector.markdown_source_rebuild_count += 1
+            collector.markdown_source_chars_processed += len(widget.source)
         original_source_render(widget)
         visual = widget._selection_visual
         if visual is not None and isinstance(visual._markdown_renderable, _SafeAssistantMarkdown):
@@ -460,6 +464,7 @@ async def _measure_stream(
             total=collector.active_markdown_renders + collector.settled_markdown_renders,
         ),
         markdown_source_rebuild_count=collector.markdown_source_rebuild_count,
+        markdown_source_chars_processed=collector.markdown_source_chars_processed,
         event_loop_delay=TimingDistribution.from_samples(heartbeat_delays),
         layout_passes=TimingDistribution.from_samples(collector.layout_ms),
         compositor_renders=TimingDistribution.from_samples(collector.compositor_ms),
@@ -516,6 +521,9 @@ def _summarize(
                 ),
                 settled_markdown_render_median=statistics.median(
                     sample.markdown_renders.settled for sample in selected
+                ),
+                markdown_source_chars_processed_median=statistics.median(
+                    sample.markdown_source_chars_processed for sample in selected
                 ),
                 event_loop_p95_median_ms=statistics.median(
                     sample.event_loop_delay.p95_ms for sample in selected
