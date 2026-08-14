@@ -22,9 +22,10 @@ signal stays bounded and serialization-safe across the RPC transport.
 
 Return types and the untrusted-content rule:
 
-* The error/generic renderers return a bounded plain ``str``. The widget renders
-  it as literal text inheriting the card's semantic muted color, so it is never
-  parsed as markup — bracket characters in tool output stay literal.
+* Generic previews and unpromoted errors return a bounded plain ``str``. Trusted
+  success summaries and promoted exit/signal labels return structured ``Content``
+  so only those facts receive semantic emphasis. The remaining tool output stays
+  literal text and is never parsed as markup — bracket characters remain literal.
 * Edit/write card rendering returns a structured ``DiffPresentation`` whose rows
   retain literal source text and precomputed intra-line ranges. ``ToolCard`` applies
   theme styles out-of-band at its current width; legacy direct diff helpers still
@@ -206,19 +207,19 @@ def render_tool_result(
     tools (read/grep/find/ls), or None. ``process_state`` is the promoted managed
     Bash state; terminal failure states use the error path even without an exit code.
 
-    Returns a plain ``str`` for the error/generic/summary/preview paths (the widget
-    escapes it as untrusted markup), a Textual ``Content`` for legacy direct diff callers,
-    or a structured :class:`DiffPresentation` for edit/write cards. Unknown
-    tools and successful results without a summary fall back to
-    :func:`render_generic`.
+    Returns a plain ``str`` for generic previews and unpromoted errors, Textual
+    ``Content`` for trusted summaries/promoted failure labels, or a structured
+    :class:`DiffPresentation` for edit/write cards. Unknown tools and successful
+    results without a summary fall back to :func:`render_generic`.
     """
 
     if tool_result_failed(is_error, exit_code, process_state=process_state):
-        return render_error(
+        error = render_error(
             output,
             exit_code=exit_code,
             output_has_exit_status=output_has_exit_status,
         )
+        return _style_error_status(error, exit_code)
     # A successful edit carries its before/after text in the tool-call arguments
     # (oldText/newText per hunk); a write carries the "after" in its arguments and
     # the "before" in the promoted snapshot. Render either as a colored unified
@@ -237,8 +238,8 @@ def render_tool_result(
     # ToolCard's equality-based expansion check honest for short complete results.
     if summary is not None:
         if name == "grep":
-            return _summary_with_grep_output(summary, output)
-        return summary
+            return _style_summary(_summary_with_grep_output(summary, output), summary)
+        return Content.styled(summary, "$success")
     # Successful shell results carry the same model-facing synthetic exit prefix
     # as failures. Their cards already communicate success, so remove only a
     # matching promoted prefix. Bash then shows the tail, where test/build summaries
@@ -364,6 +365,29 @@ def _summary_with_grep_output(summary: str, output: str, *, preview: bool = True
         return summary
     body = render_generic(output) if preview else output.rstrip("\n")
     return f"{summary}\n{body}"
+
+
+def _style_summary(rendered: str, summary: str) -> Content:
+    """Emphasize a trusted promoted summary while keeping match evidence neutral."""
+
+    content = Content.styled(summary, "$success")
+    evidence = rendered[len(summary) :]
+    if evidence:
+        content += Content.styled(evidence, "$text")
+    return content
+
+
+def _style_error_status(rendered: str, exit_code: int | None) -> str | Content:
+    """Emphasize only a promoted exit/signal status, never arbitrary stderr."""
+
+    status = _exit_status_line(exit_code)
+    if status is None or not rendered.startswith(status):
+        return rendered
+    content = Content.styled(status, "$error")
+    remainder = rendered[len(status) :]
+    if remainder:
+        content += Content.styled(remainder, "$text")
+    return content
 
 
 def render_bash_success(output: str) -> str:

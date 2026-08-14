@@ -2629,7 +2629,7 @@ def test_textual_bash_card_normalizes_collapsed_and_full_output() -> None:
 
 
 def test_textual_failed_bash_card_normalizes_collapsed_and_full_output() -> None:
-    async def scenario() -> tuple[str, str, bool]:
+    async def scenario() -> tuple[Content, str, bool]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
             renderer.event(
@@ -2653,13 +2653,14 @@ def test_textual_failed_bash_card_normalizes_collapsed_and_full_output() -> None
             await pilot.pause()
             card = _first_tool_card(app_instance)
             detail = card._detail
-            assert isinstance(detail, str)
+            assert isinstance(detail, Content)
             return detail, card._full_output, card._can_expand()
 
     detail, full_output, can_expand = anyio.run(scenario)
 
-    assert detail == "exit 2\ndiagnostic"
-    assert full_output == detail
+    assert detail.plain == "exit 2\ndiagnostic"
+    assert full_output == detail.plain
+    assert next(str(span.style) for span in detail.spans if span.start == 0) == "$error"
     assert can_expand is False
 
 
@@ -3727,6 +3728,51 @@ def test_textual_transcript_keeps_tool_cards_minimal_and_semantic(theme: str) ->
         assert padding_left == 0
         assert padding_right == 0
         assert rendered.startswith(action)
+
+
+@pytest.mark.parametrize("theme", ["wisp", "wisp-light"])
+def test_textual_bash_header_resolves_semantic_colors_in_each_theme(theme: str) -> None:
+    async def scenario() -> tuple[dict[str, str], dict[str, str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test() as pilot:
+            app_instance.theme = theme
+            renderer.event(
+                ToolCallRequested(
+                    call_id="bash",
+                    name="bash",
+                    arguments={"command": "pytest -q tests/x.py"},
+                )
+            )
+            renderer.event(
+                ToolResultReady(
+                    call_id="bash",
+                    name="bash",
+                    output="1 passed",
+                    is_error=False,
+                )
+            )
+            await pilot.pause()
+
+            card = _first_tool_card(app_instance)
+            resolved: dict[str, str] = {}
+            for text, style in card.render().render(parse_style=card._get_style):
+                color = style.rich_style.color
+                if color is None:
+                    continue
+                for token in ("Ran", "pytest", "-q", "tests/x.py"):
+                    if token in text:
+                        resolved[token] = color.get_truecolor().hex.lower()
+            variables = app_instance.get_css_variables()
+            expected = {
+                "Ran": variables["success"].lower(),
+                "pytest": variables["accent"].lower(),
+                "-q": variables["secondary"].lower(),
+                "tests/x.py": variables["primary"].lower(),
+            }
+            return resolved, expected
+
+    resolved, expected = anyio.run(scenario)
+    assert resolved == expected
 
 
 @pytest.mark.parametrize("theme", ["wisp", "wisp-light"])

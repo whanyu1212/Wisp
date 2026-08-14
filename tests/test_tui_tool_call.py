@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import pytest
+from textual.content import Content
 
-from wisp.tui.tool_call import format_tool_call_action, format_tool_call_arguments
+from wisp.tui.tool_call import (
+    ToolActionStatus,
+    format_tool_call_action,
+    format_tool_call_arguments,
+)
 
 
 def _plain(name: str, arguments: object) -> str:
     return format_tool_call_arguments(name, arguments).plain
+
+
+def _span_style(content: Content, text: str) -> str:
+    return next(
+        str(span.style) for span in content.spans if text in content.plain[span.start : span.end]
+    )
 
 
 @pytest.mark.parametrize(
@@ -100,6 +111,22 @@ def test_builtin_action_words_follow_lifecycle(
         )
 
 
+@pytest.mark.parametrize(
+    ("status", "expected_style"),
+    [
+        ("pending", "bold $accent"),
+        ("done", "bold $success"),
+        ("error", "bold $error"),
+        ("denied", "bold $warning"),
+        ("cancelled", "bold $warning"),
+    ],
+)
+def test_action_words_use_lifecycle_styles(status: ToolActionStatus, expected_style: str) -> None:
+    rendered = format_tool_call_action("read", {"path": "src/app.py"}, status=status)
+    assert str(rendered.spans[0].style) == expected_style
+    assert _span_style(rendered, "src/app.py") == "$primary"
+
+
 def test_extension_action_includes_literal_name_and_arguments() -> None:
     rendered = format_tool_call_action(
         "plugin[/bold]",
@@ -108,6 +135,7 @@ def test_extension_action_includes_literal_name_and_arguments() -> None:
     )
 
     assert rendered.plain == "Called plugin[/bold]  query=[red]literal[/red]"
+    assert _span_style(rendered, "plugin[/bold]") == "$accent"
     assert all("red" not in str(span.style).lower() for span in rendered.spans)
 
 
@@ -191,6 +219,38 @@ def test_bash_managed_process_headers_keep_operation_and_process_identity() -> N
         == "cancel proc-1"
     )
 
+    polled = format_tool_call_arguments(
+        "bash",
+        {"operation": "poll", "process_id": "proc-1", "wait_seconds": 2},
+    )
+    assert _span_style(polled, "poll") == "$secondary"
+    assert _span_style(polled, "proc-1") == "$primary"
+
+
+def test_bash_header_highlights_shell_tokens_without_changing_text() -> None:
+    rendered = format_tool_call_arguments(
+        "bash",
+        {"command": 'FOO=bar pytest -q "tests with spaces" | tee > out.txt'},
+    )
+
+    assert rendered.plain == 'FOO=bar pytest -q "tests with spaces" | tee > out.txt'
+    assert _span_style(rendered, "FOO") == "$secondary"
+    assert _span_style(rendered, "=") == "$text-muted"
+    assert _span_style(rendered, "pytest") == "$accent"
+    assert _span_style(rendered, "-q") == "$secondary"
+    assert _span_style(rendered, '"tests with spaces"') == "$warning"
+    assert _span_style(rendered, "|") == "$text-muted"
+    assert _span_style(rendered, "tee") == "$accent"
+    assert _span_style(rendered, "out.txt") == "$primary"
+
+
+def test_bash_highlighting_tolerates_incomplete_shell_syntax() -> None:
+    command = "printf 'unterminated && echo [red]literal[/red]"
+    rendered = format_tool_call_arguments("bash", {"command": command})
+
+    assert rendered.plain == command
+    assert all("red" not in str(span.style).lower() for span in rendered.spans)
+
 
 def test_built_in_headers_bound_extreme_numeric_values_without_raising() -> None:
     huge = 10**400
@@ -258,6 +318,18 @@ def test_extension_fallback_is_bounded_and_literal() -> None:
     assert all("red" not in str(span.style).lower() for span in rendered.spans)
 
 
+def test_extension_fallback_distinguishes_keys_values_and_punctuation() -> None:
+    rendered = format_tool_call_arguments(
+        "extension",
+        {"query": "value", "limit": 3},
+    )
+
+    assert rendered.plain == "query=value, limit=3"
+    assert _span_style(rendered, "query") == "$secondary"
+    assert _span_style(rendered, "=") == "$text-muted"
+    assert _span_style(rendered, "value") == "$text"
+
+
 def test_extension_fallback_is_single_line_and_bounded_as_a_whole() -> None:
     rendered = _plain(
         "extension",
@@ -277,7 +349,7 @@ def test_non_mapping_arguments_degrade_to_a_bounded_literal() -> None:
     assert all("red" not in str(span.style).lower() for span in rendered.spans)
 
 
-def test_tool_arguments_use_semantic_muted_style_without_terminal_dim() -> None:
+def test_tool_arguments_use_semantic_styles_without_terminal_dim() -> None:
     rendered = [
         format_tool_call_arguments("grep", {"pattern": "TODO", "path": "src"}),
         format_tool_call_arguments("bash", {"command": "pytest", "timeout": 30}),
@@ -285,5 +357,5 @@ def test_tool_arguments_use_semantic_muted_style_without_terminal_dim() -> None:
     ]
 
     styles = {str(span.style) for content in rendered for span in content.spans}
-    assert "$text-muted" in styles
+    assert {"$accent", "$primary", "$secondary", "$text", "$text-muted"} <= styles
     assert all("dim" not in style.split() for style in styles)

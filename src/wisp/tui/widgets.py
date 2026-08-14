@@ -2600,12 +2600,12 @@ class ToolCard(Static):
             arguments_available=self._arguments_available,
         )
         if self._elapsed is not None:
-            action += Content(f" · {_format_duration(self._elapsed)}")
+            action += Content.styled(f" · {_format_duration(self._elapsed)}", "$text-muted")
         # Label the affordance so a reader does not have to infer what a bare
         # triangle means. Enter is the primary binding; Space remains supported.
         if self._can_expand():
             label = " ▾ less (Enter)" if self._expanded else " ▸ more (Enter)"
-            action += Content(label)
+            action += Content.styled(label, "$text-muted")
         content = _tree_line(
             action,
             width=width,
@@ -2638,7 +2638,9 @@ class ToolCard(Static):
             # story. Say so honestly regardless of expand state: a capped output that
             # fits the preview budget (so there's nothing extra to expand) would
             # otherwise present as complete, which is exactly the case this marks.
-            content += Content("\n    ⋯ output truncated at the tool's limit")
+            content += Content("\n") + Content.styled(
+                "    ⋯ output truncated at the tool's limit", "$warning"
+            )
 
         self.update(content, layout=layout)
 

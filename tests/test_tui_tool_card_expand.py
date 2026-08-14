@@ -37,6 +37,13 @@ def _rendered(card: ToolCard) -> str:
     return card.render().plain
 
 
+def _span_style(card: ToolCard, text: str) -> str:
+    content = card.render()
+    return next(
+        str(span.style) for span in content.spans if text in content.plain[span.start : span.end]
+    )
+
+
 def test_pending_card_has_only_a_flat_action_row() -> None:
     card = ToolCard("bash", {"command": "pytest -q"})
 
@@ -48,6 +55,9 @@ def test_multiline_result_uses_one_branch_and_aligned_continuations() -> None:
     card.set_state("done", detail="first line\nsecond line", elapsed=1.2)
 
     assert _rendered(card) == "• Ran  pytest -q · 1.2s\n  └ first line\n    second line"
+    assert _span_style(card, "Ran") == "bold $success"
+    assert _span_style(card, "pytest") == "$accent"
+    assert _span_style(card, "1.2s") == "$text-muted"
 
 
 def test_fitting_styled_action_preserves_separator_before_arguments() -> None:
@@ -154,6 +164,7 @@ def test_truncation_marker_shows_when_truncated_collapsed_and_expanded() -> None
     marker = "truncated at the tool's limit"
 
     assert marker in _rendered(card)  # collapsed: marker present
+    assert _span_style(card, marker) == "$warning"
     card.action_toggle_expand()
     assert marker in _rendered(card)  # expanded: still present, not duplicated
     assert _rendered(card).count(marker) == 1
