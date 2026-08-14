@@ -5,6 +5,7 @@ import sys
 from collections.abc import AsyncIterator
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import anyio
 import pytest
@@ -25,6 +26,7 @@ from wisp.events import (
     UsageCostRates,
     wisp_event_from_json,
 )
+from wisp.providers.base import ToolCallResult
 from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,
@@ -124,6 +126,16 @@ class ExtraEventExecutor:
             name=tool_call.name,
             approved=True,
         )
+
+
+class ScriptedToolExecutor:
+    def __init__(self, events: tuple[object, ...]) -> None:
+        self.events = events
+
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        del tool_call
+        for event in self.events:
+            yield cast(ToolExecutionEvent, event)
 
 
 def test_agent_loop_config_preserves_legacy_positional_field_order() -> None:
@@ -628,7 +640,7 @@ def test_pure_loop_exposes_bash_timeout_as_inconclusive_error(
     assert result.exit_code is None
 
 
-def test_pure_loop_rejects_executor_without_terminal_result() -> None:
+def test_pure_loop_rejects_executor_with_unresolved_approval() -> None:
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
     provider = ScriptedProvider(
         [
@@ -646,7 +658,7 @@ def test_pure_loop_rejects_executor_without_terminal_result() -> None:
 
     async def run() -> list[object]:
         events: list[object] = []
-        with pytest.raises(ToolExecutionProtocolError, match="ended without a result"):
+        with pytest.raises(ToolExecutionProtocolError, match="unresolved approval"):
             async for event in run_agent_loop(
                 AgentLoopConfig(provider=provider, tool_executor=MissingResultExecutor()),
                 messages=(Message(role="user", content="run pwd"),),
@@ -695,6 +707,200 @@ def test_pure_loop_rejects_malformed_terminal_results(
                 pass
 
     anyio.run(run)
+
+
+def _approval_request(*, arguments: dict[str, object] | None = None) -> ToolApprovalRequested:
+    return ToolApprovalRequested(
+        call_id="call-1",
+        name="bash",
+        arguments=arguments or {"command": "pwd"},
+        safety="command",
+    )
+
+
+def _approval_resolution(*, approved: bool = True) -> ToolApprovalResolved:
+    return ToolApprovalResolved(
+        call_id="call-1",
+        name="bash",
+        approved=approved,
+    )
+
+
+def _terminal_result(*, is_error: bool = False) -> ToolExecutionEnded:
+    return ToolExecutionEnded(
+        call_id="call-1",
+        name="bash",
+        output="denied" if is_error else "done",
+        is_error=is_error,
+    )
+
+
+@pytest.mark.parametrize(
+    ("events", "error"),
+    [
+        (
+            (),
+            "ended without a result",
+        ),
+        (
+            (_approval_resolution(), _terminal_result()),
+            "resolved approval before requesting it",
+        ),
+        (
+            (_approval_request(), _approval_request(), _terminal_result()),
+            "requested approval more than once",
+        ),
+        (
+            (
+                _approval_request(),
+                _approval_resolution(),
+                _approval_resolution(),
+                _terminal_result(),
+            ),
+            "resolved approval more than once",
+        ),
+        (
+            (_approval_request(),),
+            "ended with an unresolved approval",
+        ),
+        (
+            (_approval_request(), _terminal_result()),
+            "ended with an unresolved approval",
+        ),
+        (
+            (_approval_request(arguments={"command": "whoami"}), _terminal_result()),
+            "approval arguments do not match",
+        ),
+        (
+            (_approval_request(), _approval_resolution(approved=False), _terminal_result()),
+            "reported success after approval was denied",
+        ),
+        (
+            (object(),),
+            "unsupported event type",
+        ),
+    ],
+)
+def test_pure_loop_rejects_malformed_approval_lifecycle(
+    events: tuple[object, ...],
+    error: str,
+) -> None:
+    call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ]
+        ]
+    )
+
+    async def run() -> list[object]:
+        emitted: list[object] = []
+        with pytest.raises(ToolExecutionProtocolError, match=error):
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=provider,
+                    tool_executor=ScriptedToolExecutor(events),
+                ),
+                messages=(Message(role="user", content="run pwd"),),
+            ):
+                emitted.append(event)
+        return emitted
+
+    emitted = anyio.run(run)
+
+    assert not any(isinstance(event, ToolResultReady) for event in emitted)
+    assert [event.type for event in emitted[-2:]] == ["error", "turn.completed"]
+    assert emitted[-1].outcome == "failed"
+    assert len(provider.calls) == 1
+
+
+def test_pure_loop_rejects_type_changing_nested_approval_arguments() -> None:
+    call = ToolCall(
+        call_id="call-1",
+        name="bash",
+        arguments={"command": "pwd", "options": [1]},
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ]
+        ]
+    )
+    executor = ScriptedToolExecutor(
+        (
+            _approval_request(arguments={"command": "pwd", "options": [True]}),
+            _terminal_result(),
+        )
+    )
+
+    async def run() -> None:
+        with pytest.raises(ToolExecutionProtocolError, match="approval arguments do not match"):
+            async for _ in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=executor),
+                messages=(Message(role="user", content="run pwd"),),
+            ):
+                pass
+
+    anyio.run(run)
+
+
+def test_pure_loop_accepts_denied_approval_with_error_result() -> None:
+    call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="noted"),
+            ],
+        ]
+    )
+    executor = ScriptedToolExecutor(
+        (
+            _approval_request(),
+            _approval_resolution(approved=False),
+            _terminal_result(is_error=True),
+        )
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=executor),
+                messages=(Message(role="user", content="run pwd"),),
+            )
+        ]
+
+    emitted = anyio.run(run)
+
+    result = next(event for event in emitted if isinstance(event, ToolResultReady))
+    assert result.is_error is True
+    assert provider.calls[1].tool_results == (
+        ToolCallResult(call_id="call-1", output="denied", is_error=True),
+    )
 
 
 class WriteSnapshotExecutor:
