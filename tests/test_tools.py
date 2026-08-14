@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 import anyio
@@ -72,7 +73,8 @@ def test_read_tool_supports_offset_limit_and_truncation(tmp_path: Path) -> None:
 
     assert result.text == "two\nthree\n[truncated]"
     assert result.truncated is True
-    assert result.data["line_count"] == 4
+    assert "line_count" not in result.data
+    assert result.data["selected_count"] == 3
 
 
 def test_summary_module_reads_the_real_tool_data_keys(tmp_path: Path) -> None:
@@ -96,7 +98,7 @@ def test_summary_module_reads_the_real_tool_data_keys(tmp_path: Path) -> None:
     # the whole-file count — the P1 the review caught (summary replaces the dump).
     paged = run_tool(ReadTool(), {"path": "notes.txt", "offset": 2, "limit": 1}, context)
     assert paged.text == "beta\n"
-    assert summary_of("read", paged) == "read 1 line of 3 from notes.txt"
+    assert summary_of("read", paged) == "read 1 line from notes.txt"
 
     grep = run_tool(GrepTool(), {"pattern": "alpha"}, context)
     assert summary_of("grep", grep) == "grep: 2 matches"
@@ -121,7 +123,7 @@ def test_summary_module_reads_the_real_tool_data_keys(tmp_path: Path) -> None:
     assert capped_summary is not None and capped_summary.endswith("(+ more)")
 
 
-def test_read_tool_streams_requested_slice_with_line_count(tmp_path: Path) -> None:
+def test_read_tool_stops_after_requested_slice(tmp_path: Path) -> None:
     path = tmp_path / "large.log"
     path.write_text("".join(f"line {index}\n" for index in range(10_000)), encoding="utf-8")
     context = ToolContext(cwd=tmp_path)
@@ -129,7 +131,119 @@ def test_read_tool_streams_requested_slice_with_line_count(tmp_path: Path) -> No
     result = run_tool(ReadTool(), {"path": "large.log", "offset": 5000, "limit": 2}, context)
 
     assert result.text == "line 4999\nline 5000\n"
-    assert result.data["line_count"] == 10_000
+    assert "line_count" not in result.data
+    assert result.data["selected_count"] == 2
+
+
+def test_read_line_slice_consumes_only_one_line_beyond_limit() -> None:
+    consumed = 0
+
+    class CountingLines:
+        def __enter__(self) -> CountingLines:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def __iter__(self) -> CountingLines:
+            return self
+
+        def __next__(self) -> str:
+            nonlocal consumed
+            consumed += 1
+            return f"line {consumed}\n"
+
+    class CountingPath:
+        def open(self, *_args: object, **_kwargs: object) -> CountingLines:
+            return CountingLines()
+
+    result = file_ops_module._read_line_slice(
+        CountingPath(),  # type: ignore[arg-type]
+        offset=1,
+        limit=2,
+        max_bytes=50_000,
+        max_lines=2_000,
+    )
+
+    assert result.text == "line 1\nline 2\n"
+    assert result.line_count is None
+    assert result.selected_count == 2
+    assert consumed == 3
+
+
+def test_read_tool_keeps_exact_line_count_when_slice_reaches_eof(tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("one\ntwo\n", encoding="utf-8")
+
+    result = run_tool(
+        ReadTool(),
+        {"path": "notes.txt", "offset": 2, "limit": 1},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == "two\n"
+    assert result.data["line_count"] == 2
+    assert result.data["selected_count"] == 1
+
+
+def test_read_tool_runs_filesystem_scan_off_event_loop(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("one\n", encoding="utf-8")
+    started = threading.Event()
+    release = threading.Event()
+    original = file_ops_module._read_line_slice
+
+    def blocking_read(*args: object, **kwargs: object) -> object:
+        started.set()
+        release.wait(timeout=2)
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(file_ops_module, "_read_line_slice", blocking_read)
+
+    async def scenario() -> bool:
+        completed = anyio.Event()
+
+        async def read_file() -> None:
+            await ReadTool().run({"path": "notes.txt"}, ToolContext(cwd=tmp_path))
+            completed.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(read_file)
+            assert await anyio.to_thread.run_sync(started.wait, 1)
+            await anyio.sleep(0)
+            responsive = not completed.is_set()
+            release.set()
+        return responsive
+
+    assert anyio.run(scenario) is True
+
+
+def test_read_tool_abandons_worker_wait_on_cancel(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    (tmp_path / "notes.txt").write_text("one\n", encoding="utf-8")
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_read(*_args: object, **_kwargs: object) -> object:
+        started.set()
+        release.wait(timeout=2)
+        return file_ops_module._ReadSlice("", None, 0, False)
+
+    monkeypatch.setattr(file_ops_module, "_read_line_slice", blocking_read)
+
+    async def scenario() -> None:
+        async def read_file() -> None:
+            await ReadTool().run({"path": "notes.txt"}, ToolContext(cwd=tmp_path))
+
+        with anyio.fail_after(0.5):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(read_file)
+                assert await anyio.to_thread.run_sync(started.wait, 1)
+                task_group.cancel_scope.cancel()
+        release.set()
+
+    anyio.run(scenario)
 
 
 def test_read_tool_preserves_crlf_line_endings_for_edit_workflow(tmp_path: Path) -> None:
@@ -3693,6 +3807,114 @@ def test_grep_tool_rejects_empty_pattern(tmp_path: Path) -> None:
         run_tool(GrepTool(), {"pattern": ""}, context)
 
 
+def test_grep_tool_python_fallback_stops_after_extra_match(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    first = tmp_path / "first.txt"
+    first.write_text("match\nmatch\n", encoding="utf-8")
+    visited_later = False
+
+    def files(_path: Path, _context: ToolContext) -> Iterable[Path]:
+        nonlocal visited_later
+        yield first
+        visited_later = True
+        yield tmp_path / "later.txt"
+
+    monkeypatch.setattr(search_tools_module, "_iter_files", files)
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "match", "literal": True, "max_results": 1},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == "first.txt:1:match\n[truncated]"
+    assert result.truncated is True
+    assert visited_later is False
+
+
+def test_grep_tool_python_fallback_does_not_materialize_file(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text("needle\n", encoding="utf-8")
+
+    def fail_read_text(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("Python grep must stream files")
+
+    monkeypatch.setattr(Path, "read_text", fail_read_text)
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "needle", "literal": True},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == "data.txt:1:needle"
+
+
+def test_grep_tool_python_fallback_runs_off_event_loop(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text("needle\n", encoding="utf-8")
+    started = threading.Event()
+    release = threading.Event()
+    original = search_tools_module._python_grep
+
+    def blocking_grep(**kwargs: object) -> ToolResult:
+        started.set()
+        release.wait(timeout=2)
+        return original(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(search_tools_module, "_python_grep", blocking_grep)
+
+    async def scenario() -> bool:
+        completed = anyio.Event()
+
+        async def grep_files() -> None:
+            await GrepTool().run({"pattern": "needle", "literal": True}, ToolContext(cwd=tmp_path))
+            completed.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(grep_files)
+            assert await anyio.to_thread.run_sync(started.wait, 1)
+            await anyio.sleep(0)
+            responsive = not completed.is_set()
+            release.set()
+        return responsive
+
+    assert anyio.run(scenario) is True
+
+
+def test_grep_tool_python_fallback_abandons_worker_wait_on_cancel(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text("needle\n", encoding="utf-8")
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_grep(**_kwargs: object) -> ToolResult:
+        started.set()
+        release.wait(timeout=2)
+        return ToolResult(text="No matches")
+
+    monkeypatch.setattr(search_tools_module, "_python_grep", blocking_grep)
+
+    async def scenario() -> None:
+        async def grep_files() -> None:
+            await GrepTool().run({"pattern": "needle", "literal": True}, ToolContext(cwd=tmp_path))
+
+        with anyio.fail_after(0.5):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(grep_files)
+                assert await anyio.to_thread.run_sync(started.wait, 1)
+                task_group.cancel_scope.cancel()
+        release.set()
+
+    anyio.run(scenario)
+
+
 def test_grep_tool_python_fallback_does_not_truncate_exact_limit(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -3912,3 +4134,101 @@ def test_ls_tool_truncates_large_output(tmp_path: Path) -> None:
 
     assert result.text == "a.txt\n[truncated]"
     assert result.truncated is True
+
+
+def test_grep_tool_python_fallback_bounds_eof_context_to_requested_radius(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text("one\ntwo\nthree\nfour\nmatch\n", encoding="utf-8")
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "match", "literal": True, "context": 2},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == "data.txt-3-three\ndata.txt-4-four\ndata.txt:5:match"
+
+
+def test_grep_tool_python_fallback_discards_matches_from_invalid_utf8_file(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_bytes(b"match\nmatch\n\xff")
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "match", "literal": True, "max_results": 1},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == "No matches"
+    assert result.data == {"count": 0, "matches": []}
+
+
+def test_grep_tool_python_fallback_preserves_splitlines_boundaries(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text(
+        "first\vvertical\fform\x1cfile\x1dgroup\x1erecord\x85next\u2028line\u2029paragraph",
+        encoding="utf-8",
+    )
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "^(vertical|form|file|group|record|next|line|paragraph)$"},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text.splitlines() == [
+        "data.txt:2:vertical",
+        "data.txt:3:form",
+        "data.txt:4:file",
+        "data.txt:5:group",
+        "data.txt:6:record",
+        "data.txt:7:next",
+        "data.txt:8:line",
+        "data.txt:9:paragraph",
+    ]
+
+
+def test_python_grep_splitlines_preserves_crlf_across_chunks(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    path = tmp_path / "data.txt"
+    path.write_bytes(b"one\r\ntwo\rthree")
+    monkeypatch.setattr(search_tools_module, "_PYTHON_GREP_CHUNK_BYTES", 4)
+
+    assert list(search_tools_module._iter_utf8_splitlines(path)) == ["one", "two", "three"]
+
+
+def test_python_grep_splitlines_scans_long_lines_once_per_chunk(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    path = tmp_path / "data.txt"
+    path.write_text("x" * 100, encoding="utf-8")
+    monkeypatch.setattr(search_tools_module, "_PYTHON_GREP_CHUNK_BYTES", 8)
+    scanned_chars = 0
+    original = search_tools_module._yield_splitline_chunk
+
+    def tracking_chunk(
+        text: str,
+        line_parts: list[str],
+        *,
+        final: bool = False,
+    ) -> object:
+        nonlocal scanned_chars
+        scanned_chars += len(text)
+        return original(text, line_parts, final=final)
+
+    monkeypatch.setattr(search_tools_module, "_yield_splitline_chunk", tracking_chunk)
+
+    assert list(search_tools_module._iter_utf8_splitlines(path)) == ["x" * 100]
+    assert scanned_chars == 100

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import codecs
 import fnmatch
 import os
 import re
 import shutil
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections import deque
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+
+import anyio
 
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _optional_string, _required_string
@@ -95,15 +100,18 @@ class GrepTool:
                 process_supervisor=self._process_supervisor,
             )
 
-        return _python_grep(
-            pattern=pattern,
-            path=path,
-            glob=glob,
-            ignore_case=ignore_case,
-            literal=literal,
-            context_lines=context_lines,
-            max_results=max_results,
-            context=context,
+        return await anyio.to_thread.run_sync(
+            lambda: _python_grep(
+                pattern=pattern,
+                path=path,
+                glob=glob,
+                ignore_case=ignore_case,
+                literal=literal,
+                context_lines=context_lines,
+                max_results=max_results,
+                context=context,
+            ),
+            abandon_on_cancel=True,
         )
 
 
@@ -386,32 +394,72 @@ def _python_grep(
         raise ToolError(f"Path does not exist: {display_tool_path(path, context)}")
 
     matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
+    effective_context_lines = _bounded_rg_context_lines(context_lines, context)
+    context_truncated = effective_context_lines < context_lines
     output: list[str] = []
     match_count = 0
     for file_path in _iter_files(path, context):
         if glob is not None and not _matches_glob(file_path, glob, context):
             continue
+        file_output_start = len(output)
+        file_match_start = match_count
+        file_had_extra_match = False
         try:
-            lines = file_path.read_text(encoding="utf-8").splitlines()
+            preceding: deque[tuple[int, str]] = deque(maxlen=effective_context_lines)
+            active_contexts: list[_StreamingMatchContext] = []
+            for line_number, line in enumerate(_iter_utf8_splitlines(file_path), start=1):
+                completed_contexts: list[_StreamingMatchContext] = []
+                for active in active_contexts:
+                    if active.remaining_after > 0:
+                        active.lines.append(
+                            _format_grep_record(file_path, line_number, line, False, context)
+                        )
+                        active.remaining_after -= 1
+                    if active.remaining_after == 0:
+                        completed_contexts.append(active)
+                for completed in completed_contexts:
+                    output.extend(completed.lines)
+                    active_contexts.remove(completed)
+
+                if not file_had_extra_match and matcher(line):
+                    if match_count >= max_results:
+                        # Keep consuming this file to validate its complete UTF-8
+                        # contents. A later decode error must discard all matches
+                        # from the file, matching the fallback's text-file policy.
+                        file_had_extra_match = True
+                    else:
+                        match_count += 1
+                        match_lines = [
+                            _format_grep_record(file_path, number, text, False, context)
+                            for number, text in preceding
+                        ]
+                        match_lines.append(
+                            _format_grep_record(file_path, line_number, line, True, context)
+                        )
+                        if effective_context_lines:
+                            active_contexts.append(
+                                _StreamingMatchContext(
+                                    lines=match_lines,
+                                    remaining_after=effective_context_lines,
+                                )
+                            )
+                        else:
+                            output.extend(match_lines)
+                preceding.append((line_number, line))
+            for active in active_contexts:
+                output.extend(active.lines)
         except UnicodeDecodeError:
+            del output[file_output_start:]
+            match_count = file_match_start
             continue
-        for index, line in enumerate(lines):
-            if not matcher(line):
-                continue
-            if match_count >= max_results:
-                return _result_from_grep_lines(
-                    output,
-                    max_results=max_results,
-                    context=context,
-                    force_truncated=True,
-                )
-            match_count += 1
-            if context_lines:
-                output.extend(
-                    _format_context_lines(file_path, lines, index, context_lines, context)
-                )
-            else:
-                output.append(f"{display_tool_path(file_path, context)}:{index + 1}:{line}")
+
+        if file_had_extra_match:
+            return _result_from_grep_lines(
+                output,
+                max_results=max_results,
+                context=context,
+                force_truncated=True,
+            )
 
     if not output:
         return ToolResult(text="No matches", data={"count": 0, "matches": []})
@@ -419,7 +467,81 @@ def _python_grep(
         output,
         max_results=max_results,
         context=context,
+        force_truncated=context_truncated,
     )
+
+
+_PYTHON_GREP_CHUNK_BYTES = 64 * 1024
+_SPLITLINES_BOUNDARIES = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _iter_utf8_splitlines(path: Path) -> Iterator[str]:
+    """Yield UTF-8 lines incrementally with ``str.splitlines()`` boundaries."""
+
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    line_parts: list[str] = []
+    pending_cr = False
+    with path.open("rb") as file:
+        while chunk := file.read(_PYTHON_GREP_CHUNK_BYTES):
+            decoded = decoder.decode(chunk)
+            if pending_cr:
+                yield "".join(line_parts)
+                line_parts.clear()
+                pending_cr = False
+                if decoded.startswith("\n"):
+                    decoded = decoded[1:]
+            pending_cr = yield from _yield_splitline_chunk(decoded, line_parts)
+        decoded = decoder.decode(b"", final=True)
+    if pending_cr:
+        yield "".join(line_parts)
+        line_parts.clear()
+        if decoded.startswith("\n"):
+            decoded = decoded[1:]
+    _ = yield from _yield_splitline_chunk(decoded, line_parts, final=True)
+    if line_parts:
+        yield "".join(line_parts)
+
+
+def _yield_splitline_chunk(
+    text: str,
+    line_parts: list[str],
+    *,
+    final: bool = False,
+) -> Generator[str, None, bool]:
+    start = 0
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character not in _SPLITLINES_BOUNDARIES:
+            index += 1
+            continue
+        line_parts.append(text[start:index])
+        if character == "\r" and index + 1 == len(text) and not final:
+            return True
+        yield "".join(line_parts)
+        line_parts.clear()
+        index += 2 if character == "\r" and text[index + 1 : index + 2] == "\n" else 1
+        start = index
+    if start < len(text):
+        line_parts.append(text[start:])
+    return False
+
+
+@dataclass(slots=True)
+class _StreamingMatchContext:
+    lines: list[str]
+    remaining_after: int
+
+
+def _format_grep_record(
+    file_path: Path,
+    line_number: int,
+    line: str,
+    is_match: bool,
+    context: ToolContext,
+) -> str:
+    separator = ":" if is_match else "-"
+    return f"{display_tool_path(file_path, context)}{separator}{line_number}{separator}{line}"
 
 
 def _python_find(
@@ -511,23 +633,6 @@ def _build_matcher(
 
 
 type CallableMatcher = Callable[[str], bool]
-
-
-def _format_context_lines(
-    file_path: Path,
-    lines: Sequence[str],
-    match_index: int,
-    context_lines: int,
-    context: ToolContext,
-) -> list[str]:
-    start = max(0, match_index - context_lines)
-    end = min(len(lines), match_index + context_lines + 1)
-    formatted: list[str] = []
-    for index in range(start, end):
-        separator = ":" if index == match_index else "-"
-        path_display = display_tool_path(file_path, context)
-        formatted.append(f"{path_display}{separator}{index + 1}{separator}{lines[index]}")
-    return formatted
 
 
 def _command_path(path: Path, context: ToolContext) -> str:

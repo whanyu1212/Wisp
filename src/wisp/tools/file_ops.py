@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
+
+import anyio
 
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _required_string, _truncate_text
@@ -64,30 +67,37 @@ class ReadTool:
             raise ToolError(f"File does not exist: {display_tool_path(path, context)}")
 
         try:
-            selected, line_count, selected_count, stream_truncated = _read_line_slice(
-                path,
-                offset=offset,
-                limit=limit,
-                max_bytes=context.max_output_bytes,
-                max_lines=context.max_output_lines,
+            slice_result = await anyio.to_thread.run_sync(
+                lambda: _read_line_slice(
+                    path,
+                    offset=offset,
+                    limit=limit,
+                    max_bytes=context.max_output_bytes,
+                    max_lines=context.max_output_lines,
+                ),
+                abandon_on_cancel=True,
             )
         except UnicodeDecodeError as exc:
             raise ToolError(f"File is not valid UTF-8: {display_tool_path(path, context)}") from exc
 
-        truncated = _truncate_text(selected, context=context, force_truncated=stream_truncated)
+        truncated = _truncate_text(
+            slice_result.text,
+            context=context,
+            force_truncated=slice_result.truncated,
+        )
+        data: dict[str, object] = {
+            "path": display_tool_path(path, context),
+            "selected_count": slice_result.selected_count,
+            "offset": offset,
+            "limit": limit,
+        }
+        # An exact whole-file count is available only when the bounded scan reaches
+        # EOF. Omitting it is more honest than reporting the number scanned as a total.
+        if slice_result.line_count is not None:
+            data["line_count"] = slice_result.line_count
         return ToolResult(
             text=truncated.text,
-            data={
-                "path": display_tool_path(path, context),
-                # ``line_count`` is the whole file; ``selected_count`` is the lines the
-                # offset/limit slice returned. The summary needs the latter so it
-                # doesn't claim the whole file was read when only a slice was.
-                # (Truncation reaches the summary via ToolResult.truncated below.)
-                "line_count": line_count,
-                "selected_count": selected_count,
-                "offset": offset,
-                "limit": limit,
-            },
+            data=data,
             truncated=truncated.truncated,
         )
 
@@ -327,6 +337,14 @@ def _snapshot_before_write(path: Path) -> str | None:
     return before
 
 
+@dataclass(frozen=True, slots=True)
+class _ReadSlice:
+    text: str
+    line_count: int | None
+    selected_count: int
+    truncated: bool
+
+
 def _read_line_slice(
     path: Path,
     *,
@@ -334,50 +352,48 @@ def _read_line_slice(
     limit: int | None,
     max_bytes: int,
     max_lines: int,
-) -> tuple[str, int, int, bool]:
+) -> _ReadSlice:
     selected_parts: list[str] = []
-    line_count = 0
+    scanned_count = 0
     selected_count = 0
     buffered_bytes = 0
     buffered_lines = 0
     truncated = False
-    buffering = True
 
     with path.open("r", encoding="utf-8", newline="") as file:
-        for line in file:
-            line_count += 1
-            if line_count < offset:
-                continue
-            if limit is not None and selected_count >= limit:
+        while True:
+            try:
+                line = next(file)
+            except StopIteration:
+                return _ReadSlice("".join(selected_parts), scanned_count, selected_count, truncated)
+
+            scanned_count += 1
+            if scanned_count < offset:
                 continue
 
+            if limit is not None and selected_count >= limit:
+                # One-line lookahead distinguishes a slice ending exactly at EOF from
+                # a bounded page with an unread tail. The consumed lookahead is not
+                # part of the selected slice and is never presented as a file total.
+                return _ReadSlice("".join(selected_parts), None, selected_count, truncated)
+
             selected_count += 1
-            if not buffering:
-                continue
             if max_bytes <= 0 or max_lines <= 0 or buffered_lines >= max_lines:
-                truncated = True
-                buffering = False
-                continue
+                return _ReadSlice("".join(selected_parts), None, selected_count, True)
 
             encoded_line = line.encode("utf-8")
             remaining_bytes = max_bytes - buffered_bytes
             if remaining_bytes <= 0:
-                truncated = True
-                buffering = False
-                continue
+                return _ReadSlice("".join(selected_parts), None, selected_count, True)
             if len(encoded_line) > remaining_bytes:
                 selected_parts.append(
                     encoded_line[:remaining_bytes].decode("utf-8", errors="ignore")
                 )
-                truncated = True
-                buffering = False
-                continue
+                return _ReadSlice("".join(selected_parts), None, selected_count, True)
 
             selected_parts.append(line)
             buffered_bytes += len(encoded_line)
             buffered_lines += 1
-
-    return "".join(selected_parts), line_count, selected_count, truncated
 
 
 def _parse_edits(arguments: Mapping[str, object]) -> list[tuple[str, str]]:
