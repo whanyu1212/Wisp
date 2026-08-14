@@ -2872,6 +2872,27 @@ class _SelectableMarkdownVisual(RichVisual):
         # focused presentation tests and callers outside Textual's Visual path.
         yield from console.render(self._markdown_renderable, options)
 
+    def _apply_selection_style(
+        self,
+        strip: Strip,
+        base_style: Style,
+        selection_style: Style,
+    ) -> Strip:
+        """Blend Textual's selection overlay on top of each Rich segment."""
+
+        ansi_theme = self._widget.app.ansi_theme
+        segments: list[Segment] = []
+        for segment in strip:
+            if segment.control:
+                segments.append(segment)
+                continue
+            rich_style = segment.style or base_style.rich_style
+            resolved_style = (
+                Style.from_rich_style(rich_style, ansi_theme) + selection_style
+            ).rich_style
+            segments.append(Segment(segment.text, resolved_style, segment.control))
+        return Strip(segments, strip.cell_length)
+
     def render_strips(
         self,
         width: int,
@@ -2902,8 +2923,10 @@ class _SelectableMarkdownVisual(RichVisual):
                     strip = Strip.join(
                         [
                             strip.crop(0, start_cell),
-                            strip.crop(start_cell, end_cell).apply_style(
-                                selection_style.rich_style
+                            self._apply_selection_style(
+                                strip.crop(start_cell, end_cell),
+                                style,
+                                selection_style,
                             ),
                             strip.crop(end_cell),
                         ]
