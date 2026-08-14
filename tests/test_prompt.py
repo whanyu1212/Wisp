@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -483,3 +484,26 @@ def test_project_context_honors_tiny_bounds(tmp_path: Path) -> None:
     context = build_project_context(cwd=tmp_path, max_chars=8)
 
     assert context == "[context"
+
+
+def test_project_context_applies_one_aggregate_git_deadline(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monotonic_values = iter((0.0, 0.2, 1.5, 2.1, 2.2, 2.3))
+    timeouts: list[float] = []
+
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, float)
+        timeouts.append(timeout)
+        output = "true" if command[-2:] == ("rev-parse", "--is-inside-work-tree") else ""
+        return subprocess.CompletedProcess(command, 0, stdout=output)
+
+    monkeypatch.setattr(prompt_module.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(prompt_module.subprocess, "run", fake_run)
+
+    context = build_project_context(cwd=tmp_path)
+
+    assert timeouts == [pytest.approx(1.0), pytest.approx(0.5)]
+    assert "git: branch unknown; status unavailable" in context

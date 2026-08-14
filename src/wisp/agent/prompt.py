@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from collections.abc import Iterable, Sequence
+from contextvars import ContextVar
 from pathlib import Path
 
 from wisp.agent.messages import Message
@@ -19,6 +21,11 @@ DEFAULT_CONTEXT_FILE_MAX_CHARS = 28_000
 DEFAULT_TOOL_GUIDANCE_MAX_CHARS = 4_096
 MAX_GIT_STATUS_LINES = 12
 MAX_PROJECT_FILES = 16
+GIT_CONTEXT_TIMEOUT_SECONDS = 2.0
+_GIT_CONTEXT_DEADLINE: ContextVar[float | None] = ContextVar(
+    "wisp_git_context_deadline",
+    default=None,
+)
 
 DEFAULT_SYSTEM_PROMPT = """You are Wisp, a concise coding agent running in a terminal.
 
@@ -137,34 +144,40 @@ def build_project_context(
 ) -> str:
     """Collect a bounded, low-noise project context block."""
 
-    resolved_cwd = cwd.resolve(strict=False)
-    project_root = _project_root(resolved_cwd)
-    resolved_trusted_context_root = (
-        trusted_context_root.resolve(strict=False)
-        if trusted_context_root is not None
-        else project_root
-    )
-    root_section = f"project root: {project_root}" if project_root != resolved_cwd else ""
-    sections = [
-        "[WISP PROJECT CONTEXT]",
-        f"cwd: {resolved_cwd}",
-        root_section,
-        _git_summary(resolved_cwd),
-        _project_files_summary(project_root),
-        _tool_summary(tools),
-    ]
+    deadline_token = _GIT_CONTEXT_DEADLINE.set(time.monotonic() + GIT_CONTEXT_TIMEOUT_SECONDS)
+    try:
+        resolved_cwd = cwd.resolve(strict=False)
+        project_root = _project_root(resolved_cwd)
+        resolved_trusted_context_root = (
+            trusted_context_root.resolve(strict=False)
+            if trusted_context_root is not None
+            else project_root
+        )
+        root_section = f"project root: {project_root}" if project_root != resolved_cwd else ""
+        sections = [
+            "[WISP PROJECT CONTEXT]",
+            f"cwd: {resolved_cwd}",
+            root_section,
+            _git_summary(resolved_cwd),
+            _project_files_summary(project_root),
+            _tool_summary(tools),
+        ]
 
-    base_context = "\n".join(section for section in sections if section)
-    context_file_section = _project_context_files_section(
-        project_root=project_root,
-        cwd=resolved_cwd,
-        trusted_context_root=resolved_trusted_context_root,
-        protected_paths=protected_paths,
-        max_chars=min(max_context_file_chars, _remaining_context_budget(base_context, max_chars)),
-    )
-    if context_file_section:
-        sections.append(context_file_section)
-    return _truncate_context("\n".join(section for section in sections if section), max_chars)
+        base_context = "\n".join(section for section in sections if section)
+        context_file_section = _project_context_files_section(
+            project_root=project_root,
+            cwd=resolved_cwd,
+            trusted_context_root=resolved_trusted_context_root,
+            protected_paths=protected_paths,
+            max_chars=min(
+                max_context_file_chars, _remaining_context_budget(base_context, max_chars)
+            ),
+        )
+        if context_file_section:
+            sections.append(context_file_section)
+        return _truncate_context("\n".join(section for section in sections if section), max_chars)
+    finally:
+        _GIT_CONTEXT_DEADLINE.reset(deadline_token)
 
 
 def build_untrusted_project_context(
@@ -200,7 +213,11 @@ def _project_root(cwd: Path) -> Path:
 def resolve_project_context_root(cwd: Path) -> Path:
     """Return the project root used for trust and project-context discovery."""
 
-    return _project_root(cwd.resolve(strict=False))
+    deadline_token = _GIT_CONTEXT_DEADLINE.set(time.monotonic() + GIT_CONTEXT_TIMEOUT_SECONDS)
+    try:
+        return _project_root(cwd.resolve(strict=False))
+    finally:
+        _GIT_CONTEXT_DEADLINE.reset(deadline_token)
 
 
 def _git_summary(cwd: Path) -> str:
@@ -403,6 +420,10 @@ def _unique_guidance(values: Iterable[str]) -> tuple[str, ...]:
 
 
 def _run_git(cwd: Path, *args: str) -> str | None:
+    deadline = _GIT_CONTEXT_DEADLINE.get()
+    remaining = deadline - time.monotonic() if deadline is not None else 1.0
+    if remaining <= 0:
+        return None
     try:
         result = subprocess.run(
             ("git", "-C", str(cwd), *args),
@@ -410,7 +431,7 @@ def _run_git(cwd: Path, *args: str) -> str | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=1,
+            timeout=min(1.0, remaining),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
