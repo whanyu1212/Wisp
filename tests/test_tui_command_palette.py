@@ -137,7 +137,7 @@ def test_catalog_update_keeps_freshly_opened_slash_suggestions_visible() -> None
             await pilot.pause()
             return editor.value, suggest.is_open, suggest.option_count
 
-    assert anyio.run(scenario) == ("/", True, 1)
+    assert anyio.run(scenario) == ("/", True, 2)
 
 
 def test_loaded_catalog_updates_inline_slash_suggestions() -> None:
@@ -152,7 +152,7 @@ def test_loaded_catalog_updates_inline_slash_suggestions() -> None:
         )
     )
 
-    async def scenario() -> tuple[int, str]:
+    async def scenario() -> tuple[int, tuple[str, ...]]:
         app = TextualTui()
         async with app.run_test(size=(80, 24)) as pilot:
             editor = app.query_one("#input", PromptEditor)
@@ -160,13 +160,16 @@ def test_loaded_catalog_updates_inline_slash_suggestions() -> None:
             editor.value = "/"
             await pilot.pause()
             suggest = app.query_one("#suggest", SlashSuggest)
-            prompt = suggest.get_option_at_index(0).prompt
-            return suggest.option_count, str(prompt)
+            prompts = tuple(
+                str(suggest.get_option_at_index(index).prompt)
+                for index in range(suggest.option_count)
+            )
+            return suggest.option_count, prompts
 
-    count, prompt = anyio.run(scenario)
-    assert count == 1
-    assert "/model" in prompt
-    assert "[Choose] the model" in prompt
+    count, prompts = anyio.run(scenario)
+    assert count == 2
+    assert any("/model" in prompt and "[Choose] the model" in prompt for prompt in prompts)
+    assert any("/theme" in prompt for prompt in prompts)
 
 
 def test_skill_suggestions_require_skill_prefix_and_use_literal_descriptions() -> None:

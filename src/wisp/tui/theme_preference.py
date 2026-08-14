@@ -24,11 +24,21 @@ import json
 import os
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 _PREFERENCE_FILENAME = "tui.json"
 _THEME_KEY = "theme"
+_LAST_DARK_THEME_KEY = "last_dark_theme"
+
+
+@dataclass(frozen=True)
+class ThemePreferenceState:
+    """Validated, user-local TUI theme state."""
+
+    active_theme: str | None = None
+    last_dark_theme: str | None = None
 
 
 class _Unreadable(Exception):
@@ -77,28 +87,46 @@ def load_theme_preference(
     Textual cannot resolve.
     """
 
-    # Absent and unreadable are the same answer here — no usable preference —
-    # unlike `save`, where the two call for opposite behavior.
+    return load_theme_state(home_dir=home_dir, valid_themes=valid_themes).active_theme
+
+
+def load_theme_state(
+    *,
+    home_dir: Path | None = None,
+    valid_themes: frozenset[str] | None = None,
+    valid_dark_themes: frozenset[str] | None = None,
+) -> ThemePreferenceState:
+    """Return validated theme state, tolerating absent or unusable documents."""
+
     try:
         raw = _read_document(theme_preference_path(home_dir=home_dir))
     except _Unreadable:
-        return None
+        return ThemePreferenceState()
     if raw is None:
-        return None
+        return ThemePreferenceState()
 
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        return None
+        return ThemePreferenceState()
     if not isinstance(payload, Mapping):
-        return None
+        return ThemePreferenceState()
 
     theme = payload.get(_THEME_KEY)
-    if not isinstance(theme, str) or not theme:
-        return None
-    if valid_themes is not None and theme not in valid_themes:
-        return None
-    return theme
+    if (
+        not isinstance(theme, str)
+        or not theme
+        or (valid_themes is not None and theme not in valid_themes)
+    ):
+        theme = None
+    last_dark_theme = payload.get(_LAST_DARK_THEME_KEY)
+    if (
+        not isinstance(last_dark_theme, str)
+        or not last_dark_theme
+        or (valid_dark_themes is not None and last_dark_theme not in valid_dark_themes)
+    ):
+        last_dark_theme = None
+    return ThemePreferenceState(active_theme=theme, last_dark_theme=last_dark_theme)
 
 
 def save_theme_preference(theme: str, *, home_dir: Path | None = None) -> bool:
@@ -111,6 +139,23 @@ def save_theme_preference(theme: str, *, home_dir: Path | None = None) -> bool:
     ``False`` without touching the file rather than replacing content it could
     not first read back.
     """
+
+    return _save_updates({_THEME_KEY: theme}, home_dir=home_dir)
+
+
+def save_theme_state(state: ThemePreferenceState, *, home_dir: Path | None = None) -> bool:
+    """Persist both active and most-recent dark themes atomically."""
+
+    updates: dict[str, object] = {}
+    if state.active_theme is not None:
+        updates[_THEME_KEY] = state.active_theme
+    if state.last_dark_theme is not None:
+        updates[_LAST_DARK_THEME_KEY] = state.last_dark_theme
+    return _save_updates(updates, home_dir=home_dir)
+
+
+def _save_updates(updates: Mapping[str, object], *, home_dir: Path | None) -> bool:
+    """Merge preference updates into the on-disk document atomically."""
 
     path = theme_preference_path(home_dir=home_dir)
     payload: dict[str, object] = {}
@@ -131,7 +176,7 @@ def save_theme_preference(theme: str, *, home_dir: Path | None = None) -> bool:
             existing = None
         if isinstance(existing, Mapping):
             payload.update(existing)
-    payload[_THEME_KEY] = theme
+    payload.update(updates)
 
     # Write to a sibling temp file and rename over the destination. `write_text`
     # truncates before writing, so a failure partway through would leave the file
@@ -165,7 +210,10 @@ def save_theme_preference(theme: str, *, home_dir: Path | None = None) -> bool:
 
 
 __all__ = [
+    "ThemePreferenceState",
     "load_theme_preference",
+    "load_theme_state",
     "save_theme_preference",
+    "save_theme_state",
     "theme_preference_path",
 ]

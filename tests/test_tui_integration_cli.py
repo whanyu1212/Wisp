@@ -3161,26 +3161,23 @@ def test_textual_theme_switch_rederives_transcript_styles() -> None:
     assert anyio.run(scenario) == "#2b8164"
 
 
-def test_textual_theme_switch_rederives_muted_text_color() -> None:
-    # Issue #76's baked MUTED_DARK/MUTED_LIGHT constants (theme.py) are new
-    # since the general rederive test above was written — a "dim"-styled line
-    # written after a theme switch must resolve to the *new* theme's muted
-    # color, not linger on the old one. watch_theme() only re-derives
-    # _role_styles for lines written after the switch; already-mounted lines
-    # keep their baked-in markup, which this test isn't exercising.
-    from wisp.tui.theme import MUTED_DARK, MUTED_LIGHT
-
-    async def scenario() -> str:
+def test_textual_theme_switch_atomically_recolors_mounted_muted_text() -> None:
+    async def scenario() -> tuple[str, str]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
-            app_instance.theme = "wisp-light"
             renderer.input_cleared()  # -> write_dim("input cleared")
             await pilot.pause()
-            return _transcript_styles(app_instance)
+            transcript = app_instance.query_one("#transcript", Transcript)
+            (line,) = transcript.children
+            assert isinstance(line, LineMessage)
+            before = line.styles.color.hex.lower()
+            app_instance.theme = "wisp-light"
+            await pilot.pause()
+            return before, line.styles.color.hex.lower()
 
-    rendered = anyio.run(scenario)
-    assert MUTED_LIGHT in rendered
-    assert MUTED_DARK not in rendered
+    before, after = anyio.run(scenario)
+    assert before == "#92989e"
+    assert after == "#5e6367"
 
 
 def test_textual_themed_transcript_still_escapes_untrusted_payloads() -> None:
@@ -6548,7 +6545,15 @@ def test_textual_newline_keys_edit_without_submitting() -> None:
         async with app_instance.run_test() as pilot:
             input_widget = app_instance.query_one("#input", Input)
             input_widget.focus()
-            await pilot.press(*"first", "shift+enter", *"second", "ctrl+j", *"third")
+            await pilot.press(
+                *"first",
+                "shift+enter",
+                *"second",
+                "alt+enter",
+                *"third",
+                "ctrl+j",
+                *"fourth",
+            )
             await pilot.pause()
             editor_text = input_widget.value
             try:
@@ -6564,7 +6569,7 @@ def test_textual_newline_keys_edit_without_submitting() -> None:
             return editor_text, was_submitted, submitted
 
     editor_text, submitted_early, submitted = anyio.run(scenario)
-    assert editor_text == "first\nsecond\nthird"
+    assert editor_text == "first\nsecond\nthird\nfourth"
     assert submitted_early is False
     assert submitted == editor_text
 
@@ -6811,7 +6816,14 @@ def test_textual_slash_suggest_aligns_command_and_description_columns() -> None:
     # Descriptions of different-length commands (e.g. /help vs /provider)
     # must start at the same column, not a literal two-space join that drifts
     # per command length.
-    from wisp.tui.commands import SLASH_COMMAND_SPECS
+    from wisp.tui.commands import (
+        DEFAULT_TUI_COMMAND_CATALOG,
+        TEXTUAL_LOCAL_COMMAND_DESCRIPTORS,
+    )
+
+    displayed_specs = DEFAULT_TUI_COMMAND_CATALOG.with_descriptors(
+        *TEXTUAL_LOCAL_COMMAND_DESCRIPTORS
+    ).specs
 
     async def scenario() -> list[str]:
         app_instance = TextualTui()
@@ -6825,10 +6837,10 @@ def test_textual_slash_suggest_aligns_command_and_description_columns() -> None:
             return [str(suggest.get_option_at_index(i).prompt) for i in range(suggest.option_count)]
 
     prompts = anyio.run(scenario)
-    assert len(prompts) == len(SLASH_COMMAND_SPECS)
-    name_width = max(len(spec.command) for spec in SLASH_COMMAND_SPECS)
+    assert len(prompts) == len(displayed_specs)
+    name_width = max(len(spec.command) for spec in displayed_specs)
 
-    for spec, prompt in zip(SLASH_COMMAND_SPECS, prompts, strict=True):
+    for spec, prompt in zip(displayed_specs, prompts, strict=True):
         assert prompt == f"{spec.command:<{name_width}}  {spec.description}"
 
 
@@ -7367,8 +7379,8 @@ def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
 
     styles = anyio.run(scenario)
     expected = {
-        "wisp": ("#0E1216", "#3FB8B8"),
-        "wisp-light": ("#FBFCFD", "#2E7676"),
+        "wisp": ("#0E1216", "#0E1216", "#3FB8B8"),
+        "wisp-light": ("#FBFCFD", "#FBFCFD", "#2E7676"),
     }
     for theme, (
         idle_background,
@@ -7377,9 +7389,9 @@ def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
         focused_border,
         delay,
     ) in styles.items():
-        expected_background, expected_accent = expected[theme]
-        assert idle_background == expected_background
-        assert focused_background == expected_background
+        expected_idle, expected_focused, expected_accent = expected[theme]
+        assert idle_background == expected_idle
+        assert focused_background == expected_focused
         assert idle_border != focused_border
         assert focused_border == expected_accent
         assert delay == 0.2

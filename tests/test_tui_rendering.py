@@ -1045,22 +1045,18 @@ def test_tui_notice_role_uses_a_distinct_color_from_tool() -> None:
     # Issue #72: notice and tool previously shared the accent color, making
     # them visually identical. notice now uses the (previously unused)
     # warning token instead, in both themes.
-    from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT, role_styles
+    from wisp.tui.textual_app import TextualTui
 
-    for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
-        styles = role_styles(theme)
-        assert styles["notice"] != styles["tool"]
-        assert theme.warning in styles["notice"]
-        assert theme.accent in styles["tool"]
+    assert "color: $warning" in TextualTui.CSS
+    assert "color: $accent" in TextualTui.CSS
 
 
 def test_denied_role_uses_warning_instead_of_execution_error_color() -> None:
-    from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT, role_styles
+    from wisp.tui.textual_app import TextualTui
 
-    for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
-        styles = role_styles(theme)
-        assert theme.warning in styles["denied"]
-        assert theme.error not in styles["denied"]
+    denied_rule = TextualTui.CSS.split(".message--denied", 1)[1].split("}", 1)[0]
+    assert "$warning" in denied_rule
+    assert "$error" not in denied_rule
 
 
 def test_denied_and_error_tool_cards_keep_distinct_semantic_roles() -> None:
@@ -1070,6 +1066,13 @@ def test_denied_and_error_tool_cards_keep_distinct_semantic_roles() -> None:
     error_role = ToolCard._STATUS_ROLE["error"]
 
     assert denied_role != error_role
+
+
+def test_tool_card_role_rules_preserve_muted_content_color() -> None:
+    from wisp.tui.textual_app import TextualTui
+
+    role_rule = TextualTui.CSS.split("ToolCard.message--tool,", 1)[1].split("}", 1)[0]
+    assert "color: $text-muted;" in role_rule
 
 
 def test_cancelled_tool_card_uses_explicit_cancelled_action() -> None:
@@ -1267,24 +1270,34 @@ def test_muted_text_role_meets_contrast_target() -> None:
     # not a deterministic blend — see theme.py's MUTED_DARK/MUTED_LIGHT
     # comment). The baked replacement must clear 4.5:1 against both the main
     # background and the panel background, in both themes.
-    from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT, contrast_ratio, role_styles
+    from wisp.tui.textual_app import TextualTui
+    from wisp.tui.theme import WISP_THEMES, contrast_ratio
 
-    for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
-        muted = role_styles(theme)["dim"]
+    async def scenario() -> dict[str, str]:
+        app = TextualTui()
+        async with app.run_test() as pilot:
+            resolved: dict[str, str] = {}
+            for theme in WISP_THEMES:
+                app.theme = theme.name
+                await pilot.pause()
+                resolved[theme.name] = app.get_css_variables()["transcript-muted"]
+            return resolved
+
+    muted_by_theme = anyio.run(scenario)
+    for theme in WISP_THEMES:
+        muted = muted_by_theme[theme.name]
         assert contrast_ratio(muted, theme.background) >= 4.5
         assert contrast_ratio(muted, theme.panel) >= 4.5
 
 
-def test_role_styles_no_longer_uses_bare_dim_attribute_for_muted_roles() -> None:
-    # Regression guard for the #76 fix: the literal "dim" Rich attribute must
-    # never appear in role_styles()'s output — it's non-deterministic in
-    # Wisp's rendering path (no DimFilter in the chain) and was the root
-    # cause of the double-dimming contrast bug.
-    from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT, role_styles
+def test_line_messages_keep_literal_content_without_baked_rich_styles() -> None:
+    from wisp.tui.widgets import LineMessage
 
-    for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
-        for role, style in role_styles(theme).items():
-            assert "dim" not in style.split(), f"{role!r} still uses the dim attribute: {style!r}"
+    line = LineMessage("[dim]literal[/dim]", role="dim")
+
+    rendered = line.render()
+    assert rendered.plain == "[dim]literal[/dim]"
+    assert rendered.spans == []
 
 
 def _monochrome_gray(hex_color: str) -> int:
@@ -1330,15 +1343,22 @@ def test_monochrome_operational_role_collisions_still_have_distinct_non_color_cu
     # ToolCard also adds a glyph. Conversation roles are deliberately label-free
     # and are distinguished by their rail color only, so they are excluded along
     # with quiet, borderless metadata roles.
-    from wisp.tui.theme import _ROLE_COLOR_ATTR, WISP_THEME_DARK, WISP_THEME_LIGHT
+    from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT
     from wisp.tui.widgets import _ROLE_LABELS
 
-    comparable_roles = sorted(set(_ROLE_COLOR_ATTR) - {"assistant", "dim", "session", "user"})
+    role_color_attr = {
+        "notice": "warning",
+        "error": "error",
+        "tool": "accent",
+        "approved": "success",
+        "denied": "warning",
+    }
+    comparable_roles = sorted(role_color_attr)
     collision_threshold = 5  # gray levels; "near-collision" per the issue's audit
 
     for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
         grays = {
-            role: _monochrome_gray(getattr(theme, _ROLE_COLOR_ATTR[role]))
+            role: _monochrome_gray(getattr(theme, role_color_attr[role]))
             for role in comparable_roles
         }
         for i, role_a in enumerate(comparable_roles):

@@ -74,6 +74,7 @@ class _Harness:
     session: _Overlay = field(default_factory=_Overlay)
     history: _Overlay = field(default_factory=_Overlay)
     deferred: list[object] = field(default_factory=list)
+    displaced: list[OverlayKind] = field(default_factory=list)
 
     def controller(self, *, clock: Callable[[], float] | None = None) -> TextualOverlayController:
         selected_clock = clock or (lambda: 10.0)
@@ -88,6 +89,7 @@ class _Harness:
                 OverlayKind.prompt_history: self.history,
             },
             defer_after_refresh=self.deferred.append,
+            on_overlay_displaced=self.displaced.append,
             clock=selected_clock,
         )
 
@@ -131,6 +133,30 @@ def test_opening_an_overlay_hides_every_suggestion_menu() -> None:
 
     assert harness.suggestion.hide_count == 1
     assert harness.file_suggestion.hide_count == 1
+
+
+def test_replacing_an_overlay_notifies_its_owner_before_hiding() -> None:
+    harness = _Harness()
+    controller = harness.controller()
+    controller.open(OverlayKind.prompt_history)
+    harness.history.open = True
+
+    controller.open(OverlayKind.decision)
+
+    assert harness.displaced == [OverlayKind.prompt_history]
+    assert not harness.history.is_open
+
+
+def test_starting_an_operation_notifies_the_displaced_overlay() -> None:
+    harness = _Harness()
+    controller = harness.controller()
+    controller.open(OverlayKind.prompt_history)
+    harness.history.open = True
+
+    controller.start_operation(OverlayOperation.session_switch)
+
+    assert harness.displaced == [OverlayKind.prompt_history]
+    assert not harness.history.is_open
 
 
 def test_starting_an_operation_hides_every_suggestion_menu() -> None:
