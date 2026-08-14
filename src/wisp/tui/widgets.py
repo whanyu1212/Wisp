@@ -33,6 +33,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
+from textual.css.styles import RulesMap
 from textual.message import Message
 from textual.selection import Selection
 from textual.strip import Strip
@@ -2863,6 +2864,7 @@ class _SelectableMarkdownVisual(RichVisual):
     def __init__(self, widget: Widget, renderable: RenderableType) -> None:
         super().__init__(widget, renderable)
         self._markdown_renderable = renderable
+        self._base_strips_cache: tuple[int, Style, tuple[Strip, ...]] | None = None
         self.plain = ""
 
     def __rich_console__(
@@ -2895,6 +2897,25 @@ class _SelectableMarkdownVisual(RichVisual):
             segments.append(Segment(segment.text, resolved_style, segment.control))
         return Strip(segments, strip.cell_length)
 
+    def _base_strips(
+        self,
+        width: int,
+        style: Style,
+        options: RenderOptions,
+    ) -> tuple[Strip, ...]:
+        cached = self._base_strips_cache
+        if cached is not None and cached[:2] == (width, style):
+            return cached[2]
+        strips = tuple(super().render_strips(width, None, style, options))
+        self._base_strips_cache = (width, style, strips)
+        return strips
+
+    def get_height(self, rules: RulesMap, width: int) -> int:
+        """Measure through the same immutable strips used by the following paint."""
+
+        options = RenderOptions(self._widget._get_style, rules)
+        return len(self._base_strips(width, self._widget.visual_style, options))
+
     def render_strips(
         self,
         width: int,
@@ -2902,7 +2923,8 @@ class _SelectableMarkdownVisual(RichVisual):
         style: Style,
         options: RenderOptions,
     ) -> list[Strip]:
-        strips = super().render_strips(width, height, style, options)
+        base_strips = self._base_strips(width, style, options)
+        strips = base_strips if height is None else base_strips[:height]
         # Selection offsets address the rendered rows, not the Markdown source:
         # bullets, code chrome, and soft wrapping must match what was highlighted.
         self.plain = "\n".join(strip.text.rstrip() for strip in strips)

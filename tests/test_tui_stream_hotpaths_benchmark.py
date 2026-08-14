@@ -107,6 +107,7 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
         sample.markdown_renders.active + sample.markdown_renders.settled
     )
     assert sample.markdown_renders.active > 0
+    assert sample.markdown_renders.active < sample.markdown_source_rebuild_count * 2
     assert sample.markdown_source_rebuild_count >= sample.stream_update_count
     assert sample.event_loop_delay.sample_count >= 1
     assert sample.layout_passes.sample_count >= 1
