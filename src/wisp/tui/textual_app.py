@@ -1061,6 +1061,13 @@ class TextualTui(App[None]):
 
     def on_theme_picker_selected(self, event: ThemePicker.Selected) -> None:
         event.stop()
+        overlays = self._overlay_controller
+        if (
+            overlays is None
+            or overlays.active_overlay is not OverlayKind.theme_picker
+            or self._theme_picker_original is None
+        ):
+            return
         self._invalidate_theme_preview()
         self._commit_theme(event.theme_name, announce=True)
         self._theme_picker_original = None

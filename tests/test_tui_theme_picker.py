@@ -126,6 +126,31 @@ def test_replacing_picker_with_another_overlay_rolls_back_preview(
     assert load_theme_state(home_dir=tmp_path).active_theme is None
 
 
+def test_queued_selection_is_ignored_after_picker_displacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wisp.tui.textual_app import TextualTui
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    async def scenario() -> tuple[str, str | None]:
+        app = TextualTui()
+        async with app.run_test() as pilot:
+            app.submit_command_line("/theme")
+            await pilot.pause()
+            picker = app.query_one(ThemePicker)
+            picker.post_message(ThemePicker.Selected("wisp-orchid"))
+            assert app._overlay_controller is not None
+            app._overlay_controller.open(OverlayKind.decision)
+            await pilot.pause()
+            return app.theme, app._theme_picker_original
+
+    restored, original = anyio.run(scenario)
+    assert restored == "wisp"
+    assert original is None
+    assert load_theme_state(home_dir=tmp_path).active_theme is None
+
+
 def test_multiline_theme_prefix_remains_prompt_content() -> None:
     from wisp.tui.textual_app import TextualTui
 
