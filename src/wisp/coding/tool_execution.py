@@ -63,7 +63,7 @@ _RESULT_DATA_KEYS = {
     "read": ("line_count", "selected_count", "path"),
     "grep": ("count",),
     "find": ("count",),
-    "ls": ("entries", "path"),
+    "ls": ("entries", "entry_count", "path"),
 }
 
 
@@ -388,11 +388,13 @@ def _snapshot_result_data(
     elif tool_name in {"grep", "find"}:
         _copy_result_count(data, snapshot, "count")
     elif tool_name == "ls":
-        entries = data.get("entries")
-        if type(entries) is list:
-            entry_count = len(entries)
-            if entry_count <= _MAX_RESULT_COUNT:
-                snapshot["entry_count"] = entry_count
+        _copy_result_count(data, snapshot, "entry_count")
+        if "entry_count" not in snapshot:
+            entries = data.get("entries")
+            if type(entries) is list:
+                entry_count = len(entries)
+                if entry_count <= _MAX_RESULT_COUNT:
+                    snapshot["entry_count"] = entry_count
         _copy_exact(data, snapshot, "path", str)
     return snapshot
 

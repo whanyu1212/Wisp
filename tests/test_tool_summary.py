@@ -214,3 +214,14 @@ def test_long_path_is_middle_clipped_keeping_head_and_tail() -> None:
     assert "…" in summary
     # The interpolated path itself stayed within its own ceiling.
     assert len(summary) <= len("read 3 lines from ") + _PATH_MAX_CHARS
+
+
+def test_ls_summary_prefers_exact_entry_count_when_entries_are_bounded() -> None:
+    assert (
+        summarize_tool_result(
+            "ls",
+            {"path": "big/", "entries": ["a", "b"], "entry_count": 100},
+            truncated=True,
+        )
+        == "ls: 100 entries in big/ (+ more)"
+    )

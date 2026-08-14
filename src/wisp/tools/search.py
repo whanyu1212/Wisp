@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import codecs
 import fnmatch
+import heapq
 import os
 import re
 import shutil
@@ -156,7 +157,15 @@ class FindTool:
                 process_supervisor=self._process_supervisor,
             )
 
-        return _python_find(path=path, pattern=pattern, max_results=max_results, context=context)
+        return await anyio.to_thread.run_sync(
+            lambda: _python_find(
+                path=path,
+                pattern=pattern,
+                max_results=max_results,
+                context=context,
+            ),
+            abandon_on_cancel=True,
+        )
 
 
 class LsTool:
@@ -176,23 +185,9 @@ class LsTool:
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         path = resolve_tool_path(_optional_string(arguments, "path"), context)
         include_hidden = _optional_bool(arguments, "all", default=False)
-        if not path.is_dir():
-            raise ToolError(f"Directory does not exist: {display_tool_path(path, context)}")
-
-        entries = [
-            entry for entry in path.iterdir() if include_hidden or not entry.name.startswith(".")
-        ]
-        entries.sort(key=lambda entry: entry.name.lower())
-        names = [f"{entry.name}/" if entry.is_dir() else entry.name for entry in entries]
-        truncated = truncate_text(
-            "\n".join(names),
-            max_bytes=context.max_output_bytes,
-            max_lines=context.max_output_lines,
-        )
-        return ToolResult(
-            text=truncated.text,
-            data={"path": display_tool_path(path, context), "entries": names},
-            truncated=truncated.truncated,
+        return await anyio.to_thread.run_sync(
+            lambda: _python_ls(path=path, include_hidden=include_hidden, context=context),
+            abandon_on_cancel=True,
         )
 
 
@@ -553,14 +548,62 @@ def _python_find(
 ) -> ToolResult:
     if not path.exists():
         raise ToolError(f"Path does not exist: {display_tool_path(path, context)}")
-    matches = [
-        display_tool_path(candidate, context)
-        for candidate in _iter_files(path, context)
-        if _matches_glob(candidate, pattern, context)
-    ]
-    matches.sort()
+
+    # Display paths resolve file symlinks, so a lexically late candidate may sort
+    # before an earlier directory prefix. Scan the streamed candidates completely
+    # to preserve historical global ordering, but retain only the sorted prefix and
+    # one truncation lookahead in memory.
+    matches = heapq.nsmallest(
+        max_results + 1,
+        (
+            display_tool_path(candidate, context)
+            for candidate in _iter_files(path, context)
+            if _matches_glob(candidate, pattern, context)
+        ),
+    )
     return _result_from_lines(
         matches, max_results=max_results, context=context, count_label="files"
+    )
+
+
+def _python_ls(*, path: Path, include_hidden: bool, context: ToolContext) -> ToolResult:
+    if not path.is_dir():
+        raise ToolError(f"Directory does not exist: {display_tool_path(path, context)}")
+
+    entry_count = 0
+
+    def eligible_entries() -> Iterator[os.DirEntry[str]]:
+        nonlocal entry_count
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if not include_hidden and entry.name.startswith("."):
+                    continue
+                entry_count += 1
+                yield entry
+
+    retained_limit = min(
+        max(0, context.max_output_lines),
+        max(0, context.max_output_bytes),
+    )
+    retained = heapq.nsmallest(
+        retained_limit + 1,
+        eligible_entries(),
+        key=lambda entry: entry.name.lower(),
+    )
+    names = [f"{entry.name}/" if entry.is_dir() else entry.name for entry in retained]
+    truncated = truncate_text(
+        "\n".join(names),
+        max_bytes=context.max_output_bytes,
+        max_lines=context.max_output_lines,
+    )
+    return ToolResult(
+        text=truncated.text,
+        data={
+            "path": display_tool_path(path, context),
+            "entries": names[:retained_limit],
+            "entry_count": entry_count,
+        },
+        truncated=truncated.truncated,
     )
 
 

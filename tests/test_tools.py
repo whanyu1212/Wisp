@@ -4232,3 +4232,178 @@ def test_python_grep_splitlines_scans_long_lines_once_per_chunk(
 
     assert list(search_tools_module._iter_utf8_splitlines(path)) == ["x" * 100]
     assert scanned_chars == 100
+
+
+def test_find_tool_python_fallback_bounds_retained_matches(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    visited: list[str] = []
+
+    def files(_path: Path, _context: ToolContext) -> Iterable[Path]:
+        for name in ("skip.txt", "c.py", "secret.key", "b.py", "a.py"):
+            visited.append(name)
+            yield tmp_path / name
+
+    monkeypatch.setattr(search_tools_module, "_iter_files", files)
+    context = ToolContext(cwd=tmp_path, protected_paths=("*.key",))
+
+    result = run_tool(
+        FindTool(),
+        {"path": ".", "pattern": "*.py", "max_results": 1},
+        context,
+    )
+
+    assert result.text == "a.py\n[truncated]"
+    assert result.data == {"count": 2, "files": ["a.py"]}
+    assert result.truncated is True
+    assert visited == ["skip.txt", "c.py", "secret.key", "b.py", "a.py"]
+
+
+def test_find_tool_python_fallback_preserves_global_sorted_prefix(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "first.py").write_text("", encoding="utf-8")
+    (tmp_path / "y.py").write_text("", encoding="utf-8")
+    (tmp_path / "z.py").write_text("", encoding="utf-8")
+
+    result = run_tool(
+        FindTool(),
+        {"path": ".", "pattern": "*.py", "max_results": 1},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == "a/first.py\n[truncated]"
+    assert result.data == {"count": 2, "files": ["a/first.py"]}
+
+
+def test_find_tool_python_fallback_orders_file_symlinks_by_display_path(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "a.py").write_text("", encoding="utf-8")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "b.py").write_text("", encoding="utf-8")
+    (sub / "c.py").write_text("", encoding="utf-8")
+    try:
+        (sub / "z.py").symlink_to(tmp_path / "a.py")
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    result = run_tool(
+        FindTool(),
+        {"path": "sub", "pattern": "*.py", "max_results": 1},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == "a.py\n[truncated]"
+    assert result.data == {"count": 2, "files": ["a.py"]}
+
+
+def test_find_tool_python_fallback_runs_off_event_loop(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    started = threading.Event()
+    release = threading.Event()
+    original = search_tools_module._python_find
+
+    def blocking_find(**kwargs: object) -> ToolResult:
+        started.set()
+        release.wait(timeout=2)
+        return original(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(search_tools_module, "_python_find", blocking_find)
+
+    async def scenario() -> None:
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(FindTool().run, {}, ToolContext(cwd=tmp_path))
+            assert await anyio.to_thread.run_sync(started.wait, 1)
+            with anyio.fail_after(0.5):
+                await anyio.sleep(0)
+            release.set()
+
+    anyio.run(scenario)
+
+
+def test_find_tool_python_fallback_abandons_worker_wait_on_cancel(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_find(**_kwargs: object) -> ToolResult:
+        started.set()
+        release.wait(timeout=2)
+        return ToolResult(text="No files found")
+
+    monkeypatch.setattr(search_tools_module, "_python_find", blocking_find)
+
+    async def scenario() -> None:
+        with anyio.fail_after(0.5):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(FindTool().run, {}, ToolContext(cwd=tmp_path))
+                assert await anyio.to_thread.run_sync(started.wait, 1)
+                task_group.cancel_scope.cancel()
+        release.set()
+
+    anyio.run(scenario)
+
+
+def test_ls_tool_bounds_retained_entries_and_reports_exact_count(tmp_path: Path) -> None:
+    for index in range(20):
+        (tmp_path / f"entry-{index:02}.txt").write_text("", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path, max_output_bytes=100, max_output_lines=2)
+
+    result = run_tool(LsTool(), {"path": "."}, context)
+
+    assert result.text == "entry-00.txt\nentry-01.txt\n[truncated]"
+    assert result.data == {
+        "path": ".",
+        "entries": ["entry-00.txt", "entry-01.txt"],
+        "entry_count": 20,
+    }
+    assert result.truncated is True
+
+
+def test_ls_tool_preserves_case_insensitive_order_and_hidden_option(tmp_path: Path) -> None:
+    for name in ("a", "C", "b", ".hidden"):
+        (tmp_path / name).write_text("", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    visible = run_tool(LsTool(), {"path": "."}, context)
+    all_entries = run_tool(LsTool(), {"path": ".", "all": True}, context)
+
+    assert visible.data["entries"] == ["a", "b", "C"]
+    assert visible.data["entry_count"] == 3
+    assert all_entries.data["entries"] == [".hidden", "a", "b", "C"]
+    assert all_entries.data["entry_count"] == 4
+
+
+def test_ls_tool_runs_off_event_loop_and_abandons_worker_wait_on_cancel(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_ls(**_kwargs: object) -> ToolResult:
+        started.set()
+        release.wait(timeout=2)
+        return ToolResult(text="", data={"entries": [], "entry_count": 0})
+
+    monkeypatch.setattr(search_tools_module, "_python_ls", blocking_ls)
+
+    async def scenario() -> None:
+        with anyio.fail_after(0.5):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(LsTool().run, {}, ToolContext(cwd=tmp_path))
+                assert await anyio.to_thread.run_sync(started.wait, 1)
+                await anyio.sleep(0)
+                task_group.cancel_scope.cancel()
+        release.set()
+
+    anyio.run(scenario)
