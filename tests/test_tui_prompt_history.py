@@ -410,11 +410,11 @@ def test_history_overlay_is_bounded_above_composer(size: tuple[int, int]) -> Non
         app = TextualTui()
         async with app.run_test(size=size) as pilot:
             app.record_prompt("remember me")
+            editor_top = app.query_one("#input").region.y
             await pilot.press("ctrl+r")
             await pilot.pause()
             picker = app.query_one("#prompt-history", PromptHistoryPicker)
-            composer = app.query_one("#composer")
-            return picker.region.x, picker.region.right, picker.region.bottom - composer.region.y
+            return picker.region.x, picker.region.right, picker.region.bottom - editor_top
 
     left, right, bottom_delta = anyio.run(scenario)
     assert left >= 0

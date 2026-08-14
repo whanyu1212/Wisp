@@ -7,6 +7,7 @@ import json
 import os
 from contextlib import suppress
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 from pytest import MonkeyPatch
@@ -26,6 +27,7 @@ from wisp.events import (
     RpcCommandStarted,
     RpcMessageSnapshot,
     RpcMessagesReported,
+    SessionCostSummary,
     SkillInvoked,
     TrustResolved,
     TurnStarted,
@@ -63,6 +65,8 @@ from wisp.tui.widgets import (
     Transcript,
     TranscriptEmptyState,
     WorkingIndicator,
+    _format_textual_footer_line,
+    _textual_footer_parts,
 )
 from wisp.tui.widgets import (
     PromptEditor as Input,
@@ -4360,7 +4364,7 @@ def test_textual_retry_progress_preserves_compact_prompt_and_footer() -> None:
     footer, activity, footer_below_prompt, prompt_visible = anyio.run(scenario)
     assert "custom-provider-nam…" in activity
     assert "2/3" in activity
-    assert "openai-codex/gpt-5-codex" in footer
+    assert "gpt-5-codex · ChatGPT plan" in footer
     assert footer_below_prompt
     assert prompt_visible
 
@@ -4513,23 +4517,30 @@ def _status_after_snapshots(snapshots: list[TuiViewSnapshot]) -> tuple[str, bool
 
 def test_textual_footer_updates_without_stealing_input_focus() -> None:
     status_text, focus_ok = _status_after_snapshots(
-        [TuiViewSnapshot(status="running", input_hint="wisp(running)> ", input_mode="running")]
+        [
+            TuiViewSnapshot(
+                status="running",
+                input_hint="wisp(running)> ",
+                input_mode="running",
+                cwd="/tmp",
+            )
+        ]
     )
-    assert "running" in status_text
+    assert "esc cancel" in status_text
+    assert "Working" not in status_text
     assert focus_ok
 
 
 def test_textual_status_bar_renders_compact_footer_summary() -> None:
-    # The footer keeps cwd/session on the first line and status/model on the
-    # second. Tests run with cwd chdir'd into a long pytest tmp path (see
-    # conftest._isolate_settings), so under issue #72's cwd-outranks-session
-    # priority, session correctly drops here rather than surviving as before.
+    # The Textual footer is a single quiet row: context on the left, the active
+    # shortcut in the center, and model plus billing provenance on the right.
     status_text, _ = _status_after_snapshots(
         [
             TuiViewSnapshot(
                 status="running",
                 input_hint="wisp> ",
                 input_mode="running",
+                cwd="/tmp",
                 queued_follow_ups=2,
                 last_session="sess.json",
                 provider="openai",
@@ -4537,14 +4548,15 @@ def test_textual_status_bar_renders_compact_footer_summary() -> None:
             )
         ]
     )
-    assert "\n" in status_text
-    assert "running • queued 2" in status_text
-    assert "openai/gpt-test" in status_text
+    assert "\n" not in status_text
+    assert "/tmp · queued 2" in status_text
+    assert "esc cancel" in status_text
+    assert "gpt-test · API" in status_text
+    assert "sess.json" not in status_text
+    assert "openai/" not in status_text
 
 
-def test_textual_status_bar_shows_session_when_cwd_is_short() -> None:
-    # With a short cwd both fields fit, so session id still shows up whole —
-    # proving priority=left only drops session under genuine width pressure.
+def test_textual_status_bar_omits_session_even_when_cwd_is_short() -> None:
     status_text, _ = _status_after_snapshots(
         [
             TuiViewSnapshot(
@@ -4558,17 +4570,13 @@ def test_textual_status_bar_shows_session_when_cwd_is_short() -> None:
             )
         ]
     )
-    assert "session: sess.json" in status_text
+    assert "session:" not in status_text
+    assert "sess.json" not in status_text
 
 
 def test_textual_footer_fits_the_status_content_region() -> None:
-    # The footer is sized to the #status content region (padding-excluded), not
-    # the app width. The status bar has horizontal padding, and #status-bar now
-    # also sits inside the #composer panel's round border (1 column each side),
-    # so sizing from app width would over-pad each line and make the two-line
-    # footer wrap/clip. At an 80-col terminal the render region is 76 (80 minus
-    # 2 for #composer's border minus 2 for #status-bar's padding); no footer
-    # line may exceed it.
+    # The footer is sized to #status's padding-excluded content region. At an
+    # 80-column terminal its two-column horizontal padding leaves 76 cells.
     from rich.cells import cell_len
 
     async def scenario() -> tuple[int | None, list[int]]:
@@ -4592,7 +4600,8 @@ def test_textual_footer_fits_the_status_content_region() -> None:
             return app_instance.status_width(), [cell_len(ln) for ln in lines]
 
     region_width, line_widths = anyio.run(scenario)
-    assert region_width == 76  # app width 80 minus #composer's 2-col border minus 2-col padding
+    assert region_width == 76
+    assert len(line_widths) == 1
     assert all(w <= 76 for w in line_widths)  # no line overflows the render region
 
 
@@ -4600,7 +4609,8 @@ def test_textual_footer_renders_markup_in_cwd_and_model_literally() -> None:
     # The footer is plain data (cwd, session, provider/model), but Static renders
     # markup by default — so a cwd or model name containing bracket syntax would be
     # interpreted as style tags (restyle/hide/raise). The #status widget is built
-    # with markup=False, so such content must render verbatim with no style spans.
+    # with markup=False, so such content renders verbatim. The sole Rich span is
+    # the intentional billing-provenance accent.
     async def scenario() -> tuple[str, int]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test(size=(80, 24)) as pilot:
@@ -4624,7 +4634,95 @@ def test_textual_footer_renders_markup_in_cwd_and_model_literally() -> None:
     assert "[/red]" in plain  # cwd markup survives as literal text
     assert "[bold]" in plain
     assert "[/]" in plain  # model markup survives as literal text
-    assert span_count == 0  # nothing interpreted as a style span
+    assert span_count == 1
+
+
+@pytest.mark.parametrize(
+    ("provider", "cost", "expected"),
+    [
+        ("openai-codex", None, "ChatGPT plan"),
+        ("fake", None, "offline"),
+        ("openai", None, "API"),
+        (
+            "anthropic",
+            SessionCostSummary(known_usd=Decimal("0.042"), priced_record_count=1),
+            "API $0.042",
+        ),
+        (
+            "google",
+            SessionCostSummary(
+                known_usd=Decimal("0.042"),
+                complete=False,
+                priced_record_count=1,
+                unpriced_record_count=1,
+            ),
+            "API ≥$0.042",
+        ),
+        (
+            "custom",
+            SessionCostSummary(complete=False, unpriced_record_count=1),
+            "API unpriced",
+        ),
+    ],
+)
+def test_textual_footer_labels_current_billing_routes(
+    provider: str,
+    cost: SessionCostSummary | None,
+    expected: str,
+) -> None:
+    parts = _textual_footer_parts(
+        TuiViewSnapshot(
+            status="idle",
+            input_hint="wisp> ",
+            provider=provider,
+            cost=cost,
+        )
+    )
+
+    assert parts.billing == expected
+
+
+def test_textual_footer_adapts_context_and_priority_to_width() -> None:
+    parts = _textual_footer_parts(
+        TuiViewSnapshot(
+            status="running",
+            input_hint="wisp(running)> ",
+            input_mode="running",
+            cwd="/tmp/project",
+            provider="openai-codex",
+            model="gpt-5.6-sol",
+            context=threshold_budget(),
+        )
+    )
+
+    wide = _format_textual_footer_line(parts, width=120)
+    medium = _format_textual_footer_line(parts, width=80)
+    narrow = _format_textual_footer_line(parts, width=28)
+
+    assert "esc cancel" in wide
+    assert "gpt-5.6-sol · ChatGPT plan · context ~81%" in wide
+    assert "esc cancel" not in medium
+    assert "ChatGPT plan" in medium
+    assert "gpt-5.6-sol" not in narrow
+    assert narrow.strip() == "ChatGPT plan · ~81%"
+    assert cell_len(narrow) <= 28
+
+
+def test_textual_footer_marks_current_observed_context_as_exact() -> None:
+    estimated = threshold_budget()
+    current = estimated.model_copy(
+        update={
+            "observed_tokens": 53,
+            "observed_is_current": True,
+            "context_window": 100,
+        }
+    )
+    parts = _textual_footer_parts(
+        TuiViewSnapshot(status="idle", input_hint="wisp> ", context=current)
+    )
+
+    assert parts.context_wide == "context 53%"
+    assert parts.context_compact == "53%"
 
 
 def test_textual_footer_stays_below_input_without_stealing_focus() -> None:
@@ -6000,7 +6098,7 @@ def test_textual_multiline_editor_grows_to_a_bounded_height() -> None:
         async with app_instance.run_test(size=(60, 20)) as pilot:
             input_widget = app_instance.query_one("#input", Input)
             transcript = app_instance.query_one("#transcript", Transcript)
-            footer = app_instance.query_one("#status-bar")
+            footer = app_instance.query_one("#status")
             input_widget.value = "\n".join(f"line {index}" for index in range(12))
             await pilot.pause()
             return (
@@ -6765,13 +6863,7 @@ def test_textual_startup_text_wraps_instead_of_truncating_when_narrow(width: int
 
 
 def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
-    # The editor+status frame now lives on the shared #composer panel, not on
-    # #input directly (see test_textual_composer_frames_input_and_status_as_
-    # one_panel) — #input itself has no border or background of its own, so
-    # the idle-vs-focused visual state this test guards moved to #composer's
-    # `border`/`background` (round border, not the old underline-only
-    # `border_bottom`), driven by the same `:focus-within` a child gaining
-    # focus triggers.
+    # The prompt editor owns its complete frame, including the focused accent.
     async def scenario() -> dict[str, tuple[str, str, str, str, float]]:
         styles: dict[str, tuple[str, str, str, str, float]] = {}
         for theme in ("wisp", "wisp-light"):
@@ -6779,20 +6871,19 @@ def test_textual_composer_focus_styles_resolve_for_both_themes() -> None:
             async with app_instance.run_test() as pilot:
                 app_instance.theme = theme
                 input_widget = app_instance.query_one("#input", Input)
-                composer = app_instance.query_one("#composer")
                 app_instance.screen.set_focus(None)
                 await pilot.pause(0.25)
-                idle_background = composer.styles.background.hex
-                idle_border = composer.styles.border_top[1].hex
+                idle_background = input_widget.styles.background.hex
+                idle_border = input_widget.styles.border_top[1].hex
 
                 input_widget.focus()
                 await pilot.pause(0.25)
-                transition = composer.styles.transitions["border"]
+                transition = input_widget.styles.transitions["border"]
                 styles[theme] = (
                     idle_background,
-                    composer.styles.background.hex,
+                    input_widget.styles.background.hex,
                     idle_border,
-                    composer.styles.border_top[1].hex,
+                    input_widget.styles.border_top[1].hex,
                     transition.duration,
                 )
         return styles
@@ -6844,64 +6935,46 @@ def test_textual_transcript_hides_scrollbar_chrome_without_disabling_scrolling()
 
 def test_textual_input_is_pinned_to_the_bottom() -> None:
     # Regression: a wrapping Container defaulted to height:1fr and floated the
-    # input into the middle. The transcript should own the free space (1fr) while
-    # the composer (bordered editor + status panel) plus the keybinding hint row
-    # below it hug the bottom rows. The composer is taller than the old
-    # borderless input (border top/bottom rules plus an internal status divider
-    # add rows) and the hint row adds one more below it, so the margin from the
-    # bottom is wider than before — the input itself must still sit in the
-    # composer's top row, not floated into the middle of the screen.
+    # input into the middle. The transcript owns the free space while the
+    # bordered editor and single-row footer hug the bottom.
     async def scenario() -> tuple[int, int, int, int]:
         app_instance = TextualTui()
         async with app_instance.run_test(size=(74, 24)) as pilot:
             await pilot.pause()
             input_widget = app_instance.query_one("#input", Input)
             transcript = app_instance.query_one("#transcript", Transcript)
-            hint = app_instance.query_one("#keybinding-hint")
+            footer = app_instance.query_one("#status")
             return (
                 app_instance.size.height,
                 input_widget.region.y,
                 transcript.region.height,
-                hint.region.bottom,
+                footer.region.bottom,
             )
 
-    screen_h, input_top, transcript_h, hint_bottom = anyio.run(scenario)
-    # The composer (and the input inside it) sits in the last several rows; the
-    # transcript fills most of the height above it; the hint row is the very
-    # last thing on screen.
-    assert input_top >= screen_h - 7
-    assert hint_bottom == screen_h
+    screen_h, input_top, transcript_h, footer_bottom = anyio.run(scenario)
+    assert input_top >= screen_h - 5
+    assert footer_bottom == screen_h
     assert transcript_h >= screen_h // 2
 
 
-def test_textual_keybinding_hint_lists_only_real_bindings() -> None:
-    # Persistent, low-contrast reminder below the composer — must only name
-    # affordances that actually exist (all currently show=False, i.e. hidden
-    # from Textual's own footer/help): `/` for the slash-command menu, Enter/
-    # Space to expand a focused ToolCard, Escape to leave a card back to the
-    # input. Not folded into format_tui_footer_lines (shared with line/
-    # fullscreen renderers) — this is Textual-only chrome.
-    async def scenario() -> tuple[str, bool]:
-        app_instance = TextualTui()
-        async with app_instance.run_test() as pilot:
-            await pilot.pause()
-            hint = app_instance.query_one("#keybinding-hint", Static)
-            content = hint.render()
-            assert isinstance(content, Content)
-            return content.plain, hint.display
+def test_textual_footer_shortcuts_are_contextual() -> None:
+    idle = _textual_footer_parts(
+        TuiViewSnapshot(status="idle", input_hint="wisp> ", input_mode="idle")
+    )
+    running = _textual_footer_parts(
+        TuiViewSnapshot(status="running", input_hint="wisp(running)> ", input_mode="running")
+    )
+    approval = _textual_footer_parts(
+        TuiViewSnapshot(status="approval", input_hint="", input_mode="approval")
+    )
 
-    text, displayed = anyio.run(scenario)
-    assert "/ commands" in text
-    assert "shift+enter/ctrl+j newline" in text
-    assert "esc cancel" in text
-    assert "ctrl+c×2 quit" in text
-    assert displayed
+    assert idle.center == "↵ send · / commands"
+    assert running.center == "esc cancel"
+    assert approval.center == ""
 
 
 def test_textual_input_placeholder_uses_the_prompt_glyph() -> None:
-    # The underline-only input leads with a `❯` glyph, not the verbose `wisp>`
-    # chrome. The shared semantic hint (wisp> / wisp(running)>) maps to the same
-    # quiet glyph because command activity remains visible in the transcript.
+    # The placeholder explains the editor's current submission semantics.
     async def scenario() -> tuple[str, str]:
         app_instance, renderer = create_textual_tui()
         async with app_instance.run_test() as pilot:
@@ -6913,62 +6986,64 @@ def test_textual_input_placeholder_uses_the_prompt_glyph() -> None:
             return idle_placeholder, input_widget.placeholder
 
     idle_placeholder, running_placeholder = anyio.run(scenario)
-    assert idle_placeholder == "❯ "
-    assert running_placeholder == "❯ "
+    assert idle_placeholder == "❯ Ask Wisp anything…"
+    assert running_placeholder == "❯ Add a follow-up…"
 
 
-def test_textual_composer_frames_input_and_status_as_one_panel() -> None:
-    # The editor and status line are framed together as one bordered #composer
-    # panel (input above, status below, no divider between them save the
-    # status bar's own top rule) rather than a borderless underline input
-    # floating over a separately-backgrounded status bar. #input itself carries
-    # no border of its own — the frame belongs to the shared parent, not
-    # duplicated on the child — so this asserts that split explicitly, guarding
-    # against a regression back to either the old per-widget underline or an
-    # accidental double border.
-    async def scenario() -> tuple[object, object]:
+def test_textual_prompt_editor_owns_complete_frame() -> None:
+    async def scenario() -> tuple[object, int]:
         app_instance = TextualTui()
         async with app_instance.run_test() as pilot:
             await pilot.pause()
             input_widget = app_instance.query_one("#input", Input)
-            composer = app_instance.query_one("#composer")
-            return input_widget.styles.border, composer.styles.border
+            return input_widget.styles.border, len(list(app_instance.query("#composer")))
 
-    input_border, composer_border = anyio.run(scenario)
-    # Textual's Edges exposes each side as an (edge_type, color) tuple; "" means
-    # no rule on that side.
-    assert input_border.top[0] == ""
-    assert input_border.left[0] == ""
-    assert input_border.right[0] == ""
-    assert input_border.bottom[0] == ""
-    assert composer_border.top[0] == "round"
-    assert composer_border.bottom[0] == "round"
-    assert composer_border.left[0] == "round"
-    assert composer_border.right[0] == "round"
+    input_border, composer_count = anyio.run(scenario)
+    assert input_border.top[0] == "round"
+    assert input_border.bottom[0] == "round"
+    assert input_border.left[0] == "round"
+    assert input_border.right[0] == "round"
+    assert composer_count == 0
 
 
-def test_textual_composer_frame_clicks_focus_prompt_editor() -> None:
-    async def scenario() -> list[bool]:
+@pytest.mark.parametrize("terminal_width", [40, 120])
+def test_textual_prompt_editor_border_clicks_focus_every_cell(terminal_width: int) -> None:
+    async def scenario() -> list[tuple[int, int]]:
         app_instance = TextualTui()
-        async with app_instance.run_test(size=(80, 24)) as pilot:
+        async with app_instance.run_test(size=(terminal_width, 24)) as pilot:
             await pilot.pause()
             input_widget = app_instance.query_one("#input", Input)
-            composer = app_instance.query_one("#composer")
-            width = composer.region.width
-            height = composer.region.height
-            focused: list[bool] = []
-            for offset in (
-                (width // 2, 0),
-                (width // 2, height - 1),
-                (0, height // 2),
-                (width - 1, height // 2),
-            ):
+            width = input_widget.region.width
+            height = input_widget.region.height
+            border = {(x, 0) for x in range(width)}
+            border.update((x, height - 1) for x in range(width))
+            border.update((0, y) for y in range(height))
+            border.update((width - 1, y) for y in range(height))
+            missed: list[tuple[int, int]] = []
+            for offset in sorted(border):
                 app_instance.screen.set_focus(None)
-                assert await pilot.click("#composer", offset=offset)
-                focused.append(input_widget.has_focus)
-            return focused
+                clicked = await pilot.click("#input", offset=offset)
+                if not clicked or not input_widget.has_focus:
+                    missed.append(offset)
+            return missed
 
-    assert anyio.run(scenario) == [True, True, True, True]
+    assert anyio.run(scenario) == []
+
+
+def test_textual_prompt_editor_inner_click_preserves_cursor_placement() -> None:
+    async def scenario() -> tuple[bool, int]:
+        app_instance = TextualTui()
+        async with app_instance.run_test(size=(80, 24)) as pilot:
+            input_widget = app_instance.query_one("#input", Input)
+            input_widget.value = "abcdef"
+            input_widget.cursor_location = (0, len(input_widget.value))
+            await pilot.pause()
+            assert await pilot.click("#input", offset=(2, 1))
+            return input_widget.has_focus, input_widget.cursor_location[1]
+
+    focused, cursor_column = anyio.run(scenario)
+    assert focused
+    assert cursor_column < len("abcdef")
 
 
 def test_textual_wheel_uses_one_row_sensitivity() -> None:

@@ -129,28 +129,17 @@ _SESSION_OPERATION_LABELS: dict[OverlayOperation, str] = {
     OverlayOperation.session_switch: "Switching session…",
 }
 
-# Persistent, low-contrast keybinding reminder below the composer. Only real,
-# currently-hidden (show=False) affordances — not aspirational: `/` opens the
-# slash-command menu (detected from typed input, not a Binding); Enter/Space
-# toggle a focused ToolCard's expand/collapse (ToolCard.BINDINGS); Escape
-# returns focus from a card to the input (ToolCard.BINDINGS "leave" action).
-# Textual-only chrome — deliberately not folded into format_tui_footer_lines,
-# which the line/fullscreen renderers also consume.
-_KEYBINDING_HINT = (
-    "shift+enter/ctrl+j newline   esc cancel   ctrl+g guide   ctrl+c×2 quit   / commands"
-)
-
 # The input's prompt glyph. The shell hands the Textual renderer a semantic hint
 # (`wisp> `, `wisp(running)> `, `approve? [y/N] `) shared with the line/fullscreen
-# renderers; the underline-only input reads better with a single terminal-native
-# glyph than the verbose `wisp>` chrome, so we swap it in the Textual layer only.
+# renderers; Textual turns those states into concise editor guidance behind one
+# terminal-native glyph instead of repeating the verbose `wisp>` chrome.
 _PROMPT_GLYPH = "❯"
 
-# Semantic-hint → terse Textual placeholder. Command activity is shown by the
-# persistent transcript heartbeat, so idle and running share the same quiet glyph.
+# Semantic-hint → terse Textual placeholder. Command activity remains in the
+# persistent transcript heartbeat while the editor explains what submission does.
 _INPUT_PLACEHOLDERS: dict[str, str] = {
-    "wisp> ": f"{_PROMPT_GLYPH} ",
-    "wisp(running)> ": f"{_PROMPT_GLYPH} ",
+    "wisp> ": f"{_PROMPT_GLYPH} Ask Wisp anything…",
+    "wisp(running)> ": f"{_PROMPT_GLYPH} Add a follow-up…",
     "wisp(exiting)> ": f"{_PROMPT_GLYPH} exiting…",
     "approve? [y/N] ": f"{_PROMPT_GLYPH} approve? [y/N]",
 }
@@ -334,50 +323,27 @@ class TextualTui(App[None]):
         outline-left: heavy $accent;
     }
 
-    /* One bordered panel frames the editor and its status line as a single
-       card — quiet ($secondary) at rest, accent when the editor has focus.
-       Keep the background stable so focus feedback does not create a
-       disjointed block around the composer. */
-    #composer {
+    /* The focusable editor owns its own visible card. The visual and pointer
+       hit targets therefore match at every edge and corner. */
+    #input {
         height: auto;
+        max-height: 8;
         border: round $secondary;
         background: $background;
+        padding: 0 1;
         transition: border 200ms;
     }
 
-    #composer:focus-within {
+    #input:focus {
         border: round $accent;
         background: $background;
     }
 
-    #status-bar {
-        height: auto;
-        padding: 0 1;
-        color: $text-muted;
-        align-vertical: middle;
-        border-top: solid $secondary 40%;
-    }
-
     #status {
         width: 1fr;
-        min-height: 2;
-        height: auto;
-    }
-
-    #keybinding-hint {
         height: 1;
         padding: 0 2;
         color: $text-muted;
-        text-align: right;
-        text-style: dim;
-    }
-
-    #input {
-        height: auto;
-        max-height: 8;
-        border: none;
-        padding: 0 1;
-        background: transparent;
     }
 
     HelpPanel {
@@ -545,28 +511,10 @@ class TextualTui(App[None]):
             yield ConnectPanel(id="connect-panel")
             yield ModelPicker(id="model-picker")
             yield SessionPicker(id="session-picker")
-            # #composer frames the editor and status line as one bordered panel
-            # (input above, status below, no divider between them) instead of a
-            # borderless underline input floating over a separately-backgrounded
-            # status bar. height: auto is required here — an unstyled Vertical
-            # inside this outer Vertical defaults to 1fr and would float the
-            # whole composer into the middle of the screen (see the note this
-            # replaces, same landmine, now on the wrapper instead of #input).
-            with Vertical(id="composer"):
-                yield PromptEditor(placeholder=_input_placeholder("wisp> "), id="input")
-                with Horizontal(id="status-bar"):
-                    # StatusBar owns the shell snapshot and transient spinner so
-                    # the same two-line footer surface can reflow safely at
-                    # compact widths.
-                    yield StatusBar(id="status")
-            yield Static(_KEYBINDING_HINT, id="keybinding-hint", markup=False)
-
-    @on(events.Click, "#composer")
-    def focus_prompt_editor_from_composer(self, event: events.Click) -> None:
-        """Make the composer's frame and status area focus the prompt editor."""
-
-        if event.button == 1 and self._input is not None:
-            self._input.focus()
+            yield PromptEditor(placeholder=_input_placeholder("wisp> "), id="input")
+            # Textual uses a distinct one-row information hierarchy. The shared
+            # Rich/prompt-toolkit renderers retain their existing two-line footer.
+            yield StatusBar(id="status")
 
     async def on_mount(self) -> None:
         # Retain an application title for terminal metadata without spending a
@@ -629,6 +577,8 @@ class TextualTui(App[None]):
         # mounted LineMessage widgets keep their baked-in markup colors.
         if self.is_running:
             self._role_styles = role_styles(self.current_theme)
+            if self._status is not None:
+                self._status.refresh_theme()
 
     async def on_prompt_editor_submitted(self, event: PromptEditor.Submitted) -> None:
         # Enter on a highlighted menu item accepts THAT command (Claude-Code/Codex/
@@ -1473,10 +1423,18 @@ class TextualTui(App[None]):
         overlays = self._overlay_controller
         if overlays is None:
             return
+        editor_top = self._input.region.y
         overlays.open(OverlayKind.prompt_history, preserve_viewport=True)
-        composer = self.query_one("#composer")
-        picker.styles.max_height = max(4, composer.region.y)
+        picker.styles.max_height = max(4, editor_top)
+        picker.styles.offset = (0, "-100%")
         picker.show(self._input_controller.prompt_history_entries)
+
+        def anchor_above_editor() -> None:
+            overlap = picker.region.bottom - editor_top
+            if overlap > 0:
+                picker.styles.offset = (0, -picker.region.height - overlap)
+
+        self.call_after_refresh(anchor_above_editor)
 
     # Scrollback: delegate to the Transcript's own scroll actions. Its scroll
     # watcher derives follow intent for normal movement; End uses return_to_latest

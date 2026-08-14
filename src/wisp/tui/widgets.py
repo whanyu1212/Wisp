@@ -53,6 +53,7 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
+from wisp.coding.costs import format_cost_summary
 from wisp.events import (
     RpcSessionSummary,
     RpcSkillCatalogSnapshot,
@@ -89,8 +90,9 @@ from wisp.tui.diff_presentation import (
 from wisp.tui.overlay import TranscriptViewportState
 from wisp.tui.rendering import (
     TuiViewSnapshot,
+    _footer_context_text,
+    _format_cwd_for_footer,
     _truncate_to_cell_width,
-    format_tui_footer_text,
 )
 from wisp.tui.tool_call import (
     ToolActionStatus,
@@ -2724,12 +2726,171 @@ class WorkingIndicator(Static):
         self._rendered_width = width
 
 
-class StatusBar(Static):
-    """Stable footer — cwd / session / model. No spinner, no transient state.
+@dataclass(frozen=True)
+class _TextualFooterParts:
+    """Semantic fields for Textual's single-row adaptive footer."""
 
-    The working heartbeat now lives in the transcript as ``WorkingIndicator``
-    (opencode-style), so the footer stays calm and persistent.
-    """
+    left: str
+    activity: str
+    center: str
+    model: str
+    billing: str
+    context_wide: str
+    context_compact: str
+
+
+def _textual_footer_parts(snapshot: TuiViewSnapshot) -> _TextualFooterParts:
+    activity_parts = ["plan"] if snapshot.mode == "plan" else []
+    if snapshot.queued_follow_ups:
+        activity_parts.append(f"queued {snapshot.queued_follow_ups}")
+    activity = " · ".join(activity_parts)
+    cwd = _format_cwd_for_footer(snapshot.cwd)
+    left = " · ".join(part for part in (cwd, activity) if part)
+    center = (
+        "esc cancel"
+        if snapshot.input_mode == "running"
+        else "↵ send · / commands"
+        if snapshot.input_mode == "idle"
+        else ""
+    )
+    context_wide, context_compact = _textual_context_parts(snapshot)
+    return _TextualFooterParts(
+        left=left,
+        activity=activity,
+        center=center,
+        model=snapshot.model or "",
+        billing=_textual_billing_text(snapshot),
+        context_wide=context_wide,
+        context_compact=context_compact,
+    )
+
+
+def _textual_billing_text(snapshot: TuiViewSnapshot) -> str:
+    if snapshot.provider == "openai-codex":
+        return "ChatGPT plan"
+    if snapshot.provider == "fake":
+        return "offline"
+    if snapshot.provider is None:
+        return ""
+
+    cost = snapshot.cost
+    if cost is None or (cost.priced_record_count == 0 and cost.unpriced_record_count == 0):
+        return "API"
+    summary = format_cost_summary(cost)
+    if summary == "cost unknown":
+        return "API unpriced"
+    return f"API {summary.removeprefix('cost ')}"
+
+
+def _textual_context_parts(snapshot: TuiViewSnapshot) -> tuple[str, str]:
+    context = snapshot.context
+    if context is None:
+        return "", ""
+    observed_is_current = (
+        context.observed_is_current
+        and context.observed_tokens is not None
+        and context.context_window is not None
+    )
+    percent = context.estimated_percent
+    if observed_is_current:
+        assert context.observed_tokens is not None
+        assert context.context_window is not None
+        percent = context.observed_tokens / context.context_window * 100
+    if percent is not None:
+        marker = "" if observed_is_current else "~"
+        compact = f"{marker}{percent:.0f}%"
+        return f"context {compact}", compact
+
+    compact = _footer_context_text(context)
+    if not compact:
+        return "", ""
+    return compact.replace("ctx ", "context ", 1), compact
+
+
+def _joined_footer_fields(*parts: str) -> str:
+    return " · ".join(part for part in parts if part)
+
+
+def _position_footer_fields(
+    left: str,
+    center: str,
+    right: str,
+    width: int | None,
+) -> str | None:
+    """Place three fields without overlap, returning ``None`` when they collide."""
+
+    if width is None:
+        return "  ".join(part for part in (left, center, right) if part)
+    left_width = cell_len(left)
+    center_width = cell_len(center)
+    right_width = cell_len(right)
+    if max(left_width, center_width, right_width) > width:
+        return None
+
+    right_start = width - right_width
+    if not center:
+        if left and right and left_width + 2 > right_start:
+            return None
+        return left + " " * max(0, right_start - left_width) + right
+
+    center_start = (width - center_width) // 2
+    if left and left_width + 2 > center_start:
+        return None
+    if right and center_start + center_width + 2 > right_start:
+        return None
+    return (
+        left
+        + " " * max(0, center_start - left_width)
+        + center
+        + " " * max(0, right_start - center_start - center_width)
+        + right
+    )
+
+
+def _format_textual_footer_line(
+    parts: _TextualFooterParts,
+    *,
+    width: int | None,
+) -> str:
+    full_right = _joined_footer_fields(
+        parts.model,
+        parts.billing,
+        parts.context_wide,
+    )
+    without_model = _joined_footer_fields(parts.billing, parts.context_wide)
+    compact_context = _joined_footer_fields(parts.billing, parts.context_compact)
+    candidates = [
+        (parts.left, parts.center, full_right),
+        (parts.left, "", full_right),
+        (parts.left, "", without_model),
+        (parts.left, "", compact_context),
+    ]
+    if parts.activity and parts.activity != parts.left:
+        candidates.append((parts.activity, "", compact_context))
+    candidates.extend(
+        ("", "", right)
+        for right in (
+            compact_context,
+            parts.billing,
+            parts.context_compact,
+            parts.model,
+        )
+        if right
+    )
+    candidates.extend((left, "", "") for left in (parts.activity, parts.left) if left)
+
+    selected_width = max(1, width) if width is not None else None
+    for left, center, right in dict.fromkeys(candidates):
+        line = _position_footer_fields(left, center, right, selected_width)
+        if line is not None:
+            return line
+
+    fallback = parts.activity or parts.billing or parts.context_compact or parts.left or parts.model
+    return _truncate_to_cell_width(fallback, selected_width)
+
+
+class StatusBar(Static):
+    """Textual-only single-row footer with adaptive context and billing fields."""
 
     def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
         super().__init__("idle", id=id, markup=False)
@@ -2747,7 +2908,20 @@ class StatusBar(Static):
 
     def _render_status(self) -> None:
         width = self.content_size.width
-        self.update(format_tui_footer_text(self._snapshot, width=width if width > 0 else None))
+        parts = _textual_footer_parts(self._snapshot)
+        line = _format_textual_footer_line(parts, width=width if width > 0 else None)
+        rendered = Text(line)
+        if parts.billing and (start := line.rfind(parts.billing)) >= 0:
+            theme = self.app.current_theme
+            accent = theme.accent or theme.foreground
+            if accent is not None:
+                rendered.stylize(accent, start, start + len(parts.billing))
+        self.update(rendered)
+
+    def refresh_theme(self) -> None:
+        """Re-resolve the billing accent after a live theme change."""
+
+        self._render_status()
 
 
 class _AssistantCodeBlock(CodeBlock):
