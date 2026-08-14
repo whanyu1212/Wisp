@@ -8,6 +8,7 @@ import re
 import shutil
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import anyio
@@ -401,52 +402,65 @@ def _python_grep(
             continue
         file_output_start = len(output)
         file_match_start = match_count
+        file_had_extra_match = False
         try:
             with file_path.open("r", encoding="utf-8") as file:
-                window: deque[tuple[int, str]] = deque(maxlen=effective_context_lines * 2 + 1)
-                processed_line = 0
+                preceding: deque[tuple[int, str]] = deque(maxlen=effective_context_lines)
+                active_contexts: list[_StreamingMatchContext] = []
                 for line_number, raw_line in enumerate(file, start=1):
-                    window.append((line_number, raw_line.rstrip("\r\n")))
-                    candidate_number = line_number - effective_context_lines
-                    if candidate_number <= processed_line:
-                        continue
-                    candidate = next(text for number, text in window if number == candidate_number)
-                    if matcher(candidate):
-                        if match_count >= max_results:
-                            return _result_from_grep_lines(
-                                output,
-                                max_results=max_results,
-                                context=context,
-                                force_truncated=True,
+                    line = raw_line.rstrip("\r\n")
+                    completed_contexts: list[_StreamingMatchContext] = []
+                    for active in active_contexts:
+                        if active.remaining_after > 0:
+                            active.lines.append(
+                                _format_grep_record(file_path, line_number, line, False, context)
                             )
-                        match_count += 1
-                        output.extend(
-                            _format_streaming_context(file_path, window, candidate_number, context)
-                        )
-                    processed_line = candidate_number
+                            active.remaining_after -= 1
+                        if active.remaining_after == 0:
+                            completed_contexts.append(active)
+                    for completed in completed_contexts:
+                        output.extend(completed.lines)
+                        active_contexts.remove(completed)
 
-                # Flush candidates near EOF that never accumulated a full trailing
-                # context window. The deque retains all context they can require.
-                for candidate_number, candidate in tuple(window):
-                    if candidate_number <= processed_line:
-                        continue
-                    if matcher(candidate):
+                    if not file_had_extra_match and matcher(line):
                         if match_count >= max_results:
-                            return _result_from_grep_lines(
-                                output,
-                                max_results=max_results,
-                                context=context,
-                                force_truncated=True,
+                            # Keep consuming this file to validate its complete UTF-8
+                            # contents. A later decode error must discard all matches
+                            # from the file, matching the fallback's text-file policy.
+                            file_had_extra_match = True
+                        else:
+                            match_count += 1
+                            match_lines = [
+                                _format_grep_record(file_path, number, text, False, context)
+                                for number, text in preceding
+                            ]
+                            match_lines.append(
+                                _format_grep_record(file_path, line_number, line, True, context)
                             )
-                        match_count += 1
-                        output.extend(
-                            _format_streaming_context(file_path, window, candidate_number, context)
-                        )
-                    processed_line = candidate_number
+                            if effective_context_lines:
+                                active_contexts.append(
+                                    _StreamingMatchContext(
+                                        lines=match_lines,
+                                        remaining_after=effective_context_lines,
+                                    )
+                                )
+                            else:
+                                output.extend(match_lines)
+                    preceding.append((line_number, line))
+                for active in active_contexts:
+                    output.extend(active.lines)
         except UnicodeDecodeError:
             del output[file_output_start:]
             match_count = file_match_start
             continue
+
+        if file_had_extra_match:
+            return _result_from_grep_lines(
+                output,
+                max_results=max_results,
+                context=context,
+                force_truncated=True,
+            )
 
     if not output:
         return ToolResult(text="No matches", data={"count": 0, "matches": []})
@@ -458,18 +472,21 @@ def _python_grep(
     )
 
 
-def _format_streaming_context(
+@dataclass(slots=True)
+class _StreamingMatchContext:
+    lines: list[str]
+    remaining_after: int
+
+
+def _format_grep_record(
     file_path: Path,
-    window: Iterable[tuple[int, str]],
-    match_line_number: int,
+    line_number: int,
+    line: str,
+    is_match: bool,
     context: ToolContext,
-) -> list[str]:
-    path_display = display_tool_path(file_path, context)
-    formatted: list[str] = []
-    for line_number, line in window:
-        separator = ":" if line_number == match_line_number else "-"
-        formatted.append(f"{path_display}{separator}{line_number}{separator}{line}")
-    return formatted
+) -> str:
+    separator = ":" if is_match else "-"
+    return f"{display_tool_path(file_path, context)}{separator}{line_number}{separator}{line}"
 
 
 def _python_find(

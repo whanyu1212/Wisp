@@ -4134,3 +4134,36 @@ def test_ls_tool_truncates_large_output(tmp_path: Path) -> None:
 
     assert result.text == "a.txt\n[truncated]"
     assert result.truncated is True
+
+
+def test_grep_tool_python_fallback_bounds_eof_context_to_requested_radius(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text("one\ntwo\nthree\nfour\nmatch\n", encoding="utf-8")
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "match", "literal": True, "context": 2},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == "data.txt-3-three\ndata.txt-4-four\ndata.txt:5:match"
+
+
+def test_grep_tool_python_fallback_discards_matches_from_invalid_utf8_file(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_bytes(b"match\nmatch\n\xff")
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "match", "literal": True, "max_results": 1},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == "No matches"
+    assert result.data == {"count": 0, "matches": []}
