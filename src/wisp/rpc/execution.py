@@ -2392,6 +2392,10 @@ async def run_rpc_prompt_command(
     run_active_leaf_id: str | None = None
     run_start_captured = False
 
+    async def mark_prompt_ready() -> None:
+        with anyio.CancelScope(shield=True):
+            await send.send(_RpcPromptReady(command_id=command_id))
+
     async def track_run_start(events: AsyncIterator[WispEvent]) -> AsyncIterator[WispEvent]:
         nonlocal run_active_leaf_id, run_entry_start, run_start_captured
         async for event in events:
@@ -2406,8 +2410,6 @@ async def run_rpc_prompt_command(
                 )
                 run_start_captured = True
                 yield event
-                with anyio.CancelScope(shield=True):
-                    await send.send(_RpcPromptReady(command_id=command_id))
                 continue
             yield event
 
@@ -2425,6 +2427,7 @@ async def run_rpc_prompt_command(
                     operation_id=command_id,
                     operation_instructions=operation_instructions,
                     operation_tool_names=operation_tool_names,
+                    operation_ready=mark_prompt_ready,
                 )
                 if operation_context is None
                 else agent.run(
@@ -2435,6 +2438,7 @@ async def run_rpc_prompt_command(
                     tool_context=operation_context,
                     operation_instructions=operation_instructions,
                     operation_tool_names=operation_tool_names,
+                    operation_ready=mark_prompt_ready,
                 )
             )
             await render_events(track_run_start(agent_events))

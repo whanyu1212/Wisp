@@ -9,9 +9,11 @@ from typing import Any, cast
 import anyio
 import pytest
 
+import wisp.coding.session as session_module
 import wisp.coding.tool_execution as tool_execution
 from wisp.agent.execution import ToolResultProcessingError
 from wisp.agent.messages import Message
+from wisp.agent.prompt import build_prompt_messages
 from wisp.agent.transcript import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.coding.session import CodingSession, _prompt_cache_key, _tool_result_status
 from wisp.events import (
@@ -98,6 +100,87 @@ class CapturingProvider:
         yield ProviderResponseStarted(model=model or self.default_model or self.name)
         yield ProviderTextDelta(delta="done")
         yield ProviderResponseCompleted(content="done")
+
+
+def test_coding_session_builds_trusted_prompt_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_started = threading.Event()
+    worker_release = threading.Event()
+    worker_threads: list[int] = []
+    original_build = build_prompt_messages
+
+    def blocking_build(**kwargs: object) -> tuple[Message, ...]:
+        worker_threads.append(threading.get_ident())
+        worker_started.set()
+        worker_release.wait(timeout=2)
+        return original_build(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(session_module, "build_prompt_messages", blocking_build)
+
+    async def scenario() -> tuple[bool, int]:
+        agent = CodingSession(
+            provider=CapturingProvider(),
+            sessions=JsonlSessionStore(tmp_path / "sessions"),
+            tool_context=ToolContext(cwd=tmp_path),
+            trusted=True,
+        )
+        completed = anyio.Event()
+
+        async def run_agent() -> None:
+            _ = [event async for event in agent.run("hello")]
+            completed.set()
+
+        event_loop_thread = threading.get_ident()
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(run_agent)
+            assert await anyio.to_thread.run_sync(worker_started.wait, 1)
+            await anyio.sleep(0)
+            responsive = not completed.is_set()
+            worker_release.set()
+        return responsive, event_loop_thread
+
+    responsive, event_loop_thread = anyio.run(scenario)
+
+    assert responsive
+    assert worker_threads
+    assert all(thread_id != event_loop_thread for thread_id in worker_threads)
+
+
+def test_coding_session_prompt_construction_is_abandoned_on_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_started = threading.Event()
+    worker_release = threading.Event()
+
+    def blocking_build(**_kwargs: object) -> tuple[Message, ...]:
+        worker_started.set()
+        worker_release.wait(timeout=2)
+        return ()
+
+    monkeypatch.setattr(session_module, "build_prompt_messages", blocking_build)
+
+    async def scenario() -> None:
+        agent = CodingSession(
+            provider=CapturingProvider(),
+            sessions=JsonlSessionStore(tmp_path / "sessions"),
+            tool_context=ToolContext(cwd=tmp_path),
+            trusted=True,
+        )
+
+        async def run_agent() -> None:
+            _ = [event async for event in agent.run("hello")]
+
+        with anyio.fail_after(0.5):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(run_agent)
+                assert await anyio.to_thread.run_sync(worker_started.wait, 1)
+                task_group.cancel_scope.cancel()
+        worker_release.set()
+
+    anyio.run(scenario)
 
 
 class BlockingCapturingProvider(CapturingProvider):

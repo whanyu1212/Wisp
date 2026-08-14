@@ -18,11 +18,7 @@ from wisp.agent.messages import (
     provider_history_message,
 )
 from wisp.agent.mode import DEFAULT_AGENT_MODE, PLAN_MODE_SYSTEM_PROMPT, AgentMode
-from wisp.agent.prompt import (
-    DEFAULT_CONTEXT_MAX_CHARS,
-    build_prompt_messages,
-    resolve_project_context_root,
-)
+from wisp.agent.prompt import DEFAULT_CONTEXT_MAX_CHARS, build_prompt_messages
 from wisp.agent.transcript import plan_interrupted_tool_repairs
 from wisp.coding.compaction import (
     CompactionSummary,
@@ -477,6 +473,7 @@ class CodingSession:
         tool_context: ToolContext | None = None,
         operation_instructions: str | None = None,
         operation_tool_names: frozenset[str] | None = None,
+        operation_ready: Callable[[], Awaitable[None]] | None = None,
     ) -> AsyncIterator[WispEvent]:
         async with self._operation_lock:
             self._operation_active = True
@@ -488,6 +485,7 @@ class CodingSession:
                 tool_context=tool_context,
                 operation_instructions=operation_instructions,
                 operation_tool_names=operation_tool_names,
+                operation_ready=operation_ready,
             )
             try:
                 async for event in events:
@@ -518,6 +516,7 @@ class CodingSession:
         tool_context: ToolContext | None = None,
         operation_instructions: str | None = None,
         operation_tool_names: frozenset[str] | None = None,
+        operation_ready: Callable[[], Awaitable[None]] | None = None,
     ) -> AsyncGenerator[WispEvent, None]:
         operation_context = tool_context or self.tool_context
         user_message = await self._prepare_user_message(prompt, context=operation_context)
@@ -564,16 +563,6 @@ class CodingSession:
                     tool for tool in effective_tools if tool.name in allowed_names
                 )
             operation_policy = ToolPolicy.allow_tool_names(allowed_names)
-        prompt_messages = self._prompt_messages(
-            effective_tools,
-            registry=operation_registry,
-            context=operation_context,
-        )
-        if operation_instructions:
-            prompt_messages = (
-                *prompt_messages,
-                Message(role="system", content=operation_instructions),
-            )
         executor = ConfiguredToolExecutor(
             registry=operation_registry,
             context=operation_context,
@@ -597,7 +586,10 @@ class CodingSession:
                 context_reserve_tokens=self._effective_context_reserve_tokens(),
                 cost_estimator=self._cost_estimator,
             ),
-            messages=(*prompt_messages, *self._conversation_history(history)),
+            # Publish the operation-owned harness before project-context I/O so
+            # steering, follow-ups, queue inspection, and cancellation remain
+            # responsive while prompt construction runs in its worker thread.
+            messages=self._conversation_history(history),
         )
         retained = self._retained_queues.pop(session.session_id, None)
         if retained is not None:
@@ -610,6 +602,19 @@ class CodingSession:
             harness.follow_up_message(message)
         self._active_harness = harness
         self._accepting_queued_messages = True
+        if operation_ready is not None:
+            await operation_ready()
+        prompt_messages = await self._prompt_messages_async(
+            effective_tools,
+            registry=operation_registry,
+            context=operation_context,
+        )
+        if operation_instructions:
+            prompt_messages = (
+                *prompt_messages,
+                Message(role="system", content=operation_instructions),
+            )
+        harness.replace_messages((*prompt_messages, *self._conversation_history(history)))
         await self._repair_and_flush(session, harness)
         run_snapshot = await anyio.to_thread.run_sync(session.read_run_snapshot)
         run_entry_start = run_snapshot.entry_count
@@ -1539,7 +1544,10 @@ class CodingSession:
                 )
             replay = replay_session_entries(entries)
             history = self._conversation_history(replay.messages)
-            provider_messages = self._provider_messages(history)
+            provider_messages = (
+                *await self._prompt_messages_async(),
+                *self._normalize_provider_messages(history),
+            )
             observation = self._context_observations.get(
                 session.session_id if session is not None else ""
             )
@@ -1647,8 +1655,21 @@ class CodingSession:
             max_context_chars=self.project_context_max_chars,
             include_project_context=self.trusted,
             protected_paths=operation_context.protected_paths,
-            trusted_context_root=self.project_context_root
-            or resolve_project_context_root(operation_context.cwd),
+            trusted_context_root=self.project_context_root,
+        )
+
+    async def _prompt_messages_async(
+        self,
+        tools: Sequence[ToolSpec] | None = None,
+        *,
+        registry: ToolRegistry | None = None,
+        context: ToolContext | None = None,
+    ) -> tuple[Message, ...]:
+        """Build the operation prompt without blocking the event-loop thread."""
+
+        return await anyio.to_thread.run_sync(
+            lambda: self._prompt_messages(tools, registry=registry, context=context),
+            abandon_on_cancel=True,
         )
 
     def _operation_tool_registry(self) -> ToolRegistry | None:
@@ -1669,9 +1690,6 @@ class CodingSession:
         """Retain raw tool metadata while replacing stale system prompts."""
 
         return tuple(message for message in history if message.role != "system")
-
-    def _provider_messages(self, history: Sequence[Message]) -> tuple[Message, ...]:
-        return (*self._prompt_messages(), *self._normalize_provider_messages(history))
 
     def _normalize_provider_messages(self, messages: Sequence[Message]) -> tuple[Message, ...]:
         return tuple(
