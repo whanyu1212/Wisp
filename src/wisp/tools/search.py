@@ -479,18 +479,35 @@ def _iter_utf8_splitlines(path: Path) -> Iterator[str]:
     """Yield UTF-8 lines incrementally with ``str.splitlines()`` boundaries."""
 
     decoder = codecs.getincrementaldecoder("utf-8")()
-    pending = ""
+    line_parts: list[str] = []
+    pending_cr = False
     with path.open("rb") as file:
         while chunk := file.read(_PYTHON_GREP_CHUNK_BYTES):
-            pending += decoder.decode(chunk)
-            pending = yield from _yield_complete_splitlines(pending, final=False)
-        pending += decoder.decode(b"", final=True)
-    remainder = yield from _yield_complete_splitlines(pending, final=True)
-    if remainder:
-        yield remainder
+            decoded = decoder.decode(chunk)
+            if pending_cr:
+                yield "".join(line_parts)
+                line_parts.clear()
+                pending_cr = False
+                if decoded.startswith("\n"):
+                    decoded = decoded[1:]
+            pending_cr = yield from _yield_splitline_chunk(decoded, line_parts)
+        decoded = decoder.decode(b"", final=True)
+    if pending_cr:
+        yield "".join(line_parts)
+        line_parts.clear()
+        if decoded.startswith("\n"):
+            decoded = decoded[1:]
+    _ = yield from _yield_splitline_chunk(decoded, line_parts, final=True)
+    if line_parts:
+        yield "".join(line_parts)
 
 
-def _yield_complete_splitlines(text: str, *, final: bool) -> Generator[str, None, str]:
+def _yield_splitline_chunk(
+    text: str,
+    line_parts: list[str],
+    *,
+    final: bool = False,
+) -> Generator[str, None, bool]:
     start = 0
     index = 0
     while index < len(text):
@@ -498,12 +515,16 @@ def _yield_complete_splitlines(text: str, *, final: bool) -> Generator[str, None
         if character not in _SPLITLINES_BOUNDARIES:
             index += 1
             continue
+        line_parts.append(text[start:index])
         if character == "\r" and index + 1 == len(text) and not final:
-            break
-        yield text[start:index]
+            return True
+        yield "".join(line_parts)
+        line_parts.clear()
         index += 2 if character == "\r" and text[index + 1 : index + 2] == "\n" else 1
         start = index
-    return text[start:]
+    if start < len(text):
+        line_parts.append(text[start:])
+    return False
 
 
 @dataclass(slots=True)

@@ -4206,3 +4206,29 @@ def test_python_grep_splitlines_preserves_crlf_across_chunks(
     monkeypatch.setattr(search_tools_module, "_PYTHON_GREP_CHUNK_BYTES", 4)
 
     assert list(search_tools_module._iter_utf8_splitlines(path)) == ["one", "two", "three"]
+
+
+def test_python_grep_splitlines_scans_long_lines_once_per_chunk(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    path = tmp_path / "data.txt"
+    path.write_text("x" * 100, encoding="utf-8")
+    monkeypatch.setattr(search_tools_module, "_PYTHON_GREP_CHUNK_BYTES", 8)
+    scanned_chars = 0
+    original = search_tools_module._yield_splitline_chunk
+
+    def tracking_chunk(
+        text: str,
+        line_parts: list[str],
+        *,
+        final: bool = False,
+    ) -> object:
+        nonlocal scanned_chars
+        scanned_chars += len(text)
+        return original(text, line_parts, final=final)
+
+    monkeypatch.setattr(search_tools_module, "_yield_splitline_chunk", tracking_chunk)
+
+    assert list(search_tools_module._iter_utf8_splitlines(path)) == ["x" * 100]
+    assert scanned_chars == 100
