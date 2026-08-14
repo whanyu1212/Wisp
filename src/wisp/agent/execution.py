@@ -28,7 +28,11 @@ class ToolExecutor(Protocol):
     """Execute one provider-neutral tool call as a typed event stream."""
 
     def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        """Yield optional approval events and exactly one terminal result."""
+        """Yield an optional ordered approval pair, then exactly one terminal result.
+
+        An approval request must be followed by one resolution before the result. A
+        denied approval must terminate with an error result.
+        """
         ...
 
 

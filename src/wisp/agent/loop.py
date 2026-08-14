@@ -224,35 +224,92 @@ async def _provider_events(
         yield event
 
 
-def _validate_execution_event(event: ToolExecutionEvent, tool_call: ToolCall) -> None:
-    if event.call_id != tool_call.call_id or event.name != tool_call.name:
-        raise ToolExecutionProtocolError(
-            "Tool executor event does not match the requested call: "
-            f"expected {tool_call.name}/{tool_call.call_id}, "
-            f"got {event.name}/{event.call_id}"
-        )
+@dataclass(slots=True)
+class _ToolExecutionLifecycle:
+    """Validate one executor stream before its result reaches the provider."""
+
+    tool_call: ToolCall
+    approval_requested: bool = False
+    approval_resolved: bool = False
+    approved: bool | None = None
+    terminal: ToolExecutionEnded | None = None
+
+    def accept(self, event: object) -> ToolExecutionEvent:
+        if not isinstance(event, ToolApprovalRequested | ToolApprovalResolved | ToolExecutionEnded):
+            raise ToolExecutionProtocolError(
+                "Tool executor emitted an unsupported event type for "
+                f"{self.tool_call.call_id}: {type(event).__name__}"
+            )
+        if self.terminal is not None:
+            raise ToolExecutionProtocolError(
+                f"Tool executor emitted an event after the result for {self.tool_call.call_id}"
+            )
+        if event.call_id != self.tool_call.call_id or event.name != self.tool_call.name:
+            raise ToolExecutionProtocolError(
+                "Tool executor event does not match the requested call: "
+                f"expected {self.tool_call.name}/{self.tool_call.call_id}, "
+                f"got {event.name}/{event.call_id}"
+            )
+
+        if isinstance(event, ToolApprovalRequested):
+            if self.approval_requested:
+                raise ToolExecutionProtocolError(
+                    f"Tool executor requested approval more than once for {self.tool_call.call_id}"
+                )
+            if dict(event.arguments) != dict(self.tool_call.arguments):
+                raise ToolExecutionProtocolError(
+                    "Tool executor approval arguments do not match the requested call "
+                    f"{self.tool_call.call_id}"
+                )
+            self.approval_requested = True
+        elif isinstance(event, ToolApprovalResolved):
+            if not self.approval_requested:
+                raise ToolExecutionProtocolError(
+                    "Tool executor resolved approval before requesting it for "
+                    f"{self.tool_call.call_id}"
+                )
+            if self.approval_resolved:
+                raise ToolExecutionProtocolError(
+                    f"Tool executor resolved approval more than once for {self.tool_call.call_id}"
+                )
+            self.approval_resolved = True
+            self.approved = event.approved
+        else:
+            if self.approval_requested and not self.approval_resolved:
+                raise ToolExecutionProtocolError(
+                    f"Tool executor ended with an unresolved approval for {self.tool_call.call_id}"
+                )
+            if self.approved is False and not event.is_error:
+                raise ToolExecutionProtocolError(
+                    "Tool executor reported success after approval was denied for "
+                    f"{self.tool_call.call_id}"
+                )
+            self.terminal = event
+        return event
+
+    def finish(self) -> ToolExecutionEnded:
+        if self.approval_requested and not self.approval_resolved:
+            raise ToolExecutionProtocolError(
+                f"Tool executor ended with an unresolved approval for {self.tool_call.call_id}"
+            )
+        if self.terminal is None:
+            raise ToolExecutionProtocolError(
+                f"Tool executor ended without a result for {self.tool_call.call_id}"
+            )
+        return self.terminal
 
 
 async def _execute_tool_call(
     config: AgentLoopConfig,
     tool_call: ToolCall,
 ) -> AsyncIterator[ToolExecutionEvent | ToolResultReady]:
-    terminal: ToolExecutionEnded | None = None
-    async for event in config.tool_executor.execute(tool_call):
-        if terminal is not None:
-            raise ToolExecutionProtocolError(
-                f"Tool executor emitted an event after the result for {tool_call.call_id}"
-            )
-        _validate_execution_event(event, tool_call)
-        if isinstance(event, ToolExecutionEnded):
-            terminal = event
-        else:
+    lifecycle = _ToolExecutionLifecycle(tool_call)
+    async for raw_event in config.tool_executor.execute(tool_call):
+        event = lifecycle.accept(raw_event)
+        if not isinstance(event, ToolExecutionEnded):
             yield event
 
-    if terminal is None:
-        raise ToolExecutionProtocolError(
-            f"Tool executor ended without a result for {tool_call.call_id}"
-        )
+    terminal = lifecycle.finish()
     yield terminal
     yield ToolResultReady(
         call_id=terminal.call_id,
