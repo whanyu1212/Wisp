@@ -1228,12 +1228,16 @@ class TextualTui(App[None]):
         except Exception as exc:
             self._runner_error = exc
         finally:
-            await self._stream.shutdown()
-            self.exit()
+            try:
+                await self._stream.shutdown()
+            finally:
+                self.exit()
 
     async def close(self) -> None:
-        await self._stream.shutdown()
-        self.exit()
+        try:
+            await self._stream.shutdown()
+        finally:
+            self.exit()
 
     def copy_to_clipboard(self, text: str) -> None:
         """Copy via pyperclip when available, otherwise Textual's OSC52 fallback."""

@@ -600,6 +600,43 @@ def test_in_process_sdk_close_abandons_blocked_trust_store_read(
         release_read.set()
 
 
+def test_in_process_sdk_close_reports_owner_that_resists_cancellation(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sdk_module, "_CLOSE_TIMEOUT_SECONDS", 0.01)
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        transport = controller._in_process_transport
+        real_cancel_scope = transport._owner_cancel_scope
+        real_control_send = transport._control_send
+
+        class ResistantCancelScope:
+            def cancel(self) -> None:
+                pass
+
+        class BlockedInputClose:
+            async def send(self, event: object) -> None:
+                await anyio.Event().wait()
+
+            async def aclose(self) -> None:
+                await real_control_send.aclose()
+
+        transport._owner_cancel_scope = cast(Any, ResistantCancelScope())
+        transport._control_send = cast(Any, BlockedInputClose())
+        with pytest.raises(RuntimeError, match="owner did not stop after cancellation"):
+            await controller.aclose()
+        transport._owner_cancel_scope = real_cancel_scope
+        transport._control_send = real_control_send
+        await controller.aclose()
+
+    anyio.run(scenario)
+
+
 def test_in_process_sdk_rejects_command_racing_with_close(tmp_path: Path) -> None:
     async def scenario() -> None:
         command_send_started = anyio.Event()

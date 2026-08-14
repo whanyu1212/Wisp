@@ -381,6 +381,40 @@ def test_tui_rpc_env_forwards_context_policy(
     assert child_env["WISP_CONTEXT_RESERVE_TOKENS"] == "4096"
 
 
+def test_run_tui_closes_owned_controller_when_renderer_construction_fails(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class OwnedController(ScriptedController):
+        pass
+
+    controller = OwnedController()
+
+    async def start_transport(*_args: object, **_kwargs: object) -> object:
+        return controller
+
+    async def preflight(_options: object) -> None:
+        return None
+
+    monkeypatch.setattr(tui_app_module, "_preflight_tui_options", preflight)
+    monkeypatch.setattr(tui_app_module.JsonlSubprocessRpcTransport, "start", start_transport)
+    monkeypatch.setattr(tui_app_module, "RpcController", lambda _transport: controller)
+    monkeypatch.setattr(
+        tui_app_module,
+        "create_tui_renderer",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("renderer failed")),
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError, match="renderer failed"):
+            await tui_app_module.run_tui(
+                TuiOptions(config=WispConfig(provider="fake", session_dir=tmp_path))
+            )
+
+    anyio.run(scenario)
+    assert controller.closed is True
+
+
 def test_run_tui_uses_live_fullscreen_when_interactive(
     tmp_path: Path,
     monkeypatch: object,
@@ -3558,6 +3592,27 @@ def test_textual_live_eviction_defers_history_reload_while_reader_is_browsing() 
     deferred_requests, resumed_requests = anyio.run(scenario)
     assert deferred_requests == 0
     assert resumed_requests == 1
+
+
+def test_textual_close_exits_when_stream_shutdown_fails(monkeypatch: MonkeyPatch) -> None:
+    async def scenario() -> bool:
+        app_instance = TextualTui()
+        exited = False
+
+        async def fail_shutdown() -> None:
+            raise RuntimeError("stream failed")
+
+        def exit_app(*_args: object, **_kwargs: object) -> None:
+            nonlocal exited
+            exited = True
+
+        monkeypatch.setattr(app_instance._stream, "shutdown", fail_shutdown)
+        monkeypatch.setattr(app_instance, "exit", exit_app)
+        with pytest.raises(RuntimeError, match="stream failed"):
+            await app_instance.close()
+        return exited
+
+    assert anyio.run(scenario) is True
 
 
 def test_textual_stream_shutdown_drains_pending_output() -> None:

@@ -9,6 +9,7 @@ from pathlib import Path
 import anyio
 import pytest
 from pydantic import ValidationError
+from pytest import MonkeyPatch
 
 from wisp.events import (
     ProjectConfigApplied,
@@ -77,6 +78,7 @@ from wisp.rpc import (
     SteerCommand,
     UnrevertSessionTreeCommand,
 )
+from wisp.rpc import client as rpc_client_module
 from wisp.rpc.commands import (
     ApprovalCommand,
     CancelCommand,
@@ -1632,6 +1634,34 @@ print(json.dumps(finished), flush=True)
         assert isinstance(events[1], RpcCommandFinished)
         assert events[0].command_id == "shutdown-1"
         assert events[1].ok is True
+
+    anyio.run(run)
+
+
+@pytest.mark.process
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal behavior")
+def test_jsonl_subprocess_rpc_transport_kills_sigterm_resistant_child(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        script = """
+import signal
+import sys
+import time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+sys.stdin.read()
+time.sleep(60)
+"""
+        monkeypatch.setattr(rpc_client_module, "_SUBPROCESS_CLOSE_TIMEOUT_SECONDS", 0.05)
+        transport = await JsonlSubprocessRpcTransport.start(
+            [sys.executable, "-c", script],
+            cwd=tmp_path,
+        )
+        with anyio.fail_after(1):
+            await transport.close()
+        assert transport._process.returncode is not None
+        await transport.close()
 
     anyio.run(run)
 

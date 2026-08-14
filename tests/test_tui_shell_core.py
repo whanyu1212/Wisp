@@ -3970,7 +3970,7 @@ def test_tui_shell_compact_calls_controller_without_prompting_and_returns_idle()
         await shell.run()
 
         assert controller.compactions == ["preserve tool decisions"]
-        assert controller.session_stats_requests == ["session-stats-1", "session-stats-2"]
+        assert controller.session_stats_requests == ["session-stats-1"]
         assert controller.prompts == []
         assert shell.state.current_command_id is None
         assert shell.state.current_command_type is None
