@@ -118,3 +118,30 @@ def test_flush_cancels_backoff_and_schedules_immediate_finalization(
     assert turn.finalize_requested is True
     assert app.callbacks == [controller._finalize]
     assert controller._pending_callbacks == 1
+
+
+def test_settlement_callback_waits_for_latest_finalizing_turn() -> None:
+    app = _App()
+    controller = MarkdownStreamController(cast(Any, app))
+    older = _turn()
+    latest = _turn()
+    controller._finalizing_turns.extend((older, latest))
+    calls: list[str] = []
+
+    deferred = controller.defer_until_latest_stream_settles(lambda: calls.append("settled"))
+
+    assert deferred is True
+    assert older.settled_callbacks == []
+    assert len(latest.settled_callbacks) == 1
+    assert calls == []
+
+    controller._run_settled_callbacks(latest)
+    controller._run_settled_callbacks(latest)
+
+    assert calls == ["settled"]
+
+
+def test_settlement_callback_is_not_deferred_without_a_finalizing_turn() -> None:
+    controller = MarkdownStreamController(cast(Any, _App()))
+
+    assert controller.defer_until_latest_stream_settles(lambda: None) is False

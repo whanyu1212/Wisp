@@ -2004,6 +2004,19 @@ class TextualTui(App[None]):
     def hide_working_indicator(self) -> None:
         self._transcript_controller.hide_working_indicator()
 
+    def hide_working_indicator_after_stream(self) -> None:
+        """Remove the current heartbeat with the completed stream's final layout."""
+
+        indicator = self._transcript_controller.working_indicator
+        if indicator is None:
+            return
+
+        def hide_if_current() -> None:
+            self._transcript_controller.hide_working_indicator_if_current(indicator)
+
+        if not self._stream.defer_until_latest_stream_settles(hide_if_current):
+            hide_if_current()
+
     def mount_tool_call(
         self,
         call_id: str,

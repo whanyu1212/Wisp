@@ -199,7 +199,13 @@ class TextualTranscriptController:
         """Remove the transient activity row and its unseen-output identity."""
 
         indicator = self._working_indicator
-        if indicator is None:
+        if indicator is not None:
+            self.hide_working_indicator_if_current(indicator)
+
+    def hide_working_indicator_if_current(self, indicator: WorkingIndicator) -> None:
+        """Remove ``indicator`` only if it still belongs to the active command."""
+
+        if self._working_indicator is not indicator:
             return
         self._working_indicator = None
         self.discard_unseen_output(indicator)
