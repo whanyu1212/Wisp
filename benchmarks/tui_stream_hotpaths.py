@@ -20,7 +20,7 @@ from weakref import WeakKeyDictionary
 
 import textual
 from rich.console import Console, ConsoleOptions, RenderResult
-from textual.geometry import Size
+from textual.geometry import Region, Size
 from textual.pilot import Pilot
 from textual.screen import Screen
 from textual.widget import Widget
@@ -94,6 +94,9 @@ class StreamHotpathSample:
     stream_total_ms: float
     stream_cpu_ms: float
     stream_update_count: int
+    layout_request_count: int
+    layout_requests: dict[str, int]
+    layout_passes_per_stream_update: float
     content_height_call_count: int
     content_height_calls: dict[str, int]
     markdown_renders: MarkdownRenderCounts
@@ -114,6 +117,8 @@ class StreamHotpathSummary:
     sample_count: int
     stream_total_median_ms: float
     stream_cpu_median_ms: float
+    layout_request_count_median: float
+    layout_passes_per_stream_update_median: float
     content_height_call_count_median: float
     active_markdown_render_median: float
     settled_markdown_render_median: float
@@ -140,6 +145,7 @@ class _HotpathCollector:
     settled_stream_messages: set[StreamMessage]
     layout_ms: list[float] = field(default_factory=list)
     compositor_ms: list[float] = field(default_factory=list)
+    layout_requests: dict[str, int] = field(default_factory=dict)
     content_height_calls: dict[str, int] = field(default_factory=dict)
     markdown_owners: WeakKeyDictionary[_SafeAssistantMarkdown, StreamMessage] = field(
         default_factory=WeakKeyDictionary
@@ -170,6 +176,7 @@ def _measure_textual_hotpaths(collector: _HotpathCollector) -> Iterator[None]:
 
     original_layout = Screen._refresh_layout
     original_compositor = Screen._compositor_refresh
+    original_refresh = Widget.refresh
     original_content_height = Widget.get_content_height
     original_markdown_render = _SafeAssistantMarkdown.__rich_console__
     original_source_render = StreamMessage._render_source
@@ -191,6 +198,26 @@ def _measure_textual_hotpaths(collector: _HotpathCollector) -> Iterator[None]:
         finally:
             if screen is collector.target_screen:
                 collector.compositor_ms.append(_milliseconds(started))
+
+    def refresh(
+        widget: Widget,
+        *regions: Region,
+        repaint: bool = True,
+        layout: bool = False,
+        recompose: bool = False,
+    ) -> Widget:
+        if layout and _is_on_target_screen(widget, collector.target_screen):
+            widget_name = type(widget).__name__
+            collector.layout_requests[widget_name] = (
+                collector.layout_requests.get(widget_name, 0) + 1
+            )
+        return original_refresh(
+            widget,
+            *regions,
+            repaint=repaint,
+            layout=layout,
+            recompose=recompose,
+        )
 
     def get_content_height(
         widget: Widget,
@@ -229,6 +256,7 @@ def _measure_textual_hotpaths(collector: _HotpathCollector) -> Iterator[None]:
     with (
         patch.object(Screen, "_refresh_layout", refresh_layout),
         patch.object(Screen, "_compositor_refresh", compositor_refresh),
+        patch.object(Widget, "refresh", refresh),
         patch.object(Widget, "get_content_height", get_content_height),
         patch.object(_SafeAssistantMarkdown, "__rich_console__", render_markdown),
         patch.object(StreamMessage, "_render_source", render_source),
@@ -410,6 +438,7 @@ async def _measure_stream(
         profiler.dump_stats(profile_output)
     completed = app.stream_widget_for_completed_message()
     source_complete = isinstance(completed, StreamMessage) and completed.source == "".join(chunks)
+    stream_update_count = app.last_stream_write_count
     return StreamHotpathSample(
         run=run,
         retained_history_entries=retained_history_entries,
@@ -417,7 +446,12 @@ async def _measure_stream(
         mounted_widget_count=mounted_widget_count,
         stream_total_ms=stream_total_ms,
         stream_cpu_ms=stream_cpu_ms,
-        stream_update_count=app.last_stream_write_count,
+        stream_update_count=stream_update_count,
+        layout_request_count=sum(collector.layout_requests.values()),
+        layout_requests=dict(sorted(collector.layout_requests.items())),
+        layout_passes_per_stream_update=(
+            len(collector.layout_ms) / stream_update_count if stream_update_count else 0.0
+        ),
         content_height_call_count=sum(collector.content_height_calls.values()),
         content_height_calls=dict(sorted(collector.content_height_calls.items())),
         markdown_renders=MarkdownRenderCounts(
@@ -468,6 +502,12 @@ def _summarize(
                     sample.stream_total_ms for sample in selected
                 ),
                 stream_cpu_median_ms=statistics.median(sample.stream_cpu_ms for sample in selected),
+                layout_request_count_median=statistics.median(
+                    sample.layout_request_count for sample in selected
+                ),
+                layout_passes_per_stream_update_median=statistics.median(
+                    sample.layout_passes_per_stream_update for sample in selected
+                ),
                 content_height_call_count_median=statistics.median(
                     sample.content_height_call_count for sample in selected
                 ),

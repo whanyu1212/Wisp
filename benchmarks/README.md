@@ -70,6 +70,8 @@ each scenario.
 The instrumentation is installed and restored inside the benchmark process; production TUI code
 is unchanged. In addition to paced wall time, each sample reports `stream_cpu_ms`, which uses
 process CPU time to exclude intentional sleeps without pretending CPU cost is a latency metric.
+`layout_requests` attributes `layout=True` refresh requests by concrete widget class, while
+`layout_passes_per_stream_update` shows whether paced writes trigger additional settlement layouts.
 `content_height_calls` attributes Textual height measurements by concrete widget class.
 `markdown_source_rebuild_count` counts source-to-renderable rebuilds separately from Rich visual
 renders, while `markdown_renders` splits those visual renders between the mutable streaming widget
