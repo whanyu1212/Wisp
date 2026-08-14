@@ -49,6 +49,14 @@ def _style_for(segments: list[Segment], text: str) -> RichStyle:
     )
 
 
+def _rendered_style_for(stream: StreamMessage, text: str, *, y: int = 0) -> RichStyle:
+    return next(
+        segment.style
+        for segment in stream.render_line(y)
+        if text in segment.text and segment.style is not None
+    )
+
+
 @pytest.mark.parametrize("theme_name", ["wisp", "wisp-light"])
 def test_assistant_markdown_uses_semantic_theme_styles(theme_name: str) -> None:
     async def scenario() -> tuple[list[Segment], dict[str, str]]:
@@ -145,6 +153,61 @@ def test_assistant_markdown_drag_selection_copies_rendered_structure() -> None:
     )
     assert selected == expected
     assert copied == [expected]
+
+
+@pytest.mark.parametrize("theme_name", ["wisp", "wisp-light"])
+def test_assistant_markdown_drag_selection_paints_selection_style(
+    theme_name: str,
+) -> None:
+    async def scenario() -> tuple[
+        tuple[RichStyle, RichStyle, RichStyle, RichStyle],
+        tuple[RichStyle, RichStyle, RichStyle, RichStyle],
+    ]:
+        app = TextualTui()
+        async with app.run_test(size=(60, 24)) as pilot:
+            app.theme = theme_name
+            stream = StreamMessage(
+                "Plain [linked text](https://example.com) with `inline code` and trailing text."
+            )
+            await app.query_one("#transcript", Transcript).mount(stream)
+            await pilot.pause()
+            before = (
+                _rendered_style_for(stream, "Plain"),
+                _rendered_style_for(stream, "linked text"),
+                _rendered_style_for(stream, "inline code"),
+                _rendered_style_for(stream, "trailing text"),
+            )
+
+            await pilot._post_mouse_events(
+                [events.MouseDown], widget=stream, offset=(2, 0), button=1
+            )
+            await pilot._post_mouse_events(
+                [events.MouseMove], widget=stream, offset=(35, 0), button=1
+            )
+            await pilot.pause()
+            after = (
+                _rendered_style_for(stream, "Plain"),
+                _rendered_style_for(stream, "linked text"),
+                _rendered_style_for(stream, "inline code"),
+                _rendered_style_for(stream, "trailing text"),
+            )
+            return before, after
+
+    before, after = anyio.run(scenario)
+    plain_before, link_before, code_before, trailing_before = before
+    plain_after, link_after, code_after, trailing_after = after
+
+    assert plain_after.color == plain_before.color
+    assert plain_after.bgcolor != plain_before.bgcolor
+    assert link_after.color == link_before.color
+    assert link_after.bgcolor != link_before.bgcolor
+    assert link_after.meta == link_before.meta
+    assert code_after.color == code_before.color
+    assert code_after.bgcolor != code_before.bgcolor
+    assert code_after.bold == code_before.bold
+    assert trailing_after.color == trailing_before.color
+    assert trailing_after.bgcolor == trailing_before.bgcolor
+    assert trailing_after.bold == trailing_before.bold
 
 
 def test_assistant_markdown_link_metadata_routes_through_the_app() -> None:
