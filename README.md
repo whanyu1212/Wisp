@@ -608,12 +608,17 @@ wisp
 A fullscreen Textual TUI built on the same RPC controller other integrations use. While a command
 is active, a spinning `Working…` row stays at the live transcript tail as assistant output and tool
 cards appear, and changes labels for retries, approvals, trust, or compaction. The footer shows the
-working directory/session, status, queued follow-ups, provider/model, context use, and cumulative
-cost.
+working directory plus plan/queued state on the left, the active shortcut in the center, and the
+model, billing route, and context percentage on the right. At narrow widths it progressively drops
+the shortcut, model, and working directory while preserving plan/queued state and compact billing
+and context fields.
 
-- `ctx 12k/128k` is a current provider observation; `ctx ~12k/128k` is an estimate.
-- `cost $0.042` is complete accounting; `cost ≥$0.042` includes unpriced requests. Estimates are
-  not invoices — subscription-backed Codex, custom pricing, and unknown models remain unpriced.
+- `context 53%` is a current provider observation; `context ~53%` is an estimate. Narrow layouts
+  shorten these to `53%` and `~53%`.
+- Billing shows `ChatGPT plan` for subscription-backed Codex, `offline` for the fake provider, and
+  `API` before direct-provider usage is recorded. Direct usage becomes `API $0.042` when fully
+  priced, `API ≥$0.042` when partially priced, or `API unpriced` when no request can be priced.
+  Estimates are not invoices.
 
 Unlike print mode, **the TUI exposes the full tool registry by default** — otherwise it would be a
 chatbot that can't read files or run commands. Mutating and command tools still pause for approval:
