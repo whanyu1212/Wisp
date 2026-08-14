@@ -615,10 +615,11 @@ and context fields.
 
 - `context 53%` is a current provider observation; `context ~53%` is an estimate. Narrow layouts
   shorten these to `53%` and `~53%`.
-- Billing shows `ChatGPT plan` for subscription-backed Codex, `offline` for the fake provider, and
-  `API` before direct-provider usage is recorded. Direct usage becomes `API $0.042` when fully
-  priced, `API ≥$0.042` when partially priced, or `API unpriced` when no request can be priced.
-  Estimates are not invoices.
+- Billing shows the active route as `ChatGPT plan` for subscription-backed Codex, `offline` for the
+  fake provider, or `API` for a direct provider. Once usage is recorded, its session-wide cumulative
+  estimate is labeled independently as `session $0.042`, `session ≥$0.042` when partially priced, or
+  `session unpriced` when no request can be priced. This keeps earlier usage honest after switching
+  providers. Estimates are not invoices.
 
 Unlike print mode, **the TUI exposes the full tool registry by default** — otherwise it would be a
 chatbot that can't read files or run commands. Mutating and command tools still pause for approval:

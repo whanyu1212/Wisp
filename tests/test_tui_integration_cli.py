@@ -4668,7 +4668,7 @@ def test_textual_footer_sanitizes_control_characters_before_layout() -> None:
         (
             "anthropic",
             SessionCostSummary(known_usd=Decimal("0.042"), priced_record_count=1),
-            "API $0.042",
+            "API · session $0.042",
         ),
         (
             "google",
@@ -4678,12 +4678,12 @@ def test_textual_footer_sanitizes_control_characters_before_layout() -> None:
                 priced_record_count=1,
                 unpriced_record_count=1,
             ),
-            "API ≥$0.042",
+            "API · session ≥$0.042",
         ),
         (
             "custom",
             SessionCostSummary(complete=False, unpriced_record_count=1),
-            "API unpriced",
+            "API · session unpriced",
         ),
     ],
 )
@@ -4702,6 +4702,25 @@ def test_textual_footer_labels_current_billing_routes(
     )
 
     assert parts.billing == expected
+
+
+def test_textual_footer_keeps_cumulative_cost_independent_of_active_route() -> None:
+    cost = SessionCostSummary(known_usd=Decimal("0.042"), priced_record_count=1)
+
+    api = _textual_footer_parts(
+        TuiViewSnapshot(status="idle", input_hint="wisp> ", provider="anthropic", cost=cost)
+    )
+    subscription = _textual_footer_parts(
+        TuiViewSnapshot(
+            status="idle",
+            input_hint="wisp> ",
+            provider="openai-codex",
+            cost=cost,
+        )
+    )
+
+    assert api.billing == "API · session $0.042"
+    assert subscription.billing == "ChatGPT plan · session $0.042"
 
 
 def test_textual_footer_adapts_context_and_priority_to_width() -> None:

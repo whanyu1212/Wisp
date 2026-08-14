@@ -2768,19 +2768,24 @@ def _textual_footer_parts(snapshot: TuiViewSnapshot) -> _TextualFooterParts:
 
 def _textual_billing_text(snapshot: TuiViewSnapshot) -> str:
     if snapshot.provider == "openai-codex":
-        return "ChatGPT plan"
-    if snapshot.provider == "fake":
-        return "offline"
-    if snapshot.provider is None:
-        return ""
+        route = "ChatGPT plan"
+    elif snapshot.provider == "fake":
+        route = "offline"
+    elif snapshot.provider is None:
+        route = ""
+    else:
+        route = "API"
 
     cost = snapshot.cost
     if cost is None or (cost.priced_record_count == 0 and cost.unpriced_record_count == 0):
-        return "API"
+        return route
     summary = format_cost_summary(cost)
-    if summary == "cost unknown":
-        return "API unpriced"
-    return f"API {summary.removeprefix('cost ')}"
+    session_cost = (
+        "session unpriced"
+        if summary == "cost unknown"
+        else f"session {summary.removeprefix('cost ')}"
+    )
+    return _joined_footer_fields(route, session_cost)
 
 
 def _textual_context_parts(snapshot: TuiViewSnapshot) -> tuple[str, str]:
