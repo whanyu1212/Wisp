@@ -30,8 +30,16 @@ requires it:
 6. accept clean only when the verdict identifies the recorded commit, or arrives after the trigger and
    the PR head has not changed;
 7. require both a current-head clean result and zero unresolved non-outdated actionable threads;
-8. if findings require a push, wait for replacement CI and trigger a new review for the new head.
+8. if findings require a push, wait for replacement CI and trigger a new review for the new head;
+9. keep polling until that exact-head review is clean and all actionable threads are resolved, or a
+   genuine external blocker is established.
 
 Use bounded polling, commonly around 30 seconds. Follow repository precedent for stall timing; absent
 one, about ten minutes is a reasonable point to post one fresh independently tracked trigger. Silence,
 a vanished reaction, an empty transient result, or a stale clean review is not success.
+
+
+Never treat a clean verdict on a superseded commit as sufficient. Every pushed fix, including a
+test-only fix prompted by review, requires a new exact-head trigger after replacement CI is green.
+Do not conclude a merge-ready delivery while the latest trigger is absent, queued, or awaiting a
+verdict.

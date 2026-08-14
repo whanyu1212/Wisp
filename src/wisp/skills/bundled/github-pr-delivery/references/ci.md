@@ -19,3 +19,16 @@ Poll at bounded intervals appropriate to the repository, typically 15–30 secon
 progress updates during long waits. For one plausibly flaky failure, inspect evidence before requesting
 a no-code rerun. Permit one rerun when the same head previously passed or logs support an external or
 timing cause. If it repeats, diagnose it as real or report an external blocker; do not rerun forever.
+
+
+## Clean-delivery terminal condition
+
+When the authorized goal is clean or merge-ready delivery, a terminal failure is a diagnosis point,
+not a handoff point. Inspect it and then fix branch-owned behavior, perform the single justified flaky
+rerun described above, or establish an external blocker. Continue polling after each action until all
+required checks on the current SHA are terminal and successful. Only a genuine blocker—such as
+inaccessible logs, persistent unrelated infrastructure failure, or missing authorization for a needed
+code change—ends the loop without green CI.
+
+Green CI does not make an earlier review current. After the final green result, proceed to a fresh
+exact-head review whenever clean review is part of the delivery contract.

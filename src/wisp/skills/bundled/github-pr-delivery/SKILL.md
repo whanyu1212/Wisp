@@ -30,8 +30,13 @@ files. Tool approval and authentication do not replace user authorization. Once 
 authorized, retain it across in-scope retries and pushes, but do not expand it to materially new
 effects.
 
-State the terminal condition: PR creation, terminal CI, clean exact-head review, or merge. A skill is
-an active workflow, not a durable background service; do not promise work after the active run ends.
+State the terminal condition: PR creation, terminal CI, clean exact-head review, or merge. When the
+user requests delivery until clean or merge-ready, continue polling and iterating in the active run
+until current-head CI passes, current-head review is clean, and no actionable thread remains, or a
+genuine external blocker is established. A push always invalidates earlier CI and review conclusions.
+Do not stop merely because a check is pending or failed, or because re-review has not been requested
+for the latest head. A skill is an active workflow, not a durable background service; do not promise
+work after the active run ends.
 
 ## Preserve a checkpoint
 
@@ -65,14 +70,16 @@ a commit trailer or attribution, preserve it exactly. Never add generic tool bra
    exact verification, and known limitations. Default to ready-for-review unless the user or repository
    requires a draft.
 5. **Drive current-head CI:** record the pushed SHA, wait for all required checks to become terminal,
-   inspect failures, and—only when authorized—apply narrow branch-owned fixes before repeating from the
-   new head.
+   inspect failures, and—when iteration is authorized—apply narrow branch-owned fixes or evidence-based
+   flaky reruns before repeating from the new head. Do not hand off a known failing or pending check as
+   merge-ready.
 6. **Process review thread-aware:** inspect comments, formal reviews, and review threads including
    resolution and outdated state. Verify findings, fix valid ones narrowly, push before claiming a fix,
    reply with evidence, and resolve only the addressed thread.
-7. **Run exact-head re-review only when authorized:** tie each trigger and verdict to a recorded head.
-   A queued reaction, silence, stale review, or top-level clean comment with actionable unresolved
-   threads is not a clean result.
+7. **Run exact-head re-review when authorized:** after every behavioral or test-fix push, first obtain
+   terminal green CI, then trigger a fresh review for that exact head and poll it to a verdict. Tie each
+   trigger and verdict to the recorded SHA. A queued reaction, silence, stale review, or top-level clean
+   comment with actionable unresolved threads is not a clean result.
 8. **Verify final readiness:** refresh PR metadata and separately report CI, review, thread state,
    mergeability, and caveats. Merge only when explicitly requested, then verify the merged state.
 
