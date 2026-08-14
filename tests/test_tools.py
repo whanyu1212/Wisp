@@ -4234,18 +4234,18 @@ def test_python_grep_splitlines_scans_long_lines_once_per_chunk(
     assert scanned_chars == 100
 
 
-def test_find_tool_python_fallback_stops_after_truncation_lookahead(
+def test_find_tool_python_fallback_bounds_retained_matches(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PATH", "")
     visited: list[str] = []
 
     def files(_path: Path, _context: ToolContext) -> Iterable[Path]:
-        for name in ("skip.txt", "a.py", "secret.key", "b.py", "later.py"):
+        for name in ("skip.txt", "c.py", "secret.key", "b.py", "a.py"):
             visited.append(name)
             yield tmp_path / name
 
-    monkeypatch.setattr(search_tools_module, "_iter_find_files", files)
+    monkeypatch.setattr(search_tools_module, "_iter_files", files)
     context = ToolContext(cwd=tmp_path, protected_paths=("*.key",))
 
     result = run_tool(
@@ -4257,7 +4257,7 @@ def test_find_tool_python_fallback_stops_after_truncation_lookahead(
     assert result.text == "a.py\n[truncated]"
     assert result.data == {"count": 2, "files": ["a.py"]}
     assert result.truncated is True
-    assert visited == ["skip.txt", "a.py", "secret.key", "b.py"]
+    assert visited == ["skip.txt", "c.py", "secret.key", "b.py", "a.py"]
 
 
 def test_find_tool_python_fallback_preserves_global_sorted_prefix(
@@ -4279,28 +4279,28 @@ def test_find_tool_python_fallback_preserves_global_sorted_prefix(
     assert result.data == {"count": 2, "files": ["a/first.py"]}
 
 
-def test_find_tool_python_fallback_orders_directory_prefix_with_platform_separator(
+def test_find_tool_python_fallback_orders_file_symlinks_by_display_path(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PATH", "")
-    monkeypatch.setattr(search_tools_module.os, "sep", "\\")
-    original_display = search_tools_module.display_tool_path
-    monkeypatch.setattr(
-        search_tools_module,
-        "display_tool_path",
-        lambda path, context: original_display(path, context).replace("/", "\\"),
-    )
-    (tmp_path / "a").mkdir()
-    (tmp_path / "a" / "x.py").write_text("", encoding="utf-8")
-    (tmp_path / "a0.py").write_text("", encoding="utf-8")
+    (tmp_path / "a.py").write_text("", encoding="utf-8")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "b.py").write_text("", encoding="utf-8")
+    (sub / "c.py").write_text("", encoding="utf-8")
+    try:
+        (sub / "z.py").symlink_to(tmp_path / "a.py")
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
 
     result = run_tool(
         FindTool(),
-        {"path": ".", "pattern": "*.py", "max_results": 1},
+        {"path": "sub", "pattern": "*.py", "max_results": 1},
         ToolContext(cwd=tmp_path),
     )
 
-    assert result.data == {"count": 2, "files": ["a0.py"]}
+    assert result.text == "a.py\n[truncated]"
+    assert result.data == {"count": 2, "files": ["a.py"]}
 
 
 def test_find_tool_python_fallback_runs_off_event_loop(

@@ -549,15 +549,18 @@ def _python_find(
     if not path.exists():
         raise ToolError(f"Path does not exist: {display_tool_path(path, context)}")
 
-    matches: list[str] = []
-    for candidate in _iter_find_files(path, context):
-        if not _matches_glob(candidate, pattern, context):
-            continue
-        matches.append(display_tool_path(candidate, context))
-        if len(matches) > max_results:
-            break
-
-    matches.sort()
+    # Display paths resolve file symlinks, so a lexically late candidate may sort
+    # before an earlier directory prefix. Scan the streamed candidates completely
+    # to preserve historical global ordering, but retain only the sorted prefix and
+    # one truncation lookahead in memory.
+    matches = heapq.nsmallest(
+        max_results + 1,
+        (
+            display_tool_path(candidate, context)
+            for candidate in _iter_files(path, context)
+            if _matches_glob(candidate, pattern, context)
+        ),
+    )
     return _result_from_lines(
         matches, max_results=max_results, context=context, count_label="files"
     )
@@ -602,47 +605,6 @@ def _python_ls(*, path: Path, include_hidden: bool, context: ToolContext) -> Too
         },
         truncated=truncated.truncated,
     )
-
-
-def _iter_find_files(path: Path, context: ToolContext) -> Iterable[Path]:
-    """Yield reportable files in global display-path order."""
-
-    if path.is_file():
-        if _is_path_within_tool_cwd(path, context):
-            yield path
-        return
-    if not path.is_dir():
-        return
-
-    yield from _iter_find_directory(path, context)
-
-
-def _iter_find_directory(path: Path, context: ToolContext) -> Iterable[Path]:
-    try:
-        with os.scandir(path) as entries:
-            children = [
-                entry
-                for entry in entries
-                if not _is_hidden(entry.name) and entry.name not in IGNORED_DIRS
-            ]
-    except OSError:
-        return
-
-    # A directory's descendants share ``name/`` as their prefix. Sorting actual
-    # directories by that prefix, alongside file names, makes this depth-first
-    # traversal equivalent to sorting all display paths without retaining them all.
-    children.sort(
-        key=lambda entry: (
-            f"{entry.name}{os.sep}" if entry.is_dir(follow_symlinks=False) else entry.name
-        )
-    )
-    for entry in children:
-        candidate = Path(entry.path)
-        if entry.is_dir(follow_symlinks=False):
-            yield from _iter_find_directory(candidate, context)
-        elif not entry.is_dir():
-            if _is_path_within_tool_cwd(candidate, context):
-                yield candidate
 
 
 def _iter_files(path: Path, context: ToolContext) -> Iterable[Path]:
