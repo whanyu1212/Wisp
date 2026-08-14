@@ -854,6 +854,43 @@ def test_harness_closing_before_completion_preserves_follow_up_queue() -> None:
     ]
 
 
+def test_harness_closing_after_tool_execution_end_preserves_tool_output() -> None:
+    tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=tool_call),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=(tool_call,),
+                    finish_reason="tool_calls",
+                ),
+            ]
+        ]
+    )
+    harness = _harness(
+        provider,
+        tools=(ToolSpec(name="lookup", description="Look up", input_schema={}),),
+    )
+
+    async def run() -> None:
+        events = harness.prompt("initial")
+        async for event in events:
+            if isinstance(event, ToolExecutionEnded):
+                await events.aclose()
+                return
+        raise AssertionError("missing tool execution end")
+
+    anyio.run(run)
+
+    assert [(message.role, message.content) for message in harness.messages] == [
+        ("user", "initial"),
+        ("assistant", "checking"),
+        ("tool", "tool output"),
+    ]
+
+
 def test_harness_failure_preserves_follow_up_queue_without_injection() -> None:
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="test"), RuntimeError("provider failed")]]
@@ -1183,6 +1220,39 @@ def test_harness_close_mid_all_batch_preserves_unexposed_steering() -> None:
 
     assert injected.content == "visible"
     assert [message.content for message in harness.queued_messages.steering] == ["still queued"]
+    assert [(message.role, message.content) for message in harness.messages[-2:]] == [
+        ("assistant", "answer"),
+        ("user", "visible"),
+    ]
+
+
+def test_harness_close_mid_all_follow_up_batch_preserves_unexposed_messages() -> None:
+    provider = ScriptedProvider(
+        [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="answer")]]
+    )
+    harness = AgentHarness(
+        AgentHarnessConfig(
+            provider=provider,
+            tool_executor=RecordingToolExecutor(),
+            follow_up_mode="all",
+        )
+    )
+    harness.follow_up("visible")
+    harness.follow_up("still queued")
+
+    async def run() -> QueueMessageInjected:
+        events = harness.prompt("initial")
+        async for event in events:
+            if isinstance(event, QueueMessageInjected):
+                await events.aclose()
+                return event
+        raise AssertionError("missing follow-up injection")
+
+    injected = anyio.run(run)
+
+    assert injected.kind == "follow_up"
+    assert injected.content == "visible"
+    assert [message.content for message in harness.queued_messages.follow_up] == ["still queued"]
     assert [(message.role, message.content) for message in harness.messages[-2:]] == [
         ("assistant", "answer"),
         ("user", "visible"),
