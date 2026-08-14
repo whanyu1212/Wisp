@@ -85,6 +85,20 @@ def test_read_summary_falls_back_when_selected_count_absent() -> None:
     )
 
 
+def test_read_summary_handles_unknown_total() -> None:
+    assert (
+        summarize_tool_result("read", {"path": "large.log", "selected_count": 2})
+        == "read 2 lines from large.log"
+    )
+
+
+def test_read_summary_handles_truncated_unknown_total() -> None:
+    assert (
+        summarize_tool_result("read", {"path": "large.log", "selected_count": 2}, truncated=True)
+        == "read (truncated) from large.log"
+    )
+
+
 def test_read_summary_none_when_line_count_missing_or_non_int() -> None:
     assert summarize_tool_result("read", {"path": "x"}) is None
     assert summarize_tool_result("read", {"line_count": "many"}) is None

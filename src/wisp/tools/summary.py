@@ -53,32 +53,23 @@ def summarize_tool_result(
 
 def _summarize_read(data: Mapping[str, object], truncated: bool) -> str | None:
     line_count = data.get("line_count")
-    if not isinstance(line_count, int):
+    selected = data.get("selected_count")
+    if not isinstance(line_count, int) and not isinstance(selected, int):
         return None
     path = _path(data)
     suffix = f" from {path}" if path else ""
 
-    # Three counts matter, and the summary must not overstate what the model saw:
-    #   line_count     — the whole file
-    #   selected_count — lines matching the offset/limit slice (may be < the file)
-    #   truncated      — the output budget clipped even that slice, so FEWER lines
-    #                    than selected_count were actually returned
-    # ``line_count`` alone (what a naive summary would show) claims the whole file was
-    # read even for a two-line page of a huge file — the summary replaces the raw
-    # output, so that would actively mislead.
-    selected = data.get("selected_count")
-
     if truncated:
-        # The budget clipped the output, so no line count is exactly honest; say the
-        # read was truncated and name the file size for scale rather than a number
-        # that overstates what came back.
-        return f"read (truncated){suffix} — {_count(line_count, 'line', 'lines')} total"
-    if isinstance(selected, int) and selected < line_count:
-        # A page of a larger file: report the slice returned and the file total.
-        return f"read {_count(selected, 'line', 'lines')} of {line_count}{suffix}"
-    # Whole file (or an older data shape without selected_count): the simple form.
-    returned = selected if isinstance(selected, int) else line_count
-    return f"read {_count(returned, 'line', 'lines')}{suffix}"
+        if isinstance(line_count, int):
+            return f"read (truncated){suffix} — {_count(line_count, 'line', 'lines')} total"
+        return f"read (truncated){suffix}"
+    if isinstance(line_count, int):
+        if isinstance(selected, int) and selected < line_count:
+            return f"read {_count(selected, 'line', 'lines')} of {line_count}{suffix}"
+        returned = selected if isinstance(selected, int) else line_count
+        return f"read {_count(returned, 'line', 'lines')}{suffix}"
+    assert isinstance(selected, int)
+    return f"read {_count(selected, 'line', 'lines')}{suffix}"
 
 
 def _summarize_grep(data: Mapping[str, object], truncated: bool) -> str | None:

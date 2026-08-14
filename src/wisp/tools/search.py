@@ -6,8 +6,11 @@ import fnmatch
 import os
 import re
 import shutil
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
+
+import anyio
 
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _optional_string, _required_string
@@ -95,15 +98,18 @@ class GrepTool:
                 process_supervisor=self._process_supervisor,
             )
 
-        return _python_grep(
-            pattern=pattern,
-            path=path,
-            glob=glob,
-            ignore_case=ignore_case,
-            literal=literal,
-            context_lines=context_lines,
-            max_results=max_results,
-            context=context,
+        return await anyio.to_thread.run_sync(
+            lambda: _python_grep(
+                pattern=pattern,
+                path=path,
+                glob=glob,
+                ignore_case=ignore_case,
+                literal=literal,
+                context_lines=context_lines,
+                max_results=max_results,
+                context=context,
+            ),
+            abandon_on_cancel=True,
         )
 
 
@@ -386,32 +392,61 @@ def _python_grep(
         raise ToolError(f"Path does not exist: {display_tool_path(path, context)}")
 
     matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
+    effective_context_lines = _bounded_rg_context_lines(context_lines, context)
+    context_truncated = effective_context_lines < context_lines
     output: list[str] = []
     match_count = 0
     for file_path in _iter_files(path, context):
         if glob is not None and not _matches_glob(file_path, glob, context):
             continue
+        file_output_start = len(output)
+        file_match_start = match_count
         try:
-            lines = file_path.read_text(encoding="utf-8").splitlines()
+            with file_path.open("r", encoding="utf-8") as file:
+                window: deque[tuple[int, str]] = deque(maxlen=effective_context_lines * 2 + 1)
+                processed_line = 0
+                for line_number, raw_line in enumerate(file, start=1):
+                    window.append((line_number, raw_line.rstrip("\r\n")))
+                    candidate_number = line_number - effective_context_lines
+                    if candidate_number <= processed_line:
+                        continue
+                    candidate = next(text for number, text in window if number == candidate_number)
+                    if matcher(candidate):
+                        if match_count >= max_results:
+                            return _result_from_grep_lines(
+                                output,
+                                max_results=max_results,
+                                context=context,
+                                force_truncated=True,
+                            )
+                        match_count += 1
+                        output.extend(
+                            _format_streaming_context(file_path, window, candidate_number, context)
+                        )
+                    processed_line = candidate_number
+
+                # Flush candidates near EOF that never accumulated a full trailing
+                # context window. The deque retains all context they can require.
+                for candidate_number, candidate in tuple(window):
+                    if candidate_number <= processed_line:
+                        continue
+                    if matcher(candidate):
+                        if match_count >= max_results:
+                            return _result_from_grep_lines(
+                                output,
+                                max_results=max_results,
+                                context=context,
+                                force_truncated=True,
+                            )
+                        match_count += 1
+                        output.extend(
+                            _format_streaming_context(file_path, window, candidate_number, context)
+                        )
+                    processed_line = candidate_number
         except UnicodeDecodeError:
+            del output[file_output_start:]
+            match_count = file_match_start
             continue
-        for index, line in enumerate(lines):
-            if not matcher(line):
-                continue
-            if match_count >= max_results:
-                return _result_from_grep_lines(
-                    output,
-                    max_results=max_results,
-                    context=context,
-                    force_truncated=True,
-                )
-            match_count += 1
-            if context_lines:
-                output.extend(
-                    _format_context_lines(file_path, lines, index, context_lines, context)
-                )
-            else:
-                output.append(f"{display_tool_path(file_path, context)}:{index + 1}:{line}")
 
     if not output:
         return ToolResult(text="No matches", data={"count": 0, "matches": []})
@@ -419,7 +454,22 @@ def _python_grep(
         output,
         max_results=max_results,
         context=context,
+        force_truncated=context_truncated,
     )
+
+
+def _format_streaming_context(
+    file_path: Path,
+    window: Iterable[tuple[int, str]],
+    match_line_number: int,
+    context: ToolContext,
+) -> list[str]:
+    path_display = display_tool_path(file_path, context)
+    formatted: list[str] = []
+    for line_number, line in window:
+        separator = ":" if line_number == match_line_number else "-"
+        formatted.append(f"{path_display}{separator}{line_number}{separator}{line}")
+    return formatted
 
 
 def _python_find(
@@ -511,23 +561,6 @@ def _build_matcher(
 
 
 type CallableMatcher = Callable[[str], bool]
-
-
-def _format_context_lines(
-    file_path: Path,
-    lines: Sequence[str],
-    match_index: int,
-    context_lines: int,
-    context: ToolContext,
-) -> list[str]:
-    start = max(0, match_index - context_lines)
-    end = min(len(lines), match_index + context_lines + 1)
-    formatted: list[str] = []
-    for index in range(start, end):
-        separator = ":" if index == match_index else "-"
-        path_display = display_tool_path(file_path, context)
-        formatted.append(f"{path_display}{separator}{index + 1}{separator}{lines[index]}")
-    return formatted
 
 
 def _command_path(path: Path, context: ToolContext) -> str:
