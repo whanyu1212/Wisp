@@ -24,6 +24,7 @@ from wisp.coding.compaction import (
     plan_preflight_compaction,
     serialize_compaction_transcript,
     summarize_manual_compaction,
+    truncate_active_turn_tool_results,
 )
 from wisp.coding.session import CodingSession
 from wisp.events import (
@@ -542,6 +543,35 @@ def test_manual_compaction_plan_rejects_split_tool_group() -> None:
 
     with pytest.raises(ValueError, match="splits a tool call/result group"):
         plan_manual_compaction(SessionReplay(rows=rows))
+
+
+def test_active_turn_truncation_reclaims_utf8_bytes_and_preserves_unicode_tail() -> None:
+    content = "界" * 399 + "終"
+    messages = (Message(role="tool", content=content, tool_call_id="call-1"),)
+
+    truncated = truncate_active_turn_tool_results(messages, excess_tokens=50)
+
+    assert truncated is not None
+    result = truncated[0].content
+    assert len(content.encode("utf-8")) - len(result.encode("utf-8")) >= 200
+    assert result.startswith("[truncated]")
+    assert result.endswith("終")
+    assert len(result) >= 200
+
+
+def test_active_turn_truncation_prioritizes_largest_utf8_payload() -> None:
+    ascii_content = "a" * 500
+    unicode_content = "界" * 300
+    messages = (
+        Message(role="tool", content=ascii_content, tool_call_id="ascii"),
+        Message(role="tool", content=unicode_content, tool_call_id="unicode"),
+    )
+
+    truncated = truncate_active_turn_tool_results(messages, excess_tokens=25)
+
+    assert truncated is not None
+    assert truncated[0].content == ascii_content
+    assert truncated[1].content != unicode_content
 
 
 def test_compaction_transcript_is_labelled_and_truncates_tool_results() -> None:

@@ -17,7 +17,7 @@ def estimate_context(
     tools: Sequence[ToolSpec] = (),
     tool_results: Sequence[ToolCallResult] = (),
 ) -> ContextEstimate:
-    """Estimate normalized request context with a stable chars-per-token heuristic."""
+    """Estimate normalized request context with a stable UTF-8-bytes-per-token heuristic."""
 
     system_payloads = [
         _message_payload(message) for message in messages if message.role == "system"
@@ -132,7 +132,7 @@ def _payload_tokens(payload: object) -> int:
         separators=(",", ":"),
         sort_keys=True,
     )
-    return math.ceil(len(text) / 4)
+    return math.ceil(len(text.encode("utf-8")) / 4)
 
 
 __all__ = ["build_context_budget", "context_fingerprint", "estimate_context"]

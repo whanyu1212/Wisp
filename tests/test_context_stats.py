@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -72,6 +73,92 @@ def test_context_estimate_accounts_for_system_messages_tools_and_results() -> No
     )
     assert continued.message_tokens > initial.message_tokens
     assert continued.total_tokens > initial.total_tokens
+
+
+def _serialized_tokens(payload: object) -> int:
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return math.ceil(len(text.encode("utf-8")) / 4)
+
+
+def test_context_estimate_preserves_ascii_heuristic() -> None:
+    message = Message(role="user", content="plain ASCII")
+    payload = [{"role": "user", "content": "plain ASCII"}]
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+    estimate = estimate_context((message,))
+
+    assert len(serialized) == len(serialized.encode("utf-8"))
+    assert estimate.message_tokens == math.ceil(len(serialized) / 4)
+
+
+@pytest.mark.parametrize("content", ["漢字かな", "👩‍💻🚀", "e\u0301", "ASCII と emoji 🌍"])
+def test_context_estimate_uses_utf8_size_for_unicode_messages(content: str) -> None:
+    payload = [{"role": "user", "content": content}]
+
+    first = estimate_context((Message(role="user", content=content),))
+    second = estimate_context((Message(role="user", content=content),))
+
+    assert first == second
+    assert first.message_tokens == _serialized_tokens(payload)
+    assert first.message_tokens >= math.ceil(
+        len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)) / 4
+    )
+
+
+def test_context_estimate_uses_utf8_size_for_every_payload_category() -> None:
+    messages = (
+        Message(role="system", content="系统 🌐"),
+        Message(role="user", content="質問 e\u0301"),
+    )
+    result = ToolCallResult(call_id="呼出", output="結果 ✅", is_error=False)
+    tool = ToolSpec(
+        name="検索",
+        description="探す 🔎",
+        input_schema={"type": "object", "properties": {"値": {"type": "string"}}},
+    )
+
+    estimate = estimate_context(messages, (tool,), (result,))
+
+    assert estimate.system_tokens == _serialized_tokens([{"role": "system", "content": "系统 🌐"}])
+    assert estimate.message_tokens == _serialized_tokens(
+        [
+            {"role": "user", "content": "質問 e\u0301"},
+            {"call_id": "呼出", "output": "結果 ✅", "is_error": False},
+        ]
+    )
+    assert estimate.tool_schema_tokens == _serialized_tokens(
+        [
+            {
+                "name": "検索",
+                "description": "探す 🔎",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"値": {"type": "string"}},
+                },
+            }
+        ]
+    )
+    assert estimate.total_tokens == (
+        estimate.system_tokens + estimate.message_tokens + estimate.tool_schema_tokens
+    )
+
+
+def test_unicode_context_fingerprint_remains_compatible() -> None:
+    messages = (
+        Message(role="system", content="系统"),
+        Message(role="user", content="café 👩‍💻 e\u0301"),
+    )
+    tools = (
+        ToolSpec(
+            name="検索",
+            description="探す 🔎",
+            input_schema={"type": "object", "properties": {"値": {"type": "string"}}},
+        ),
+    )
+
+    assert context_fingerprint(messages, tools) == (
+        "6b0bd768cecdf716c02766c3fdc84a68853b1b9cdc86b49355caba3980e1c2cd"
+    )
 
 
 def test_context_budget_is_permissive_for_unknown_models_and_tracks_reserve() -> None:
