@@ -37,10 +37,11 @@ uv run python -m benchmarks.tui_stream_hotpaths --runs 5 \
   --output profiles/tui-stream-hotpaths.json
 ```
 
-The default matrix retains exactly 75, 120, and 300 history entries. The 120-entry production
-window means those conditions mount 75, 120, and 120 history widgets, respectively, before starting
-the same command lifecycle that keeps Wisp's 80 ms working indicator at the transcript tail while
-streaming 100 chunks at 20 ms intervals. It rotates condition order between runs and reports
+The default matrix retains exactly 60, 75, and 300 history entries. The 60-entry production
+window means every condition mounts 60 history widgets; the latter two retain additional entries
+to isolate retained-history pressure from mounted-widget growth before starting the same command
+lifecycle that keeps Wisp's 80 ms working indicator at the transcript tail while streaming 100
+chunks at 20 ms intervals. It rotates condition order between runs and reports
 individual samples plus per-condition medians. `event_loop_delay` comes from a separate 10 ms
 absolute-deadline heartbeat. `layout_passes` wraps Textual's private `_refresh_layout` seam and
 `compositor_renders` wraps `_compositor_refresh` only during the streaming phase. These timings
@@ -87,7 +88,7 @@ portable performance thresholds.
 
 Compare absolute timings only on the same machine. `warm_newest_page_read_ms` and
 `older_page_read_ms` measure cache-backed paging after the cold initial read.
-`mounted_widget_counts` remains bounded by the 120-entry history window (plus the
+`mounted_widget_counts` remains bounded by the 60-entry history window (plus the
 session marker), while `retained_entry_counts` remains bounded by the 1,200-entry
 history retention limit. This intentionally executes a local shell command through
 `ProcessSupervisor`; it uses a temporary directory and is cancelled before exit.
