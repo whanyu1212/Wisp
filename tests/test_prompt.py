@@ -93,6 +93,9 @@ def test_default_prompt_requires_evidence_backed_workflow_completion(
     assert "report the check as unverified" in prompt
     assert "run the relevant checks or tests when practical" in prompt
     assert "follow the project's own verification instructions when present" in prompt
+    assert "preserve the user's configured author identity" in prompt
+    assert "Co-authored-by: Wisp <316893498+WispAgent@users.noreply.github.com>" in prompt
+    assert "Add the trailer exactly once" in prompt
     assert "Always finish change or build tasks with a concise final response" in prompt
     assert "passed, failed, timed out, or were not run" in prompt
     assert "pre-existing staged, modified, and untracked files as user-owned" in prompt
