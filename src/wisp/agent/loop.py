@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
 import wisp.providers.events as provider_events
+from wisp.agent.configuration import (
+    validate_agent_runtime_limits,
+    validate_non_negative_integer,
+)
 from wisp.agent.context import build_context_budget, estimate_context
 from wisp.agent.execution import (
     ToolExecutionEvent,
@@ -110,16 +114,14 @@ class AgentLoopConfig:
     prompt_cache_key: str | None = None
 
     def __post_init__(self) -> None:
-        if self.context_window is not None and self.context_window <= 0:
-            raise ValueError("context_window must be positive")
-        if self.context_reserve_tokens < 0:
-            raise ValueError("context_reserve_tokens must be non-negative")
-        if not 0 < self.context_pressure_threshold <= 1:
-            raise ValueError("context_pressure_threshold must be greater than 0 and at most 1")
-        if self.turn_offset < 0:
-            raise ValueError("turn_offset must be non-negative")
-        if self.tool_iteration_offset < 0:
-            raise ValueError("tool_iteration_offset must be non-negative")
+        validate_agent_runtime_limits(
+            max_tool_iterations=self.max_tool_iterations,
+            context_window=self.context_window,
+            context_reserve_tokens=self.context_reserve_tokens,
+            context_pressure_threshold=self.context_pressure_threshold,
+        )
+        validate_non_negative_integer(self.turn_offset, field="turn_offset")
+        validate_non_negative_integer(self.tool_iteration_offset, field="tool_iteration_offset")
 
 
 def _is_cancelled(config: AgentLoopConfig) -> bool:

@@ -587,6 +587,39 @@ def test_harness_queue_capacity_is_shared_and_recovers_after_removal() -> None:
     assert recovered.follow_up == ()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_tool_iterations", -1),
+        ("context_window", 0),
+        ("context_reserve_tokens", True),
+        ("context_pressure_threshold", float("inf")),
+    ],
+)
+def test_agent_harness_config_rejects_invalid_shared_runtime_limits(
+    field: str, value: object
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        AgentHarnessConfig(
+            provider=ScriptedProvider([]),
+            tool_executor=RecordingToolExecutor(),
+            **cast(dict[str, object], {field: value}),
+        )
+
+
+def test_agent_harness_config_accepts_runtime_limit_boundaries() -> None:
+    config = AgentHarnessConfig(
+        provider=ScriptedProvider([]),
+        tool_executor=RecordingToolExecutor(),
+        max_tool_iterations=0,
+        context_window=1,
+        context_reserve_tokens=1,
+        context_pressure_threshold=1,
+    )
+
+    assert config.max_tool_iterations == 0
+
+
 def test_harness_queue_modes_are_independent_and_reported_in_updates() -> None:
     harness = _harness(ScriptedProvider([]))
 
