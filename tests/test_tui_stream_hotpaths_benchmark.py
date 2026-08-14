@@ -68,6 +68,7 @@ def test_hotpath_collector_does_not_retain_superseded_markdown() -> None:
 def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() -> None:
     original_layout = Screen._refresh_layout
     original_compositor = Screen._compositor_refresh
+    original_refresh = Widget.refresh
     original_content_height = Widget.get_content_height
     original_markdown_render = _SafeAssistantMarkdown.__rich_console__
     original_source_render = StreamMessage._render_source
@@ -77,8 +78,8 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
         BenchmarkConfig(
             message_count=8,
             retained_history_entries=(4,),
-            stream_chunks=2,
-            stream_interval_seconds=0.001,
+            stream_chunks=4,
+            stream_interval_seconds=0.08,
             heartbeat_interval_seconds=0.001,
             viewport_width=80,
             viewport_height=12,
@@ -88,6 +89,7 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
 
     assert Screen._refresh_layout is original_layout
     assert Screen._compositor_refresh is original_compositor
+    assert Widget.refresh is original_refresh
     assert Widget.get_content_height is original_content_height
     assert _SafeAssistantMarkdown.__rich_console__ is original_markdown_render
     assert StreamMessage._render_source is original_source_render
@@ -99,7 +101,18 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     assert sample.mounted_widget_count == 6
     assert sample.stream_total_ms >= 0
     assert sample.stream_cpu_ms >= 0
-    assert 1 <= sample.stream_update_count <= report.config.stream_chunks + 1
+    assert (
+        report.config.stream_chunks
+        <= sample.stream_update_count
+        <= (report.config.stream_chunks + 1)
+    )
+    assert sample.layout_request_count == sum(sample.layout_requests.values())
+    assert sample.layout_request_count > 0
+    assert sample.layout_requests["StreamMessage"] <= sample.stream_update_count + 1
+    assert sample.layout_passes_per_stream_update == (
+        sample.layout_passes.sample_count / sample.stream_update_count
+    )
+    assert sample.layout_passes.sample_count <= sample.stream_update_count + 2
     assert sample.content_height_call_count == sum(sample.content_height_calls.values())
     assert sample.content_height_call_count > 0
     assert sample.content_height_calls["StreamMessage"] > 0
@@ -121,12 +134,16 @@ def test_tui_stream_hotpaths_reports_real_stream_and_restores_textual_methods() 
     summary = report.summaries[0]
     assert summary.sample_count == 1
     assert summary.stream_cpu_median_ms == sample.stream_cpu_ms
+    assert summary.layout_request_count_median == sample.layout_request_count
+    assert summary.layout_passes_per_stream_update_median == sample.layout_passes_per_stream_update
     assert summary.content_height_call_count_median == sample.content_height_call_count
     assert summary.active_markdown_render_median == sample.markdown_renders.active
     assert summary.settled_markdown_render_median == sample.markdown_renders.settled
     assert '"retained_history_entries": 4' in report.to_json()
     assert '"mounted_history_entries": 4' in report.to_json()
     assert '"stream_cpu_ms":' in report.to_json()
+    assert '"layout_requests":' in report.to_json()
+    assert '"layout_passes_per_stream_update":' in report.to_json()
     assert '"markdown_renders":' in report.to_json()
 
 
@@ -171,6 +188,7 @@ def test_tui_stream_hotpaths_restores_textual_methods_after_stream_failure(
 ) -> None:
     original_layout = Screen._refresh_layout
     original_compositor = Screen._compositor_refresh
+    original_refresh = Widget.refresh
     original_content_height = Widget.get_content_height
     original_markdown_render = _SafeAssistantMarkdown.__rich_console__
     original_source_render = StreamMessage._render_source
@@ -197,6 +215,7 @@ def test_tui_stream_hotpaths_restores_textual_methods_after_stream_failure(
 
     assert Screen._refresh_layout is original_layout
     assert Screen._compositor_refresh is original_compositor
+    assert Widget.refresh is original_refresh
     assert Widget.get_content_height is original_content_height
     assert _SafeAssistantMarkdown.__rich_console__ is original_markdown_render
     assert StreamMessage._render_source is original_source_render

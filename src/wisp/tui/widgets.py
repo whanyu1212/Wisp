@@ -34,6 +34,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.css.styles import RulesMap
+from textual.geometry import Size
 from textual.message import Message
 from textual.selection import Selection
 from textual.strip import Strip
@@ -1960,6 +1961,17 @@ class Transcript(VerticalScroll):
         self._history_loading = False
         self._history_request_armed = True
 
+    def _size_updated(
+        self,
+        size: Size,
+        virtual_size: Size,
+        container_size: Size,
+        layout: bool = True,
+    ) -> bool:
+        """Apply measured scroll geometry without requesting a second layout."""
+
+        return super()._size_updated(size, virtual_size, container_size, layout=False)
+
     def compose(self) -> ComposeResult:
         if self._empty_wordmark is not None:
             self._empty_state = TranscriptEmptyState(
@@ -3211,6 +3223,25 @@ class StreamMessage(Static):
         super().notify_style_update()
         if self.is_mounted and self._source:
             self._render_source()
+
+    def _size_updated(
+        self,
+        size: Size,
+        virtual_size: Size,
+        container_size: Size,
+        layout: bool = True,
+    ) -> bool:
+        """Apply measured geometry without scheduling a recursive layout pass.
+
+        Updating this auto-height widget already requested the layout that measured
+        these dimensions. Textual's default implementation assigns ``virtual_size``
+        through its layout-reactive descriptor, which schedules a second full screen
+        layout even though the compositor just produced the value. A direct reactive
+        update retains the measured geometry and scroll bookkeeping while leaving
+        future content updates and terminal resizes responsible for their own layout.
+        """
+
+        return super()._size_updated(size, virtual_size, container_size, layout=False)
 
     async def append_markdown(self, fragment: str) -> None:
         """Append a coalesced provider fragment and rerender the retained source."""
