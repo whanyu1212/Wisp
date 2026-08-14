@@ -38,6 +38,7 @@ from wisp.trust_flow import TrustDecision
 from wisp.tui.commands import parse_tui_slash_command
 from wisp.tui.compact_echo import MAX_PENDING_ECHOES as _MAX_PENDING_ECHOES
 from wisp.tui.history import (
+    TUI_HISTORY_PAGE_LIMIT,
     HistoricalToolCard,
     HistoricalTranscriptMessage,
     history_entries_from_rpc_messages,
@@ -5095,6 +5096,44 @@ def test_textual_history_prepend_does_not_override_home_at_top() -> None:
     following, scroll_y = anyio.run(scenario)
     assert following is False
     assert scroll_y == 0
+
+
+@pytest.mark.parametrize("navigation", ["page_up", "wheel_up"])
+def test_textual_history_window_navigation_reaches_retained_entries_in_tall_viewport(
+    navigation: str,
+) -> None:
+    async def scenario() -> tuple[float, list[str]]:
+        app_instance, renderer = create_textual_tui()
+        async with app_instance.run_test(size=(80, 200)) as pilot:
+            renderer.replace_history_entries(
+                tuple(
+                    HistoricalTranscriptMessage(role="assistant", content=f"current {index}")
+                    for index in range(TUI_HISTORY_PAGE_LIMIT)
+                ),
+                session_label="Windowed session",
+            )
+            await app_instance.wait_for_history_render()
+            await pilot.pause()
+            transcript = app_instance.query_one("#transcript", Transcript)
+            assert transcript.max_scroll_y == 0
+
+            if navigation == "page_up":
+                app_instance.action_scroll_transcript_page_up()
+            else:
+                await pilot._post_mouse_events(
+                    [events.MouseScrollUp],
+                    widget=transcript,
+                    times=1,
+                )
+            await pilot.pause()
+            return transcript.max_scroll_y, _transcript_texts(app_instance)
+
+    max_scroll_y, texts = anyio.run(scenario)
+
+    assert max_scroll_y == 0
+    assert "current 0" in texts
+    assert f"current {TUI_TRANSCRIPT_WINDOW_SHIFT - 1}" in texts
+    assert f"current {TUI_HISTORY_PAGE_LIMIT - 1}" not in texts
 
 
 def test_textual_history_window_shifts_without_evicting_live_output() -> None:
