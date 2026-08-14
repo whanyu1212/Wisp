@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import codecs
 import fnmatch
 import os
 import re
 import shutil
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -404,51 +405,49 @@ def _python_grep(
         file_match_start = match_count
         file_had_extra_match = False
         try:
-            with file_path.open("r", encoding="utf-8") as file:
-                preceding: deque[tuple[int, str]] = deque(maxlen=effective_context_lines)
-                active_contexts: list[_StreamingMatchContext] = []
-                for line_number, raw_line in enumerate(file, start=1):
-                    line = raw_line.rstrip("\r\n")
-                    completed_contexts: list[_StreamingMatchContext] = []
-                    for active in active_contexts:
-                        if active.remaining_after > 0:
-                            active.lines.append(
-                                _format_grep_record(file_path, line_number, line, False, context)
-                            )
-                            active.remaining_after -= 1
-                        if active.remaining_after == 0:
-                            completed_contexts.append(active)
-                    for completed in completed_contexts:
-                        output.extend(completed.lines)
-                        active_contexts.remove(completed)
-
-                    if not file_had_extra_match and matcher(line):
-                        if match_count >= max_results:
-                            # Keep consuming this file to validate its complete UTF-8
-                            # contents. A later decode error must discard all matches
-                            # from the file, matching the fallback's text-file policy.
-                            file_had_extra_match = True
-                        else:
-                            match_count += 1
-                            match_lines = [
-                                _format_grep_record(file_path, number, text, False, context)
-                                for number, text in preceding
-                            ]
-                            match_lines.append(
-                                _format_grep_record(file_path, line_number, line, True, context)
-                            )
-                            if effective_context_lines:
-                                active_contexts.append(
-                                    _StreamingMatchContext(
-                                        lines=match_lines,
-                                        remaining_after=effective_context_lines,
-                                    )
-                                )
-                            else:
-                                output.extend(match_lines)
-                    preceding.append((line_number, line))
+            preceding: deque[tuple[int, str]] = deque(maxlen=effective_context_lines)
+            active_contexts: list[_StreamingMatchContext] = []
+            for line_number, line in enumerate(_iter_utf8_splitlines(file_path), start=1):
+                completed_contexts: list[_StreamingMatchContext] = []
                 for active in active_contexts:
-                    output.extend(active.lines)
+                    if active.remaining_after > 0:
+                        active.lines.append(
+                            _format_grep_record(file_path, line_number, line, False, context)
+                        )
+                        active.remaining_after -= 1
+                    if active.remaining_after == 0:
+                        completed_contexts.append(active)
+                for completed in completed_contexts:
+                    output.extend(completed.lines)
+                    active_contexts.remove(completed)
+
+                if not file_had_extra_match and matcher(line):
+                    if match_count >= max_results:
+                        # Keep consuming this file to validate its complete UTF-8
+                        # contents. A later decode error must discard all matches
+                        # from the file, matching the fallback's text-file policy.
+                        file_had_extra_match = True
+                    else:
+                        match_count += 1
+                        match_lines = [
+                            _format_grep_record(file_path, number, text, False, context)
+                            for number, text in preceding
+                        ]
+                        match_lines.append(
+                            _format_grep_record(file_path, line_number, line, True, context)
+                        )
+                        if effective_context_lines:
+                            active_contexts.append(
+                                _StreamingMatchContext(
+                                    lines=match_lines,
+                                    remaining_after=effective_context_lines,
+                                )
+                            )
+                        else:
+                            output.extend(match_lines)
+                preceding.append((line_number, line))
+            for active in active_contexts:
+                output.extend(active.lines)
         except UnicodeDecodeError:
             del output[file_output_start:]
             match_count = file_match_start
@@ -470,6 +469,41 @@ def _python_grep(
         context=context,
         force_truncated=context_truncated,
     )
+
+
+_PYTHON_GREP_CHUNK_BYTES = 64 * 1024
+_SPLITLINES_BOUNDARIES = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _iter_utf8_splitlines(path: Path) -> Iterator[str]:
+    """Yield UTF-8 lines incrementally with ``str.splitlines()`` boundaries."""
+
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    pending = ""
+    with path.open("rb") as file:
+        while chunk := file.read(_PYTHON_GREP_CHUNK_BYTES):
+            pending += decoder.decode(chunk)
+            pending = yield from _yield_complete_splitlines(pending, final=False)
+        pending += decoder.decode(b"", final=True)
+    remainder = yield from _yield_complete_splitlines(pending, final=True)
+    if remainder:
+        yield remainder
+
+
+def _yield_complete_splitlines(text: str, *, final: bool) -> Generator[str, None, str]:
+    start = 0
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character not in _SPLITLINES_BOUNDARIES:
+            index += 1
+            continue
+        if character == "\r" and index + 1 == len(text) and not final:
+            break
+        yield text[start:index]
+        index += 2 if character == "\r" and text[index + 1 : index + 2] == "\n" else 1
+        start = index
+    return text[start:]
 
 
 @dataclass(slots=True)

@@ -4167,3 +4167,42 @@ def test_grep_tool_python_fallback_discards_matches_from_invalid_utf8_file(
 
     assert result.text == "No matches"
     assert result.data == {"count": 0, "matches": []}
+
+
+def test_grep_tool_python_fallback_preserves_splitlines_boundaries(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    (tmp_path / "data.txt").write_text(
+        "first\vvertical\fform\x1cfile\x1dgroup\x1erecord\x85next\u2028line\u2029paragraph",
+        encoding="utf-8",
+    )
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "^(vertical|form|file|group|record|next|line|paragraph)$"},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text.splitlines() == [
+        "data.txt:2:vertical",
+        "data.txt:3:form",
+        "data.txt:4:file",
+        "data.txt:5:group",
+        "data.txt:6:record",
+        "data.txt:7:next",
+        "data.txt:8:line",
+        "data.txt:9:paragraph",
+    ]
+
+
+def test_python_grep_splitlines_preserves_crlf_across_chunks(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    path = tmp_path / "data.txt"
+    path.write_bytes(b"one\r\ntwo\rthree")
+    monkeypatch.setattr(search_tools_module, "_PYTHON_GREP_CHUNK_BYTES", 4)
+
+    assert list(search_tools_module._iter_utf8_splitlines(path)) == ["one", "two", "three"]
