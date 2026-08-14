@@ -36,7 +36,11 @@ from wisp.events import (
 )
 from wisp.providers.catalog import ModelCatalogProviderEntry
 from wisp.tools.context import ToolContext
-from wisp.tui.commands import DEFAULT_TUI_COMMAND_CATALOG, TuiCommandCatalog
+from wisp.tui.commands import (
+    DEFAULT_TUI_COMMAND_CATALOG,
+    TEXTUAL_LOCAL_COMMAND_DESCRIPTORS,
+    TuiCommandCatalog,
+)
 from wisp.tui.connect_widget import ConnectPanel, ConnectPanelMode
 from wisp.tui.connections import ConnectionProviderStatus
 from wisp.tui.context_widget import ContextStatusOverlay
@@ -50,19 +54,24 @@ from wisp.tui.overlay import (
     TranscriptViewportState,
 )
 from wisp.tui.prompt_history_widget import PromptHistoryPicker
-from wisp.tui.rendering import (
-    TuiRenderer,
-    TuiViewSnapshot,
-    _markup_escape,
-)
+from wisp.tui.rendering import TuiRenderer, TuiViewSnapshot
 from wisp.tui.skills import skill_catalog_text, skill_invocation_text
 from wisp.tui.state import TuiCancelRequested, TuiQuitRequested
 from wisp.tui.stream_buffer import MarkdownStreamController
 from wisp.tui.textual_input import TextualInputController
 from wisp.tui.textual_renderer import TextualTuiRenderer
 from wisp.tui.textual_transcript import TextualTranscriptController
-from wisp.tui.theme import WISP_THEME_NAMES, WISP_THEMES, role_styles
-from wisp.tui.theme_preference import load_theme_preference, save_theme_preference
+from wisp.tui.theme import (
+    DEFAULT_THEME_NAME,
+    PAPER_THEME_NAME,
+    WISP_DARK_THEME_NAMES,
+    WISP_THEME_BY_NAME,
+    WISP_THEME_BY_SLUG,
+    WISP_THEME_NAMES,
+    WISP_THEMES,
+)
+from wisp.tui.theme_picker import ThemePicker
+from wisp.tui.theme_preference import ThemePreferenceState, load_theme_state, save_theme_state
 from wisp.tui.tool_call import ToolActionStatus
 from wisp.tui.widgets import (
     DecisionPanel,
@@ -80,19 +89,6 @@ from wisp.tui.widgets import (
     ToolCard,
     Transcript,
 )
-
-# Plain Rich color names used only before on_mount resolves the themed palette
-# (e.g. startup notices written during app construction).
-_ROLE_FALLBACK: dict[str, str] = {
-    "notice": "cyan",
-    "error": "red",
-    "dim": "dim",
-    "user": "bold magenta",
-    "assistant": "bold green",
-    "tool": "blue",
-    "approved": "green",
-    "denied": "red",
-}
 
 # The Wisp wordmark, shown while the transcript is empty. Drawn from U+2588 FULL
 # BLOCK rather than box-drawing or ASCII art: a single, near-universally
@@ -260,6 +256,8 @@ class TextualTui(App[None]):
     .message--user {
         border-left: heavy $primary;
         background: $panel;
+        color: $primary;
+        text-style: bold;
         padding-right: 1;
     }
 
@@ -270,29 +268,33 @@ class TextualTui(App[None]):
 
     .message--tool {
         border-left: outer $accent;
-        background: $surface;
+        color: $accent;
         padding-right: 1;
     }
 
     .message--notice {
         border-left: outer $warning;
+        color: $warning;
     }
 
     .message--approved {
         border-left: outer $success;
         background: $success-muted;
+        color: $success;
         padding-right: 1;
     }
 
     .message--denied {
         border-left: outer $warning;
         background: $warning-muted;
+        color: $warning;
         padding-right: 1;
     }
 
     .message--error {
         border-left: outer $error;
         background: $error-muted;
+        color: $error;
         padding-right: 1;
     }
 
@@ -300,7 +302,7 @@ class TextualTui(App[None]):
     .message--session {
         border-left: none;
         padding-left: 2;
-        color: $text-muted;
+        color: $transcript-muted;
     }
 
     /* Tool activity is a flat action/result tree rather than another bordered
@@ -406,6 +408,11 @@ class TextualTui(App[None]):
 
     def __init__(self, *, protected_paths: tuple[str, ...] | None = None) -> None:
         super().__init__()
+        # Register and select a Wisp theme before application CSS is parsed so
+        # the transcript's custom muted variable is available on first mount.
+        for theme in WISP_THEMES:
+            self.register_theme(theme)
+        self.theme = DEFAULT_THEME_NAME
         # The parent's already-resolved protected-path policy, threaded down from
         # `run_tui`. It is *not* re-derived here: the resolved policy reflects the
         # `--auth-file` override and the trust decision the parent made before
@@ -426,6 +433,7 @@ class TextualTui(App[None]):
         self._suggest: SlashSuggest | None = None
         self._file_suggest: FileSuggest | None = None
         self._prompt_history_picker: PromptHistoryPicker | None = None
+        self._theme_picker: ThemePicker | None = None
         self._decision_panel: DecisionPanel | None = None
         self._connect_panel: ConnectPanel | None = None
         self._model_picker: ModelPicker | None = None
@@ -436,6 +444,11 @@ class TextualTui(App[None]):
         self._help_viewport_state: TranscriptViewportState | None = None
         self._help_viewport_baseline: TranscriptViewportState | None = None
         self._command_catalog = DEFAULT_TUI_COMMAND_CATALOG
+        self._last_dark_theme = DEFAULT_THEME_NAME
+        self._theme_picker_original: str | None = None
+        self._pending_theme_preview: str | None = None
+        self._theme_preview_scheduled = False
+        self._theme_preview_epoch = 0
         self._skill_catalog = RpcSkillCatalogSnapshot()
         self._agent_mode = "build"
         self._current_prompt = "wisp> "
@@ -476,10 +489,6 @@ class TextualTui(App[None]):
         self._last_history_render_mounts: tuple[AwaitMount, ...] = ()
         self._history_layout_generation = 0
         self._transcript_epoch = 0
-        # Role→Rich-style map for transcript lines, resolved from the active
-        # theme and re-derived on theme change (watch_theme). Populated in
-        # on_mount. LineMessage widgets carry it as pre-composed markup.
-        self._role_styles: dict[str, str] = {}
         self._stream = MarkdownStreamController(self)
 
     def clear_prompt_editor(self) -> None:
@@ -522,6 +531,7 @@ class TextualTui(App[None]):
             # (the `/` and `@` triggers are mutually exclusive by construction).
             yield FileSuggest(id="file-suggest")
             yield PromptHistoryPicker(id="prompt-history")
+            yield ThemePicker(id="theme-picker")
             yield DecisionPanel(id="decision-panel")
             yield ConnectPanel(id="connect-panel")
             yield ModelPicker(id="model-picker")
@@ -536,14 +546,18 @@ class TextualTui(App[None]):
         # permanent screen row on Textual's Header. The disposable welcome state
         # below is Wisp's only visible identity treatment.
         self.title = "wisp"
-        for theme in WISP_THEMES:
-            self.register_theme(theme)
         # A persisted choice only selects among Wisp's own themes: Textual also
         # registers ~20 built-ins, and silently adopting one of those from a
         # stale or hand-edited file would leave the transcript's role colors
         # (resolved from the active theme) unrecognizable.
-        self.theme = load_theme_preference(valid_themes=WISP_THEME_NAMES) or WISP_THEMES[0].name
-        self._role_styles = role_styles(self.current_theme)
+        preference = load_theme_state(
+            valid_themes=WISP_THEME_NAMES,
+            valid_dark_themes=WISP_DARK_THEME_NAMES,
+        )
+        self.theme = preference.active_theme or DEFAULT_THEME_NAME
+        self._last_dark_theme = preference.last_dark_theme or (
+            self.theme if self.theme in WISP_DARK_THEME_NAMES else DEFAULT_THEME_NAME
+        )
         self._transcript = self.query_one("#transcript", Transcript)
         self._jump_to_latest = self.query_one("#jump-latest", JumpToLatest)
         self._status = self.query_one("#status", StatusBar)
@@ -551,6 +565,7 @@ class TextualTui(App[None]):
         self._suggest = self.query_one("#suggest", SlashSuggest)
         self._file_suggest = self.query_one("#file-suggest", FileSuggest)
         self._prompt_history_picker = self.query_one("#prompt-history", PromptHistoryPicker)
+        self._theme_picker = self.query_one("#theme-picker", ThemePicker)
         self._decision_panel = self.query_one("#decision-panel", DecisionPanel)
         self._connect_panel = self.query_one("#connect-panel", ConnectPanel)
         self._model_picker = self.query_one("#model-picker", ModelPicker)
@@ -570,6 +585,7 @@ class TextualTui(App[None]):
                 OverlayKind.model_picker: self._model_picker,
                 OverlayKind.session_picker: self._session_picker,
                 OverlayKind.prompt_history: self._prompt_history_picker,
+                OverlayKind.theme_picker: self._theme_picker,
                 OverlayKind.context_status: self._context_status,
                 OverlayKind.operation_indicator: self._operation_indicator,
             },
@@ -587,11 +603,9 @@ class TextualTui(App[None]):
         self.screen.set_class(event.size.width < 80, "-compact-help")
 
     def watch_theme(self, theme_name: str) -> None:
-        # `theme` is a Textual reactive; re-derive transcript role colors so
-        # message widgets mounted after a switch track the new palette. Already-
-        # mounted LineMessage widgets keep their baked-in markup colors.
+        # Theme variables recolor mounted CSS-owned content atomically. Widgets
+        # with cached theme-derived Rich content refresh their own presentation.
         if self.is_running:
-            self._role_styles = role_styles(self.current_theme)
             if self._status is not None:
                 self._status.refresh_theme()
 
@@ -926,7 +940,29 @@ class TextualTui(App[None]):
     def submit_command_line(self, text: str) -> None:
         """Submit a typed slash-command line through the input controller."""
 
+        if self._submit_local_theme_command(text):
+            self.clear_prompt_editor()
+            return
         self._input_controller.submit_line(text, clear_editor=True)
+
+    def _submit_local_theme_command(self, text: str) -> bool:
+        """Handle Textual-only ``/theme`` without crossing the RPC boundary."""
+
+        parts = text.strip().split()
+        if not parts or parts[0].casefold() != "/theme":
+            return False
+        if len(parts) == 1:
+            self.show_theme_picker()
+            return True
+        if len(parts) != 2:
+            self.write_error("Usage: /theme [vapor|orchid|ember|paper]")
+            return True
+        spec = WISP_THEME_BY_SLUG.get(parts[1].casefold())
+        if spec is None:
+            self.write_error(f"Unknown theme: {parts[1]}")
+            return True
+        self._commit_theme(spec.name, announce=True)
+        return True
 
     def _submit_decision_line(self, text: str) -> bool:
         # The decision overlay temporarily hides the composer. Keep its draft
@@ -1008,6 +1044,46 @@ class TextualTui(App[None]):
         event.stop()
         self.hide_prompt_history()
 
+    def on_theme_picker_previewed(self, event: ThemePicker.Previewed) -> None:
+        event.stop()
+        if self._theme_picker_original is None:
+            return
+        self._pending_theme_preview = event.theme_name
+        if self._theme_preview_scheduled:
+            return
+        self._theme_preview_scheduled = True
+        epoch = self._theme_preview_epoch
+        self.call_after_refresh(self._flush_theme_preview, epoch)
+
+    def on_theme_picker_selected(self, event: ThemePicker.Selected) -> None:
+        event.stop()
+        self._invalidate_theme_preview()
+        self._commit_theme(event.theme_name, announce=True)
+        self._theme_picker_original = None
+        self.hide_theme_picker()
+
+    def on_theme_picker_cancelled(self, event: ThemePicker.Cancelled) -> None:
+        event.stop()
+        original = self._theme_picker_original
+        self._invalidate_theme_preview()
+        self._theme_picker_original = None
+        if original in WISP_THEME_NAMES:
+            self.theme = original
+        self.hide_theme_picker()
+
+    def _flush_theme_preview(self, epoch: int) -> None:
+        if epoch != self._theme_preview_epoch:
+            return
+        self._theme_preview_scheduled = False
+        theme_name, self._pending_theme_preview = self._pending_theme_preview, None
+        if theme_name in WISP_THEME_NAMES and self._theme_picker_original is not None:
+            self.theme = theme_name
+
+    def _invalidate_theme_preview(self) -> None:
+        self._theme_preview_epoch += 1
+        self._pending_theme_preview = None
+        self._theme_preview_scheduled = False
+
     def on_context_status_overlay_cancelled(self, event: ContextStatusOverlay.Cancelled) -> None:
         event.stop()
         self.hide_context_status()
@@ -1016,8 +1092,9 @@ class TextualTui(App[None]):
         """Apply the executable catalog to inline slash suggestions."""
 
         self._command_catalog = catalog
+        presentation_catalog = catalog.with_descriptors(*TEXTUAL_LOCAL_COMMAND_DESCRIPTORS)
         if self._suggest is not None:
-            self._suggest.set_catalog(catalog)
+            self._suggest.set_catalog(presentation_catalog)
             # Catalog discovery can complete just after the user starts typing at
             # startup. Reproject the current editor value so an already-open `/`
             # menu is refreshed instead of being dismissed by the catalog swap.
@@ -1048,7 +1125,7 @@ class TextualTui(App[None]):
 
         text = skill_invocation_text(event)
         if widget is not None:
-            widget.update(_markup_escape(text))
+            widget.update(text)
             self.note_transcript_update(widget)
             return
         self.write_message(text, role="user")
@@ -1444,26 +1521,46 @@ class TextualTui(App[None]):
         self._input_controller.submit_line(command, clear_editor=False)
 
     def action_toggle_theme(self) -> None:
-        """Switch between Wisp's light and dark palettes and remember the choice.
+        """Toggle Paper against the most recently committed dark theme."""
 
-        Presentation-only, so this stays client-side: it never reaches the RPC
-        subprocess or the agent settings model. Already-mounted transcript lines
-        keep the styles they were written with (see ``theme.role_styles``), so a
-        switch re-colors the chrome and everything written afterwards.
-        """
+        next_name = self._last_dark_theme if self.theme == PAPER_THEME_NAME else PAPER_THEME_NAME
+        self._commit_theme(next_name, announce=True)
 
-        names = [theme.name for theme in WISP_THEMES]
-        try:
-            next_name = names[(names.index(self.theme) + 1) % len(names)]
-        except ValueError:
-            # An unrecognized active theme (only reachable if something outside
-            # Wisp set it) resolves to the default rather than failing.
-            next_name = names[0]
-        self.theme = next_name
-        # A failed write is surfaced rather than swallowed: the theme still
-        # changed for this session, but the user should know it will not stick.
-        suffix = "" if save_theme_preference(next_name) else " (could not save)"
-        self.write_notice(f"Theme: {next_name}{suffix}")
+    def _commit_theme(self, theme_name: str, *, announce: bool) -> None:
+        """Apply and persist one validated curated theme."""
+
+        spec = WISP_THEME_BY_NAME.get(theme_name)
+        if spec is None:
+            return
+        self.theme = spec.name
+        if spec.dark:
+            self._last_dark_theme = spec.name
+        saved = save_theme_state(
+            ThemePreferenceState(
+                active_theme=spec.name,
+                last_dark_theme=self._last_dark_theme,
+            )
+        )
+        if announce:
+            suffix = "" if saved else " (could not save)"
+            self.write_notice(f"Theme: {spec.label}{suffix}")
+
+    def show_theme_picker(self) -> None:
+        picker = self._theme_picker
+        overlays = self._overlay_controller
+        if picker is None or overlays is None:
+            return
+        if picker.is_open:
+            self.on_theme_picker_cancelled(ThemePicker.Cancelled())
+            return
+        self._theme_picker_original = self.theme
+        self._invalidate_theme_preview()
+        overlays.open(OverlayKind.theme_picker, preserve_viewport=True)
+        picker.show(self.theme)
+
+    def hide_theme_picker(self) -> bool:
+        overlays = self._overlay_controller
+        return overlays is not None and overlays.close(OverlayKind.theme_picker)
 
     def action_open_prompt_history(self) -> None:
         picker = self._prompt_history_picker
@@ -2089,15 +2186,8 @@ class TextualTui(App[None]):
 
         self._transcript_controller.fail_pending_tool_calls(detail)
 
-    def _style(self, role: str) -> str:
-        # Resolve a transcript role to a theme-derived Rich style. Falls back to
-        # a plain color name if called before on_mount populates the map.
-        return self._role_styles.get(role, _ROLE_FALLBACK.get(role, ""))
-
     def _write_styled(self, role: str, message: str) -> None:
-        style = self._style(role)
-        escaped = _markup_escape(message)
-        self._mount_line(role, f"[{style}]{escaped}[/{style}]" if style else escaped)
+        self._mount_line(role, message)
 
     def write_notice(self, message: str) -> None:
         self._write_styled("notice", message)
@@ -2111,10 +2201,7 @@ class TextualTui(App[None]):
     def mount_history_marker(self, message: str, *, before: Widget | None) -> None:
         """Mount the durable boundary between the session label and history."""
 
-        style = self._style("dim")
-        escaped = _markup_escape(message)
-        markup = f"[{style}]{escaped}[/{style}]" if style else escaped
-        widget = LineMessage(markup, role="dim")
+        widget = LineMessage(message, role="dim")
         transcript = self._transcript
         if before is not None and transcript is not None and before.parent is not transcript:
             # Textual may not have attached a widget mounted in the completed
@@ -2180,7 +2267,7 @@ class TextualTui(App[None]):
         self._history_marker = widget
 
     def write_user(self, message: str) -> LineMessage | None:
-        return self._mount_line("user", _markup_escape(message))
+        return self._mount_line("user", message)
 
     def write_assistant(self, message: str) -> StreamMessage | None:
         """Mount a settled assistant turn through the same Markdown path as streaming."""
@@ -2196,18 +2283,18 @@ class TextualTui(App[None]):
 
     def write_message(self, message: str, *, role: str) -> Widget | None:
         # Assistant content is Markdown whether it streamed live or arrived as one
-        # completed event. Other roles remain literal and escaped at the boundary.
+        # completed event. Other roles remain literal at the widget boundary.
         if role == "assistant":
             return self.write_assistant(message)
-        return self._mount_line(role, _markup_escape(message))
+        return self._mount_line(role, message)
 
-    def _mount_line(self, role: str, markup: str) -> LineMessage | None:
+    def _mount_line(self, role: str, text: str) -> LineMessage | None:
         # Mount one role-styled LineMessage. Transcript owns the transcript and
         # its own follow-the-tail intent; we just re-assert the follow after the
         # mount lays out.
         if self._transcript is None:
             return None
-        widget = LineMessage(markup, role=role)
+        widget = LineMessage(text, role=role)
         self._mount_transcript_message(widget)
         self._transcript_controller.settle_widget(
             widget,
@@ -2231,7 +2318,7 @@ class TextualTui(App[None]):
         widget: Widget = (
             StreamMessage(message)
             if role == "assistant" and _historical_message_needs_markdown(message)
-            else LineMessage(_markup_escape(message), role=role)
+            else LineMessage(message, role=role)
         )
         self._mount_transcript_message(widget, before=before)
         return widget

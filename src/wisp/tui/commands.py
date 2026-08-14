@@ -114,6 +114,11 @@ class TuiCommandCatalog:
     def get(self, identifier: str) -> CommandDescriptor:
         return self._registry.get(identifier)
 
+    def with_descriptors(self, *descriptors: CommandDescriptor) -> TuiCommandCatalog:
+        """Return a catalog extended with Textual-local command metadata."""
+
+        return TuiCommandCatalog((*self.descriptors, *descriptors))
+
     @classmethod
     def from_rpc(cls, descriptors: tuple[RpcCommandDescriptor, ...]) -> TuiCommandCatalog:
         """Build a catalog from RPC discovery, excluding commands without TUI handlers."""
@@ -150,6 +155,18 @@ def _command_descriptor_from_rpc(descriptor: RpcCommandDescriptor) -> CommandDes
 
 
 DEFAULT_TUI_COMMAND_CATALOG = TuiCommandCatalog(builtin_command_descriptors())
+
+TEXTUAL_LOCAL_COMMAND_DESCRIPTORS = (
+    CommandDescriptor(
+        name="theme",
+        title="Theme",
+        description="Preview or choose a Wisp color theme",
+        category="configuration",
+        arguments=(CommandArgument("name", "vapor, orchid, ember, or paper"),),
+        accepts_arguments=True,
+        order=58,
+    ),
+)
 
 
 # Ordered for display: the everyday commands first, session/auth after. Only

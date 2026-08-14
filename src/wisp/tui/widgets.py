@@ -116,15 +116,15 @@ class PromptEditor(TextArea):
     HELP = """
     # Prompt editor
 
-    Write a prompt and press **Enter** to send it. Use **Shift+Enter** or
-    **Ctrl+J** for a newline. Type `/` for commands or `@` to reference a project
-    path; when a suggestion menu is visible, Enter accepts its highlighted item.
+    Write a prompt and press **Enter** to send it. Use **Shift+Enter**, **Alt+Enter**,
+    or **Ctrl+J** for a newline. Type `/` for commands or `@` to reference a
+    project path; when a suggestion menu is visible, Enter accepts its highlighted item.
     Tool approval panels default to **1 (Approve once)**; their own contextual help
     explains every permission scope before you decide.
     """
     BINDINGS = [
         Binding("enter", "submit", "Send / accept suggestion", show=False),
-        Binding("shift+enter,ctrl+j", "newline", "Newline", show=False),
+        Binding("shift+enter,alt+enter,ctrl+j", "newline", "Newline", show=False),
     ]
 
     class Submitted(Message):
@@ -269,7 +269,7 @@ class PromptEditor(TextArea):
             self.action_submit()
             event.stop()
             event.prevent_default()
-        elif event.key in {"shift+enter", "ctrl+j"}:
+        elif event.key in {"shift+enter", "alt+enter", "ctrl+j"}:
             self.action_newline()
             event.stop()
             event.prevent_default()
@@ -2442,10 +2442,10 @@ _ROLE_LABELS: dict[str, str] = {
 class LineMessage(Static):
     """A single role-styled transcript line for non-streamed content."""
 
-    def __init__(self, markup: str, *, role: str) -> None:
-        # `markup` is escaped message content composed by the caller. Static
-        # renders it with markup enabled by default.
-        super().__init__(markup)
+    def __init__(self, text: str, *, role: str) -> None:
+        # Retain literal content and let theme-reactive CSS own presentation.
+        # Baked Rich markup cannot be recolored atomically after a theme switch.
+        super().__init__(text, markup=False)
         self.add_class("message", f"message--{role}")
         # Fixed labels are safe as border chrome. Conversation and quiet metadata
         # roles map to "" and intentionally receive no title.

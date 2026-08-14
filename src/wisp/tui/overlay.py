@@ -25,6 +25,7 @@ class OverlayKind(StrEnum):
     model_picker = "model_picker"
     session_picker = "session_picker"
     prompt_history = "prompt_history"
+    theme_picker = "theme_picker"
     context_status = "context_status"
     operation_indicator = "operation_indicator"
 

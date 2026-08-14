@@ -8,10 +8,13 @@ from pathlib import Path
 import anyio
 import pytest
 
-from wisp.tui.theme import WISP_THEME_NAMES, WISP_THEMES
+from wisp.tui.theme import PAPER_THEME_NAME, WISP_THEME_NAMES, WISP_THEMES
 from wisp.tui.theme_preference import (
+    ThemePreferenceState,
     load_theme_preference,
+    load_theme_state,
     save_theme_preference,
+    save_theme_state,
     theme_preference_path,
 )
 
@@ -34,6 +37,20 @@ def test_saved_theme_round_trips(tmp_path: Path) -> None:
     assert save_theme_preference("wisp-light", home_dir=tmp_path)
 
     assert load_theme_preference(home_dir=tmp_path) == "wisp-light"
+
+
+def test_theme_state_round_trips_active_and_most_recent_dark_theme(tmp_path: Path) -> None:
+    state = ThemePreferenceState(active_theme=PAPER_THEME_NAME, last_dark_theme="wisp-ember")
+
+    assert save_theme_state(state, home_dir=tmp_path)
+    assert (
+        load_theme_state(
+            home_dir=tmp_path,
+            valid_themes=WISP_THEME_NAMES,
+            valid_dark_themes=frozenset({"wisp", "wisp-orchid", "wisp-ember"}),
+        )
+        == state
+    )
 
 
 def test_save_creates_the_parent_directory(tmp_path: Path) -> None:
@@ -210,7 +227,7 @@ def test_wisp_theme_names_covers_every_defined_theme() -> None:
     assert WISP_THEME_NAMES == {theme.name for theme in WISP_THEMES}
 
 
-def test_toggle_cycles_themes_and_persists_the_choice(
+def test_toggle_uses_paper_and_most_recent_dark_theme(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from wisp.tui.textual_app import TextualTui
@@ -231,7 +248,7 @@ def test_toggle_cycles_themes_and_persists_the_choice(
     start, switched, returned, persisted = anyio.run(scenario)
 
     assert start == WISP_THEMES[0].name
-    assert switched == WISP_THEMES[1].name
+    assert switched == PAPER_THEME_NAME
     assert returned == start
     # The last toggle is what persists.
     assert persisted == start
