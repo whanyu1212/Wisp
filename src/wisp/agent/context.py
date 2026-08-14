@@ -102,13 +102,13 @@ def context_fingerprint(
             for tool in tools
         ],
     }
-    encoded = json.dumps(
+    text = json.dumps(
         payload,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
-    ).encode()
-    return sha256(encoded).hexdigest()
+    )
+    return sha256(_utf8_bytes(text)).hexdigest()
 
 
 def _message_payload(message: Message) -> dict[str, object]:
@@ -133,7 +133,13 @@ def _payload_tokens(payload: object) -> int:
         separators=(",", ":"),
         sort_keys=True,
     )
-    return math.ceil(len(text.encode("utf-8")) / 4)
+    return math.ceil(len(_utf8_bytes(text)) / 4)
+
+
+def _utf8_bytes(text: str) -> bytes:
+    """Encode valid Unicode normally and preserve lone surrogates as JSON escapes."""
+
+    return text.encode("utf-8", errors="backslashreplace")
 
 
 __all__ = ["build_context_budget", "context_fingerprint", "estimate_context"]

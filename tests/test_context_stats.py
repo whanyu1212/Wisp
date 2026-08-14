@@ -121,6 +121,20 @@ def test_context_estimate_uses_utf8_size_for_unicode_messages(content: str) -> N
     )
 
 
+def test_context_estimate_and_fingerprint_escape_lone_surrogates() -> None:
+    content = "invalid surrogate: \ud800"
+    payload = [{"role": "user", "content": content}]
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    expected_tokens = math.ceil(len(serialized.encode("utf-8", errors="backslashreplace")) / 4)
+    message = Message(role="user", content=content)
+
+    estimate = estimate_context((message,))
+    first_fingerprint = context_fingerprint((message,))
+
+    assert estimate.message_tokens == expected_tokens
+    assert first_fingerprint == context_fingerprint((message,))
+
+
 def test_context_estimate_uses_utf8_size_for_every_payload_category() -> None:
     messages = (
         Message(role="system", content="系统 🌐"),
