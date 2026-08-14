@@ -5,6 +5,7 @@ from pathlib import Path
 import anyio
 import pytest
 
+from wisp.tui.overlay import OverlayKind
 from wisp.tui.theme import PAPER_THEME_NAME
 from wisp.tui.theme_picker import ThemePicker
 from wisp.tui.theme_preference import load_theme_state
@@ -95,6 +96,33 @@ def test_ctrl_t_does_not_commit_while_picker_owns_a_preview(
     preview, restored = anyio.run(scenario)
     assert preview == "wisp-orchid"
     assert restored == "wisp"
+    assert load_theme_state(home_dir=tmp_path).active_theme is None
+
+
+def test_replacing_picker_with_another_overlay_rolls_back_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from wisp.tui.textual_app import TextualTui
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    async def scenario() -> tuple[str, str, str | None]:
+        app = TextualTui()
+        async with app.run_test() as pilot:
+            app.submit_command_line("/theme")
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause()
+            preview = app.theme
+            assert app._overlay_controller is not None
+            app._overlay_controller.open(OverlayKind.decision)
+            await pilot.pause()
+            return preview, app.theme, app._theme_picker_original
+
+    preview, restored, original = anyio.run(scenario)
+    assert preview == "wisp-orchid"
+    assert restored == "wisp"
+    assert original is None
     assert load_theme_state(home_dir=tmp_path).active_theme is None
 
 

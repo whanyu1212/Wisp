@@ -91,6 +91,7 @@ class TextualOverlayController:
         transcript: TranscriptViewport,
         overlays: Mapping[OverlayKind, OverlaySurface],
         defer_after_refresh: Callable[[Callable[[], None]], None],
+        on_overlay_displaced: Callable[[OverlayKind], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._composer = composer
@@ -102,6 +103,7 @@ class TextualOverlayController:
         self._transcript = transcript
         self._overlays = dict(overlays)
         self._defer_after_refresh = defer_after_refresh
+        self._on_overlay_displaced = on_overlay_displaced
         self._clock = clock
         self._active_overlay: OverlayKind | None = None
         self._active_operation: OverlayOperation | None = None
@@ -130,6 +132,7 @@ class TextualOverlayController:
         """Prepare one visible overlay and make it the sole transition owner."""
 
         self._begin_transition()
+        self._notify_displaced_overlay(replacement=kind)
         self._hide_all_overlays()
         self._clear_viewport_state()
         if preserve_viewport:
@@ -163,6 +166,7 @@ class TextualOverlayController:
         """Hide transient UI while a sequential session operation is pending."""
 
         self._begin_transition()
+        self._notify_displaced_overlay()
         self._hide_all_overlays()
         self._clear_viewport_state()
         self._active_overlay = None
@@ -207,6 +211,12 @@ class TextualOverlayController:
         for surface in self._overlays.values():
             if surface.is_open:
                 surface.hide()
+
+    def _notify_displaced_overlay(self, *, replacement: OverlayKind | None = None) -> None:
+        active = self._active_overlay
+        if active is None or active is replacement or self._on_overlay_displaced is None:
+            return
+        self._on_overlay_displaced(active)
 
     def _restore_composer(self) -> None:
         self._composer.display = True

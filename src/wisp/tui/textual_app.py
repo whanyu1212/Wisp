@@ -590,6 +590,7 @@ class TextualTui(App[None]):
                 OverlayKind.operation_indicator: self._operation_indicator,
             },
             defer_after_refresh=self._defer_overlay_restore,
+            on_overlay_displaced=self._on_overlay_displaced,
         )
         self.set_command_catalog(self._command_catalog)
         self.set_skill_catalog(self._skill_catalog)
@@ -1066,12 +1067,19 @@ class TextualTui(App[None]):
 
     def on_theme_picker_cancelled(self, event: ThemePicker.Cancelled) -> None:
         event.stop()
+        self._rollback_theme_picker_preview()
+        self.hide_theme_picker()
+
+    def _rollback_theme_picker_preview(self) -> None:
         original = self._theme_picker_original
         self._invalidate_theme_preview()
         self._theme_picker_original = None
         if original in WISP_THEME_NAMES:
             self.theme = original
-        self.hide_theme_picker()
+
+    def _on_overlay_displaced(self, kind: OverlayKind) -> None:
+        if kind is OverlayKind.theme_picker:
+            self._rollback_theme_picker_preview()
 
     def _flush_theme_preview(self, epoch: int) -> None:
         if epoch != self._theme_preview_epoch:
