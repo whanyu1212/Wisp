@@ -173,6 +173,7 @@ def test_agent_loop_config_preserves_legacy_positional_field_order() -> None:
         ("context_reserve_tokens", False, "context_reserve_tokens"),
         ("context_pressure_threshold", 0, "context_pressure_threshold"),
         ("context_pressure_threshold", 1.1, "context_pressure_threshold"),
+        ("context_pressure_threshold", 10**1000, "context_pressure_threshold"),
         ("context_pressure_threshold", float("nan"), "context_pressure_threshold"),
         ("context_pressure_threshold", float("inf"), "context_pressure_threshold"),
         ("turn_offset", -1, "turn_offset"),

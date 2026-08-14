@@ -44,7 +44,7 @@ def validate_agent_runtime_limits(
         raise ValueError(
             "context_pressure_threshold must be a finite number greater than 0 and at most 1"
         )
-    if not math.isfinite(context_pressure_threshold) or not 0 < context_pressure_threshold <= 1:
+    if not 0 < context_pressure_threshold <= 1 or not math.isfinite(context_pressure_threshold):
         raise ValueError(
             "context_pressure_threshold must be a finite number greater than 0 and at most 1"
         )
