@@ -9,6 +9,7 @@ from textual.widget import Widget
 
 from wisp.events import JsonObject
 from wisp.tui.history import (
+    TUI_HISTORY_PAGE_LIMIT,
     HistoricalSkillInvocation,
     HistoricalToolCard,
     HistoricalTranscriptMessage,
@@ -365,11 +366,14 @@ def test_history_controller_reloads_latest_after_older_paging_evicts_it() -> Non
     assert surface.latest_history_requests == 1
     assert surface.history_labels[0] == "user: older 0"
 
-    reloaded = _messages("assistant", "latest", 75)
+    reloaded = _messages("assistant", "latest", TUI_HISTORY_PAGE_LIMIT)
     follow_requests_before_reload = surface.follow_requests
     controller.replace_latest_entries(reloaded)
 
-    assert surface.history_labels == [f"assistant: latest {index}" for index in range(75)]
+    first_visible = TUI_HISTORY_PAGE_LIMIT - TUI_TRANSCRIPT_WINDOW_SIZE
+    assert surface.history_labels == [
+        f"assistant: latest {index}" for index in range(first_visible, TUI_HISTORY_PAGE_LIMIT)
+    ]
     assert surface.follow_requests == follow_requests_before_reload + 1
     assert not controller.show_latest()
 

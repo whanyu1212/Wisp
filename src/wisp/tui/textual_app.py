@@ -832,6 +832,7 @@ class TextualTui(App[None]):
             self._cancel_card_expand_repin()
             assert self._transcript is not None
             self._transcript.stop_following()
+            self._transcript.request_history_at_top()
         self._forward_jump_overlay_scroll(event, direction=-1)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:

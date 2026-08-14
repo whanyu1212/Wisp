@@ -6,8 +6,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TypeVar
 
-TUI_TRANSCRIPT_WINDOW_SIZE = 120
-TUI_TRANSCRIPT_WINDOW_SHIFT = 75
+TUI_TRANSCRIPT_WINDOW_SIZE = 60
+TUI_TRANSCRIPT_WINDOW_SHIFT = 40
 TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT = 1_200
 
 Entry = TypeVar("Entry")

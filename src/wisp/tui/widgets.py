@@ -2131,6 +2131,7 @@ class Transcript(VerticalScroll):
 
         self._stop_following()
         self.scroll_page_up(animate=False)
+        self.request_history_at_top()
 
     def page_down(self) -> None:
         """Scroll one transcript page without Textual's default animation."""

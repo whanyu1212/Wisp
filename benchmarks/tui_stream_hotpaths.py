@@ -67,7 +67,7 @@ class TimingDistribution:
 @dataclass(frozen=True)
 class BenchmarkConfig:
     message_count: int = 400
-    retained_history_entries: tuple[int, ...] = (75, 120, 300)
+    retained_history_entries: tuple[int, ...] = (60, 75, 300)
     stream_chunks: int = 100
     stream_interval_seconds: float = 0.02
     heartbeat_interval_seconds: float = 0.01
