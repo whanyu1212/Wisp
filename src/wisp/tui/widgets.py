@@ -2867,7 +2867,16 @@ def _format_textual_footer_line(
         (parts.left, "", compact_context),
     ]
     if parts.activity and parts.activity != parts.left:
-        candidates.append((parts.activity, "", compact_context))
+        candidates.extend(
+            (parts.activity, "", right)
+            for right in (
+                compact_context,
+                parts.billing,
+                parts.context_compact,
+                parts.model,
+            )
+            if right
+        )
     candidates.extend(
         ("", "", right)
         for right in (

@@ -4730,6 +4730,24 @@ def test_textual_footer_adapts_context_and_priority_to_width() -> None:
     assert cell_len(narrow) <= 28
 
 
+def test_textual_footer_preserves_activity_before_right_only_fallbacks() -> None:
+    parts = _textual_footer_parts(
+        TuiViewSnapshot(
+            status="running",
+            input_hint="wisp(running)> ",
+            mode="plan",
+            provider="openai",
+            context=threshold_budget(),
+        )
+    )
+
+    narrow = _format_textual_footer_line(parts, width=12)
+
+    assert "plan" in narrow
+    assert "API" in narrow
+    assert "~81%" not in narrow
+
+
 def test_textual_footer_marks_current_observed_context_as_exact() -> None:
     estimated = threshold_budget()
     current = estimated.model_copy(
