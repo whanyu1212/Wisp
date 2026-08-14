@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
@@ -224,6 +225,27 @@ async def _provider_events(
         yield event
 
 
+def _json_payloads_match(left: object, right: object) -> bool:
+    """Compare JSON payloads canonically without conflating booleans and numbers."""
+
+    try:
+        return json.dumps(
+            left,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ) == json.dumps(
+            right,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 @dataclass(slots=True)
 class _ToolExecutionLifecycle:
     """Validate one executor stream before its result reaches the provider."""
@@ -256,7 +278,7 @@ class _ToolExecutionLifecycle:
                 raise ToolExecutionProtocolError(
                     f"Tool executor requested approval more than once for {self.tool_call.call_id}"
                 )
-            if dict(event.arguments) != dict(self.tool_call.arguments):
+            if not _json_payloads_match(event.arguments, self.tool_call.arguments):
                 raise ToolExecutionProtocolError(
                     "Tool executor approval arguments do not match the requested call "
                     f"{self.tool_call.call_id}"

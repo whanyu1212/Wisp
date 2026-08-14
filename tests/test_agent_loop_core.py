@@ -821,6 +821,43 @@ def test_pure_loop_rejects_malformed_approval_lifecycle(
     assert len(provider.calls) == 1
 
 
+def test_pure_loop_rejects_type_changing_nested_approval_arguments() -> None:
+    call = ToolCall(
+        call_id="call-1",
+        name="bash",
+        arguments={"command": "pwd", "options": [1]},
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ]
+        ]
+    )
+    executor = ScriptedToolExecutor(
+        (
+            _approval_request(arguments={"command": "pwd", "options": [True]}),
+            _terminal_result(),
+        )
+    )
+
+    async def run() -> None:
+        with pytest.raises(ToolExecutionProtocolError, match="approval arguments do not match"):
+            async for _ in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=executor),
+                messages=(Message(role="user", content="run pwd"),),
+            ):
+                pass
+
+    anyio.run(run)
+
+
 def test_pure_loop_accepts_denied_approval_with_error_result() -> None:
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
     provider = ScriptedProvider(
