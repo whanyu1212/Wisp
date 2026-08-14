@@ -289,7 +289,7 @@ def truncate_active_turn_tool_results(
         message = truncated[index]
         content_bytes = len(message.content.encode("utf-8"))
         remaining_target = target_bytes - reclaimed_bytes
-        minimum_bytes = len(message.content[:_MIN_TRUNCATED_TOOL_RESULT_CHARS].encode("utf-8"))
+        minimum_bytes = len(message.content[-_MIN_TRUNCATED_TOOL_RESULT_CHARS:].encode("utf-8"))
         max_bytes = max(minimum_bytes, content_bytes - remaining_target)
         result = truncate_text_tail(message.content, max_bytes=max_bytes, max_lines=10_000_000)
         if not result.truncated:

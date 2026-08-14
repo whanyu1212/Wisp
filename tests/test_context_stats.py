@@ -11,6 +11,7 @@ from wisp.coding.compaction import should_auto_compact
 from wisp.coding.stats import build_session_stats
 from wisp.events import (
     CompactionPolicyStatus,
+    ContextEstimate,
     ContextEstimated,
     SessionStatsReported,
     TokenUsage,
@@ -65,6 +66,7 @@ def test_context_estimate_accounts_for_system_messages_tools_and_results() -> No
         (ToolCallResult(call_id="call-1", output="a large tool result" * 20),),
     )
 
+    assert initial.method == "utf8_bytes_div_4_v2"
     assert initial.system_tokens > 0
     assert initial.message_tokens > 0
     assert initial.tool_schema_tokens > 0
@@ -78,6 +80,20 @@ def test_context_estimate_accounts_for_system_messages_tools_and_results() -> No
 def _serialized_tokens(payload: object) -> int:
     text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return math.ceil(len(text.encode("utf-8")) / 4)
+
+
+def test_context_estimate_accepts_legacy_method_values() -> None:
+    legacy = {
+        "method": "chars_div_4_v1",
+        "system_tokens": 1,
+        "message_tokens": 2,
+        "tool_schema_tokens": 3,
+        "total_tokens": 6,
+    }
+
+    estimate = ContextEstimate.model_validate(legacy)
+
+    assert estimate.method == "chars_div_4_v1"
 
 
 def test_context_estimate_preserves_ascii_heuristic() -> None:

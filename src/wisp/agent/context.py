@@ -45,6 +45,7 @@ def estimate_context(
     message_tokens = _payload_tokens(message_payloads)
     tool_schema_tokens = _payload_tokens(tool_payloads)
     return ContextEstimate(
+        method="utf8_bytes_div_4_v2",
         system_tokens=system_tokens,
         message_tokens=message_tokens,
         tool_schema_tokens=tool_schema_tokens,

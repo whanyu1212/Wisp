@@ -559,6 +559,26 @@ def test_active_turn_truncation_reclaims_utf8_bytes_and_preserves_unicode_tail()
     assert len(result) >= 200
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "界" * 200 + "a" * 300,
+        "a" * 200 + "界" * 300,
+    ],
+)
+def test_active_turn_truncation_sizes_floor_from_retained_unicode_tail(content: str) -> None:
+    messages = (Message(role="tool", content=content, tool_call_id="call-1"),)
+
+    truncated = truncate_active_turn_tool_results(messages, excess_tokens=10_000)
+
+    assert truncated is not None
+    result = truncated[0].content
+    assert result.startswith("[truncated]")
+    assert result.endswith(content[-1])
+    assert len(result) >= 200
+    assert len(result.encode("utf-8")) <= len(content[-200:].encode("utf-8"))
+
+
 def test_active_turn_truncation_prioritizes_largest_utf8_payload() -> None:
     ascii_content = "a" * 500
     unicode_content = "界" * 300
