@@ -786,6 +786,9 @@ class TextualTui(App[None]):
             and event.navigation.reader_generation != transcript.follow_generation
         ):
             transcript.history_page_request_failed()
+            pending = self._pending_history_navigation
+            if pending.reader_generation == transcript.follow_generation:
+                transcript.request_history_at_top(pending)
             return
         if (
             event.navigation.intent is not HistoryNavigationIntent.PRESERVE
