@@ -207,6 +207,35 @@ def _require_provider_response_started(started: bool) -> None:
         raise ProviderProtocolError("Provider emitted response data before response_started")
 
 
+def _resolve_provider_response_id(
+    *,
+    started_response_id: str | None,
+    terminal_response_id: str | None,
+    tool_calls: Sequence[ToolCall],
+) -> str | None:
+    """Resolve one consistent response id from a provider lifecycle."""
+
+    candidates = [
+        ("response_started", started_response_id),
+        ("terminal response", terminal_response_id),
+        *((f"tool call {tool_call.call_id}", tool_call.response_id) for tool_call in tool_calls),
+    ]
+    supplied = [
+        (source, response_id) for source, response_id in candidates if response_id is not None
+    ]
+    if not supplied:
+        return None
+
+    resolved_source, resolved_id = supplied[0]
+    for source, response_id in supplied[1:]:
+        if response_id != resolved_id:
+            raise ProviderProtocolError(
+                "Provider emitted conflicting response ids: "
+                f"{resolved_source}={resolved_id!r}, {source}={response_id!r}"
+            )
+    return resolved_id
+
+
 async def _provider_events(
     stream: AsyncIterator[provider_events.ProviderEvent],
 ) -> AsyncIterator[provider_events.ProviderEvent]:
@@ -381,6 +410,7 @@ async def run_agent_loop(
                     yield event
                 break
             response_started = False
+            started_response_id: str | None = None
             terminal_response: ProviderResponseCompleted | ProviderResponseFailed | None = None
             streamed_tool_calls: list[ToolCall] = []
             streamed_text: list[str] = []
@@ -425,6 +455,7 @@ async def run_agent_loop(
                             "Provider emitted response_started more than once"
                         )
                     response_started = True
+                    started_response_id = provider_event.response_id
                     response_model = provider_event.model
                     yield MessageStarted(turn=turn)
                 elif isinstance(provider_event, provider_events.ProviderRetrying):
@@ -478,6 +509,11 @@ async def run_agent_loop(
             if terminal_response is None:
                 raise ProviderProtocolError("Provider stream ended without a terminal response")
             if isinstance(terminal_response, ProviderResponseFailed):
+                _resolve_provider_response_id(
+                    started_response_id=started_response_id,
+                    terminal_response_id=terminal_response.response_id,
+                    tool_calls=streamed_tool_calls,
+                )
                 if is_context_overflow_message(terminal_response.message):
                     raise ContextOverflowError(terminal_response.message)
                 raise ProviderError(terminal_response.message)
@@ -489,16 +525,11 @@ async def run_agent_loop(
             response = terminal_response
             completed_content = response.content or "".join(streamed_text)
             tool_calls = response.tool_calls
-            response_id = response.response_id
-            if response_id is None:
-                response_id = next(
-                    (
-                        tool_call.response_id
-                        for tool_call in reversed(tool_calls)
-                        if tool_call.response_id is not None
-                    ),
-                    None,
-                )
+            response_id = _resolve_provider_response_id(
+                started_response_id=started_response_id,
+                terminal_response_id=response.response_id,
+                tool_calls=tool_calls,
+            )
             previous_response_id = response_id
             usage = (
                 TokenUsage(
