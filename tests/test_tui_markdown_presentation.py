@@ -2,18 +2,32 @@
 
 from __future__ import annotations
 
+import gc
 import re
+import weakref
 from typing import cast
+from unittest.mock import patch
 
 import anyio
 import pytest
-from rich.console import RenderableType
+from rich.console import (
+    Console,
+    ConsoleOptions,
+    RenderableType,
+    RenderResult,
+)
 from rich.segment import Segment
 from rich.style import Style as RichStyle
 from textual import events
+from textual.visual import RenderOptions
 
 from wisp.tui.textual_app import TextualTui
-from wisp.tui.widgets import StreamMessage, Transcript
+from wisp.tui.widgets import (
+    StreamMessage,
+    Transcript,
+    _SafeAssistantMarkdown,
+    _SelectableMarkdownVisual,
+)
 
 pytestmark = pytest.mark.tui
 
@@ -89,6 +103,99 @@ def test_assistant_markdown_uses_semantic_theme_styles(theme_name: str) -> None:
     assert bullet.bold
     assert bullet.color is not None
     assert bullet.color.get_truecolor().hex.lower() == colors["accent"].lower()
+
+
+def test_assistant_markdown_reuses_measured_strips_for_paint() -> None:
+    async def scenario() -> tuple[int, int, int]:
+        app = TextualTui()
+        async with app.run_test(size=(80, 30)):
+            stream = StreamMessage()
+            await app.query_one("#transcript", Transcript).mount(stream)
+            await stream.replace_markdown(_DOCUMENT)
+            visual = stream._selection_visual
+            assert isinstance(visual, _SelectableMarkdownVisual)
+            render_count = 0
+            original_render = _SafeAssistantMarkdown.__rich_console__
+
+            def count_render(
+                markdown: _SafeAssistantMarkdown,
+                console: Console,
+                options: ConsoleOptions,
+            ) -> RenderResult:
+                nonlocal render_count
+                render_count += 1
+                yield from original_render(markdown, console, options)
+
+            with patch.object(_SafeAssistantMarkdown, "__rich_console__", count_render):
+                height = visual.get_height(stream.styles, 80)
+                strips = visual.render_strips(
+                    80,
+                    None,
+                    stream.visual_style,
+                    RenderOptions(stream._get_style, stream.styles),
+                )
+            return height, len(strips), render_count
+
+    height, strip_count, render_count = anyio.run(scenario)
+
+    assert height == strip_count
+    assert render_count == 1
+
+
+def test_assistant_markdown_strip_cache_retains_only_the_current_width() -> None:
+    async def scenario() -> tuple[int, int, int]:
+        app = TextualTui()
+        async with app.run_test(size=(80, 30)):
+            stream = StreamMessage()
+            await app.query_one("#transcript", Transcript).mount(stream)
+            await stream.replace_markdown(_DOCUMENT)
+            visual = stream._selection_visual
+            assert isinstance(visual, _SelectableMarkdownVisual)
+            render_count = 0
+            original_render = _SafeAssistantMarkdown.__rich_console__
+
+            def count_render(
+                markdown: _SafeAssistantMarkdown,
+                console: Console,
+                options: ConsoleOptions,
+            ) -> RenderResult:
+                nonlocal render_count
+                render_count += 1
+                yield from original_render(markdown, console, options)
+
+            options = RenderOptions(stream._get_style, stream.styles)
+            with patch.object(_SafeAssistantMarkdown, "__rich_console__", count_render):
+                wide = visual.render_strips(80, None, stream.visual_style, options)
+                narrow = visual.render_strips(28, None, stream.visual_style, options)
+                visual.render_strips(80, None, stream.visual_style, options)
+            return len(wide), len(narrow), render_count
+
+    wide_height, narrow_height, render_count = anyio.run(scenario)
+
+    assert narrow_height > wide_height
+    assert render_count == 3
+
+
+def test_assistant_markdown_source_revision_releases_the_previous_visual() -> None:
+    async def scenario() -> tuple[weakref.ReferenceType[_SelectableMarkdownVisual], str]:
+        app = TextualTui()
+        async with app.run_test():
+            stream = StreamMessage("# First")
+            await app.query_one("#transcript", Transcript).mount(stream)
+            first_visual = stream._selection_visual
+            assert isinstance(first_visual, _SelectableMarkdownVisual)
+            first_reference = weakref.ref(first_visual)
+
+            await stream.replace_markdown("# Second")
+            del first_visual
+            gc.collect()
+
+            return first_reference, stream.source
+
+    first_reference, source = anyio.run(scenario)
+
+    assert source == "# Second"
+    assert first_reference() is None
 
 
 def test_assistant_markdown_renders_structure_in_one_widget() -> None:
